@@ -22,6 +22,7 @@ const nanbox_abi = @import("nanbox_abi.zig");
 pub const profiler = @import("profiler.zig");
 pub const flamegraph = @import("flamegraph.zig");
 pub const pprof = @import("pprof.zig");
+const FunctionRegistry = @import("function_registry.zig");
 
 // ============================================================================
 // 全局运行时状态
@@ -3752,7 +3753,16 @@ pub fn php_function_exists(args: []const Value, allocator: Allocator) !Value {
     _ = allocator;
     if (args.len != 1) return error.InvalidArgumentCount;
     if (!args[0].isString()) return Value.initBool(false);
-    return Value.initBool(lookupBuiltinFunction(args[0].asString().data) != null);
+    const name = args[0].asString().data;
+    // 优先查 FunctionRegistry（单一真相源，覆盖所有 builtin）
+    if (FunctionRegistry.isRegistered(name)) return Value.initBool(true);
+    // 再查动态 wrapper 表（可能有运行时注册的额外函数）
+    if (lookupBuiltinFunction(name) != null) return Value.initBool(true);
+    // 检查用户定义函数注册表
+    if (user_function_registry) |reg| {
+        if (reg.contains(name)) return Value.initBool(true);
+    }
+    return Value.initBool(false);
 }
 
 pub fn php_gc_enable(args: []const Value, allocator: Allocator) !Value {
@@ -10447,6 +10457,8 @@ pub fn php_is_callable(val: Value) !Value {
     if (actual_val.isString()) {
         // 字符串只有是已知函数名时才callable
         const name = actual_val.asString().data;
+        // 优先查 FunctionRegistry（单一真相源）
+        if (FunctionRegistry.isRegistered(name)) return Value.initBool(true);
         if (lookupBuiltinFunction(name) != null) return Value.initBool(true);
         if (user_function_registry) |reg| {
             if (reg.contains(name)) return Value.initBool(true);

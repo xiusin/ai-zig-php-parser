@@ -75,6 +75,12 @@ pub const Global = lto.Global;
 pub const SymbolTable = lto.SymbolTable;
 pub const MergedModule = lto.MergedModule;
 
+pub const function_registry = @import("function_registry.zig");
+pub const FunctionRegistry = function_registry;
+pub const FunctionMeta = function_registry.FunctionMeta;
+pub const FunctionId = function_registry.FunctionId;
+pub const INVALID_FUNCTION_ID = function_registry.INVALID_FUNCTION_ID;
+
 pub const pgo = @import("pgo.zig");
 pub const Profile = pgo.Profile;
 pub const ProfileGuidedOptimizer = pgo.ProfileGuidedOptimizer;

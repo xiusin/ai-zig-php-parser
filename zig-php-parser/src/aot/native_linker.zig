@@ -24,6 +24,7 @@ const Allocator = std.mem.Allocator;
 const IR = @import("ir.zig");
 const Diagnostics = @import("diagnostics.zig");
 const DiagnosticEngine = Diagnostics.DiagnosticEngine;
+const FunctionRegistry = @import("function_registry.zig");
 
 /// 获取类名的最后一部分（用于变量名）
 /// @param full_name 完整类名（如 "App\\Utils\\Helper"）
@@ -705,9 +706,9 @@ pub const NativeLinker = struct {
             \\const aot_registered_functions = std.StaticStringMap(void).initComptime(.{
             \\
         );
-        // 遍历builtin_map生成函数名列表
-        for (builtin_map.keys()) |key| {
-            try writer.print("    .{{ \"{s}\", {{}} }},\n", .{key});
+        // 遍历 FunctionRegistry 生成函数名列表
+        for (FunctionRegistry.registry[1..]) |entry| {
+            try writer.print("    .{{ \"{s}\", {{}} }},\n", .{entry.php_name});
         }
         try writer.writeAll(
             \\});
@@ -1292,22 +1293,22 @@ pub const NativeLinker = struct {
             \\
         );
 
-        // 生成每个builtin函数的dispatch分支
-        for (builtin_map.keys(), builtin_map.values()) |key, info| {
+        // 生成每个builtin函数的dispatch分支（从 FunctionRegistry 遍历）
+        for (FunctionRegistry.registry[1..]) |entry| {
             // 只处理is_*类型检查函数（单参数，无allocator）
-            if (!std.mem.startsWith(u8, key, "is_")) continue;
-            if (info.needs_allocator) continue;
+            if (!std.mem.startsWith(u8, entry.php_name, "is_")) continue;
+            if (entry.needs_allocator) continue;
             
             // is_subclass_of 需要 2 个参数，特殊处理
-            if (std.mem.eql(u8, key, "is_subclass_of")) {
-                try writer.print("    if (std.mem.eql(u8, name, \"{s}\")) {{\n", .{key});
-                try writer.print("        if (args.len >= 2) return try runtime.{s}(args[0], args[1]);\n", .{info.runtime_name});
+            if (std.mem.eql(u8, entry.php_name, "is_subclass_of")) {
+                try writer.print("    if (std.mem.eql(u8, name, \"{s}\")) {{\n", .{entry.php_name});
+                try writer.print("        if (args.len >= 2) return try runtime.{s}(args[0], args[1]);\n", .{entry.runtime_name});
                 try writer.print("        return runtime.Value.initNull();\n    }}\n", .{});
                 continue;
             }
             
-            try writer.print("    if (std.mem.eql(u8, name, \"{s}\")) {{\n", .{key});
-            try writer.print("        if (args.len > 0) return try runtime.{s}(args[0]);\n", .{info.runtime_name});
+            try writer.print("    if (std.mem.eql(u8, name, \"{s}\")) {{\n", .{entry.php_name});
+            try writer.print("        if (args.len > 0) return try runtime.{s}(args[0]);\n", .{entry.runtime_name});
             try writer.print("        return runtime.Value.initNull();\n    }}\n", .{});
         }
 
@@ -2592,6 +2593,13 @@ pub const NativeLinker = struct {
         return false;
     }
 
+    /// FunctionId-based fast-path: O(1) 元数据访问，跳过字符串查找
+    fn functionNeedsAllocatorById(fid: u16) bool {
+        if (fid == 0) return false;
+        const meta = FunctionRegistry.getMeta(fid);
+        return meta.needs_allocator;
+    }
+
     fn functionMayRaise(self: *const Self, func_name: []const u8) bool {
         _ = self;
         if (std.mem.startsWith(u8, func_name, "__declare_function__::")) return false;
@@ -2599,13 +2607,20 @@ pub const NativeLinker = struct {
         return true;
     }
 
-    /// 检查是否是内置函数
+    /// FunctionId-based fast-path: O(1) runtime_name 访问
+    fn getRuntimeNameById(fid: u16) []const u8 {
+        if (fid == 0) return "";
+        const meta = FunctionRegistry.getMeta(fid);
+        return meta.runtime_name;
+    }
+
+    /// 检查是否是内置函数（委托到 FunctionRegistry）
     fn isBuiltinFunction(self: *const Self, func_name: []const u8) bool {
         _ = self;
 
         // 已经是php_前缀的是内置函数
         if (std.mem.startsWith(u8, func_name, "php_")) return true;
-        return builtinInfo(func_name) != null;
+        return FunctionRegistry.isRegistered(func_name);
     }
 
     /// 检查用户定义函数是否存在于 IR module 中
@@ -2616,23 +2631,13 @@ pub const NativeLinker = struct {
         return false;
     }
 
-    /// 检查函数是否是"语句函数"（返回值通常被忽略）
+    /// 检查函数是否是"语句函数"（返回值通常被忽略，委托到 FunctionRegistry）
     fn isStatementFunction(self: *const Self, func_name: []const u8) bool {
         _ = self;
-        const statement_funcs = [_][]const u8{
-            "echo",       "var_dump",  "print_r",     "unset",
-            "array_push", "array_pop", "array_shift", "array_unshift",
-            "sort",       "rsort",     "asort",       "arsort",
-            "ksort",      "krsort",    "shuffle",     "usort",
-            "uasort",     "uksort",
-        };
-        for (statement_funcs) |sf| {
-            if (std.mem.eql(u8, func_name, sf)) return true;
-        }
-        return false;
+        return FunctionRegistry.isStatementFunction(func_name);
     }
 
-    /// 映射PHP函数名到运行时函数名
+    /// 映射PHP函数名到运行时函数名（委托到 FunctionRegistry）
     fn mapToRuntimeFunction(self: *const Self, func_name: []const u8) []const u8 {
         _ = self;
 
@@ -2640,553 +2645,25 @@ pub const NativeLinker = struct {
         if (std.mem.startsWith(u8, func_name, "php_")) {
             return func_name;
         }
-        if (builtinInfo(func_name)) |info| return info.runtime_name;
+        if (FunctionRegistry.getRuntimeName(func_name)) |rt_name| return rt_name;
         return func_name;
     }
 
-    const BuiltinInfo = struct {
-        runtime_name: []const u8,
-        needs_allocator: bool,
-        may_raise: bool = true,
-        ref_params: []const u8 = &[_]u8{}, // indices of reference parameters (1-based for optional params)
-    };
+    /// BuiltinInfo 兼容类型 - 委托到 FunctionRegistry
+    const BuiltinInfo = FunctionRegistry.BuiltinInfo;
 
+    /// 查询 builtin 函数元数据（委托到 FunctionRegistry）
     fn builtinInfo(func_name: []const u8) ?BuiltinInfo {
-        return builtin_map.get(func_name);
+        return FunctionRegistry.builtinInfo(func_name);
     }
 
     /// Get reference parameter indices for a builtin function (public for IR Generator)
     pub fn getBuiltinRefParams(func_name: []const u8) []const u8 {
-        if (builtinInfo(func_name)) |info| return info.ref_params;
-        return &[_]u8{};
+        return FunctionRegistry.getRefParams(func_name);
     }
 
-    const builtin_map = std.StaticStringMap(BuiltinInfo).initComptime(@as([]const struct { []const u8, BuiltinInfo }, &.{
-        .{ "echo", bi(.{ .runtime_name = "php_echo", .needs_allocator = false }) },
-        .{ "print", bi(.{ .runtime_name = "php_print", .needs_allocator = false }) },
-        .{ "var_dump", bi(.{ .runtime_name = "php_var_dump", .needs_allocator = false }) },
-        .{ "print_r", bi(.{ .runtime_name = "print_r", .needs_allocator = false }) },
-        .{ "var_export", bi(.{ .runtime_name = "var_export", .needs_allocator = false }) },
-
-        // 引用操作函数
-        .{ "php_deref", bi(.{ .runtime_name = "php_deref", .needs_allocator = false }) },
-        .{ "php_ref_assign", bi(.{ .runtime_name = "php_ref_assign", .needs_allocator = false, .may_raise = false }) },
-        .{ "php_ref_assign_ptr", bi(.{ .runtime_name = "php_ref_assign_ptr", .needs_allocator = false, .may_raise = false }) },
-
-        .{ "define", bi(.{ .runtime_name = "php_define", .needs_allocator = true }) },
-        .{ "defined", bi(.{ .runtime_name = "php_defined", .needs_allocator = false }) },
-        .{ "constant", bi(.{ .runtime_name = "php_constant_get", .needs_allocator = true }) },
-        .{ "get_defined_constants", bi(.{ .runtime_name = "php_get_defined_constants", .needs_allocator = true }) },
-
-        .{ "class_exists", bi(.{ .runtime_name = "php_class_exists", .needs_allocator = true }) },
-        .{ "enum_exists", bi(.{ .runtime_name = "php_enum_exists", .needs_allocator = true }) },
-        .{ "interface_exists", bi(.{ .runtime_name = "php_interface_exists", .needs_allocator = true }) },
-        .{ "trait_exists", bi(.{ .runtime_name = "php_trait_exists", .needs_allocator = true }) },
-        .{ "method_exists", bi(.{ .runtime_name = "php_method_exists", .needs_allocator = false }) },
-        .{ "property_exists", bi(.{ .runtime_name = "php_property_exists", .needs_allocator = false }) },
-        .{ "is_subclass_of", bi(.{ .runtime_name = "php_is_subclass_of", .needs_allocator = false }) },
-        .{ "get_class", bi(.{ .runtime_name = "php_get_class", .needs_allocator = true }) },
-        .{ "get_parent_class", .{ .runtime_name = "php_get_parent_class", .needs_allocator = true } },
-        .{ "serialize", bi(.{ .runtime_name = "php_serialize", .needs_allocator = true }) },
-        .{ "unserialize", bi(.{ .runtime_name = "php_unserialize", .needs_allocator = true }) },
-        .{ "json_encode", bi(.{ .runtime_name = "php_json_encode", .needs_allocator = true }) },
-        .{ "json_decode", bi(.{ .runtime_name = "php_json_decode", .needs_allocator = true }) },
-        .{ "json_last_error", bi(.{ .runtime_name = "php_json_last_error", .needs_allocator = false, .may_raise = false }) },
-        .{ "json_last_error_msg", bi(.{ .runtime_name = "php_json_last_error_msg", .needs_allocator = true, .may_raise = false }) },
-        .{ "func_get_args", bi(.{ .runtime_name = "php_func_get_args", .needs_allocator = true }) },
-        .{ "func_get_arg", bi(.{ .runtime_name = "php_func_get_arg", .needs_allocator = false }) },
-        .{ "func_num_args", bi(.{ .runtime_name = "php_func_num_args", .needs_allocator = false, .may_raise = false }) },
-        .{ "memory_get_usage", bi(.{ .runtime_name = "php_memory_get_usage", .needs_allocator = true, .may_raise = false }) },
-        .{ "memory_get_peak_usage", bi(.{ .runtime_name = "php_memory_get_peak_usage", .needs_allocator = true, .may_raise = false }) },
-        .{ "shell_exec", bi(.{ .runtime_name = "php_shell_exec", .needs_allocator = true, .may_raise = false }) },
-        .{ "exec", bi(.{ .runtime_name = "php_exec", .needs_allocator = true, .may_raise = false, .ref_params = &[_]u8{ 1, 2 } }) },
-        .{ "system", bi(.{ .runtime_name = "php_system", .needs_allocator = true, .may_raise = false, .ref_params = &[_]u8{1} }) },
-        .{ "escapeshellarg", bi(.{ .runtime_name = "php_escapeshellarg", .needs_allocator = true, .may_raise = false }) },
-        .{ "escapeshellcmd", bi(.{ .runtime_name = "php_escapeshellcmd", .needs_allocator = true, .may_raise = false }) },
-        .{ "substr_replace", bi(.{ .runtime_name = "php_substr_replace", .needs_allocator = true, .may_raise = false }) },
-        .{ "file_put_contents", .{ .runtime_name = "php_file_put_contents", .needs_allocator = true } },
-        .{ "file_get_contents", .{ .runtime_name = "php_file_get_contents", .needs_allocator = true } },
-        .{ "fopen", .{ .runtime_name = "php_fopen", .needs_allocator = true } },
-        .{ "fwrite", .{ .runtime_name = "php_fwrite", .needs_allocator = true } },
-        .{ "fread", .{ .runtime_name = "php_fread", .needs_allocator = true } },
-        .{ "fclose", .{ .runtime_name = "php_fclose", .needs_allocator = false } },
-        .{ "is_resource", .{ .runtime_name = "php_is_resource", .needs_allocator = false } },
-        .{ "getcwd", .{ .runtime_name = "php_getcwd", .needs_allocator = true } },
-        .{ "php_sapi_name", .{ .runtime_name = "php_sapi_name", .needs_allocator = true } },
-        .{ "php_uname", .{ .runtime_name = "php_uname", .needs_allocator = true } },
-        .{ "unlink", .{ .runtime_name = "php_unlink", .needs_allocator = false } },
-        .{ "filesize", .{ .runtime_name = "php_filesize", .needs_allocator = false } },
-        .{ "is_file", .{ .runtime_name = "php_is_file", .needs_allocator = false } },
-        .{ "is_dir", .{ .runtime_name = "php_is_dir", .needs_allocator = false } },
-        .{ "is_readable", .{ .runtime_name = "php_is_readable", .needs_allocator = false } },
-        .{ "is_writable", .{ .runtime_name = "php_is_writable", .needs_allocator = false } },
-        .{ "sys_get_temp_dir", .{ .runtime_name = "php_sys_get_temp_dir", .needs_allocator = true } },
-        .{ "file", .{ .runtime_name = "php_file", .needs_allocator = true } },
-        .{ "file_exists", .{ .runtime_name = "php_file_exists", .needs_allocator = false } },
-        .{ "fgets", .{ .runtime_name = "php_fgets", .needs_allocator = false } },
-        .{ "fseek", .{ .runtime_name = "php_fseek", .needs_allocator = false } },
-        .{ "scandir", .{ .runtime_name = "php_scandir", .needs_allocator = true } },
-        .{ "function_exists", bi(.{ .runtime_name = "aot_function_exists", .needs_allocator = false, .may_raise = false }) },
-        .{ "gc_enable", bi(.{ .runtime_name = "php_gc_enable", .needs_allocator = true, .may_raise = false }) },
-        .{ "gc_collect_cycles", bi(.{ .runtime_name = "php_gc_collect_cycles", .needs_allocator = true, .may_raise = false }) },
-        .{ "ini_get", bi(.{ .runtime_name = "php_ini_get", .needs_allocator = true, .may_raise = false }) },
-        .{ "getrusage", bi(.{ .runtime_name = "php_getrusage", .needs_allocator = true, .may_raise = false }) },
-
-        .{ "strlen", bi(.{ .runtime_name = "php_strlen", .needs_allocator = false }) },
-        .{ "substr", bi(.{ .runtime_name = "php_substr", .needs_allocator = true }) },
-        .{ "strpos", bi(.{ .runtime_name = "php_strpos", .needs_allocator = false }) },
-        .{ "strtoupper", bi(.{ .runtime_name = "php_strtoupper", .needs_allocator = true }) },
-        .{ "strtolower", bi(.{ .runtime_name = "php_strtolower", .needs_allocator = true }) },
-        .{ "trim", bi(.{ .runtime_name = "php_trim", .needs_allocator = true }) },
-        .{ "ltrim", bi(.{ .runtime_name = "php_ltrim", .needs_allocator = true }) },
-        .{ "rtrim", bi(.{ .runtime_name = "php_rtrim", .needs_allocator = true }) },
-        .{ "str_replace", bi(.{ .runtime_name = "php_str_replace", .needs_allocator = true, .ref_params = &[_]u8{3} }) },
-        .{ "str_ireplace", bi(.{ .runtime_name = "php_str_ireplace", .needs_allocator = true, .ref_params = &[_]u8{3} }) },
-        .{ "str_repeat", bi(.{ .runtime_name = "php_str_repeat", .needs_allocator = true }) },
-        .{ "str_pad", bi(.{ .runtime_name = "php_str_pad", .needs_allocator = true }) },
-        .{ "strstr", bi(.{ .runtime_name = "php_strstr", .needs_allocator = true }) },
-        .{ "stristr", bi(.{ .runtime_name = "php_stristr", .needs_allocator = true }) },
-        .{ "strrchr", bi(.{ .runtime_name = "php_strrchr", .needs_allocator = true }) },
-        .{ "strnatcmp", bi(.{ .runtime_name = "php_strnatcmp", .needs_allocator = false }) },
-        .{ "strnatcasecmp", bi(.{ .runtime_name = "php_strnatcasecmp", .needs_allocator = false }) },
-        .{ "strchr", bi(.{ .runtime_name = "php_strstr", .needs_allocator = true }) }, // strchr是strstr的别名
-        .{ "strrev", bi(.{ .runtime_name = "php_strrev", .needs_allocator = true }) },
-        .{ "str_shuffle", bi(.{ .runtime_name = "php_str_shuffle", .needs_allocator = true }) },
-        .{ "str_contains", bi(.{ .runtime_name = "php_str_contains", .needs_allocator = false }) },
-        .{ "preg_match", bi(.{ .runtime_name = "preg_match", .needs_allocator = true }) },
-        .{ "preg_match_with_matches", bi(.{ .runtime_name = "preg_match_with_matches", .needs_allocator = true }) },
-        .{ "preg_match_all", bi(.{ .runtime_name = "preg_match_all", .needs_allocator = true }) },
-        .{ "preg_replace", bi(.{ .runtime_name = "preg_replace", .needs_allocator = true }) },
-        .{ "preg_filter", bi(.{ .runtime_name = "preg_filter", .needs_allocator = true }) },
-        .{ "preg_replace_callback", bi(.{ .runtime_name = "php_preg_replace_callback", .needs_allocator = true }) },
-        .{ "preg_split", bi(.{ .runtime_name = "preg_split", .needs_allocator = true }) },
-        .{ "preg_grep", bi(.{ .runtime_name = "preg_grep", .needs_allocator = true }) },
-        .{ "preg_quote", bi(.{ .runtime_name = "preg_quote", .needs_allocator = true }) },
-        .{ "preg_last_error", bi(.{ .runtime_name = "preg_last_error", .needs_allocator = false, .may_raise = false }) },
-        .{ "str_starts_with", bi(.{ .runtime_name = "php_str_starts_with", .needs_allocator = false }) },
-        .{ "str_word_count", bi(.{ .runtime_name = "php_str_word_count", .needs_allocator = false }) },
-        .{ "count_chars", bi(.{ .runtime_name = "php_count_chars", .needs_allocator = true }) },
-        .{ "str_ends_with", bi(.{ .runtime_name = "php_str_ends_with", .needs_allocator = false }) },
-        .{ "ucfirst", bi(.{ .runtime_name = "php_ucfirst", .needs_allocator = true }) },
-        .{ "lcfirst", bi(.{ .runtime_name = "php_lcfirst", .needs_allocator = true }) },
-        .{ "ucwords", bi(.{ .runtime_name = "php_ucwords", .needs_allocator = true }) },
-        .{ "explode", bi(.{ .runtime_name = "php_explode", .needs_allocator = true }) },
-        .{ "implode", bi(.{ .runtime_name = "php_implode", .needs_allocator = true }) },
-        .{ "join", bi(.{ .runtime_name = "php_implode", .needs_allocator = true }) },
-        .{ "str_getcsv", bi(.{ .runtime_name = "php_str_getcsv", .needs_allocator = true }) },
-        .{ "str_split", bi(.{ .runtime_name = "php_str_split", .needs_allocator = true }) },
-        .{ "strcmp", bi(.{ .runtime_name = "php_strcmp", .needs_allocator = false }) },
-        .{ "strcasecmp", bi(.{ .runtime_name = "php_strcasecmp", .needs_allocator = true }) },
-        .{ "strncasecmp", bi(.{ .runtime_name = "php_strncasecmp", .needs_allocator = false }) },
-        .{ "strnatcmp", bi(.{ .runtime_name = "php_strnatcmp", .needs_allocator = false }) },
-        .{ "strnatcasecmp", bi(.{ .runtime_name = "php_strnatcasecmp", .needs_allocator = false }) },
-        .{ "stripos", bi(.{ .runtime_name = "php_stripos", .needs_allocator = false }) },
-        .{ "strrpos", bi(.{ .runtime_name = "php_strrpos", .needs_allocator = false }) },
-        .{ "strripos", bi(.{ .runtime_name = "php_strripos", .needs_allocator = false }) },
-        .{ "sprintf", bi(.{ .runtime_name = "php_sprintf", .needs_allocator = true }) },
-        .{ "vsprintf", bi(.{ .runtime_name = "php_vsprintf", .needs_allocator = true }) },
-        .{ "sscanf", .{ .runtime_name = "php_sscanf", .needs_allocator = true } },
-        .{ "preg_match", .{ .runtime_name = "php_preg_match", .needs_allocator = true } },
-        .{ "preg_match_all", .{ .runtime_name = "php_preg_match_all", .needs_allocator = true } },
-        .{ "preg_replace", .{ .runtime_name = "preg_replace", .needs_allocator = true } },
-        .{ "preg_replace_callback", .{ .runtime_name = "php_preg_replace_callback", .needs_allocator = true } },
-        .{ "preg_split", .{ .runtime_name = "php_preg_split", .needs_allocator = true } },
-        .{ "filter_var", bi(.{ .runtime_name = "php_filter_var", .needs_allocator = true }) },
-        .{ "printf", bi(.{ .runtime_name = "php_printf", .needs_allocator = true }) },
-        .{ "chunk_split", bi(.{ .runtime_name = "php_chunk_split", .needs_allocator = true }) },
-        .{ "wordwrap", bi(.{ .runtime_name = "php_wordwrap", .needs_allocator = true }) },
-        .{ "nl2br", bi(.{ .runtime_name = "php_nl2br", .needs_allocator = true }) },
-        .{ "strip_tags", bi(.{ .runtime_name = "php_strip_tags", .needs_allocator = true }) },
-        .{ "htmlspecialchars", bi(.{ .runtime_name = "php_htmlspecialchars", .needs_allocator = true }) },
-        .{ "htmlentities", bi(.{ .runtime_name = "php_htmlentities", .needs_allocator = true }) },
-        .{ "htmlspecialchars_decode", bi(.{ .runtime_name = "php_htmlspecialchars_decode", .needs_allocator = true }) },
-        .{ "number_format", bi(.{ .runtime_name = "php_number_format", .needs_allocator = true }) },
-        .{ "bin2hex", bi(.{ .runtime_name = "php_bin2hex", .needs_allocator = true }) },
-        .{ "decbin", bi(.{ .runtime_name = "php_decbin", .needs_allocator = true }) },
-        .{ "hex2bin", bi(.{ .runtime_name = "php_hex2bin", .needs_allocator = true }) },
-        .{ "base64_encode", bi(.{ .runtime_name = "php_base64_encode", .needs_allocator = true }) },
-        .{ "base64_decode", bi(.{ .runtime_name = "php_base64_decode", .needs_allocator = true }) },
-        .{ "md5", bi(.{ .runtime_name = "php_md5", .needs_allocator = true }) },
-        .{ "sha1", bi(.{ .runtime_name = "php_sha1", .needs_allocator = true }) },
-        .{ "password_hash", bi(.{ .runtime_name = "php_password_hash", .needs_allocator = true }) },
-        .{ "password_verify", bi(.{ .runtime_name = "php_password_verify", .needs_allocator = true }) },
-        .{ "password_get_info", bi(.{ .runtime_name = "php_password_get_info", .needs_allocator = true }) },
-        .{ "password_needs_rehash", bi(.{ .runtime_name = "php_password_needs_rehash", .needs_allocator = true }) },
-        .{ "uniqid", bi(.{ .runtime_name = "php_uniqid", .needs_allocator = true }) },
-        .{ "ord", bi(.{ .runtime_name = "php_ord", .needs_allocator = false }) },
-        .{ "chr", bi(.{ .runtime_name = "php_chr", .needs_allocator = true }) },
-        .{ "urlencode", bi(.{ .runtime_name = "php_urlencode", .needs_allocator = true }) },
-        .{ "urldecode", bi(.{ .runtime_name = "php_urldecode", .needs_allocator = true }) },
-        .{ "rawurlencode", bi(.{ .runtime_name = "php_rawurlencode", .needs_allocator = true }) },
-        .{ "rawurldecode", bi(.{ .runtime_name = "php_rawurldecode", .needs_allocator = true }) },
-
-        .{ "count", bi(.{ .runtime_name = "php_count", .needs_allocator = false }) },
-        .{ "in_array", bi(.{ .runtime_name = "php_in_array", .needs_allocator = false }) },
-        .{ "array_key_exists", bi(.{ .runtime_name = "php_array_key_exists", .needs_allocator = false }) },
-        .{ "array_keys", bi(.{ .runtime_name = "php_array_keys", .needs_allocator = true }) },
-        .{ "array_is_list", bi(.{ .runtime_name = "php_array_is_list", .needs_allocator = false, .may_raise = false }) },
-        .{ "array_values", bi(.{ .runtime_name = "php_array_values", .needs_allocator = true }) },
-        .{ "array_push", bi(.{ .runtime_name = "php_array_push", .needs_allocator = true }) },
-        .{ "array_pop", bi(.{ .runtime_name = "php_array_pop", .needs_allocator = true }) },
-        .{ "array_shift", bi(.{ .runtime_name = "php_array_shift", .needs_allocator = true }) },
-        .{ "array_unshift", bi(.{ .runtime_name = "php_array_unshift", .needs_allocator = true }) },
-        .{ "array_slice", bi(.{ .runtime_name = "php_array_slice", .needs_allocator = true }) },
-        .{ "array_splice", bi(.{ .runtime_name = "php_array_splice", .needs_allocator = true }) },
-        .{ "array_merge", bi(.{ .runtime_name = "php_array_merge", .needs_allocator = true }) },
-        .{ "array_map", bi(.{ .runtime_name = "php_array_map", .needs_allocator = true }) },
-        .{ "array_filter", bi(.{ .runtime_name = "php_array_filter", .needs_allocator = true }) },
-        .{ "array_reduce", bi(.{ .runtime_name = "php_array_reduce", .needs_allocator = true }) },
-        .{ "array_find", bi(.{ .runtime_name = "php_array_find", .needs_allocator = true }) },
-        .{ "array_find_key", bi(.{ .runtime_name = "php_array_find_key", .needs_allocator = true }) },
-        .{ "array_chunk", bi(.{ .runtime_name = "php_array_chunk", .needs_allocator = true }) },
-        .{ "array_column", bi(.{ .runtime_name = "php_array_column", .needs_allocator = true }) },
-        .{ "array_sum", bi(.{ .runtime_name = "php_array_sum", .needs_allocator = false }) },
-        .{ "array_product", bi(.{ .runtime_name = "php_array_product", .needs_allocator = false }) },
-        .{ "array_search", bi(.{ .runtime_name = "php_array_search", .needs_allocator = false }) },
-        .{ "array_reverse", bi(.{ .runtime_name = "php_array_reverse", .needs_allocator = true }) },
-        .{ "array_unique", bi(.{ .runtime_name = "php_array_unique", .needs_allocator = true }) },
-        .{ "array_flip", bi(.{ .runtime_name = "php_array_flip", .needs_allocator = true }) },
-        .{ "array_combine", bi(.{ .runtime_name = "php_array_combine", .needs_allocator = true }) },
-        .{ "array_pad", bi(.{ .runtime_name = "php_array_pad", .needs_allocator = true }) },
-        .{ "array_fill", bi(.{ .runtime_name = "php_array_fill", .needs_allocator = true }) },
-        .{ "array_fill_keys", bi(.{ .runtime_name = "php_array_fill_keys", .needs_allocator = true }) },
-        .{ "array_intersect", bi(.{ .runtime_name = "php_array_intersect", .needs_allocator = true }) },
-        .{ "array_diff", bi(.{ .runtime_name = "php_array_diff", .needs_allocator = true }) },
-        .{ "array_diff_key", bi(.{ .runtime_name = "php_array_diff_key", .needs_allocator = true }) },
-        .{ "array_walk", bi(.{ .runtime_name = "php_array_walk", .needs_allocator = true }) },
-        .{ "array_walk_recursive", bi(.{ .runtime_name = "php_array_walk_recursive", .needs_allocator = true }) },
-        .{ "iterator_to_array", bi(.{ .runtime_name = "php_iterator_to_array", .needs_allocator = true }) },
-        .{ "array_count_values", bi(.{ .runtime_name = "php_array_count_values", .needs_allocator = true }) },
-        .{ "array_rand", bi(.{ .runtime_name = "php_array_rand", .needs_allocator = true }) },
-        .{ "array_key_first", bi(.{ .runtime_name = "php_array_key_first", .needs_allocator = false }) },
-        .{ "array_key_last", bi(.{ .runtime_name = "php_array_key_last", .needs_allocator = false }) },
-        .{ "array_multisort", bi(.{ .runtime_name = "php_array_multisort", .needs_allocator = true }) },
-        .{ "array_flip", bi(.{ .runtime_name = "php_array_flip", .needs_allocator = true }) },
-        .{ "array_key_first", bi(.{ .runtime_name = "php_array_key_first", .needs_allocator = false }) },
-        .{ "array_count_values", bi(.{ .runtime_name = "php_array_count_values", .needs_allocator = true }) },
-        .{ "array_rand", bi(.{ .runtime_name = "php_array_rand", .needs_allocator = true }) },
-        .{ "shuffle", bi(.{ .runtime_name = "php_shuffle", .needs_allocator = true }) },
-        .{ "compact", bi(.{ .runtime_name = "php_compact", .needs_allocator = true }) },
-        .{ "extract", bi(.{ .runtime_name = "php_extract", .needs_allocator = true }) },
-        .{ "array_fill_keys", bi(.{ .runtime_name = "php_array_fill_keys", .needs_allocator = true }) },
-        .{ "natsort", bi(.{ .runtime_name = "php_natsort", .needs_allocator = true }) },
-        .{ "array_key_last", bi(.{ .runtime_name = "php_array_key_last", .needs_allocator = false }) },
-        .{ "array_fill", bi(.{ .runtime_name = "php_array_fill", .needs_allocator = true }) },
-        .{ "array_column", bi(.{ .runtime_name = "php_array_column", .needs_allocator = true }) },
-        .{ "array_walk", bi(.{ .runtime_name = "php_array_walk", .needs_allocator = true }) },
-        .{ "array_walk_recursive", bi(.{ .runtime_name = "php_array_walk_recursive", .needs_allocator = true }) },
-        .{ "array_splice", bi(.{ .runtime_name = "php_array_splice", .needs_allocator = true }) },
-        .{ "array_intersect", bi(.{ .runtime_name = "php_array_intersect", .needs_allocator = true }) },
-        .{ "array_diff", bi(.{ .runtime_name = "php_array_diff", .needs_allocator = true }) },
-        .{ "array_combine", bi(.{ .runtime_name = "php_array_combine", .needs_allocator = true }) },
-        .{ "array_pad", bi(.{ .runtime_name = "php_array_pad", .needs_allocator = true }) },
-        .{ "php_array_merge_into", bi(.{ .runtime_name = "php_array_merge_into", .needs_allocator = true }) },
-        .{ "sizeof", bi(.{ .runtime_name = "php_sizeof", .needs_allocator = false }) },
-        .{ "sort", bi(.{ .runtime_name = "php_sort", .needs_allocator = true }) },
-        .{ "rsort", bi(.{ .runtime_name = "php_rsort", .needs_allocator = true }) },
-        .{ "asort", bi(.{ .runtime_name = "php_asort", .needs_allocator = true }) },
-        .{ "arsort", bi(.{ .runtime_name = "php_arsort", .needs_allocator = true }) },
-        .{ "ksort", bi(.{ .runtime_name = "php_ksort", .needs_allocator = true }) },
-        .{ "krsort", bi(.{ .runtime_name = "php_krsort", .needs_allocator = true }) },
-        .{ "usort", bi(.{ .runtime_name = "php_usort", .needs_allocator = true }) },
-        .{ "uasort", bi(.{ .runtime_name = "php_uasort", .needs_allocator = true }) },
-        .{ "uksort", bi(.{ .runtime_name = "php_uksort", .needs_allocator = true }) },
-        .{ "array_multisort", bi(.{ .runtime_name = "php_array_multisort", .needs_allocator = true }) },
-        .{ "range", bi(.{ .runtime_name = "php_range", .needs_allocator = true }) },
-        .{ "current", bi(.{ .runtime_name = "php_current", .needs_allocator = true }) },
-        .{ "next", bi(.{ .runtime_name = "php_next", .needs_allocator = true }) },
-        .{ "prev", bi(.{ .runtime_name = "php_prev", .needs_allocator = true }) },
-        .{ "reset", bi(.{ .runtime_name = "php_reset", .needs_allocator = true }) },
-        .{ "end", bi(.{ .runtime_name = "php_end", .needs_allocator = true }) },
-        .{ "key", bi(.{ .runtime_name = "php_key", .needs_allocator = true }) },
-        .{ "each", bi(.{ .runtime_name = "php_each", .needs_allocator = true }) },
-
-        // Object functions
-        .{ "php_object_new", bi(.{ .runtime_name = "php_object_new", .needs_allocator = true }) },
-        .{ "php_object_new_with_constructor", bi(.{ .runtime_name = "php_object_new_with_constructor", .needs_allocator = true }) },
-
-        .{ "abs", bi(.{ .runtime_name = "php_abs", .needs_allocator = false }) },
-        .{ "sqrt", .{ .runtime_name = "php_sqrt", .needs_allocator = false } },
-        .{ "round", .{ .runtime_name = "php_round", .needs_allocator = false } },
-        .{ "floor", .{ .runtime_name = "php_floor", .needs_allocator = false } },
-        .{ "ceil", .{ .runtime_name = "php_ceil", .needs_allocator = false } },
-        .{ "min", .{ .runtime_name = "php_min", .needs_allocator = false } },
-        .{ "max", .{ .runtime_name = "php_max", .needs_allocator = false } },
-        .{ "pow", .{ .runtime_name = "php_pow_func", .needs_allocator = false } },
-        .{ "sin", .{ .runtime_name = "php_sin", .needs_allocator = false } },
-        .{ "cos", .{ .runtime_name = "php_cos", .needs_allocator = false } },
-        .{ "tan", .{ .runtime_name = "php_tan", .needs_allocator = false } },
-        .{ "asin", .{ .runtime_name = "php_asin", .needs_allocator = false } },
-        .{ "acos", .{ .runtime_name = "php_acos", .needs_allocator = false } },
-        .{ "atan", .{ .runtime_name = "php_atan", .needs_allocator = false } },
-        .{ "atan2", .{ .runtime_name = "php_atan2", .needs_allocator = false } },
-        .{ "sinh", .{ .runtime_name = "php_sinh", .needs_allocator = false } },
-        .{ "cosh", .{ .runtime_name = "php_cosh", .needs_allocator = false } },
-        .{ "tanh", .{ .runtime_name = "php_tanh", .needs_allocator = false } },
-        .{ "decbin", .{ .runtime_name = "php_decbin", .needs_allocator = true } },
-        .{ "dechex", .{ .runtime_name = "php_dechex", .needs_allocator = true } },
-        .{ "decoct", .{ .runtime_name = "php_decoct", .needs_allocator = true } },
-        .{ "bindec", .{ .runtime_name = "php_bindec", .needs_allocator = false } },
-        .{ "hexdec", .{ .runtime_name = "php_hexdec", .needs_allocator = false } },
-        .{ "octdec", .{ .runtime_name = "php_octdec", .needs_allocator = false } },
-        .{ "base_convert", .{ .runtime_name = "php_base_convert", .needs_allocator = true } },
-        .{ "log", .{ .runtime_name = "php_log", .needs_allocator = false } },
-        .{ "log10", .{ .runtime_name = "php_log10", .needs_allocator = false } },
-        .{ "log2", .{ .runtime_name = "php_log2", .needs_allocator = false } },
-        .{ "exp", .{ .runtime_name = "php_exp", .needs_allocator = false } },
-        .{ "fmod", .{ .runtime_name = "php_fmod", .needs_allocator = false } },
-        .{ "intdiv", .{ .runtime_name = "php_intdiv", .needs_allocator = false } },
-        .{ "fdiv", bi(.{ .runtime_name = "php_fdiv", .needs_allocator = false, .may_raise = false }) },
-        .{ "hypot", .{ .runtime_name = "php_hypot", .needs_allocator = false } },
-        .{ "deg2rad", .{ .runtime_name = "php_deg2rad", .needs_allocator = false } },
-        .{ "rad2deg", .{ .runtime_name = "php_rad2deg", .needs_allocator = false } },
-        .{ "pi", .{ .runtime_name = "php_pi", .needs_allocator = false } },
-        .{ "rand", .{ .runtime_name = "php_rand", .needs_allocator = false } },
-        .{ "mt_rand", .{ .runtime_name = "php_mt_rand", .needs_allocator = false } },
-
-        .{ "time", bi(.{ .runtime_name = "php_time", .needs_allocator = false, .may_raise = false }) },
-        .{ "getdate", bi(.{ .runtime_name = "php_getdate", .needs_allocator = true }) },
-        .{ "idate", bi(.{ .runtime_name = "php_idate", .needs_allocator = true }) },
-        .{ "mktime", bi(.{ .runtime_name = "php_mktime", .needs_allocator = false, .may_raise = false }) },
-        .{ "checkdate", bi(.{ .runtime_name = "php_checkdate", .needs_allocator = false, .may_raise = false }) },
-        .{ "gmdate", bi(.{ .runtime_name = "php_gmdate", .needs_allocator = true }) },
-        .{ "microtime", bi(.{ .runtime_name = "php_microtime", .needs_allocator = true }) },
-        .{ "date", bi(.{ .runtime_name = "php_date", .needs_allocator = true }) },
-        .{ "strtotime", bi(.{ .runtime_name = "php_strtotime", .needs_allocator = true }) },
-        .{ "sleep", bi(.{ .runtime_name = "php_sleep", .needs_allocator = false }) },
-        .{ "usleep", bi(.{ .runtime_name = "php_usleep", .needs_allocator = false }) },
-
-        .{ "srand", .{ .runtime_name = "php_srand", .needs_allocator = false } },
-        .{ "mt_srand", .{ .runtime_name = "php_mt_srand", .needs_allocator = false } },
-        .{ "random_int", .{ .runtime_name = "php_random_int", .needs_allocator = false } },
-        .{ "random_bytes", .{ .runtime_name = "php_random_bytes", .needs_allocator = true } },
-
-        // Static variable functions
-        .{ "getStaticVar", bi(.{ .runtime_name = "getStaticVar", .needs_allocator = false }) },
-        .{ "setStaticVar", bi(.{ .runtime_name = "setStaticVar", .needs_allocator = false }) },
-
-        .{ "is_null", .{ .runtime_name = "php_is_null", .needs_allocator = false } },
-        .{ "is_bool", .{ .runtime_name = "php_is_bool", .needs_allocator = false } },
-        .{ "is_int", .{ .runtime_name = "php_is_int", .needs_allocator = false } },
-        .{ "is_float", .{ .runtime_name = "php_is_float", .needs_allocator = false } },
-        .{ "is_string", .{ .runtime_name = "php_is_string", .needs_allocator = false } },
-        .{ "is_array", .{ .runtime_name = "php_is_array", .needs_allocator = false } },
-        .{ "is_object", .{ .runtime_name = "php_is_object", .needs_allocator = false } },
-        .{ "is_numeric", .{ .runtime_name = "php_is_numeric", .needs_allocator = false } },
-        .{ "is_callable", .{ .runtime_name = "php_is_callable", .needs_allocator = false } },
-        .{ "is_resource", .{ .runtime_name = "php_is_resource", .needs_allocator = false } },
-        .{ "is_scalar", .{ .runtime_name = "php_is_scalar", .needs_allocator = false } },
-        .{ "is_infinite", .{ .runtime_name = "php_is_infinite", .needs_allocator = false } },
-        .{ "is_nan", .{ .runtime_name = "php_is_nan", .needs_allocator = false } },
-        .{ "is_finite", .{ .runtime_name = "php_is_finite", .needs_allocator = false } },
-        .{ "is_countable", .{ .runtime_name = "php_is_countable", .needs_allocator = false } },
-        .{ "is_iterable", .{ .runtime_name = "php_is_iterable", .needs_allocator = false } },
-        .{ "isset", .{ .runtime_name = "php_isset", .needs_allocator = false } },
-        .{ "empty", .{ .runtime_name = "php_empty", .needs_allocator = false } },
-        .{ "unset", .{ .runtime_name = "php_unset", .needs_allocator = true, .may_raise = false } },
-
-        .{ "intval", .{ .runtime_name = "php_intval", .needs_allocator = false } },
-        .{ "floatval", .{ .runtime_name = "php_floatval", .needs_allocator = false } },
-        .{ "strval", .{ .runtime_name = "php_strval", .needs_allocator = true } },
-        .{ "boolval", .{ .runtime_name = "php_boolval", .needs_allocator = false } },
-        .{ "gettype", .{ .runtime_name = "php_gettype", .needs_allocator = true } },
-        .{ "settype", bi(.{ .runtime_name = "php_settype", .needs_allocator = true, .may_raise = false, .ref_params = &[_]u8{0} }) },
-        .{ "exit", .{ .runtime_name = "php_exit", .needs_allocator = false } },
-        .{ "die", .{ .runtime_name = "php_exit", .needs_allocator = false } },
-
-        .{ "file_get_contents", .{ .runtime_name = "php_file_get_contents", .needs_allocator = true } },
-        .{ "file_put_contents", .{ .runtime_name = "php_file_put_contents", .needs_allocator = true } },
-        .{ "file_exists", .{ .runtime_name = "php_file_exists", .needs_allocator = false } },
-        .{ "is_file", .{ .runtime_name = "php_is_file", .needs_allocator = false } },
-        .{ "is_dir", .{ .runtime_name = "php_is_dir", .needs_allocator = false } },
-        .{ "filesize", .{ .runtime_name = "php_filesize", .needs_allocator = false } },
-        .{ "unlink", .{ .runtime_name = "php_unlink", .needs_allocator = false } },
-        .{ "rename", .{ .runtime_name = "php_rename", .needs_allocator = false } },
-        .{ "copy", .{ .runtime_name = "php_copy", .needs_allocator = false } },
-        .{ "mkdir", .{ .runtime_name = "php_mkdir", .needs_allocator = false } },
-        .{ "rmdir", .{ .runtime_name = "php_rmdir", .needs_allocator = false } },
-        .{ "basename", .{ .runtime_name = "php_basename", .needs_allocator = true } },
-        .{ "dirname", .{ .runtime_name = "php_dirname", .needs_allocator = true } },
-        .{ "getmypid", bi(.{ .runtime_name = "php_getmypid", .needs_allocator = false, .may_raise = false }) },
-        .{ "getmygid", bi(.{ .runtime_name = "php_getmygid", .needs_allocator = false, .may_raise = false }) },
-        .{ "phpversion", bi(.{ .runtime_name = "php_phpversion", .needs_allocator = true, .may_raise = false }) },
-        .{ "extension_loaded", bi(.{ .runtime_name = "php_extension_loaded", .needs_allocator = false, .may_raise = false }) },
-        .{ "get_loaded_extensions", bi(.{ .runtime_name = "php_get_loaded_extensions", .needs_allocator = true, .may_raise = false }) },
-
-        .{ "go", bi(.{ .runtime_name = "php_go_builtin", .needs_allocator = true }) },
-
-        .{ "php_bool_or", bi(.{ .runtime_name = "php_bool_or", .needs_allocator = false, .may_raise = false }) },
-        .{ "php_property_array_push_with_obj", bi(.{ .runtime_name = "php_property_array_push_with_obj", .needs_allocator = false }) },
-        .{ "php_property_array_set_with_obj", bi(.{ .runtime_name = "php_property_array_set_with_obj", .needs_allocator = false }) },
-
-        // ctype 函数
-        .{ "ctype_alnum", bi(.{ .runtime_name = "php_ctype_alnum", .needs_allocator = false, .may_raise = false }) },
-        .{ "ctype_alpha", bi(.{ .runtime_name = "php_ctype_alpha", .needs_allocator = false, .may_raise = false }) },
-        .{ "ctype_digit", bi(.{ .runtime_name = "php_ctype_digit", .needs_allocator = false, .may_raise = false }) },
-        .{ "ctype_lower", bi(.{ .runtime_name = "php_ctype_lower", .needs_allocator = false, .may_raise = false }) },
-        .{ "ctype_upper", bi(.{ .runtime_name = "php_ctype_upper", .needs_allocator = false, .may_raise = false }) },
-        .{ "ctype_space", bi(.{ .runtime_name = "php_ctype_space", .needs_allocator = false, .may_raise = false }) },
-        .{ "ctype_print", bi(.{ .runtime_name = "php_ctype_print", .needs_allocator = false, .may_raise = false }) },
-        .{ "ctype_punct", bi(.{ .runtime_name = "php_ctype_punct", .needs_allocator = false, .may_raise = false }) },
-        .{ "ctype_xdigit", bi(.{ .runtime_name = "php_ctype_xdigit", .needs_allocator = false, .may_raise = false }) },
-        .{ "ctype_cntrl", bi(.{ .runtime_name = "php_ctype_cntrl", .needs_allocator = false, .may_raise = false }) },
-        .{ "ctype_graph", bi(.{ .runtime_name = "php_ctype_graph", .needs_allocator = false, .may_raise = false }) },
-
-        // 网络函数
-        .{ "getenv", bi(.{ .runtime_name = "php_getenv", .needs_allocator = true }) },
-        .{ "gethostbyname", bi(.{ .runtime_name = "php_gethostbyname", .needs_allocator = true }) },
-        .{ "gethostname", bi(.{ .runtime_name = "php_gethostname", .needs_allocator = true }) },
-        .{ "parse_url", bi(.{ .runtime_name = "php_parse_url", .needs_allocator = true }) },
-
-        // 回调函数（特殊处理参数，不走通用 allocator 逻辑）
-        .{ "call_user_func", bi(.{ .runtime_name = "php_call_user_func", .needs_allocator = false }) },
-        .{ "call_user_func_array", bi(.{ .runtime_name = "php_call_user_func_array", .needs_allocator = false }) },
-
-        // 字符串函数
-        .{ "addslashes", bi(.{ .runtime_name = "php_addslashes", .needs_allocator = true }) },
-        .{ "substr_count", bi(.{ .runtime_name = "php_substr_count", .needs_allocator = false }) },
-        .{ "crc32", bi(.{ .runtime_name = "php_crc32", .needs_allocator = false }) },
-
-        // 多字节字符串函数
-        .{ "mb_strlen", bi(.{ .runtime_name = "php_mb_strlen", .needs_allocator = false }) },
-        .{ "mb_substr", bi(.{ .runtime_name = "php_mb_substr", .needs_allocator = false }) },
-        .{ "mb_strtoupper", bi(.{ .runtime_name = "php_mb_strtoupper", .needs_allocator = false }) },
-        .{ "mb_strtolower", bi(.{ .runtime_name = "php_mb_strtolower", .needs_allocator = false }) },
-        .{ "mb_detect_encoding", bi(.{ .runtime_name = "php_mb_detect_encoding", .needs_allocator = true }) },
-
-        // 错误处理（特殊处理参数）
-        .{ "set_error_handler", bi(.{ .runtime_name = "php_set_error_handler", .needs_allocator = false }) },
-        .{ "restore_error_handler", bi(.{ .runtime_name = "php_restore_error_handler", .needs_allocator = false }) },
-
-        // 类型/调试
-        .{ "get_debug_type", bi(.{ .runtime_name = "php_get_debug_type", .needs_allocator = true }) },
-
-        // 哈希
-        .{ "hash", bi(.{ .runtime_name = "php_hash", .needs_allocator = true }) },
-        .{ "hash_hmac", bi(.{ .runtime_name = "php_hash_hmac", .needs_allocator = true }) },
-        .{ "hash_equals", bi(.{ .runtime_name = "php_hash_equals", .needs_allocator = false }) },
-        .{ "hash_algos", bi(.{ .runtime_name = "php_hash_algos", .needs_allocator = true }) },
-
-        // 文件系统
-        .{ "filemtime", bi(.{ .runtime_name = "php_filemtime", .needs_allocator = false }) },
-        .{ "fileatime", bi(.{ .runtime_name = "php_fileatime", .needs_allocator = false }) },
-
-        // 数学
-        .{ "base_convert", bi(.{ .runtime_name = "php_base_convert", .needs_allocator = true }) },
-
-        // GC
-        .{ "gc_enabled", bi(.{ .runtime_name = "php_gc_enabled", .needs_allocator = false, .may_raise = false }) },
-
-        // 网络
-        .{ "ip2long", bi(.{ .runtime_name = "php_ip2long", .needs_allocator = false }) },
-        .{ "long2ip", bi(.{ .runtime_name = "php_long2ip", .needs_allocator = true }) },
-
-        // 错误处理
-        .{ "trigger_error", bi(.{ .runtime_name = "php_trigger_error", .needs_allocator = false }) },
-        .{ "user_error", bi(.{ .runtime_name = "php_trigger_error", .needs_allocator = false }) },
-        .{ "set_exception_handler", bi(.{ .runtime_name = "php_set_exception_handler", .needs_allocator = true }) },
-        .{ "restore_exception_handler", bi(.{ .runtime_name = "php_restore_exception_handler", .needs_allocator = false }) },
-
-        // 字符串
-        .{ "stripslashes", bi(.{ .runtime_name = "php_stripslashes", .needs_allocator = true }) },
-
-        // URL/网络
-        .{ "http_build_query", bi(.{ .runtime_name = "php_http_build_query", .needs_allocator = true }) },
-        .{ "parse_str", bi(.{ .runtime_name = "php_parse_str", .needs_allocator = true }) },
-
-        // 文件系统
-        .{ "glob", bi(.{ .runtime_name = "php_glob", .needs_allocator = true }) },
-        .{ "touch", bi(.{ .runtime_name = "php_touch", .needs_allocator = false }) },
-        .{ "pathinfo", bi(.{ .runtime_name = "php_pathinfo", .needs_allocator = false }) },
-        .{ "realpath", bi(.{ .runtime_name = "php_realpath", .needs_allocator = true }) },
-
-        // 输出缓冲
-        .{ "ob_start", bi(.{ .runtime_name = "php_ob_start", .needs_allocator = false }) },
-        .{ "ob_gzhandler", bi(.{ .runtime_name = "php_ob_gzhandler", .needs_allocator = true }) },
-        .{ "mysqli_connect", bi(.{ .runtime_name = "php_mysqli_connect", .needs_allocator = true, .may_raise = false }) },
-        .{ "token_get_all", bi(.{ .runtime_name = "php_token_get_all", .needs_allocator = true }) },
-        .{ "ob_get_contents", bi(.{ .runtime_name = "php_ob_get_contents", .needs_allocator = true }) },
-        .{ "ob_end_clean", bi(.{ .runtime_name = "php_ob_end_clean", .needs_allocator = false }) },
-        .{ "ob_get_clean", bi(.{ .runtime_name = "php_ob_get_clean", .needs_allocator = true }) },
-        .{ "ob_get_level", bi(.{ .runtime_name = "php_ob_get_level", .needs_allocator = false, .may_raise = false }) },
-        .{ "ob_flush", bi(.{ .runtime_name = "php_ob_flush", .needs_allocator = false }) },
-        .{ "ob_end_flush", bi(.{ .runtime_name = "php_ob_end_flush", .needs_allocator = false }) },
-        .{ "ob_get_length", bi(.{ .runtime_name = "php_ob_get_length", .needs_allocator = false, .may_raise = false }) },
-        .{ "ob_get_status", bi(.{ .runtime_name = "php_ob_get_status", .needs_allocator = true }) },
-        .{ "ob_implicit_flush", bi(.{ .runtime_name = "php_ob_implicit_flush", .needs_allocator = false, .may_raise = false }) },
-        .{ "get_resource_id", bi(.{ .runtime_name = "php_get_resource_id", .needs_allocator = false }) },
-
-        // 临时文件/调试
-        .{ "tempnam", bi(.{ .runtime_name = "php_tempnam", .needs_allocator = true }) },
-        .{ "debug_zval_dump", bi(.{ .runtime_name = "php_debug_zval_dump", .needs_allocator = false }) },
-
-        // HTTP 头（CLI 模式）
-        .{ "headers_list", bi(.{ .runtime_name = "php_headers_list", .needs_allocator = true }) },
-        .{ "header", bi(.{ .runtime_name = "php_header", .needs_allocator = false }) },
-        .{ "http_response_code", bi(.{ .runtime_name = "php_http_response_code", .needs_allocator = false }) },
-
-        .{ "php_concat", bi(.{ .runtime_name = "php_concat", .needs_allocator = true }) },
-        .{ "php_array_iter_init", bi(.{ .runtime_name = "php_array_iter_init", .needs_allocator = true }) },
-        .{ "php_array_iter_init_snapshot", bi(.{ .runtime_name = "php_array_iter_init_snapshot", .needs_allocator = true }) },
-        .{ "php_array_iter_init_ref", bi(.{ .runtime_name = "php_array_iter_init_ref", .needs_allocator = true }) },
-        .{ "php_array_iter_key", bi(.{ .runtime_name = "php_array_iter_key", .needs_allocator = true }) },
-        .{ "php_array_iter_value_ref_reuse", bi(.{ .runtime_name = "php_array_iter_value_ref_reuse", .needs_allocator = false, .may_raise = true }) },
-        .{ "php_array_iter_valid_ref", bi(.{ .runtime_name = "php_array_iter_valid_ref", .needs_allocator = false, .may_raise = true }) },
-        .{ "php_array_iter_next_ref", bi(.{ .runtime_name = "php_array_iter_next_ref", .needs_allocator = false, .may_raise = true }) },
-        .{ "php_array_iter_free", bi(.{ .runtime_name = "php_array_iter_free", .needs_allocator = true }) },
-        .{ "php_array_iter_free_ref", bi(.{ .runtime_name = "php_array_iter_free_ref", .needs_allocator = true }) },
-        .{ "php_create_closure", bi(.{ .runtime_name = "php_create_closure", .needs_allocator = true }) },
-        .{ "php_object_unset", bi(.{ .runtime_name = "php_object_unset", .needs_allocator = true }) },
-        .{ "php_args_append_spread", bi(.{ .runtime_name = "php_args_append_spread", .needs_allocator = true }) },
-        .{ "php_invoke_callable_args_array", bi(.{ .runtime_name = "php_invoke_callable_args_array", .needs_allocator = true }) },
-        .{ "php_object_call_safe_args_array", bi(.{ .runtime_name = "php_object_call_safe_args_array", .needs_allocator = true }) },
-        .{ "php_object_call_args_array", bi(.{ .runtime_name = "php_object_call_args_array", .needs_allocator = true }) },
-        .{ "php_object_call_named_args", bi(.{ .runtime_name = "php_object_call_named_args", .needs_allocator = true }) },
-        .{ "php_constant_get", bi(.{ .runtime_name = "php_constant_get", .needs_allocator = true }) },
-        .{ "php_go_builtin", bi(.{ .runtime_name = "php_go_builtin", .needs_allocator = true }) },
-        .{ "php_json_encode", bi(.{ .runtime_name = "php_json_encode", .needs_allocator = true }) },
-
-        // PCNTL 函数
-        .{ "pcntl_fork", bi(.{ .runtime_name = "php_pcntl_fork", .needs_allocator = false }) },
-        .{ "pcntl_waitpid", bi(.{ .runtime_name = "php_pcntl_waitpid", .needs_allocator = true }) },
-        .{ "pcntl_wait", bi(.{ .runtime_name = "php_pcntl_wait", .needs_allocator = true }) },
-        .{ "pcntl_wexitstatus", bi(.{ .runtime_name = "php_pcntl_wexitstatus", .needs_allocator = false }) },
-        .{ "pcntl_signal", bi(.{ .runtime_name = "php_pcntl_signal", .needs_allocator = true }) },
-        .{ "pcntl_signal_dispatch", bi(.{ .runtime_name = "php_pcntl_signal_dispatch", .needs_allocator = true }) },
-        .{ "pcntl_alarm", bi(.{ .runtime_name = "php_pcntl_alarm", .needs_allocator = false }) },
-        .{ "pcntl_sigprocmask", bi(.{ .runtime_name = "php_pcntl_sigprocmask", .needs_allocator = true }) },
-        // POSIX 函数
-        .{ "posix_getpid", bi(.{ .runtime_name = "php_posix_getpid", .needs_allocator = false }) },
-        .{ "posix_kill", bi(.{ .runtime_name = "php_posix_kill", .needs_allocator = false }) },
-        .{ "posix_mkfifo", bi(.{ .runtime_name = "php_posix_mkfifo", .needs_allocator = true }) },
-        // IPC 函数
-        .{ "ftok", bi(.{ .runtime_name = "php_ftok", .needs_allocator = true }) },
-        .{ "msg_get_queue", bi(.{ .runtime_name = "php_msg_get_queue", .needs_allocator = true }) },
-        .{ "msg_remove_queue", bi(.{ .runtime_name = "php_msg_remove_queue", .needs_allocator = false }) },
-        .{ "sem_get", bi(.{ .runtime_name = "php_sem_get", .needs_allocator = true }) },
-        .{ "sem_remove", bi(.{ .runtime_name = "php_sem_remove", .needs_allocator = false }) },
-        .{ "shmop_open", bi(.{ .runtime_name = "php_shmop_open", .needs_allocator = true }) },
-        .{ "shmop_close", bi(.{ .runtime_name = "php_shmop_close", .needs_allocator = false }) },
-        // Socket 函数
-        .{ "socket_create_pair", bi(.{ .runtime_name = "php_socket_create_pair", .needs_allocator = true }) },
-        .{ "socket_close", bi(.{ .runtime_name = "php_socket_close", .needs_allocator = false }) },
-        
-        // 异常处理函数
-        .{ "throwThrowable", bi(.{ .runtime_name = "throwThrowable", .needs_allocator = true }) },
-
-        // 新增缺失函数
-        .{ "error_get_last", bi(.{ .runtime_name = "php_error_get_last", .needs_allocator = true, .may_raise = false }) },
-        .{ "rewind", bi(.{ .runtime_name = "php_rewind", .needs_allocator = false }) },
-        .{ "gethostbyaddr", bi(.{ .runtime_name = "php_gethostbyaddr", .needs_allocator = true }) },
-        .{ "hash_file", bi(.{ .runtime_name = "php_hash_file", .needs_allocator = true }) },
-        .{ "get_resource_type", bi(.{ .runtime_name = "php_get_resource_type", .needs_allocator = true }) },
-        .{ "stream_register_wrapper", bi(.{ .runtime_name = "php_stream_register_wrapper", .needs_allocator = true }) },
-        .{ "stream_wrapper_register", bi(.{ .runtime_name = "php_stream_register_wrapper", .needs_allocator = true }) },
-    }));
-
-    fn bi(info: BuiltinInfo) BuiltinInfo {
-        return info;
-    }
+    // NOTE: builtin_map 已被 FunctionRegistry 替代（单一真相源）
+    // 所有 builtin 函数元数据统一由 src/aot/function_registry.zig 管理
 
     /// 生成函数
     fn generateFunction(self: *Self, code: *std.ArrayList(u8), _: *const IR.Module, func: *const IR.Function) !void {
@@ -8328,8 +7805,8 @@ pub const NativeLinker = struct {
                 } else {
 
                 // 生成函数调用
-                // 检查是否是内置函数
-                const is_builtin = self.isBuiltinFunction(op.func_name);
+                // 检查是否是内置函数（优先使用编译期解析的 FunctionId，O(1) 查找）
+                const is_builtin = if (op.function_id != 0) true else self.isBuiltinFunction(op.func_name);
                 const is_runtime_declare = std.mem.startsWith(u8, op.func_name, "__declare_function__::");
 
                 // 生成函数调用
@@ -8361,7 +7838,8 @@ pub const NativeLinker = struct {
 
                     // 有返回值寄存器
                     if (is_builtin) {
-                        const runtime_name = self.mapToRuntimeFunction(op.func_name);
+                        // FunctionId fast-path: 当编译期已解析 FunctionId 时，O(1) 获取元数据
+                        const runtime_name = if (op.function_id != 0) getRuntimeNameById(op.function_id) else self.mapToRuntimeFunction(op.func_name);
 
                         // 特殊处理 throwThrowable：需要将Value参数转换为[]const u8
                         if (std.mem.eql(u8, runtime_name, "throwThrowable")) {
@@ -8557,7 +8035,7 @@ pub const NativeLinker = struct {
                                 try self.writeValueArgs(writer, op.args);
                             }
                             try writer.writeAll(");\n");
-                        } else if (self.functionNeedsAllocator(op.func_name)) {
+                        } else if (if (op.function_id != 0) functionNeedsAllocatorById(op.function_id) else self.functionNeedsAllocator(op.func_name)) {
                             if (std.mem.eql(u8, runtime_name, "php_sprintf") or std.mem.eql(u8, runtime_name, "php_printf")) {
                                 if (op.args.len == 0) {
                                     try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{reg.id});
@@ -9184,8 +8662,9 @@ pub const NativeLinker = struct {
                             }
                         }
                     } else if (is_builtin) {
-                        const runtime_name = self.mapToRuntimeFunction(op.func_name);
-                        const needs_alloc = self.functionNeedsAllocator(op.func_name);
+                        // FunctionId fast-path: 当编译期已解析 FunctionId 时，O(1) 获取元数据
+                        const runtime_name = if (op.function_id != 0) getRuntimeNameById(op.function_id) else self.mapToRuntimeFunction(op.func_name);
+                        const needs_alloc = if (op.function_id != 0) functionNeedsAllocatorById(op.function_id) else self.functionNeedsAllocator(op.func_name);
 
                         // 检查是否需要 allocator 参数
                         if (needs_alloc) {
@@ -15671,8 +15150,8 @@ pub const NativeLinker = struct {
                     try writer.writeAll("    runtime.php_error_suppress_pop();\n");
                 } else {
 
-                // 检查是否是内置函数
-                const is_builtin = self.isBuiltinFunction(op.func_name);
+                // 检查是否是内置函数（优先使用编译期解析的 FunctionId，O(1) 查找）
+                const is_builtin = if (op.function_id != 0) true else self.isBuiltinFunction(op.func_name);
                 const is_runtime_declare = std.mem.startsWith(u8, op.func_name, "__declare_function__::");
                 const in_try_block = self.current_exception_handler != null;
 
@@ -15696,8 +15175,9 @@ pub const NativeLinker = struct {
                     }
                 } else if (result_reg) |r| {
                     if (is_builtin) {
-                        const runtime_name = self.mapToRuntimeFunction(op.func_name);
-                        const needs_alloc = self.functionNeedsAllocator(op.func_name);
+                        // FunctionId fast-path: 当编译期已解析 FunctionId 时，O(1) 获取元数据
+                        const runtime_name = if (op.function_id != 0) getRuntimeNameById(op.function_id) else self.mapToRuntimeFunction(op.func_name);
+                        const needs_alloc = if (op.function_id != 0) functionNeedsAllocatorById(op.function_id) else self.functionNeedsAllocator(op.func_name);
 
                         if (std.mem.eql(u8, runtime_name, "php_str_getcsv")) {
                             if (op.args.len < 4) {
@@ -15829,8 +15309,9 @@ pub const NativeLinker = struct {
                             }
                         }
                     } else if (is_builtin) {
-                        const runtime_name = self.mapToRuntimeFunction(op.func_name);
-                        const needs_alloc = self.functionNeedsAllocator(op.func_name);
+                        // FunctionId fast-path: 当编译期已解析 FunctionId 时，O(1) 获取元数据
+                        const runtime_name = if (op.function_id != 0) getRuntimeNameById(op.function_id) else self.mapToRuntimeFunction(op.func_name);
+                        const needs_alloc = if (op.function_id != 0) functionNeedsAllocatorById(op.function_id) else self.functionNeedsAllocator(op.func_name);
 
                         if (std.mem.eql(u8, runtime_name, "php_str_getcsv")) {
                             if (op.args.len < 4) {
@@ -16332,6 +15813,7 @@ pub const NativeLinker = struct {
             .{ .src = "src/aot/concurrency_runtime.zig", .dst = "concurrency_runtime.zig" },
             .{ .src = "src/aot/array_ops_shared.zig", .dst = "array_ops_shared.zig" },
             .{ .src = "src/aot/nanbox_abi.zig", .dst = "nanbox_abi.zig" },
+            .{ .src = "src/aot/function_registry.zig", .dst = "function_registry.zig" },
         };
 
         for (files) |f| {

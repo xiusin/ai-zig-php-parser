@@ -39,6 +39,7 @@ const SourceLocation = Diagnostics.SourceLocation;
 const SymbolTableMod = @import("symbol_table.zig");
 const SymbolTable = SymbolTableMod.SymbolTable;
 const NativeLinker = @import("native_linker.zig").NativeLinker;
+const FunctionRegistry = @import("function_registry.zig");
 const InferredType = SymbolTableMod.InferredType;
 const ConcreteType = SymbolTableMod.ConcreteType;
 const TypeInferenceMod = @import("type_inference.zig");
@@ -5779,8 +5780,8 @@ pub const IRGenerator = struct {
             else
                 &[_]u32{};
 
-            // 获取内建函数的引用参数信息
-            const builtin_ref_params = if (func_name.len > 0) NativeLinker.getBuiltinRefParams(func_name) else &[_]u8{};
+            // 获取内建函数的引用参数信息（直接查询 FunctionRegistry 单一真相源）
+            const builtin_ref_params = if (func_name.len > 0) FunctionRegistry.getRefParams(func_name) else &[_]u8{};
 
             args = try self.allocator.alloc(Register, call_data.args.len);
             for (call_data.args, 0..) |arg_idx, i| {
@@ -5903,8 +5904,17 @@ pub const IRGenerator = struct {
             }
         }
 
+        // 早期解析 FunctionId — 用于参数补齐快速路径分发
+        // 当 pad_fid == 0（用户定义函数）时，跳过全部 ~30 条 builtin 参数补齐逻辑
+        const pad_fid: u16 = if (func_name.len > 0 and indirect_callee == null)
+            (FunctionRegistry.lookupByName(func_name) orelse 0)
+        else
+            0;
+
         // Builtins with optional boolean flag: print_r($v[, $return]) / var_export($v[, $return])
-        if (func_name.len != 0 and (std.mem.eql(u8, func_name, "print_r") or std.mem.eql(u8, func_name, "var_export"))) {
+        if (pad_fid == FunctionRegistry.comptimeLookup("print_r") or
+            pad_fid == FunctionRegistry.comptimeLookup("var_export"))
+        {
             if (args.len == 1) {
                 const padded = try self.allocator.alloc(Register, 2);
                 padded[0] = args[0];
@@ -5913,7 +5923,7 @@ pub const IRGenerator = struct {
             }
         }
 
-        if (func_name.len != 0 and indirect_callee == null) {
+        if (pad_fid != 0) {
             if (std.mem.eql(u8, func_name, "strpos") or std.mem.eql(u8, func_name, "stripos") or std.mem.eql(u8, func_name, "strrpos") or std.mem.eql(u8, func_name, "strripos")) {
                 if (args.len == 2) {
                     const padded = try self.allocator.alloc(Register, 3);
@@ -6205,12 +6215,12 @@ pub const IRGenerator = struct {
         }
         
         // password_hash(password, algo, options=[]) — runtime只接受2个Value参数，截断options
-        if (std.mem.eql(u8, func_name, "password_hash") and args.len > 2) {
+        if (pad_fid == FunctionRegistry.comptimeLookup("password_hash") and args.len > 2) {
             args = args[0..2];
         }
 
         // 特殊处理：iterator_to_array 第二个参数可选，默认为true
-        if (std.mem.eql(u8, func_name, "iterator_to_array") and args.len == 1) {
+        if (pad_fid == FunctionRegistry.comptimeLookup("iterator_to_array") and args.len == 1) {
             const padded = try self.allocator.alloc(Register, 2);
             padded[0] = args[0];
             padded[1] = try self.emitWithResult(.{ .const_missing = {} }, .php_value);
@@ -6225,10 +6235,18 @@ pub const IRGenerator = struct {
             } }, .php_value);
         }
 
+        // 复用早期 pad_fid；仅当 func_name 被修改时（如 preg_match→preg_match_with_matches）重新解析
+        const resolved_fid: u16 = if (pad_fid == FunctionRegistry.comptimeLookup("preg_match") and
+            std.mem.eql(u8, func_name, "preg_match_with_matches"))
+            (FunctionRegistry.lookupByName(func_name) orelse 0)
+        else
+            pad_fid;
+
         const result = try self.emitWithResult(.{ .call = .{
             .func_name = func_name,
             .args = args,
             .return_type = .php_value,
+            .function_id = resolved_fid,
         } }, .php_value);
 
         // 引用参数写回

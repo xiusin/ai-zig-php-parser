@@ -1033,6 +1033,8 @@ pub const Instruction = struct {
         args: []const Register,
         /// Return type
         return_type: Type,
+        /// Resolved FunctionId from FunctionRegistry (0 = unresolved/dynamic)
+        function_id: u16 = 0,
     };
 
     /// Indirect function call
