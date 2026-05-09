@@ -7850,225 +7850,220 @@ pub const NativeLinker = struct {
                         // FunctionId fast-path: 当编译期已解析 FunctionId 时，O(1) 获取元数据
                         const runtime_name = if (op.function_id != 0) getRuntimeNameById(op.function_id) else self.mapToRuntimeFunction(op.func_name);
 
-                        // 特殊处理 throwThrowable：需要将Value参数转换为[]const u8
-                        if (std.mem.eql(u8, runtime_name, "throwThrowable")) {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                            if (op.args.len >= 2) {
-                                // 第1个参数：class_name (Value -> []const u8)
-                                const class_arg = op.args[0];
-                                try writer.print("reg_{d}.asString().data, ", .{class_arg.id});
-                                
-                                // 第2个参数：message (Value -> []const u8)
-                                const msg_arg = op.args[1];
-                                try writer.print("reg_{d}.asString().data", .{msg_arg.id});
-                            } else {
-                                try writer.writeAll("\"UnhandledMatchError\", \"Unhandled match case\"");
-                            }
-                            try writer.writeAll(", runtime.runtime_allocator);\n");
-                        } else if (std.mem.eql(u8, runtime_name, "preg_match") or std.mem.eql(u8, runtime_name, "php_preg_match")) {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                            if (op.args.len >= 2) {
-                                // 前2个参数正常传递
-                                try self.writeValueArgs(writer, op.args[0..2]);
-                                try writer.writeAll(", ");
-                                
-                                // 第3个参数matches（引用）
-                                if (op.args.len >= 3) {
-                                    const matches_arg = op.args[2];
-                                    const matches_type = @as(std.meta.Tag(IR.Type), matches_arg.type_);
-                                    const is_alloca = if (self.current_alloca_regs) |alloca_regs|
-                                        alloca_regs.contains(matches_arg.id)
-                                    else
-                                        false;
-                                    
-                                    if (matches_type == .ptr or is_alloca) {
-                                        // 指针类型，直接传递
-                                        try writer.print("reg_{d}", .{matches_arg.id});
+                        // CallConvention 驱动分发：O(1) switch 替代 O(n) 字符串比较
+                        const convention = if (op.function_id != 0) FunctionRegistry.getCallConvention(op.function_id) else blk: {
+                            break :blk if (FunctionRegistry.getCallConventionByName(op.func_name)) |cc| cc else .standard;
+                        };
+
+                        switch (convention) {
+                            .standard => {
+                                // 89% 函数走此路径：标准参数传递
+                                const needs_alloc = if (op.function_id != 0) functionNeedsAllocatorById(op.function_id) else self.functionNeedsAllocator(op.func_name);
+                                if (needs_alloc) {
+                                    if (op.args.len > 0) {
+                                        // 特殊处理：file_put_contents只接受2个参数+allocator
+                                        if (op.function_id == FunctionRegistry.comptimeLookup("file_put_contents")) {
+                                            const max_args = @min(op.args.len, 2);
+                                            try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                            try self.writeValueArgs(writer, op.args[0..max_args]);
+                                            try writer.writeAll(", runtime.runtime_allocator);\n");
+                                        } else {
+                                            try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                            try self.writeValueArgs(writer, op.args);
+                                            try writer.writeAll(", runtime.runtime_allocator);\n");
+                                        }
                                     } else {
-                                        // 非指针类型：检查是否是常量（const.null等）
-                                        // 对于常量，使用临时变量；对于寄存器，取地址
-                                        const inst_for_arg = blk: {
-                                            if (self.current_function_for_resolve) |func| {
-                                                for (func.blocks.items) |block| {
-                                                    for (block.instructions.items) |inst_item| {
-                                                        if (inst_item.result) |res| {
-                                                            if (res.id == matches_arg.id) {
-                                                                break :blk inst_item;
+                                        try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(runtime.runtime_allocator);\n", .{runtime_name});
+                                    }
+                                } else {
+                                    const builtin_info = builtinInfo(op.func_name);
+                                    const may_raise = if (builtin_info) |info| info.may_raise else true;
+                                    if (may_raise) {
+                                        try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                    } else {
+                                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.{s}(", .{runtime_name});
+                                    }
+                                    try self.writeValueArgs(writer, op.args);
+                                    try writer.writeAll(");\n");
+                                }
+                            },
+                            .ref_param => {
+                                // 引用参数调用：preg_match族、str_replace族
+                                if (op.function_id == FunctionRegistry.comptimeLookup("preg_match") or
+                                    op.function_id == FunctionRegistry.comptimeLookup("preg_match_all"))
+                                {
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                    if (op.args.len >= 2) {
+                                        try self.writeValueArgs(writer, op.args[0..2]);
+                                        try writer.writeAll(", ");
+                                        if (op.args.len >= 3) {
+                                            const matches_arg = op.args[2];
+                                            const matches_type = @as(std.meta.Tag(IR.Type), matches_arg.type_);
+                                            const is_alloca = if (self.current_alloca_regs) |alloca_regs|
+                                                alloca_regs.contains(matches_arg.id)
+                                            else
+                                                false;
+                                            if (matches_type == .ptr or is_alloca) {
+                                                try writer.print("reg_{d}", .{matches_arg.id});
+                                            } else {
+                                                const inst_for_arg = blk: {
+                                                    if (self.current_function_for_resolve) |func| {
+                                                        for (func.blocks.items) |block| {
+                                                            for (block.instructions.items) |inst_item| {
+                                                                if (inst_item.result) |res| {
+                                                                    if (res.id == matches_arg.id) {
+                                                                        break :blk inst_item;
+                                                                    }
+                                                                }
                                                             }
                                                         }
                                                     }
+                                                    break :blk null;
+                                                };
+                                                const is_const = if (inst_for_arg) |inst_item|
+                                                    (inst_item.op == .const_null or inst_item.op == .const_int or inst_item.op == .const_float or inst_item.op == .const_bool or inst_item.op == .const_string)
+                                                else
+                                                    false;
+                                                if (is_const) {
+                                                    try writer.writeAll("blk: { var tmp = reg_");
+                                                    try writer.print("{d}; break :blk &tmp; }}", .{matches_arg.id});
+                                                } else {
+                                                    try writer.print("&reg_{d}", .{matches_arg.id});
                                                 }
                                             }
-                                            break :blk null;
-                                        };
-                                        
-                                        // 如果是常量指令（const_null, const_int等），使用临时变量
-                                        const is_const = if (inst_for_arg) |inst_item|
-                                            (inst_item.op == .const_null or inst_item.op == .const_int or inst_item.op == .const_float or inst_item.op == .const_bool or inst_item.op == .const_string)
+                                        } else {
+                                            try writer.writeAll("blk: { var tmp = runtime.Value.initNull(); break :blk &tmp; }");
+                                        }
+                                        try writer.writeAll(", ");
+                                        if (op.args.len >= 4) {
+                                            try self.writeRegRef(writer, op.args[3].id);
+                                        } else {
+                                            try writer.writeAll("runtime.Value.initInt(0)");
+                                        }
+                                        try writer.writeAll(", ");
+                                        if (op.args.len >= 5) {
+                                            try self.writeRegRef(writer, op.args[4].id);
+                                        } else {
+                                            try writer.writeAll("runtime.Value.initInt(0)");
+                                        }
+                                        try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    } else {
+                                        try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull(), blk: { var tmp = runtime.Value.initNull(); break :blk &tmp; }, runtime.Value.initInt(0), runtime.Value.initInt(0), runtime.runtime_allocator);\n");
+                                    }
+                                } else if (op.function_id == FunctionRegistry.comptimeLookup("preg_match_with_matches")) {
+                                    if (op.args.len >= 3) {
+                                        try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_preg_match(", .{});
+                                        try self.writeValueArgs(writer, op.args[0..2]);
+                                        try writer.writeAll(", ");
+                                        const matches_arg = op.args[2];
+                                        const is_alloca = if (self.current_alloca_regs) |alloca_regs|
+                                            alloca_regs.contains(matches_arg.id)
                                         else
                                             false;
-                                        
-                                        if (is_const) {
-                                            try writer.writeAll("blk: { var tmp = reg_");
-                                            try writer.print("{d}; break :blk &tmp; }}", .{matches_arg.id});
+                                        if (is_alloca) {
+                                            try writer.print("reg_{d}", .{matches_arg.id});
                                         } else {
                                             try writer.print("&reg_{d}", .{matches_arg.id});
                                         }
-                                    }
-                                } else {
-                                    // 使用一个临时变量
-                                    try writer.writeAll("blk: { var tmp = runtime.Value.initNull(); break :blk &tmp; }");
-                                }
-                                try writer.writeAll(", ");
-                                
-                                // 第4个参数flags（可选，默认0）
-                                if (op.args.len >= 4) {
-                                    try self.writeRegRef(writer, op.args[3].id);
-                                } else {
-                                    try writer.writeAll("runtime.Value.initInt(0)");
-                                }
-                                try writer.writeAll(", ");
-                                
-                                // 第5个参数offset（可选，默认0）
-                                if (op.args.len >= 5) {
-                                    try self.writeRegRef(writer, op.args[4].id);
-                                } else {
-                                    try writer.writeAll("runtime.Value.initInt(0)");
-                                }
-                                
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else {
-                                // 参数不足，fallback
-                                try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull(), blk: { var tmp = runtime.Value.initNull(); break :blk &tmp; }, runtime.Value.initInt(0), runtime.Value.initInt(0), runtime.runtime_allocator);\n");
-                            }
-                        } else if (std.mem.eql(u8, runtime_name, "preg_match_all") or std.mem.eql(u8, runtime_name, "php_preg_match_all")) {
-                            // preg_match_all与preg_match相同处理
-                            try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                            if (op.args.len >= 2) {
-                                try self.writeValueArgs(writer, op.args[0..2]);
-                                try writer.writeAll(", ");
-                                
-                                if (op.args.len >= 3) {
-                                    const matches_arg = op.args[2];
-                                    const is_alloca = if (self.current_alloca_regs) |alloca_regs|
-                                        alloca_regs.contains(matches_arg.id)
-                                    else
-                                        false;
-                                    
-                                    if (is_alloca) {
-                                        // 真正的alloca寄存器
-                                        try writer.print("reg_{d}", .{matches_arg.id});
+                                        try writer.writeAll(", runtime.Value.initInt(0), runtime.Value.initInt(0), runtime.runtime_allocator);\n");
                                     } else {
-                                        // 非alloca：使用临时变量（因为可能是未定义的ptr寄存器）
-                                        try writer.writeAll("blk: { var tmp = reg_");
-                                        try writer.print("{d}; break :blk &tmp; }}", .{matches_arg.id});
+                                        try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_preg_match(", .{});
+                                        try self.writeValueArgs(writer, op.args);
+                                        try writer.writeAll(", blk: { var tmp = runtime.Value.initNull(); break :blk &tmp; }, runtime.Value.initInt(0), runtime.Value.initInt(0), runtime.runtime_allocator);\n");
+                                    }
+                                } else if (op.function_id == FunctionRegistry.comptimeLookup("preg_replace") or
+                                           op.function_id == FunctionRegistry.comptimeLookup("preg_filter"))
+                                {
+                                    const needs_alloc = if (op.function_id != 0) functionNeedsAllocatorById(op.function_id) else self.functionNeedsAllocator(op.func_name);
+                                    if (needs_alloc) {
+                                        try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                        try self.writeValueArgsArray(writer, op.args);
+                                        try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    } else {
+                                        try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                        try self.writeValueArgsArray(writer, op.args);
+                                        try writer.writeAll(");\n");
+                                    }
+                                } else if (op.function_id == FunctionRegistry.comptimeLookup("preg_split")) {
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                    if (op.args.len >= 2) {
+                                        try self.writeValueArgs(writer, op.args[0..2]);
+                                        if (op.args.len >= 3) {
+                                            try writer.writeAll(", ");
+                                            try self.writeValueArgs(writer, op.args[2..3]);
+                                        } else {
+                                            try writer.writeAll(", runtime.Value.initInt(-1)");
+                                        }
+                                        if (op.args.len >= 4) {
+                                            try writer.writeAll(", ");
+                                            try self.writeValueArgs(writer, op.args[3..4]);
+                                        } else {
+                                            try writer.writeAll(", runtime.Value.initInt(0)");
+                                        }
+                                    } else {
+                                        try self.writeValueArgs(writer, op.args);
+                                        try writer.writeAll(", runtime.Value.initInt(-1), runtime.Value.initInt(0)");
+                                    }
+                                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                                } else {
+                                    const needs_alloc = if (op.function_id != 0) functionNeedsAllocatorById(op.function_id) else self.functionNeedsAllocator(op.func_name);
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                    try self.writeValueArgsArray(writer, op.args);
+                                    if (needs_alloc) {
+                                        try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    } else {
+                                        try writer.writeAll(");\n");
+                                    }
+                                }
+                            },
+                            .variadic_array => {
+                                // 可变参数数组：max, min, sprintf, printf, var_dump
+                                if (op.function_id == FunctionRegistry.comptimeLookup("max") or
+                                    op.function_id == FunctionRegistry.comptimeLookup("min"))
+                                {
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                    try self.writeValueArgsArray(writer, op.args);
+                                    try writer.writeAll(");\n");
+                                } else if (op.function_id == FunctionRegistry.comptimeLookup("sprintf") or
+                                           op.function_id == FunctionRegistry.comptimeLookup("printf"))
+                                {
+                                    if (op.args.len == 0) {
+                                        try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{reg.id});
+                                    } else {
+                                        const fmt_arg = op.args[0];
+                                        const fmt_arg_type = @as(std.meta.Tag(IR.Type), fmt_arg.type_);
+                                        try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                        try self.writePhpValueExpr(writer, fmt_arg_type, fmt_arg.id);
+                                        try writer.writeAll(", ");
+                                        try self.writeValueArgsArray(writer, op.args[1..]);
+                                        try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    }
+                                } else if (op.function_id == FunctionRegistry.comptimeLookup("var_dump")) {
+                                    if (op.args.len <= 1) {
+                                        try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                        if (op.args.len == 1) {
+                                            try self.writeValueArgs(writer, op.args);
+                                        } else {
+                                            try writer.writeAll("runtime.Value.initNull()");
+                                        }
+                                        try writer.writeAll(");\n");
+                                    } else {
+                                        for (op.args) |arg| {
+                                            try writer.print("    _ = try runtime.php_var_dump(", .{});
+                                            try self.writePhpValueExpr(writer, @as(std.meta.Tag(IR.Type), arg.type_), arg.id);
+                                            try writer.writeAll(");\n");
+                                        }
+                                        try self.writeRegAssignment(writer, reg.id, "runtime.Value.initNull()");
                                     }
                                 } else {
-                                    try writer.writeAll("blk: { var tmp = runtime.Value.initNull(); break :blk &tmp; }");
-                                }
-                                try writer.writeAll(", ");
-                                
-                                if (op.args.len >= 4) {
-                                    try self.writeRegRef(writer, op.args[3].id);
-                                } else {
-                                    try writer.writeAll("runtime.Value.initInt(0)");
-                                }
-                                try writer.writeAll(", ");
-                                
-                                if (op.args.len >= 5) {
-                                    try self.writeRegRef(writer, op.args[4].id);
-                                } else {
-                                    try writer.writeAll("runtime.Value.initInt(0)");
-                                }
-                                
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else {
-                                try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull(), blk: { var tmp = runtime.Value.initNull(); break :blk &tmp; }, runtime.Value.initInt(0), runtime.Value.initInt(0), runtime.runtime_allocator);\n");
-                            }
-                        } else if (std.mem.eql(u8, runtime_name, "preg_match_with_matches")) {
-                            // 旧版本兼容：preg_match_with_matches
-                            if (op.args.len >= 3) {
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_preg_match(", .{});
-                                // 前2个参数正常传递
-                                try self.writeValueArgs(writer, op.args[0..2]);
-                                try writer.writeAll(", ");
-                                // 第3个参数：引用参数
-                                const matches_arg = op.args[2];
-                                const is_alloca = if (self.current_alloca_regs) |alloca_regs|
-                                    alloca_regs.contains(matches_arg.id)
-                                else
-                                    false;
-                                
-                                // 只有真正的alloca寄存器（*Value）才直接传递，其他都取地址
-                                if (is_alloca) {
-                                    try writer.print("reg_{d}", .{matches_arg.id});
-                                } else {
-                                    try writer.print("&reg_{d}", .{matches_arg.id});
-                                }
-                                try writer.writeAll(", runtime.Value.initInt(0), runtime.Value.initInt(0), runtime.runtime_allocator);\n");
-                            } else {
-                                // 参数不足，fallback
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_preg_match(", .{});
-                                try self.writeValueArgs(writer, op.args);
-                                try writer.writeAll(", blk: { var tmp = runtime.Value.initNull(); break :blk &tmp; }, runtime.Value.initInt(0), runtime.Value.initInt(0), runtime.runtime_allocator);\n");
-                            }
-                        } else if (std.mem.eql(u8, runtime_name, "php_max") or std.mem.eql(u8, runtime_name, "php_min")) {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                            try self.writeValueArgsArray(writer, op.args);
-                            try writer.writeAll(");\n");
-                        } else if (std.mem.eql(u8, runtime_name, "php_in_array")) {
-                            // in_array(needle, haystack, strict = false)
-                            try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                            try self.writeValueArgs(writer, op.args);
-                            if (op.args.len < 3) {
-                                try writer.writeAll(", runtime.Value.initBool(false)");
-                            }
-                            try writer.writeAll(");\n");
-                        } else if (std.mem.eql(u8, runtime_name, "php_array_slice")) {
-                            // array_slice 的 length 参数是可选的，缺失时补 null
-                            try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                            try self.writeValueArgs(writer, op.args);
-                            if (op.args.len < 3) {
-                                try writer.writeAll(", runtime.Value.initNull()");
-                            }
-                            try writer.writeAll(", runtime.runtime_allocator);\n");
-                        } else if (std.mem.eql(u8, runtime_name, "php_mt_rand") or std.mem.eql(u8, runtime_name, "php_rand")) {
-                            // mt_rand(min = null, max = null) - 不需要allocator
-                            try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                            if (op.args.len == 0) {
-                                try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull()");
-                            } else if (op.args.len == 1) {
-                                try self.writeValueArgs(writer, op.args);
-                                try writer.writeAll(", runtime.Value.initNull()");
-                            } else {
-                                try self.writeValueArgs(writer, op.args);
-                            }
-                            try writer.writeAll(");\n");
-                        } else if (if (op.function_id != 0) functionNeedsAllocatorById(op.function_id) else self.functionNeedsAllocator(op.func_name)) {
-                            if (std.mem.eql(u8, runtime_name, "php_sprintf") or std.mem.eql(u8, runtime_name, "php_printf")) {
-                                if (op.args.len == 0) {
-                                    try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{reg.id});
-                                } else {
-                                    const fmt_arg = op.args[0];
-                                    const fmt_arg_type = @as(std.meta.Tag(IR.Type), fmt_arg.type_);
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                    try self.writePhpValueExpr(writer, fmt_arg_type, fmt_arg.id);
-                                    try writer.writeAll(", ");
-                                    try self.writeValueArgsArray(writer, op.args[1..]);
-                                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    try self.writeValueArgsArray(writer, op.args);
+                                    try writer.writeAll(");\n");
                                 }
-                            } else if (std.mem.eql(u8, runtime_name, "php_str_getcsv")) {
-                                if (op.args.len < 4) {
-                                    try writer.writeAll("    runtime.emitDeprecatedStrGetcsvEscape();\n");
-                                }
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                try self.writeStrGetcsvArgs(writer, op.args);
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_array_merge") or std.mem.eql(u8, runtime_name, "php_array_intersect") or std.mem.eql(u8, runtime_name, "php_array_diff") or std.mem.eql(u8, runtime_name, "php_array_diff_key") or std.mem.eql(u8, runtime_name, "php_array_multisort") or std.mem.eql(u8, runtime_name, "php_compact") or std.mem.eql(u8, runtime_name, "php_array_map") or std.mem.eql(u8, runtime_name, "php_json_decode") or std.mem.eql(u8, runtime_name, "php_func_get_args") or std.mem.eql(u8, runtime_name, "php_memory_get_usage") or std.mem.eql(u8, runtime_name, "php_memory_get_peak_usage") or std.mem.eql(u8, runtime_name, "php_shell_exec") or std.mem.eql(u8, runtime_name, "php_exec") or std.mem.eql(u8, runtime_name, "php_system") or std.mem.eql(u8, runtime_name, "php_substr_replace") or std.mem.eql(u8, runtime_name, "php_function_exists") or std.mem.eql(u8, runtime_name, "php_gc_enable") or std.mem.eql(u8, runtime_name, "php_gc_collect_cycles") or std.mem.eql(u8, runtime_name, "php_ini_get") or std.mem.eql(u8, runtime_name, "php_getrusage") or std.mem.eql(u8, runtime_name, "php_unset")) {
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                try self.writeValueArgsArray(writer, op.args);
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_array_push") or std.mem.eql(u8, runtime_name, "php_array_unshift")) {
+                            },
+                            .first_arg_then_array => {
+                                // 首参+数组：array_push, array_pop, array_shift, array_unshift
+                                const needs_alloc = if (op.function_id != 0) functionNeedsAllocatorById(op.function_id) else self.functionNeedsAllocator(op.func_name);
                                 if (op.args.len == 0) {
                                     try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{reg.id});
                                 } else {
@@ -8076,523 +8071,188 @@ pub const NativeLinker = struct {
                                     const first_type = @as(std.meta.Tag(IR.Type), first_arg.type_);
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     try self.writePhpValueExpr(writer, first_type, first_arg.id);
-                                    try writer.writeAll(", ");
-                                    try self.writeValueArgsArray(writer, op.args[1..]);
-                                    try writer.writeAll(", runtime.runtime_allocator);\n");
-                                }
-                            } else if (std.mem.eql(u8, runtime_name, "php_getdate")) {
-                                // getdate(timestamp = null)
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                if (op.args.len > 0) {
-                                    try self.writeValueArgs(writer, op.args);
-                                } else {
-                                    try writer.writeAll("runtime.Value.initNull()");
-                                }
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_idate")) {
-                                // idate(format, timestamp = null)
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                if (op.args.len >= 2) {
-                                    try self.writeValueArgs(writer, op.args[0..2]);
-                                } else if (op.args.len == 1) {
-                                    try self.writeValueArgs(writer, op.args);
-                                    try writer.writeAll(", runtime.Value.initNull()");
-                                } else {
-                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull()");
-                                }
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_microtime")) {
-                                // microtime(get_as_float = false)
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                if (op.args.len > 0) {
-                                    try self.writeValueArgs(writer, op.args);
-                                } else {
-                                    try writer.writeAll("runtime.Value.initBool(false)");
-                                }
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_date") or
-                                       std.mem.eql(u8, runtime_name, "php_gmdate")) {
-                                // date/gmdate(format, timestamp = null)
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                if (op.args.len > 0) {
-                                    try self.writeValueArgs(writer, op.args);
-                                    if (op.args.len == 1) {
-                                        try writer.writeAll(", runtime.Value.initNull()");
-                                    }
-                                } else {
-                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull()");
-                                }
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_strtotime")) {
-                                // strtotime(time_str, now = null)
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                if (op.args.len > 0) {
-                                    try self.writeValueArgs(writer, op.args);
-                                    if (op.args.len == 1) {
-                                        try writer.writeAll(", runtime.Value.initNull()");
-                                    }
-                                } else {
-                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull()");
-                                }
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_count")) {
-                                // count(arr, mode = 0)
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                if (op.args.len > 0) {
-                                    try self.writeValueArgs(writer, op.args);
-                                    if (op.args.len == 1) {
-                                        try writer.writeAll(", runtime.Value.initInt(0)");
-                                    }
-                                } else {
-                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(0)");
-                                }
-                                try writer.writeAll(");\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_array_chunk")) {
-                                // array_chunk(arr, size, preserve_keys = false)
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                if (op.args.len > 0) {
-                                    try self.writeValueArgs(writer, op.args);
-                                    if (op.args.len == 2) {
-                                        try writer.writeAll(", runtime.Value.initBool(false)");
-                                    } else if (op.args.len == 1) {
-                                        try writer.writeAll(", runtime.Value.initInt(1), runtime.Value.initBool(false)");
-                                    }
-                                }
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_array_rand")) {
-                                // array_rand(arr, num = 1)
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                if (op.args.len > 0) {
-                                    try self.writeValueArgs(writer, op.args);
-                                    if (op.args.len == 1) {
-                                        try writer.writeAll(", runtime.Value.initInt(1)");
-                                    }
-                                }
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_json_encode")) {
-                                // json_encode(value, flags = 0, depth = 512)
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                if (op.args.len > 0) {
-                                    try self.writeValueArgs(writer, op.args);
-                                    if (op.args.len == 1) {
-                                        try writer.writeAll(", runtime.Value.initInt(0), runtime.Value.initInt(512)");
-                                    } else if (op.args.len == 2) {
-                                        try writer.writeAll(", runtime.Value.initInt(512)");
-                                    }
-                                } else {
-                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(0), runtime.Value.initInt(512)");
-                                }
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_array_column")) {
-                                // array_column(arr, column_key, index_key = null)
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                if (op.args.len >= 2) {
-                                    try self.writeValueArgs(writer, op.args);
-                                    if (op.args.len == 2) {
-                                        try writer.writeAll(", runtime.Value.initNull()");
-                                    }
-                                } else {
-                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull(), runtime.Value.initNull()");
-                                }
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_extract")) {
-                                // extract(arr, flags = EXTR_OVERWRITE, prefix = "")
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                if (op.args.len > 0) {
-                                    try self.writeValueArgs(writer, op.args);
-                                    if (op.args.len == 1) {
-                                        try writer.writeAll(", runtime.Value.initInt(0), runtime.Value.initString(runtime.PHPString.initStatic(\"\"))");
-                                    } else if (op.args.len == 2) {
-                                        try writer.writeAll(", runtime.Value.initString(runtime.PHPString.initStatic(\"\"))");
-                                    }
-                                } else {
-                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(0), runtime.Value.initString(runtime.PHPString.initStatic(\"\"))");
-                                }
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_array_iter_init") or
-                                std.mem.eql(u8, runtime_name, "php_array_iter_key") or
-                                std.mem.eql(u8, runtime_name, "php_array_iter_free"))
-                            {
-                                // 这些函数的 allocator 在第二个参数位置
-                                if (op.args.len > 0) {
-                                    const first_arg = op.args[0];
-                                    const first_type = @as(std.meta.Tag(IR.Type), first_arg.type_);
-                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                    try self.writePhpValueExpr(writer, first_type, first_arg.id);
-                                    try writer.writeAll(", runtime.runtime_allocator");
                                     if (op.args.len > 1) {
                                         try writer.writeAll(", ");
-                                        try self.writeValueArgs(writer, op.args[1..]);
+                                        try self.writeValueArgsArray(writer, op.args[1..]);
                                     }
+                                    if (needs_alloc) {
+                                        try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    } else {
+                                        try writer.writeAll(");\n");
+                                    }
+                                }
+                            },
+                            .all_args_array => {
+                                // 全参数数组：call_user_func, isset, unset, compact, func_get_args, extract
+                                if (op.function_id == FunctionRegistry.comptimeLookup("call_user_func")) {
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(&[_]runtime.Value{{", .{runtime_name});
+                                    for (op.args, 0..) |arg, i| {
+                                        if (i > 0) try writer.writeAll(", ");
+                                        try self.writePhpValueExpr(writer, @as(std.meta.Tag(IR.Type), arg.type_), arg.id);
+                                    }
+                                    try writer.writeAll("}, runtime.runtime_allocator);\n");
+                                } else if (op.function_id == FunctionRegistry.comptimeLookup("isset")) {
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(&[_]runtime.Value{{", .{runtime_name});
+                                    for (op.args, 0..) |arg, i| {
+                                        if (i > 0) try writer.writeAll(", ");
+                                        const arg_type = @as(std.meta.Tag(IR.Type), arg.type_);
+                                        try self.writePhpValueExpr(writer, arg_type, arg.id);
+                                    }
+                                    try writer.writeAll("});\n");
+                                } else if (op.function_id == FunctionRegistry.comptimeLookup("unset")) {
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(&[_]runtime.Value{{", .{runtime_name});
+                                    for (op.args, 0..) |arg, i| {
+                                        if (i > 0) try writer.writeAll(", ");
+                                        const arg_type = @as(std.meta.Tag(IR.Type), arg.type_);
+                                        try self.writePhpValueExpr(writer, arg_type, arg.id);
+                                    }
+                                    try writer.writeAll("}, runtime.runtime_allocator);\n");
+                                } else {
+                                    const needs_alloc = if (op.function_id != 0) functionNeedsAllocatorById(op.function_id) else self.functionNeedsAllocator(op.func_name);
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                    try self.writeValueArgsArray(writer, op.args);
+                                    if (needs_alloc) {
+                                        try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    } else {
+                                        try writer.writeAll(");\n");
+                                    }
+                                }
+                            },
+                            .callback => {
+                                // 回调调用：array_map, array_filter, array_walk, usort等
+                                const needs_alloc = if (op.function_id != 0) functionNeedsAllocatorById(op.function_id) else self.functionNeedsAllocator(op.func_name);
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                try self.writeValueArgsArray(writer, op.args);
+                                if (needs_alloc) {
+                                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                                } else {
                                     try writer.writeAll(");\n");
-                                } else {
-                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(runtime.Value.initNull(), runtime.runtime_allocator);\n", .{runtime_name});
                                 }
-                            } else if (std.mem.eql(u8, runtime_name, "php_array_filter")) {
-                                // array_filter(arr, callback = null, mode = 0)
-                                // 函数签名: php_array_filter(arr, callback, mode, allocator)
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                if (op.args.len >= 1) {
-                                    // arr 参数
-                                    try self.writeValueArgs(writer, op.args[0..1]);
-                                    // callback 参数
+                            },
+                            .statement => {
+                                // 语句调用：echo, print等
+                                const needs_alloc = if (op.function_id != 0) functionNeedsAllocatorById(op.function_id) else self.functionNeedsAllocator(op.func_name);
+                                if (needs_alloc) {
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                    try self.writeValueArgs(writer, op.args);
+                                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                                } else {
+                                    const builtin_info = builtinInfo(op.func_name);
+                                    const may_raise = if (builtin_info) |info| info.may_raise else true;
+                                    if (may_raise) {
+                                        try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                    } else {
+                                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.{s}(", .{runtime_name});
+                                    }
+                                    try self.writeValueArgs(writer, op.args);
+                                    try writer.writeAll(");\n");
+                                }
+                            },
+                            .special => {
+                                // 特殊调用：throwThrowable, password_hash, ob_start, ob_get_status, str_getcsv, pathinfo等
+                                if (op.function_id == FunctionRegistry.comptimeLookup("throwThrowable")) {
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len >= 2) {
-                                        try writer.writeAll(", ");
-                                        try self.writeValueArgs(writer, op.args[1..2]);
+                                        const class_arg = op.args[0];
+                                        try writer.print("reg_{d}.asString().data, ", .{class_arg.id});
+                                        const msg_arg = op.args[1];
+                                        try writer.print("reg_{d}.asString().data", .{msg_arg.id});
                                     } else {
-                                        try writer.writeAll(", runtime.Value.initNull()");
+                                        try writer.writeAll("\"UnhandledMatchError\", \"Unhandled match case\"");
                                     }
-                                    // mode 参数
-                                    if (op.args.len >= 3) {
-                                        try writer.writeAll(", ");
-                                        try self.writeValueArgs(writer, op.args[2..3]);
-                                    } else {
-                                        try writer.writeAll(", runtime.Value.initInt(0)");
-                                    }
-                                } else {
-                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull(), runtime.Value.initInt(0)");
-                                }
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "preg_split") or std.mem.eql(u8, runtime_name, "php_preg_split")) {
-                                // preg_split(pattern, subject, limit=-1, flags=0, allocator)
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                if (op.args.len >= 2) {
-                                    try self.writeValueArgs(writer, op.args[0..2]);
-                                    // limit (optional, default -1)
-                                    if (op.args.len >= 3) {
-                                        try writer.writeAll(", ");
-                                        try self.writeValueArgs(writer, op.args[2..3]);
-                                    } else {
-                                        try writer.writeAll(", runtime.Value.initInt(-1)");
-                                    }
-                                    // flags (optional, default 0)
-                                    if (op.args.len >= 4) {
-                                        try writer.writeAll(", ");
-                                        try self.writeValueArgs(writer, op.args[3..4]);
-                                    } else {
-                                        try writer.writeAll(", runtime.Value.initInt(0)");
-                                    }
-                                } else {
-                                    try self.writeValueArgs(writer, op.args);
-                                    try writer.writeAll(", runtime.Value.initInt(-1), runtime.Value.initInt(0)");
-                                }
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_ob_get_status")) {
-                                // ob_get_status(full_status = false) - 无参数时补默认 false
-                                // 函数签名: php_ob_get_status(full_status: Value, allocator: Allocator)
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                if (op.args.len >= 1) {
-                                    try self.writeValueArgs(writer, op.args[0..1]);
-                                } else {
-                                    try writer.writeAll("runtime.Value.initBool(false)");
-                                }
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_mb_detect_encoding")) {
-                                // mb_detect_encoding(str, encodings = null, strict = false)
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                if (op.args.len > 0) {
-                                    try self.writeValueArgs(writer, op.args);
-                                    if (op.args.len == 1) {
-                                        try writer.writeAll(", runtime.Value.initNull(), runtime.Value.initBool(false)");
-                                    } else if (op.args.len == 2) {
-                                        try writer.writeAll(", runtime.Value.initBool(false)");
-                                    }
-                                } else {
-                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull(), runtime.Value.initBool(false)");
-                                }
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_base64_decode")) {
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                if (op.args.len > 0) {
-                                    try self.writeValueArgs(writer, op.args);
-                                    if (op.args.len == 1) {
-                                        try writer.writeAll(", runtime.Value.initBool(false)");
-                                    }
-                                } else {
-                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initBool(false)");
-                                }
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_count_chars")) {
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                if (op.args.len > 0) {
-                                    try self.writeValueArgs(writer, op.args);
-                                    if (op.args.len == 1) {
-                                        try writer.writeAll(", runtime.Value.initInt(0)");
-                                    }
-                                } else {
-                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(0)");
-                                }
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (op.args.len > 0) {
-                                // 特殊处理：file_put_contents只接受2个参数+allocator
-                                if (std.mem.eql(u8, runtime_name, "php_file_put_contents")) {
-                                    const max_args = @min(op.args.len, 2);
-                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                    try self.writeValueArgs(writer, op.args[0..max_args]);
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
-                                } else {
+                                } else if (op.function_id == FunctionRegistry.comptimeLookup("password_hash")) {
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                    try self.writeValueArgs(writer, op.args);
-                                    try writer.writeAll(", runtime.runtime_allocator);\n");
-                                }
-                            } else {
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(runtime.runtime_allocator);\n", .{runtime_name});
-                            }
-                        } else {
-                            // 特殊处理可选参数函数
-                            if (std.mem.eql(u8, runtime_name, "php_round")) {
-                                // round(val, precision=0, mode=0) -> 3 args
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                if (op.args.len > 0) {
-                                    try self.writeValueArgs(writer, op.args);
-                                    if (op.args.len == 1) {
-                                        try writer.writeAll(", runtime.Value.initNull(), runtime.Value.initNull()");
-                                    } else if (op.args.len == 2) {
-                                        try writer.writeAll(", runtime.Value.initNull()");
-                                    }
-                                } else {
-                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull(), runtime.Value.initNull()");
-                                }
-                                try writer.writeAll(");\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_count")) {
-                                // count(arr, mode = 0)
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                if (op.args.len > 0) {
-                                    try self.writeValueArgs(writer, op.args);
-                                    if (op.args.len == 1) {
-                                        try writer.writeAll(", runtime.Value.initInt(0)");
-                                    }
-                                } else {
-                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(0)");
-                                }
-                                try writer.writeAll(");\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_isset")) {
-                                // isset(...$vars) - 可变参数，传递数组切片
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(&[_]runtime.Value{{", .{runtime_name});
-                                if (op.args.len > 0) {
-                                    for (op.args, 0..) |arg, i| {
-                                        if (i > 0) try writer.writeAll(", ");
-                                        const arg_type = @as(std.meta.Tag(IR.Type), arg.type_);
-                                        try self.writePhpValueExpr(writer, arg_type, arg.id);
-                                    }
-                                }
-                                try writer.writeAll("});\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_unset")) {
-                                // unset(...$vars) - 可变参数，传递数组切片
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(&[_]runtime.Value{{", .{runtime_name});
-                                if (op.args.len > 0) {
-                                    for (op.args, 0..) |arg, i| {
-                                        if (i > 0) try writer.writeAll(", ");
-                                        const arg_type = @as(std.meta.Tag(IR.Type), arg.type_);
-                                        try self.writePhpValueExpr(writer, arg_type, arg.id);
-                                    }
-                                }
-                                try writer.writeAll("}, runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_str_word_count")) {
-                                // str_word_count(str, format = 0, charlist = null)
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                if (op.args.len > 0) {
-                                    try self.writeValueArgs(writer, op.args);
-                                    if (op.args.len == 1) {
-                                        try writer.writeAll(", runtime.Value.initInt(0), runtime.Value.initNull()");
-                                    } else if (op.args.len == 2) {
-                                        try writer.writeAll(", runtime.Value.initNull()");
-                                    }
-                                } else {
-                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(0), runtime.Value.initNull()");
-                                }
-                                try writer.writeAll(");\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_mkdir")) {
-                                // mkdir(dirname, permissions = 0777, recursive = false)
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                if (op.args.len > 0) {
-                                    try self.writeValueArgs(writer, op.args);
-                                    if (op.args.len == 1) {
-                                        try writer.writeAll(", runtime.Value.initInt(0o777), runtime.Value.initBool(false)");
-                                    } else if (op.args.len == 2) {
-                                        try writer.writeAll(", runtime.Value.initBool(false)");
-                                    }
-                                } else {
-                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(0o777), runtime.Value.initBool(false)");
-                                }
-                                try writer.writeAll(");\n");
-                            } else if (std.mem.eql(u8, runtime_name, "aot_function_exists")) {
-                                // 直接调用，不带runtime.前缀
-                                try self.writeRegAssignmentFmt(writer, reg.id, "aot_function_exists(", .{});
-                                if (op.args.len > 0) {
-                                    const arg = op.args[0];
-                                    try self.writePhpValueExpr(writer, @as(std.meta.Tag(IR.Type), arg.type_), arg.id);
-                                    try writer.writeAll(".asString().data");
-                                }
-                                try writer.writeAll(");\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_set_error_handler")) {
-                                // set_error_handler(handler, error_types = E_ALL)
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                if (op.args.len > 0) {
-                                    try self.writeValueArgs(writer, op.args);
-                                    if (op.args.len == 1) {
-                                        try writer.writeAll(", runtime.Value.initInt(32767)"); // E_ALL
-                                    }
-                                }
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_call_user_func")) {
-                                // call_user_func(callback, ...args) — 需要传切片
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(&[_]runtime.Value{{", .{runtime_name});
-                                for (op.args, 0..) |arg, i| {
-                                    if (i > 0) try writer.writeAll(", ");
-                                    try self.writePhpValueExpr(writer, @as(std.meta.Tag(IR.Type), arg.type_), arg.id);
-                                }
-                                try writer.writeAll("}, runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_call_user_func_array")) {
-                                // call_user_func_array(callback, args_array)
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                try self.writeValueArgs(writer, op.args);
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_mb_strlen")) {
-                                // mb_strlen(str, encoding = "UTF-8")
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                if (op.args.len > 0) {
-                                    try self.writeValueArgs(writer, op.args);
-                                    if (op.args.len == 1) {
-                                        try writer.writeAll(", runtime.Value.initNull()");
-                                    }
-                                }
-                                try writer.writeAll(");\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_substr_count")) {
-                                // substr_count(haystack, needle, offset = 0, length = null)
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                if (op.args.len > 0) {
-                                    try self.writeValueArgs(writer, op.args);
-                                    if (op.args.len == 2) {
-                                        try writer.writeAll(", runtime.Value.initInt(0), runtime.Value.initNull()");
-                                    } else if (op.args.len == 3) {
-                                        try writer.writeAll(", runtime.Value.initNull()");
-                                    }
-                                }
-                                try writer.writeAll(");\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_ob_start")) {
-                                // ob_start(callback = null, chunk_size = 0, flags = ...)
-                                // 只传第一个参数（callback），忽略 chunk_size 和 flags
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                if (op.args.len > 0) {
-                                    const arg = op.args[0];
-                                    try self.writePhpValueExpr(writer, @as(std.meta.Tag(IR.Type), arg.type_), arg.id);
-                                } else {
-                                    try writer.writeAll("runtime.Value.initNull()");
-                                }
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_ob_get_status")) {
-                                // ob_get_status(full_status = false)
-                                // 函数签名: php_ob_get_status(full_status: Value, allocator: Allocator)
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                if (op.args.len >= 1) {
-                                    try self.writeValueArgs(writer, op.args[0..1]);
-                                } else {
-                                    try writer.writeAll("runtime.Value.initBool(false)");
-                                }
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_var_dump")) {
-                                // var_dump(...$values) — 可变参数，逐个调用
-                                if (op.args.len <= 1) {
-                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                    if (op.args.len == 1) {
+                                    if (op.args.len >= 2) {
+                                        try self.writeValueArgs(writer, op.args[0..2]);
+                                    } else if (op.args.len == 1) {
                                         try self.writeValueArgs(writer, op.args);
+                                        try writer.writeAll(", runtime.Value.initInt(1)");
+                                    } else {
+                                        try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(1)");
+                                    }
+                                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                                } else if (op.function_id == FunctionRegistry.comptimeLookup("ob_start")) {
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                    if (op.args.len > 0) {
+                                        const arg = op.args[0];
+                                        try self.writePhpValueExpr(writer, @as(std.meta.Tag(IR.Type), arg.type_), arg.id);
                                     } else {
                                         try writer.writeAll("runtime.Value.initNull()");
                                     }
+                                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                                } else if (op.function_id == FunctionRegistry.comptimeLookup("ob_get_status")) {
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                    if (op.args.len >= 1) {
+                                        try self.writeValueArgs(writer, op.args[0..1]);
+                                    } else {
+                                        try writer.writeAll("runtime.Value.initBool(false)");
+                                    }
+                                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                                } else if (op.function_id == FunctionRegistry.comptimeLookup("str_getcsv")) {
+                                    if (op.args.len < 4) {
+                                        try writer.writeAll("    runtime.emitDeprecatedStrGetcsvEscape();\n");
+                                    }
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                    try self.writeStrGetcsvArgs(writer, op.args);
+                                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                                } else if (op.function_id == FunctionRegistry.comptimeLookup("pathinfo")) {
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                    if (op.args.len > 0) {
+                                        try self.writeValueArgs(writer, op.args);
+                                        if (op.args.len == 1) {
+                                            try writer.writeAll(", runtime.Value.initInt(-1)");
+                                        }
+                                    }
+                                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                                } else if (op.function_id == FunctionRegistry.comptimeLookup("in_array")) {
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                    try self.writeValueArgs(writer, op.args);
+                                    if (op.args.len < 3) {
+                                        try writer.writeAll(", runtime.Value.initBool(false)");
+                                    }
+                                    try writer.writeAll(");\n");
+                                } else if (std.mem.eql(u8, runtime_name, "php_ref_assign_ptr") and op.args.len >= 2) {
+                                    // ref_assign_ptr: 第一个参数需要指针
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                    const first_arg = op.args[0];
+                                    const is_ptr_reg = if (self.current_ref_ptr_regs) |rpr|
+                                        rpr.contains(first_arg.id)
+                                    else
+                                        false;
+                                    const is_alloca_reg = if (self.current_alloca_regs) |ar|
+                                        ar.contains(first_arg.id)
+                                    else
+                                        false;
+                                    if (is_ptr_reg or is_alloca_reg) {
+                                        try writer.print("reg_{d}", .{first_arg.id});
+                                    } else {
+                                        try writer.print("&reg_{d}", .{first_arg.id});
+                                    }
+                                    for (op.args[1..]) |arg| {
+                                        try writer.writeAll(", ");
+                                        try self.writeRegRef(writer, arg.id);
+                                    }
                                     try writer.writeAll(");\n");
                                 } else {
-                                    for (op.args) |arg| {
-                                        try writer.print("    _ = try runtime.php_var_dump(", .{});
-                                        try self.writePhpValueExpr(writer, @as(std.meta.Tag(IR.Type), arg.type_), arg.id);
+                                    const needs_alloc = if (op.function_id != 0) functionNeedsAllocatorById(op.function_id) else self.functionNeedsAllocator(op.func_name);
+                                    if (needs_alloc) {
+                                        try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                        try self.writeValueArgs(writer, op.args);
+                                        try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    } else {
+                                        const builtin_info = builtinInfo(op.func_name);
+                                        const may_raise = if (builtin_info) |info| info.may_raise else true;
+                                        if (may_raise) {
+                                            try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                        } else {
+                                            try self.writeRegAssignmentFmt(writer, reg.id, "runtime.{s}(", .{runtime_name});
+                                        }
+                                        try self.writeValueArgs(writer, op.args);
                                         try writer.writeAll(");\n");
                                     }
-                                    try self.writeRegAssignment(writer, reg.id, "runtime.Value.initNull()");
                                 }
-                            } else if (std.mem.eql(u8, runtime_name, "php_header")) {
-                                // header(string, replace = true, response_code = 0)
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                if (op.args.len > 0) {
-                                    try self.writeValueArgs(writer, op.args);
-                                    if (op.args.len == 1) {
-                                        try writer.writeAll(", runtime.Value.initBool(true), runtime.Value.initInt(0)");
-                                    } else if (op.args.len == 2) {
-                                        try writer.writeAll(", runtime.Value.initInt(0)");
-                                    }
-                                }
-                                try writer.writeAll(");\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_pathinfo")) {
-                                // pathinfo(path, option = -1)
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                if (op.args.len > 0) {
-                                    try self.writeValueArgs(writer, op.args);
-                                    if (op.args.len == 1) {
-                                        try writer.writeAll(", runtime.Value.initInt(-1)");
-                                    }
-                                }
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_trigger_error")) {
-                                // trigger_error(message, error_type = E_USER_NOTICE)
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                if (op.args.len > 0) {
-                                    try self.writeValueArgs(writer, op.args);
-                                    if (op.args.len == 1) {
-                                        try writer.writeAll(", runtime.Value.initInt(1024)"); // E_USER_NOTICE
-                                    }
-                                }
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_mb_strtoupper") or std.mem.eql(u8, runtime_name, "php_mb_strtolower")) {
-                                // mb_strtoupper/mb_strtolower(str, encoding = "UTF-8")
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                if (op.args.len > 0) {
-                                    try self.writeValueArgs(writer, op.args);
-                                    if (op.args.len == 1) {
-                                        try writer.writeAll(", runtime.Value.initNull()");
-                                    }
-                                }
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_mb_substr")) {
-                                // mb_substr(str, start, length = null, encoding = null)
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                if (op.args.len > 0) {
-                                    try self.writeValueArgs(writer, op.args);
-                                    if (op.args.len == 2) {
-                                        try writer.writeAll(", runtime.Value.initNull(), runtime.Value.initNull()");
-                                    } else if (op.args.len == 3) {
-                                        try writer.writeAll(", runtime.Value.initNull()");
-                                    }
-                                }
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_password_hash")) {
-                                // password_hash(password, algo) — IR已截断到2个参数，补齐不足的
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                if (op.args.len >= 2) {
-                                    try self.writeValueArgs(writer, op.args[0..2]);
-                                } else if (op.args.len == 1) {
-                                    try self.writeValueArgs(writer, op.args);
-                                    try writer.writeAll(", runtime.Value.initInt(1)");
-                                } else {
-                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(1)");
-                                }
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_hash_file")) {
-                                // hash_file(algo, filename, binary = false)
-                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                try self.writeValueArgs(writer, op.args);
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else {
-                                // 通用builtin函数调用
-                                const builtin_info = builtinInfo(op.func_name);
-                                const may_raise = if (builtin_info) |info| info.may_raise else true;
-                                
-                                if (may_raise) {
-                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                } else {
-                                    try self.writeRegAssignmentFmt(writer, reg.id, "runtime.{s}(", .{runtime_name});
-                                }
-                                try self.writeValueArgs(writer, op.args);
-                                try writer.writeAll(");\n");
-                            }
+                            },
                         }
                     } else {
                         // 用户定义函数 - 先检查是否存在
@@ -8675,112 +8335,187 @@ pub const NativeLinker = struct {
                         const runtime_name = if (op.function_id != 0) getRuntimeNameById(op.function_id) else self.mapToRuntimeFunction(op.func_name);
                         const needs_alloc = if (op.function_id != 0) functionNeedsAllocatorById(op.function_id) else self.functionNeedsAllocator(op.func_name);
 
-                        // 检查是否需要 allocator 参数
-                        if (needs_alloc) {
-                            if (std.mem.eql(u8, runtime_name, "php_sprintf") or std.mem.eql(u8, runtime_name, "php_printf")) {
-                                if (op.args.len == 0) {
-                                    try writer.writeAll("    _ = runtime.Value.initNull();\n");
+                        // CallConvention 驱动分发（无返回值路径）
+                        const convention = if (op.function_id != 0) FunctionRegistry.getCallConvention(op.function_id) else blk: {
+                            break :blk if (FunctionRegistry.getCallConventionByName(op.func_name)) |cc| cc else .standard;
+                        };
+
+                        switch (convention) {
+                            .standard => {
+                                if (needs_alloc) {
+                                    if (op.args.len > 0) {
+                                        try writer.print("    _ = try runtime.{s}(", .{runtime_name});
+                                        try self.writeValueArgs(writer, op.args);
+                                        try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    } else {
+                                        try writer.print("    _ = try runtime.{s}(runtime.runtime_allocator);\n", .{runtime_name});
+                                    }
                                 } else {
-                                    const fmt_arg = op.args[0];
-                                    const fmt_arg_type = @as(std.meta.Tag(IR.Type), fmt_arg.type_);
+                                    const builtin_info = builtinInfo(op.func_name);
+                                    const may_raise = if (builtin_info) |info| info.may_raise else true;
+                                    if (may_raise) {
+                                        try writer.print("    _ = try runtime.{s}(", .{runtime_name});
+                                    } else {
+                                        try writer.print("    _ = runtime.{s}(", .{runtime_name});
+                                    }
+                                    try self.writeValueArgs(writer, op.args);
+                                    try writer.writeAll(");\n");
+                                }
+                            },
+                            .variadic_array => {
+                                if (op.function_id == FunctionRegistry.comptimeLookup("sprintf") or
+                                    op.function_id == FunctionRegistry.comptimeLookup("printf"))
+                                {
+                                    if (op.args.len == 0) {
+                                        try writer.writeAll("    _ = runtime.Value.initNull();\n");
+                                    } else {
+                                        const fmt_arg = op.args[0];
+                                        const fmt_arg_type = @as(std.meta.Tag(IR.Type), fmt_arg.type_);
+                                        try writer.print("    _ = try runtime.{s}(", .{runtime_name});
+                                        try self.writePhpValueExpr(writer, fmt_arg_type, fmt_arg.id);
+                                        try writer.writeAll(", ");
+                                        try self.writeValueArgsArray(writer, op.args[1..]);
+                                        try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    }
+                                } else {
                                     try writer.print("    _ = try runtime.{s}(", .{runtime_name});
-                                    try self.writePhpValueExpr(writer, fmt_arg_type, fmt_arg.id);
-                                    try writer.writeAll(", ");
-                                    try self.writeValueArgsArray(writer, op.args[1..]);
-                                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    try self.writeValueArgsArray(writer, op.args);
+                                    try writer.writeAll(");\n");
                                 }
-                            } else if (std.mem.eql(u8, runtime_name, "php_str_getcsv")) {
-                                if (op.args.len < 4) {
-                                    try writer.writeAll("    runtime.emitDeprecatedStrGetcsvEscape();\n");
-                                }
-                                try writer.print("    _ = try runtime.{s}(", .{runtime_name});
-                                try self.writeStrGetcsvArgs(writer, op.args);
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_array_merge") or std.mem.eql(u8, runtime_name, "php_array_intersect") or std.mem.eql(u8, runtime_name, "php_array_diff") or std.mem.eql(u8, runtime_name, "php_array_diff_key") or std.mem.eql(u8, runtime_name, "php_array_multisort") or std.mem.eql(u8, runtime_name, "php_array_map") or std.mem.eql(u8, runtime_name, "php_json_decode") or std.mem.eql(u8, runtime_name, "php_memory_get_usage") or std.mem.eql(u8, runtime_name, "php_memory_get_peak_usage") or std.mem.eql(u8, runtime_name, "php_shell_exec") or std.mem.eql(u8, runtime_name, "php_exec") or std.mem.eql(u8, runtime_name, "php_system") or std.mem.eql(u8, runtime_name, "php_substr_replace") or std.mem.eql(u8, runtime_name, "php_function_exists") or std.mem.eql(u8, runtime_name, "php_gc_enable") or std.mem.eql(u8, runtime_name, "php_gc_collect_cycles") or std.mem.eql(u8, runtime_name, "php_ini_get") or std.mem.eql(u8, runtime_name, "php_getrusage") or std.mem.eql(u8, runtime_name, "php_unset")) {
-                                try writer.print("    _ = try runtime.{s}(", .{runtime_name});
-                                try self.writeValueArgsArray(writer, op.args);
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_array_push") or std.mem.eql(u8, runtime_name, "php_array_unshift")) {
+                            },
+                            .first_arg_then_array => {
                                 if (op.args.len > 0) {
                                     const first_arg = op.args[0];
                                     const first_type = @as(std.meta.Tag(IR.Type), first_arg.type_);
                                     try writer.print("    _ = try runtime.{s}(", .{runtime_name});
                                     try self.writePhpValueExpr(writer, first_type, first_arg.id);
-                                    try writer.writeAll(", ");
-                                    try self.writeValueArgsArray(writer, op.args[1..]);
-                                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    if (op.args.len > 1) {
+                                        try writer.writeAll(", ");
+                                        try self.writeValueArgsArray(writer, op.args[1..]);
+                                    }
+                                    if (needs_alloc) {
+                                        try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    } else {
+                                        try writer.writeAll(");\n");
+                                    }
                                 } else {
                                     try writer.writeAll("    _ = runtime.Value.initNull();\n");
                                 }
-                            } else if (std.mem.eql(u8, runtime_name, "php_password_hash")) {
-                                // password_hash(password, algo) — IR已截断到2个参数，补齐不足的
+                            },
+                            .all_args_array => {
                                 try writer.print("    _ = try runtime.{s}(", .{runtime_name});
-                                if (op.args.len >= 2) {
-                                    try self.writeValueArgs(writer, op.args[0..2]);
-                                } else if (op.args.len == 1) {
-                                    try self.writeValueArgs(writer, op.args);
-                                    try writer.writeAll(", runtime.Value.initInt(1)");
+                                try self.writeValueArgsArray(writer, op.args);
+                                if (needs_alloc) {
+                                    try writer.writeAll(", runtime.runtime_allocator);\n");
                                 } else {
-                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(1)");
+                                    try writer.writeAll(");\n");
                                 }
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (std.mem.eql(u8, runtime_name, "php_ob_get_status")) {
-                                // ob_get_status(full_status = false)
+                            },
+                            .callback => {
                                 try writer.print("    _ = try runtime.{s}(", .{runtime_name});
-                                if (op.args.len >= 1) {
-                                    try self.writeValueArgs(writer, op.args[0..1]);
+                                try self.writeValueArgsArray(writer, op.args);
+                                if (needs_alloc) {
+                                    try writer.writeAll(", runtime.runtime_allocator);\n");
                                 } else {
-                                    try writer.writeAll("runtime.Value.initBool(false)");
+                                    try writer.writeAll(");\n");
                                 }
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else if (op.args.len > 0) {
-                                try writer.print("    _ = try runtime.{s}(", .{runtime_name});
-                                try self.writeValueArgs(writer, op.args);
-                                try writer.writeAll(", runtime.runtime_allocator);\n");
-                            } else {
-                                try writer.print("    _ = try runtime.{s}(runtime.runtime_allocator);\n", .{runtime_name});
-                            }
-                        } else {
-                            // 特殊处理php_ref_assign_ptr：第一个参数需要指针
-                            if (std.mem.eql(u8, runtime_name, "php_ref_assign_ptr") and op.args.len >= 2) {
-                                try writer.print("    _ = try runtime.{s}(", .{runtime_name});
-                                // 第一个参数：检查是否已经是指针类型寄存器
-                                const first_arg = op.args[0];
-                                const is_ptr_reg = if (self.current_ref_ptr_regs) |rpr|
-                                    rpr.contains(first_arg.id)
-                                else
-                                    false;
-                                const is_alloca_reg = if (self.current_alloca_regs) |ar|
-                                    ar.contains(first_arg.id)
-                                else
-                                    false;
-                                
-                                if (is_ptr_reg or is_alloca_reg) {
-                                    // 已经是指针类型寄存器，直接使用
-                                    try writer.print("reg_{d}", .{first_arg.id});
-                                } else {
-                                    // 普通值类型寄存器，需要取地址
-                                    try writer.print("&reg_{d}", .{first_arg.id});
-                                }
-                                // 其余参数：正常处理
-                                for (op.args[1..]) |arg| {
-                                    try writer.writeAll(", ");
-                                    try self.writeRegRef(writer, arg.id);
-                                }
-                                try writer.writeAll(");\n");
-                            } else {
-                                // 通用builtin函数调用（无返回值）
-                                const builtin_info = builtinInfo(op.func_name);
-                                const may_raise = if (builtin_info) |info| info.may_raise else true;
-                                
-                                if (may_raise) {
+                            },
+                            .ref_param => {
+                                if (needs_alloc) {
                                     try writer.print("    _ = try runtime.{s}(", .{runtime_name});
+                                    try self.writeValueArgsArray(writer, op.args);
+                                    try writer.writeAll(", runtime.runtime_allocator);\n");
                                 } else {
-                                    try writer.print("    _ = runtime.{s}(", .{runtime_name});
+                                    try writer.print("    _ = try runtime.{s}(", .{runtime_name});
+                                    try self.writeValueArgsArray(writer, op.args);
+                                    try writer.writeAll(");\n");
                                 }
-                                try self.writeValueArgs(writer, op.args);
-                                try writer.writeAll(");\n");
-                            }
+                            },
+                            .statement => {
+                                if (needs_alloc) {
+                                    try writer.print("    _ = try runtime.{s}(", .{runtime_name});
+                                    try self.writeValueArgs(writer, op.args);
+                                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                                } else {
+                                    const builtin_info = builtinInfo(op.func_name);
+                                    const may_raise = if (builtin_info) |info| info.may_raise else true;
+                                    if (may_raise) {
+                                        try writer.print("    _ = try runtime.{s}(", .{runtime_name});
+                                    } else {
+                                        try writer.print("    _ = runtime.{s}(", .{runtime_name});
+                                    }
+                                    try self.writeValueArgs(writer, op.args);
+                                    try writer.writeAll(");\n");
+                                }
+                            },
+                            .special => {
+                                if (op.function_id == FunctionRegistry.comptimeLookup("str_getcsv")) {
+                                    if (op.args.len < 4) {
+                                        try writer.writeAll("    runtime.emitDeprecatedStrGetcsvEscape();\n");
+                                    }
+                                    try writer.print("    _ = try runtime.{s}(", .{runtime_name});
+                                    try self.writeStrGetcsvArgs(writer, op.args);
+                                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                                } else if (op.function_id == FunctionRegistry.comptimeLookup("password_hash")) {
+                                    try writer.print("    _ = try runtime.{s}(", .{runtime_name});
+                                    if (op.args.len >= 2) {
+                                        try self.writeValueArgs(writer, op.args[0..2]);
+                                    } else if (op.args.len == 1) {
+                                        try self.writeValueArgs(writer, op.args);
+                                        try writer.writeAll(", runtime.Value.initInt(1)");
+                                    } else {
+                                        try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(1)");
+                                    }
+                                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                                } else if (op.function_id == FunctionRegistry.comptimeLookup("ob_get_status")) {
+                                    try writer.print("    _ = try runtime.{s}(", .{runtime_name});
+                                    if (op.args.len >= 1) {
+                                        try self.writeValueArgs(writer, op.args[0..1]);
+                                    } else {
+                                        try writer.writeAll("runtime.Value.initBool(false)");
+                                    }
+                                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                                } else if (std.mem.eql(u8, runtime_name, "php_ref_assign_ptr") and op.args.len >= 2) {
+                                    try writer.print("    _ = try runtime.{s}(", .{runtime_name});
+                                    const first_arg = op.args[0];
+                                    const is_ptr_reg = if (self.current_ref_ptr_regs) |rpr|
+                                        rpr.contains(first_arg.id)
+                                    else
+                                        false;
+                                    const is_alloca_reg = if (self.current_alloca_regs) |ar|
+                                        ar.contains(first_arg.id)
+                                    else
+                                        false;
+                                    if (is_ptr_reg or is_alloca_reg) {
+                                        try writer.print("reg_{d}", .{first_arg.id});
+                                    } else {
+                                        try writer.print("&reg_{d}", .{first_arg.id});
+                                    }
+                                    for (op.args[1..]) |arg| {
+                                        try writer.writeAll(", ");
+                                        try self.writeRegRef(writer, arg.id);
+                                    }
+                                    try writer.writeAll(");\n");
+                                } else if (needs_alloc) {
+                                    if (op.args.len > 0) {
+                                        try writer.print("    _ = try runtime.{s}(", .{runtime_name});
+                                        try self.writeValueArgs(writer, op.args);
+                                        try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    } else {
+                                        try writer.print("    _ = try runtime.{s}(runtime.runtime_allocator);\n", .{runtime_name});
+                                    }
+                                } else {
+                                    const builtin_info = builtinInfo(op.func_name);
+                                    const may_raise = if (builtin_info) |info| info.may_raise else true;
+                                    if (may_raise) {
+                                        try writer.print("    _ = try runtime.{s}(", .{runtime_name});
+                                    } else {
+                                        try writer.print("    _ = runtime.{s}(", .{runtime_name});
+                                    }
+                                    try self.writeValueArgs(writer, op.args);
+                                    try writer.writeAll(");\n");
+                                }
+                            },
                         }
                     } else {
                         // 用户定义函数
@@ -15188,84 +14923,107 @@ pub const NativeLinker = struct {
                         const runtime_name = if (op.function_id != 0) getRuntimeNameById(op.function_id) else self.mapToRuntimeFunction(op.func_name);
                         const needs_alloc = if (op.function_id != 0) functionNeedsAllocatorById(op.function_id) else self.functionNeedsAllocator(op.func_name);
 
-                        if (std.mem.eql(u8, runtime_name, "php_str_getcsv")) {
-                            if (op.args.len < 4) {
-                                try writer.writeAll("        runtime.emitDeprecatedStrGetcsvEscape();\n");
-                            }
-                            if (in_try_block) {
-                                try writer.print("        {s} = runtime.{s}(", .{ r, runtime_name });
-                            } else {
-                                try writer.print("        {s} = try runtime.{s}(", .{ r, runtime_name });
-                            }
-                            try self.writeStrGetcsvArgs(writer, op.args);
-                            try writer.writeAll(", runtime.runtime_allocator");
-                            if (in_try_block) {
-                                try writer.writeAll(") catch runtime.Value.initNull();\n");
-                            } else {
-                                try writer.writeAll(");\n");
-                            }
-                        } else if (std.mem.eql(u8, runtime_name, "php_in_array")) {
-                            // in_array(needle, haystack, strict = false)
-                            if (in_try_block) {
-                                try writer.print("        {s} = runtime.{s}(", .{ r, runtime_name });
-                            } else {
-                                try writer.print("        {s} = try runtime.{s}(", .{ r, runtime_name });
-                            }
-                            for (op.args, 0..) |arg, i| {
-                                if (i > 0) try writer.writeAll(", ");
-                                try self.writeRegRef(writer, arg.id);
-                            }
-                            if (op.args.len < 3) {
-                                try writer.writeAll(", runtime.Value.initBool(false)");
-                            }
-                            if (in_try_block) {
-                                try writer.writeAll(") catch runtime.Value.initNull();\n");
-                            } else {
-                                try writer.writeAll(");\n");
-                            }
-                        } else if (std.mem.eql(u8, runtime_name, "php_ob_get_status")) {
-                            // ob_get_status(full_status = false)
-                            // 函数签名: php_ob_get_status(full_status: Value, allocator: Allocator)
-                            if (in_try_block) {
-                                try writer.print("        {s} = runtime.{s}(", .{ r, runtime_name });
-                            } else {
-                                try writer.print("        {s} = try runtime.{s}(", .{ r, runtime_name });
-                            }
-                            if (op.args.len >= 1) {
-                                try self.writeRegRef(writer, op.args[0].id);
-                            } else {
-                                try writer.writeAll("runtime.Value.initBool(false)");
-                            }
-                            try writer.writeAll(", runtime.runtime_allocator");
-                            if (in_try_block) {
-                                try writer.writeAll(") catch runtime.Value.initNull();\n");
-                            } else {
-                                try writer.writeAll(");\n");
-                            }
-                        } else {
-                            if (in_try_block) {
-                                try writer.print("        {s} = runtime.{s}(", .{ r, runtime_name });
-                            } else {
-                                try writer.print("        {s} = try runtime.{s}(", .{ r, runtime_name });
-                            }
+                        // CallConvention 驱动分发（try-catch 有返回值路径）
+                        const convention = if (op.function_id != 0) FunctionRegistry.getCallConvention(op.function_id) else blk: {
+                            break :blk if (FunctionRegistry.getCallConventionByName(op.func_name)) |cc| cc else .standard;
+                        };
 
-                            const max_args = if (std.mem.eql(u8, op.func_name, "file_put_contents"))
-                                @min(op.args.len, 2)
-                            else
-                                op.args.len;
-
-                            for (op.args[0..max_args], 0..) |arg, i| {
-                                if (i > 0) try writer.writeAll(", ");
-                                try self.writeRegRef(writer, arg.id);
-                            }
-                            if (needs_alloc) {
-                                try writer.writeAll(", runtime.runtime_allocator");
-                            }
-                            if (in_try_block) {
-                                try writer.writeAll(") catch runtime.Value.initNull();\n");
-                            } else {
-                                try writer.writeAll(");\n");
-                            }
+                        switch (convention) {
+                            .standard, .callback, .all_args_array, .variadic_array, .first_arg_then_array, .ref_param, .statement => {
+                                if (in_try_block) {
+                                    try writer.print("        {s} = runtime.{s}(", .{ r, runtime_name });
+                                } else {
+                                    try writer.print("        {s} = try runtime.{s}(", .{ r, runtime_name });
+                                }
+                                const max_args = if (op.function_id == FunctionRegistry.comptimeLookup("file_put_contents"))
+                                    @min(op.args.len, 2)
+                                else
+                                    op.args.len;
+                                for (op.args[0..max_args], 0..) |arg, i| {
+                                    if (i > 0) try writer.writeAll(", ");
+                                    try self.writeRegRef(writer, arg.id);
+                                }
+                                if (needs_alloc) {
+                                    try writer.writeAll(", runtime.runtime_allocator");
+                                }
+                                if (in_try_block) {
+                                    try writer.writeAll(") catch runtime.Value.initNull();\n");
+                                } else {
+                                    try writer.writeAll(");\n");
+                                }
+                            },
+                            .special => {
+                                if (op.function_id == FunctionRegistry.comptimeLookup("str_getcsv")) {
+                                    if (op.args.len < 4) {
+                                        try writer.writeAll("        runtime.emitDeprecatedStrGetcsvEscape();\n");
+                                    }
+                                    if (in_try_block) {
+                                        try writer.print("        {s} = runtime.{s}(", .{ r, runtime_name });
+                                    } else {
+                                        try writer.print("        {s} = try runtime.{s}(", .{ r, runtime_name });
+                                    }
+                                    try self.writeStrGetcsvArgs(writer, op.args);
+                                    try writer.writeAll(", runtime.runtime_allocator");
+                                    if (in_try_block) {
+                                        try writer.writeAll(") catch runtime.Value.initNull();\n");
+                                    } else {
+                                        try writer.writeAll(");\n");
+                                    }
+                                } else if (op.function_id == FunctionRegistry.comptimeLookup("in_array")) {
+                                    if (in_try_block) {
+                                        try writer.print("        {s} = runtime.{s}(", .{ r, runtime_name });
+                                    } else {
+                                        try writer.print("        {s} = try runtime.{s}(", .{ r, runtime_name });
+                                    }
+                                    for (op.args, 0..) |arg, i| {
+                                        if (i > 0) try writer.writeAll(", ");
+                                        try self.writeRegRef(writer, arg.id);
+                                    }
+                                    if (op.args.len < 3) {
+                                        try writer.writeAll(", runtime.Value.initBool(false)");
+                                    }
+                                    if (in_try_block) {
+                                        try writer.writeAll(") catch runtime.Value.initNull();\n");
+                                    } else {
+                                        try writer.writeAll(");\n");
+                                    }
+                                } else if (op.function_id == FunctionRegistry.comptimeLookup("ob_get_status")) {
+                                    if (in_try_block) {
+                                        try writer.print("        {s} = runtime.{s}(", .{ r, runtime_name });
+                                    } else {
+                                        try writer.print("        {s} = try runtime.{s}(", .{ r, runtime_name });
+                                    }
+                                    if (op.args.len >= 1) {
+                                        try self.writeRegRef(writer, op.args[0].id);
+                                    } else {
+                                        try writer.writeAll("runtime.Value.initBool(false)");
+                                    }
+                                    try writer.writeAll(", runtime.runtime_allocator");
+                                    if (in_try_block) {
+                                        try writer.writeAll(") catch runtime.Value.initNull();\n");
+                                    } else {
+                                        try writer.writeAll(");\n");
+                                    }
+                                } else {
+                                    if (in_try_block) {
+                                        try writer.print("        {s} = runtime.{s}(", .{ r, runtime_name });
+                                    } else {
+                                        try writer.print("        {s} = try runtime.{s}(", .{ r, runtime_name });
+                                    }
+                                    for (op.args, 0..) |arg, i| {
+                                        if (i > 0) try writer.writeAll(", ");
+                                        try self.writeRegRef(writer, arg.id);
+                                    }
+                                    if (needs_alloc) {
+                                        try writer.writeAll(", runtime.runtime_allocator");
+                                    }
+                                    if (in_try_block) {
+                                        try writer.writeAll(") catch runtime.Value.initNull();\n");
+                                    } else {
+                                        try writer.writeAll(");\n");
+                                    }
+                                }
+                            },
                         }
                     } else if (!self.isUserDefinedFunction(op.func_name)) {
                         // 函数未定义：生成运行时 Fatal error
@@ -15322,23 +15080,43 @@ pub const NativeLinker = struct {
                         const runtime_name = if (op.function_id != 0) getRuntimeNameById(op.function_id) else self.mapToRuntimeFunction(op.func_name);
                         const needs_alloc = if (op.function_id != 0) functionNeedsAllocatorById(op.function_id) else self.functionNeedsAllocator(op.func_name);
 
-                        if (std.mem.eql(u8, runtime_name, "php_str_getcsv")) {
-                            if (op.args.len < 4) {
-                                try writer.writeAll("        runtime.emitDeprecatedStrGetcsvEscape();\n");
-                            }
-                            try writer.print("        _ = try runtime.{s}(", .{runtime_name});
-                            try self.writeStrGetcsvArgs(writer, op.args);
-                            try writer.writeAll(", runtime.runtime_allocator);\n");
-                        } else {
-                            try writer.print("        _ = try runtime.{s}(", .{runtime_name});
-                            for (op.args, 0..) |arg, i| {
-                                if (i > 0) try writer.writeAll(", ");
-                                try self.writeRegRef(writer, arg.id);
-                            }
-                            if (needs_alloc) {
-                                try writer.writeAll(", runtime.runtime_allocator");
-                            }
-                            try writer.writeAll(");\n");
+                        // CallConvention 驱动分发（try-catch 无返回值路径）
+                        const convention = if (op.function_id != 0) FunctionRegistry.getCallConvention(op.function_id) else blk: {
+                            break :blk if (FunctionRegistry.getCallConventionByName(op.func_name)) |cc| cc else .standard;
+                        };
+
+                        switch (convention) {
+                            .standard, .callback, .all_args_array, .variadic_array, .first_arg_then_array, .ref_param, .statement => {
+                                try writer.print("        _ = try runtime.{s}(", .{runtime_name});
+                                for (op.args, 0..) |arg, i| {
+                                    if (i > 0) try writer.writeAll(", ");
+                                    try self.writeRegRef(writer, arg.id);
+                                }
+                                if (needs_alloc) {
+                                    try writer.writeAll(", runtime.runtime_allocator");
+                                }
+                                try writer.writeAll(");\n");
+                            },
+                            .special => {
+                                if (op.function_id == FunctionRegistry.comptimeLookup("str_getcsv")) {
+                                    if (op.args.len < 4) {
+                                        try writer.writeAll("        runtime.emitDeprecatedStrGetcsvEscape();\n");
+                                    }
+                                    try writer.print("        _ = try runtime.{s}(", .{runtime_name});
+                                    try self.writeStrGetcsvArgs(writer, op.args);
+                                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                                } else {
+                                    try writer.print("        _ = try runtime.{s}(", .{runtime_name});
+                                    for (op.args, 0..) |arg, i| {
+                                        if (i > 0) try writer.writeAll(", ");
+                                        try self.writeRegRef(writer, arg.id);
+                                    }
+                                    if (needs_alloc) {
+                                        try writer.writeAll(", runtime.runtime_allocator");
+                                    }
+                                    try writer.writeAll(");\n");
+                                }
+                            },
                         }
                     } else if (!self.isUserDefinedFunction(op.func_name)) {
                         // 函数未定义：生成运行时 Fatal error
