@@ -5073,12 +5073,14 @@ pub const IRGenerator = struct {
                 .func_name = "php_error_suppress_push",
                 .args = &.{},
                 .return_type = .void,
+                .function_id = FunctionRegistry.comptimeLookup("php_error_suppress_push"),
             } }, null);
             const inner_reg = try self.generateExpression(unary_data.expr);
             _ = try self.emit(.{ .call = .{
                 .func_name = "php_error_suppress_pop",
                 .args = &.{},
                 .return_type = .void,
+                .function_id = FunctionRegistry.comptimeLookup("php_error_suppress_pop"),
             } }, null);
             return inner_reg;
         }
