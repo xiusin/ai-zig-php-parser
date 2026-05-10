@@ -575,6 +575,13 @@ pub const registry = [_]FunctionMeta{
     .{ .php_name = "php_deref", .runtime_name = "php_deref", .category = .internal },
     .{ .php_name = "php_ref_assign", .runtime_name = "php_ref_assign", .category = .internal, .may_raise = false },
     .{ .php_name = "php_ref_assign_ptr", .runtime_name = "php_ref_assign_ptr", .category = .internal, .may_raise = false },
+
+    // ===== StringBuilder 内部函数 =====
+    .{ .php_name = "sb_create", .runtime_name = "php_sb_create", .needs_allocator = true, .category = .internal },
+    .{ .php_name = "sb_append", .runtime_name = "php_sb_append", .needs_allocator = true, .category = .internal },
+    .{ .php_name = "sb_to_string", .runtime_name = "php_sb_to_string", .needs_allocator = true, .category = .internal },
+    .{ .php_name = "sb_length", .runtime_name = "php_sb_length", .category = .internal, .is_pure = true },
+    .{ .php_name = "sb_free", .runtime_name = "php_sb_free", .needs_allocator = true, .category = .internal, .call_convention = .statement },
     .{ .php_name = "php_object_new", .runtime_name = "php_object_new", .needs_allocator = true, .category = .internal },
     .{ .php_name = "php_object_new_with_constructor", .runtime_name = "php_object_new_with_constructor", .needs_allocator = true, .category = .internal },
     .{ .php_name = "php_concat", .runtime_name = "php_concat", .needs_allocator = true, .category = .internal },

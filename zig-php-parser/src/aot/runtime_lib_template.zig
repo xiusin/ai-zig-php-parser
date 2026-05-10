@@ -1477,7 +1477,7 @@ pub const PHPString = struct {
         // 目前的问题是：某些 Value 可能持有旧 data 指针的引用
         // TODO: 修复后重新启用
 
-        // 小字符串优化：≤256 字节使用栈缓冲
+        // 小字符串优化：≤256 字节使用栈缓冲（减少堆分配碎片）
         if (new_length <= 256) {
             var stack_buf: [256]u8 = undefined;
             if (self.length > 0) {
@@ -1579,6 +1579,61 @@ pub const PHPString = struct {
     /// 字符串长度
     pub fn len(self: *PHPString) usize {
         return self.length;
+    }
+};
+
+// ============================================================================
+// StringBuilder — 高效字符串构建（用于循环中的 $s = $s . const 模式）
+// ============================================================================
+
+pub const PHPStringBuilder = struct {
+    buffer: []u8,
+    len: usize,
+    capacity: usize,
+    allocator: Allocator,
+
+    pub fn init(allocator: Allocator, initial_capacity: usize) !*PHPStringBuilder {
+        const sb = try allocator.create(PHPStringBuilder);
+        const cap = if (initial_capacity < 64) @as(usize, 64) else initial_capacity;
+        sb.* = .{
+            .buffer = try allocator.alloc(u8, cap),
+            .len = 0,
+            .capacity = cap,
+            .allocator = allocator,
+        };
+        return sb;
+    }
+
+    pub fn deinit(self: *PHPStringBuilder) void {
+        self.allocator.free(self.buffer);
+        self.allocator.destroy(self);
+    }
+
+    pub fn append(self: *PHPStringBuilder, str: []const u8) !void {
+        const needed = self.len + str.len;
+        if (needed > self.capacity) {
+            var new_cap = self.capacity;
+            while (new_cap < needed) {
+                new_cap = new_cap * 2;
+            }
+            const new_buf = try self.allocator.realloc(u8, self.buffer, new_cap);
+            self.buffer = new_buf;
+            self.capacity = new_cap;
+        }
+        @memcpy(self.buffer[self.len..needed], str);
+        self.len = needed;
+    }
+
+    pub fn appendString(self: *PHPStringBuilder, s: *PHPString) !void {
+        try self.append(s.data[0..s.length]);
+    }
+
+    pub fn toString(self: *PHPStringBuilder) !*PHPString {
+        return try PHPString.init(self.allocator, self.buffer[0..self.len]);
+    }
+
+    pub fn length(self: *PHPStringBuilder) usize {
+        return self.len;
     }
 };
 
@@ -2754,7 +2809,7 @@ const builtin_fn_by_id = blk: {
         .{ "addslashes", wrapBuiltin_addslashes },
         .{ "stripslashes", wrapBuiltin_stripslashes },
     };
-    inline for (mapping) |entry| {
+    for (mapping) |entry| {
         const id = FunctionRegistry.comptimeLookup(entry[0]);
         table[id] = entry[1];
     }
@@ -5361,6 +5416,46 @@ pub fn php_logical_xor(lhs: Value, rhs: Value) !Value {
 // ============================================================================
 // 字符串运算符
 // ============================================================================
+
+/// StringBuilder: 创建新的字符串构建器
+pub fn php_sb_create(allocator: Allocator) !Value {
+    const sb = try PHPStringBuilder.init(allocator, 64);
+    return Value.initPtr(sb, Value.TYPE_STRUCT);
+}
+
+/// StringBuilder: 追加字符串
+pub fn php_sb_append(sb_val: Value, str_val: Value, allocator: Allocator) !Value {
+    _ = allocator;
+    const sb = @as(*PHPStringBuilder, @ptrCast(@alignCast(sb_val.asPtr())));
+    if (str_val.isString()) {
+        try sb.appendString(str_val.asString());
+    } else {
+        const s = str_val.toString(allocator) catch return sb_val;
+        defer s.release(allocator);
+        try sb.append(s.data[0..s.length]);
+    }
+    return sb_val;
+}
+
+/// StringBuilder: 转为 PHP 字符串
+pub fn php_sb_to_string(sb_val: Value, allocator: Allocator) !Value {
+    const sb = @as(*PHPStringBuilder, @ptrCast(@alignCast(sb_val.asPtr())));
+    const result = try sb.toString();
+    return Value.initString(result);
+}
+
+/// StringBuilder: 获取长度
+pub fn php_sb_length(sb_val: Value) Value {
+    const sb = @as(*PHPStringBuilder, @ptrCast(@alignCast(sb_val.asPtr())));
+    return Value.initInt(@intCast(sb.length()));
+}
+
+/// StringBuilder: 释放
+pub fn php_sb_free(sb_val: Value, allocator: Allocator) void {
+    const sb = @as(*PHPStringBuilder, @ptrCast(@alignCast(sb_val.asPtr())));
+    sb.deinit();
+    _ = allocator;
+}
 
 /// 字符串连接运算
 pub fn php_concat(lhs: Value, rhs: Value, allocator: Allocator) !Value {

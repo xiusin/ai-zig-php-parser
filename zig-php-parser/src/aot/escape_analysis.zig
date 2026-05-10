@@ -24,7 +24,7 @@ pub const EscapeAnalysis = struct {
 
     pub fn deinit(self: *EscapeAnalysis) void {
         self.escaped.deinit();
-        self.worklist.deinit();
+        self.worklist.deinit(self.allocator);
     }
 
     /// 分析函数中的逃逸情况
@@ -40,8 +40,10 @@ pub const EscapeAnalysis = struct {
             }
             
             // 检查终止符（返回值）
-            if (block.terminator.ret) |ret_val| {
-                try self.markEscaped(ret_val.id);
+            if (block.terminator) |term| {
+                if (term.ret) |ret_val| {
+                    try self.markEscaped(ret_val.id);
+                }
             }
         }
 
@@ -78,7 +80,7 @@ pub const EscapeAnalysis = struct {
                 }
             },
             // 数组/对象元素逃逸
-            .array_set, .array_set_nested, .object_set => {
+            .array_set, .array_set_nested => {
                 if (inst.result) |result| {
                     try self.markEscaped(result.id);
                 }
