@@ -2651,129 +2651,131 @@ pub fn make_ref(ptr: *Value, allocator: Allocator) !Value {
 
 const BuiltinFn = *const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value;
 
-const builtin_function_map = std.StaticStringMap(BuiltinFn).initComptime(.{
-    .{ "strlen", wrapBuiltin_strlen },
-    .{ "strtoupper", wrapBuiltin_strtoupper },
-    .{ "strtolower", wrapBuiltin_strtolower },
-    .{ "str_ireplace", wrapBuiltin_str_ireplace },
-    .{ "str_getcsv", wrapBuiltin_str_getcsv },
-    .{ "func_get_args", wrapBuiltin_func_get_args },
-    .{ "func_get_arg", wrapBuiltin_func_get_arg },
-    .{ "func_num_args", wrapBuiltin_func_num_args },
-    .{ "memory_get_usage", wrapBuiltin_memory_get_usage },
-    .{ "memory_get_peak_usage", wrapBuiltin_memory_get_peak_usage },
-    .{ "function_exists", wrapBuiltin_function_exists },
-    .{ "gc_enable", wrapBuiltin_gc_enable },
-    .{ "gc_collect_cycles", wrapBuiltin_gc_collect_cycles },
-    .{ "ini_get", wrapBuiltin_ini_get },
-    .{ "getrusage", wrapBuiltin_getrusage },
-    .{ "json_decode", wrapBuiltin_json_decode },
-    .{ "json_last_error_msg", wrapBuiltin_json_last_error_msg },
-    .{ "trim", wrapBuiltin_trim },
-    .{ "count", wrapBuiltin_count },
-    .{ "sqrt", wrapBuiltin_sqrt },
-    .{ "strval", wrapBuiltin_strval },
-    .{ "array_map", wrapBuiltin_array_map },
-    .{ "array_filter", wrapBuiltin_array_filter },
-    .{ "array_reduce", wrapBuiltin_array_reduce },
-    .{ "array_walk", wrapBuiltin_array_walk },
-    .{ "array_walk_recursive", wrapBuiltin_array_walk_recursive },
-    .{ "array_merge", wrapBuiltin_array_merge },
-    .{ "array_sum", wrapBuiltin_array_sum },
-    .{ "round", wrapBuiltin_round },
-    .{ "ob_start", wrapBuiltin_ob_start },
-    .{ "ob_gzhandler", wrapBuiltin_ob_gzhandler },
-    .{ "usort", wrapBuiltin_usort },
-    .{ "select", wrapBuiltin_select },
-    .{ "get_class_methods", wrapBuiltin_get_class_methods },
-    .{ "get_class_vars", wrapBuiltin_get_class_vars },
-    .{ "get_object_vars", wrapBuiltin_get_object_vars },
-    .{ "get_called_class", wrapBuiltin_get_called_class },
-    .{ "forward_static_call", wrapBuiltin_forward_static_call },
-    .{ "forward_static_call_array", wrapBuiltin_forward_static_call_array },
-    // 文件系统函数
-    .{ "filemtime", wrapBuiltin_filemtime },
-    .{ "fileatime", wrapBuiltin_fileatime },
-    .{ "filectime", wrapBuiltin_filectime },
-    // 网络函数
-    .{ "getenv", wrapBuiltin_getenv },
-    .{ "gethostbyname", wrapBuiltin_gethostbyname },
-    .{ "gethostname", wrapBuiltin_gethostname },
-    .{ "ip2long", wrapBuiltin_ip2long },
-    .{ "long2ip", wrapBuiltin_long2ip },
-    .{ "parse_url", wrapBuiltin_parse_url },
-    // 错误处理函数
-    .{ "set_error_handler", wrapBuiltin_set_error_handler },
-    .{ "restore_error_handler", wrapBuiltin_restore_error_handler },
-    .{ "trigger_error", wrapBuiltin_trigger_error },
-    .{ "error_reporting", wrapBuiltin_error_reporting },
-    // Ctype 字符类型检测函数
-    .{ "ctype_alnum", wrapBuiltin_ctype_alnum },
-    .{ "ctype_alpha", wrapBuiltin_ctype_alpha },
-    .{ "ctype_cntrl", wrapBuiltin_ctype_cntrl },
-    .{ "ctype_digit", wrapBuiltin_ctype_digit },
-    .{ "ctype_graph", wrapBuiltin_ctype_graph },
-    .{ "ctype_lower", wrapBuiltin_ctype_lower },
-    .{ "ctype_print", wrapBuiltin_ctype_print },
-    .{ "ctype_punct", wrapBuiltin_ctype_punct },
-    .{ "ctype_space", wrapBuiltin_ctype_space },
-    .{ "ctype_upper", wrapBuiltin_ctype_upper },
-    .{ "ctype_xdigit", wrapBuiltin_ctype_xdigit },
-    // Mbstring 多字节字符串函数
-    .{ "mb_strlen", wrapBuiltin_mb_strlen },
-    .{ "mb_substr", wrapBuiltin_mb_substr },
-    .{ "mb_strtoupper", wrapBuiltin_mb_strtoupper },
-    .{ "mb_strtolower", wrapBuiltin_mb_strtolower },
-    // 字符串函数
-    .{ "substr_count", wrapBuiltin_substr_count },
-    .{ "ucfirst", wrapBuiltin_ucfirst },
-    .{ "lcfirst", wrapBuiltin_lcfirst },
-    .{ "ucwords", wrapBuiltin_ucwords },
-    .{ "strrpos", wrapBuiltin_strrpos },
-    .{ "strripos", wrapBuiltin_strripos },
-    .{ "str_word_count", wrapBuiltin_str_word_count },
-    .{ "substr", wrapBuiltin_substr },
-    .{ "strpos", wrapBuiltin_strpos },
-    // 数学函数
-    .{ "floor", wrapBuiltin_floor },
-    .{ "ceil", wrapBuiltin_ceil },
-    .{ "sin", wrapBuiltin_sin },
-    .{ "cos", wrapBuiltin_cos },
-    .{ "tan", wrapBuiltin_tan },
-    .{ "log", wrapBuiltin_log },
-    .{ "exp", wrapBuiltin_exp },
-    .{ "hypot", wrapBuiltin_hypot },
-    .{ "pow", wrapBuiltin_pow },
-    .{ "min", wrapBuiltin_min },
-    .{ "max", wrapBuiltin_max },
-    // 字符串函数
-    .{ "stripos", wrapBuiltin_stripos },
-    .{ "strstr", wrapBuiltin_strstr },
-    .{ "str_split", wrapBuiltin_str_split },
-    .{ "implode", wrapBuiltin_implode },
-    .{ "explode", wrapBuiltin_explode },
-    // 回调函数
-    .{ "is_callable", wrapBuiltin_is_callable },
-    .{ "get_debug_type", wrapBuiltin_get_debug_type },
-    .{ "call_user_func", wrapBuiltin_call_user_func },
-    .{ "call_user_func_array", wrapBuiltin_call_user_func_array },
-    .{ "compact", wrapBuiltin_compact },
-    .{ "extract", wrapBuiltin_extract },
-    // 字符操作函数
-    .{ "ord", wrapBuiltin_ord },
-    .{ "chr", wrapBuiltin_chr },
-    .{ "md5", wrapBuiltin_md5 },
-    .{ "sha1", wrapBuiltin_sha1 },
-    .{ "crc32", wrapBuiltin_crc32 },
-    .{ "strrev", wrapBuiltin_strrev },
-    .{ "ltrim", wrapBuiltin_ltrim },
-    .{ "rtrim", wrapBuiltin_rtrim },
-    .{ "addslashes", wrapBuiltin_addslashes },
-    .{ "stripslashes", wrapBuiltin_stripslashes },
-});
+const builtin_fn_by_id = blk: {
+    @setEvalBranchQuota(200000);
+    var table: [FunctionRegistry.REGISTRY_SIZE]?BuiltinFn = .{null} ** FunctionRegistry.REGISTRY_SIZE;
+    const mapping = .{
+        .{ "strlen", wrapBuiltin_strlen },
+        .{ "strtoupper", wrapBuiltin_strtoupper },
+        .{ "strtolower", wrapBuiltin_strtolower },
+        .{ "str_ireplace", wrapBuiltin_str_ireplace },
+        .{ "str_getcsv", wrapBuiltin_str_getcsv },
+        .{ "func_get_args", wrapBuiltin_func_get_args },
+        .{ "func_get_arg", wrapBuiltin_func_get_arg },
+        .{ "func_num_args", wrapBuiltin_func_num_args },
+        .{ "memory_get_usage", wrapBuiltin_memory_get_usage },
+        .{ "memory_get_peak_usage", wrapBuiltin_memory_get_peak_usage },
+        .{ "function_exists", wrapBuiltin_function_exists },
+        .{ "gc_enable", wrapBuiltin_gc_enable },
+        .{ "gc_collect_cycles", wrapBuiltin_gc_collect_cycles },
+        .{ "ini_get", wrapBuiltin_ini_get },
+        .{ "getrusage", wrapBuiltin_getrusage },
+        .{ "json_decode", wrapBuiltin_json_decode },
+        .{ "json_last_error_msg", wrapBuiltin_json_last_error_msg },
+        .{ "trim", wrapBuiltin_trim },
+        .{ "count", wrapBuiltin_count },
+        .{ "sqrt", wrapBuiltin_sqrt },
+        .{ "strval", wrapBuiltin_strval },
+        .{ "array_map", wrapBuiltin_array_map },
+        .{ "array_filter", wrapBuiltin_array_filter },
+        .{ "array_reduce", wrapBuiltin_array_reduce },
+        .{ "array_walk", wrapBuiltin_array_walk },
+        .{ "array_walk_recursive", wrapBuiltin_array_walk_recursive },
+        .{ "array_merge", wrapBuiltin_array_merge },
+        .{ "array_sum", wrapBuiltin_array_sum },
+        .{ "round", wrapBuiltin_round },
+        .{ "ob_start", wrapBuiltin_ob_start },
+        .{ "ob_gzhandler", wrapBuiltin_ob_gzhandler },
+        .{ "usort", wrapBuiltin_usort },
+        .{ "select", wrapBuiltin_select },
+        .{ "get_class_methods", wrapBuiltin_get_class_methods },
+        .{ "get_class_vars", wrapBuiltin_get_class_vars },
+        .{ "get_object_vars", wrapBuiltin_get_object_vars },
+        .{ "get_called_class", wrapBuiltin_get_called_class },
+        .{ "forward_static_call", wrapBuiltin_forward_static_call },
+        .{ "forward_static_call_array", wrapBuiltin_forward_static_call_array },
+        .{ "filemtime", wrapBuiltin_filemtime },
+        .{ "fileatime", wrapBuiltin_fileatime },
+        .{ "filectime", wrapBuiltin_filectime },
+        .{ "getenv", wrapBuiltin_getenv },
+        .{ "gethostbyname", wrapBuiltin_gethostbyname },
+        .{ "gethostname", wrapBuiltin_gethostname },
+        .{ "ip2long", wrapBuiltin_ip2long },
+        .{ "long2ip", wrapBuiltin_long2ip },
+        .{ "parse_url", wrapBuiltin_parse_url },
+        .{ "set_error_handler", wrapBuiltin_set_error_handler },
+        .{ "restore_error_handler", wrapBuiltin_restore_error_handler },
+        .{ "trigger_error", wrapBuiltin_trigger_error },
+        .{ "error_reporting", wrapBuiltin_error_reporting },
+        .{ "ctype_alnum", wrapBuiltin_ctype_alnum },
+        .{ "ctype_alpha", wrapBuiltin_ctype_alpha },
+        .{ "ctype_cntrl", wrapBuiltin_ctype_cntrl },
+        .{ "ctype_digit", wrapBuiltin_ctype_digit },
+        .{ "ctype_graph", wrapBuiltin_ctype_graph },
+        .{ "ctype_lower", wrapBuiltin_ctype_lower },
+        .{ "ctype_print", wrapBuiltin_ctype_print },
+        .{ "ctype_punct", wrapBuiltin_ctype_punct },
+        .{ "ctype_space", wrapBuiltin_ctype_space },
+        .{ "ctype_upper", wrapBuiltin_ctype_upper },
+        .{ "ctype_xdigit", wrapBuiltin_ctype_xdigit },
+        .{ "mb_strlen", wrapBuiltin_mb_strlen },
+        .{ "mb_substr", wrapBuiltin_mb_substr },
+        .{ "mb_strtoupper", wrapBuiltin_mb_strtoupper },
+        .{ "mb_strtolower", wrapBuiltin_mb_strtolower },
+        .{ "substr_count", wrapBuiltin_substr_count },
+        .{ "ucfirst", wrapBuiltin_ucfirst },
+        .{ "lcfirst", wrapBuiltin_lcfirst },
+        .{ "ucwords", wrapBuiltin_ucwords },
+        .{ "strrpos", wrapBuiltin_strrpos },
+        .{ "strripos", wrapBuiltin_strripos },
+        .{ "str_word_count", wrapBuiltin_str_word_count },
+        .{ "substr", wrapBuiltin_substr },
+        .{ "strpos", wrapBuiltin_strpos },
+        .{ "floor", wrapBuiltin_floor },
+        .{ "ceil", wrapBuiltin_ceil },
+        .{ "sin", wrapBuiltin_sin },
+        .{ "cos", wrapBuiltin_cos },
+        .{ "tan", wrapBuiltin_tan },
+        .{ "log", wrapBuiltin_log },
+        .{ "exp", wrapBuiltin_exp },
+        .{ "hypot", wrapBuiltin_hypot },
+        .{ "pow", wrapBuiltin_pow },
+        .{ "min", wrapBuiltin_min },
+        .{ "max", wrapBuiltin_max },
+        .{ "stripos", wrapBuiltin_stripos },
+        .{ "strstr", wrapBuiltin_strstr },
+        .{ "str_split", wrapBuiltin_str_split },
+        .{ "implode", wrapBuiltin_implode },
+        .{ "explode", wrapBuiltin_explode },
+        .{ "is_callable", wrapBuiltin_is_callable },
+        .{ "get_debug_type", wrapBuiltin_get_debug_type },
+        .{ "call_user_func", wrapBuiltin_call_user_func },
+        .{ "call_user_func_array", wrapBuiltin_call_user_func_array },
+        .{ "compact", wrapBuiltin_compact },
+        .{ "extract", wrapBuiltin_extract },
+        .{ "ord", wrapBuiltin_ord },
+        .{ "chr", wrapBuiltin_chr },
+        .{ "md5", wrapBuiltin_md5 },
+        .{ "sha1", wrapBuiltin_sha1 },
+        .{ "crc32", wrapBuiltin_crc32 },
+        .{ "strrev", wrapBuiltin_strrev },
+        .{ "ltrim", wrapBuiltin_ltrim },
+        .{ "rtrim", wrapBuiltin_rtrim },
+        .{ "addslashes", wrapBuiltin_addslashes },
+        .{ "stripslashes", wrapBuiltin_stripslashes },
+    };
+    inline for (mapping) |entry| {
+        const id = FunctionRegistry.comptimeLookup(entry[0]);
+        table[id] = entry[1];
+    }
+    break :blk table;
+};
 
 fn lookupBuiltinFunction(name: []const u8) ?BuiltinFn {
-    return builtin_function_map.get(name);
+    if (FunctionRegistry.lookupByName(name)) |id| {
+        return builtin_fn_by_id[id];
+    }
+    return null;
 }
 
 pub fn php_create_closure(name: Value, captures: Value, is_static_val: Value, allocator: Allocator) !Value {
@@ -3754,11 +3756,7 @@ pub fn php_function_exists(args: []const Value, allocator: Allocator) !Value {
     if (args.len != 1) return error.InvalidArgumentCount;
     if (!args[0].isString()) return Value.initBool(false);
     const name = args[0].asString().data;
-    // 优先查 FunctionRegistry（单一真相源，覆盖所有 builtin）
     if (FunctionRegistry.isRegistered(name)) return Value.initBool(true);
-    // 再查动态 wrapper 表（可能有运行时注册的额外函数）
-    if (lookupBuiltinFunction(name) != null) return Value.initBool(true);
-    // 检查用户定义函数注册表
     if (user_function_registry) |reg| {
         if (reg.contains(name)) return Value.initBool(true);
     }
@@ -10455,11 +10453,8 @@ pub fn php_is_callable(val: Value) !Value {
     const actual_val = if (val.isRef()) val.asRef().* else val;
     if (actual_val.isFunction()) return Value.initBool(true);
     if (actual_val.isString()) {
-        // 字符串只有是已知函数名时才callable
         const name = actual_val.asString().data;
-        // 优先查 FunctionRegistry（单一真相源）
         if (FunctionRegistry.isRegistered(name)) return Value.initBool(true);
-        if (lookupBuiltinFunction(name) != null) return Value.initBool(true);
         if (user_function_registry) |reg| {
             if (reg.contains(name)) return Value.initBool(true);
         }

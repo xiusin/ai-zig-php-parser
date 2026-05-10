@@ -571,12 +571,29 @@ pub const NativeLinker = struct {
         try writer.writeAll(func_code.items);
         // std.debug.print("Function code written\n", .{});
 
+        var has_main: bool = false;
         var has_select: bool = false;
+        var has_go: bool = false;
+        var has_go_wait_all: bool = false;
+        var has_go_join: bool = false;
+        var has_get_class_methods: bool = false;
+        var has_get_class_vars: bool = false;
+        var has_get_object_vars: bool = false;
+        var has_get_called_class: bool = false;
+        var has_forward_static_call: bool = false;
+        var has_forward_static_call_array: bool = false;
         for (ir_module.functions.items) |func| {
-            if (std.mem.eql(u8, func.name, "select")) {
-                has_select = true;
-                break;
-            }
+            if (!has_main and std.mem.eql(u8, func.name, "__main__")) has_main = true;
+            if (!has_select and std.mem.eql(u8, func.name, "select")) has_select = true;
+            if (!has_go and std.mem.eql(u8, func.name, "go")) has_go = true;
+            if (!has_go_wait_all and std.mem.eql(u8, func.name, "go_wait_all")) has_go_wait_all = true;
+            if (!has_go_join and std.mem.eql(u8, func.name, "go_join")) has_go_join = true;
+            if (!has_get_class_methods and std.mem.eql(u8, func.name, "get_class_methods")) has_get_class_methods = true;
+            if (!has_get_class_vars and std.mem.eql(u8, func.name, "get_class_vars")) has_get_class_vars = true;
+            if (!has_get_object_vars and std.mem.eql(u8, func.name, "get_object_vars")) has_get_object_vars = true;
+            if (!has_get_called_class and std.mem.eql(u8, func.name, "get_called_class")) has_get_called_class = true;
+            if (!has_forward_static_call and std.mem.eql(u8, func.name, "forward_static_call")) has_forward_static_call = true;
+            if (!has_forward_static_call_array and std.mem.eql(u8, func.name, "forward_static_call_array")) has_forward_static_call_array = true;
         }
         if (!has_select) {
             try writer.writeAll(
@@ -588,14 +605,6 @@ pub const NativeLinker = struct {
             );
         }
 
-        var has_go: bool = false;
-        var has_go_wait_all: bool = false;
-        var has_go_join: bool = false;
-        for (ir_module.functions.items) |func| {
-            if (std.mem.eql(u8, func.name, "go")) has_go = true;
-            if (std.mem.eql(u8, func.name, "go_wait_all")) has_go_wait_all = true;
-            if (std.mem.eql(u8, func.name, "go_join")) has_go_join = true;
-        }
         if (!has_go) {
             try writer.writeAll(
                 \\
@@ -624,20 +633,6 @@ pub const NativeLinker = struct {
             );
         }
 
-        var has_get_class_methods: bool = false;
-        var has_get_class_vars: bool = false;
-        var has_get_object_vars: bool = false;
-        var has_get_called_class: bool = false;
-        var has_forward_static_call: bool = false;
-        var has_forward_static_call_array: bool = false;
-        for (ir_module.functions.items) |func| {
-            if (std.mem.eql(u8, func.name, "get_class_methods")) has_get_class_methods = true;
-            if (std.mem.eql(u8, func.name, "get_class_vars")) has_get_class_vars = true;
-            if (std.mem.eql(u8, func.name, "get_object_vars")) has_get_object_vars = true;
-            if (std.mem.eql(u8, func.name, "get_called_class")) has_get_called_class = true;
-            if (std.mem.eql(u8, func.name, "forward_static_call")) has_forward_static_call = true;
-            if (std.mem.eql(u8, func.name, "forward_static_call_array")) has_forward_static_call_array = true;
-        }
         if (!has_get_class_methods) {
             try writer.writeAll(
                 \\
@@ -1164,15 +1159,6 @@ pub const NativeLinker = struct {
             \\    registerAllFunctions() catch {};
             \\
         );
-
-        // 检查是否存在 __main__ 函数
-        var has_main = false;
-        for (ir_module.functions.items) |func| {
-            if (std.mem.eql(u8, func.name, "__main__")) {
-                has_main = true;
-                break;
-            }
-        }
 
         if (has_main) {
             // std.debug.print("Writing main call\n", .{});
@@ -8212,7 +8198,7 @@ pub const NativeLinker = struct {
                                         try writer.writeAll(", runtime.Value.initBool(false)");
                                     }
                                     try writer.writeAll(");\n");
-                                } else if (std.mem.eql(u8, runtime_name, "php_ref_assign_ptr") and op.args.len >= 2) {
+                                } else if (op.function_id == FunctionRegistry.comptimeLookup("php_ref_assign_ptr") and op.args.len >= 2) {
                                     // ref_assign_ptr: 第一个参数需要指针
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     const first_arg = op.args[0];
@@ -8475,7 +8461,7 @@ pub const NativeLinker = struct {
                                         try writer.writeAll("runtime.Value.initBool(false)");
                                     }
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
-                                } else if (std.mem.eql(u8, runtime_name, "php_ref_assign_ptr") and op.args.len >= 2) {
+                                } else if (op.function_id == FunctionRegistry.comptimeLookup("php_ref_assign_ptr") and op.args.len >= 2) {
                                     try writer.print("    _ = try runtime.{s}(", .{runtime_name});
                                     const first_arg = op.args[0];
                                     const is_ptr_reg = if (self.current_ref_ptr_regs) |rpr|

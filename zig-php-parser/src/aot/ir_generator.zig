@@ -5343,7 +5343,7 @@ pub const IRGenerator = struct {
 
         // PHP 8.1 first-class callable: Closure::fromCallable(func_name)
         // The parser rewrites strlen(...) to Closure::fromCallable(strlen)
-        if (std.mem.eql(u8, func_name, "Closure::fromCallable") and call_data.args.len == 1) {
+        if (func_name.len == 22 and std.mem.startsWith(u8, func_name, "Closure::fromCallable") and call_data.args.len == 1) {
             const arg_node = self.getNode(call_data.args[0]) orelse {
                 return self.emitWithResult(.{ .const_null = {} }, .php_value);
             };
@@ -6040,8 +6040,9 @@ pub const IRGenerator = struct {
 
         // 复用早期 pad_fid；仅当 func_name 被修改时（如 preg_match→preg_match_with_matches）重新解析
         const resolved_fid: u16 = if (pad_fid == FunctionRegistry.comptimeLookup("preg_match") and
-            std.mem.eql(u8, func_name, "preg_match_with_matches"))
-            (FunctionRegistry.lookupByName(func_name) orelse 0)
+            FunctionRegistry.lookupByName(func_name) != null and
+            FunctionRegistry.lookupByName(func_name).? == FunctionRegistry.comptimeLookup("preg_match_with_matches"))
+            FunctionRegistry.comptimeLookup("preg_match_with_matches")
         else
             pad_fid;
 

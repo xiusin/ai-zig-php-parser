@@ -434,6 +434,7 @@ pub const registry = [_]FunctionMeta{
     .{ .php_name = "tempnam", .runtime_name = "php_tempnam", .needs_allocator = true, .category = .file },
     .{ .php_name = "filemtime", .runtime_name = "php_filemtime", .category = .file },
     .{ .php_name = "fileatime", .runtime_name = "php_fileatime", .category = .file },
+    .{ .php_name = "filectime", .runtime_name = "php_filectime", .category = .file },
 
     // ===== Time 函数 =====
     .{ .php_name = "time", .runtime_name = "php_time", .category = .time, .may_raise = false },
@@ -458,6 +459,12 @@ pub const registry = [_]FunctionMeta{
     .{ .php_name = "get_class", .runtime_name = "php_get_class", .needs_allocator = true, .category = .object },
     .{ .php_name = "get_parent_class", .runtime_name = "php_get_parent_class", .needs_allocator = true, .category = .object },
     .{ .php_name = "get_debug_type", .runtime_name = "php_get_debug_type", .needs_allocator = true, .category = .object },
+    .{ .php_name = "get_class_methods", .runtime_name = "php_get_class_methods", .needs_allocator = true, .category = .reflection, .call_convention = .all_args_array },
+    .{ .php_name = "get_class_vars", .runtime_name = "php_get_class_vars", .needs_allocator = true, .category = .reflection, .call_convention = .all_args_array },
+    .{ .php_name = "get_object_vars", .runtime_name = "php_get_object_vars", .needs_allocator = true, .category = .reflection, .call_convention = .all_args_array },
+    .{ .php_name = "get_called_class", .runtime_name = "php_get_called_class", .needs_allocator = true, .category = .reflection, .call_convention = .all_args_array },
+    .{ .php_name = "forward_static_call", .runtime_name = "php_forward_static_call", .needs_allocator = true, .category = .reflection, .call_convention = .all_args_array },
+    .{ .php_name = "forward_static_call_array", .runtime_name = "php_forward_static_call_array", .needs_allocator = true, .category = .reflection, .call_convention = .all_args_array },
 
     // ===== Callback 函数 =====
     .{ .php_name = "call_user_func", .runtime_name = "php_call_user_func", .category = .callback, .call_convention = .all_args_array },
@@ -483,6 +490,7 @@ pub const registry = [_]FunctionMeta{
     .{ .php_name = "restore_error_handler", .runtime_name = "php_restore_error_handler", .category = .error_handling },
     .{ .php_name = "trigger_error", .runtime_name = "php_trigger_error", .category = .error_handling, .call_convention = .statement, .default_args = &[_]DefaultArgValue{ .none, .{ .int_val = 1024 } } },
     .{ .php_name = "user_error", .runtime_name = "php_trigger_error", .category = .error_handling, .call_convention = .statement, .default_args = &[_]DefaultArgValue{ .none, .{ .int_val = 1024 } } }, // alias
+    .{ .php_name = "error_reporting", .runtime_name = "php_error_reporting", .category = .error_handling, .call_convention = .all_args_array },
     .{ .php_name = "set_exception_handler", .runtime_name = "php_set_exception_handler", .needs_allocator = true, .category = .error_handling },
     .{ .php_name = "restore_exception_handler", .runtime_name = "php_restore_exception_handler", .category = .error_handling },
     .{ .php_name = "error_get_last", .runtime_name = "php_error_get_last", .needs_allocator = true, .category = .error_handling, .may_raise = false },
@@ -561,6 +569,7 @@ pub const registry = [_]FunctionMeta{
     .{ .php_name = "shmop_close", .runtime_name = "php_shmop_close", .category = .process },
     .{ .php_name = "socket_create_pair", .runtime_name = "php_socket_create_pair", .needs_allocator = true, .category = .process },
     .{ .php_name = "socket_close", .runtime_name = "php_socket_close", .category = .process },
+    .{ .php_name = "select", .runtime_name = "php_select", .needs_allocator = true, .category = .process, .call_convention = .all_args_array },
 
     // ===== Internal 函数（AOT 内部使用） =====
     .{ .php_name = "php_deref", .runtime_name = "php_deref", .category = .internal },
