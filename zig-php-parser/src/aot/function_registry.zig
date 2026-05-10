@@ -150,7 +150,7 @@ pub const registry = [_]FunctionMeta{
     // ===== Output 函数 (ID 1-4) =====
     .{ .php_name = "echo", .runtime_name = "php_echo", .category = .output, .is_statement = true, .call_convention = .statement },
     .{ .php_name = "print", .runtime_name = "php_print", .category = .output, .call_convention = .statement },
-    .{ .php_name = "var_dump", .runtime_name = "php_var_dump", .category = .output, .is_statement = true, .call_convention = .variadic_array },
+    .{ .php_name = "var_dump", .runtime_name = "php_var_dump", .needs_allocator = true, .category = .output, .is_statement = true, .call_convention = .variadic_array },
     .{ .php_name = "print_r", .runtime_name = "print_r", .category = .output, .is_statement = true, .call_convention = .statement, .default_args = &[_]DefaultArgValue{ .none, .{ .bool_val = false } } },
     .{ .php_name = "var_export", .runtime_name = "var_export", .category = .output, .call_convention = .statement, .default_args = &[_]DefaultArgValue{ .none, .{ .bool_val = false } } },
 
@@ -486,7 +486,7 @@ pub const registry = [_]FunctionMeta{
     .{ .php_name = "debug_zval_dump", .runtime_name = "php_debug_zval_dump", .category = .misc },
 
     // ===== Error Handling 函数 =====
-    .{ .php_name = "set_error_handler", .runtime_name = "php_set_error_handler", .category = .error_handling, .call_convention = .callback, .default_args = &[_]DefaultArgValue{ .none, .{ .int_val = 32767 } } },
+    .{ .php_name = "set_error_handler", .runtime_name = "php_set_error_handler", .needs_allocator = true, .category = .error_handling, .call_convention = .callback, .default_args = &[_]DefaultArgValue{ .none, .{ .int_val = 32767 } } },
     .{ .php_name = "restore_error_handler", .runtime_name = "php_restore_error_handler", .category = .error_handling },
     .{ .php_name = "trigger_error", .runtime_name = "php_trigger_error", .category = .error_handling, .call_convention = .statement, .default_args = &[_]DefaultArgValue{ .none, .{ .int_val = 1024 } } },
     .{ .php_name = "user_error", .runtime_name = "php_trigger_error", .category = .error_handling, .call_convention = .statement, .default_args = &[_]DefaultArgValue{ .none, .{ .int_val = 1024 } } }, // alias
@@ -733,6 +733,15 @@ pub fn isPure(php_name: []const u8) bool {
     return meta.is_pure;
 }
 
+/// 从 CallConvention 推导 needs_allocator 期望值
+pub fn inferNeedsAllocator(id: FunctionId) ?bool {
+    const meta = getMeta(id);
+    return switch (meta.call_convention) {
+        .callback => true,
+        .all_args_array, .variadic_array, .first_arg_then_array, .standard, .ref_param, .statement, .special => null,
+    };
+}
+
 /// 获取函数分类
 pub fn getCategory(php_name: []const u8) ?Category {
     const meta = getMetaByName(php_name) orelse return null;
@@ -789,6 +798,17 @@ comptime {
     // 确保 REGISTRY_SIZE 在 u16 范围内
     if (REGISTRY_SIZE > std.math.maxInt(FunctionId)) {
         @compileError("Registry size exceeds FunctionId capacity (u16)");
+    }
+    // CallConvention 语义一致性验证
+    // all_args_array/callback/variadic_array 类函数隐含 needs_allocator = true
+    @setEvalBranchQuota(100000);
+    for (1..REGISTRY_SIZE) |i| {
+        const inferred = inferNeedsAllocator(@intCast(i));
+        if (inferred) |expected_alloc| {
+            if (expected_alloc and !registry[i].needs_allocator) {
+                @compileError("CallConvention consistency: " ++ registry[i].php_name ++ " has call_convention=" ++ @tagName(registry[i].call_convention) ++ " which implies needs_allocator=true, but needs_allocator=false");
+            }
+        }
     }
 }
 

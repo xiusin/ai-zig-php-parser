@@ -1471,21 +1471,11 @@ pub const PHPString = struct {
             return error.StringTooLarge;
         }
 
-        // 临时禁用 COW 优化（有 bug）
-        // if (self.ref_count == 1 and !self.is_static and other.length > 0) {
-        //     const old_len = self.length;
-        //     const new_data = try allocator.realloc(self.data, new_length);
-        //     @memcpy(new_data[old_len..new_length], other.data[0..other.length]);
-        //     self.data = new_data;
-        //     self.length = new_length;
-        //     alloc_counters.php_string_bytes += other.length;
-        //     alloc_counters.php_string_live_bytes += other.length;
-        //     alloc_counters.php_string_peak_live_bytes = @max(
-        //         alloc_counters.php_string_peak_live_bytes,
-        //         alloc_counters.php_string_live_bytes,
-        //     );
-        //     return self;
-        // }
+        // COW 优化暂时禁用（原有 bug 需深度调试）
+        // 当 self.ref_count==1 且非静态时可原地 realloc 扩容
+        // 但需确保所有引用 self 的 Value 都能感知到 data 指针变化
+        // 目前的问题是：某些 Value 可能持有旧 data 指针的引用
+        // TODO: 修复后重新启用
 
         // 小字符串优化：≤256 字节使用栈缓冲
         if (new_length <= 256) {

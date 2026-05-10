@@ -20,6 +20,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const IR = @import("ir.zig");
+const FunctionRegistry = @import("function_registry.zig");
 const Module = IR.Module;
 const Function = IR.Function;
 const BasicBlock = IR.BasicBlock;
@@ -143,7 +144,7 @@ pub const PassConfig = struct {
             .constant_propagation = true,
             .sccp = true,
             .box_unbox_elim = true,
-            .function_inlining = true, // 启用内联
+            .function_inlining = true,
             .inline_threshold = 15,
             .type_specialization = false,
             .cse = true,
@@ -154,10 +155,9 @@ pub const PassConfig = struct {
             .cfg_cleanup = true,
             .rc_elision = true,
             .max_iterations = 3,
-            // 启用部分高级优化
-            .scalar_replacement = false,
-            .gvn = true, // 全局值编号
-            .advanced_sccp = false,
+            .scalar_replacement = true,
+            .gvn = true,
+            .advanced_sccp = true,
             .slp_vectorization = false,
             .polyhedral_optimization = false,
             .loop_vectorization = false,
@@ -858,18 +858,6 @@ pub const IROptimizer = struct {
         return changed;
     }
 
-    /// comptime 纯函数白名单：这些函数无全局副作用，操作数不变时可安全提升
-    const pure_functions = std.StaticStringMap(void).initComptime(.{
-        .{ "array_sum", {} },
-        .{ "array_product", {} },
-        .{ "array_count", {} },
-        .{ "count", {} },
-        .{ "strlen", {} },
-        .{ "sizeof", {} },
-        .{ "array_key_exists", {} },
-        .{ "in_array", {} },
-    });
-
     /// 检查指令是否为循环不变量（扩展：含 concat、纯函数调用、load 等安全可提升的指令）
     fn isLoopInvariant(self: *Self, inst: *Instruction, loop: *Analysis.Loop) bool {
         // 纯常量指令始终可提升
@@ -892,10 +880,10 @@ pub const IROptimizer = struct {
         }
 
         // 纯函数调用：操作数为循环不变量时可安全提升
-        // 特殊处理：如果参数是 load，检查 load 的地址是否循环不变（忽略循环内的 store）
         if (inst.op == .call) {
             const op = inst.op.call;
-            if (pure_functions.has(op.func_name)) {
+            const is_pure = if (op.function_id > 0) FunctionRegistry.getMeta(op.function_id).is_pure else FunctionRegistry.isPure(op.func_name);
+            if (is_pure) {
                 for (op.args) |arg| {
                     // 检查参数寄存器的定义是否在循环外
                     // 如果是 load，检查 load 的地址
@@ -2940,7 +2928,8 @@ pub const IROptimizer = struct {
 
             // Operations with side effects
             .store => true,
-            .call, .call_indirect => true,
+            .call => |op| if (op.function_id > 0) !FunctionRegistry.getMeta(op.function_id).is_pure else true,
+            .call_indirect => true,
             .array_new, .array_get, .array_set, .array_set_nested, .array_ensure, .array_push, .array_key_exists, .array_unset => true,
             .concat, .interpolate => true,
             .new_object, .property_get, .property_set, .method_call, .clone => true,
@@ -3850,16 +3839,19 @@ pub const IROptimizer = struct {
                     }
                 }
             },
-            // comptime 内置纯函数常量折叠：abs/max/min/strlen
             .call => |op| {
-                if (std.mem.eql(u8, op.func_name, "abs") and op.args.len == 1) {
+                const fid = op.function_id;
+                if (fid == 0) return false;
+                const meta = FunctionRegistry.getMeta(fid);
+                if (!meta.is_pure) return false;
+                if (fid == FunctionRegistry.comptimeLookup("abs") and op.args.len == 1) {
                     if (self.constant_values.get(op.args[0].id)) |v| {
                         if (v == .int) {
                             inst.op = .{ .const_int = if (v.int < 0) -v.int else v.int };
                             return true;
                         }
                     }
-                } else if (std.mem.eql(u8, op.func_name, "max") and op.args.len == 2) {
+                } else if (fid == FunctionRegistry.comptimeLookup("max") and op.args.len == 2) {
                     if (self.constant_values.get(op.args[0].id)) |a| {
                         if (self.constant_values.get(op.args[1].id)) |b| {
                             if (a == .int and b == .int) {
@@ -3868,7 +3860,7 @@ pub const IROptimizer = struct {
                             }
                         }
                     }
-                } else if (std.mem.eql(u8, op.func_name, "min") and op.args.len == 2) {
+                } else if (fid == FunctionRegistry.comptimeLookup("min") and op.args.len == 2) {
                     if (self.constant_values.get(op.args[0].id)) |a| {
                         if (self.constant_values.get(op.args[1].id)) |b| {
                             if (a == .int and b == .int) {
@@ -3877,7 +3869,7 @@ pub const IROptimizer = struct {
                             }
                         }
                     }
-                } else if (std.mem.eql(u8, op.func_name, "strlen") and op.args.len == 1) {
+                } else if (fid == FunctionRegistry.comptimeLookup("strlen") and op.args.len == 1) {
                     const module = self.current_module orelse return false;
                     if (self.constant_values.get(op.args[0].id)) |v| {
                         if (v == .string_id) {
