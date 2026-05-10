@@ -5397,7 +5397,7 @@ pub const IRGenerator = struct {
             } }, .php_value);
         }
 
-        if (func_name.len != 0 and indirect_callee == null and std.mem.eql(u8, func_name, "compact")) {
+        if (func_name.len != 0 and indirect_callee == null and FunctionRegistry.lookupByName(func_name) == FunctionRegistry.comptimeLookup("compact")) {
             var can_lower_compact = true;
             for (call_data.args) |arg_idx| {
                 const arg_node = self.getNode(arg_idx) orelse {
@@ -5487,7 +5487,7 @@ pub const IRGenerator = struct {
         }
 
         // isset($obj->prop)：需要调用 php_object_isset 以触发 __isset 魔法方法
-        if (func_name.len != 0 and indirect_callee == null and std.mem.eql(u8, func_name, "isset")) {
+        if (func_name.len != 0 and indirect_callee == null and FunctionRegistry.lookupByName(func_name) == FunctionRegistry.comptimeLookup("isset")) {
             if (call_data.args.len >= 1) {
                 const arg_idx = call_data.args[0];
                 const arg_node = self.getNode(arg_idx);
@@ -5508,7 +5508,7 @@ pub const IRGenerator = struct {
 
         // unset($arr[$key])：这是语言结构而非真实函数，AOT 需要生成 array_unset 指令
         // 这里只做最小覆盖：单参数且为 array_access，并且带 index。
-        if (func_name.len != 0 and indirect_callee == null and std.mem.eql(u8, func_name, "unset")) {
+        if (func_name.len != 0 and indirect_callee == null and FunctionRegistry.lookupByName(func_name) == FunctionRegistry.comptimeLookup("unset")) {
             var unset_handled = false;
             for (call_data.args) |arg_idx| {
                 const arg_node = self.getNode(arg_idx);
@@ -5896,7 +5896,7 @@ pub const IRGenerator = struct {
 
                 // 特殊处理：preg_match/preg_match_all的第3个参数（引用参数）
                 // 跳过生成，避免对未定义变量的global_get警告
-                if (i == 2 and (std.mem.eql(u8, func_name, "preg_match") or std.mem.eql(u8, func_name, "preg_match_all"))) {
+                if (i == 2 and (FunctionRegistry.lookupByName(func_name) == FunctionRegistry.comptimeLookup("preg_match") or FunctionRegistry.lookupByName(func_name) == FunctionRegistry.comptimeLookup("preg_match_all"))) {
                     // 用null占位，后续特殊处理会替换
                     args[i] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
                     continue;
