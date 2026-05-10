@@ -146,16 +146,16 @@ pub const CallFrame = struct {
     function_name: []const u8,
     file: []const u8,
     line: u32,
-    locals: std.StringHashMap(Value),
-    imported_globals: std.StringHashMap(void),
+    locals: std.AutoHashMap(u32, Value),
+    imported_globals: std.AutoHashMap(u32, void),
 
     pub fn init(allocator: std.mem.Allocator, function_name: []const u8, file: []const u8, line: u32) CallFrame {
         return CallFrame{
             .function_name = function_name,
             .file = file,
             .line = line,
-            .locals = std.StringHashMap(Value).init(allocator),
-            .imported_globals = std.StringHashMap(void).init(allocator),
+            .locals = std.AutoHashMap(u32, Value).init(allocator),
+            .imported_globals = std.AutoHashMap(u32, void).init(allocator),
         };
     }
 
@@ -169,7 +169,6 @@ pub const CallFrame = struct {
         self.imported_globals.deinit();
     }
 
-    /// Reset the frame for reuse, keeping allocated capacity
     pub fn reset(self: *CallFrame, allocator: std.mem.Allocator) void {
         var iterator = self.locals.iterator();
         while (iterator.next()) |entry| {
@@ -2502,13 +2501,16 @@ pub const VM = struct {
         self.allocator.destroy(self);
     }
 
-    pub fn getVariable(self: *VM, name: []const u8) ?Value {
-        // Check cached current call frame first
+    inline fn varNameId(self: *VM, name: []const u8) ?u32 {
+        const idx = self.context.string_pool.getIndex(name) orelse return null;
+        return @intCast(idx);
+    }
+
+    pub fn getVariableById(self: *VM, name_id: u32) ?Value {
         if (self.current_frame) |frame| {
-            // If variable is imported from global scope, fetch it from there
-            if (frame.imported_globals.contains(name)) {
+            if (frame.imported_globals.count() > 0 and frame.imported_globals.contains(name_id)) {
+                const name = self.context.string_pool.keys()[name_id];
                 const val = self.global.get(name);
-                // Dereference if it's a reference
                 if (val) |v| {
                     if (v.isReference()) {
                         const hash = v.asReferenceHash();
@@ -2519,8 +2521,7 @@ pub const VM = struct {
                 }
                 return val;
             }
-            if (frame.locals.get(name)) |value| {
-                // Dereference if it's a reference
+            if (frame.locals.get(name_id)) |value| {
                 if (value.isReference()) {
                     const hash = value.asReferenceHash();
                     if (self.ref_hash_to_key.get(hash)) |key| {
@@ -2531,7 +2532,7 @@ pub const VM = struct {
             }
         }
 
-        // Then check global scope
+        const name = self.context.string_pool.keys()[name_id];
         const val = self.global.get(name);
         if (val) |v| {
             if (v.isReference()) {
@@ -2544,13 +2545,11 @@ pub const VM = struct {
         return val;
     }
 
-    pub fn setVariable(self: *VM, name: []const u8, value: Value) !void {
-        // Check cached current call frame first
+    pub fn setVariableById(self: *VM, name_id: u32, value: Value) !void {
+        const name = self.context.string_pool.keys()[name_id];
         if (self.current_frame) |frame| {
-            // Check if variable exists and is a reference (check raw storage)
-            if (frame.locals.getPtr(name)) |existing_ptr| {
+            if (frame.locals.getPtr(name_id)) |existing_ptr| {
                 if (existing_ptr.isReference()) {
-                    // Update the referenced value
                     const hash = existing_ptr.asReferenceHash();
                     if (self.ref_hash_to_key.get(hash)) |key| {
                         if (self.static_vars.getPtr(key)) |static_ptr| {
@@ -2561,30 +2560,7 @@ pub const VM = struct {
                 }
             }
 
-            // Check if this is a static variable (only if we have a function name)
-            if (frame.function_name.len > 0) {
-                const static_key = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ frame.function_name, name });
-                defer self.allocator.free(static_key);
-
-                if (self.static_vars.contains(static_key)) {
-                    // Update static variable storage
-                    if (self.static_vars.getPtr(static_key)) |static_val_ptr| {
-                        self.releaseValue(static_val_ptr.*);
-                        self.retainValue(value);
-                        static_val_ptr.* = value;
-                    }
-                    // Also update local reference
-                    if (frame.locals.get(name)) |old_value| {
-                        self.releaseValue(old_value);
-                    }
-                    self.retainValue(value);
-                    try frame.locals.put(name, value);
-                    return;
-                }
-            }
-
-            // If variable is imported from global scope, check if it's a reference there
-            if (frame.imported_globals.contains(name)) {
+            if (frame.imported_globals.count() > 0 and frame.imported_globals.contains(name_id)) {
                 if (self.global.getPtr(name)) |global_ptr| {
                     if (global_ptr.isReference()) {
                         const hash = global_ptr.asReferenceHash();
@@ -2600,18 +2576,68 @@ pub const VM = struct {
                 return;
             }
 
-            // If it's a new variable in local scope, retain it
-            // If it exists, set() will handle release/retain
-            if (frame.locals.get(name)) |old_value| {
+            if (self.static_vars.count() > 0 and frame.function_name.len > 0) {
+                const static_key = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ frame.function_name, name });
+                defer self.allocator.free(static_key);
+
+                if (self.static_vars.contains(static_key)) {
+                    if (self.static_vars.getPtr(static_key)) |static_val_ptr| {
+                        self.releaseValue(static_val_ptr.*);
+                        self.retainValue(value);
+                        static_val_ptr.* = value;
+                    }
+                    if (frame.locals.get(name_id)) |old_value| {
+                        self.releaseValue(old_value);
+                    }
+                    self.retainValue(value);
+                    try frame.locals.put(name_id, value);
+                    return;
+                }
+            }
+
+            if (frame.locals.get(name_id)) |old_value| {
                 self.releaseValue(old_value);
             }
 
             self.retainValue(value);
-            try frame.locals.put(name, value);
+            try frame.locals.put(name_id, value);
             return;
         }
 
-        // Then set in global scope - check if it's a reference
+        if (self.global.getPtr(name)) |global_ptr| {
+            if (global_ptr.isReference()) {
+                const hash = global_ptr.asReferenceHash();
+                if (self.ref_hash_to_key.get(hash)) |key| {
+                    if (self.static_vars.getPtr(key)) |static_ptr| {
+                        static_ptr.* = value;
+                        return;
+                    } else {}
+                } else {}
+            }
+        }
+        try self.global.set(name, value);
+    }
+
+    pub fn getVariable(self: *VM, name: []const u8) ?Value {
+        if (self.varNameId(name)) |id| {
+            return self.getVariableById(id);
+        }
+        const val = self.global.get(name);
+        if (val) |v| {
+            if (v.isReference()) {
+                const hash = v.asReferenceHash();
+                if (self.ref_hash_to_key.get(hash)) |key| {
+                    return self.static_vars.get(key);
+                }
+            }
+        }
+        return val;
+    }
+
+    pub fn setVariable(self: *VM, name: []const u8, value: Value) !void {
+        if (self.varNameId(name)) |id| {
+            return try self.setVariableById(id, value);
+        }
         if (self.global.getPtr(name)) |global_ptr| {
             if (global_ptr.isReference()) {
                 const hash = global_ptr.asReferenceHash();
@@ -2627,23 +2653,20 @@ pub const VM = struct {
     }
 
     pub fn deleteVariable(self: *VM, name: []const u8) bool {
-        // Check cached current call frame first
-        if (self.current_frame) |frame| {
-            // If it's an imported global, unset removes the import, not the global var
-            if (frame.imported_globals.contains(name)) {
-                _ = frame.imported_globals.remove(name);
-                return true;
-            }
-
-            if (frame.locals.get(name)) |old_value| {
-                self.releaseValue(old_value);
-                _ = frame.locals.remove(name);
-                return true;
+        if (self.varNameId(name)) |id| {
+            if (self.current_frame) |frame| {
+                if (frame.imported_globals.count() > 0 and frame.imported_globals.contains(id)) {
+                    _ = frame.imported_globals.remove(id);
+                    return true;
+                }
+                if (frame.locals.get(id)) |old_value| {
+                    self.releaseValue(old_value);
+                    _ = frame.locals.remove(id);
+                    return true;
+                }
             }
         }
-
-        // Then check global scope
-        return self.global.remove(name);
+        return self.global.vars.remove(name);
     }
 
     fn retainValue(self: *VM, value: Value) void {
@@ -5232,9 +5255,13 @@ pub const VM = struct {
         var current_frame = &self.call_stack.items[self.call_stack.items.len - 1];
         var it = bound_args.iterator();
         while (it.next()) |entry| {
-            // Transfer ownership to locals
             self.retainValue(entry.value_ptr.*);
-            try current_frame.locals.put(entry.key_ptr.*, entry.value_ptr.*);
+            const param_name = entry.key_ptr.*;
+            if (self.varNameId(param_name)) |id| {
+                try current_frame.locals.put(id, entry.value_ptr.*);
+            } else {
+                try self.global.set(param_name, entry.value_ptr.*);
+            }
         }
 
         // Check if this is a generator function (contains yield)
@@ -5253,7 +5280,7 @@ pub const VM = struct {
                 generator_state.function_body = body_node;
 
                 // Save $this context if available
-                const this_value = if (current_frame.locals.get("$this")) |*this_val| this_val.retain() else null;
+                const this_value = if (self.varNameId("$this")) |this_id| if (current_frame.locals.get(this_id)) |*this_val| this_val.retain() else null else null;
                 generator_state.this_context = this_value;
 
                 self.generator_state = generator_state;
@@ -5280,17 +5307,12 @@ pub const VM = struct {
                 // Normal function - execute body
                 result = self.eval(body_node) catch |err| blk: {
                     if (err == error.Return) {
-                        if (self.return_value) |val| {
-                            break :blk val;
-                        }
-                        break :blk Value.initNull();
+                        const ret = self.return_value orelse Value.initNull();
+                        self.return_value = null;
+                        break :blk ret;
                     }
                     return err;
                 };
-                if (self.return_value) |val| {
-                    result = val;
-                    self.return_value = null;
-                }
             }
         }
 
@@ -5300,9 +5322,7 @@ pub const VM = struct {
                 if (param.is_reference and i < ref_names.len) {
                     const caller_var_name = ref_names[i];
                     const param_name = param.name.data;
-                    // Get the modified value from local scope
-                    if (current_frame.locals.get(param_name)) |modified_value| {
-                        // Update the caller's variable
+                    if (current_frame.locals.get(self.varNameId(param_name) orelse continue)) |modified_value| {
                         self.retainValue(modified_value);
                         try self.setVariableInParentFrame(caller_var_name, modified_value);
                     }
@@ -5327,10 +5347,14 @@ pub const VM = struct {
     fn setVariableInParentFrame(self: *VM, name: []const u8, value: Value) !void {
         if (self.call_stack.items.len > 1) {
             var parent_frame = &self.call_stack.items[self.call_stack.items.len - 2];
-            if (parent_frame.locals.get(name)) |old_value| {
-                self.releaseValue(old_value);
+            if (self.varNameId(name)) |id| {
+                if (parent_frame.locals.get(id)) |old_value| {
+                    self.releaseValue(old_value);
+                }
+                try parent_frame.locals.put(id, value);
+            } else {
+                try self.global.set(name, value);
             }
-            try parent_frame.locals.put(name, value);
         } else {
             // Set in global scope
             try self.global.set(name, value);
@@ -5381,19 +5405,20 @@ pub const VM = struct {
         if (closure.function.parameters.len > 0) {
             param_name = closure.function.parameters[0].name.data;
 
-            // Direct access to current frame's locals - avoid setVariable overhead
             if (self.call_stack.items.len > 0) {
                 var current_frame = &self.call_stack.items[self.call_stack.items.len - 1];
 
-                // Fast path: try to find existing entry first
-                if (current_frame.locals.get(param_name)) |old_value| {
-                    self.releaseValue(old_value);
-                    self.retainValue(arg);
-                    try current_frame.locals.put(param_name, arg);
+                if (self.varNameId(param_name)) |id| {
+                    if (current_frame.locals.get(id)) |old_value| {
+                        self.releaseValue(old_value);
+                        self.retainValue(arg);
+                        try current_frame.locals.put(id, arg);
+                    } else {
+                        self.retainValue(arg);
+                        try current_frame.locals.put(id, arg);
+                    }
                 } else {
-                    // New variable
-                    self.retainValue(arg);
-                    try current_frame.locals.put(param_name, arg);
+                    try self.setVariable(param_name, arg);
                 }
             } else {
                 try self.setVariable(param_name, arg);
@@ -5443,24 +5468,31 @@ pub const VM = struct {
             param2_name = closure.function.parameters[1].name.data;
         }
 
-        // Direct access to current frame's locals
         if (self.call_stack.items.len > 0) {
             var current_frame = &self.call_stack.items[self.call_stack.items.len - 1];
 
             if (param1_name.len > 0) {
-                if (current_frame.locals.get(param1_name)) |old_value| {
-                    self.releaseValue(old_value);
+                if (self.varNameId(param1_name)) |id1| {
+                    if (current_frame.locals.get(id1)) |old_value| {
+                        self.releaseValue(old_value);
+                    }
+                    self.retainValue(arg1);
+                    try current_frame.locals.put(id1, arg1);
+                } else {
+                    try self.setVariable(param1_name, arg1);
                 }
-                self.retainValue(arg1);
-                try current_frame.locals.put(param1_name, arg1);
             }
 
             if (param2_name.len > 0) {
-                if (current_frame.locals.get(param2_name)) |old_value| {
-                    self.releaseValue(old_value);
+                if (self.varNameId(param2_name)) |id2| {
+                    if (current_frame.locals.get(id2)) |old_value| {
+                        self.releaseValue(old_value);
+                    }
+                    self.retainValue(arg2);
+                    try current_frame.locals.put(id2, arg2);
+                } else {
+                    try self.setVariable(param2_name, arg2);
                 }
-                self.retainValue(arg2);
-                try current_frame.locals.put(param2_name, arg2);
             }
         } else {
             if (param1_name.len > 0) try self.setVariable(param1_name, arg1);
@@ -5587,19 +5619,20 @@ pub const VM = struct {
         if (arrow_fn.parameters.len > 0) {
             param_name = arrow_fn.parameters[0].name.data;
 
-            // Direct access to current frame's locals - avoid setVariable overhead
             if (self.call_stack.items.len > 0) {
                 var current_frame = &self.call_stack.items[self.call_stack.items.len - 1];
 
-                // Fast path: try to find existing entry first
-                if (current_frame.locals.get(param_name)) |old_value| {
-                    self.releaseValue(old_value);
-                    self.retainValue(arg);
-                    try current_frame.locals.put(param_name, arg);
+                if (self.varNameId(param_name)) |id| {
+                    if (current_frame.locals.get(id)) |old_value| {
+                        self.releaseValue(old_value);
+                        self.retainValue(arg);
+                        try current_frame.locals.put(id, arg);
+                    } else {
+                        self.retainValue(arg);
+                        try current_frame.locals.put(id, arg);
+                    }
                 } else {
-                    // New variable
-                    self.retainValue(arg);
-                    try current_frame.locals.put(param_name, arg);
+                    try self.setVariable(param_name, arg);
                 }
             } else {
                 try self.setVariable(param_name, arg);
@@ -6354,11 +6387,9 @@ pub const VM = struct {
         // 使用 Value 的快速算术操作 (支持 48 位整数)
         switch (binary_expr.op) {
             Token.Tag.plus => {
-                // 快速路径：两个整数
                 if (left.isInt() and right.isInt()) {
                     return Value.addIntFast(left, right);
                 }
-                // 通用路径：带溢出检查
                 return Value.addGeneric(left, right);
             },
             Token.Tag.minus => {
@@ -6505,8 +6536,7 @@ pub const VM = struct {
     /// Fast variable evaluation without defer
     inline fn evaluateVariableFast(self: *VM, ast_node: *const ast.Node) Value {
         const name_id = ast_node.data.variable.name;
-        const name = self.context.string_pool.keys()[name_id];
-        if (self.getVariable(name)) |value| {
+        if (self.getVariableById(name_id)) |value| {
             return value.retain();
         }
         return Value.initNull();
@@ -6597,16 +6627,12 @@ pub const VM = struct {
 
         if (target_node.tag == .variable) {
             const name_id = target_node.data.variable.name;
-            const name = self.context.string_pool.keys()[name_id];
 
-            // Get current value
-            const current_val = self.getVariable(name) orelse Value.initInt(0);
+            const current_val = self.getVariableById(name_id) orelse Value.initInt(0);
 
-            // Compute new value based on operator
             const new_val = try self.computeCompoundOp(op, current_val, rhs_value);
 
-            // Set the new value
-            try self.setVariable(name, new_val);
+            try self.setVariableById(name_id, new_val);
             return new_val;
         } else if (target_node.tag == .property_access) {
             const obj_val = try self.eval(target_node.data.property_access.target);
@@ -6838,8 +6864,7 @@ pub const VM = struct {
 
         const ast_node = &self.context.nodes.items[node];
 
-        // 每次调用都打印
-        std.debug.print("eval: depth={} tag={s}\n", .{ self.recursion_depth, @tagName(ast_node.tag) });
+
 
         // Update current line for error reporting - 安全检查
         // main_token is a Token struct, not an index
@@ -6904,10 +6929,10 @@ pub const VM = struct {
             },
             .variable => {
                 const name_id = ast_node.data.variable.name;
-                const name = self.context.string_pool.keys()[name_id];
-                if (self.getVariable(name)) |value| {
+                if (self.getVariableById(name_id)) |value| {
                     return value.retain();
                 } else {
+                    const name = self.context.string_pool.keys()[name_id];
                     const exception = try ExceptionFactory.createUndefinedVariableError(self.allocator, name, self.current_file, self.current_line);
                     return self.throwException(exception);
                 }
@@ -6973,21 +6998,11 @@ pub const VM = struct {
 
                 if (target_node.tag == .variable) {
                     const name_id = target_node.data.variable.name;
-                    const name = self.context.string_pool.keys()[name_id];
 
                     if (is_reference) {
-                        // Reference assignment: $ref = &expr
-                        // If expr already returns a reference, use it directly
-                        if (value.isReference()) {
-                            _ = value.asReferenceHash();
-                            try self.setVariable(name, value);
-                        } else {
-                            // For now, only support reference returns from functions
-                            // Direct variable references like $ref = &$var not yet supported
-                            try self.setVariable(name, value);
-                        }
+                        try self.setVariableById(name_id, value);
                     } else {
-                        try self.setVariable(name, value);
+                        try self.setVariableById(name_id, value);
                     }
                 } else if (target_node.tag == .variable_variable) {
                     // $$var = value: 先求值内层变量得到变量名，再设置该变量
@@ -8589,7 +8604,8 @@ pub const VM = struct {
             const current_frame = &self.call_stack.items[self.call_stack.items.len - 1];
             var locals_iter = current_frame.locals.iterator();
             while (locals_iter.next()) |entry| {
-                try closure.captureVariable(entry.key_ptr.*, entry.value_ptr.*);
+                const var_name = self.context.string_pool.keys()[entry.key_ptr.*];
+                try closure.captureVariable(var_name, entry.value_ptr.*);
             }
         }
 
@@ -8604,12 +8620,9 @@ pub const VM = struct {
 
             if (expr_node.tag == .variable) {
                 const name_id = expr_node.data.variable.name;
-                const name = self.context.string_pool.keys()[name_id];
 
-                // Get current value
-                const current_val = if (self.getVariable(name)) |v| v else Value.initInt(0);
+                const current_val = if (self.getVariableById(name_id)) |v| v else Value.initInt(0);
 
-                // Increment/Decrement
                 var new_val: Value = undefined;
                 if (unary_expr.op == .plus_plus) {
                     new_val = try self.incrementValue(current_val);
@@ -8617,8 +8630,7 @@ pub const VM = struct {
                     new_val = try self.decrementValue(current_val);
                 }
 
-                // Update variable (setVariable retains the new value)
-                try self.setVariable(name, new_val);
+                try self.setVariableById(name_id, new_val);
 
                 // For prefix, return new value.
                 _ = self.retainValue(new_val);
@@ -8656,15 +8668,11 @@ pub const VM = struct {
 
             if (expr_node.tag == .variable) {
                 const name_id = expr_node.data.variable.name;
-                const name = self.context.string_pool.keys()[name_id];
 
-                // Get current value
-                const current_val = if (self.getVariable(name)) |v| v else Value.initInt(0);
+                const current_val = if (self.getVariableById(name_id)) |v| v else Value.initInt(0);
 
-                // Retain current value because we will return it, and setVariable might release the one in storage
                 self.retainValue(current_val);
 
-                // Calculate new value
                 var new_val: Value = undefined;
                 if (postfix_expr.op == .plus_plus) {
                     new_val = try self.incrementValue(current_val);
@@ -8672,8 +8680,7 @@ pub const VM = struct {
                     new_val = try self.decrementValue(current_val);
                 }
 
-                // Update variable
-                try self.setVariable(name, new_val);
+                try self.setVariableById(name_id, new_val);
 
                 return current_val;
             } else if (expr_node.tag == .property_access) {
@@ -9287,8 +9294,7 @@ pub const VM = struct {
                 const var_node = self.context.nodes.items[var_idx];
                 if (var_node.tag == .variable) {
                     const name_id = var_node.data.variable.name;
-                    const name = self.context.string_pool.keys()[name_id];
-                    try self.setVariable(name, Value.initInt(i));
+                    try self.setVariableById(name_id, Value.initInt(i));
                 } else {
                     const exception = try ExceptionFactory.createTypeError(self.allocator, "Range variable must be a variable", self.current_file, self.current_line);
                     return self.throwException(exception);
@@ -9360,8 +9366,7 @@ pub const VM = struct {
                 const key_node = self.context.nodes.items[key_idx];
                 if (key_node.tag == .variable) {
                     const name_id = key_node.data.variable.name;
-                    const name = self.context.string_pool.keys()[name_id];
-                    try self.setVariable(name, key_result.retain());
+                    try self.setVariableById(name_id, key_result.retain());
                 }
             }
 
@@ -9373,8 +9378,7 @@ pub const VM = struct {
                 const value_node = self.context.nodes.items[foreach_stmt.value];
                 if (value_node.tag == .variable) {
                     const name_id = value_node.data.variable.name;
-                    const name = self.context.string_pool.keys()[name_id];
-                    try self.setVariable(name, value_result.retain());
+                    try self.setVariableById(name_id, value_result.retain());
                 }
             }
 
@@ -9486,18 +9490,15 @@ pub const VM = struct {
                 const key_node = self.context.nodes.items[key_idx];
                 if (key_node.tag == .variable) {
                     const name_id = key_node.data.variable.name;
-                    const name = self.context.string_pool.keys()[name_id];
-                    try self.setVariable(name, key.retain());
+                    try self.setVariableById(name_id, key.retain());
                 }
             }
 
-            // 设置 value 变量
             if (foreach_stmt.value > 0 and foreach_stmt.value < self.context.nodes.items.len) {
                 const value_node = self.context.nodes.items[foreach_stmt.value];
                 if (value_node.tag == .variable) {
                     const value_name_id = value_node.data.variable.name;
-                    const value_name = self.context.string_pool.keys()[value_name_id];
-                    try self.setVariable(value_name, value.retain());
+                    try self.setVariableById(value_name_id, value.retain());
                 }
             }
 
@@ -9860,28 +9861,23 @@ pub const VM = struct {
 
     /// Evaluate global statement - imports variables from global scope
     fn evaluateGlobalStatement(self: *VM, global_stmt: anytype) !Value {
-        // For each variable in global statement, import it from global scope
         for (global_stmt.vars) |var_idx| {
             const var_node = self.context.nodes.items[var_idx];
 
-            // Get the variable name (should be a simple variable node)
             if (var_node.tag == .variable) {
                 const name_id = var_node.data.variable.name;
                 const name = self.context.string_pool.keys()[name_id];
 
-                // Ensure variable exists in global scope (init to null if not)
                 if (!self.global.vars.contains(name)) {
                     try self.global.set(name, Value.initNull());
                 }
 
-                // If in function context, mark as imported
                 if (self.current_frame) |frame| {
-                    try frame.imported_globals.put(name, {});
+                    try frame.imported_globals.put(name_id, {});
 
-                    // Remove any shadowing local variable
-                    if (frame.locals.get(name)) |old_val| {
+                    if (frame.locals.get(name_id)) |old_val| {
                         self.releaseValue(old_val);
-                        _ = frame.locals.remove(name);
+                        _ = frame.locals.remove(name_id);
                     }
                 }
             }
@@ -9923,7 +9919,7 @@ pub const VM = struct {
                     // Set local/global reference to static variable
                     const static_val = self.static_vars.get(static_key).?;
                     if (self.current_frame) |frame| {
-                        try frame.locals.put(var_name, static_val.retain());
+                        try frame.locals.put(name_id, static_val.retain());
                     } else {
                         try self.global.set(var_name, static_val.retain());
                     }
@@ -9943,7 +9939,7 @@ pub const VM = struct {
 
                 const static_val = self.static_vars.get(static_key).?;
                 if (self.current_frame) |frame| {
-                    try frame.locals.put(var_name, static_val.retain());
+                    try frame.locals.put(name_id, static_val.retain());
                 } else {
                     try self.global.set(var_name, static_val.retain());
                 }
@@ -11966,8 +11962,10 @@ pub const VM = struct {
                 // Get $this from the previous call frame (the one that called parent::)
                 if (self.call_stack.items.len > 1) {
                     const caller_frame = &self.call_stack.items[self.call_stack.items.len - 2];
-                    if (caller_frame.locals.get("$this")) |this_val| {
-                        try self.setVariable("$this", this_val);
+                    if (self.varNameId("$this")) |this_id| {
+                        if (caller_frame.locals.get(this_id)) |this_val| {
+                            try self.setVariableById(this_id, this_val);
+                        }
                     }
                 }
             }

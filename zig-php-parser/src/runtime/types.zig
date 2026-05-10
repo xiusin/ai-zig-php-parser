@@ -2905,19 +2905,68 @@ pub const Value = struct {
         return initInt(result);
     }
 
-    /// 快速整数减法 (无类型检查)
     pub inline fn subIntFast(a: Value, b: Value) Value {
         const result = a.asInt() -% b.asInt();
         return initInt(result);
     }
 
-    /// 快速整数乘法 (无类型检查)
     pub inline fn mulIntFast(a: Value, b: Value) Value {
         const result = a.asInt() *% b.asInt();
         return initInt(result);
     }
 
-    /// 快速整数除法 (无类型检查，除数为0返回0)
+    pub inline fn addIntUltraFast(a: Value, b: Value) Value {
+        const a_raw = a.val & INT48_MASK;
+        const b_raw = b.val & INT48_MASK;
+        const a_sign = a_raw & INT48_SIGN_BIT;
+        const b_sign = b_raw & INT48_SIGN_BIT;
+        var a_i: i64 = undefined;
+        if (a_sign != 0) {
+            a_i = @bitCast(a_raw | 0xFFFF000000000000);
+        } else {
+            a_i = @bitCast(a_raw);
+        }
+        var b_i: i64 = undefined;
+        if (b_sign != 0) {
+            b_i = @bitCast(b_raw | 0xFFFF000000000000);
+        } else {
+            b_i = @bitCast(b_raw);
+        }
+        const result = a_i +% b_i;
+        const encoded: u64 = @as(u64, @bitCast(result)) & INT48_MASK;
+        return .{ .val = TAG_INT_MARKER | encoded };
+    }
+
+    pub inline fn subIntUltraFast(a: Value, b: Value) Value {
+        const a_raw = a.val & INT48_MASK;
+        const b_raw = b.val & INT48_MASK;
+        const a_sign = a_raw & INT48_SIGN_BIT;
+        const b_sign = b_raw & INT48_SIGN_BIT;
+        var a_i: i64 = undefined;
+        if (a_sign != 0) {
+            a_i = @bitCast(a_raw | 0xFFFF000000000000);
+        } else {
+            a_i = @bitCast(a_raw);
+        }
+        var b_i: i64 = undefined;
+        if (b_sign != 0) {
+            b_i = @bitCast(b_raw | 0xFFFF000000000000);
+        } else {
+            b_i = @bitCast(b_raw);
+        }
+        const result = a_i -% b_i;
+        const encoded: u64 = @as(u64, @bitCast(result)) & INT48_MASK;
+        return .{ .val = TAG_INT_MARKER | encoded };
+    }
+
+    pub inline fn ltIntBool(a: Value, b: Value) bool {
+        return a.asInt() < b.asInt();
+    }
+
+    pub inline fn leIntBool(a: Value, b: Value) bool {
+        return a.asInt() <= b.asInt();
+    }
+
     pub inline fn divIntFast(a: Value, b: Value) Value {
         const bv = b.asInt();
         if (bv == 0) return initInt(0);

@@ -92,6 +92,8 @@ pub const PassConfig = struct {
     strength_reduction: bool = false,
     /// Enable Mem2Reg (promote memory to registers)
     mem2reg: bool = false,
+    /// Enable Global-to-Local promotion (global.get/set → alloca+load/store)
+    global_promotion: bool = false,
     /// Enable loop unrolling
     loop_unroll: bool = false,
     /// Enable CFG cleanup (block merge, trivial branch simplification, phi cleanup)
@@ -151,6 +153,7 @@ pub const PassConfig = struct {
             .licm = true,
             .strength_reduction = true,
             .mem2reg = true,
+            .global_promotion = true,
             .loop_unroll = false,
             .cfg_cleanup = true,
             .rc_elision = true,
@@ -178,6 +181,7 @@ pub const PassConfig = struct {
             .licm = true,
             .strength_reduction = true,
             .mem2reg = true,
+            .global_promotion = true,
             .loop_unroll = false,
             .cfg_cleanup = true,
             .rc_elision = true,
@@ -206,6 +210,7 @@ pub const PassConfig = struct {
             .licm = false,
             .strength_reduction = true,
             .mem2reg = true,
+            .global_promotion = true,
             .loop_unroll = false, // Unrolling increases size
             .cfg_cleanup = true,
             .rc_elision = true,
@@ -250,6 +255,7 @@ pub const OptimizationStats = struct {
     slp_vectorizations: u32 = 0,
     polyhedral_transforms: u32 = 0,
     loop_vectorizations: u32 = 0,
+    global_promotions: u32 = 0,
 
     /// Reset all statistics
     pub fn reset(self: *OptimizationStats) void {
@@ -428,6 +434,13 @@ pub const IROptimizer = struct {
             self.stats.passes_run += 1;
 
             // Run each enabled pass
+            if (self.config.global_promotion) {
+                if (try self.runGlobalPromotion(module)) {
+                    changed = true;
+                }
+                if (self.verify_ir) try self.verifyModule(module);
+            }
+
             if (self.config.mem2reg) {
                 if (try self.runMem2Reg(module)) {
                     changed = true;
@@ -1506,6 +1519,215 @@ pub const IROptimizer = struct {
     }
 
     // ========================================================================
+    // Global Promotion (global.get/set → alloca+load/store)
+    // ========================================================================
+
+    fn runGlobalPromotion(self: *Self, module: *Module) !bool {
+        var changed = false;
+        for (module.functions.items) |func| {
+            if (try self.promoteGlobalsInFunction(func)) {
+                changed = true;
+            }
+        }
+        return changed;
+    }
+
+    fn promoteGlobalsInFunction(self: *Self, func: *Function) !bool {
+        const GlobalInfo = struct {
+            name: []const u8,
+            promotable: bool = true,
+            has_call_in_scope: bool = false,
+            alloca_reg: ?Register = null,
+            type_: ?Type = null,
+        };
+
+        var global_vars = std.StringHashMap(GlobalInfo).init(self.allocator);
+        defer {
+            var it = global_vars.iterator();
+            while (it.next()) |entry| {
+                self.allocator.free(entry.key_ptr.*);
+            }
+            global_vars.deinit();
+        }
+
+        var blocks_with_call = std.AutoHashMap(*BasicBlock, void).init(self.allocator);
+        defer blocks_with_call.deinit();
+
+        for (func.blocks.items) |block| {
+            var block_has_call = false;
+            for (block.instructions.items) |inst| {
+                switch (inst.op) {
+                    .call, .call_indirect, .method_call, .static_method_call, .parent_call => {
+                        block_has_call = true;
+                    },
+                    .global_get => |op| {
+                        const gop = try global_vars.getOrPut(try self.allocator.dupe(u8, op.name));
+                        if (!gop.found_existing) {
+                            gop.value_ptr.* = .{ .name = op.name };
+                        }
+                        if (inst.result) |res| {
+                            gop.value_ptr.type_ = res.type_;
+                        }
+                    },
+                    .global_set => |op| {
+                        const gop = try global_vars.getOrPut(try self.allocator.dupe(u8, op.name));
+                        if (!gop.found_existing) {
+                            gop.value_ptr.* = .{ .name = op.name };
+                        }
+                        if (op.value) |val| {
+                            gop.value_ptr.type_ = val.type_;
+                        }
+                    },
+                    .global_ref_bind => |op| {
+                        const gop = try global_vars.getOrPut(try self.allocator.dupe(u8, op.target));
+                        if (!gop.found_existing) {
+                            gop.value_ptr.* = .{ .name = op.target };
+                        }
+                        gop.value_ptr.promotable = false;
+                    },
+                    .global_unset => {
+                        // global_unset uses a Register for name, can't easily get string name
+                        // Conservatively mark all globals as non-promotable
+                        var it2 = global_vars.iterator();
+                        while (it2.next()) |entry2| {
+                            entry2.value_ptr.promotable = false;
+                        }
+                    },
+                    .global_get_dynamic, .global_set_dynamic => {
+                        // Dynamic access makes all globals non-promotable conservatively
+                        // (we don't know which variable is accessed)
+                    },
+                    else => {},
+                }
+            }
+            if (block_has_call) {
+                try blocks_with_call.put(block, {});
+            }
+        }
+
+        for (func.blocks.items) |block| {
+            if (!blocks_with_call.contains(block)) continue;
+            for (block.instructions.items) |inst| {
+                switch (inst.op) {
+                    .global_get => |op| {
+                        if (global_vars.getPtr(op.name)) |info| {
+                            info.has_call_in_scope = true;
+                        }
+                    },
+                    .global_set => |op| {
+                        if (global_vars.getPtr(op.name)) |info| {
+                            info.has_call_in_scope = true;
+                        }
+                    },
+                    else => {},
+                }
+            }
+        }
+
+        var any_promoted = false;
+        {
+            var it = global_vars.iterator();
+            while (it.next()) |entry| {
+                const info = entry.value_ptr.*;
+                if (info.promotable and !info.has_call_in_scope) {
+                    any_promoted = true;
+                    break;
+                }
+            }
+        }
+        if (!any_promoted) return false;
+
+        const entry_block = func.getEntryBlock() orelse return false;
+
+        var insert_pos: usize = 0;
+        for (entry_block.instructions.items, 0..) |inst, i| {
+            if (inst.op == .alloca) {
+                insert_pos = i + 1;
+            } else {
+                break;
+            }
+        }
+
+        {
+            var it = global_vars.iterator();
+            while (it.next()) |entry| {
+                const info = entry.value_ptr;
+                if (!info.promotable or info.has_call_in_scope) continue;
+
+                const var_type = info.type_ orelse Type{ .php_value = {} };
+                const type_ptr = try self.allocator.create(Type);
+                type_ptr.* = var_type;
+                const alloca_reg = func.newRegister(Type{ .ptr = type_ptr });
+                info.alloca_reg = alloca_reg;
+
+                const alloca_inst = try self.allocator.create(Instruction);
+                alloca_inst.* = .{
+                    .result = alloca_reg,
+                    .op = .{ .alloca = .{ .type_ = var_type, .count = 1 } },
+                    .location = .{},
+                };
+                try entry_block.instructions.insert(self.allocator, insert_pos, alloca_inst);
+                insert_pos += 1;
+
+                const init_val_reg = func.newRegister(var_type);
+                const init_get_inst = try self.allocator.create(Instruction);
+                init_get_inst.* = .{
+                    .result = init_val_reg,
+                    .op = .{ .global_get = .{ .name = info.name } },
+                    .location = .{},
+                };
+                try entry_block.instructions.insert(self.allocator, insert_pos, init_get_inst);
+                insert_pos += 1;
+
+                const store_inst = try self.allocator.create(Instruction);
+                store_inst.* = .{
+                    .result = null,
+                    .op = .{ .store = .{ .ptr = alloca_reg, .value = init_val_reg } },
+                    .location = .{},
+                };
+                try entry_block.instructions.insert(self.allocator, insert_pos, store_inst);
+                insert_pos += 1;
+            }
+        }
+
+        for (func.blocks.items) |block| {
+            var i: usize = 0;
+            while (i < block.instructions.items.len) {
+                const inst = block.instructions.items[i];
+                switch (inst.op) {
+                    .global_get => |op| {
+                        if (global_vars.getPtr(op.name)) |info| {
+                            if (info.promotable and !info.has_call_in_scope and info.alloca_reg != null) {
+                                const alloca_reg = info.alloca_reg.?;
+                                if (inst.result) |res| {
+                                    inst.op = .{ .load = .{ .ptr = alloca_reg, .type_ = res.type_ } };
+                                    self.stats.global_promotions += 1;
+                                }
+                            }
+                        }
+                    },
+                    .global_set => |op| {
+                        if (global_vars.getPtr(op.name)) |info| {
+                            if (info.promotable and !info.has_call_in_scope and info.alloca_reg != null) {
+                                const alloca_reg = info.alloca_reg.?;
+                                if (op.value) |val| {
+                                    inst.op = .{ .store = .{ .ptr = alloca_reg, .value = val } };
+                                    inst.result = null;
+                                    self.stats.global_promotions += 1;
+                                }
+                            }
+                        }
+                    },
+                    else => {},
+                }
+                i += 1;
+            }
+        }
+
+        return true;
+    }
+
+    // ========================================================================
     // Mem2Reg (Promote Memory to Register)
     // ========================================================================
 
@@ -2552,9 +2774,12 @@ pub const IROptimizer = struct {
         var changed = false;
         for (module.functions.items) |func| {
             // 逃逸分析待修复（API 不兼容），暂时跳过
-            // self.escape_analysis = try EscapeAnalysis.init(self.allocator);
-            // defer { if (self.escape_analysis) |*ea| ea.deinit(); self.escape_analysis = null; };
-            // try self.escape_analysis.?.analyze(func);
+            self.escape_analysis = try EscapeAnalysis.init(self.allocator);
+            defer {
+                if (self.escape_analysis) |*ea| ea.deinit();
+                self.escape_analysis = null;
+            }
+            try self.escape_analysis.?.analyze(func);
 
             if (try self.eliminateRCEllisionInFunction(func)) {
                 changed = true;

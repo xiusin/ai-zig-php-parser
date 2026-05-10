@@ -5425,7 +5425,6 @@ pub fn php_sb_create(allocator: Allocator) !Value {
 
 /// StringBuilder: 追加字符串
 pub fn php_sb_append(sb_val: Value, str_val: Value, allocator: Allocator) !Value {
-    _ = allocator;
     const sb = @as(*PHPStringBuilder, @ptrCast(@alignCast(sb_val.asPtr())));
     if (str_val.isString()) {
         try sb.appendString(str_val.asString());
@@ -5439,6 +5438,7 @@ pub fn php_sb_append(sb_val: Value, str_val: Value, allocator: Allocator) !Value
 
 /// StringBuilder: 转为 PHP 字符串
 pub fn php_sb_to_string(sb_val: Value, allocator: Allocator) !Value {
+    _ = allocator;
     const sb = @as(*PHPStringBuilder, @ptrCast(@alignCast(sb_val.asPtr())));
     const result = try sb.toString();
     return Value.initString(result);

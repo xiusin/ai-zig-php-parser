@@ -896,6 +896,10 @@ pub const BytecodeGenerator = struct {
         } else {
             try self.emit(.ret_void, 0, 0);
         }
+        // ret/ret_void completely clears the operand stack at runtime,
+        // so reset current_stack to 0 (empty operand stack) to prevent
+        // visitBlock from emitting spurious pop instructions
+        self.current_stack = 0;
     }
 
     /// 访问break语句
@@ -905,9 +909,9 @@ pub const BytecodeGenerator = struct {
             const loop_ctx = self.loop_stack.items[self.loop_stack.items.len - 1];
             try self.emitJump(.jmp, loop_ctx.break_label);
         }
+        self.current_stack = 0;
     }
 
-    /// 访问continue语句
     fn visitContinue(self: *BytecodeGenerator, index: ast.Node.Index) CompileError!void {
         _ = index;
         if (self.loop_stack.items.len > 0) {
@@ -916,6 +920,7 @@ pub const BytecodeGenerator = struct {
                 try self.emitJump(.jmp, label);
             }
         }
+        self.current_stack = 0;
     }
 
     /// 访问赋值语句
