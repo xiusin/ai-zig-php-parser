@@ -1,0 +1,191 @@
+{
+  "manifest_version": "1.0",
+  "description": "Integration test manifest for zig-php-parser fuzzy tests",
+  "test_directory": "fuzzy_scripts",
+  "created": "2026-06-10",
+  "tests": [
+    {
+      "file": "test_001_variables.php",
+      "description": "基础变量与类型测试：标量类型、数组、动态变量名、variable variables",
+      "category": "variables",
+      "tags": ["variables", "types", "dynamic_variables"]
+    },
+    {
+      "file": "test_003_type_juggling.php",
+      "description": "类型自动转换测试：字符串/数字转换、布尔转换、整数转换、浮点转换、数组转换、对象转换、混合运算",
+      "category": "types",
+      "tags": ["type_juggling", "casting", "conversion"]
+    },
+    {
+      "file": "test_006_loops_for.php",
+      "description": "for循环测试：基础for、多变量、无限循环+break、continue、嵌套循环、替代语法、省略部分表达式、双重break",
+      "category": "control_flow",
+      "tags": ["for", "loops", "break", "continue"]
+    },
+    {
+      "file": "test_007_loops_while.php",
+      "description": "while和do-while循环测试：基础while、替代语法、do-while、嵌套while、break/continue",
+      "category": "control_flow",
+      "tags": ["while", "do_while", "loops"]
+    },
+    {
+      "file": "test_008_loops_foreach.php",
+      "description": "foreach循环测试：索引数组遍历、带键遍历、关联数组、多维数组、引用遍历",
+      "category": "control_flow",
+      "tags": ["foreach", "loops", "arrays"]
+    },
+    {
+      "file": "test_009_functions_basic.php",
+      "description": "函数基础测试：基础函数、默认参数、类型声明、返回值类型、可变参数、引用参数",
+      "category": "functions",
+      "tags": ["functions", "parameters", "return_types"]
+    },
+    {
+      "file": "test_010_closures.php",
+      "description": "闭包和匿名函数测试：基础闭包、use捕获、引用捕获、闭包作为回调",
+      "category": "functions",
+      "tags": ["closures", "anonymous_functions", "callbacks"]
+    },
+    {
+      "file": "test_012_arrays_basic.php",
+      "description": "数组基础测试：创建数组、数组访问、多维数组、数组函数、展开运算符",
+      "category": "arrays",
+      "tags": ["arrays", "multidimensional", "spread"]
+    },
+    {
+      "file": "test_018_magic_methods.php",
+      "description": "魔术方法测试：__construct、__destruct、__get、__set、__call、__toString等",
+      "category": "oop",
+      "tags": ["magic_methods", "oop", "classes"]
+    },
+    {
+      "file": "test_021_math_functions.php",
+      "description": "数学函数测试：abs、ceil、floor、round、max、min、pow、sqrt、rand、三角函数等",
+      "category": "builtin_functions",
+      "tags": ["math", "functions", "numeric"]
+    },
+    {
+      "file": "test_023_string_advanced.php",
+      "description": "字符串高级操作测试：多字节字符串、字符串函数、编码处理",
+      "category": "strings",
+      "tags": ["strings", "multibyte", "encoding"]
+    },
+    {
+      "file": "test_029_callback.php",
+      "description": "回调函数测试：基础回调、数组回调、闭包回调、callable类型",
+      "category": "functions",
+      "tags": ["callbacks", "callable", "closures"]
+    },
+    {
+      "file": "test_030_variables_advanced.php",
+      "description": "变量高级操作测试：变量变量、引用赋值、global关键字、static变量",
+      "category": "variables",
+      "tags": ["variable_variables", "references", "global", "static"]
+    },
+    {
+      "file": "test_033_namespaces.php",
+      "description": "命名空间测试：namespace声明、use导入、别名、全局命名空间、子命名空间",
+      "category": "namespaces",
+      "tags": ["namespaces", "use", "import"]
+    },
+    {
+      "file": "test_047_readonly_props.php",
+      "description": "只读属性测试 (PHP 8.1+)：单个只读属性、构造函数赋值、继承中的只读属性",
+      "category": "oop",
+      "tags": ["readonly", "php8.1", "properties"]
+    },
+    {
+      "file": "test_048_dnf_types.php",
+      "description": "DNF类型测试 (PHP 8.2+)：联合类型和交叉类型组合、接口组合",
+      "category": "types",
+      "tags": ["dnf_types", "php8.2", "type_system"]
+    },
+    {
+      "file": "test_049_type_system.php",
+      "description": "类型系统边界测试：混合类型参数、可空类型、联合类型、联合与交叉类型组合",
+      "category": "types",
+      "tags": ["type_system", "union_types", "nullable"]
+    },
+    {
+      "file": "test_051_closures_advanced.php",
+      "description": "闭包高级特性测试：自动绑定$this、静态闭包、闭包fromCallable",
+      "category": "functions",
+      "tags": ["closures", "advanced", "binding"]
+    },
+    {
+      "file": "test_052_complex_expressions.php",
+      "description": "复杂表达式测试：复杂算术表达式、三元运算符、null合并、逻辑短路",
+      "category": "expressions",
+      "tags": ["expressions", "ternary", "null_coalesce"]
+    },
+    {
+      "file": "test_056_superglobals.php",
+      "description": "超全局变量测试：$GLOBALS、$_SERVER、$_GET、$_POST、$_COOKIE等",
+      "category": "builtin",
+      "tags": ["superglobals", "globals"]
+    },
+    {
+      "file": "test_057_output_buffering.php",
+      "description": "输出缓冲测试：ob_start、ob_get_contents、ob_end_clean、嵌套缓冲",
+      "category": "output",
+      "tags": ["output_buffering", "ob"]
+    },
+    {
+      "file": "test_063_sorting_algorithms.php",
+      "description": "排序算法对比测试：冒泡排序、选择排序、插入排序、快速排序等性能对比",
+      "category": "algorithms",
+      "tags": ["sorting", "algorithms", "benchmark"]
+    },
+    {
+      "file": "test_064_string_manipulation.php",
+      "description": "字符串操作高级测试：多字节字符串处理、正则替换、字符串搜索",
+      "category": "strings",
+      "tags": ["strings", "manipulation", "regex"]
+    },
+    {
+      "file": "test_065_array_walk.php",
+      "description": "array_walk和回调测试：array_walk基础、array_walk_recursive、array_map、array_filter",
+      "category": "arrays",
+      "tags": ["array_walk", "array_map", "callbacks"]
+    },
+    {
+      "file": "test_068_misc_functions.php",
+      "description": "杂项函数测试：变量处理、类型检查、序列化、JSON、唯一标识、进程信息、内存信息、时间测量",
+      "category": "builtin_functions",
+      "tags": ["misc", "var_export", "serialize", "json", "profiling"]
+    },
+    {
+      "file": "test_do_while_comprehensive.php",
+      "description": "do-while综合测试：基础do-while、单次迭代、break、continue、嵌套、复杂条件、函数调用、阶乘计算等22项测试",
+      "category": "control_flow",
+      "tags": ["do_while", "loops", "comprehensive"]
+    },
+    {
+      "file": "test_runtime_functions.php",
+      "description": "运行时函数综合测试：strlen、strpos、substr、explode、implode/join、array_keys、array_values、in_array、array_search、字符串索引读写",
+      "category": "runtime",
+      "tags": ["runtime", "string_functions", "array_functions"]
+    }
+  ],
+  "categories": {
+    "variables": "变量与类型相关测试",
+    "types": "类型系统与类型转换测试",
+    "control_flow": "控制流（循环、条件）测试",
+    "functions": "函数与闭包测试",
+    "arrays": "数组操作测试",
+    "oop": "面向对象编程测试",
+    "strings": "字符串操作测试",
+    "expressions": "表达式与运算符测试",
+    "namespaces": "命名空间测试",
+    "builtin_functions": "内置函数测试",
+    "builtin": "PHP内置功能测试",
+    "output": "输出控制测试",
+    "algorithms": "算法实现测试",
+    "runtime": "运行时功能测试"
+  },
+  "requirements": {
+    "php_interpreter": "zig-out/bin/php-interpreter",
+    "build_command": "zig build",
+    "build_modes": ["ReleaseSafe", "ReleaseFast"]
+  }
+}

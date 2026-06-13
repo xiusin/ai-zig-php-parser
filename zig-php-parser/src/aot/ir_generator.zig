@@ -725,6 +725,7 @@ pub const IRGenerator = struct {
                     _ = try self.generateExpression(expr_idx);
                 }
             },
+            .include_stmt, .require_stmt => try self.generateIncludeStmt(node),
             else => {
                 _ = try self.generateExpression(index);
             },
@@ -3477,6 +3478,50 @@ pub const IRGenerator = struct {
                 .args = args,
                 .return_type = .void,
             } }, null);
+        }
+    }
+
+    /// Generate IR for include/require statements (both .include_stmt and .require_stmt tags)
+    fn generateIncludeStmt(self: *Self, node: *const Node) !void {
+        // Both .include_stmt and .require_stmt use the same data struct
+        const inc_data = node.data.include_stmt;
+        const is_require = inc_data.is_require or node.tag == .require_stmt;
+        const is_once = inc_data.is_once;
+
+        // Check if path is a static string literal
+        const path_node = self.getNode(inc_data.path);
+        if (path_node != null and path_node.?.tag == .literal_string) {
+            // Static path - resolve at compile time
+            const path_str = self.getString(path_node.?.data.literal_string.value);
+
+            if (self.module) |module| {
+                // Intern the path in the module's string table
+                const str_id = try module.internString(path_str);
+
+                // Emit include/require IR instruction
+                const op: Instruction.Op = if (is_require)
+                    .{ .require = .{ .path_str_id = str_id, .is_once = is_once } }
+                else
+                    .{ .include = .{ .path_str_id = str_id, .is_once = is_once } };
+                _ = try self.emit(op, null);
+
+                // Track for multi-file compiler merge
+                try module.compile_time_includes.append(self.allocator, .{
+                    .resolved_path = try self.allocator.dupe(u8, path_str),
+                    .is_once = is_once,
+                    .is_require = is_require,
+                });
+            }
+        } else {
+            // Dynamic path - generate runtime call
+            const path_reg = try self.generateExpression(inc_data.path);
+
+            // Emit runtime include/require instruction
+            const op: Instruction.Op = if (is_require)
+                .{ .require_runtime = .{ .operand = path_reg } }
+            else
+                .{ .include_runtime = .{ .operand = path_reg } };
+            _ = try self.emit(op, null);
         }
     }
 

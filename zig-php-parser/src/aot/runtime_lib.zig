@@ -2,7 +2,7 @@
 //!
 //! This module provides the runtime support for AOT-compiled PHP programs.
 //! It includes:
-//! - PHPValue: The dynamic PHP value type with tagged union representation
+//! - PHPValue: 8-byte NaN-boxed value representation
 //! - Reference counting garbage collection
 //! - Array operations
 //! - String operations
@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const nanbox = @import("nanbox_abi.zig");
 
 // ============================================================================
 // Global Allocator for Runtime
@@ -32,7 +33,7 @@ pub fn getGlobalAllocator() Allocator {
 
 /// Initialize the runtime with a custom allocator (for testing)
 pub fn initRuntime(allocator: Allocator) void {
-    _ = allocator; // 忽略传入的allocator，使用内部GPA
+    _ = allocator;
     if (global_gpa == null) {
         global_gpa = std.heap.GeneralPurposeAllocator(.{}){};
     }
@@ -40,11 +41,8 @@ pub fn initRuntime(allocator: Allocator) void {
 
 /// Deinitialize the runtime and free all resources
 pub fn deinitRuntime() void {
-    // Reset global mutex pointer (will be freed by GPA deinit)
     global_mutex = null;
 
-    // Free the global allocator and all its resources
-    // This will automatically free all allocations including global_mutex
     if (global_gpa) |*gpa| {
         const leak_check = gpa.deinit();
         if (leak_check == .leak) {
@@ -55,10 +53,26 @@ pub fn deinitRuntime() void {
 }
 
 // ============================================================================
-// PHP Value Type System
+// PHP Value Type System (NaN-boxed, 8 bytes)
 // ============================================================================
 
-/// Value type tag for PHPValue
+/// The main PHP value type - an 8-byte NaN-boxed u64.
+/// Simple types (null, bool, int, float) are stored entirely in-band.
+/// Complex types (string, array, object) encode a pointer to a heap object.
+pub const Value = u64;
+
+/// Type alias for backward compatibility
+pub const PHPValue = Value;
+
+/// GC header embedded at the start of every heap-allocated PHP type.
+pub const GcHeader = extern struct {
+    ref_count: u32,
+};
+
+// ============================================================================
+// Value Type Tag (kept for IR compatibility)
+// ============================================================================
+
 pub const ValueTag = enum(u8) {
     null = 0,
     bool = 1,
@@ -70,7 +84,6 @@ pub const ValueTag = enum(u8) {
     resource = 7,
     callable = 8,
 
-    /// Convert tag to PHP type name string
     pub fn toTypeName(self: ValueTag) []const u8 {
         return switch (self) {
             .null => "NULL",
@@ -86,175 +99,71 @@ pub const ValueTag = enum(u8) {
     }
 };
 
-/// Internal data union for PHPValue
-pub const ValueData = extern union {
-    bool_val: bool,
-    int_val: i64,
-    float_val: f64,
-    string_ptr: ?*PHPString,
-    array_ptr: ?*PHPArray,
-    object_ptr: ?*PHPObject,
-    resource_ptr: ?*anyopaque,
-    callable_ptr: ?*PHPCallable,
-};
-
-/// The main PHP value type - a tagged union with reference counting
-/// Memory layout: 24 bytes (tag: 1, padding: 3, ref_count: 4, data: 16)
-pub const PHPValue = extern struct {
-    /// Type tag
-    tag: ValueTag,
-    /// Padding for alignment
-    _padding: [3]u8 = .{ 0, 0, 0 },
-    /// Reference count for garbage collection
-    ref_count: u32,
-    /// Value data
-    data: ValueData,
-
-    const Self = @This();
-
-    /// Check if this value is null
-    pub fn isNull(self: *const Self) bool {
-        return self.tag == .null;
-    }
-
-    /// Check if this value is truthy (PHP truthiness rules)
-    pub fn isTruthy(self: *const Self) bool {
-        return switch (self.tag) {
-            .null => false,
-            .bool => self.data.bool_val,
-            .int => self.data.int_val != 0,
-            .float => self.data.float_val != 0.0 and !std.math.isNan(self.data.float_val),
-            .string => blk: {
-                if (self.data.string_ptr) |str| {
-                    // Empty string or "0" is falsy
-                    if (str.length == 0) break :blk false;
-                    if (str.length == 1 and str.data[0] == '0') break :blk false;
-                    break :blk true;
-                }
-                break :blk false;
-            },
-            .array => blk: {
-                if (self.data.array_ptr) |arr| {
-                    break :blk arr.count() > 0;
-                }
-                break :blk false;
-            },
-            .object => self.data.object_ptr != null,
-            .resource => self.data.resource_ptr != null,
-            .callable => self.data.callable_ptr != null,
-        };
-    }
-
-    /// Get the type name of this value
-    pub fn getTypeName(self: *const Self) []const u8 {
-        return self.tag.toTypeName();
-    }
-
-    /// Convert to integer (PHP type juggling)
-    pub fn toInt(self: *const Self) i64 {
-        return switch (self.tag) {
-            .null => 0,
-            .bool => if (self.data.bool_val) @as(i64, 1) else @as(i64, 0),
-            .int => self.data.int_val,
-            .float => @intFromFloat(self.data.float_val),
-            .string => blk: {
-                if (self.data.string_ptr) |str| {
-                    break :blk parseIntFromString(str.getData()) catch 0;
-                }
-                break :blk 0;
-            },
-            .array => blk: {
-                if (self.data.array_ptr) |arr| {
-                    break :blk if (arr.count() > 0) @as(i64, 1) else @as(i64, 0);
-                }
-                break :blk 0;
-            },
-            .object => 1, // Objects convert to 1
-            .resource => 1, // Resources convert to their ID (simplified to 1)
-            .callable => 1,
-        };
-    }
-
-    /// Convert to float (PHP type juggling)
-    pub fn toFloat(self: *const Self) f64 {
-        return switch (self.tag) {
-            .null => 0.0,
-            .bool => if (self.data.bool_val) @as(f64, 1.0) else @as(f64, 0.0),
-            .int => @floatFromInt(self.data.int_val),
-            .float => self.data.float_val,
-            .string => blk: {
-                if (self.data.string_ptr) |str| {
-                    break :blk parseFloatFromString(str.getData()) catch 0.0;
-                }
-                break :blk 0.0;
-            },
-            .array => blk: {
-                if (self.data.array_ptr) |arr| {
-                    break :blk if (arr.count() > 0) @as(f64, 1.0) else @as(f64, 0.0);
-                }
-                break :blk 0.0;
-            },
-            .object => 1.0,
-            .resource => 1.0,
-            .callable => 1.0,
-        };
-    }
-
-    /// Convert to boolean (PHP type juggling)
-    pub fn toBool(self: *const Self) bool {
-        return self.isTruthy();
-    }
-    
-    /// Retain (increment ref count) - for AOT generated code
-    pub fn retain(self: Self) Self {
-        var copy = self;
-        copy.ref_count += 1;
-        return copy;
-    }
-    
-    /// Release (decrement ref count) - for AOT generated code
-    pub fn release(self: *Self, allocator: Allocator) void {
-        _ = allocator;
-        if (self.ref_count > 0) {
-            self.ref_count -= 1;
-        }
-    }
-};
-
 // ============================================================================
 // PHP String Type
 // ============================================================================
 
+/// SSO inline buffer threshold: strings <= 23 bytes fit inline (24 bytes with null)
+pub const PHP_STRING_SSO_MAX: usize = 23;
+pub const PHP_STRING_INLINE_SIZE: usize = 24;
+
 /// PHP String - reference counted, immutable string
+/// Uses SSO (Small String Optimization): strings with length <= 23 are stored inline
+/// without heap allocation for the string data.
 pub const PHPString = struct {
-    /// String data (not null-terminated internally, but we keep a null for C compat)
+    /// GC header (must be first field for uniform GC access)
+    header: GcHeader,
+    /// Inline buffer for SSO (23 chars + null terminator = 24 bytes)
+    inline_data: [PHP_STRING_INLINE_SIZE]u8,
+    /// String data pointer: for inline strings, points to inline_data;
+    /// for heap strings, points to the heap-allocated buffer.
+    /// Always null-terminated for C compatibility.
     data: [*]u8,
     /// String length (not including null terminator)
     length: usize,
-    /// Capacity of allocated buffer
+    /// Capacity of allocated buffer, or 0 for inline strings (sentinel)
     capacity: usize,
-    /// Reference count
-    ref_count: u32,
     /// Hash cache (0 = not computed)
     hash: u32,
 
     const Self = @This();
 
-    /// Create a new PHPString from a slice
-    pub fn init(allocator: Allocator, str: []const u8) !*Self {
-        const capacity = str.len + 1; // +1 for null terminator
-        const data = try allocator.alloc(u8, capacity);
-        @memcpy(data[0..str.len], str);
-        data[str.len] = 0; // Null terminate for C compatibility
+    /// Returns true if this string is stored inline (SSO)
+    pub fn isInline(self: *const Self) bool {
+        return self.capacity == 0;
+    }
 
+    /// Create a new PHPString from a slice.
+    /// Strings with length <= 23 are stored inline without heap allocation for the data.
+    pub fn init(allocator: Allocator, str: []const u8) !*Self {
         const self = try allocator.create(Self);
-        self.* = .{
-            .data = data.ptr,
-            .length = str.len,
-            .capacity = capacity,
-            .ref_count = 1,
-            .hash = 0,
-        };
+        errdefer allocator.destroy(self);
+
+        if (str.len <= PHP_STRING_SSO_MAX) {
+            // SSO: store inline, no heap allocation for data
+            @memcpy(self.inline_data[0..str.len], str);
+            self.inline_data[str.len] = 0;
+            self.header = .{ .ref_count = 1 };
+            self.data = @ptrCast(&self.inline_data);
+            self.length = str.len;
+            self.capacity = 0; // sentinel: inline
+            self.hash = 0;
+        } else {
+            // Heap allocation
+            const capacity = str.len + 1;
+            const data = try allocator.alloc(u8, capacity);
+            errdefer allocator.free(data);
+            @memcpy(data[0..str.len], str);
+            data[str.len] = 0;
+            self.* = .{
+                .header = .{ .ref_count = 1 },
+                .inline_data = undefined,
+                .data = data.ptr,
+                .length = str.len,
+                .capacity = capacity,
+                .hash = 0,
+            };
+        }
         return self;
     }
 
@@ -271,38 +180,55 @@ pub const PHPString = struct {
         allocator.destroy(self);
     }
 
-    /// Get string data as a slice
+    /// Get string data as a slice (works for both inline and heap)
     pub fn getData(self: *const Self) []const u8 {
         return self.data[0..self.length];
     }
 
-    /// Get null-terminated C string
+    /// Get null-terminated C string (works for both inline and heap)
     pub fn getCString(self: *const Self) [*:0]const u8 {
         return @ptrCast(self.data);
     }
 
-    /// Concatenate two strings
+    /// Concatenate two strings, producing a new PHPString.
+    /// Result uses SSO if total length <= 23.
     pub fn concat(self: *const Self, other: *const Self, allocator: Allocator) !*Self {
         const new_len = self.length + other.length;
-        const capacity = new_len + 1;
-        const data = try allocator.alloc(u8, capacity);
-
-        @memcpy(data[0..self.length], self.data[0..self.length]);
-        @memcpy(data[self.length..new_len], other.data[0..other.length]);
-        data[new_len] = 0;
 
         const result = try allocator.create(Self);
-        result.* = .{
-            .data = data.ptr,
-            .length = new_len,
-            .capacity = capacity,
-            .ref_count = 1,
-            .hash = 0,
-        };
+        errdefer allocator.destroy(result);
+
+        if (new_len <= PHP_STRING_SSO_MAX) {
+            // Result fits inline
+            @memcpy(result.inline_data[0..self.length], self.data[0..self.length]);
+            @memcpy(result.inline_data[self.length..new_len], other.data[0..other.length]);
+            result.inline_data[new_len] = 0;
+            result.header = .{ .ref_count = 1 };
+            result.data = @ptrCast(&result.inline_data);
+            result.length = new_len;
+            result.capacity = 0;
+            result.hash = 0;
+        } else {
+            // Heap allocation
+            const capacity = new_len + 1;
+            const data = try allocator.alloc(u8, capacity);
+            errdefer allocator.free(data);
+            @memcpy(data[0..self.length], self.data[0..self.length]);
+            @memcpy(data[self.length..new_len], other.data[0..other.length]);
+            data[new_len] = 0;
+            result.* = .{
+                .header = .{ .ref_count = 1 },
+                .inline_data = undefined,
+                .data = data.ptr,
+                .length = new_len,
+                .capacity = capacity,
+                .hash = 0,
+            };
+        }
         return result;
     }
 
-    /// Compute hash (FNV-1a)
+    /// Compute hash (FNV-1a). Works for both inline and heap strings.
     pub fn computeHash(self: *Self) u32 {
         if (self.hash != 0) return self.hash;
 
@@ -311,21 +237,116 @@ pub const PHPString = struct {
             h ^= byte;
             h *%= 16777619;
         }
-        self.hash = if (h == 0) 1 else h; // Avoid 0 as it means "not computed"
+        self.hash = if (h == 0) 1 else h;
         return self.hash;
     }
 
-    /// Check equality with another string
+    /// Check equality with another string. Works for both inline and heap.
     pub fn eql(self: *const Self, other: *const Self) bool {
         if (self.length != other.length) return false;
         return std.mem.eql(u8, self.data[0..self.length], other.data[0..other.length]);
     }
 
-    /// Compare with another string (for sorting)
+    /// Compare with another string (for sorting). Works for both inline and heap.
     pub fn compare(self: *const Self, other: *const Self) std.math.Order {
         return std.mem.order(u8, self.data[0..self.length], other.data[0..other.length]);
     }
 };
+
+// ============================================================================
+// PHP String Builder
+// ============================================================================
+
+/// PHPStringBuilder - efficient string construction with exponential growth.
+/// Builds up a string incrementally and finalizes into a PHPString.
+pub const PHPStringBuilder = struct {
+    allocator: Allocator,
+    buffer: []u8,
+    length: usize,
+    capacity: usize,
+
+    const Self = @This();
+
+    /// Create a new builder with initial capacity
+    pub fn init(allocator: Allocator, initial_capacity: usize) !*Self {
+        const self = try allocator.create(Self);
+        errdefer allocator.destroy(self);
+        const cap = @max(initial_capacity, 1);
+        self.* = .{
+            .allocator = allocator,
+            .buffer = try allocator.alloc(u8, cap),
+            .length = 0,
+            .capacity = cap,
+        };
+        return self;
+    }
+
+    /// Append a string to the builder. Uses exponential growth (2x) for reallocation.
+    pub fn append(self: *Self, str: []const u8) !void {
+        const needed = self.length + str.len;
+        if (needed > self.capacity) {
+            // Exponential growth: double until we have enough
+            var new_cap = self.capacity;
+            while (new_cap < needed) {
+                // Guard against overflow: if doubling would overflow, just use needed
+                if (new_cap > std.math.maxInt(usize) / 2) {
+                    new_cap = needed;
+                } else {
+                    new_cap *= 2;
+                }
+            }
+            self.buffer = try self.allocator.realloc(self.buffer, new_cap);
+            self.capacity = new_cap;
+        }
+        @memcpy(self.buffer[self.length..needed], str);
+        self.length = needed;
+    }
+
+    /// Append a single byte
+    pub fn appendByte(self: *Self, byte: u8) !void {
+        try self.append(&[_]u8{byte});
+    }
+
+    /// Finalize the builder into a PHPString. The builder is consumed (do not use after this).
+    /// The resulting PHPString may use SSO if the data fits inline.
+    pub fn build(self: *Self) !*PHPString {
+        const str = try PHPString.init(self.allocator, self.buffer[0..self.length]);
+        return str;
+    }
+
+    /// Deinitialize and free the builder without building
+    pub fn deinit(self: *Self) void {
+        if (self.capacity > 0) {
+            self.allocator.free(self.buffer);
+        }
+        self.allocator.destroy(self);
+    }
+};
+
+/// Create a string builder with initial capacity
+pub fn php_string_builder_create(capacity: usize) *PHPStringBuilder {
+    const allocator = getGlobalAllocator();
+    return PHPStringBuilder.init(allocator, capacity) catch @panic("OOM in php_string_builder_create");
+}
+
+/// Append a string to the builder
+pub fn php_string_builder_append(builder: *PHPStringBuilder, str: []const u8) void {
+    builder.append(str) catch @panic("OOM in php_string_builder_append");
+}
+
+/// Finalize the builder into a PHPString
+pub fn php_string_builder_build(builder: *PHPStringBuilder) *PHPString {
+    const result = builder.build() catch @panic("OOM in php_string_builder_build");
+    // Builder is consumed; free its buffer but not the struct (caller should free)
+    if (builder.capacity > 0) {
+        builder.allocator.free(builder.buffer);
+        builder.capacity = 0;
+        builder.length = 0;
+        builder.buffer = &.{};
+    }
+    builder.allocator.destroy(builder);
+    return result;
+}
 
 // ============================================================================
 // PHP Array Type
@@ -360,16 +381,21 @@ pub const ArrayKey = union(enum) {
 /// PHP Array entry
 pub const ArrayEntry = struct {
     key: ArrayKey,
-    value: *PHPValue,
+    /// Stored directly as NaN-boxed Value (not a pointer-to-Value)
+    value: Value,
     /// For maintaining insertion order
     next_order: ?*ArrayEntry,
     prev_order: ?*ArrayEntry,
+    /// Probe sequence length for Robin Hood hashing
+    psl: u32,
 };
 
-/// PHP Array - ordered hash map
+/// PHP Array - ordered hash map using Robin Hood probing for O(1) expected lookup
 pub const PHPArray = struct {
+    /// GC header (must be first field for uniform GC access)
+    header: GcHeader,
     allocator: Allocator,
-    /// Hash buckets
+    /// Hash buckets using Robin Hood open addressing (entries stored directly, not ptrs)
     buckets: []?*ArrayEntry,
     /// Number of buckets
     bucket_count: usize,
@@ -381,44 +407,54 @@ pub const PHPArray = struct {
     last: ?*ArrayEntry,
     /// Next integer key for append operations
     next_int_key: i64,
-    /// Reference count
-    ref_count: u32,
+    /// Base capacity used for pre-allocation
+    base_capacity: usize,
 
     const Self = @This();
     const INITIAL_BUCKET_COUNT = 8;
-    const LOAD_FACTOR = 0.75;
+    const LOAD_FACTOR_NUM: usize = 3;
+    const LOAD_FACTOR_DEN: usize = 4; // 3/4 = 0.75
 
     /// Create a new empty array
     pub fn init(allocator: Allocator) !*Self {
-        const buckets = try allocator.alloc(?*ArrayEntry, INITIAL_BUCKET_COUNT);
+        return initCapacity(allocator, INITIAL_BUCKET_COUNT);
+    }
+
+    /// Create a new array with pre-allocated capacity
+    pub fn initCapacity(allocator: Allocator, initial_capacity: usize) !*Self {
+        // Use next power of two that satisfies the load factor requirement
+        var bucket_count = INITIAL_BUCKET_COUNT;
+        while (bucket_count * LOAD_FACTOR_NUM / LOAD_FACTOR_DEN < initial_capacity) {
+            bucket_count *= 2;
+        }
+
+        const buckets = try allocator.alloc(?*ArrayEntry, bucket_count);
         @memset(buckets, null);
 
         const self = try allocator.create(Self);
         self.* = .{
+            .header = .{ .ref_count = 1 },
             .allocator = allocator,
             .buckets = buckets,
-            .bucket_count = INITIAL_BUCKET_COUNT,
+            .bucket_count = bucket_count,
             .entry_count = 0,
             .first = null,
             .last = null,
             .next_int_key = 0,
-            .ref_count = 1,
+            .base_capacity = initial_capacity,
         };
         return self;
     }
 
     /// Deinitialize and free all resources
     pub fn deinit(self: *Self, allocator: Allocator) void {
-        // Free all entries
         var entry = self.first;
         while (entry) |e| {
             const next = e.next_order;
-            // Release the value
-            php_gc_release(e.value);
-            // Free string key if present
+            gcReleaseValue(e.value);
             if (e.key == .string) {
-                e.key.string.ref_count -= 1;
-                if (e.key.string.ref_count == 0) {
+                e.key.string.header.ref_count -= 1;
+                if (e.key.string.header.ref_count == 0) {
                     e.key.string.deinit(allocator);
                 }
             }
@@ -435,44 +471,64 @@ pub const PHPArray = struct {
         return self.entry_count;
     }
 
-    /// Find entry by key
+    /// Find entry by key using Robin Hood probing
     fn findEntry(self: *const Self, key: ArrayKey) ?*ArrayEntry {
-        const bucket_idx = key.hash() % self.bucket_count;
-        var entry = self.buckets[bucket_idx];
-        while (entry) |e| {
-            if (e.key.eql(key)) return e;
-            // Linear probing within bucket (simplified - real impl would use chaining)
-            entry = e.next_order;
-            if (entry) |next| {
-                const next_bucket = next.key.hash() % self.bucket_count;
-                if (next_bucket != bucket_idx) break;
+        const hash = key.hash();
+        var idx = hash % self.bucket_count;
+        var psl: u32 = 0;
+
+        while (true) {
+            const maybe_entry = self.buckets[idx];
+            if (maybe_entry) |entry| {
+                if (entry.key.eql(key)) {
+                    return entry;
+                }
+                // Robin Hood termination: if current PSL exceeds entry's PSL, key not present
+                if (psl > entry.psl) {
+                    return null;
+                }
+                psl += 1;
+                idx = (idx + 1) % self.bucket_count;
+            } else {
+                return null;
             }
         }
-        return null;
     }
 
-    /// Get value by key
-    pub fn get(self: *const Self, key: ArrayKey) ?*PHPValue {
+    /// Get value by key (returns NaN-boxed Value)
+    pub fn getValue(self: *const Self, key: ArrayKey) Value {
         if (self.findEntry(key)) |entry| {
+            gcRetainValue(entry.value);
             return entry.value;
         }
-        return null;
+        return nanbox.encodeNull();
     }
 
-    /// Set value by key
-    pub fn set(self: *Self, key: ArrayKey, value: *PHPValue) !void {
-        // Check if key exists
+    /// Ensure capacity for additional elements (2x growth strategy)
+    pub fn ensureCapacity(self: *Self, additional: usize) !void {
+        const needed = self.entry_count + additional;
+        const threshold = self.bucket_count * LOAD_FACTOR_NUM / LOAD_FACTOR_DEN;
+        if (needed <= threshold) return;
+
+        var new_bucket_count = self.bucket_count;
+        while (needed > new_bucket_count * LOAD_FACTOR_NUM / LOAD_FACTOR_DEN) {
+            new_bucket_count *= 2;
+        }
+        try self.resizeToCapacity(new_bucket_count);
+    }
+
+    /// Set value by key using Robin Hood probing
+    pub fn set(self: *Self, key: ArrayKey, value: Value) !void {
+        // Check if key already exists
         if (self.findEntry(key)) |entry| {
-            // Release old value
-            php_gc_release(entry.value);
-            // Set new value
+            gcReleaseValue(entry.value);
             entry.value = value;
-            php_gc_retain(value);
+            gcRetainValue(value);
             return;
         }
 
-        // Check if we need to resize
-        if (@as(f64, @floatFromInt(self.entry_count + 1)) > @as(f64, @floatFromInt(self.bucket_count)) * LOAD_FACTOR) {
+        // Check load factor: entry_count + 1 > buckets * 0.75 => 4*(entry_count+1) > 3*buckets
+        if ((self.entry_count + 1) * LOAD_FACTOR_DEN > self.bucket_count * LOAD_FACTOR_NUM) {
             try self.resize();
         }
 
@@ -483,17 +539,15 @@ pub const PHPArray = struct {
             .value = value,
             .next_order = null,
             .prev_order = self.last,
+            .psl = 0,
         };
 
-        // Retain the value
-        php_gc_retain(value);
+        gcRetainValue(value);
 
-        // Retain string key if present
         if (key == .string) {
-            key.string.ref_count += 1;
+            key.string.header.ref_count += 1;
         }
 
-        // Update order links
         if (self.last) |last| {
             last.next_order = entry;
         } else {
@@ -501,22 +555,39 @@ pub const PHPArray = struct {
         }
         self.last = entry;
 
-        // Insert into bucket
-        const bucket_idx = key.hash() % self.bucket_count;
-        self.buckets[bucket_idx] = entry;
+        // Robin Hood insertion: swap entire entry pointers at bucket level
+        const hash = key.hash();
+        var idx = hash % self.bucket_count;
+        entry.psl = 0;
 
-        self.entry_count += 1;
+        while (true) {
+            const maybe_existing = self.buckets[idx];
+            if (maybe_existing) |existing_entry| {
+                // Robin Hood: if our PSL (entry.psl) is greater than existing's PSL, swap
+                if (entry.psl > existing_entry.psl) {
+                    // Swap: entry goes into the bucket, existing_entry becomes our probe entry
+                    self.buckets[idx] = entry;
+                    entry = existing_entry;
+                }
+                entry.psl += 1;
+                idx = (idx + 1) % self.bucket_count;
+            } else {
+                // Found empty slot
+                self.buckets[idx] = entry;
+                self.entry_count += 1;
 
-        // Update next_int_key if this is an integer key
-        if (key == .int) {
-            if (key.int >= self.next_int_key) {
-                self.next_int_key = key.int + 1;
+                if (key == .int) {
+                    if (key.int >= self.next_int_key) {
+                        self.next_int_key = key.int + 1;
+                    }
+                }
+                return;
             }
         }
     }
 
     /// Push value (append with auto-incrementing integer key)
-    pub fn push(self: *Self, value: *PHPValue) !void {
+    pub fn push(self: *Self, value: Value) !void {
         const key = ArrayKey{ .int = self.next_int_key };
         try self.set(key, value);
     }
@@ -526,65 +597,106 @@ pub const PHPArray = struct {
         return self.findEntry(key) != null;
     }
 
-    /// Remove entry by key
+    /// Remove entry by key using Robin Hood probing with backward shift
     pub fn unset(self: *Self, key: ArrayKey) void {
-        const bucket_idx = key.hash() % self.bucket_count;
+        const hash = key.hash();
+        var idx = hash % self.bucket_count;
+        var psl: u32 = 0;
 
-        // Find and remove entry
-        var entry = self.buckets[bucket_idx];
-        var prev: ?*ArrayEntry = null;
-
-        while (entry) |e| {
-            if (e.key.eql(key)) {
-                // Update bucket chain
-                if (prev) |p| {
-                    _ = p; // Simplified - would update chain
-                }
-                self.buckets[bucket_idx] = null;
-
-                // Update order links
-                if (e.prev_order) |p| {
-                    p.next_order = e.next_order;
-                } else {
-                    self.first = e.next_order;
-                }
-                if (e.next_order) |n| {
-                    n.prev_order = e.prev_order;
-                } else {
-                    self.last = e.prev_order;
-                }
-
-                // Release value
-                php_gc_release(e.value);
-
-                // Free string key if present
-                if (e.key == .string) {
-                    e.key.string.ref_count -= 1;
-                    if (e.key.string.ref_count == 0) {
-                        e.key.string.deinit(self.allocator);
+        while (true) {
+            const maybe_entry = self.buckets[idx];
+            if (maybe_entry) |entry| {
+                if (entry.key.eql(key)) {
+                    // Remove from order list
+                    if (entry.prev_order) |p| {
+                        p.next_order = entry.next_order;
+                    } else {
+                        self.first = entry.next_order;
                     }
+                    if (entry.next_order) |n| {
+                        n.prev_order = entry.prev_order;
+                    } else {
+                        self.last = entry.prev_order;
+                    }
+
+                    gcReleaseValue(entry.value);
+
+                    if (entry.key == .string) {
+                        entry.key.string.header.ref_count -= 1;
+                        if (entry.key.string.header.ref_count == 0) {
+                            entry.key.string.deinit(self.allocator);
+                        }
+                    }
+
+                    self.allocator.destroy(entry);
+                    self.buckets[idx] = null;
+                    self.entry_count -= 1;
+
+                    // Robin Hood backward shift: move subsequent entries back
+                    var next_idx = (idx + 1) % self.bucket_count;
+                    while (true) {
+                        const next = self.buckets[next_idx];
+                        if (next) |next_entry| {
+                            if (next_entry.psl == 0) break;
+                            // Shift entry backward
+                            next_entry.psl -= 1;
+                            self.buckets[idx] = next_entry;
+                            self.buckets[next_idx] = null;
+                            idx = next_idx;
+                            next_idx = (next_idx + 1) % self.bucket_count;
+                        } else {
+                            break;
+                        }
+                    }
+                    return;
                 }
 
-                self.allocator.destroy(e);
-                self.entry_count -= 1;
-                return;
+                if (psl > entry.psl) {
+                    return; // Key not found
+                }
+
+                psl += 1;
+                idx = (idx + 1) % self.bucket_count;
+            } else {
+                return; // Empty slot, key not found
             }
-            prev = e;
-            entry = e.next_order;
         }
     }
 
-    /// Resize the hash table
+    /// Resize the hash table (2x growth)
     fn resize(self: *Self) !void {
-        const new_bucket_count = self.bucket_count * 2;
+        try self.resizeToCapacity(self.bucket_count * 2);
+    }
+
+    /// Resize to a specific bucket count with proper Robin Hood rehashing
+    fn resizeToCapacity(self: *Self, new_bucket_count: usize) !void {
         const new_buckets = try self.allocator.alloc(?*ArrayEntry, new_bucket_count);
         @memset(new_buckets, null);
 
-        // Rehash all entries
+        // Re-insert all entries using Robin Hood probing
         var entry = self.first;
         while (entry) |e| {
-            const bucket_idx = e.key.hash() % new_bucket_count;
-            new_buckets[bucket_idx] = e;
+            const hash = e.key.hash();
+            var idx = hash % new_bucket_count;
+            e.psl = 0;
+
+            var current: *ArrayEntry = e;
+            while (true) {
+                const maybe_entry = new_buckets[idx];
+                if (maybe_entry) |existing_entry| {
+                    if (current.psl > existing_entry.psl) {
+                        // Swap: current goes into the slot, existing becomes current
+                        new_buckets[idx] = current;
+                        current = existing_entry;
+                    }
+                    current.psl += 1;
+                    idx = (idx + 1) % new_bucket_count;
+                } else {
+                    new_buckets[idx] = current;
+                    break;
+                }
+            }
+
             entry = e.next_order;
         }
 
@@ -600,13 +712,13 @@ pub const PHPArray = struct {
 
 /// PHP Object
 pub const PHPObject = struct {
+    /// GC header (must be first field for uniform GC access)
+    header: GcHeader,
     allocator: Allocator,
     /// Class name
     class_name: []const u8,
     /// Properties (stored as array)
     properties: *PHPArray,
-    /// Reference count
-    ref_count: u32,
 
     const Self = @This();
 
@@ -616,10 +728,10 @@ pub const PHPObject = struct {
 
         const self = try allocator.create(Self);
         self.* = .{
+            .header = .{ .ref_count = 1 },
             .allocator = allocator,
             .class_name = class_name,
             .properties = properties,
-            .ref_count = 1,
         };
         return self;
     }
@@ -630,37 +742,36 @@ pub const PHPObject = struct {
         allocator.destroy(self);
     }
 
-    /// Get property value
-    pub fn getProperty(self: *const Self, name: *PHPString) ?*PHPValue {
-        return self.properties.get(.{ .string = name });
+    /// Get property value (returns NaN-boxed Value)
+    pub fn getProperty(self: *const Self, name: *PHPString) Value {
+        return self.properties.getValue(.{ .string = name });
     }
 
     /// Set property value
-    pub fn setProperty(self: *Self, name: *PHPString, value: *PHPValue) !void {
+    pub fn setProperty(self: *Self, name: *PHPString, value: Value) !void {
         try self.properties.set(.{ .string = name }, value);
     }
 };
 
 /// PHP Callable (function reference)
 pub const PHPCallable = struct {
+    header: GcHeader,
     /// Function name or closure
     name: ?[]const u8,
     /// Object for method calls
     object: ?*PHPObject,
     /// Method name for method calls
     method: ?[]const u8,
-    /// Reference count
-    ref_count: u32,
 
     const Self = @This();
 
     pub fn init(allocator: Allocator, name: []const u8) !*Self {
         const self = try allocator.create(Self);
         self.* = .{
+            .header = .{ .ref_count = 1 },
             .name = name,
             .object = null,
             .method = null,
-            .ref_count = 1,
         };
         return self;
     }
@@ -670,110 +781,66 @@ pub const PHPCallable = struct {
     }
 };
 
-
 // ============================================================================
 // Value Creation Functions
 // ============================================================================
 
-/// Create a null value
-pub fn php_value_create_null() *PHPValue {
-    const allocator = getGlobalAllocator();
-    const val = allocator.create(PHPValue) catch return null_sentinel;
-    val.* = .{
-        .tag = .null,
-        .ref_count = 1,
-        .data = .{ .int_val = 0 },
-    };
-    return val;
+/// Create a null value (returns NaN-boxed u64, no allocation)
+pub fn php_value_create_null() Value {
+    return nanbox.encodeNull();
 }
 
-/// Create a boolean value
-pub fn php_value_create_bool(b: bool) *PHPValue {
-    const allocator = getGlobalAllocator();
-    const val = allocator.create(PHPValue) catch return null_sentinel;
-    val.* = .{
-        .tag = .bool,
-        .ref_count = 1,
-        .data = .{ .bool_val = b },
-    };
-    return val;
+/// Create a boolean value (returns NaN-boxed u64, no allocation)
+pub fn php_value_create_bool(b: bool) Value {
+    return nanbox.encodeBool(b);
 }
 
-/// Create an integer value
-pub fn php_value_create_int(i: i64) *PHPValue {
-    const allocator = getGlobalAllocator();
-    const val = allocator.create(PHPValue) catch return null_sentinel;
-    val.* = .{
-        .tag = .int,
-        .ref_count = 1,
-        .data = .{ .int_val = i },
-    };
-    return val;
+/// Create an integer value (returns NaN-boxed u64, no allocation)
+pub fn php_value_create_int(i: i64) Value {
+    return nanbox.encodeInt(i);
 }
 
-/// Create a float value
-pub fn php_value_create_float(f: f64) *PHPValue {
-    const allocator = getGlobalAllocator();
-    const val = allocator.create(PHPValue) catch return null_sentinel;
-    val.* = .{
-        .tag = .float,
-        .ref_count = 1,
-        .data = .{ .float_val = f },
-    };
-    return val;
+/// Create a float value (returns NaN-boxed u64, no allocation)
+pub fn php_value_create_float(f: f64) Value {
+    return nanbox.encodeFloat(f);
 }
 
-/// Create a string value from a slice
-pub fn php_value_create_string(data: []const u8) *PHPValue {
+/// Create a string value from a slice (heap-allocates PHPString)
+pub fn php_value_create_string(data: []const u8) Value {
     const allocator = getGlobalAllocator();
-    const str = PHPString.init(allocator, data) catch return null_sentinel;
-    const val = allocator.create(PHPValue) catch {
-        str.deinit(allocator);
-        return null_sentinel;
-    };
-    val.* = .{
-        .tag = .string,
-        .ref_count = 1,
-        .data = .{ .string_ptr = str },
-    };
-    return val;
+    const str = PHPString.init(allocator, data) catch return nanbox.encodeNull();
+    return nanbox.encodePtr(@intFromPtr(str), nanbox.TYPE_STRING);
 }
 
 /// Create a string value from a C string pointer and length
-pub fn php_value_create_string_raw(data: [*]const u8, len: usize) *PHPValue {
+pub fn php_value_create_string_raw(data: [*]const u8, len: usize) Value {
     return php_value_create_string(data[0..len]);
 }
 
-/// Create an empty array value
-pub fn php_value_create_array() *PHPValue {
+/// Create an empty array value (heap-allocates PHPArray)
+pub fn php_value_create_array() Value {
     const allocator = getGlobalAllocator();
-    const arr = PHPArray.init(allocator) catch return null_sentinel;
-    const val = allocator.create(PHPValue) catch {
-        arr.deinit(allocator);
-        return null_sentinel;
-    };
-    val.* = .{
-        .tag = .array,
-        .ref_count = 1,
-        .data = .{ .array_ptr = arr },
-    };
-    return val;
+    const arr = PHPArray.init(allocator) catch return nanbox.encodeNull();
+    return nanbox.encodePtr(@intFromPtr(arr), nanbox.TYPE_ARRAY);
 }
 
-/// Create an object value
-pub fn php_value_create_object(class_name: []const u8) *PHPValue {
+/// Create an object value (heap-allocates PHPObject)
+pub fn php_value_create_object(class_name: []const u8) Value {
     const allocator = getGlobalAllocator();
-    const obj = PHPObject.init(allocator, class_name) catch return null_sentinel;
-    const val = allocator.create(PHPValue) catch {
-        obj.deinit(allocator);
-        return null_sentinel;
-    };
-    val.* = .{
-        .tag = .object,
-        .ref_count = 1,
-        .data = .{ .object_ptr = obj },
-    };
-    return val;
+    const obj = PHPObject.init(allocator, class_name) catch return nanbox.encodeNull();
+    return nanbox.encodePtr(@intFromPtr(obj), nanbox.TYPE_OBJECT);
+}
+
+/// Wrap an existing PHPString pointer into a Value (no allocation).
+/// The caller retains ownership of the string; the Value borrows the pointer.
+pub fn php_value_create_string_ptr(str: *PHPString) Value {
+    return nanbox.encodePtr(@intFromPtr(str), nanbox.TYPE_STRING);
+}
+
+/// Wrap an existing PHPArray pointer into a Value (no allocation).
+/// The caller retains ownership of the array; the Value borrows the pointer.
+pub fn php_value_create_array_ptr(arr: *PHPArray) Value {
+    return nanbox.encodePtr(@intFromPtr(arr), nanbox.TYPE_ARRAY);
 }
 
 // ============================================================================
@@ -781,90 +848,192 @@ pub fn php_value_create_object(class_name: []const u8) *PHPValue {
 // ============================================================================
 
 /// Get the type tag of a value
-pub fn php_value_get_type(val: *const PHPValue) u8 {
-    return @intFromEnum(val.tag);
+pub fn php_value_get_type(val: Value) u8 {
+    if (nanbox.isNull(val)) return @intFromEnum(ValueTag.null);
+    if (nanbox.isBool(val)) return @intFromEnum(ValueTag.bool);
+    if (nanbox.isInt(val)) return @intFromEnum(ValueTag.int);
+    if (nanbox.isFloat(val)) return @intFromEnum(ValueTag.float);
+    if (nanbox.isString(val)) return @intFromEnum(ValueTag.string);
+    if (nanbox.isArray(val)) return @intFromEnum(ValueTag.array);
+    if (nanbox.isObject(val)) return @intFromEnum(ValueTag.object);
+    return @intFromEnum(ValueTag.null);
 }
 
 /// Get the type name of a value
-pub fn php_value_get_type_name(val: *const PHPValue) []const u8 {
-    return val.getTypeName();
+pub fn php_value_get_type_name(val: Value) []const u8 {
+    return valueGetTypeName(val);
 }
 
-/// Convert value to integer
-pub fn php_value_to_int(val: *const PHPValue) i64 {
-    return val.toInt();
+fn valueGetTypeName(val: Value) []const u8 {
+    if (nanbox.isNull(val)) return "NULL";
+    if (nanbox.isBool(val)) return "boolean";
+    if (nanbox.isInt(val)) return "integer";
+    if (nanbox.isFloat(val)) return "double";
+    if (nanbox.isString(val)) return "string";
+    if (nanbox.isArray(val)) return "array";
+    if (nanbox.isObject(val)) return "object";
+    return "unknown";
 }
 
-/// Convert value to float
-pub fn php_value_to_float(val: *const PHPValue) f64 {
-    return val.toFloat();
+/// Check if value is null
+pub fn valueIsNull(val: Value) bool {
+    return nanbox.isNull(val);
 }
 
-/// Convert value to boolean
-pub fn php_value_to_bool(val: *const PHPValue) bool {
-    return val.toBool();
+/// Check if value is truthy (PHP truthiness rules)
+pub fn valueIsTruthy(val: Value) bool {
+    if (nanbox.isNull(val)) return false;
+    if (nanbox.isBool(val)) return nanbox.decodeBool(val);
+    if (nanbox.isInt(val)) return nanbox.decodeInt(val) != 0;
+    if (nanbox.isFloat(val)) {
+        const f = nanbox.decodeFloat(val);
+        return f != 0.0 and !std.math.isNan(f);
+    }
+    if (nanbox.isString(val)) {
+        const str = getStringPtr(val);
+        if (str.length == 0) return false;
+        if (str.length == 1 and str.data[0] == '0') return false;
+        return true;
+    }
+    if (nanbox.isArray(val)) {
+        const arr = getArrayPtr(val);
+        return arr.count() > 0;
+    }
+    if (nanbox.isObject(val)) return true;
+    return false;
 }
 
-/// Convert value to string (returns a new PHPValue)
-pub fn php_value_to_string(val: *const PHPValue) *PHPValue {
+/// Check if value is an array
+pub fn valueIsArray(val: Value) bool {
+    return nanbox.isArray(val);
+}
+
+/// Check if value is a string
+pub fn valueIsString(val: Value) bool {
+    return nanbox.isString(val);
+}
+
+/// Check if value is a bool
+pub fn valueIsBool(val: Value) bool {
+    return nanbox.isBool(val);
+}
+
+/// Check if value is an int
+pub fn valueIsInt(val: Value) bool {
+    return nanbox.isInt(val);
+}
+
+/// Check if value is a float
+pub fn valueIsFloat(val: Value) bool {
+    return nanbox.isFloat(val);
+}
+
+/// Check if value is an object
+pub fn valueIsObject(val: Value) bool {
+    return nanbox.isObject(val);
+}
+
+/// Check if value is a reference
+pub fn valueIsRef(val: Value) bool {
+    return nanbox.isRef(val);
+}
+
+/// Check if value is a function/closure
+pub fn valueIsFunction(val: Value) bool {
+    return nanbox.isFunction(val);
+}
+
+/// Extract the reference pointer from a ref-encoded Value.
+/// Caller must ensure the value is a ref type before calling.
+pub fn getRefPtr(val: Value) *Value {
+    return @ptrFromInt(nanbox.decodePtr(val));
+}
+
+/// Convert value to integer (PHP type juggling)
+pub fn php_value_to_int(val: Value) i64 {
+    if (nanbox.isNull(val)) return 0;
+    if (nanbox.isBool(val)) return if (nanbox.decodeBool(val)) @as(i64, 1) else @as(i64, 0);
+    if (nanbox.isInt(val)) return nanbox.decodeInt(val);
+    if (nanbox.isFloat(val)) return @intFromFloat(nanbox.decodeFloat(val));
+    if (nanbox.isString(val)) {
+        const str = getStringPtr(val);
+        return parseIntFromString(str.getData()) catch 0;
+    }
+    if (nanbox.isArray(val)) {
+        const arr = getArrayPtr(val);
+        return if (arr.count() > 0) @as(i64, 1) else @as(i64, 0);
+    }
+    if (nanbox.isObject(val)) return 1;
+    return 0;
+}
+
+/// Convert value to float (PHP type juggling)
+pub fn php_value_to_float(val: Value) f64 {
+    if (nanbox.isNull(val)) return 0.0;
+    if (nanbox.isBool(val)) return if (nanbox.decodeBool(val)) @as(f64, 1.0) else @as(f64, 0.0);
+    if (nanbox.isInt(val)) return @floatFromInt(nanbox.decodeInt(val));
+    if (nanbox.isFloat(val)) return nanbox.decodeFloat(val);
+    if (nanbox.isString(val)) {
+        const str = getStringPtr(val);
+        return parseFloatFromString(str.getData()) catch 0.0;
+    }
+    if (nanbox.isArray(val)) {
+        const arr = getArrayPtr(val);
+        return if (arr.count() > 0) @as(f64, 1.0) else @as(f64, 0.0);
+    }
+    if (nanbox.isObject(val)) return 1.0;
+    return 0.0;
+}
+
+/// Convert value to boolean (PHP type juggling)
+pub fn php_value_to_bool(val: Value) bool {
+    return valueIsTruthy(val);
+}
+
+/// Convert value to string (returns a new NaN-boxed Value)
+pub fn php_value_to_string(val: Value) Value {
     const allocator = getGlobalAllocator();
 
-    switch (val.tag) {
-        .null => return php_value_create_string(""),
-        .bool => return php_value_create_string(if (val.data.bool_val) "1" else ""),
-        .int => {
-            var buf: [32]u8 = undefined;
-            const result = std.fmt.bufPrint(&buf, "{d}", .{val.data.int_val}) catch return php_value_create_string("0");
-            return php_value_create_string(result);
-        },
-        .float => {
-            var buf: [64]u8 = undefined;
-            const result = std.fmt.bufPrint(&buf, "{d}", .{val.data.float_val}) catch return php_value_create_string("0");
-            return php_value_create_string(result);
-        },
-        .string => {
-            // Return a copy with incremented ref count
-            if (val.data.string_ptr) |str| {
-                const new_val = allocator.create(PHPValue) catch return null_sentinel;
-                new_val.* = .{
-                    .tag = .string,
-                    .ref_count = 1,
-                    .data = .{ .string_ptr = str },
-                };
-                str.ref_count += 1;
-                return new_val;
-            }
-            return php_value_create_string("");
-        },
-        .array => return php_value_create_string("Array"),
-        .object => {
-            // In real PHP, this would call __toString() if defined
-            if (val.data.object_ptr) |obj| {
-                var buf: [256]u8 = undefined;
-                const result = std.fmt.bufPrint(&buf, "Object({s})", .{obj.class_name}) catch return php_value_create_string("Object");
-                return php_value_create_string(result);
-            }
-            return php_value_create_string("Object");
-        },
-        .resource => return php_value_create_string("Resource"),
-        .callable => return php_value_create_string("Callable"),
+    if (nanbox.isNull(val)) return php_value_create_string("");
+    if (nanbox.isBool(val)) return php_value_create_string(if (nanbox.decodeBool(val)) "1" else "");
+    if (nanbox.isInt(val)) {
+        var buf: [32]u8 = undefined;
+        const result = std.fmt.bufPrint(&buf, "{d}", .{nanbox.decodeInt(val)}) catch return php_value_create_string("0");
+        return php_value_create_string(result);
     }
+    if (nanbox.isFloat(val)) {
+        var buf: [64]u8 = undefined;
+        const result = std.fmt.bufPrint(&buf, "{d}", .{nanbox.decodeFloat(val)}) catch return php_value_create_string("0");
+        return php_value_create_string(result);
+    }
+    if (nanbox.isString(val)) {
+        const str = getStringPtr(val);
+        str.header.ref_count += 1;
+        return nanbox.encodePtr(@intFromPtr(str), nanbox.TYPE_STRING);
+    }
+    if (nanbox.isArray(val)) return php_value_create_string("Array");
+    if (nanbox.isObject(val)) {
+        const obj = getObjectPtr(val);
+        var buf: [256]u8 = undefined;
+        const result = std.fmt.bufPrint(&buf, "Object({s})", .{obj.class_name}) catch return php_value_create_string("Object");
+        return php_value_create_string(result);
+    }
+    return php_value_create_string("");
 }
 
 /// Cast value to a specific type (PHP-style type juggling)
-pub fn php_value_cast(val: *const PHPValue, target_type: ValueTag) *PHPValue {
+pub fn php_value_cast(val: Value, target_type: ValueTag) Value {
     return switch (target_type) {
         .null => php_value_create_null(),
-        .bool => php_value_create_bool(val.toBool()),
-        .int => php_value_create_int(val.toInt()),
-        .float => php_value_create_float(val.toFloat()),
+        .bool => php_value_create_bool(valueIsTruthy(val)),
+        .int => php_value_create_int(php_value_to_int(val)),
+        .float => php_value_create_float(php_value_to_float(val)),
         .string => php_value_to_string(val),
         .array => blk: {
-            // Casting to array wraps the value
             const arr = php_value_create_array();
-            if (arr.data.array_ptr) |array| {
-                // For non-null values, create array with single element
-                if (val.tag != .null) {
+            if (nanbox.isArray(arr)) {
+                const array = getArrayPtr(arr);
+                if (!nanbox.isNull(val)) {
                     const val_copy = php_value_clone(val);
                     array.push(val_copy) catch {};
                 }
@@ -872,90 +1041,91 @@ pub fn php_value_cast(val: *const PHPValue, target_type: ValueTag) *PHPValue {
             break :blk arr;
         },
         .object => blk: {
-            // Casting to object creates stdClass
             const obj = php_value_create_object("stdClass");
-            if (obj.data.object_ptr) |object| {
-                // For arrays, convert to object properties
-                if (val.tag == .array) {
-                    if (val.data.array_ptr) |arr| {
-                        var entry = arr.first;
-                        while (entry) |e| {
-                            if (e.key == .string) {
-                                object.setProperty(e.key.string, e.value) catch {};
-                            }
-                            entry = e.next_order;
+            if (nanbox.isObject(obj)) {
+                const object = getObjectPtr(obj);
+                if (nanbox.isArray(val)) {
+                    const arr = getArrayPtr(val);
+                    var entry = arr.first;
+                    while (entry) |e| {
+                        if (e.key == .string) {
+                            object.setProperty(e.key.string, e.value) catch {};
                         }
+                        entry = e.next_order;
                     }
                 }
             }
             break :blk obj;
         },
-        .resource, .callable => php_value_create_null(), // Cannot cast to these
+        .resource, .callable => php_value_create_null(),
     };
 }
 
 /// Clone a value (deep copy for complex types)
-pub fn php_value_clone(val: *const PHPValue) *PHPValue {
+pub fn php_value_clone(val: Value) Value {
     const allocator = getGlobalAllocator();
 
-    switch (val.tag) {
-        .null, .bool, .int, .float => {
-            // Simple types - create new value
-            const new_val = allocator.create(PHPValue) catch return null_sentinel;
-            new_val.* = val.*;
-            new_val.ref_count = 1;
-            return new_val;
-        },
-        .string => {
-            // Strings are immutable, so we can share with ref count
-            if (val.data.string_ptr) |str| {
-                str.ref_count += 1;
-                const new_val = allocator.create(PHPValue) catch return null_sentinel;
-                new_val.* = val.*;
-                new_val.ref_count = 1;
-                return new_val;
-            }
-            return php_value_create_string("");
-        },
-        .array => {
-            // Deep copy array
-            const new_arr = php_value_create_array();
-            if (val.data.array_ptr) |arr| {
-                if (new_arr.data.array_ptr) |new_array| {
-                    var entry = arr.first;
-                    while (entry) |e| {
-                        const cloned_val = php_value_clone(e.value);
-                        new_array.set(e.key, cloned_val) catch {};
-                        entry = e.next_order;
-                    }
-                }
-            }
-            return new_arr;
-        },
-        .object => {
-            // Clone object
-            if (val.data.object_ptr) |obj| {
-                const new_obj = php_value_create_object(obj.class_name);
-                if (new_obj.data.object_ptr) |new_object| {
-                    // Clone properties
-                    var entry = obj.properties.first;
-                    while (entry) |e| {
-                        if (e.key == .string) {
-                            const cloned_val = php_value_clone(e.value);
-                            new_object.setProperty(e.key.string, cloned_val) catch {};
-                        }
-                        entry = e.next_order;
-                    }
-                }
-                return new_obj;
-            }
-            return php_value_create_null();
-        },
-        .resource, .callable => {
-            // Resources and callables cannot be cloned
-            return php_value_create_null();
-        },
+    if (nanbox.isNull(val) or nanbox.isBool(val) or nanbox.isInt(val) or nanbox.isFloat(val)) {
+        return val; // Simple types are value types, just copy the u64
     }
+    if (nanbox.isString(val)) {
+        const str = getStringPtr(val);
+        const new_str = PHPString.init(allocator, str.getData()) catch return nanbox.encodeNull();
+        return nanbox.encodePtr(@intFromPtr(new_str), nanbox.TYPE_STRING);
+    }
+    if (nanbox.isArray(val)) {
+        const new_arr = php_value_create_array();
+        const arr = getArrayPtr(val);
+        if (nanbox.isArray(new_arr)) {
+            const new_array = getArrayPtr(new_arr);
+            var entry = arr.first;
+            while (entry) |e| {
+                const cloned_val = php_value_clone(e.value);
+                new_array.set(e.key, cloned_val) catch {};
+                entry = e.next_order;
+            }
+        }
+        return new_arr;
+    }
+    if (nanbox.isObject(val)) {
+        const obj = getObjectPtr(val);
+        const new_obj = php_value_create_object(obj.class_name);
+        if (nanbox.isObject(new_obj)) {
+            const new_object = getObjectPtr(new_obj);
+            var entry = obj.properties.first;
+            while (entry) |e| {
+                if (e.key == .string) {
+                    const cloned_val = php_value_clone(e.value);
+                    new_object.setProperty(e.key.string, cloned_val) catch {};
+                }
+                entry = e.next_order;
+            }
+        }
+        return new_obj;
+    }
+    return nanbox.encodeNull();
+}
+
+// ============================================================================
+// Helper: extract heap pointers from NaN-boxed values
+// ============================================================================
+
+/// Extract the PHPString pointer from a string-encoded Value.
+/// Caller must ensure the value is a string type before calling.
+pub fn getStringPtr(val: Value) *PHPString {
+    return @ptrFromInt(nanbox.decodePtr(val));
+}
+
+/// Extract the PHPArray pointer from an array-encoded Value.
+/// Caller must ensure the value is an array type before calling.
+pub fn getArrayPtr(val: Value) *PHPArray {
+    return @ptrFromInt(nanbox.decodePtr(val));
+}
+
+/// Extract the PHPObject pointer from an object-encoded Value.
+/// Caller must ensure the value is an object type before calling.
+pub fn getObjectPtr(val: Value) *PHPObject {
+    return @ptrFromInt(nanbox.decodePtr(val));
 }
 
 // ============================================================================
@@ -966,14 +1136,12 @@ pub fn php_value_clone(val: *const PHPValue) *PHPValue {
 fn parseIntFromString(str: []const u8) !i64 {
     if (str.len == 0) return 0;
 
-    // Skip leading whitespace
     var start: usize = 0;
     while (start < str.len and (str[start] == ' ' or str[start] == '\t' or str[start] == '\n' or str[start] == '\r')) {
         start += 1;
     }
     if (start >= str.len) return 0;
 
-    // Check for sign
     var negative = false;
     if (str[start] == '-') {
         negative = true;
@@ -982,7 +1150,6 @@ fn parseIntFromString(str: []const u8) !i64 {
         start += 1;
     }
 
-    // Parse digits
     var result: i64 = 0;
     var has_digits = false;
     while (start < str.len) {
@@ -1003,182 +1170,148 @@ fn parseIntFromString(str: []const u8) !i64 {
 /// Parse float from string (PHP-style)
 fn parseFloatFromString(str: []const u8) !f64 {
     if (str.len == 0) return 0.0;
-
-    // Use std.fmt.parseFloat for simplicity
     return std.fmt.parseFloat(f64, str) catch 0.0;
 }
-
-/// Undefined value sentinel (for error cases)
-var null_sentinel_value: PHPValue = .{
-    .tag = .null,
-    .ref_count = 1,
-    .data = .{ .int_val = 0 },
-};
-
-const null_sentinel = &null_sentinel_value;
-
 
 // ============================================================================
 // Reference Counting Garbage Collection
 // ============================================================================
 
-/// Increment reference count
-pub fn php_gc_retain(val: *PHPValue) void {
-    if (val == null_sentinel) return;
-    val.ref_count += 1;
+/// Increment reference count on a heap-allocated Value.
+/// For simple types (null, bool, int, float) this is a no-op.
+pub fn php_gc_retain(val: Value) void {
+    gcRetainValue(val);
 }
 
-/// Decrement reference count and free if zero
-pub fn php_gc_release(val: *PHPValue) void {
-    if (val == null_sentinel) return;
-    if (val.ref_count == 0) return; // Already freed or static
+/// Decrement reference count and free if zero.
+pub fn php_gc_release(val: Value) void {
+    gcReleaseValue(val);
+}
 
-    val.ref_count -= 1;
-    if (val.ref_count == 0) {
-        php_gc_free_value(val);
+fn gcRetainValue(val: Value) void {
+    if (!nanbox.isHeapType(val)) return;
+    const ptr = nanbox.decodePtr(val);
+    const header: *GcHeader = @ptrFromInt(ptr);
+    header.ref_count += 1;
+}
+
+fn gcReleaseValue(val: Value) void {
+    if (!nanbox.isHeapType(val)) return;
+    const ptr = nanbox.decodePtr(val);
+    const header: *GcHeader = @ptrFromInt(ptr);
+    if (header.ref_count == 0) return;
+    header.ref_count -= 1;
+    if (header.ref_count == 0) {
+        gcFreeValue(val);
     }
 }
 
-/// Free a value and its internal data
-fn php_gc_free_value(val: *PHPValue) void {
+/// Free a heap-allocated Value and its internal data
+fn gcFreeValue(val: Value) void {
     const allocator = getGlobalAllocator();
+    const ptr = nanbox.decodePtr(val);
 
-    // Free internal data based on type
-    switch (val.tag) {
-        .string => {
-            if (val.data.string_ptr) |str| {
-                str.ref_count -= 1;
-                if (str.ref_count == 0) {
-                    str.deinit(allocator);
-                }
-            }
-        },
-        .array => {
-            if (val.data.array_ptr) |arr| {
-                arr.ref_count -= 1;
-                if (arr.ref_count == 0) {
-                    arr.deinit(allocator);
-                }
-            }
-        },
-        .object => {
-            if (val.data.object_ptr) |obj| {
-                obj.ref_count -= 1;
-                if (obj.ref_count == 0) {
-                    obj.deinit(allocator);
-                }
-            }
-        },
-        .callable => {
-            if (val.data.callable_ptr) |callable| {
-                callable.ref_count -= 1;
-                if (callable.ref_count == 0) {
-                    callable.deinit(allocator);
-                }
-            }
-        },
-        // Simple types have no internal data to free
-        .null, .bool, .int, .float, .resource => {},
+    if (nanbox.isString(val)) {
+        const str: *PHPString = @ptrFromInt(ptr);
+        str.deinit(allocator);
+    } else if (nanbox.isArray(val)) {
+        const arr: *PHPArray = @ptrFromInt(ptr);
+        arr.deinit(allocator);
+    } else if (nanbox.isObject(val)) {
+        const obj: *PHPObject = @ptrFromInt(ptr);
+        obj.deinit(allocator);
     }
-
-    // Free the value itself
-    allocator.destroy(val);
 }
 
 /// Get current reference count (for debugging/testing)
-pub fn php_gc_get_ref_count(val: *const PHPValue) u32 {
-    return val.ref_count;
+pub fn php_gc_get_ref_count(val: Value) u32 {
+    if (!nanbox.isHeapType(val)) return 0;
+    const ptr = nanbox.decodePtr(val);
+    const header: *GcHeader = @ptrFromInt(ptr);
+    return header.ref_count;
 }
 
 /// Check if value is shared (ref_count > 1)
-pub fn php_gc_is_shared(val: *const PHPValue) bool {
-    return val.ref_count > 1;
+pub fn php_gc_is_shared(val: Value) bool {
+    if (!nanbox.isHeapType(val)) return false;
+    const ptr = nanbox.decodePtr(val);
+    const header: *GcHeader = @ptrFromInt(ptr);
+    return header.ref_count > 1;
 }
 
-/// Copy-on-write: ensure value is not shared before modification
-/// Returns a new value if shared, or the same value if not
-pub fn php_gc_copy_on_write(val: *PHPValue) *PHPValue {
-    if (val.ref_count <= 1) {
-        return val;
-    }
+/// Copy-on-write: ensure value is not shared before modification.
+/// For simple types, returns the same value. For heap types with ref_count > 1, clones.
+pub fn php_gc_copy_on_write(val: Value) Value {
+    if (!nanbox.isHeapType(val)) return val;
 
-    // Value is shared, need to make a copy
+    const ptr = nanbox.decodePtr(val);
+    const header: *GcHeader = @ptrFromInt(ptr);
+    if (header.ref_count <= 1) return val;
+
     const copy = php_value_clone(val);
-    php_gc_release(val);
+    gcReleaseValue(val);
     return copy;
 }
-
 
 // ============================================================================
 // Array Runtime Operations
 // ============================================================================
 
-/// Create a new empty array
+/// Create a new empty array (returns raw PHPArray pointer)
 pub fn php_array_create() *PHPArray {
     const allocator = getGlobalAllocator();
     return PHPArray.init(allocator) catch {
-        // Return a static empty array on failure
         return null_array;
     };
 }
 
-/// Create a new array with initial capacity
+/// Create a new array with initial capacity (pre-allocated bucket count)
 pub fn php_array_create_with_capacity(capacity: usize) *PHPArray {
     const allocator = getGlobalAllocator();
-    const arr = PHPArray.init(allocator) catch return null_array;
-    // Pre-allocate buckets if needed
-    if (capacity > PHPArray.INITIAL_BUCKET_COUNT) {
-        arr.resize() catch {};
-    }
-    return arr;
+    return PHPArray.initCapacity(allocator, capacity) catch {
+        return null_array;
+    };
 }
 
-/// Get array element by integer key
-pub fn php_array_get_int(arr: *PHPArray, key: i64) *PHPValue {
-    if (arr.get(.{ .int = key })) |val| {
-        php_gc_retain(val);
-        return val;
-    }
-    return php_value_create_null();
+/// Pre-allocate capacity in an array for batch push operations (2x growth strategy)
+pub fn php_array_ensure_capacity(arr: *PHPArray, additional: usize) void {
+    arr.ensureCapacity(additional) catch {};
 }
 
-/// Get array element by string key
-pub fn php_array_get_string(arr: *PHPArray, key: *PHPString) *PHPValue {
-    if (arr.get(.{ .string = key })) |val| {
-        php_gc_retain(val);
-        return val;
-    }
-    return php_value_create_null();
+/// Get array element by integer key (returns NaN-boxed Value)
+pub fn php_array_get_int(arr: *PHPArray, key: i64) Value {
+    return arr.getValue(.{ .int = key });
 }
 
-/// Get array element by PHPValue key
-pub fn php_array_get(arr: *PHPArray, key: *PHPValue) *PHPValue {
+/// Get array element by string key (returns NaN-boxed Value)
+pub fn php_array_get_string(arr: *PHPArray, key: *PHPString) Value {
+    return arr.getValue(.{ .string = key });
+}
+
+/// Get array element by Value key
+pub fn php_array_get(arr: *PHPArray, key: Value) Value {
     const array_key = valueToArrayKey(key);
-    if (arr.get(array_key)) |val| {
-        php_gc_retain(val);
-        return val;
-    }
-    return php_value_create_null();
+    return arr.getValue(array_key);
 }
 
 /// Set array element by integer key
-pub fn php_array_set_int(arr: *PHPArray, key: i64, value: *PHPValue) void {
+pub fn php_array_set_int(arr: *PHPArray, key: i64, value: Value) void {
     arr.set(.{ .int = key }, value) catch {};
 }
 
 /// Set array element by string key
-pub fn php_array_set_string(arr: *PHPArray, key: *PHPString, value: *PHPValue) void {
+pub fn php_array_set_string(arr: *PHPArray, key: *PHPString, value: Value) void {
     arr.set(.{ .string = key }, value) catch {};
 }
 
-/// Set array element by PHPValue key
-pub fn php_array_set(arr: *PHPArray, key: *PHPValue, value: *PHPValue) void {
+/// Set array element by Value key
+pub fn php_array_set(arr: *PHPArray, key: Value, value: Value) void {
     const array_key = valueToArrayKey(key);
     arr.set(array_key, value) catch {};
 }
 
 /// Push value to array (append)
-pub fn php_array_push(arr: *PHPArray, value: *PHPValue) void {
+pub fn php_array_push(arr: *PHPArray, value: Value) void {
     arr.push(value) catch {};
 }
 
@@ -1188,7 +1321,7 @@ pub fn php_array_count(arr: *PHPArray) i64 {
 }
 
 /// Check if key exists in array
-pub fn php_array_key_exists(arr: *PHPArray, key: *PHPValue) bool {
+pub fn php_array_key_exists(arr: *PHPArray, key: Value) bool {
     const array_key = valueToArrayKey(key);
     return arr.keyExists(array_key);
 }
@@ -1204,7 +1337,7 @@ pub fn php_array_key_exists_string(arr: *PHPArray, key: *PHPString) bool {
 }
 
 /// Unset array element
-pub fn php_array_unset(arr: *PHPArray, key: *PHPValue) void {
+pub fn php_array_unset(arr: *PHPArray, key: Value) void {
     const array_key = valueToArrayKey(key);
     arr.unset(array_key);
 }
@@ -1219,18 +1352,18 @@ pub fn php_array_unset_string(arr: *PHPArray, key: *PHPString) void {
     arr.unset(.{ .string = key });
 }
 
-/// Get array keys as a new array
-pub fn php_array_keys(arr: *PHPArray) *PHPValue {
+/// Get array keys as a new array value
+pub fn php_array_keys(arr: *PHPArray) Value {
     const result = php_value_create_array();
-    if (result.data.array_ptr) |result_arr| {
+    if (nanbox.isArray(result)) {
+        const result_arr = getArrayPtr(result);
         var entry = arr.first;
         while (entry) |e| {
             const key_val = switch (e.key) {
                 .int => |i| php_value_create_int(i),
                 .string => |s| blk: {
-                    s.ref_count += 1;
-                    const val = php_value_create_string(s.getData());
-                    break :blk val;
+                    s.header.ref_count += 1;
+                    break :blk php_value_create_string(s.getData());
                 },
             };
             result_arr.push(key_val) catch {};
@@ -1241,12 +1374,13 @@ pub fn php_array_keys(arr: *PHPArray) *PHPValue {
 }
 
 /// Get array values as a new array (re-indexed)
-pub fn php_array_values(arr: *PHPArray) *PHPValue {
+pub fn php_array_values(arr: *PHPArray) Value {
     const result = php_value_create_array();
-    if (result.data.array_ptr) |result_arr| {
+    if (nanbox.isArray(result)) {
+        const result_arr = getArrayPtr(result);
         var entry = arr.first;
         while (entry) |e| {
-            php_gc_retain(e.value);
+            gcRetainValue(e.value);
             result_arr.push(e.value) catch {};
             entry = e.next_order;
         }
@@ -1255,13 +1389,13 @@ pub fn php_array_values(arr: *PHPArray) *PHPValue {
 }
 
 /// Merge two arrays
-pub fn php_array_merge(arr1: *PHPArray, arr2: *PHPArray) *PHPValue {
+pub fn php_array_merge(arr1: *PHPArray, arr2: *PHPArray) Value {
     const result = php_value_create_array();
-    if (result.data.array_ptr) |result_arr| {
-        // Copy arr1 (re-index integer keys)
+    if (nanbox.isArray(result)) {
+        const result_arr = getArrayPtr(result);
         var entry = arr1.first;
         while (entry) |e| {
-            php_gc_retain(e.value);
+            gcRetainValue(e.value);
             switch (e.key) {
                 .int => result_arr.push(e.value) catch {},
                 .string => |s| result_arr.set(.{ .string = s }, e.value) catch {},
@@ -1269,10 +1403,9 @@ pub fn php_array_merge(arr1: *PHPArray, arr2: *PHPArray) *PHPValue {
             entry = e.next_order;
         }
 
-        // Copy arr2 (re-index integer keys, overwrite string keys)
         entry = arr2.first;
         while (entry) |e| {
-            php_gc_retain(e.value);
+            gcRetainValue(e.value);
             switch (e.key) {
                 .int => result_arr.push(e.value) catch {},
                 .string => |s| result_arr.set(.{ .string = s }, e.value) catch {},
@@ -1281,6 +1414,41 @@ pub fn php_array_merge(arr1: *PHPArray, arr2: *PHPArray) *PHPValue {
         }
     }
     return result;
+}
+
+/// Check if value exists in array (loose comparison, returns bool)
+pub fn php_in_array(needle: Value, haystack: Value) Value {
+    if (!nanbox.isArray(haystack)) return php_value_create_bool(false);
+    const arr = getArrayPtr(haystack);
+
+    var entry = arr.first;
+    while (entry) |e| {
+        const eq_result = php_eq(needle, e.value) catch return php_value_create_bool(false);
+        if (nanbox.decodeBool(eq_result)) return php_value_create_bool(true);
+        entry = e.next_order;
+    }
+
+    return php_value_create_bool(false);
+}
+
+/// Search for value in array and return first matching key (loose comparison, returns key or false)
+pub fn php_array_search(needle: Value, haystack: Value) Value {
+    if (!nanbox.isArray(haystack)) return php_value_create_bool(false);
+    const arr = getArrayPtr(haystack);
+
+    var entry = arr.first;
+    while (entry) |e| {
+        const eq_result = php_eq(needle, e.value) catch return php_value_create_bool(false);
+        if (nanbox.decodeBool(eq_result)) {
+            return switch (e.key) {
+                .int => |i| php_value_create_int(i),
+                .string => |s| php_value_create_string(s.getData()),
+            };
+        }
+        entry = e.next_order;
+    }
+
+    return php_value_create_bool(false);
 }
 
 /// Check if array is empty
@@ -1289,106 +1457,85 @@ pub fn php_array_is_empty(arr: *PHPArray) bool {
 }
 
 /// Get first element of array
-pub fn php_array_first(arr: *PHPArray) *PHPValue {
+pub fn php_array_first(arr: *PHPArray) Value {
     if (arr.first) |entry| {
-        php_gc_retain(entry.value);
+        gcRetainValue(entry.value);
         return entry.value;
     }
-    return php_value_create_null();
+    return nanbox.encodeNull();
 }
 
 /// Get last element of array
-pub fn php_array_last(arr: *PHPArray) *PHPValue {
+pub fn php_array_last(arr: *PHPArray) Value {
     if (arr.last) |entry| {
-        php_gc_retain(entry.value);
+        gcRetainValue(entry.value);
         return entry.value;
     }
-    return php_value_create_null();
+    return nanbox.encodeNull();
 }
 
-/// Convert PHPValue to ArrayKey
-fn valueToArrayKey(val: *PHPValue) ArrayKey {
-    return switch (val.tag) {
-        .int => .{ .int = val.data.int_val },
-        .float => .{ .int = @intFromFloat(val.data.float_val) },
-        .bool => .{ .int = if (val.data.bool_val) 1 else 0 },
-        .null => .{ .int = 0 },
-        .string => blk: {
-            if (val.data.string_ptr) |str| {
-                // Try to parse as integer
-                const int_val = parseIntFromString(str.getData()) catch {
-                    break :blk ArrayKey{ .string = str };
-                };
-                // Check if the entire string is a valid integer
-                var buf: [32]u8 = undefined;
-                const result = std.fmt.bufPrint(&buf, "{d}", .{int_val}) catch {
-                    break :blk ArrayKey{ .string = str };
-                };
-                if (result.len == str.length and std.mem.eql(u8, result, str.getData())) {
-                    break :blk ArrayKey{ .int = int_val };
-                }
-                break :blk ArrayKey{ .string = str };
-            }
-            break :blk ArrayKey{ .int = 0 };
-        },
-        else => .{ .int = 0 },
-    };
+/// Convert Value to ArrayKey
+fn valueToArrayKey(val: Value) ArrayKey {
+    if (nanbox.isInt(val)) return .{ .int = nanbox.decodeInt(val) };
+    if (nanbox.isFloat(val)) return .{ .int = @intFromFloat(nanbox.decodeFloat(val)) };
+    if (nanbox.isBool(val)) return .{ .int = if (nanbox.decodeBool(val)) 1 else 0 };
+    if (nanbox.isNull(val)) return .{ .int = 0 };
+    if (nanbox.isString(val)) {
+        const str = getStringPtr(val);
+        const int_val = parseIntFromString(str.getData()) catch {
+            return ArrayKey{ .string = str };
+        };
+        var buf: [32]u8 = undefined;
+        const result = std.fmt.bufPrint(&buf, "{d}", .{int_val}) catch {
+            return ArrayKey{ .string = str };
+        };
+        if (result.len == str.length and std.mem.eql(u8, result, str.getData())) {
+            return ArrayKey{ .int = int_val };
+        }
+        return ArrayKey{ .string = str };
+    }
+    return .{ .int = 0 };
 }
 
 /// Static null array for error cases
 var null_array_storage: PHPArray = .{
-    .allocator = std.heap.page_allocator,
-    .buckets = &[_]?*ArrayEntry{},
+    .header = .{ .ref_count = 1 },
+    .allocator = undefined,
+    .buckets = undefined,
     .bucket_count = 0,
     .entry_count = 0,
     .first = null,
     .last = null,
     .next_int_key = 0,
-    .ref_count = 1,
 };
 var null_array: *PHPArray = &null_array_storage;
-
 
 // ============================================================================
 // String Runtime Operations
 // ============================================================================
 
 /// Concatenate two values as strings
-pub fn php_string_concat(a: *PHPValue, b: *PHPValue) *PHPValue {
+pub fn php_string_concat(a: Value, b: Value) Value {
     const allocator = getGlobalAllocator();
 
-    // Convert both values to strings
     const str_a = php_value_to_string(a);
-    defer php_gc_release(str_a);
+    defer gcReleaseValue(str_a);
     const str_b = php_value_to_string(b);
-    defer php_gc_release(str_b);
+    defer gcReleaseValue(str_b);
 
-    // Get string pointers
-    const ptr_a = str_a.data.string_ptr orelse return php_value_create_string("");
-    const ptr_b = str_b.data.string_ptr orelse return php_value_clone(str_a);
+    const ptr_a = getStringPtr(str_a);
+    const ptr_b = getStringPtr(str_b);
 
-    // Concatenate
-    const result_str = ptr_a.concat(ptr_b, allocator) catch return php_value_create_string("");
+    const result_str = ptr_a.concat(ptr_b, allocator) catch return nanbox.encodeNull();
 
-    const result = allocator.create(PHPValue) catch {
-        result_str.deinit(allocator);
-        return null_sentinel;
-    };
-    result.* = .{
-        .tag = .string,
-        .ref_count = 1,
-        .data = .{ .string_ptr = result_str },
-    };
-    return result;
+    return nanbox.encodePtr(@intFromPtr(result_str), nanbox.TYPE_STRING);
 }
 
 /// Get string length
-pub fn php_string_length(val: *PHPValue) i64 {
-    if (val.tag != .string) return 0;
-    if (val.data.string_ptr) |str| {
-        return @intCast(str.length);
-    }
-    return 0;
+pub fn php_string_length(val: Value) i64 {
+    if (!nanbox.isString(val)) return 0;
+    const str = getStringPtr(val);
+    return @intCast(str.length);
 }
 
 /// Get string length from PHPString
@@ -1397,71 +1544,55 @@ pub fn php_string_len(str: *PHPString) i64 {
 }
 
 /// String interpolation - concatenate multiple parts
-pub fn php_string_interpolate(parts: []const *PHPValue) *PHPValue {
+pub fn php_string_interpolate(parts: []const Value) Value {
     if (parts.len == 0) return php_value_create_string("");
     if (parts.len == 1) return php_value_to_string(parts[0]);
 
     const allocator = getGlobalAllocator();
 
-    // Calculate total length
     var total_len: usize = 0;
     for (parts) |part| {
         const str_part = php_value_to_string(part);
-        defer php_gc_release(str_part);
-        if (str_part.data.string_ptr) |str| {
-            total_len += str.length;
-        }
+        defer gcReleaseValue(str_part);
+        const str = getStringPtr(str_part);
+        total_len += str.length;
     }
 
-    // Allocate result buffer
     const capacity = total_len + 1;
-    const data = allocator.alloc(u8, capacity) catch return php_value_create_string("");
+    const data = allocator.alloc(u8, capacity) catch return nanbox.encodeNull();
 
-    // Copy parts
     var offset: usize = 0;
     for (parts) |part| {
         const str_part = php_value_to_string(part);
-        defer php_gc_release(str_part);
-        if (str_part.data.string_ptr) |str| {
-            @memcpy(data[offset .. offset + str.length], str.data[0..str.length]);
-            offset += str.length;
-        }
+        defer gcReleaseValue(str_part);
+        const str = getStringPtr(str_part);
+        @memcpy(data[offset .. offset + str.length], str.data[0..str.length]);
+        offset += str.length;
     }
     data[total_len] = 0;
 
-    // Create result string
     const result_str = allocator.create(PHPString) catch {
         allocator.free(data);
-        return php_value_create_string("");
+        return nanbox.encodeNull();
     };
     result_str.* = .{
+        .header = .{ .ref_count = 1 },
         .data = data.ptr,
         .length = total_len,
         .capacity = capacity,
-        .ref_count = 1,
         .hash = 0,
     };
 
-    const result = allocator.create(PHPValue) catch {
-        result_str.deinit(allocator);
-        return null_sentinel;
-    };
-    result.* = .{
-        .tag = .string,
-        .ref_count = 1,
-        .data = .{ .string_ptr = result_str },
-    };
-    return result;
+    return nanbox.encodePtr(@intFromPtr(result_str), nanbox.TYPE_STRING);
 }
 
 /// Get substring
-pub fn php_string_substr(val: *PHPValue, start: i64, length: ?i64) *PHPValue {
-    if (val.tag != .string) return php_value_create_string("");
-    const str = val.data.string_ptr orelse return php_value_create_string("");
+pub fn php_string_substr(val: Value, start: i64, length: ?i64) Value {
+    if (!nanbox.isString(val)) return php_value_create_string("");
+    const str = getStringPtr(val);
 
     const str_len: i64 = @intCast(str.length);
 
-    // Handle negative start
     var actual_start: i64 = start;
     if (actual_start < 0) {
         actual_start = str_len + actual_start;
@@ -1469,7 +1600,6 @@ pub fn php_string_substr(val: *PHPValue, start: i64, length: ?i64) *PHPValue {
     }
     if (actual_start >= str_len) return php_value_create_string("");
 
-    // Handle length
     var actual_len: i64 = undefined;
     if (length) |len| {
         if (len < 0) {
@@ -1483,7 +1613,6 @@ pub fn php_string_substr(val: *PHPValue, start: i64, length: ?i64) *PHPValue {
 
     if (actual_len <= 0) return php_value_create_string("");
 
-    // Clamp to string bounds
     const ustart: usize = @intCast(actual_start);
     var ulen: usize = @intCast(actual_len);
     if (ustart + ulen > str.length) {
@@ -1494,25 +1623,22 @@ pub fn php_string_substr(val: *PHPValue, start: i64, length: ?i64) *PHPValue {
 }
 
 /// Find position of substring
-pub fn php_string_strpos(haystack: *PHPValue, needle: *PHPValue, offset: i64) *PHPValue {
-    if (haystack.tag != .string) return php_value_create_bool(false);
-    const hay_str = haystack.data.string_ptr orelse return php_value_create_bool(false);
+pub fn php_string_strpos(haystack: Value, needle: Value, offset: i64) Value {
+    if (!nanbox.isString(haystack)) return php_value_create_bool(false);
+    const hay_str = getStringPtr(haystack);
 
-    // Convert needle to string
     const needle_str_val = php_value_to_string(needle);
-    defer php_gc_release(needle_str_val);
-    const needle_str = needle_str_val.data.string_ptr orelse return php_value_create_bool(false);
+    defer gcReleaseValue(needle_str_val);
+    const needle_str = getStringPtr(needle_str_val);
 
     if (needle_str.length == 0) return php_value_create_bool(false);
 
-    // Handle offset
     var search_start: usize = 0;
     if (offset > 0) {
         search_start = @intCast(offset);
         if (search_start >= hay_str.length) return php_value_create_bool(false);
     }
 
-    // Search for needle
     const hay_data = hay_str.data[search_start..hay_str.length];
     const needle_data = needle_str.data[0..needle_str.length];
 
@@ -1524,12 +1650,12 @@ pub fn php_string_strpos(haystack: *PHPValue, needle: *PHPValue, offset: i64) *P
 }
 
 /// Convert string to uppercase
-pub fn php_string_strtoupper(val: *PHPValue) *PHPValue {
-    if (val.tag != .string) return php_value_to_string(val);
-    const str = val.data.string_ptr orelse return php_value_create_string("");
+pub fn php_string_strtoupper(val: Value) Value {
+    if (!nanbox.isString(val)) return php_value_to_string(val);
+    const str = getStringPtr(val);
 
     const allocator = getGlobalAllocator();
-    const data = allocator.alloc(u8, str.length + 1) catch return php_value_create_string("");
+    const data = allocator.alloc(u8, str.length + 1) catch return nanbox.encodeNull();
 
     for (str.data[0..str.length], 0..) |c, i| {
         data[i] = std.ascii.toUpper(c);
@@ -1538,35 +1664,26 @@ pub fn php_string_strtoupper(val: *PHPValue) *PHPValue {
 
     const result_str = allocator.create(PHPString) catch {
         allocator.free(data);
-        return php_value_create_string("");
+        return nanbox.encodeNull();
     };
     result_str.* = .{
+        .header = .{ .ref_count = 1 },
         .data = data.ptr,
         .length = str.length,
         .capacity = str.length + 1,
-        .ref_count = 1,
         .hash = 0,
     };
 
-    const result = allocator.create(PHPValue) catch {
-        result_str.deinit(allocator);
-        return null_sentinel;
-    };
-    result.* = .{
-        .tag = .string,
-        .ref_count = 1,
-        .data = .{ .string_ptr = result_str },
-    };
-    return result;
+    return nanbox.encodePtr(@intFromPtr(result_str), nanbox.TYPE_STRING);
 }
 
 /// Convert string to lowercase
-pub fn php_string_strtolower(val: *PHPValue) *PHPValue {
-    if (val.tag != .string) return php_value_to_string(val);
-    const str = val.data.string_ptr orelse return php_value_create_string("");
+pub fn php_string_strtolower(val: Value) Value {
+    if (!nanbox.isString(val)) return php_value_to_string(val);
+    const str = getStringPtr(val);
 
     const allocator = getGlobalAllocator();
-    const data = allocator.alloc(u8, str.length + 1) catch return php_value_create_string("");
+    const data = allocator.alloc(u8, str.length + 1) catch return nanbox.encodeNull();
 
     for (str.data[0..str.length], 0..) |c, i| {
         data[i] = std.ascii.toLower(c);
@@ -1575,32 +1692,23 @@ pub fn php_string_strtolower(val: *PHPValue) *PHPValue {
 
     const result_str = allocator.create(PHPString) catch {
         allocator.free(data);
-        return php_value_create_string("");
+        return nanbox.encodeNull();
     };
     result_str.* = .{
+        .header = .{ .ref_count = 1 },
         .data = data.ptr,
         .length = str.length,
         .capacity = str.length + 1,
-        .ref_count = 1,
         .hash = 0,
     };
 
-    const result = allocator.create(PHPValue) catch {
-        result_str.deinit(allocator);
-        return null_sentinel;
-    };
-    result.* = .{
-        .tag = .string,
-        .ref_count = 1,
-        .data = .{ .string_ptr = result_str },
-    };
-    return result;
+    return nanbox.encodePtr(@intFromPtr(result_str), nanbox.TYPE_STRING);
 }
 
 /// Trim whitespace from string
-pub fn php_string_trim(val: *PHPValue) *PHPValue {
-    if (val.tag != .string) return php_value_to_string(val);
-    const str = val.data.string_ptr orelse return php_value_create_string("");
+pub fn php_string_trim(val: Value) Value {
+    if (!nanbox.isString(val)) return php_value_to_string(val);
+    const str = getStringPtr(val);
 
     const data = str.data[0..str.length];
     const trimmed = std.mem.trim(u8, data, " \t\n\r\x00\x0b");
@@ -1609,25 +1717,24 @@ pub fn php_string_trim(val: *PHPValue) *PHPValue {
 }
 
 /// Replace occurrences in string
-pub fn php_string_str_replace(search: *PHPValue, replace: *PHPValue, subject: *PHPValue) *PHPValue {
-    if (subject.tag != .string) return php_value_to_string(subject);
-    const subj_str = subject.data.string_ptr orelse return php_value_create_string("");
+pub fn php_string_str_replace(search: Value, replace: Value, subject: Value) Value {
+    if (!nanbox.isString(subject)) return php_value_to_string(subject);
+    const subj_str = getStringPtr(subject);
 
     const search_val = php_value_to_string(search);
-    defer php_gc_release(search_val);
-    const search_str = search_val.data.string_ptr orelse return php_value_clone(subject);
+    defer gcReleaseValue(search_val);
+    const search_str = getStringPtr(search_val);
 
     const replace_val = php_value_to_string(replace);
-    defer php_gc_release(replace_val);
-    const replace_str = replace_val.data.string_ptr orelse return php_value_clone(subject);
+    defer gcReleaseValue(replace_val);
+    const replace_str = getStringPtr(replace_val);
 
     if (search_str.length == 0) return php_value_clone(subject);
 
     const allocator = getGlobalAllocator();
 
-    // Simple implementation: find and replace all occurrences
-    var result = try std.ArrayList(u8).initCapacity(allocator, 0);
-    defer result.deinit(allocator);
+    var result = std.ArrayList(u8).initCapacity(allocator, 0) catch return php_value_clone(subject);
+    defer result.deinit();
 
     const subj_data = subj_str.data[0..subj_str.length];
     const search_data = search_str.data[0..search_str.length];
@@ -1638,10 +1745,10 @@ pub fn php_string_str_replace(search: *PHPValue, replace: *PHPValue, subject: *P
         if (i + search_str.length <= subj_str.length and
             std.mem.eql(u8, subj_data[i .. i + search_str.length], search_data))
         {
-            result.appendSlice(allocator, replace_data) catch return php_value_clone(subject);
+            result.appendSlice(replace_data) catch return php_value_clone(subject);
             i += search_str.length;
         } else {
-            result.append(allocator, subj_data[i]) catch return php_value_clone(subject);
+            result.append(subj_data[i]) catch return php_value_clone(subject);
             i += 1;
         }
     }
@@ -1650,24 +1757,21 @@ pub fn php_string_str_replace(search: *PHPValue, replace: *PHPValue, subject: *P
 }
 
 /// Split string by delimiter
-pub fn php_string_explode(delimiter: *PHPValue, string: *PHPValue) *PHPValue {
+pub fn php_string_explode(delimiter: Value, string: Value) Value {
     const result = php_value_create_array();
-    if (result.data.array_ptr == null) return result;
-    const arr = result.data.array_ptr.?;
+    if (!nanbox.isArray(result)) return result;
+    const arr = getArrayPtr(result);
 
-    if (string.tag != .string) {
+    if (!nanbox.isString(string)) {
         const str_val = php_value_to_string(string);
         arr.push(str_val) catch {};
         return result;
     }
 
-    const str = string.data.string_ptr orelse return result;
+    const str = getStringPtr(string);
     const delim_val = php_value_to_string(delimiter);
-    defer php_gc_release(delim_val);
-    const delim_str = delim_val.data.string_ptr orelse {
-        arr.push(php_value_clone(string)) catch {};
-        return result;
-    };
+    defer gcReleaseValue(delim_val);
+    const delim_str = getStringPtr(delim_val);
 
     if (delim_str.length == 0) {
         arr.push(php_value_clone(string)) catch {};
@@ -1685,36 +1789,74 @@ pub fn php_string_explode(delimiter: *PHPValue, string: *PHPValue) *PHPValue {
     return result;
 }
 
+/// Get a single character from string at index (returns 1-char string or empty string)
+pub fn php_string_get_char(val: Value, index: i64) Value {
+    if (!nanbox.isString(val)) return php_value_create_string("");
+    const str = getStringPtr(val);
+
+    const str_len: i64 = @intCast(str.length);
+
+    var actual_index = index;
+    if (actual_index < 0) {
+        actual_index = str_len + actual_index;
+    }
+    if (actual_index < 0 or actual_index >= str_len) {
+        return php_value_create_string("");
+    }
+
+    const ui: usize = @intCast(actual_index);
+    return php_value_create_string(str.data[ui..ui+1]);
+}
+
+/// Set a single character in string at index (modifies string in place)
+pub fn php_string_set_char(str: *PHPString, index: i64, char_val: Value) void {
+    const str_len: i64 = @intCast(str.length);
+
+    var actual_index = index;
+    if (actual_index < 0) {
+        actual_index = str_len + actual_index;
+    }
+    if (actual_index < 0 or actual_index >= str_len) {
+        return;
+    }
+
+    const char_str_val = php_value_to_string(char_val);
+    defer gcReleaseValue(char_str_val);
+    const char_str = getStringPtr(char_str_val);
+
+    if (char_str.length > 0) {
+        const ui: usize = @intCast(actual_index);
+        str.data[ui] = char_str.data[0];
+    }
+}
+
 /// Join array elements with delimiter
-pub fn php_string_implode(glue: *PHPValue, pieces: *PHPValue) *PHPValue {
-    if (pieces.tag != .array) return php_value_create_string("");
-    const arr = pieces.data.array_ptr orelse return php_value_create_string("");
+pub fn php_string_implode(glue: Value, pieces: Value) Value {
+    if (!nanbox.isArray(pieces)) return php_value_create_string("");
+    const arr = getArrayPtr(pieces);
 
     if (arr.count() == 0) return php_value_create_string("");
 
     const glue_val = php_value_to_string(glue);
-    defer php_gc_release(glue_val);
-    const glue_str = glue_val.data.string_ptr;
+    defer gcReleaseValue(glue_val);
+    const glue_str = getStringPtr(glue_val);
 
     const allocator = getGlobalAllocator();
-    var result = try std.ArrayList(u8).initCapacity(allocator, 0);
-    defer result.deinit(allocator);
+    var result = std.ArrayList(u8).initCapacity(allocator, 0) catch return nanbox.encodeNull();
+    defer result.deinit();
 
     var first = true;
     var entry = arr.first;
     while (entry) |e| {
         if (!first) {
-            if (glue_str) |gs| {
-                result.appendSlice(allocator, gs.data[0..gs.length]) catch {};
-            }
+            result.appendSlice(glue_str.data[0..glue_str.length]) catch {};
         }
         first = false;
 
         const str_val = php_value_to_string(e.value);
-        defer php_gc_release(str_val);
-        if (str_val.data.string_ptr) |s| {
-            result.appendSlice(allocator, s.data[0..s.length]) catch {};
-        }
+        defer gcReleaseValue(str_val);
+        const s = getStringPtr(str_val);
+        result.appendSlice(s.data[0..s.length]) catch {};
 
         entry = e.next_order;
     }
@@ -1722,41 +1864,96 @@ pub fn php_string_implode(glue: *PHPValue, pieces: *PHPValue) *PHPValue {
     return php_value_create_string(result.items);
 }
 
-
 // ============================================================================
 // I/O Operations
 // ============================================================================
 
 /// Echo a value (output without newline)
-pub fn php_echo(val: *PHPValue) !void {
+pub fn php_echo(val: Value) !void {
     const str_val = php_value_to_string(val);
-    defer php_gc_release(str_val);
+    defer gcReleaseValue(str_val);
 
-    if (str_val.data.string_ptr) |str| {
-        const stdout = std.io.getStdOut().writer();
-        stdout.writeAll(str.data[0..str.length]) catch {};
-    }
+    const str = getStringPtr(str_val);
+    const stdout = std.io.getStdOut().writer();
+    stdout.writeAll(str.data[0..str.length]) catch {};
 }
 
 /// Print a value (output with return value 1)
-pub fn php_print(val: *PHPValue) i64 {
+pub fn php_print(val: Value) i64 {
     php_echo(val) catch {};
     return 1;
 }
 
 /// Print with newline
-pub fn php_println(val: *PHPValue) void {
+pub fn php_println(val: Value) void {
     php_echo(val) catch {};
     const stdout = std.io.getStdOut().writer();
     stdout.writeAll("\n") catch {};
 }
 
 /// Print formatted string (printf-style)
-pub fn php_printf(format: *PHPValue, args: []const *PHPValue) *PHPValue {
-    // Simplified implementation - just concatenate format with args
+pub fn php_printf(format: Value, args: []const Value) Value {
     _ = args;
-    php_echo(format);
+    php_echo(format) catch {};
     return php_value_create_int(1);
+}
+
+// ============================================================================
+// Include/Require Runtime Support
+// ============================================================================
+
+/// Runtime php_include function for dynamic file paths.
+/// Since we cannot re-compile at runtime, this generates a warning and returns false.
+/// For static paths resolved at compile time, the IR is merged by the multi-file compiler.
+pub fn php_include(path_val: Value) Value {
+    const str_val = php_value_to_string(path_val);
+    defer gcReleaseValue(str_val);
+
+    const stderr = std.io.getStdErr().writer();
+    const str = getStringPtr(str_val);
+    if (str.length > 0) {
+        stderr.print("Warning: include(): Cannot include file '{s}' at runtime in AOT-compiled code. " ++
+            "Use a static file path for compile-time inclusion.\n", .{str.data[0..str.length]}) catch {};
+    } else {
+        stderr.writeAll("Warning: include(): Cannot include file at runtime in AOT-compiled code. " ++
+            "Use a static file path for compile-time inclusion.\n") catch {};
+    }
+
+    // PHP include returns false on failure in expression context
+    return nanbox.encodeBool(false);
+}
+
+/// Runtime php_require function for dynamic file paths.
+/// Since we cannot re-compile at runtime, this generates a fatal error and terminates.
+/// For static paths resolved at compile time, the IR is merged by the multi-file compiler.
+pub fn php_require(path_val: Value) Value {
+    const str_val = php_value_to_string(path_val);
+    defer gcReleaseValue(str_val);
+
+    const stderr = std.io.getStdErr().writer();
+    const str = getStringPtr(str_val);
+    if (str.length > 0) {
+        stderr.print("Fatal error: require(): Cannot require file '{s}' at runtime in AOT-compiled code. " ++
+            "Use a static file path for compile-time inclusion.\n", .{str.data[0..str.length]}) catch {};
+    } else {
+        stderr.writeAll("Fatal error: require(): Cannot require file at runtime in AOT-compiled code. " ++
+            "Use a static file path for compile-time inclusion.\n") catch {};
+    }
+
+    // PHP require generates a fatal error. In AOT, we call exit(1).
+    std.process.exit(1);
+}
+
+/// Runtime php_include_once function for dynamic file paths.
+/// Since we cannot track state at runtime for AOT, delegates to php_include.
+pub fn php_include_once(path_val: Value) Value {
+    return php_include(path_val);
+}
+
+/// Runtime php_require_once function for dynamic file paths.
+/// Since we cannot track state at runtime for AOT, delegates to php_require.
+pub fn php_require_once(path_val: Value) Value {
+    return php_require(path_val);
 }
 
 // ============================================================================
@@ -1764,50 +1961,43 @@ pub fn php_printf(format: *PHPValue, args: []const *PHPValue) *PHPValue {
 // ============================================================================
 
 /// strlen - Get string length
-pub fn php_builtin_strlen(val: *PHPValue) *PHPValue {
+pub fn php_builtin_strlen(val: Value) Value {
     return php_value_create_int(php_string_length(val));
 }
 
 /// count - Get array/object count
-pub fn php_builtin_count(val: *PHPValue) *PHPValue {
-    return switch (val.tag) {
-        .array => blk: {
-            if (val.data.array_ptr) |arr| {
-                break :blk php_value_create_int(@intCast(arr.count()));
-            }
-            break :blk php_value_create_int(0);
-        },
-        .object => blk: {
-            if (val.data.object_ptr) |obj| {
-                break :blk php_value_create_int(@intCast(obj.properties.count()));
-            }
-            break :blk php_value_create_int(0);
-        },
-        .null => php_value_create_int(0),
-        else => php_value_create_int(1),
-    };
+pub fn php_builtin_count(val: Value) Value {
+    if (nanbox.isArray(val)) {
+        const arr = getArrayPtr(val);
+        return php_value_create_int(@intCast(arr.count()));
+    }
+    if (nanbox.isObject(val)) {
+        const obj = getObjectPtr(val);
+        return php_value_create_int(@intCast(obj.properties.count()));
+    }
+    if (nanbox.isNull(val)) return php_value_create_int(0);
+    return php_value_create_int(1);
 }
 
 /// var_dump - Dump variable information
-pub fn php_builtin_var_dump(val: *PHPValue) void {
-    // 使用 ArrayList 作为缓冲区
+pub fn php_builtin_var_dump(val: Value) void {
     const allocator = getGlobalAllocator();
     var buffer = std.ArrayList(u8).initCapacity(allocator, 0) catch return;
-    defer buffer.deinit(allocator);
-    
+    defer buffer.deinit();
+
     dumpValue(buffer.writer(), val, 0) catch {};
     const stdout = std.io.getStdOut().writer();
     stdout.writeAll(buffer.items) catch {};
 }
 
 /// print_r - Print human-readable representation
-pub fn php_builtin_print_r(val: *PHPValue, return_output: bool) *PHPValue {
+pub fn php_builtin_print_r(val: Value, return_output: bool) Value {
     const allocator = getGlobalAllocator();
     var buffer = std.ArrayList(u8).initCapacity(allocator, 0) catch return php_value_create_bool(false);
-    defer buffer.deinit(allocator);
+    defer buffer.deinit();
 
     printValue(buffer.writer(), val, 0) catch {};
-    
+
     if (return_output) {
         return php_value_create_string(buffer.items);
     } else {
@@ -1818,147 +2008,142 @@ pub fn php_builtin_print_r(val: *PHPValue, return_output: bool) *PHPValue {
 }
 
 /// var_export - Output or return a parsable string representation
-pub fn php_builtin_var_export(val: *PHPValue, return_output: bool) *PHPValue {
+pub fn php_builtin_var_export(val: Value, return_output: bool) Value {
     const allocator = getGlobalAllocator();
-    var buffer = std.ArrayList(u8).initCapacity(allocator, 0) catch return php_value_create_null();
-    defer buffer.deinit(allocator);
+    var buffer = std.ArrayList(u8).initCapacity(allocator, 0) catch return nanbox.encodeNull();
+    defer buffer.deinit();
 
     exportValue(buffer.writer(), val) catch {};
-    
+
     if (return_output) {
         return php_value_create_string(buffer.items);
     } else {
         const stdout = std.io.getStdOut().writer();
         stdout.writeAll(buffer.items) catch {};
-        return php_value_create_null();
+        return nanbox.encodeNull();
     }
 }
 
 /// gettype - Get the type of a variable
-pub fn php_builtin_gettype(val: *PHPValue) *PHPValue {
-    return php_value_create_string(val.getTypeName());
+pub fn php_builtin_gettype(val: Value) Value {
+    return php_value_create_string(valueGetTypeName(val));
 }
 
 /// is_null - Check if value is null
-pub fn php_builtin_is_null(val: *PHPValue) *PHPValue {
-    return php_value_create_bool(val.tag == .null);
+pub fn php_builtin_is_null(val: Value) Value {
+    return php_value_create_bool(nanbox.isNull(val));
 }
 
 /// is_bool - Check if value is boolean
-pub fn php_builtin_is_bool(val: *PHPValue) *PHPValue {
-    return php_value_create_bool(val.tag == .bool);
+pub fn php_builtin_is_bool(val: Value) Value {
+    return php_value_create_bool(nanbox.isBool(val));
 }
 
 /// is_int / is_integer / is_long - Check if value is integer
-pub fn php_builtin_is_int(val: *PHPValue) *PHPValue {
-    return php_value_create_bool(val.tag == .int);
+pub fn php_builtin_is_int(val: Value) Value {
+    return php_value_create_bool(nanbox.isInt(val));
 }
 
 /// is_float / is_double / is_real - Check if value is float
-pub fn php_builtin_is_float(val: *PHPValue) *PHPValue {
-    return php_value_create_bool(val.tag == .float);
+pub fn php_builtin_is_float(val: Value) Value {
+    return php_value_create_bool(nanbox.isFloat(val));
 }
 
 /// is_numeric - Check if value is numeric or numeric string
-pub fn php_builtin_is_numeric(val: *PHPValue) *PHPValue {
-    return switch (val.tag) {
-        .int, .float => php_value_create_bool(true),
-        .string => blk: {
-            if (val.data.string_ptr) |str| {
-                const data = str.data[0..str.length];
-                // Try to parse as number
-                _ = std.fmt.parseFloat(f64, data) catch {
-                    break :blk php_value_create_bool(false);
-                };
-                break :blk php_value_create_bool(true);
-            }
-            break :blk php_value_create_bool(false);
-        },
-        else => php_value_create_bool(false),
-    };
+pub fn php_builtin_is_numeric(val: Value) Value {
+    if (nanbox.isInt(val) or nanbox.isFloat(val)) return php_value_create_bool(true);
+    if (nanbox.isString(val)) {
+        const str = getStringPtr(val);
+        const data = str.data[0..str.length];
+        _ = std.fmt.parseFloat(f64, data) catch {
+            return php_value_create_bool(false);
+        };
+        return php_value_create_bool(true);
+    }
+    return php_value_create_bool(false);
 }
 
 /// is_string - Check if value is string
-pub fn php_builtin_is_string(val: *PHPValue) *PHPValue {
-    return php_value_create_bool(val.tag == .string);
+pub fn php_builtin_is_string(val: Value) Value {
+    return php_value_create_bool(nanbox.isString(val));
 }
 
 /// is_array - Check if value is array
-pub fn php_builtin_is_array(val: *PHPValue) *PHPValue {
-    return php_value_create_bool(val.tag == .array);
+pub fn php_builtin_is_array(val: Value) Value {
+    return php_value_create_bool(nanbox.isArray(val));
 }
 
 /// is_object - Check if value is object
-pub fn php_builtin_is_object(val: *PHPValue) *PHPValue {
-    return php_value_create_bool(val.tag == .object);
+pub fn php_builtin_is_object(val: Value) Value {
+    return php_value_create_bool(nanbox.isObject(val));
 }
 
 /// is_callable - Check if value is callable
-pub fn php_builtin_is_callable(val: *PHPValue) *PHPValue {
-    return php_value_create_bool(val.tag == .callable);
+pub fn php_builtin_is_callable(val: Value) Value {
+    _ = val;
+    return php_value_create_bool(false);
 }
 
 /// empty - Check if value is empty
-pub fn php_builtin_empty(val: *PHPValue) *PHPValue {
-    return php_value_create_bool(!val.isTruthy());
+pub fn php_builtin_empty(val: Value) Value {
+    return php_value_create_bool(!valueIsTruthy(val));
 }
 
 /// isset - Check if value is set and not null
-pub fn php_builtin_isset(val: *PHPValue) *PHPValue {
-    return php_value_create_bool(val.tag != .null);
+pub fn php_builtin_isset(val: Value) Value {
+    return php_value_create_bool(!nanbox.isNull(val));
 }
 
 /// intval - Get integer value
-pub fn php_builtin_intval(val: *PHPValue) *PHPValue {
-    return php_value_create_int(val.toInt());
+pub fn php_builtin_intval(val: Value) Value {
+    return php_value_create_int(php_value_to_int(val));
 }
 
 /// floatval / doubleval - Get float value
-pub fn php_builtin_floatval(val: *PHPValue) *PHPValue {
-    return php_value_create_float(val.toFloat());
+pub fn php_builtin_floatval(val: Value) Value {
+    return php_value_create_float(php_value_to_float(val));
 }
 
 /// strval - Get string value
-pub fn php_builtin_strval(val: *PHPValue) *PHPValue {
+pub fn php_builtin_strval(val: Value) Value {
     return php_value_to_string(val);
 }
 
 /// boolval - Get boolean value
-pub fn php_builtin_boolval(val: *PHPValue) *PHPValue {
-    return php_value_create_bool(val.toBool());
+pub fn php_builtin_boolval(val: Value) Value {
+    return php_value_create_bool(valueIsTruthy(val));
 }
 
 /// abs - Absolute value
-pub fn php_builtin_abs(val: *PHPValue) *PHPValue {
-    return switch (val.tag) {
-        .int => php_value_create_int(if (val.data.int_val < 0) -val.data.int_val else val.data.int_val),
-        .float => php_value_create_float(@abs(val.data.float_val)),
-        else => blk: {
-            const num = val.toFloat();
-            break :blk php_value_create_float(@abs(num));
-        },
-    };
+pub fn php_builtin_abs(val: Value) Value {
+    if (nanbox.isInt(val)) {
+        const i = nanbox.decodeInt(val);
+        return php_value_create_int(if (i < 0) -i else i);
+    }
+    if (nanbox.isFloat(val)) {
+        return php_value_create_float(@abs(nanbox.decodeFloat(val)));
+    }
+    const num = php_value_to_float(val);
+    return php_value_create_float(@abs(num));
 }
 
 /// min - Find minimum value
-pub fn php_builtin_min(args: []const *PHPValue) *PHPValue {
-    if (args.len == 0) return php_value_create_null();
-    if (args.len == 1 and args[0].tag == .array) {
-        // min of array
-        if (args[0].data.array_ptr) |arr| {
-            var min_val: ?*PHPValue = null;
-            var entry = arr.first;
-            while (entry) |e| {
-                if (min_val == null or compareValues(e.value, min_val.?) == .lt) {
-                    min_val = e.value;
-                }
-                entry = e.next_order;
+pub fn php_builtin_min(args: []const Value) Value {
+    if (args.len == 0) return nanbox.encodeNull();
+    if (args.len == 1 and nanbox.isArray(args[0])) {
+        const arr = getArrayPtr(args[0]);
+        var min_val: ?Value = null;
+        var entry = arr.first;
+        while (entry) |e| {
+            if (min_val == null or compareValues(e.value, min_val.?) == .lt) {
+                min_val = e.value;
             }
-            if (min_val) |v| {
-                return php_value_clone(v);
-            }
+            entry = e.next_order;
         }
-        return php_value_create_null();
+        if (min_val) |v| {
+            return php_value_clone(v);
+        }
+        return nanbox.encodeNull();
     }
 
     var min_val = args[0];
@@ -1971,24 +2156,22 @@ pub fn php_builtin_min(args: []const *PHPValue) *PHPValue {
 }
 
 /// max - Find maximum value
-pub fn php_builtin_max(args: []const *PHPValue) *PHPValue {
-    if (args.len == 0) return php_value_create_null();
-    if (args.len == 1 and args[0].tag == .array) {
-        // max of array
-        if (args[0].data.array_ptr) |arr| {
-            var max_val: ?*PHPValue = null;
-            var entry = arr.first;
-            while (entry) |e| {
-                if (max_val == null or compareValues(e.value, max_val.?) == .gt) {
-                    max_val = e.value;
-                }
-                entry = e.next_order;
+pub fn php_builtin_max(args: []const Value) Value {
+    if (args.len == 0) return nanbox.encodeNull();
+    if (args.len == 1 and nanbox.isArray(args[0])) {
+        const arr = getArrayPtr(args[0]);
+        var max_val: ?Value = null;
+        var entry = arr.first;
+        while (entry) |e| {
+            if (max_val == null or compareValues(e.value, max_val.?) == .gt) {
+                max_val = e.value;
             }
-            if (max_val) |v| {
-                return php_value_clone(v);
-            }
+            entry = e.next_order;
         }
-        return php_value_create_null();
+        if (max_val) |v| {
+            return php_value_clone(v);
+        }
+        return nanbox.encodeNull();
     }
 
     var max_val = args[0];
@@ -2001,20 +2184,20 @@ pub fn php_builtin_max(args: []const *PHPValue) *PHPValue {
 }
 
 /// floor - Round down
-pub fn php_builtin_floor(val: *PHPValue) *PHPValue {
-    const f = val.toFloat();
+pub fn php_builtin_floor(val: Value) Value {
+    const f = php_value_to_float(val);
     return php_value_create_float(@floor(f));
 }
 
 /// ceil - Round up
-pub fn php_builtin_ceil(val: *PHPValue) *PHPValue {
-    const f = val.toFloat();
+pub fn php_builtin_ceil(val: Value) Value {
+    const f = php_value_to_float(val);
     return php_value_create_float(@ceil(f));
 }
 
 /// round - Round to nearest
-pub fn php_builtin_round(val: *PHPValue, precision: i64) *PHPValue {
-    const f = val.toFloat();
+pub fn php_builtin_round(val: Value, precision: i64) Value {
+    const f = php_value_to_float(val);
     if (precision == 0) {
         return php_value_create_float(@round(f));
     }
@@ -2023,255 +2206,604 @@ pub fn php_builtin_round(val: *PHPValue, precision: i64) *PHPValue {
 }
 
 // ============================================================================
+// Arithmetic & Comparison Operators
+// ============================================================================
+
+/// Check if a value can be used in arithmetic operations.
+fn checkArithmeticOperand(val: Value) bool {
+    if (nanbox.isNull(val) or nanbox.isBool(val) or nanbox.isInt(val) or nanbox.isFloat(val)) return true;
+    if (nanbox.isString(val)) {
+        const str = getStringPtr(val);
+        _ = parseIntFromString(str.getData()) catch {
+            _ = parseFloatFromString(str.getData()) catch return false;
+        };
+        return true;
+    }
+    if (nanbox.isArray(val)) return true;
+    if (nanbox.isObject(val)) return true;
+    return false;
+}
+
+/// Addition (PHP semantics): int+int stays int (overflow → float), otherwise float.
+pub fn php_add(lhs: Value, rhs: Value) !Value {
+    if (nanbox.isArray(lhs) and nanbox.isArray(rhs)) {
+        return php_array_union(lhs, rhs);
+    }
+    if (nanbox.isInt(lhs) and nanbox.isInt(rhs)) {
+        const a = nanbox.decodeInt(lhs);
+        const b = nanbox.decodeInt(rhs);
+        const result = @addWithOverflow(a, b);
+        if (result[1] != 0) {
+            return php_value_create_float(@as(f64, @floatFromInt(a)) + @as(f64, @floatFromInt(b)));
+        }
+        return php_value_create_int(result[0]);
+    }
+    const a = php_value_to_float(lhs);
+    const b = php_value_to_float(rhs);
+    return php_value_create_float(a + b);
+}
+
+/// Subtraction (PHP semantics).
+pub fn php_sub(lhs: Value, rhs: Value) !Value {
+    if (nanbox.isInt(lhs) and nanbox.isInt(rhs)) {
+        const a = nanbox.decodeInt(lhs);
+        const b = nanbox.decodeInt(rhs);
+        const result = @subWithOverflow(a, b);
+        if (result[1] != 0) {
+            return php_value_create_float(@as(f64, @floatFromInt(a)) - @as(f64, @floatFromInt(b)));
+        }
+        return php_value_create_int(result[0]);
+    }
+    const a = php_value_to_float(lhs);
+    const b = php_value_to_float(rhs);
+    return php_value_create_float(a - b);
+}
+
+/// Unary negation.
+pub fn php_neg(val: Value) !Value {
+    if (nanbox.isInt(val)) {
+        const a = nanbox.decodeInt(val);
+        return php_value_create_int(-a);
+    }
+    return php_value_create_float(-php_value_to_float(val));
+}
+
+/// Multiplication (PHP semantics).
+pub fn php_mul(lhs: Value, rhs: Value) !Value {
+    if (nanbox.isInt(lhs) and nanbox.isInt(rhs)) {
+        const a = nanbox.decodeInt(lhs);
+        const b = nanbox.decodeInt(rhs);
+        const result = @mulWithOverflow(a, b);
+        if (result[1] != 0) {
+            return php_value_create_float(@as(f64, @floatFromInt(a)) * @as(f64, @floatFromInt(b)));
+        }
+        return php_value_create_int(result[0]);
+    }
+    const a = php_value_to_float(lhs);
+    const b = php_value_to_float(rhs);
+    return php_value_create_float(a * b);
+}
+
+/// Division (PHP semantics).
+pub fn php_div(lhs: Value, rhs: Value) !Value {
+    const lhs_is_int = nanbox.isInt(lhs) or nanbox.isNull(lhs) or nanbox.isBool(lhs);
+    const rhs_is_int = nanbox.isInt(rhs) or nanbox.isNull(rhs) or nanbox.isBool(rhs);
+
+    if (lhs_is_int and rhs_is_int) {
+        const a = php_value_to_int(lhs);
+        const b = php_value_to_int(rhs);
+        if (b == 0) {
+            php_throw_message("Division by zero");
+            return error.RuntimeError;
+        }
+        if (@mod(a, b) == 0) {
+            const result = @divTrunc(a, b);
+            return php_value_create_int(result);
+        }
+    }
+
+    const a = php_value_to_float(lhs);
+    const b = php_value_to_float(rhs);
+    if (b == 0.0) {
+        php_throw_message("Division by zero");
+        return error.RuntimeError;
+    }
+    return php_value_create_float(a / b);
+}
+
+/// Modulo (PHP semantics).
+pub fn php_mod(lhs: Value, rhs: Value) !Value {
+    const a = php_value_to_int(lhs);
+    const b = php_value_to_int(rhs);
+    if (b == 0) {
+        php_throw_message("Modulo by zero");
+        return error.RuntimeError;
+    }
+    return php_value_create_int(@mod(a, b));
+}
+
+/// Power (PHP semantics).
+pub fn php_pow(base: Value, exp: Value) !Value {
+    if (nanbox.isInt(base) and nanbox.isInt(exp) and php_value_to_int(exp) >= 0) {
+        const a_i = php_value_to_int(base);
+        const b_i = php_value_to_int(exp);
+        var result: i64 = 1;
+        var i: i64 = 0;
+        while (i < b_i) : (i += 1) {
+            const ovf = @mulWithOverflow(result, a_i);
+            if (ovf[1] != 0) {
+                break;
+            }
+            result = ovf[0];
+        }
+        if (i == b_i) {
+            return php_value_create_int(result);
+        }
+    }
+    const a = php_value_to_float(base);
+    const b = php_value_to_float(exp);
+    return php_value_create_float(std.math.pow(f64, a, b));
+}
+
+/// Concatenation (the `.` operator in PHP).
+pub fn php_concat(lhs: Value, rhs: Value, allocator: Allocator) !Value {
+    _ = allocator;
+    return php_string_concat(lhs, rhs);
+}
+
+/// Concatenation with undefined variable handling (for AOT uninitialized var warnings).
+pub fn php_concat_with_undef(lhs: Value, rhs: Value, lhs_undef: bool, lhs_name: []const u8, rhs_undef: bool, rhs_name: []const u8, allocator: Allocator) !Value {
+    _ = lhs_undef;
+    _ = lhs_name;
+    _ = rhs_undef;
+    _ = rhs_name;
+    return php_concat(lhs, rhs, allocator);
+}
+
+/// Equality (==) with PHP type juggling.
+pub fn php_eq(lhs: Value, rhs: Value) !Value {
+    if (nanbox.isNull(lhs) and nanbox.isNull(rhs)) return php_value_create_bool(true);
+    if (nanbox.isNull(lhs) or nanbox.isNull(rhs)) return php_value_create_bool(false);
+
+    if (nanbox.isBool(lhs) or nanbox.isBool(rhs)) {
+        return php_value_create_bool(valueIsTruthy(lhs) == valueIsTruthy(rhs));
+    }
+
+    if ((nanbox.isInt(lhs) or nanbox.isFloat(lhs)) and (nanbox.isInt(rhs) or nanbox.isFloat(rhs))) {
+        return php_value_create_bool(php_value_to_float(lhs) == php_value_to_float(rhs));
+    }
+    if ((nanbox.isInt(lhs) or nanbox.isFloat(lhs)) and nanbox.isString(rhs)) {
+        const f = parseFloatFromString(getStringPtr(rhs).getData()) catch return php_value_create_bool(false);
+        return php_value_create_bool(php_value_to_float(lhs) == f);
+    }
+    if (nanbox.isString(lhs) and (nanbox.isInt(rhs) or nanbox.isFloat(rhs))) {
+        const f = parseFloatFromString(getStringPtr(lhs).getData()) catch return php_value_create_bool(false);
+        return php_value_create_bool(f == php_value_to_float(rhs));
+    }
+
+    if (nanbox.isString(lhs) and nanbox.isString(rhs)) {
+        return php_value_create_bool(getStringPtr(lhs).eql(getStringPtr(rhs)));
+    }
+
+    if (nanbox.isArray(lhs) and nanbox.isArray(rhs)) {
+        return php_value_create_bool(lhs == rhs);
+    }
+
+    return php_value_create_bool(valueIsTruthy(lhs) == valueIsTruthy(rhs));
+}
+
+/// Not equal (!=) with PHP type juggling.
+pub fn php_ne(lhs: Value, rhs: Value) !Value {
+    const eq_result = try php_eq(lhs, rhs);
+    return php_value_create_bool(!nanbox.decodeBool(eq_result));
+}
+
+/// Strict equality (===).
+pub fn php_identical(lhs: Value, rhs: Value) !Value {
+    // For simple types, identity is bit-exact equality
+    if (nanbox.isNull(lhs) or nanbox.isNull(rhs)) {
+        return php_value_create_bool(nanbox.isNull(lhs) and nanbox.isNull(rhs));
+    }
+    if (nanbox.isBool(lhs) or nanbox.isBool(rhs)) {
+        if (!nanbox.isBool(lhs) or !nanbox.isBool(rhs)) return php_value_create_bool(false);
+        return php_value_create_bool(nanbox.decodeBool(lhs) == nanbox.decodeBool(rhs));
+    }
+    if (nanbox.isInt(lhs) or nanbox.isInt(rhs)) {
+        if (!nanbox.isInt(lhs) or !nanbox.isInt(rhs)) return php_value_create_bool(false);
+        return php_value_create_bool(nanbox.decodeInt(lhs) == nanbox.decodeInt(rhs));
+    }
+    if (nanbox.isFloat(lhs) or nanbox.isFloat(rhs)) {
+        if (!nanbox.isFloat(lhs) or !nanbox.isFloat(rhs)) return php_value_create_bool(false);
+        return php_value_create_bool(nanbox.decodeFloat(lhs) == nanbox.decodeFloat(rhs));
+    }
+    if (nanbox.isString(lhs) or nanbox.isString(rhs)) {
+        if (!nanbox.isString(lhs) or !nanbox.isString(rhs)) return php_value_create_bool(false);
+        return php_value_create_bool(getStringPtr(lhs).eql(getStringPtr(rhs)));
+    }
+    if (nanbox.isArray(lhs) or nanbox.isArray(rhs)) {
+        if (!nanbox.isArray(lhs) or !nanbox.isArray(rhs)) return php_value_create_bool(false);
+        return php_value_create_bool(getArrayPtr(lhs) == getArrayPtr(rhs));
+    }
+    if (nanbox.isObject(lhs) or nanbox.isObject(rhs)) {
+        if (!nanbox.isObject(lhs) or !nanbox.isObject(rhs)) return php_value_create_bool(false);
+        return php_value_create_bool(getObjectPtr(lhs) == getObjectPtr(rhs));
+    }
+    return php_value_create_bool(false);
+}
+
+/// Strict not equal (!==).
+pub fn php_not_identical(lhs: Value, rhs: Value) !Value {
+    const result = try php_identical(lhs, rhs);
+    return php_value_create_bool(!nanbox.decodeBool(result));
+}
+
+/// Less than (<).
+pub fn php_lt(lhs: Value, rhs: Value) !Value {
+    if ((nanbox.isInt(lhs) or nanbox.isFloat(lhs)) and (nanbox.isInt(rhs) or nanbox.isFloat(rhs))) {
+        return php_value_create_bool(php_value_to_float(lhs) < php_value_to_float(rhs));
+    }
+    const str_a = php_value_to_string(lhs);
+    defer gcReleaseValue(str_a);
+    const str_b = php_value_to_string(rhs);
+    defer gcReleaseValue(str_b);
+    return php_value_create_bool(getStringPtr(str_a).compare(getStringPtr(str_b)) == .lt);
+}
+
+/// Less than or equal (<=).
+pub fn php_le(lhs: Value, rhs: Value) !Value {
+    if ((nanbox.isInt(lhs) or nanbox.isFloat(lhs)) and (nanbox.isInt(rhs) or nanbox.isFloat(rhs))) {
+        return php_value_create_bool(php_value_to_float(lhs) <= php_value_to_float(rhs));
+    }
+    const str_a = php_value_to_string(lhs);
+    defer gcReleaseValue(str_a);
+    const str_b = php_value_to_string(rhs);
+    defer gcReleaseValue(str_b);
+    const ord = getStringPtr(str_a).compare(getStringPtr(str_b));
+    return php_value_create_bool(ord == .lt or ord == .eq);
+}
+
+/// Greater than (>).
+pub fn php_gt(lhs: Value, rhs: Value) !Value {
+    if ((nanbox.isInt(lhs) or nanbox.isFloat(lhs)) and (nanbox.isInt(rhs) or nanbox.isFloat(rhs))) {
+        return php_value_create_bool(php_value_to_float(lhs) > php_value_to_float(rhs));
+    }
+    const str_a = php_value_to_string(lhs);
+    defer gcReleaseValue(str_a);
+    const str_b = php_value_to_string(rhs);
+    defer gcReleaseValue(str_b);
+    return php_value_create_bool(getStringPtr(str_a).compare(getStringPtr(str_b)) == .gt);
+}
+
+/// Greater than or equal (>=).
+pub fn php_ge(lhs: Value, rhs: Value) !Value {
+    if ((nanbox.isInt(lhs) or nanbox.isFloat(lhs)) and (nanbox.isInt(rhs) or nanbox.isFloat(rhs))) {
+        return php_value_create_bool(php_value_to_float(lhs) >= php_value_to_float(rhs));
+    }
+    const str_a = php_value_to_string(lhs);
+    defer gcReleaseValue(str_a);
+    const str_b = php_value_to_string(rhs);
+    defer gcReleaseValue(str_b);
+    const ord = getStringPtr(str_a).compare(getStringPtr(str_b));
+    return php_value_create_bool(ord == .gt or ord == .eq);
+}
+
+/// Spaceship operator (<=>).
+pub fn php_spaceship(lhs: Value, rhs: Value) !Value {
+    if ((nanbox.isInt(lhs) or nanbox.isFloat(lhs)) and (nanbox.isInt(rhs) or nanbox.isFloat(rhs))) {
+        return php_value_create_int(@intFromEnum(std.math.order(php_value_to_float(lhs), php_value_to_float(rhs))));
+    }
+    const str_a = php_value_to_string(lhs);
+    defer gcReleaseValue(str_a);
+    const str_b = php_value_to_string(rhs);
+    defer gcReleaseValue(str_b);
+    return php_value_create_int(@intFromEnum(getStringPtr(str_a).compare(getStringPtr(str_b))));
+}
+
+/// Bitwise AND (&).
+pub fn php_and(lhs: Value, rhs: Value) !Value {
+    return php_value_create_int(php_value_to_int(lhs) & php_value_to_int(rhs));
+}
+
+/// Bitwise OR (|).
+pub fn php_or(lhs: Value, rhs: Value) !Value {
+    return php_value_create_int(php_value_to_int(lhs) | php_value_to_int(rhs));
+}
+
+/// Bitwise XOR (^).
+pub fn php_xor(lhs: Value, rhs: Value) !Value {
+    return php_value_create_int(php_value_to_int(lhs) ^ php_value_to_int(rhs));
+}
+
+/// Boolean OR (or keyword).
+pub fn php_bool_or(lhs: Value, rhs: Value) Value {
+    return php_value_create_bool(valueIsTruthy(lhs) or valueIsTruthy(rhs));
+}
+
+/// Logical XOR.
+pub fn php_logical_xor(lhs: Value, rhs: Value) !Value {
+    return php_value_create_bool(valueIsTruthy(lhs) != valueIsTruthy(rhs));
+}
+
+/// Array union ($a + $b): left-preferring merge.
+pub fn php_array_union(lhs: Value, rhs: Value) !Value {
+    if (!nanbox.isArray(lhs) or !nanbox.isArray(rhs)) {
+        return php_throw_message("Unsupported operand types for +");
+    }
+    const lhs_arr = getArrayPtr(lhs);
+    const rhs_arr = getArrayPtr(rhs);
+
+    const result = php_value_create_array();
+    if (!nanbox.isArray(result)) return result;
+    const result_arr = getArrayPtr(result);
+
+    var entry = lhs_arr.first;
+    while (entry) |e| {
+        gcRetainValue(e.value);
+        result_arr.set(e.key, e.value) catch {};
+        entry = e.next_order;
+    }
+
+    entry = rhs_arr.first;
+    while (entry) |e| {
+        if (!result_arr.keyExists(e.key)) {
+            gcRetainValue(e.value);
+            result_arr.set(e.key, e.value) catch {};
+        }
+        entry = e.next_order;
+    }
+
+    return result;
+}
+
+/// pow() function (aliased as php_pow_func).
+pub fn php_pow_func(base: Value, exponent: Value) !Value {
+    return php_pow(base, exponent);
+}
+
+/// addslashes() function.
+pub fn php_addslashes(str: Value, allocator: Allocator) !Value {
+    if (!nanbox.isString(str)) {
+        return php_value_to_string(str);
+    }
+    const s = getStringPtr(str);
+    var result_buf = std.ArrayList(u8).init(allocator);
+    defer result_buf.deinit();
+
+    for (s.data[0..s.length]) |c| {
+        switch (c) {
+            '\'', '"', '\\' => try result_buf.appendSlice(&[_]u8{ '\\', c }),
+            0 => try result_buf.appendSlice("\\0"),
+            else => try result_buf.append(c),
+        }
+    }
+    return php_value_create_string(result_buf.items);
+}
+
+/// Check if a value represents an "undefined variable" access.
+/// In the NaN-boxed world, undefined is represented as a special null-like pattern.
+pub fn php_is_undefined(val: Value) bool {
+    return nanbox.isNull(val);
+}
+
+// ============================================================================
 // Helper Functions for Output
 // ============================================================================
 
 /// Dump value with type information (for var_dump)
-fn dumpValue(writer: anytype, val: *PHPValue, indent: usize) !void {
+fn dumpValue(writer: anytype, val: Value, indent: usize) !void {
     const indent_str = "  ";
 
-    // Write indentation
     for (0..indent) |_| {
         try writer.writeAll(indent_str);
     }
 
-    switch (val.tag) {
-        .null => try writer.writeAll("NULL\n"),
-        .bool => {
-            try writer.writeAll("bool(");
-            try writer.writeAll(if (val.data.bool_val) "true" else "false");
-            try writer.writeAll(")\n");
-        },
-        .int => {
-            try writer.print("int({d})\n", .{val.data.int_val});
-        },
-        .float => {
-            try writer.print("float({d})\n", .{val.data.float_val});
-        },
-        .string => {
-            if (val.data.string_ptr) |str| {
-                try writer.print("string({d}) \"{s}\"\n", .{ str.length, str.data[0..str.length] });
-            } else {
-                try writer.writeAll("string(0) \"\"\n");
+    if (nanbox.isNull(val)) {
+        try writer.writeAll("NULL\n");
+    } else if (nanbox.isBool(val)) {
+        try writer.writeAll("bool(");
+        try writer.writeAll(if (nanbox.decodeBool(val)) "true" else "false");
+        try writer.writeAll(")\n");
+    } else if (nanbox.isInt(val)) {
+        try writer.print("int({d})\n", .{nanbox.decodeInt(val)});
+    } else if (nanbox.isFloat(val)) {
+        try writer.print("float({d})\n", .{nanbox.decodeFloat(val)});
+    } else if (nanbox.isString(val)) {
+        const str = getStringPtr(val);
+        try writer.print("string({d}) \"{s}\"\n", .{ str.length, str.data[0..str.length] });
+    } else if (nanbox.isArray(val)) {
+        const arr = getArrayPtr(val);
+        try writer.print("array({d}) {{\n", .{arr.count()});
+        var entry = arr.first;
+        while (entry) |e| {
+            for (0..indent + 1) |_| {
+                try writer.writeAll(indent_str);
             }
-        },
-        .array => {
-            if (val.data.array_ptr) |arr| {
-                try writer.print("array({d}) {{\n", .{arr.count()});
-                var entry = arr.first;
-                while (entry) |e| {
-                    for (0..indent + 1) |_| {
-                        try writer.writeAll(indent_str);
-                    }
-                    switch (e.key) {
-                        .int => |i| try writer.print("[{d}]=>\n", .{i}),
-                        .string => |s| try writer.print("[\"{s}\"]=>\n", .{s.data[0..s.length]}),
-                    }
-                    try dumpValue(writer, e.value, indent + 1);
-                    entry = e.next_order;
-                }
-                for (0..indent) |_| {
-                    try writer.writeAll(indent_str);
-                }
-                try writer.writeAll("}\n");
-            } else {
-                try writer.writeAll("array(0) {}\n");
+            switch (e.key) {
+                .int => |i| try writer.print("[{d}]=>\n", .{i}),
+                .string => |s| try writer.print("[\"{s}\"]=>\n", .{s.data[0..s.length]}),
             }
-        },
-        .object => {
-            if (val.data.object_ptr) |obj| {
-                try writer.print("object({s})#{d} ({d}) {{\n", .{
-                    obj.class_name,
-                    @intFromPtr(obj),
-                    obj.properties.count(),
-                });
-                var entry = obj.properties.first;
-                while (entry) |e| {
-                    for (0..indent + 1) |_| {
-                        try writer.writeAll(indent_str);
-                    }
-                    if (e.key == .string) {
-                        try writer.print("[\"{s}\"]=>\n", .{e.key.string.data[0..e.key.string.length]});
-                    }
-                    try dumpValue(writer, e.value, indent + 1);
-                    entry = e.next_order;
-                }
-                for (0..indent) |_| {
-                    try writer.writeAll(indent_str);
-                }
-                try writer.writeAll("}\n");
-            } else {
-                try writer.writeAll("object(null)\n");
+            try dumpValue(writer, e.value, indent + 1);
+            entry = e.next_order;
+        }
+        for (0..indent) |_| {
+            try writer.writeAll(indent_str);
+        }
+        try writer.writeAll("}\n");
+    } else if (nanbox.isObject(val)) {
+        const obj = getObjectPtr(val);
+        try writer.print("object({s})#{d} ({d}) {{\n", .{
+            obj.class_name,
+            @intFromPtr(obj),
+            obj.properties.count(),
+        });
+        var entry = obj.properties.first;
+        while (entry) |e| {
+            for (0..indent + 1) |_| {
+                try writer.writeAll(indent_str);
             }
-        },
-        .resource => try writer.writeAll("resource\n"),
-        .callable => try writer.writeAll("callable\n"),
+            if (e.key == .string) {
+                try writer.print("[\"{s}\"]=>\n", .{e.key.string.data[0..e.key.string.length]});
+            }
+            try dumpValue(writer, e.value, indent + 1);
+            entry = e.next_order;
+        }
+        for (0..indent) |_| {
+            try writer.writeAll(indent_str);
+        }
+        try writer.writeAll("}\n");
+    } else {
+        try writer.writeAll("unknown\n");
     }
 }
 
 /// Print value in human-readable format (for print_r)
-fn printValue(writer: anytype, val: *PHPValue, indent: usize) !void {
+fn printValue(writer: anytype, val: Value, indent: usize) !void {
     const indent_str = "    ";
 
-    switch (val.tag) {
-        .null => try writer.writeAll(""),
-        .bool => try writer.writeAll(if (val.data.bool_val) "1" else ""),
-        .int => try writer.print("{d}", .{val.data.int_val}),
-        .float => try writer.print("{d}", .{val.data.float_val}),
-        .string => {
-            if (val.data.string_ptr) |str| {
-                try writer.writeAll(str.data[0..str.length]);
-            }
-        },
-        .array => {
-            try writer.writeAll("Array\n");
-            for (0..indent) |_| {
+    if (nanbox.isNull(val)) {
+        try writer.writeAll("");
+    } else if (nanbox.isBool(val)) {
+        try writer.writeAll(if (nanbox.decodeBool(val)) "1" else "");
+    } else if (nanbox.isInt(val)) {
+        try writer.print("{d}", .{nanbox.decodeInt(val)});
+    } else if (nanbox.isFloat(val)) {
+        try writer.print("{d}", .{nanbox.decodeFloat(val)});
+    } else if (nanbox.isString(val)) {
+        const str = getStringPtr(val);
+        try writer.writeAll(str.data[0..str.length]);
+    } else if (nanbox.isArray(val)) {
+        try writer.writeAll("Array\n");
+        for (0..indent) |_| {
+            try writer.writeAll(indent_str);
+        }
+        try writer.writeAll("(\n");
+        const arr = getArrayPtr(val);
+        var entry = arr.first;
+        while (entry) |e| {
+            for (0..indent + 1) |_| {
                 try writer.writeAll(indent_str);
             }
-            try writer.writeAll("(\n");
-            if (val.data.array_ptr) |arr| {
-                var entry = arr.first;
-                while (entry) |e| {
-                    for (0..indent + 1) |_| {
-                        try writer.writeAll(indent_str);
-                    }
-                    switch (e.key) {
-                        .int => |i| try writer.print("[{d}] => ", .{i}),
-                        .string => |s| try writer.print("[{s}] => ", .{s.data[0..s.length]}),
-                    }
-                    try printValue(writer, e.value, indent + 1);
-                    try writer.writeAll("\n");
-                    entry = e.next_order;
-                }
+            switch (e.key) {
+                .int => |i| try writer.print("[{d}] => ", .{i}),
+                .string => |s| try writer.print("[{s}] => ", .{s.data[0..s.length]}),
             }
-            for (0..indent) |_| {
+            try printValue(writer, e.value, indent + 1);
+            try writer.writeAll("\n");
+            entry = e.next_order;
+        }
+        for (0..indent) |_| {
+            try writer.writeAll(indent_str);
+        }
+        try writer.writeAll(")\n");
+    } else if (nanbox.isObject(val)) {
+        const obj = getObjectPtr(val);
+        try writer.print("{s} Object\n", .{obj.class_name});
+        for (0..indent) |_| {
+            try writer.writeAll(indent_str);
+        }
+        try writer.writeAll("(\n");
+        var entry = obj.properties.first;
+        while (entry) |e| {
+            for (0..indent + 1) |_| {
                 try writer.writeAll(indent_str);
             }
-            try writer.writeAll(")\n");
-        },
-        .object => {
-            if (val.data.object_ptr) |obj| {
-                try writer.print("{s} Object\n", .{obj.class_name});
-                for (0..indent) |_| {
-                    try writer.writeAll(indent_str);
-                }
-                try writer.writeAll("(\n");
-                var entry = obj.properties.first;
-                while (entry) |e| {
-                    for (0..indent + 1) |_| {
-                        try writer.writeAll(indent_str);
-                    }
-                    if (e.key == .string) {
-                        try writer.print("[{s}] => ", .{e.key.string.data[0..e.key.string.length]});
-                    }
-                    try printValue(writer, e.value, indent + 1);
-                    try writer.writeAll("\n");
-                    entry = e.next_order;
-                }
-                for (0..indent) |_| {
-                    try writer.writeAll(indent_str);
-                }
-                try writer.writeAll(")\n");
+            if (e.key == .string) {
+                try writer.print("[{s}] => ", .{e.key.string.data[0..e.key.string.length]});
             }
-        },
-        .resource => try writer.writeAll("Resource"),
-        .callable => try writer.writeAll("Callable"),
+            try printValue(writer, e.value, indent + 1);
+            try writer.writeAll("\n");
+            entry = e.next_order;
+        }
+        for (0..indent) |_| {
+            try writer.writeAll(indent_str);
+        }
+        try writer.writeAll(")\n");
+    } else {
+        try writer.writeAll("unknown");
     }
 }
 
 /// Export value as parsable PHP code (for var_export)
-fn exportValue(writer: anytype, val: *PHPValue) !void {
-    switch (val.tag) {
-        .null => try writer.writeAll("NULL"),
-        .bool => try writer.writeAll(if (val.data.bool_val) "true" else "false"),
-        .int => try writer.print("{d}", .{val.data.int_val}),
-        .float => try writer.print("{d}", .{val.data.float_val}),
-        .string => {
-            if (val.data.string_ptr) |str| {
-                try writer.writeAll("'");
-                // Escape single quotes
-                for (str.data[0..str.length]) |c| {
-                    if (c == '\'') {
-                        try writer.writeAll("\\'");
-                    } else if (c == '\\') {
-                        try writer.writeAll("\\\\");
-                    } else {
-                        try writer.writeByte(c);
-                    }
-                }
-                try writer.writeAll("'");
+fn exportValue(writer: anytype, val: Value) !void {
+    if (nanbox.isNull(val)) {
+        try writer.writeAll("NULL");
+    } else if (nanbox.isBool(val)) {
+        try writer.writeAll(if (nanbox.decodeBool(val)) "true" else "false");
+    } else if (nanbox.isInt(val)) {
+        try writer.print("{d}", .{nanbox.decodeInt(val)});
+    } else if (nanbox.isFloat(val)) {
+        try writer.print("{d}", .{nanbox.decodeFloat(val)});
+    } else if (nanbox.isString(val)) {
+        const str = getStringPtr(val);
+        try writer.writeAll("'");
+        for (str.data[0..str.length]) |c| {
+            if (c == '\'') {
+                try writer.writeAll("\\'");
+            } else if (c == '\\') {
+                try writer.writeAll("\\\\");
             } else {
-                try writer.writeAll("''");
+                try writer.writeByte(c);
             }
-        },
-        .array => {
-            try writer.writeAll("array (\n");
-            if (val.data.array_ptr) |arr| {
-                var entry = arr.first;
-                while (entry) |e| {
-                    try writer.writeAll("  ");
-                    switch (e.key) {
-                        .int => |i| try writer.print("{d}", .{i}),
-                        .string => |s| {
-                            try writer.writeAll("'");
-                            try writer.writeAll(s.data[0..s.length]);
-                            try writer.writeAll("'");
-                        },
-                    }
-                    try writer.writeAll(" => ");
-                    try exportValue(writer, e.value);
-                    try writer.writeAll(",\n");
-                    entry = e.next_order;
-                }
+        }
+        try writer.writeAll("'");
+    } else if (nanbox.isArray(val)) {
+        try writer.writeAll("array (\n");
+        const arr = getArrayPtr(val);
+        var entry = arr.first;
+        while (entry) |e| {
+            try writer.writeAll("  ");
+            switch (e.key) {
+                .int => |i| try writer.print("{d}", .{i}),
+                .string => |s| {
+                    try writer.writeAll("'");
+                    try writer.writeAll(s.data[0..s.length]);
+                    try writer.writeAll("'");
+                },
             }
-            try writer.writeAll(")");
-        },
-        .object => {
-            if (val.data.object_ptr) |obj| {
-                try writer.print("(object) array(\n", .{});
-                var entry = obj.properties.first;
-                while (entry) |e| {
-                    try writer.writeAll("   '");
-                    if (e.key == .string) {
-                        try writer.writeAll(e.key.string.data[0..e.key.string.length]);
-                    }
-                    try writer.writeAll("' => ");
-                    try exportValue(writer, e.value);
-                    try writer.writeAll(",\n");
-                    entry = e.next_order;
-                }
-                try writer.writeAll(")");
+            try writer.writeAll(" => ");
+            try exportValue(writer, e.value);
+            try writer.writeAll(",\n");
+            entry = e.next_order;
+        }
+        try writer.writeAll(")");
+    } else if (nanbox.isObject(val)) {
+        const obj = getObjectPtr(val);
+        try writer.print("(object) array(\n", .{});
+        var entry = obj.properties.first;
+        while (entry) |e| {
+            try writer.writeAll("   '");
+            if (e.key == .string) {
+                try writer.writeAll(e.key.string.data[0..e.key.string.length]);
             }
-        },
-        .resource => try writer.writeAll("NULL /* resource */"),
-        .callable => try writer.writeAll("NULL /* callable */"),
+            try writer.writeAll("' => ");
+            try exportValue(writer, e.value);
+            try writer.writeAll(",\n");
+            entry = e.next_order;
+        }
+        try writer.writeAll(")");
+    } else {
+        try writer.writeAll("NULL");
     }
 }
 
 /// Compare two values (for min/max)
-fn compareValues(a: *PHPValue, b: *PHPValue) std.math.Order {
-    // Numeric comparison if both are numeric
-    if ((a.tag == .int or a.tag == .float) and (b.tag == .int or b.tag == .float)) {
-        const fa = a.toFloat();
-        const fb = b.toFloat();
+fn compareValues(a: Value, b: Value) std.math.Order {
+    if ((nanbox.isInt(a) or nanbox.isFloat(a)) and (nanbox.isInt(b) or nanbox.isFloat(b))) {
+        const fa = php_value_to_float(a);
+        const fb = php_value_to_float(b);
         return std.math.order(fa, fb);
     }
 
-    // String comparison if both are strings
-    if (a.tag == .string and b.tag == .string) {
-        if (a.data.string_ptr) |sa| {
-            if (b.data.string_ptr) |sb| {
-                return sa.compare(sb);
-            }
-        }
+    if (nanbox.isString(a) and nanbox.isString(b)) {
+        const sa = getStringPtr(a);
+        const sb = getStringPtr(b);
+        return sa.compare(sb);
     }
 
-    // Default: compare as floats
-    const fa = a.toFloat();
-    const fb = b.toFloat();
+    const fa = php_value_to_float(a);
+    const fb = php_value_to_float(b);
     return std.math.order(fa, fb);
 }
-
 
 // ============================================================================
 // Exception Handling Runtime
@@ -2279,37 +2811,26 @@ fn compareValues(a: *PHPValue, b: *PHPValue) std.math.Order {
 
 /// Stack frame for exception stack trace
 pub const StackFrame = struct {
-    /// Function name
     function_name: []const u8,
-    /// File name
     file_name: []const u8,
-    /// Line number
     line: u32,
-    /// Column number
     column: u32,
-    /// Class name (for methods)
     class_name: ?[]const u8,
-    /// Next frame in the stack
     next: ?*StackFrame,
 };
 
 /// Exception state
 pub const ExceptionState = struct {
-    /// Current exception (if any)
-    current_exception: ?*PHPValue,
-    /// Exception message
+    current_exception: Value,
     message: ?[]const u8,
-    /// Exception code
     code: i64,
-    /// Stack trace
     stack_trace: ?*StackFrame,
-    /// Previous exception (for chaining)
     previous: ?*ExceptionState,
 };
 
 /// Thread-local exception state
 var exception_state: ExceptionState = .{
-    .current_exception = null,
+    .current_exception = nanbox.encodeNull(),
     .message = null,
     .code = 0,
     .stack_trace = null,
@@ -2317,30 +2838,24 @@ var exception_state: ExceptionState = .{
 };
 
 /// Throw an exception
-pub fn php_throw(exception: *PHPValue) void {
+pub fn php_throw(exception: Value) void {
     exception_state.current_exception = exception;
-    php_gc_retain(exception);
+    gcRetainValue(exception);
 
-    // Extract message if it's an object with a message property
-    if (exception.tag == .object) {
-        if (exception.data.object_ptr) |obj| {
-            // Try to get message property
-            const allocator = getGlobalAllocator();
-            const msg_key = PHPString.init(allocator, "message") catch return;
-            defer msg_key.deinit(allocator);
+    if (nanbox.isObject(exception)) {
+        const obj = getObjectPtr(exception);
+        const allocator = getGlobalAllocator();
+        const msg_key = PHPString.init(allocator, "message") catch return;
+        defer msg_key.deinit(allocator);
 
-            if (obj.getProperty(msg_key)) |msg_val| {
-                if (msg_val.tag == .string) {
-                    if (msg_val.data.string_ptr) |str| {
-                        exception_state.message = str.getData();
-                    }
-                }
-            }
-        }
-    } else if (exception.tag == .string) {
-        if (exception.data.string_ptr) |str| {
+        const msg_val = obj.getProperty(msg_key);
+        if (nanbox.isString(msg_val)) {
+            const str = getStringPtr(msg_val);
             exception_state.message = str.getData();
         }
+    } else if (nanbox.isString(exception)) {
+        const str = getStringPtr(exception);
+        exception_state.message = str.getData();
     }
 }
 
@@ -2348,23 +2863,20 @@ pub fn php_throw(exception: *PHPValue) void {
 pub fn php_throw_message(message: []const u8) void {
     const exception = php_value_create_string(message);
     php_throw(exception);
-    // php_throw retains the exception, so we release our reference
-    php_gc_release(exception);
+    gcReleaseValue(exception);
 }
 
 /// Throw a typed exception
 pub fn php_throw_exception(class_name: []const u8, message: []const u8, code: i64) void {
     const allocator = getGlobalAllocator();
 
-    // Create exception object
     const exception = php_value_create_object(class_name);
-    if (exception.data.object_ptr) |obj| {
-        // Set message property
+    if (nanbox.isObject(exception)) {
+        const obj = getObjectPtr(exception);
         const msg_key = PHPString.init(allocator, "message") catch return;
         const msg_val = php_value_create_string(message);
         obj.setProperty(msg_key, msg_val) catch {};
 
-        // Set code property
         const code_key = PHPString.init(allocator, "code") catch return;
         const code_val = php_value_create_int(code);
         obj.setProperty(code_key, code_val) catch {};
@@ -2375,44 +2887,44 @@ pub fn php_throw_exception(class_name: []const u8, message: []const u8, code: i6
 }
 
 /// Catch the current exception
-pub fn php_catch() ?*PHPValue {
+pub fn php_catch() Value {
     const ex = exception_state.current_exception;
-    exception_state.current_exception = null;
+    exception_state.current_exception = nanbox.encodeNull();
     exception_state.message = null;
     exception_state.code = 0;
     return ex;
 }
 
 /// Catch exception of specific type
-pub fn php_catch_type(class_name: []const u8) ?*PHPValue {
-    if (exception_state.current_exception) |ex| {
-        if (ex.tag == .object) {
-            if (ex.data.object_ptr) |obj| {
-                if (std.mem.eql(u8, obj.class_name, class_name)) {
-                    return php_catch();
-                }
+pub fn php_catch_type(class_name: []const u8) Value {
+    if (!nanbox.isNull(exception_state.current_exception)) {
+        const ex = exception_state.current_exception;
+        if (nanbox.isObject(ex)) {
+            const obj = getObjectPtr(ex);
+            if (std.mem.eql(u8, obj.class_name, class_name)) {
+                return php_catch();
             }
         }
     }
-    return null;
+    return nanbox.encodeNull();
 }
 
 /// Check if there's a pending exception
 pub fn php_has_exception() bool {
-    return exception_state.current_exception != null;
+    return !nanbox.isNull(exception_state.current_exception);
 }
 
 /// Get current exception without clearing it
-pub fn php_get_exception() ?*PHPValue {
+pub fn php_get_exception() Value {
     return exception_state.current_exception;
 }
 
 /// Clear current exception without returning it
 pub fn php_clear_exception() void {
-    if (exception_state.current_exception) |ex| {
-        php_gc_release(ex);
+    if (!nanbox.isNull(exception_state.current_exception)) {
+        gcReleaseValue(exception_state.current_exception);
     }
-    exception_state.current_exception = null;
+    exception_state.current_exception = nanbox.encodeNull();
     exception_state.message = null;
     exception_state.code = 0;
 }
@@ -2452,39 +2964,32 @@ pub fn php_pop_stack_frame() void {
 }
 
 /// Get stack trace as array
-pub fn php_get_stack_trace() *PHPValue {
+pub fn php_get_stack_trace() Value {
     const result = php_value_create_array();
-    if (result.data.array_ptr == null) return result;
-    const arr = result.data.array_ptr.?;
+    if (!nanbox.isArray(result)) return result;
+    const arr = getArrayPtr(result);
 
     var frame = exception_state.stack_trace;
     while (frame) |f| {
         const frame_arr = php_value_create_array();
-        if (frame_arr.data.array_ptr) |fa| {
-            // Add function name
+        if (nanbox.isArray(frame_arr)) {
+            const fa = getArrayPtr(frame_arr);
             const func_key = php_value_create_string("function");
             const func_val = php_value_create_string(f.function_name);
             php_array_set(fa, func_key, func_val);
-            php_gc_release(func_key);
 
-            // Add file name
             const file_key = php_value_create_string("file");
             const file_val = php_value_create_string(f.file_name);
             php_array_set(fa, file_key, file_val);
-            php_gc_release(file_key);
 
-            // Add line number
             const line_key = php_value_create_string("line");
             const line_val = php_value_create_int(@intCast(f.line));
             php_array_set(fa, line_key, line_val);
-            php_gc_release(line_key);
 
-            // Add class name if present
             if (f.class_name) |cn| {
                 const class_key = php_value_create_string("class");
                 const class_val = php_value_create_string(cn);
                 php_array_set(fa, class_key, class_val);
-                php_gc_release(class_key);
             }
         }
         arr.push(frame_arr) catch {};
@@ -2517,15 +3022,15 @@ pub fn php_print_stack_trace() void {
 
 /// Handle uncaught exception (called at program exit if exception is pending)
 pub fn php_handle_uncaught_exception() void {
-    if (exception_state.current_exception) |ex| {
+    if (!nanbox.isNull(exception_state.current_exception)) {
+        const ex = exception_state.current_exception;
         const stderr = std.io.getStdErr().writer();
 
         stderr.writeAll("\nFatal error: Uncaught ") catch {};
 
-        if (ex.tag == .object) {
-            if (ex.data.object_ptr) |obj| {
-                stderr.print("{s}", .{obj.class_name}) catch {};
-            }
+        if (nanbox.isObject(ex)) {
+            const obj = getObjectPtr(ex);
+            stderr.print("{s}", .{obj.class_name}) catch {};
         }
 
         if (exception_state.message) |msg| {
@@ -2540,34 +3045,29 @@ pub fn php_handle_uncaught_exception() void {
 }
 
 /// Rethrow current exception
-pub fn php_rethrow() void {
-    // Exception is already set, just return to propagate
-}
+pub fn php_rethrow() void {}
 
 /// Create a new Exception object
-pub fn php_create_exception(class_name: []const u8, message: []const u8, code: i64, previous: ?*PHPValue) *PHPValue {
+pub fn php_create_exception(class_name: []const u8, message: []const u8, code: i64, previous: Value) Value {
     const allocator = getGlobalAllocator();
 
     const exception = php_value_create_object(class_name);
-    if (exception.data.object_ptr) |obj| {
-        // Set message
+    if (nanbox.isObject(exception)) {
+        const obj = getObjectPtr(exception);
         const msg_key = PHPString.init(allocator, "message") catch return exception;
         const msg_val = php_value_create_string(message);
         obj.setProperty(msg_key, msg_val) catch {};
 
-        // Set code
         const code_key = PHPString.init(allocator, "code") catch return exception;
         const code_val = php_value_create_int(code);
         obj.setProperty(code_key, code_val) catch {};
 
-        // Set previous exception
-        if (previous) |prev| {
+        if (!nanbox.isNull(previous)) {
             const prev_key = PHPString.init(allocator, "previous") catch return exception;
-            php_gc_retain(prev);
-            obj.setProperty(prev_key, prev) catch {};
+            gcRetainValue(previous);
+            obj.setProperty(prev_key, previous) catch {};
         }
 
-        // Set file and line from current stack frame
         if (exception_state.stack_trace) |frame| {
             const file_key = PHPString.init(allocator, "file") catch return exception;
             const file_val = php_value_create_string(frame.file_name);
@@ -2582,19 +3082,15 @@ pub fn php_create_exception(class_name: []const u8, message: []const u8, code: i
     return exception;
 }
 
-
 // ============================================================================
 // Mutex / Concurrency Runtime
 // ============================================================================
 
 /// Mutex type for lock statement
 pub const PHPMutex = struct {
-    /// Internal mutex implementation
     mutex: std.Thread.Mutex,
-    /// Reference count
     ref_count: u32,
 
-    /// Initialize a new mutex
     pub fn init() PHPMutex {
         return .{
             .mutex = .{},
@@ -2602,33 +3098,25 @@ pub const PHPMutex = struct {
         };
     }
 
-    /// Lock the mutex
     pub fn lock(self: *PHPMutex) void {
         self.mutex.lock();
     }
 
-    /// Unlock the mutex
     pub fn unlock(self: *PHPMutex) void {
         self.mutex.unlock();
     }
 
-    /// Try to lock the mutex (non-blocking)
     pub fn tryLock(self: *PHPMutex) bool {
         return self.mutex.tryLock();
     }
 };
 
-/// Thread-local global mutex for lock {} blocks
-/// This is a simple implementation - each lock {} block uses the same global mutex
-/// For more advanced use cases, users should use explicit mutex objects
 var global_mutex: ?*PHPMutex = null;
 
-/// Get or create the global mutex
 fn getGlobalMutex() *PHPMutex {
     if (global_mutex == null) {
         const allocator = getGlobalAllocator();
         global_mutex = allocator.create(PHPMutex) catch {
-            // Fallback to static mutex if allocation fails
             const static = struct {
                 var mutex: PHPMutex = PHPMutex.init();
             };
@@ -2639,462 +3127,49 @@ fn getGlobalMutex() *PHPMutex {
     return global_mutex.?;
 }
 
-/// Create a new mutex
 pub fn php_mutex_new() *PHPMutex {
     const allocator = getGlobalAllocator();
     const mutex = allocator.create(PHPMutex) catch {
-        // Return global mutex as fallback
         return getGlobalMutex();
     };
     mutex.* = PHPMutex.init();
     return mutex;
 }
 
-/// Acquire the global mutex lock (for lock {} blocks)
 pub fn php_mutex_lock() void {
     const mutex = getGlobalMutex();
     mutex.lock();
 }
 
-/// Release the global mutex lock (for lock {} blocks)
 pub fn php_mutex_unlock() void {
     const mutex = getGlobalMutex();
     mutex.unlock();
 }
 
-/// Acquire a specific mutex lock
 pub fn php_mutex_lock_ptr(mutex: *PHPMutex) void {
     mutex.lock();
 }
 
-/// Release a specific mutex lock
 pub fn php_mutex_unlock_ptr(mutex: *PHPMutex) void {
     mutex.unlock();
 }
 
-/// Try to acquire a specific mutex lock (non-blocking)
 pub fn php_mutex_trylock_ptr(mutex: *PHPMutex) bool {
     return mutex.tryLock();
 }
 
-/// Retain mutex reference
 pub fn php_mutex_retain(mutex: *PHPMutex) void {
     mutex.ref_count += 1;
 }
 
-/// Release mutex reference
 pub fn php_mutex_release(mutex: *PHPMutex) void {
     if (mutex.ref_count == 0) return;
     mutex.ref_count -= 1;
     if (mutex.ref_count == 0) {
-        // Don't free the global mutex
         if (mutex == global_mutex) return;
         const allocator = getGlobalAllocator();
         allocator.destroy(mutex);
     }
-}
-
-
-// ============================================================================
-// Unit Tests
-// ============================================================================
-
-test "PHPValue creation - null" {
-    initRuntime(std.testing.allocator);
-    defer deinitRuntime();
-
-    const val = php_value_create_null();
-    defer php_gc_release(val);
-
-    try std.testing.expectEqual(ValueTag.null, val.tag);
-    try std.testing.expectEqual(@as(u32, 1), val.ref_count);
-    try std.testing.expect(val.isNull());
-    try std.testing.expect(!val.isTruthy());
-}
-
-test "PHPValue creation - bool" {
-    initRuntime(std.testing.allocator);
-    defer deinitRuntime();
-
-    const val_true = php_value_create_bool(true);
-    defer php_gc_release(val_true);
-    const val_false = php_value_create_bool(false);
-    defer php_gc_release(val_false);
-
-    try std.testing.expectEqual(ValueTag.bool, val_true.tag);
-    try std.testing.expect(val_true.data.bool_val);
-    try std.testing.expect(val_true.isTruthy());
-
-    try std.testing.expectEqual(ValueTag.bool, val_false.tag);
-    try std.testing.expect(!val_false.data.bool_val);
-    try std.testing.expect(!val_false.isTruthy());
-}
-
-test "PHPValue creation - int" {
-    initRuntime(std.testing.allocator);
-    defer deinitRuntime();
-
-    const val = php_value_create_int(42);
-    defer php_gc_release(val);
-
-    try std.testing.expectEqual(ValueTag.int, val.tag);
-    try std.testing.expectEqual(@as(i64, 42), val.data.int_val);
-    try std.testing.expect(val.isTruthy());
-
-    const zero = php_value_create_int(0);
-    defer php_gc_release(zero);
-    try std.testing.expect(!zero.isTruthy());
-}
-
-test "PHPValue creation - float" {
-    initRuntime(std.testing.allocator);
-    defer deinitRuntime();
-
-    const val = php_value_create_float(3.14);
-    defer php_gc_release(val);
-
-    try std.testing.expectEqual(ValueTag.float, val.tag);
-    try std.testing.expectApproxEqAbs(@as(f64, 3.14), val.data.float_val, 0.001);
-    try std.testing.expect(val.isTruthy());
-}
-
-test "PHPValue creation - string" {
-    initRuntime(std.testing.allocator);
-    defer deinitRuntime();
-
-    const val = php_value_create_string("hello");
-    defer php_gc_release(val);
-
-    try std.testing.expectEqual(ValueTag.string, val.tag);
-    try std.testing.expect(val.data.string_ptr != null);
-    try std.testing.expectEqualStrings("hello", val.data.string_ptr.?.getData());
-    try std.testing.expect(val.isTruthy());
-
-    // Empty string is falsy
-    const empty = php_value_create_string("");
-    defer php_gc_release(empty);
-    try std.testing.expect(!empty.isTruthy());
-
-    // "0" is falsy
-    const zero_str = php_value_create_string("0");
-    defer php_gc_release(zero_str);
-    try std.testing.expect(!zero_str.isTruthy());
-}
-
-test "PHPValue creation - array" {
-    initRuntime(std.testing.allocator);
-    defer deinitRuntime();
-
-    const val = php_value_create_array();
-    defer php_gc_release(val);
-
-    try std.testing.expectEqual(ValueTag.array, val.tag);
-    try std.testing.expect(val.data.array_ptr != null);
-    try std.testing.expectEqual(@as(usize, 0), val.data.array_ptr.?.count());
-    try std.testing.expect(!val.isTruthy()); // Empty array is falsy
-}
-
-test "Type conversion - toInt" {
-    initRuntime(std.testing.allocator);
-    defer deinitRuntime();
-
-    const null_val = php_value_create_null();
-    defer php_gc_release(null_val);
-    try std.testing.expectEqual(@as(i64, 0), null_val.toInt());
-
-    const bool_true = php_value_create_bool(true);
-    defer php_gc_release(bool_true);
-    try std.testing.expectEqual(@as(i64, 1), bool_true.toInt());
-
-    const float_val = php_value_create_float(3.7);
-    defer php_gc_release(float_val);
-    try std.testing.expectEqual(@as(i64, 3), float_val.toInt());
-
-    const str_val = php_value_create_string("42");
-    defer php_gc_release(str_val);
-    try std.testing.expectEqual(@as(i64, 42), str_val.toInt());
-}
-
-test "Type conversion - toFloat" {
-    initRuntime(std.testing.allocator);
-    defer deinitRuntime();
-
-    const int_val = php_value_create_int(42);
-    defer php_gc_release(int_val);
-    try std.testing.expectApproxEqAbs(@as(f64, 42.0), int_val.toFloat(), 0.001);
-
-    const bool_val = php_value_create_bool(true);
-    defer php_gc_release(bool_val);
-    try std.testing.expectApproxEqAbs(@as(f64, 1.0), bool_val.toFloat(), 0.001);
-}
-
-test "Type conversion - toBool" {
-    initRuntime(std.testing.allocator);
-    defer deinitRuntime();
-
-    const int_zero = php_value_create_int(0);
-    defer php_gc_release(int_zero);
-    try std.testing.expect(!int_zero.toBool());
-
-    const int_nonzero = php_value_create_int(1);
-    defer php_gc_release(int_nonzero);
-    try std.testing.expect(int_nonzero.toBool());
-
-    const str_empty = php_value_create_string("");
-    defer php_gc_release(str_empty);
-    try std.testing.expect(!str_empty.toBool());
-
-    const str_nonempty = php_value_create_string("hello");
-    defer php_gc_release(str_nonempty);
-    try std.testing.expect(str_nonempty.toBool());
-}
-
-test "Reference counting" {
-    initRuntime(std.testing.allocator);
-    defer deinitRuntime();
-
-    const val = php_value_create_int(42);
-    try std.testing.expectEqual(@as(u32, 1), val.ref_count);
-
-    php_gc_retain(val);
-    try std.testing.expectEqual(@as(u32, 2), val.ref_count);
-
-    php_gc_retain(val);
-    try std.testing.expectEqual(@as(u32, 3), val.ref_count);
-
-    php_gc_release(val);
-    try std.testing.expectEqual(@as(u32, 2), val.ref_count);
-
-    php_gc_release(val);
-    try std.testing.expectEqual(@as(u32, 1), val.ref_count);
-
-    php_gc_release(val);
-    // Value should be freed now
-}
-
-test "Array operations" {
-    initRuntime(std.testing.allocator);
-    defer deinitRuntime();
-
-    const arr_val = php_value_create_array();
-    defer php_gc_release(arr_val);
-    const arr = arr_val.data.array_ptr.?;
-
-    // Push values - array retains them, so we release our reference after push
-    const val1 = php_value_create_int(10);
-    php_array_push(arr, val1);
-    php_gc_release(val1); // Release our reference, array still holds it
-
-    const val2 = php_value_create_int(20);
-    php_array_push(arr, val2);
-    php_gc_release(val2);
-
-    const val3 = php_value_create_string("hello");
-    php_array_push(arr, val3);
-    php_gc_release(val3);
-
-    try std.testing.expectEqual(@as(i64, 3), php_array_count(arr));
-
-    // Get by index
-    const got1 = php_array_get_int(arr, 0);
-    defer php_gc_release(got1);
-    try std.testing.expectEqual(@as(i64, 10), got1.data.int_val);
-
-    const got2 = php_array_get_int(arr, 1);
-    defer php_gc_release(got2);
-    try std.testing.expectEqual(@as(i64, 20), got2.data.int_val);
-
-    // Key exists
-    try std.testing.expect(php_array_key_exists_int(arr, 0));
-    try std.testing.expect(php_array_key_exists_int(arr, 1));
-    try std.testing.expect(!php_array_key_exists_int(arr, 10));
-}
-
-test "String operations" {
-    initRuntime(std.testing.allocator);
-    defer deinitRuntime();
-
-    const str1 = php_value_create_string("Hello");
-    defer php_gc_release(str1);
-    const str2 = php_value_create_string(" World");
-    defer php_gc_release(str2);
-
-    // Concatenation
-    const concat = php_string_concat(str1, str2);
-    defer php_gc_release(concat);
-    try std.testing.expectEqualStrings("Hello World", concat.data.string_ptr.?.getData());
-
-    // Length
-    try std.testing.expectEqual(@as(i64, 5), php_string_length(str1));
-    try std.testing.expectEqual(@as(i64, 6), php_string_length(str2));
-    try std.testing.expectEqual(@as(i64, 11), php_string_length(concat));
-}
-
-test "String substr" {
-    initRuntime(std.testing.allocator);
-    defer deinitRuntime();
-
-    const str = php_value_create_string("Hello World");
-    defer php_gc_release(str);
-
-    // Basic substr
-    const sub1 = php_string_substr(str, 0, 5);
-    defer php_gc_release(sub1);
-    try std.testing.expectEqualStrings("Hello", sub1.data.string_ptr.?.getData());
-
-    // Substr from middle
-    const sub2 = php_string_substr(str, 6, null);
-    defer php_gc_release(sub2);
-    try std.testing.expectEqualStrings("World", sub2.data.string_ptr.?.getData());
-
-    // Negative start
-    const sub3 = php_string_substr(str, -5, null);
-    defer php_gc_release(sub3);
-    try std.testing.expectEqualStrings("World", sub3.data.string_ptr.?.getData());
-}
-
-test "Built-in functions - strlen" {
-    initRuntime(std.testing.allocator);
-    defer deinitRuntime();
-
-    const str = php_value_create_string("Hello");
-    defer php_gc_release(str);
-
-    const len = php_builtin_strlen(str);
-    defer php_gc_release(len);
-
-    try std.testing.expectEqual(ValueTag.int, len.tag);
-    try std.testing.expectEqual(@as(i64, 5), len.data.int_val);
-}
-
-test "Built-in functions - count" {
-    initRuntime(std.testing.allocator);
-    defer deinitRuntime();
-
-    const arr_val = php_value_create_array();
-    defer php_gc_release(arr_val);
-    const arr = arr_val.data.array_ptr.?;
-
-    // Push values - array retains them, so we release our reference after push
-    const v1 = php_value_create_int(1);
-    php_array_push(arr, v1);
-    php_gc_release(v1);
-
-    const v2 = php_value_create_int(2);
-    php_array_push(arr, v2);
-    php_gc_release(v2);
-
-    const v3 = php_value_create_int(3);
-    php_array_push(arr, v3);
-    php_gc_release(v3);
-
-    const count = php_builtin_count(arr_val);
-    defer php_gc_release(count);
-
-    try std.testing.expectEqual(ValueTag.int, count.tag);
-    try std.testing.expectEqual(@as(i64, 3), count.data.int_val);
-}
-
-test "Built-in functions - type checking" {
-    initRuntime(std.testing.allocator);
-    defer deinitRuntime();
-
-    const null_val = php_value_create_null();
-    defer php_gc_release(null_val);
-    const int_val = php_value_create_int(42);
-    defer php_gc_release(int_val);
-    const str_val = php_value_create_string("hello");
-    defer php_gc_release(str_val);
-    const arr_val = php_value_create_array();
-    defer php_gc_release(arr_val);
-
-    // is_null
-    const is_null_result = php_builtin_is_null(null_val);
-    defer php_gc_release(is_null_result);
-    try std.testing.expect(is_null_result.data.bool_val);
-
-    // is_int
-    const is_int_result = php_builtin_is_int(int_val);
-    defer php_gc_release(is_int_result);
-    try std.testing.expect(is_int_result.data.bool_val);
-
-    // is_string
-    const is_string_result = php_builtin_is_string(str_val);
-    defer php_gc_release(is_string_result);
-    try std.testing.expect(is_string_result.data.bool_val);
-
-    // is_array
-    const is_array_result = php_builtin_is_array(arr_val);
-    defer php_gc_release(is_array_result);
-    try std.testing.expect(is_array_result.data.bool_val);
-}
-
-test "Exception handling" {
-    initRuntime(std.testing.allocator);
-    defer deinitRuntime();
-
-    // Initially no exception
-    try std.testing.expect(!php_has_exception());
-
-    // Throw exception
-    php_throw_message("Test error");
-    try std.testing.expect(php_has_exception());
-
-    // Get message
-    const msg = php_get_exception_message();
-    try std.testing.expect(msg != null);
-    try std.testing.expectEqualStrings("Test error", msg.?);
-
-    // Catch exception
-    const ex = php_catch();
-    try std.testing.expect(ex != null);
-    try std.testing.expect(!php_has_exception());
-
-    php_gc_release(ex.?);
-}
-
-test "Value cloning" {
-    initRuntime(std.testing.allocator);
-    defer deinitRuntime();
-
-    // Clone int
-    const int_val = php_value_create_int(42);
-    defer php_gc_release(int_val);
-    const int_clone = php_value_clone(int_val);
-    defer php_gc_release(int_clone);
-    try std.testing.expectEqual(@as(i64, 42), int_clone.data.int_val);
-    try std.testing.expect(int_val != int_clone);
-
-    // Clone string (shares data)
-    const str_val = php_value_create_string("hello");
-    defer php_gc_release(str_val);
-    const str_clone = php_value_clone(str_val);
-    defer php_gc_release(str_clone);
-    try std.testing.expectEqualStrings("hello", str_clone.data.string_ptr.?.getData());
-}
-
-test "Math functions" {
-    initRuntime(std.testing.allocator);
-    defer deinitRuntime();
-
-    // abs
-    const neg = php_value_create_int(-42);
-    defer php_gc_release(neg);
-    const abs_result = php_builtin_abs(neg);
-    defer php_gc_release(abs_result);
-    try std.testing.expectEqual(@as(i64, 42), abs_result.data.int_val);
-
-    // floor
-    const float_val = php_value_create_float(3.7);
-    defer php_gc_release(float_val);
-    const floor_result = php_builtin_floor(float_val);
-    defer php_gc_release(floor_result);
-    try std.testing.expectApproxEqAbs(@as(f64, 3.0), floor_result.data.float_val, 0.001);
-
-    // ceil
-    const ceil_result = php_builtin_ceil(float_val);
-    defer php_gc_release(ceil_result);
-    try std.testing.expectApproxEqAbs(@as(f64, 4.0), ceil_result.data.float_val, 0.001);
 }
 
 // ============================================================================
@@ -3116,129 +3191,100 @@ pub const PHPArrayIterator = struct {
     }
 };
 
-/// Initialize array iterator (returns iterator as PHPValue)
-export fn php_array_iter_init(iterable: *PHPValue) *PHPValue {
+/// Initialize array iterator
+export fn php_array_iter_init(val: Value) Value {
     const allocator = getGlobalAllocator();
-    
-    // 如果不是数组，返回空迭代器
-    if (iterable.tag != .array or iterable.data.array_ptr == null) {
-        const iter_val = allocator.create(PHPValue) catch unreachable;
-        iter_val.* = .{
-            .tag = .null,
-            .data = .{ .int_val = 0 },
-            .ref_count = 1,
-        };
-        return iter_val;
+
+    if (!nanbox.isArray(val)) {
+        return nanbox.encodeNull();
     }
-    
-    const array = iterable.data.array_ptr.?;
-    const iter = allocator.create(PHPArrayIterator) catch unreachable;
+
+    const array = getArrayPtr(val);
+    const iter = allocator.create(PHPArrayIterator) catch @panic("OOM");
     iter.* = PHPArrayIterator.init(array);
-    
-    // 将迭代器包装为 PHPValue（使用 resource 类型）
-    const iter_val = allocator.create(PHPValue) catch unreachable;
-    const iter_ptr: i64 = @bitCast(@intFromPtr(iter));
-    iter_val.* = .{
-        .tag = .resource,
-        .data = .{ .int_val = iter_ptr },
-        .ref_count = 1,
-    };
-    
-    return iter_val;
+
+    return nanbox.encodePtr(@intFromPtr(iter), nanbox.TYPE_REF);
 }
 
 /// Check if iterator is valid
-export fn php_array_iter_valid(iter_val: *PHPValue) *PHPValue {
-    if (iter_val.tag != .resource) {
+export fn php_array_iter_valid(iter_val: Value) Value {
+    if (nanbox.getPtrType(iter_val) != nanbox.TYPE_REF) {
         return php_value_create_bool(false);
     }
-    
-    const iter_ptr: i64 = iter_val.data.int_val;
-    const iter: *PHPArrayIterator = @ptrFromInt(@as(usize, @bitCast(iter_ptr)));
+    const iter: *PHPArrayIterator = @ptrFromInt(nanbox.decodePtr(iter_val));
     return php_value_create_bool(!iter.is_done);
 }
 
 /// Get current key
-export fn php_array_iter_key(iter_val: *PHPValue) *PHPValue {
-    if (iter_val.tag != .resource) {
-        return php_value_create_null();
+export fn php_array_iter_key(iter_val: Value) Value {
+    if (nanbox.getPtrType(iter_val) != nanbox.TYPE_REF) {
+        return nanbox.encodeNull();
     }
-    
-    const iter_ptr: i64 = iter_val.data.int_val;
-    const iter: *PHPArrayIterator = @ptrFromInt(@as(usize, @bitCast(iter_ptr)));
-    
+    const iter: *PHPArrayIterator = @ptrFromInt(nanbox.decodePtr(iter_val));
+
     if (iter.current) |entry| {
         return switch (entry.key) {
             .int => |i| php_value_create_int(i),
             .string => |s| php_value_create_string(s.getData()),
         };
     }
-    
-    return php_value_create_null();
+
+    return nanbox.encodeNull();
 }
 
 /// Get current value
-export fn php_array_iter_value(iter_val: *PHPValue) *PHPValue {
-    if (iter_val.tag != .resource) {
-        return php_value_create_null();
+export fn php_array_iter_value(iter_val: Value) Value {
+    if (nanbox.getPtrType(iter_val) != nanbox.TYPE_REF) {
+        return nanbox.encodeNull();
     }
-    
-    const iter_ptr: i64 = iter_val.data.int_val;
-    const iter: *PHPArrayIterator = @ptrFromInt(@as(usize, @bitCast(iter_ptr)));
-    
+    const iter: *PHPArrayIterator = @ptrFromInt(nanbox.decodePtr(iter_val));
+
     if (iter.current) |entry| {
-        php_gc_retain(entry.value);
+        gcRetainValue(entry.value);
         return entry.value;
     }
-    
-    return php_value_create_null();
+
+    return nanbox.encodeNull();
 }
 
 /// Get current value by reference
-export fn php_array_iter_value_ref(iter_val: *PHPValue) *PHPValue {
-    // 对于 AOT，引用和值相同（都返回指针）
+export fn php_array_iter_value_ref(iter_val: Value) Value {
     return php_array_iter_value(iter_val);
 }
 
 /// Move to next element
-export fn php_array_iter_next(iter_val: *PHPValue) *PHPValue {
-    if (iter_val.tag != .resource) {
+export fn php_array_iter_next(iter_val: Value) Value {
+    if (nanbox.getPtrType(iter_val) != nanbox.TYPE_REF) {
         return iter_val;
     }
-    
-    const iter_ptr: i64 = iter_val.data.int_val;
-    const iter: *PHPArrayIterator = @ptrFromInt(@as(usize, @bitCast(iter_ptr)));
-    
+    const iter: *PHPArrayIterator = @ptrFromInt(nanbox.decodePtr(iter_val));
+
     if (iter.current) |entry| {
         iter.current = entry.next_order;
         iter.is_done = iter.current == null;
     } else {
         iter.is_done = true;
     }
-    
+
     return iter_val;
 }
 
 /// Free iterator
-export fn php_array_iter_free(iter_val: *PHPValue) void {
-    if (iter_val.tag != .resource) {
+export fn php_array_iter_free(iter_val: Value) void {
+    if (nanbox.getPtrType(iter_val) != nanbox.TYPE_REF) {
         return;
     }
-    
     const allocator = getGlobalAllocator();
-    const iter_ptr: i64 = iter_val.data.int_val;
-    const iter: *PHPArrayIterator = @ptrFromInt(@as(usize, @bitCast(iter_ptr)));
+    const iter: *PHPArrayIterator = @ptrFromInt(nanbox.decodePtr(iter_val));
     allocator.destroy(iter);
-    
-    // 释放 iter_val 本身
-    php_gc_release(iter_val);
+    gcReleaseValue(iter_val);
 }
 
 // ============================================================================
-// Math Functions
+// Math Functions (exported)
 // ============================================================================
 
-export fn php_round(value: *PHPValue, precision: *PHPValue) *PHPValue {
+export fn php_round(value: Value, precision: Value) Value {
     const num = php_value_to_float(value);
     const prec = @as(i32, @intCast(php_value_to_int(precision)));
     const multiplier = std.math.pow(f64, 10.0, @as(f64, @floatFromInt(prec)));
@@ -3250,42 +3296,40 @@ export fn php_round(value: *PHPValue, precision: *PHPValue) *PHPValue {
 // Time Functions
 // ============================================================================
 
-export fn php_microtime(get_as_float: *PHPValue) *PHPValue {
+export fn php_microtime(get_as_float: Value) Value {
     const as_float = php_value_to_bool(get_as_float);
     const now = std.time.microTimestamp();
-    
+
     if (as_float) {
         const seconds = @as(f64, @floatFromInt(now)) / 1_000_000.0;
         return php_value_create_float(seconds);
     }
-    
+
     const sec = @divFloor(now, 1_000_000);
     const usec = @mod(now, 1_000_000);
     const allocator = getGlobalAllocator();
-    const str = std.fmt.allocPrint(allocator, "0.{d:0>6} {d}", .{ usec, sec }) catch return php_value_create_null();
+    const str = std.fmt.allocPrint(allocator, "0.{d:0>6} {d}", .{ usec, sec }) catch return nanbox.encodeNull();
     return php_value_create_string(str);
 }
 
-export fn php_date(format: *PHPValue, timestamp: *PHPValue) *PHPValue {
+export fn php_date(format: Value, timestamp: Value) Value {
     _ = format;
-    const ts = if (timestamp.tag == .null) std.time.timestamp() else php_value_to_int(timestamp);
-    
+    const ts = if (nanbox.isNull(timestamp)) std.time.timestamp() else php_value_to_int(timestamp);
+
     const allocator = getGlobalAllocator();
     const epoch_seconds: u64 = @intCast(ts);
-    
-    // 简化实现：只返回 Y-m-d 格式
-    // 1970-01-01 00:00:00 UTC 是 epoch 0
+
     const days_since_epoch = epoch_seconds / 86400;
     const year = 1970 + @divFloor(days_since_epoch, 365);
     const month: u8 = 1;
     const day: u8 = 1;
-    
-    const result = std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2}", .{ year, month, day }) catch return php_value_create_null();
-    
+
+    const result = std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2}", .{ year, month, day }) catch return nanbox.encodeNull();
+
     return php_value_create_string(result);
 }
 
-export fn php_strtotime(time_str: *PHPValue, now: *PHPValue) *PHPValue {
+export fn php_strtotime(time_str: Value, now: Value) Value {
     _ = time_str;
     _ = now;
     return php_value_create_int(std.time.timestamp());
@@ -3295,79 +3339,464 @@ export fn php_strtotime(time_str: *PHPValue, now: *PHPValue) *PHPValue {
 // Constant Functions
 // ============================================================================
 
-pub var constants_map: ?std.StringHashMap(*PHPValue) = null;
+pub var constants_map: ?std.StringHashMap(Value) = null;
 
-export fn php_define(name: *PHPValue, value: *PHPValue) *PHPValue {
+export fn php_define(name: Value, value: Value) Value {
     const allocator = getGlobalAllocator();
-    
+
     if (constants_map == null) {
-        constants_map = std.StringHashMap(*PHPValue).init(allocator);
+        constants_map = std.StringHashMap(Value).init(allocator);
     }
-    
-    if (name.tag != .string or name.data.string_ptr == null) {
+
+    if (!nanbox.isString(name)) {
         return php_value_create_bool(false);
     }
-    
-    const name_str = name.data.string_ptr.?.getData();
-    const name_copy = allocator.dupe(u8, name_str) catch return php_value_create_bool(false);
-    
-    php_gc_retain(value);
+
+    const name_str = getStringPtr(name);
+    const name_copy = allocator.dupe(u8, name_str.getData()) catch return php_value_create_bool(false);
+
+    gcRetainValue(value);
     constants_map.?.put(name_copy, value) catch return php_value_create_bool(false);
-    
+
     return php_value_create_bool(true);
 }
 
-export fn php_constant(name: *PHPValue) *PHPValue {
+export fn php_constant(name: Value) Value {
     if (constants_map == null) {
-        return php_value_create_null();
+        return nanbox.encodeNull();
     }
-    
-    if (name.tag != .string or name.data.string_ptr == null) {
-        return php_value_create_null();
+
+    if (!nanbox.isString(name)) {
+        return nanbox.encodeNull();
     }
-    
-    const name_str = name.data.string_ptr.?.getData();
-    if (constants_map.?.get(name_str)) |val| {
-        php_gc_retain(val);
+
+    const name_str = getStringPtr(name);
+    if (constants_map.?.get(name_str.getData())) |val| {
+        gcRetainValue(val);
         return val;
     }
-    
-    return php_value_create_null();
+
+    return nanbox.encodeNull();
 }
 
-/// count() - 计算数组元素个数
-/// @param arr 要计数的数组
-/// @param mode 可选，COUNT_RECURSIVE(1)表示递归计数
-pub fn php_count(arr: Value, mode: Value) !Value {
-    const mode_int = if (mode.tag == .int) mode.data.int_val else 0;
-    
-    if (arr.tag != .array or arr.data.array_ptr == null) {
-        return Value.initInt(0);
+/// count() - count array elements
+pub fn php_count(arr: Value, mode: Value) Value {
+    const mode_int = if (nanbox.isInt(mode)) nanbox.decodeInt(mode) else 0;
+
+    if (!nanbox.isArray(arr)) {
+        return php_value_create_int(0);
     }
-    
-    const arr_ptr = arr.data.array_ptr.?;
-    
-    // COUNT_RECURSIVE = 1
+
+    const arr_ptr = getArrayPtr(arr);
+
     if (mode_int == 1) {
-        return Value.initInt(@intCast(countRecursive(arr_ptr)));
+        return php_value_create_int(@intCast(countRecursive(arr_ptr)));
     }
-    
-    return Value.initInt(@intCast(arr_ptr.count()));
+
+    return php_value_create_int(@intCast(arr_ptr.count()));
 }
 
 fn countRecursive(arr: *PHPArray) usize {
     var total: usize = arr.count();
-    
-    var iter = arr.iterator();
-    while (iter.next()) |entry| {
-        const val = entry.value_ptr.*;
-        if (val.tag == .array and val.data.array_ptr != null) {
-            total += countRecursive(val.data.array_ptr.?);
+
+    var entry = arr.first;
+    while (entry) |e| {
+        if (nanbox.isArray(e.value)) {
+            const child = getArrayPtr(e.value);
+            total += countRecursive(child);
         }
+        entry = e.next_order;
     }
-    
+
     return total;
 }
 
-// Value type alias for AOT generated code
-pub const Value = PHPValue;
+// ============================================================================
+// Unit Tests
+// ============================================================================
+
+test "Value creation - null" {
+    initRuntime(std.testing.allocator);
+    defer deinitRuntime();
+
+    const val = php_value_create_null();
+    try std.testing.expect(nanbox.isNull(val));
+    try std.testing.expect(!valueIsTruthy(val));
+}
+
+test "Value creation - bool" {
+    initRuntime(std.testing.allocator);
+    defer deinitRuntime();
+
+    const val_true = php_value_create_bool(true);
+    const val_false = php_value_create_bool(false);
+
+    try std.testing.expect(nanbox.isBool(val_true));
+    try std.testing.expect(nanbox.decodeBool(val_true));
+    try std.testing.expect(valueIsTruthy(val_true));
+
+    try std.testing.expect(nanbox.isBool(val_false));
+    try std.testing.expect(!nanbox.decodeBool(val_false));
+    try std.testing.expect(!valueIsTruthy(val_false));
+}
+
+test "Value creation - int" {
+    initRuntime(std.testing.allocator);
+    defer deinitRuntime();
+
+    const val = php_value_create_int(42);
+    try std.testing.expect(nanbox.isInt(val));
+    try std.testing.expectEqual(@as(i64, 42), nanbox.decodeInt(val));
+    try std.testing.expect(valueIsTruthy(val));
+
+    const zero = php_value_create_int(0);
+    try std.testing.expect(!valueIsTruthy(zero));
+}
+
+test "Value creation - float" {
+    initRuntime(std.testing.allocator);
+    defer deinitRuntime();
+
+    const val = php_value_create_float(3.14);
+    try std.testing.expect(nanbox.isFloat(val));
+    try std.testing.expectApproxEqAbs(@as(f64, 3.14), nanbox.decodeFloat(val), 0.001);
+    try std.testing.expect(valueIsTruthy(val));
+}
+
+test "Value creation - string" {
+    initRuntime(std.testing.allocator);
+    defer deinitRuntime();
+
+    const val = php_value_create_string("hello");
+    defer gcReleaseValue(val);
+
+    try std.testing.expect(nanbox.isString(val));
+    try std.testing.expectEqualStrings("hello", getStringPtr(val).getData());
+    try std.testing.expect(valueIsTruthy(val));
+
+    const empty = php_value_create_string("");
+    defer gcReleaseValue(empty);
+    try std.testing.expect(!valueIsTruthy(empty));
+
+    const zero_str = php_value_create_string("0");
+    defer gcReleaseValue(zero_str);
+    try std.testing.expect(!valueIsTruthy(zero_str));
+}
+
+test "Value creation - array" {
+    initRuntime(std.testing.allocator);
+    defer deinitRuntime();
+
+    const val = php_value_create_array();
+    defer gcReleaseValue(val);
+
+    try std.testing.expect(nanbox.isArray(val));
+    try std.testing.expectEqual(@as(usize, 0), getArrayPtr(val).count());
+    try std.testing.expect(!valueIsTruthy(val));
+}
+
+test "NaN-boxing roundtrip - integer" {
+    for ([_]i64{ 0, 1, -1, 42, -42, 0x7FFFFFFFFFFF, -0x800000000000 }) |i| {
+        const encoded = nanbox.encodeInt(i);
+        try std.testing.expect(nanbox.isInt(encoded));
+        try std.testing.expectEqual(i, nanbox.decodeInt(encoded));
+        // Verify it's NOT a float
+        try std.testing.expect(!nanbox.isFloat(encoded));
+    }
+}
+
+test "NaN-boxing roundtrip - float" {
+    const test_values = [_]f64{ 0.0, -0.0, 1.0, -1.0, 3.14159, std.math.inf(f64), -std.math.inf(f64), 1e308, 1e-308 };
+    for (test_values) |f| {
+        const encoded = nanbox.encodeFloat(f);
+        try std.testing.expect(nanbox.isFloat(encoded));
+        const decoded = nanbox.decodeFloat(encoded);
+        if (std.math.isNan(f)) {
+            try std.testing.expect(std.math.isNan(decoded));
+        } else {
+            try std.testing.expectEqual(f, decoded);
+        }
+    }
+    // NaN canonicalization
+    const nan_val = nanbox.encodeFloat(std.math.nan(f64));
+    try std.testing.expect(nanbox.isFloat(nan_val));
+    try std.testing.expect(std.math.isNan(nanbox.decodeFloat(nan_val)));
+}
+
+test "NaN-boxing roundtrip - null/bool" {
+    const null_val = nanbox.encodeNull();
+    try std.testing.expect(nanbox.isNull(null_val));
+    try std.testing.expect(!nanbox.isBool(null_val));
+
+    const true_val = nanbox.encodeBool(true);
+    try std.testing.expect(nanbox.isBool(true_val));
+    try std.testing.expect(nanbox.decodeBool(true_val));
+
+    const false_val = nanbox.encodeBool(false);
+    try std.testing.expect(nanbox.isBool(false_val));
+    try std.testing.expect(!nanbox.decodeBool(false_val));
+}
+
+test "NaN-boxing roundtrip - pointer types" {
+    // Verify pointer encoding/decoding
+    const test_addr: usize = 0x7FFFFFFFFFFF;
+    const encoded_str = nanbox.encodePtr(test_addr, nanbox.TYPE_STRING);
+    try std.testing.expect(nanbox.isString(encoded_str));
+    try std.testing.expectEqual(test_addr, nanbox.decodePtr(encoded_str));
+
+    const encoded_arr = nanbox.encodePtr(test_addr, nanbox.TYPE_ARRAY);
+    try std.testing.expect(nanbox.isArray(encoded_arr));
+    try std.testing.expectEqual(test_addr, nanbox.decodePtr(encoded_arr));
+
+    const encoded_obj = nanbox.encodePtr(test_addr, nanbox.TYPE_OBJECT);
+    try std.testing.expect(nanbox.isObject(encoded_obj));
+    try std.testing.expectEqual(test_addr, nanbox.decodePtr(encoded_obj));
+}
+
+test "Type conversion - toInt" {
+    initRuntime(std.testing.allocator);
+    defer deinitRuntime();
+
+    try std.testing.expectEqual(@as(i64, 0), php_value_to_int(php_value_create_null()));
+
+    try std.testing.expectEqual(@as(i64, 1), php_value_to_int(php_value_create_bool(true)));
+
+    try std.testing.expectEqual(@as(i64, 3), php_value_to_int(php_value_create_float(3.7)));
+
+    const str_val = php_value_create_string("42");
+    defer gcReleaseValue(str_val);
+    try std.testing.expectEqual(@as(i64, 42), php_value_to_int(str_val));
+}
+
+test "Type conversion - toFloat" {
+    initRuntime(std.testing.allocator);
+    defer deinitRuntime();
+
+    try std.testing.expectApproxEqAbs(@as(f64, 42.0), php_value_to_float(php_value_create_int(42)), 0.001);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.0), php_value_to_float(php_value_create_bool(true)), 0.001);
+}
+
+test "Type conversion - toBool" {
+    initRuntime(std.testing.allocator);
+    defer deinitRuntime();
+
+    try std.testing.expect(!php_value_to_bool(php_value_create_int(0)));
+    try std.testing.expect(php_value_to_bool(php_value_create_int(1)));
+
+    const str_empty = php_value_create_string("");
+    defer gcReleaseValue(str_empty);
+    try std.testing.expect(!php_value_to_bool(str_empty));
+
+    const str_nonempty = php_value_create_string("hello");
+    defer gcReleaseValue(str_nonempty);
+    try std.testing.expect(php_value_to_bool(str_nonempty));
+}
+
+test "Reference counting" {
+    initRuntime(std.testing.allocator);
+    defer deinitRuntime();
+
+    const val = php_value_create_string("test");
+    try std.testing.expectEqual(@as(u32, 1), php_gc_get_ref_count(val));
+
+    php_gc_retain(val);
+    try std.testing.expectEqual(@as(u32, 2), php_gc_get_ref_count(val));
+
+    php_gc_retain(val);
+    try std.testing.expectEqual(@as(u32, 3), php_gc_get_ref_count(val));
+
+    php_gc_release(val);
+    try std.testing.expectEqual(@as(u32, 2), php_gc_get_ref_count(val));
+
+    php_gc_release(val);
+    try std.testing.expectEqual(@as(u32, 1), php_gc_get_ref_count(val));
+
+    php_gc_release(val);
+    // Value should be freed now
+}
+
+test "Array operations" {
+    initRuntime(std.testing.allocator);
+    defer deinitRuntime();
+
+    const arr_val = php_value_create_array();
+    defer gcReleaseValue(arr_val);
+    const arr = getArrayPtr(arr_val);
+
+    const val1 = php_value_create_int(10);
+    php_array_push(arr, val1);
+
+    const val2 = php_value_create_int(20);
+    php_array_push(arr, val2);
+
+    const val3 = php_value_create_string("hello");
+    defer gcReleaseValue(val3);
+    php_array_push(arr, val3);
+
+    try std.testing.expectEqual(@as(i64, 3), php_array_count(arr));
+
+    const got1 = php_array_get_int(arr, 0);
+    try std.testing.expectEqual(@as(i64, 10), nanbox.decodeInt(got1));
+
+    const got2 = php_array_get_int(arr, 1);
+    try std.testing.expectEqual(@as(i64, 20), nanbox.decodeInt(got2));
+
+    try std.testing.expect(php_array_key_exists_int(arr, 0));
+    try std.testing.expect(php_array_key_exists_int(arr, 1));
+    try std.testing.expect(!php_array_key_exists_int(arr, 10));
+}
+
+test "String operations" {
+    initRuntime(std.testing.allocator);
+    defer deinitRuntime();
+
+    const str1 = php_value_create_string("Hello");
+    defer gcReleaseValue(str1);
+    const str2 = php_value_create_string(" World");
+    defer gcReleaseValue(str2);
+
+    const concat = php_string_concat(str1, str2);
+    defer gcReleaseValue(concat);
+    try std.testing.expectEqualStrings("Hello World", getStringPtr(concat).getData());
+
+    try std.testing.expectEqual(@as(i64, 5), php_string_length(str1));
+    try std.testing.expectEqual(@as(i64, 6), php_string_length(str2));
+    try std.testing.expectEqual(@as(i64, 11), php_string_length(concat));
+}
+
+test "String substr" {
+    initRuntime(std.testing.allocator);
+    defer deinitRuntime();
+
+    const str = php_value_create_string("Hello World");
+    defer gcReleaseValue(str);
+
+    const sub1 = php_string_substr(str, 0, 5);
+    defer gcReleaseValue(sub1);
+    try std.testing.expectEqualStrings("Hello", getStringPtr(sub1).getData());
+
+    const sub2 = php_string_substr(str, 6, null);
+    defer gcReleaseValue(sub2);
+    try std.testing.expectEqualStrings("World", getStringPtr(sub2).getData());
+
+    const sub3 = php_string_substr(str, -5, null);
+    defer gcReleaseValue(sub3);
+    try std.testing.expectEqualStrings("World", getStringPtr(sub3).getData());
+}
+
+test "Built-in functions - strlen" {
+    initRuntime(std.testing.allocator);
+    defer deinitRuntime();
+
+    const str = php_value_create_string("Hello");
+    defer gcReleaseValue(str);
+
+    const len = php_builtin_strlen(str);
+    try std.testing.expect(nanbox.isInt(len));
+    try std.testing.expectEqual(@as(i64, 5), nanbox.decodeInt(len));
+}
+
+test "Built-in functions - count" {
+    initRuntime(std.testing.allocator);
+    defer deinitRuntime();
+
+    const arr_val = php_value_create_array();
+    defer gcReleaseValue(arr_val);
+    const arr = getArrayPtr(arr_val);
+
+    php_array_push(arr, php_value_create_int(1));
+    php_array_push(arr, php_value_create_int(2));
+    php_array_push(arr, php_value_create_int(3));
+
+    const count = php_builtin_count(arr_val);
+    try std.testing.expect(nanbox.isInt(count));
+    try std.testing.expectEqual(@as(i64, 3), nanbox.decodeInt(count));
+}
+
+test "Built-in functions - type checking" {
+    initRuntime(std.testing.allocator);
+    defer deinitRuntime();
+
+    const null_val = php_value_create_null();
+    const int_val = php_value_create_int(42);
+    const str_val = php_value_create_string("hello");
+    defer gcReleaseValue(str_val);
+    const arr_val = php_value_create_array();
+    defer gcReleaseValue(arr_val);
+
+    const is_null_result = php_builtin_is_null(null_val);
+    try std.testing.expect(nanbox.decodeBool(is_null_result));
+
+    const is_int_result = php_builtin_is_int(int_val);
+    try std.testing.expect(nanbox.decodeBool(is_int_result));
+
+    const is_string_result = php_builtin_is_string(str_val);
+    try std.testing.expect(nanbox.decodeBool(is_string_result));
+
+    const is_array_result = php_builtin_is_array(arr_val);
+    try std.testing.expect(nanbox.decodeBool(is_array_result));
+}
+
+test "Exception handling" {
+    initRuntime(std.testing.allocator);
+    defer deinitRuntime();
+
+    try std.testing.expect(!php_has_exception());
+
+    php_throw_message("Test error");
+    try std.testing.expect(php_has_exception());
+
+    const msg = php_get_exception_message();
+    try std.testing.expect(msg != null);
+    try std.testing.expectEqualStrings("Test error", msg.?);
+
+    const ex = php_catch();
+    try std.testing.expect(!nanbox.isNull(ex));
+    try std.testing.expect(!php_has_exception());
+
+    gcReleaseValue(ex);
+}
+
+test "Value cloning" {
+    initRuntime(std.testing.allocator);
+    defer deinitRuntime();
+
+    const int_val = php_value_create_int(42);
+    const int_clone = php_value_clone(int_val);
+    try std.testing.expectEqual(@as(i64, 42), nanbox.decodeInt(int_clone));
+    try std.testing.expectEqual(int_val, int_clone);
+}
+
+test "Math functions" {
+    initRuntime(std.testing.allocator);
+    defer deinitRuntime();
+
+    const neg = php_value_create_int(-42);
+    const abs_result = php_builtin_abs(neg);
+    try std.testing.expectEqual(@as(i64, 42), nanbox.decodeInt(abs_result));
+
+    const float_val = php_value_create_float(3.7);
+    const floor_result = php_builtin_floor(float_val);
+    try std.testing.expectApproxEqAbs(@as(f64, 3.0), nanbox.decodeFloat(floor_result), 0.001);
+
+    const ceil_result = php_builtin_ceil(float_val);
+    try std.testing.expectApproxEqAbs(@as(f64, 4.0), nanbox.decodeFloat(ceil_result), 0.001);
+}
+
+test "NaN-boxing identity for simple types" {
+    // Simple types should have identity equality (same u64 bits)
+    try std.testing.expectEqual(php_value_create_null(), php_value_create_null());
+    try std.testing.expectEqual(php_value_create_bool(true), php_value_create_bool(true));
+    try std.testing.expectEqual(php_value_create_bool(false), php_value_create_bool(false));
+    try std.testing.expectEqual(php_value_create_int(42), php_value_create_int(42));
+    try std.testing.expectEqual(php_value_create_float(3.14), php_value_create_float(3.14));
+}
+
+test "Int encoding edge cases" {
+    // Max positive 48-bit int
+    try std.testing.expectEqual(@as(i64, 0x7FFFFFFFFFFF), nanbox.decodeInt(nanbox.encodeInt(0x7FFFFFFFFFFF)));
+    // Min negative 48-bit int
+    try std.testing.expectEqual(@as(i64, -0x800000000000), nanbox.decodeInt(nanbox.encodeInt(-0x800000000000)));
+    // Zero
+    try std.testing.expectEqual(@as(i64, 0), nanbox.decodeInt(nanbox.encodeInt(0)));
+}

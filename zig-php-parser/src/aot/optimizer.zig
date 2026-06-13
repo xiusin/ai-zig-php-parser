@@ -1692,7 +1692,7 @@ pub const IROptimizer = struct {
             var back_edges = try std.ArrayList(BackEdge).initCapacity(self.allocator, 0);
             defer back_edges.deinit(self.allocator);
 
-            try self.renameVariables(entry, &dt, &current_values, &new_phis, &reg_to_alloca, &reg_rename_map, &back_edges);
+            try self.renameVariables(func, entry, &dt, &current_values, &new_phis, &reg_to_alloca, &reg_rename_map, &back_edges);
 
             // 填充回边
             for (back_edges.items) |edge| {
@@ -2041,6 +2041,7 @@ pub const IROptimizer = struct {
     /// Rename variables in the dominator tree
     fn renameVariables(
         self: *Self,
+        func: *Function,
         block: *BasicBlock,
         dt: *const Analysis.DominatorTree,
         current_values: *std.AutoHashMap(*Instruction, std.ArrayListUnmanaged(Register)),
@@ -2130,7 +2131,7 @@ pub const IROptimizer = struct {
 
         // 3. Recurse to dominated blocks FIRST
         for (dt.children[block.index].items) |child| {
-            try self.renameVariables(child, dt, current_values, new_phis, reg_to_alloca, reg_rename_map, back_edges);
+            try self.renameVariables(func, child, dt, current_values, new_phis, reg_to_alloca, reg_rename_map, back_edges);
         }
 
         // 4. Update Successors' Phis AFTER recursion
@@ -2166,19 +2167,33 @@ pub const IROptimizer = struct {
                         const alloca = entry.key_ptr.*;
                         const phi_inst = entry.value_ptr.*;
 
+                        var val: Register = undefined;
+                        var has_val = false;
+
                         if (current_values.getPtr(alloca)) |stack| {
                             if (stack.items.len > 0) {
-                                const val = stack.items[stack.items.len - 1];
-                                std.debug.print("  Adding phi incoming (forward): block_{d} -> block_{d}, reg_{d}\n", .{ block.index, succ.index, val.id });
-
-                                const old_incoming = phi_inst.op.phi.incoming;
-                                const new_incoming = try self.allocator.alloc(IR.Instruction.PhiIncoming, old_incoming.len + 1);
-                                @memcpy(new_incoming[0..old_incoming.len], old_incoming);
-                                new_incoming[old_incoming.len] = .{ .value = val, .block = block };
-
-                                if (old_incoming.len > 0) self.allocator.free(old_incoming);
-                                phi_inst.op.phi.incoming = new_incoming;
+                                val = stack.items[stack.items.len - 1];
+                                has_val = true;
                             }
+                        }
+
+                        if (!has_val) {
+                            // Create undef register: entry block has no store for this alloca,
+                            // but phi still needs an incoming value (e.g. do-while loops).
+                            std.debug.print("  Adding phi incoming (forward, undef): block_{d} -> block_{d}, alloca type {}\n", .{ block.index, succ.index, alloca.op.alloca.type_ });
+                            val = func.newRegister(alloca.op.alloca.type_);
+                        }
+
+                        {
+                            std.debug.print("  Adding phi incoming (forward): block_{d} -> block_{d}, reg_{d}\n", .{ block.index, succ.index, val.id });
+
+                            const old_incoming = phi_inst.op.phi.incoming;
+                            const new_incoming = try self.allocator.alloc(IR.Instruction.PhiIncoming, old_incoming.len + 1);
+                            @memcpy(new_incoming[0..old_incoming.len], old_incoming);
+                            new_incoming[old_incoming.len] = .{ .value = val, .block = block };
+
+                            if (old_incoming.len > 0) self.allocator.free(old_incoming);
+                            phi_inst.op.phi.incoming = new_incoming;
                         }
                     }
                 }

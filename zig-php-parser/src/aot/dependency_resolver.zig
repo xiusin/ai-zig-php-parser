@@ -131,6 +131,12 @@ pub const DependencyResolver = struct {
     unresolved: std.ArrayListUnmanaged(UnresolvedFile),
     /// Stack for cycle detection during DFS
     visit_stack: std.ArrayListUnmanaged([]const u8),
+    /// Set of files that have been included via include_once/require_once
+    /// These should not be processed again even if included from another file
+    once_included: std.StringHashMapUnmanaged(void),
+    /// Track which files were resolved via _once (for IR merge dedup)
+    /// Maps: included_once_file -> the file that first included it
+    once_included_by: std.StringHashMapUnmanaged([]const u8),
 
     const Self = @This();
 
@@ -146,6 +152,8 @@ pub const DependencyResolver = struct {
             .cycles = .{},
             .unresolved = .{},
             .visit_stack = .{},
+            .once_included = .{},
+            .once_included_by = .{},
         };
         return self;
     }
@@ -178,6 +186,12 @@ pub const DependencyResolver = struct {
 
         // Free visit stack
         self.visit_stack.deinit(self.allocator);
+
+        // Free once_included
+        self.once_included.deinit(self.allocator);
+
+        // Free once_included_by
+        self.once_included_by.deinit(self.allocator);
 
         // Don't destroy self - caller will do it
     }
@@ -264,6 +278,21 @@ pub const DependencyResolver = struct {
             try gop.value_ptr.includes.append(self.allocator, inc);
 
             if (inc.resolved_path) |resolved| {
+                // Handle include_once/require_once deduplication:
+                // If this is a _once include and the file has already been included via _once,
+                // skip it to avoid double-inclusion of IR
+                if (inc.is_once) {
+                    if (self.once_included.contains(resolved)) {
+                        // Already included via _once, skip recursive processing
+                        // But still record as a dependency for ordering
+                        continue;
+                    }
+                    // Mark as once-included and track who included it first
+                    try self.once_included.put(self.allocator, resolved, {});
+                    const src_dup = try self.allocator.dupe(u8, file_path);
+                    try self.once_included_by.put(self.allocator, resolved, src_dup);
+                }
+
                 try gop.value_ptr.dependencies.append(self.allocator, resolved);
                 // Recursively process the dependency
                 try self.processFile(resolved);
@@ -671,6 +700,27 @@ pub const DependencyResolver = struct {
             try paths.append(self.allocator, entry.key_ptr.*);
         }
         return try self.allocator.dupe([]const u8, paths.items);
+    }
+
+    /// Check if a file has been included via include_once/require_once
+    pub fn isOnceIncluded(self: *const Self, path: []const u8) bool {
+        return self.once_included.contains(path);
+    }
+
+    /// Get the file that first included the given path via _once
+    pub fn getOnceIncludedBy(self: *const Self, path: []const u8) ?[]const u8 {
+        return self.once_included_by.get(path);
+    }
+
+    /// Check if there is a circular dependency involving the given file
+    pub fn hasCycle(self: *const Self, file_path: []const u8) bool {
+        for (self.cycles.items) |cycle| {
+            if (std.mem.eql(u8, cycle.start_file, file_path)) return true;
+            for (cycle.cycle) |path_in_cycle| {
+                if (std.mem.eql(u8, path_in_cycle, file_path)) return true;
+            }
+        }
+        return false;
     }
 };
 

@@ -37,6 +37,19 @@ pub const Module = struct {
     inferred_types: std.StringHashMap(std.AutoHashMap(usize, Type)),
     /// 匿名类计数器
     next_anon_class_id: u32 = 0,
+    /// Compile-time resolved includes: list of (resolved_path, is_once) that were found
+    /// Used by the multi-file compiler to merge IR from included files
+    compile_time_includes: std.ArrayListUnmanaged(CompileTimeInclude),
+
+    /// A compile-time include entry
+    pub const CompileTimeInclude = struct {
+        /// Resolved absolute path of the included file
+        resolved_path: []const u8,
+        /// Whether this is a _once variant
+        is_once: bool,
+        /// Whether this is a require (vs include)
+        is_require: bool,
+    };
 
     const Self = @This();
 
@@ -51,6 +64,7 @@ pub const Module = struct {
             .types = .{},
             .string_table = .{},
             .inferred_types = std.StringHashMap(std.AutoHashMap(usize, Type)).init(allocator),
+            .compile_time_includes = .{},
         };
     }
 
@@ -86,6 +100,12 @@ pub const Module = struct {
             self.allocator.free(str);
         }
         self.string_table.deinit(self.allocator);
+
+        // Free compile-time includes
+        for (self.compile_time_includes.items) |inc| {
+            self.allocator.free(inc.resolved_path);
+        }
+        self.compile_time_includes.deinit(self.allocator);
     }
 
     /// Add a function to the module (replaces existing if duplicate name)
@@ -964,6 +984,16 @@ pub const Instruction = struct {
         yield_val: YieldOp,
         /// Yield from another generator/iterable
         yield_from: UnaryOp,
+
+        // ============ Include/Require Operations ============
+        /// Compile-time include (static path, resolved at compile time)
+        include: IncludeOp,
+        /// Compile-time require (static path, resolved at compile time)
+        require: IncludeOp,
+        /// Runtime include (dynamic path, calls php_include)
+        include_runtime: UnaryOp,
+        /// Runtime require (dynamic path, calls php_require)
+        require_runtime: UnaryOp,
     };
 
     /// Parameter operation
@@ -987,6 +1017,14 @@ pub const Instruction = struct {
     pub const YieldOp = struct {
         key: ?Register,
         value: ?Register,
+    };
+
+    /// Include/Require operation
+    pub const IncludeOp = struct {
+        /// Path string table ID (resolved absolute path for compile-time)
+        path_str_id: u32,
+        /// Whether this is a _once variant
+        is_once: bool,
     };
 
     /// Binary operation operands
