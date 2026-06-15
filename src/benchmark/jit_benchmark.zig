@@ -490,7 +490,7 @@ pub const JITBenchmark = struct {
         output_path: []const u8,
         format: ReportFormat,
     ) !void {
-        const file = try std.fs.cwd().createFile(output_path, .{});
+        const file = try std.fs.cwd.createFile(output_path, .{});
         defer file.close();
         
         const writer = file.writer();

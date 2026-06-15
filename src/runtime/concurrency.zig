@@ -48,9 +48,9 @@ pub fn Channel(comptime T: type) type {
         capacity: usize,
         
         // 同步原语
-        mutex: std.Thread.Mutex,
-        not_empty: std.Thread.Condition,
-        not_full: std.Thread.Condition,
+        mutex: std.Io.Mutex,
+        not_empty: std.Io.Condition,
+        not_full: std.Io.Condition,
         
         // 状态
         state: std.atomic.Value(State),
@@ -71,11 +71,11 @@ pub fn Channel(comptime T: type) type {
             
             self.* = .{
                 .allocator = allocator,
-                .buffer = .{},
+                .buffer = .empty,
                 .capacity = capacity,
-                .mutex = .{},
-                .not_empty = .{},
-                .not_full = .{},
+                .mutex = .init,
+                .not_empty = .init,
+                .not_full = .init,
                 .state = std.atomic.Value(State).init(.open),
                 .send_count = std.atomic.Value(u64).init(0),
                 .recv_count = std.atomic.Value(u64).init(0),
@@ -101,8 +101,8 @@ pub fn Channel(comptime T: type) type {
         /// @thread-safety GUARDED_BY(mutex)
         /// @ownership TRANSFER (data 的所有权转移到 Channel)
         pub fn send(self: *Self, data: T) !void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+            defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
             
             // 检查 Channel 是否已关闭
             if (self.state.load(.acquire) == .closed) {
@@ -114,7 +114,7 @@ pub fn Channel(comptime T: type) type {
                 if (self.state.load(.acquire) == .closed) {
                     return error.ChannelClosed;
                 }
-                self.not_full.wait(&self.mutex);
+                self.not_full.waitUncancelable(std.Io.Threaded.global_single_threaded.io(), &self.mutex);
             }
             
             // 添加数据到缓冲区
@@ -124,7 +124,7 @@ pub fn Channel(comptime T: type) type {
             _ = self.send_count.fetchAdd(1, .monotonic);
             
             // 通知等待的接收者
-            self.not_empty.signal();
+            self.not_empty.signal(std.Io.Threaded.global_single_threaded.io());
         }
         
         /// 从 Channel 接收数据
@@ -133,15 +133,15 @@ pub fn Channel(comptime T: type) type {
         /// @thread-safety GUARDED_BY(mutex)
         /// @ownership TRANSFER (返回的数据所有权转移给调用者)
         pub fn recv(self: *Self) !T {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+            defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
             
             // 等待缓冲区有数据
             while (self.buffer.items.len == 0) {
                 if (self.state.load(.acquire) == .closed) {
                     return error.ChannelClosed;
                 }
-                self.not_empty.wait(&self.mutex);
+                self.not_empty.waitUncancelable(std.Io.Threaded.global_single_threaded.io(), &self.mutex);
             }
             
             // 从缓冲区取出数据
@@ -151,7 +151,7 @@ pub fn Channel(comptime T: type) type {
             _ = self.recv_count.fetchAdd(1, .monotonic);
             
             // 通知等待的发送者
-            self.not_full.signal();
+            self.not_full.signal(std.Io.Threaded.global_single_threaded.io());
             
             return data;
         }
@@ -161,8 +161,8 @@ pub fn Channel(comptime T: type) type {
         /// @post 如果缓冲区有空间，添加数据并返回 true；否则返回 false
         /// @thread-safety GUARDED_BY(mutex)
         pub fn trySend(self: *Self, data: T) !bool {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+            defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
             
             if (self.state.load(.acquire) == .closed) {
                 return error.ChannelClosed;
@@ -174,7 +174,7 @@ pub fn Channel(comptime T: type) type {
             
             try self.buffer.append(self.allocator, data);
             _ = self.send_count.fetchAdd(1, .monotonic);
-            self.not_empty.signal();
+            self.not_empty.signal(std.Io.Threaded.global_single_threaded.io());
             
             return true;
         }
@@ -184,8 +184,8 @@ pub fn Channel(comptime T: type) type {
         /// @post 如果缓冲区有数据，返回数据；否则返回 null
         /// @thread-safety GUARDED_BY(mutex)
         pub fn tryRecv(self: *Self) ?T {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+            defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
             
             if (self.buffer.items.len == 0) {
                 return null;
@@ -193,7 +193,7 @@ pub fn Channel(comptime T: type) type {
             
             const data = self.buffer.orderedRemove(0);
             _ = self.recv_count.fetchAdd(1, .monotonic);
-            self.not_full.signal();
+            self.not_full.signal(std.Io.Threaded.global_single_threaded.io());
             
             return data;
         }
@@ -205,8 +205,8 @@ pub fn Channel(comptime T: type) type {
             self.state.store(.closed, .release);
             
             // 唤醒所有等待的线程
-            self.not_empty.broadcast();
-            self.not_full.broadcast();
+            self.not_empty.broadcast(std.Io.Threaded.global_single_threaded.io());
+            self.not_full.broadcast(std.Io.Threaded.global_single_threaded.io());
         }
         
         /// 检查 Channel 是否已关闭
@@ -218,8 +218,8 @@ pub fn Channel(comptime T: type) type {
         /// 获取缓冲区当前大小
         /// @thread-safety GUARDED_BY(mutex)
         pub fn len(self: *Self) usize {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+            defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
             return self.buffer.items.len;
         }
         
@@ -258,7 +258,7 @@ pub fn ThreadSafeCache(comptime K: type, comptime V: type) type {
         
         allocator: std.mem.Allocator,
         data: HashMap,
-        mutex: std.Thread.Mutex,
+        mutex: std.Io.Mutex,
         access_count: std.atomic.Value(usize),
         
         /// 初始化缓存
@@ -267,7 +267,7 @@ pub fn ThreadSafeCache(comptime K: type, comptime V: type) type {
             return .{
                 .allocator = allocator,
                 .data = HashMap.init(allocator),
-                .mutex = .{},
+                .mutex = .init,
                 .access_count = std.atomic.Value(usize).init(0),
             };
         }
@@ -283,8 +283,8 @@ pub fn ThreadSafeCache(comptime K: type, comptime V: type) type {
         pub fn get(self: *Self, key: K) ?V {
             _ = self.access_count.fetchAdd(1, .monotonic);
             
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+            defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
             
             return self.data.get(key);
         }
@@ -292,8 +292,8 @@ pub fn ThreadSafeCache(comptime K: type, comptime V: type) type {
         /// 设置值
         /// @thread-safety GUARDED_BY(mutex)
         pub fn put(self: *Self, key: K, value: V) !void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+            defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
             
             try self.data.put(key, value);
         }
@@ -301,8 +301,8 @@ pub fn ThreadSafeCache(comptime K: type, comptime V: type) type {
         /// 删除值
         /// @thread-safety GUARDED_BY(mutex)
         pub fn remove(self: *Self, key: K) bool {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+            defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
             
             return self.data.remove(key);
         }
@@ -310,8 +310,8 @@ pub fn ThreadSafeCache(comptime K: type, comptime V: type) type {
         /// 清空缓存
         /// @thread-safety GUARDED_BY(mutex)
         pub fn clear(self: *Self) void {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+            defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
             
             self.data.clearRetainingCapacity();
         }
@@ -376,30 +376,30 @@ pub const AtomicCounter = struct {
 pub const RWLock = struct {
     readers: std.atomic.Value(i32),
     writer: std.atomic.Value(bool),
-    mutex: std.Thread.Mutex,
-    read_cond: std.Thread.Condition,
-    write_cond: std.Thread.Condition,
+    mutex: std.Io.Mutex,
+    read_cond: std.Io.Condition,
+    write_cond: std.Io.Condition,
     
     /// 初始化读写锁
     pub fn init() RWLock {
         return .{
             .readers = std.atomic.Value(i32).init(0),
             .writer = std.atomic.Value(bool).init(false),
-            .mutex = .{},
-            .read_cond = .{},
-            .write_cond = .{},
+            .mutex = .init,
+            .read_cond = .init,
+            .write_cond = .init,
         };
     }
     
     /// 获取读锁
     /// @thread-safety GUARDED_BY(mutex)
     pub fn lockRead(self: *RWLock) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+        defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
         
         // 等待写锁释放
         while (self.writer.load(.acquire)) {
-            self.read_cond.wait(&self.mutex);
+            self.read_cond.waitUncancelable(std.Io.Threaded.global_single_threaded.io(), &self.mutex);
         }
         
         _ = self.readers.fetchAdd(1, .monotonic);
@@ -412,19 +412,19 @@ pub const RWLock = struct {
         
         // 如果是最后一个读者，通知等待的写者
         if (prev == 1) {
-            self.write_cond.signal();
+            self.write_cond.signal(std.Io.Threaded.global_single_threaded.io());
         }
     }
     
     /// 获取写锁
     /// @thread-safety GUARDED_BY(mutex)
     pub fn lockWrite(self: *RWLock) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+        defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
         
         // 等待所有读者和写者完成
         while (self.writer.load(.acquire) or self.readers.load(.acquire) > 0) {
-            self.write_cond.wait(&self.mutex);
+            self.write_cond.waitUncancelable(std.Io.Threaded.global_single_threaded.io(), &self.mutex);
         }
         
         self.writer.store(true, .release);
@@ -436,8 +436,8 @@ pub const RWLock = struct {
         self.writer.store(false, .release);
         
         // 通知所有等待的读者和写者
-        self.read_cond.broadcast();
-        self.write_cond.signal();
+        self.read_cond.broadcast(std.Io.Threaded.global_single_threaded.io());
+        self.write_cond.signal(std.Io.Threaded.global_single_threaded.io());
     }
 };
 
@@ -744,46 +744,59 @@ test "LockFreeStack: push and pop" {
 // PHP 并发类型包装
 // ============================================================================
 
-/// PHP Mutex 包装
+/// PHP Mutex 包装 - 使用 std.atomic.Mutex 自旋锁实现
+/// 在低竞争场景下自旋等待，避免内核上下文切换开销
 /// @thread-safety GUARDED_BY(mutex)
 pub const PHPMutex = struct {
-    mutex: std.Thread.Mutex,
+    mutex: std.atomic.Mutex,
     allocator: std.mem.Allocator,
     lock_count: std.atomic.Value(u32),
-    
+
+    // 最大自旋次数，超过后让出 CPU
+    const MAX_SPINS = 64;
+
     pub fn init(allocator: std.mem.Allocator) PHPMutex {
         return .{
-            .mutex = .{},
+            .mutex = .unlocked,
             .allocator = allocator,
             .lock_count = std.atomic.Value(u32).init(0),
         };
     }
-    
+
     pub fn deinit(self: *PHPMutex) void {
         _ = self;
-        // Mutex 不需要显式清理
     }
-    
+
     pub fn lock(self: *PHPMutex, coroutine_id: u64) void {
-        _ = coroutine_id; // 暂时不使用协程 ID
-        self.mutex.lock();
+        _ = coroutine_id;
+        var spins: u32 = 0;
+        while (!self.mutex.tryLock()) {
+            spins += 1;
+            if (spins > MAX_SPINS) {
+                // 退避策略：让出 CPU，避免饥饿
+                std.Thread.yield() catch {};
+                spins = 0;
+            } else {
+                std.atomic.spinLoopHint();
+            }
+        }
         _ = self.lock_count.fetchAdd(1, .monotonic);
     }
-    
+
     pub fn unlock(self: *PHPMutex) void {
         _ = self.lock_count.fetchSub(1, .monotonic);
         self.mutex.unlock();
     }
-    
+
     pub fn tryLock(self: *PHPMutex, coroutine_id: u64) bool {
-        _ = coroutine_id; // 暂时不使用协程 ID
+        _ = coroutine_id;
         if (self.mutex.tryLock()) {
             _ = self.lock_count.fetchAdd(1, .monotonic);
             return true;
         }
         return false;
     }
-    
+
     pub fn getLockCount(self: *const PHPMutex) u32 {
         return self.lock_count.load(.monotonic);
     }
@@ -891,23 +904,41 @@ pub const PHPRWLock = struct {
     }
 };
 
-/// PHP SharedData 包装
+/// PHP SharedData 包装 - 使用 std.atomic.Mutex 自旋锁
 /// @thread-safety GUARDED_BY(mutex)
 pub const PHPSharedData = struct {
     data: std.StringHashMap([]const u8),
-    mutex: std.Thread.Mutex,
+    mutex: std.atomic.Mutex,
     allocator: std.mem.Allocator,
     access_count: std.atomic.Value(u64),
-    
+    const MAX_SPINS = 64;
+
     pub fn init(allocator: std.mem.Allocator) PHPSharedData {
         return .{
             .data = std.StringHashMap([]const u8).init(allocator),
-            .mutex = .{},
+            .mutex = .unlocked,
             .allocator = allocator,
             .access_count = std.atomic.Value(u64).init(0),
         };
     }
-    
+
+    fn spinLock(self: *PHPSharedData) void {
+        var spins: u32 = 0;
+        while (!self.mutex.tryLock()) {
+            spins += 1;
+            if (spins > MAX_SPINS) {
+                std.Thread.yield() catch {};
+                spins = 0;
+            } else {
+                std.atomic.spinLoopHint();
+            }
+        }
+    }
+
+    fn spinUnlock(self: *PHPSharedData) void {
+        self.mutex.unlock();
+    }
+
     pub fn deinit(self: *PHPSharedData) void {
         var iter = self.data.iterator();
         while (iter.next()) |entry| {
@@ -916,41 +947,40 @@ pub const PHPSharedData = struct {
         }
         self.data.deinit();
     }
-    
+
     pub fn get(self: *PHPSharedData, key: []const u8) ?[]const u8 {
         _ = self.access_count.fetchAdd(1, .monotonic);
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.spinLock();
+        defer self.spinUnlock();
         return self.data.get(key);
     }
-    
+
     pub fn set(self: *PHPSharedData, key: []const u8, value: []const u8) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        
-        // 如果键已存在，先释放旧值
+        self.spinLock();
+        defer self.spinUnlock();
+
         if (self.data.fetchRemove(key)) |kv| {
             self.allocator.free(kv.key);
             self.allocator.free(kv.value);
         }
-        
+
         const key_copy = try self.allocator.dupe(u8, key);
         errdefer self.allocator.free(key_copy);
-        
+
         const value_copy = try self.allocator.dupe(u8, value);
         errdefer self.allocator.free(value_copy);
-        
+
         try self.data.put(key_copy, value_copy);
     }
-    
+
     pub fn put(self: *PHPSharedData, key: []const u8, value: []const u8) !void {
         return self.set(key, value);
     }
-    
+
     pub fn remove(self: *PHPSharedData, key: []const u8) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
-        
+        self.spinLock();
+        defer self.spinUnlock();
+
         if (self.data.fetchRemove(key)) |kv| {
             self.allocator.free(kv.key);
             self.allocator.free(kv.value);
@@ -958,22 +988,22 @@ pub const PHPSharedData = struct {
         }
         return false;
     }
-    
+
     pub fn has(self: *PHPSharedData, key: []const u8) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.spinLock();
+        defer self.spinUnlock();
         return self.data.contains(key);
     }
     
     pub fn size(self: *PHPSharedData) usize {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.spinLock();
+        defer self.spinUnlock();
         return self.data.count();
     }
-    
+
     pub fn clear(self: *PHPSharedData) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.spinLock();
+        defer self.spinUnlock();
         
         var iter = self.data.iterator();
         while (iter.next()) |entry| {

@@ -27,7 +27,7 @@ fn benchmarkSyncFileIO(allocator: std.mem.Allocator, config: TestConfig) !u64 {
         const filename = try std.fmt.allocPrint(allocator, "test_sync_{d}.dat", .{i});
         defer allocator.free(filename);
         
-        const file = try std.fs.cwd().createFile(filename, .{});
+        const file = try std.fs.cwd.createFile(filename, .{});
         defer file.close();
         
         const data = try allocator.alloc(u8, config.file_size);
@@ -43,7 +43,7 @@ fn benchmarkSyncFileIO(allocator: std.mem.Allocator, config: TestConfig) !u64 {
         const filename = try std.fmt.allocPrint(allocator, "test_sync_{d}.dat", .{i});
         defer allocator.free(filename);
         
-        const file = try std.fs.cwd().openFile(filename, .{});
+        const file = try std.fs.cwd.openFile(filename, .{});
         defer file.close();
         
         const data = try allocator.alloc(u8, config.file_size);
@@ -58,7 +58,7 @@ fn benchmarkSyncFileIO(allocator: std.mem.Allocator, config: TestConfig) !u64 {
         const filename = try std.fmt.allocPrint(allocator, "test_sync_{d}.dat", .{i});
         defer allocator.free(filename);
         
-        try std.fs.cwd().deleteFile(filename);
+        try std.fs.cwd.deleteFile(filename);
     }
     
     const end_time = std.time.nanoTimestamp();
@@ -101,7 +101,7 @@ fn benchmarkAsyncFileIO(allocator: std.mem.Allocator, config: TestConfig) !u64 {
         const filename = try std.fmt.allocPrint(allocator, "test_async_{d}.dat", .{i});
         defer allocator.free(filename);
         
-        try std.fs.cwd().deleteFile(filename);
+        try std.fs.cwd.deleteFile(filename);
     }
     
     const end_time = std.time.nanoTimestamp();

@@ -63,7 +63,7 @@ pub const FileHash = struct {
 
     /// 计算文件哈希
     pub fn compute(allocator: Allocator, path: []const u8) !FileHash {
-        const file = try std.fs.cwd().openFile(path, .{});
+        const file = try std.Io.Dir.cwd().openFile(path, .{});
         defer file.close();
 
         const stat = try file.stat();
@@ -125,8 +125,8 @@ pub const DependencyInfo = struct {
         return .{
             .file_path = try allocator.dupe(u8, file_path),
             .hash = undefined, // 需要单独计算
-            .dependencies = std.ArrayListUnmanaged([]const u8){},
-            .dependents = std.ArrayListUnmanaged([]const u8){},
+            .dependencies = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 },
+            .dependents = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 },
             .compile_time = 0,
             .output_path = &.{},
         };
@@ -208,8 +208,8 @@ pub const DependencyInfo = struct {
         var info = DependencyInfo{
             .file_path = undefined,
             .hash = undefined,
-            .dependencies = std.ArrayListUnmanaged([]const u8){},
-            .dependents = std.ArrayListUnmanaged([]const u8){},
+            .dependencies = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 },
+            .dependents = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 },
             .compile_time = 0,
             .output_path = &.{},
         };
@@ -304,7 +304,7 @@ pub const CompilationCache = struct {
 
     pub fn init(allocator: Allocator) !CompilationCache {
         // 创建缓存目录
-        const cache_dir = try std.fs.cwd().makeOpenPath(CACHE_DIR, .{});
+        const cache_dir = try std.Io.Dir.cwd().makeOpenPath(CACHE_DIR, .{});
 
         return .{
             .cache_dir = cache_dir,
@@ -553,7 +553,7 @@ pub const IncrementalCompiler = struct {
         };
 
         // 创建AOT编译器
-        var aot_compiler = try CompilerMod.AOTCompiler.init(self.allocator, aot_options);
+        var aot_compiler = try CompilerMod.AOTCompiler.init(self.allocator, undefined, aot_options);
         defer aot_compiler.deinit();
 
         // 编译到IR

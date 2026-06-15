@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("time_compat.zig");
 const types = @import("types.zig");
 const Value = types.Value;
 
@@ -11,7 +12,7 @@ pub const Session = struct {
         return .{
             .id = id,
             .data = std.StringHashMap(Value).init(allocator),
-            .last_access = std.time.timestamp(),
+            .last_access = time_compat.timestamp(),
         };
     }
 
@@ -28,19 +29,19 @@ pub const Session = struct {
 pub const SessionManager = struct {
     allocator: std.mem.Allocator,
     sessions: std.StringHashMap(*Session),
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
 
     pub fn init(allocator: std.mem.Allocator) SessionManager {
         return .{
             .allocator = allocator,
             .sessions = std.StringHashMap(*Session).init(allocator),
-            .mutex = .{},
+            .mutex = .init,
         };
     }
 
     pub fn deinit(self: *SessionManager) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+        defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
 
         var it = self.sessions.iterator();
         while (it.next()) |entry| {
@@ -59,19 +60,19 @@ pub const SessionManager = struct {
         const session = try self.allocator.create(Session);
         session.* = Session.init(self.allocator, id);
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+        defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
         try self.sessions.put(id, session);
 
         return session;
     }
 
     pub fn getSession(self: *SessionManager, id: []const u8) ?*Session {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+        defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
 
         if (self.sessions.get(id)) |session| {
-            session.last_access = std.time.timestamp();
+            session.last_access = time_compat.timestamp();
             return session;
         }
         return null;

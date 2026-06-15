@@ -10,13 +10,13 @@ pub fn main() !void {
     const allocator = gpa.allocator();
 
     // Ensure interpreter exists
-    const cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
+    const cwd = try std.fs.cwd.realpathAlloc(allocator, ".");
     defer allocator.free(cwd);
     
     const interpreter_path = try std.fs.path.join(allocator, &.{cwd, INTERPRETER_BIN});
     defer allocator.free(interpreter_path);
     
-    std.fs.cwd().access(interpreter_path, .{}) catch {
+    std.fs.cwd.access(interpreter_path, .{}) catch {
         std.debug.print("Error: Interpreter not found at {s}\n", .{interpreter_path});
         std.debug.print("Please run 'zig build' first.\n", .{});
         std.process.exit(1);
@@ -60,13 +60,13 @@ pub fn main() !void {
     defer freeListMap(allocator, &xfail);
 
     // Walk directory
-    var dir = try std.fs.cwd().openDir(test_dir, .{ .iterate = true });
+    var dir = try std.fs.cwd.openDir(test_dir, .{ .iterate = true });
     defer dir.close();
 
     var walker = try dir.walk(allocator);
     defer walker.deinit();
 
-    var test_paths = std.ArrayListUnmanaged([]const u8){};
+    var test_paths = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
     defer {
         for (test_paths.items) |p| allocator.free(p);
         test_paths.deinit(allocator);
@@ -94,7 +94,7 @@ pub fn main() !void {
     total_tests = test_paths.items.len;
 
     if (cache_enabled) {
-        std.fs.cwd().makePath(cache_dir) catch {};
+        std.fs.cwd.makePath(cache_dir) catch {};
     }
 
     var output_mutex: std.Thread.Mutex = .{};
@@ -245,7 +245,7 @@ fn workerLoop(shared: anytype) void {
             if (name) |n| {
                 bin_path = std.fs.path.join(arena, &.{ shared.cache_dir, n }) catch "";
                 if (bin_path.len != 0) {
-                    std.fs.cwd().access(bin_path, .{}) catch {
+                    std.fs.cwd.access(bin_path, .{}) catch {
                         const timestamp = std.time.milliTimestamp();
                         const temp_name = std.fmt.allocPrint(arena, "tmp_{d}_{d}.bin", .{ timestamp, i }) catch "";
                         const temp_path = std.fs.path.join(arena, &.{ shared.cache_dir, temp_name }) catch "";
@@ -285,12 +285,12 @@ fn workerLoop(shared: anytype) void {
                                 _ = shared.failed.fetchAdd(1, .acq_rel);
                             }
                             shared.output_mutex.unlock();
-                            std.fs.cwd().deleteFile(temp_path) catch {};
+                            std.fs.cwd.deleteFile(temp_path) catch {};
                             continue;
                         }
 
-                        std.fs.cwd().rename(temp_path, bin_path) catch {
-                            std.fs.cwd().deleteFile(temp_path) catch {};
+                        std.fs.cwd.rename(temp_path, bin_path) catch {
+                            std.fs.cwd.deleteFile(temp_path) catch {};
                         };
                     };
                 }
@@ -398,7 +398,7 @@ fn workerLoop(shared: anytype) void {
 }
 
 fn hashFileHex(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
-    const file = try std.fs.cwd().openFile(path, .{});
+    const file = try std.fs.cwd.openFile(path, .{});
     defer file.close();
     const data = try file.readToEndAlloc(allocator, 64 * 1024 * 1024);
     defer allocator.free(data);
@@ -507,7 +507,7 @@ fn getenvOwned(allocator: std.mem.Allocator, name: []const u8) ?[]u8 {
 
 fn loadListFile(allocator: std.mem.Allocator, path: []const u8) !std.StringHashMap([]const u8) {
     var map = std.StringHashMap([]const u8).init(allocator);
-    const file = std.fs.cwd().openFile(path, .{}) catch return map;
+    const file = std.fs.cwd.openFile(path, .{}) catch return map;
     defer file.close();
 
     const contents = try file.readToEndAlloc(allocator, 1024 * 1024);

@@ -1,6 +1,7 @@
 const std = @import("std");
 const types = @import("types.zig");
 const Value = types.Value;
+const time_compat = @import("time_compat.zig");
 
 /// 性能优化模块
 /// 包含：字符串驻留优化、内联缓存、数组优化、内存池、SIMD加速
@@ -58,7 +59,7 @@ pub const EnhancedStringInterner = struct {
             .allocator = alloc,
             .strings = .{},
             .stats = .{},
-            .short_string_cache = [_]?[]const u8{null} ** 256,
+            .short_string_cache = @splat(null),
         };
     }
 
@@ -71,9 +72,9 @@ pub const EnhancedStringInterner = struct {
     }
 
     pub fn intern(self: *EnhancedStringInterner, str: []const u8) ![]const u8 {
-        const start_time = std.time.nanoTimestamp();
+        const start_time = time_compat.nanoTimestamp();
         defer {
-            const end_time = std.time.nanoTimestamp();
+            const end_time = time_compat.nanoTimestamp();
             self.stats.lookup_time_ns += @intCast(end_time - start_time);
         }
 
@@ -96,7 +97,7 @@ pub const EnhancedStringInterner = struct {
         }
 
         // 创建新的驻留字符串
-        const intern_start = std.time.nanoTimestamp();
+        const intern_start = time_compat.nanoTimestamp();
         const owned = try self.allocator.dupe(u8, str);
         const hash = std.hash.Wyhash.hash(0, str);
 
@@ -112,7 +113,7 @@ pub const EnhancedStringInterner = struct {
             self.short_string_cache[str[0]] = owned;
         }
 
-        const intern_end = std.time.nanoTimestamp();
+        const intern_end = time_compat.nanoTimestamp();
         self.stats.intern_time_ns += @intCast(intern_end - intern_start);
         self.stats.miss_count += 1;
         self.stats.total_interned += 1;
@@ -167,12 +168,12 @@ pub const InlineCacheEntry = struct {
         self.class_id = class_id;
         self.method_ptr = method;
         self.hit_count = 0;
-        self.last_access = std.time.timestamp();
+        self.last_access = time_compat.timestamp();
     }
 
     pub fn recordHit(self: *InlineCacheEntry) void {
         self.hit_count += 1;
-        self.last_access = std.time.timestamp();
+        self.last_access = time_compat.timestamp();
     }
 };
 
@@ -197,7 +198,7 @@ pub const PolymorphicInlineCache = struct {
 
     pub fn init() PolymorphicInlineCache {
         return .{
-            .entries = [_]InlineCacheEntry{InlineCacheEntry.init()} ** MAX_ENTRIES,
+            .entries = @splat(InlineCacheEntry.init()),
             .entry_count = 0,
             .stats = .{},
         };

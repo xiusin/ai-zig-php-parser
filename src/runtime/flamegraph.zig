@@ -122,6 +122,7 @@ pub const FlameGraphNode = struct {
 /// 火焰图生成器
 pub const FlameGraphGenerator = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     profiler: *Profiler,
     
     /// 根节点
@@ -137,7 +138,7 @@ pub const FlameGraphGenerator = struct {
     min_display_time_ns: u64,
     
     /// 线程安全
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
 
     sampling_running: std.atomic.Value(bool),
     sampling_thread: ?std.Thread,
@@ -145,17 +146,18 @@ pub const FlameGraphGenerator = struct {
     /// 初始化火焰图生成器
     /// @pre allocator 和 profiler 必须有效
     /// @post 返回初始化的生成器
-    pub fn init(allocator: std.mem.Allocator, profiler: *Profiler) !FlameGraphGenerator {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, profiler: *Profiler) !FlameGraphGenerator {
         const root = try FlameGraphNode.init(allocator, "root");
         
         return FlameGraphGenerator{
             .allocator = allocator,
+            .io = io,
             .profiler = profiler,
             .root = root,
-            .samples = .{},
+            .samples = .{ .items = &.{}, .capacity = 0 },
             .sampling_interval_ns = 1_000_000, // 1ms 默认采样间隔
             .min_display_time_ns = 100_000, // 0.1ms 最小显示时间
-            .mutex = .{},
+            .mutex = std.Io.Mutex.init,
             .sampling_running = std.atomic.Value(bool).init(false),
             .sampling_thread = null,
         };
@@ -176,15 +178,15 @@ pub const FlameGraphGenerator = struct {
     
     /// 设置采样间隔
     pub fn setSamplingInterval(self: *FlameGraphGenerator, interval_ns: u64) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lock(self.io) catch {};
+        defer self.mutex.unlock(self.io);
         self.sampling_interval_ns = interval_ns;
     }
     
     /// 设置最小显示时间
     pub fn setMinDisplayTime(self: *FlameGraphGenerator, min_time_ns: u64) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lock(self.io) catch {};
+        defer self.mutex.unlock(self.io);
         self.min_display_time_ns = min_time_ns;
     }
 
@@ -218,8 +220,8 @@ pub const FlameGraphGenerator = struct {
     /// @pre profiler 必须已经收集了性能数据
     /// @post 构建火焰图树结构
     pub fn collectFromProfiler(self: *FlameGraphGenerator) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lock(self.io) catch {};
+        defer self.mutex.unlock(self.io);
         
         // 获取所有函数统计
         const all_stats = try self.profiler.getAllStats(self.allocator);
@@ -248,8 +250,8 @@ pub const FlameGraphGenerator = struct {
         const stack_names = try self.profiler.snapshotCallStackNames(self.allocator);
         defer self.allocator.free(stack_names);
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lock(self.io) catch {};
+        defer self.mutex.unlock(self.io);
 
         self.root.total_time_ns += weight_ns;
 
@@ -266,8 +268,8 @@ pub const FlameGraphGenerator = struct {
     /// @pre frames 必须有效
     /// @post 样本被添加到样本列表
     pub fn addSample(self: *FlameGraphGenerator, frames: []const StackFrame, weight_ns: u64) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lock(self.io) catch {};
+        defer self.mutex.unlock(self.io);
         
         // 复制帧数据
         var frames_copy = try self.allocator.alloc(StackFrame, frames.len);
@@ -293,8 +295,8 @@ pub const FlameGraphGenerator = struct {
     /// @pre samples 必须已经收集
     /// @post 构建完整的火焰图树结构
     pub fn buildFromSamples(self: *FlameGraphGenerator) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lock(self.io) catch {};
+        defer self.mutex.unlock(self.io);
         
         // 重置根节点
         self.root.deinit(self.allocator);
@@ -326,8 +328,8 @@ pub const FlameGraphGenerator = struct {
     };
 
     pub fn buildFromFoldedFormat(self: *FlameGraphGenerator, folded: []const u8, unit: FoldedUnit) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lock(self.io) catch {};
+        defer self.mutex.unlock(self.io);
 
         self.root.deinit(self.allocator);
         self.allocator.destroy(self.root);
@@ -368,18 +370,16 @@ pub const FlameGraphGenerator = struct {
     /// 格式：func1;func2;func3 count
     /// @post 返回折叠格式的字符串
     pub fn generateFoldedFormat(self: *FlameGraphGenerator, allocator: std.mem.Allocator) ![]u8 {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lock(self.io) catch {};
+        defer self.mutex.unlock(self.io);
 
-        var buffer: std.ArrayListUnmanaged(u8) = .{};
+        var buffer: std.ArrayListUnmanaged(u8) = .{ .items = &.{}, .capacity = 0 };
         errdefer buffer.deinit(allocator);
         
-        const writer = buffer.writer(allocator);
-        
-        var stack: std.ArrayListUnmanaged([]const u8) = .{};
+        var stack: std.ArrayListUnmanaged([]const u8) = .{ .items = &.{}, .capacity = 0 };
         defer stack.deinit(allocator);
 
-        try self.writeFoldedNode(writer, allocator, self.root, &stack);
+        try self.writeFoldedNode(&buffer, allocator, self.root, &stack);
         
         return buffer.toOwnedSlice(allocator);
     }
@@ -387,7 +387,7 @@ pub const FlameGraphGenerator = struct {
     /// 递归写入折叠格式节点
     fn writeFoldedNode(
         self: *FlameGraphGenerator,
-        writer: anytype,
+        buffer: *std.ArrayListUnmanaged(u8),
         allocator: std.mem.Allocator,
         node: *const FlameGraphNode,
         stack: *std.ArrayListUnmanaged([]const u8),
@@ -396,7 +396,7 @@ pub const FlameGraphGenerator = struct {
         if (node.parent == null and std.mem.eql(u8, node.name, "root")) {
             var iter = node.children.valueIterator();
             while (iter.next()) |child| {
-                try self.writeFoldedNode(writer, allocator, child.*, stack);
+                try self.writeFoldedNode(buffer, allocator, child.*, stack);
             }
             return;
         }
@@ -413,19 +413,19 @@ pub const FlameGraphGenerator = struct {
         if (node.self_time_ns > 0) {
             // 输出调用栈
             for (stack.items, 0..) |name, i| {
-                if (i > 0) try writer.writeAll(";");
-                try writer.writeAll(name);
+                if (i > 0) try buffer.appendSlice(allocator, ";");
+                try buffer.appendSlice(allocator, name);
             }
             
             // 输出时间（转换为微秒）
             const time_us = node.self_time_ns / 1000;
-            try writer.print(" {d}\n", .{time_us});
+            try buffer.print(allocator, " {d}\n", .{time_us});
         }
         
         // 递归处理子节点
         var iter = node.children.valueIterator();
         while (iter.next()) |child| {
-            try self.writeFoldedNode(writer, allocator, child.*, stack);
+            try self.writeFoldedNode(buffer, allocator, child.*, stack);
         }
     }
     
@@ -433,10 +433,10 @@ pub const FlameGraphGenerator = struct {
     /// @param top_n 返回前 N 个热点函数
     /// @post 返回按总时间排序的热点函数列表
     pub fn identifyHotspots(self: *FlameGraphGenerator, allocator: std.mem.Allocator, top_n: usize) ![]HotspotInfo {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lock(self.io) catch {};
+        defer self.mutex.unlock(self.io);
 
-        var hotspots: std.ArrayListUnmanaged(HotspotInfo) = .{};
+        var hotspots: std.ArrayListUnmanaged(HotspotInfo) = .{ .items = &.{}, .capacity = 0 };
         errdefer hotspots.deinit(allocator);
         
         // 收集所有节点
@@ -492,16 +492,14 @@ pub const FlameGraphGenerator = struct {
     /// 生成火焰图 SVG
     /// @post 返回 SVG 格式的火焰图
     pub fn generateSVG(self: *FlameGraphGenerator, allocator: std.mem.Allocator, width: u32, height: u32) ![]u8 {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lock(self.io) catch {};
+        defer self.mutex.unlock(self.io);
 
-        var buffer: std.ArrayListUnmanaged(u8) = .{};
+        var buffer: std.ArrayListUnmanaged(u8) = .{ .items = &.{}, .capacity = 0 };
         errdefer buffer.deinit(allocator);
         
-        const writer = buffer.writer(allocator);
-        
         // SVG 头部
-        try writer.print(
+        try buffer.print(allocator,
             \\<?xml version="1.0" standalone="no"?>
             \\<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
             \\<svg version="1.1" width="{d}" height="{d}" xmlns="http://www.w3.org/2000/svg">
@@ -519,11 +517,11 @@ pub const FlameGraphGenerator = struct {
         // 绘制火焰图
         const total_time = self.root.total_time_ns;
         if (total_time > 0) {
-            try self.drawNode(writer, self.root, 0, 0, @floatFromInt(width), total_time, 40);
+            try self.drawNode(&buffer, allocator, self.root, 0, 0, @floatFromInt(width), total_time, 40);
         }
         
         // SVG 尾部
-        try writer.writeAll("</svg>\n");
+        try buffer.appendSlice(allocator, "</svg>\n");
         
         return buffer.toOwnedSlice(allocator);
     }
@@ -531,7 +529,8 @@ pub const FlameGraphGenerator = struct {
     /// 递归绘制节点
     fn drawNode(
         self: *FlameGraphGenerator,
-        writer: anytype,
+        buffer: *std.ArrayListUnmanaged(u8),
+        allocator: std.mem.Allocator,
         node: *const FlameGraphNode,
         depth: u32,
         x: f64,
@@ -549,7 +548,7 @@ pub const FlameGraphGenerator = struct {
         const hue = @mod(depth * 17, 360);
         
         // 绘制矩形
-        try writer.print(
+        try buffer.print(allocator, 
             \\<rect x="{d:.2}" y="{d}" width="{d:.2}" height="{d}" fill="hsl({d}, 60%, 60%)" stroke="white"/>
             \\
         , .{ x, y, width_px, box_height, hue });
@@ -559,7 +558,7 @@ pub const FlameGraphGenerator = struct {
             const text_x = x + width_px / 2.0;
             const text_y = y + 12;
             
-            try writer.print(
+            try buffer.print(allocator, 
                 \\<text text-anchor="middle" x="{d:.2}" y="{d}" font-size="12" font-family="Verdana" fill="rgb(0,0,0)">{s}</text>
                 \\
             , .{ text_x, text_y, node.name });
@@ -572,7 +571,7 @@ pub const FlameGraphGenerator = struct {
             const child_width = width_px * @as(f64, @floatFromInt(child.*.total_time_ns)) / @as(f64, @floatFromInt(node.total_time_ns));
             
             if (child_width > 0.1) {
-                try self.drawNode(writer, child.*, depth + 1, child_x, child_width, total_time, y_offset);
+                try self.drawNode(buffer, allocator, child.*, depth + 1, child_x, child_width, total_time, y_offset);
             }
             
             child_x += child_width;
@@ -628,7 +627,7 @@ pub const FlameGraphGenerator = struct {
             "调用次数",
             "占比(%)",
         });
-        std.debug.print("{s}\n", .{"-" ** 90});
+        std.debug.print("{s}\n", .{(@as([90]u8, @splat('-')))[0..]});
         
         for (hotspots) |hotspot| {
             const percentage = if (total_time > 0)
@@ -722,7 +721,7 @@ test "FlameGraphGenerator 初始化" {
     var profiler = try Profiler.init(allocator, .custom);
     defer profiler.deinit();
     
-    var generator = try FlameGraphGenerator.init(allocator, &profiler);
+    var generator = try FlameGraphGenerator.init(allocator, undefined, &profiler);
     defer generator.deinit();
     
     try std.testing.expectEqualStrings("root", generator.root.name);
@@ -735,7 +734,7 @@ test "FlameGraphGenerator 添加样本" {
     var profiler = try Profiler.init(allocator, .custom);
     defer profiler.deinit();
     
-    var generator = try FlameGraphGenerator.init(allocator, &profiler);
+    var generator = try FlameGraphGenerator.init(allocator, undefined, &profiler);
     defer generator.deinit();
     
     const frames = [_]StackFrame{
@@ -754,7 +753,7 @@ test "FlameGraphGenerator 从样本构建" {
     var profiler = try Profiler.init(allocator, .custom);
     defer profiler.deinit();
     
-    var generator = try FlameGraphGenerator.init(allocator, &profiler);
+    var generator = try FlameGraphGenerator.init(allocator, undefined, &profiler);
     defer generator.deinit();
     
     // 添加样本
@@ -783,7 +782,7 @@ test "FlameGraphGenerator 生成折叠格式" {
     var profiler = try Profiler.init(allocator, .custom);
     defer profiler.deinit();
     
-    var generator = try FlameGraphGenerator.init(allocator, &profiler);
+    var generator = try FlameGraphGenerator.init(allocator, undefined, &profiler);
     defer generator.deinit();
     
     // 设置较低的最小显示时间以确保数据被包含
@@ -813,7 +812,7 @@ test "FlameGraphGenerator 识别热点" {
     var profiler = try Profiler.init(allocator, .custom);
     defer profiler.deinit();
     
-    var generator = try FlameGraphGenerator.init(allocator, &profiler);
+    var generator = try FlameGraphGenerator.init(allocator, undefined, &profiler);
     defer generator.deinit();
     
     // 设置较低的最小显示时间
@@ -856,7 +855,7 @@ test "FlameGraphGenerator 从 Profiler 收集" {
     try profiler.enterFunction("test_func2");
     try profiler.exitFunction("test_func2");
     
-    var generator = try FlameGraphGenerator.init(allocator, &profiler);
+    var generator = try FlameGraphGenerator.init(allocator, undefined, &profiler);
     defer generator.deinit();
     
     // 从 profiler 收集数据
@@ -872,7 +871,7 @@ test "FlameGraphGenerator 设置参数" {
     var profiler = try Profiler.init(allocator, .custom);
     defer profiler.deinit();
     
-    var generator = try FlameGraphGenerator.init(allocator, &profiler);
+    var generator = try FlameGraphGenerator.init(allocator, undefined, &profiler);
     defer generator.deinit();
     
     // 设置采样间隔

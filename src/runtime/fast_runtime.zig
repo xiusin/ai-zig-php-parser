@@ -1,5 +1,6 @@
 //! 性能优化集成模块
 //! 统一导出所有优化组件，提供配置和基准测试
+const time_compat = @import("time_compat.zig");
 
 const std = @import("std");
 
@@ -81,9 +82,9 @@ pub const Benchmark = struct {
 
         // 正式测试
         for (0..iterations) |_| {
-            const start = std.time.nanoTimestamp();
+            const start = time_compat.nanoTimestamp();
             func();
-            const end = std.time.nanoTimestamp();
+            const end = time_compat.nanoTimestamp();
             const elapsed = @as(u64, @intCast(end - start));
 
             total += elapsed;

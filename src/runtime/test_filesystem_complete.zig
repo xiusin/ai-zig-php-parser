@@ -13,18 +13,18 @@ const filesystem = @import("filesystem_complete.zig");
 test "scandir - 基本功能" {
     // 创建测试目录
     const test_dir = "test_scandir_basic";
-    try std.fs.cwd().makeDir(test_dir);
-    defer std.fs.cwd().deleteTree(test_dir) catch {};
+    try std.fs.cwd.makeDir(test_dir);
+    defer std.fs.cwd.deleteTree(test_dir) catch {};
     
     // 创建测试文件
     {
-        const file1 = try std.fs.cwd().createFile(test_dir ++ "/file1.txt", .{});
+        const file1 = try std.fs.cwd.createFile(test_dir ++ "/file1.txt", .{});
         defer file1.close();
         
-        const file2 = try std.fs.cwd().createFile(test_dir ++ "/file2.txt", .{});
+        const file2 = try std.fs.cwd.createFile(test_dir ++ "/file2.txt", .{});
         defer file2.close();
         
-        const file3 = try std.fs.cwd().createFile(test_dir ++ "/aaa.txt", .{});
+        const file3 = try std.fs.cwd.createFile(test_dir ++ "/aaa.txt", .{});
         defer file3.close();
     }
     
@@ -35,18 +35,18 @@ test "scandir - 基本功能" {
 
 test "scandir - 升序排序" {
     const test_dir = "test_scandir_asc";
-    try std.fs.cwd().makeDir(test_dir);
-    defer std.fs.cwd().deleteTree(test_dir) catch {};
+    try std.fs.cwd.makeDir(test_dir);
+    defer std.fs.cwd.deleteTree(test_dir) catch {};
     
     // 创建文件（乱序）
     {
-        const file_z = try std.fs.cwd().createFile(test_dir ++ "/zzz.txt", .{});
+        const file_z = try std.fs.cwd.createFile(test_dir ++ "/zzz.txt", .{});
         defer file_z.close();
         
-        const file_a = try std.fs.cwd().createFile(test_dir ++ "/aaa.txt", .{});
+        const file_a = try std.fs.cwd.createFile(test_dir ++ "/aaa.txt", .{});
         defer file_a.close();
         
-        const file_m = try std.fs.cwd().createFile(test_dir ++ "/mmm.txt", .{});
+        const file_m = try std.fs.cwd.createFile(test_dir ++ "/mmm.txt", .{});
         defer file_m.close();
     }
     
@@ -55,15 +55,15 @@ test "scandir - 升序排序" {
 
 test "scandir - 降序排序" {
     const test_dir = "test_scandir_desc";
-    try std.fs.cwd().makeDir(test_dir);
-    defer std.fs.cwd().deleteTree(test_dir) catch {};
+    try std.fs.cwd.makeDir(test_dir);
+    defer std.fs.cwd.deleteTree(test_dir) catch {};
     
     // 创建文件
     {
-        const file1 = try std.fs.cwd().createFile(test_dir ++ "/file1.txt", .{});
+        const file1 = try std.fs.cwd.createFile(test_dir ++ "/file1.txt", .{});
         defer file1.close();
         
-        const file2 = try std.fs.cwd().createFile(test_dir ++ "/file2.txt", .{});
+        const file2 = try std.fs.cwd.createFile(test_dir ++ "/file2.txt", .{});
         defer file2.close();
     }
     
@@ -72,12 +72,12 @@ test "scandir - 降序排序" {
 
 test "scandir - 不排序" {
     const test_dir = "test_scandir_nosort";
-    try std.fs.cwd().makeDir(test_dir);
-    defer std.fs.cwd().deleteTree(test_dir) catch {};
+    try std.fs.cwd.makeDir(test_dir);
+    defer std.fs.cwd.deleteTree(test_dir) catch {};
     
     // 创建文件
     {
-        const file1 = try std.fs.cwd().createFile(test_dir ++ "/file1.txt", .{});
+        const file1 = try std.fs.cwd.createFile(test_dir ++ "/file1.txt", .{});
         defer file1.close();
     }
     
@@ -86,8 +86,8 @@ test "scandir - 不排序" {
 
 test "scandir - 包含点目录" {
     const test_dir = "test_scandir_dots";
-    try std.fs.cwd().makeDir(test_dir);
-    defer std.fs.cwd().deleteTree(test_dir) catch {};
+    try std.fs.cwd.makeDir(test_dir);
+    defer std.fs.cwd.deleteTree(test_dir) catch {};
     
     // scandir 应该包含 "." 和 ".." 条目
     // 在集成测试中验证

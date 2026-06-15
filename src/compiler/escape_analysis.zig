@@ -478,7 +478,7 @@ pub const DataFlowGraph = struct {
 
     /// 获取指向某节点的所有边
     pub fn getIncomingEdges(self: *const DataFlowGraph, allocator: std.mem.Allocator, node_id: u32) ![]DFGEdge {
-        var result = std.ArrayListUnmanaged(DFGEdge){};
+        var result = std.ArrayListUnmanaged(DFGEdge){ .items = &.{}, .capacity = 0 };
         for (self.edges.items) |edge| {
             if (edge.to == node_id) {
                 try result.append(allocator, edge);
@@ -489,7 +489,7 @@ pub const DataFlowGraph = struct {
 
     /// 获取从某节点出发的所有边
     pub fn getOutgoingEdges(self: *const DataFlowGraph, allocator: std.mem.Allocator, node_id: u32) ![]DFGEdge {
-        var result = std.ArrayListUnmanaged(DFGEdge){};
+        var result = std.ArrayListUnmanaged(DFGEdge){ .items = &.{}, .capacity = 0 };
         for (self.edges.items) |edge| {
             if (edge.from == node_id) {
                 try result.append(allocator, edge);
@@ -510,7 +510,7 @@ pub const DataFlowGraph = struct {
 
     /// 获取所有分配节点
     pub fn getAllocationNodes(self: *const DataFlowGraph, allocator: std.mem.Allocator) ![]u32 {
-        var result = std.ArrayListUnmanaged(u32){};
+        var result = std.ArrayListUnmanaged(u32){ .items = &.{}, .capacity = 0 };
         for (self.nodes.items) |node| {
             if (node.kind == .allocation) {
                 try result.append(allocator, node.id);
@@ -700,7 +700,7 @@ pub const DataFlowGraph = struct {
                         if (var_defs.getPtr(entry.key_ptr.*)) |list| {
                             try list.append(self.allocator, block_id);
                         } else {
-                            var list = std.ArrayListUnmanaged(u32){};
+                            var list = std.ArrayListUnmanaged(u32){ .items = &.{}, .capacity = 0 };
                             try list.append(self.allocator, block_id);
                             try var_defs.put(self.allocator, entry.key_ptr.*, list);
                         }
@@ -714,7 +714,7 @@ pub const DataFlowGraph = struct {
         var var_iter = var_defs.iterator();
         while (var_iter.next()) |entry| {
             const variable = entry.key_ptr.*;
-            var worklist = std.ArrayListUnmanaged(u32){};
+            var worklist = std.ArrayListUnmanaged(u32){ .items = &.{}, .capacity = 0 };
             defer worklist.deinit(self.allocator);
 
             // 初始化工作列表
@@ -1451,7 +1451,7 @@ pub const EscapeAnalyzer = struct {
 
     /// 生成分析报告
     pub fn generateReport(self: *const EscapeAnalyzer, allocator: std.mem.Allocator) ![]u8 {
-        var buffer = std.ArrayListUnmanaged(u8){};
+        var buffer = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
         const writer = buffer.writer(allocator);
 
         try writer.print("=== Escape Analysis Report ===\n", .{});
@@ -1475,7 +1475,7 @@ pub const EscapeAnalyzer = struct {
 
     /// 获取所有可栈分配的对象
     pub fn getStackAllocatableObjects(self: *const EscapeAnalyzer, allocator: std.mem.Allocator) ![]u32 {
-        var result = std.ArrayListUnmanaged(u32){};
+        var result = std.ArrayListUnmanaged(u32){ .items = &.{}, .capacity = 0 };
         var iter = self.escape_info_map.iterator();
         while (iter.next()) |entry| {
             if (entry.value_ptr.isStackAllocatable()) {
@@ -1487,7 +1487,7 @@ pub const EscapeAnalyzer = struct {
 
     /// 获取所有可标量替换的对象
     pub fn getScalarReplaceableObjects(self: *const EscapeAnalyzer, allocator: std.mem.Allocator) ![]u32 {
-        var result = std.ArrayListUnmanaged(u32){};
+        var result = std.ArrayListUnmanaged(u32){ .items = &.{}, .capacity = 0 };
         var iter = self.escape_info_map.iterator();
         while (iter.next()) |entry| {
             if (entry.value_ptr.isScalarReplaceable()) {
@@ -1499,13 +1499,13 @@ pub const EscapeAnalyzer = struct {
 
     /// 追踪逃逸路径
     pub fn traceEscapePath(self: *const EscapeAnalyzer, alloc_id: u32, allocator: std.mem.Allocator) ![]EscapePathStep {
-        var path = std.ArrayListUnmanaged(EscapePathStep){};
+        var path = std.ArrayListUnmanaged(EscapePathStep){ .items = &.{}, .capacity = 0 };
 
         // 从分配点开始追踪
         var visited = std.AutoHashMapUnmanaged(u32, void){};
         defer visited.deinit(allocator);
 
-        var queue = std.ArrayListUnmanaged(u32){};
+        var queue = std.ArrayListUnmanaged(u32){ .items = &.{}, .capacity = 0 };
         defer queue.deinit(allocator);
 
         try queue.append(allocator, alloc_id);
@@ -1955,7 +1955,7 @@ pub const OptimizationResult = struct {
 
     /// 生成综合报告
     pub fn generateReport(self: *const OptimizationResult, allocator: std.mem.Allocator) ![]u8 {
-        var buffer = std.ArrayListUnmanaged(u8){};
+        var buffer = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
         const writer = buffer.writer(allocator);
 
         const escape_stats = self.escape_analyzer.getStats();

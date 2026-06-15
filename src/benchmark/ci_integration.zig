@@ -56,7 +56,7 @@ pub const CIRunner = struct {
         );
         
         // 确保报告目录存在
-        std.fs.cwd().makePath(config.report_dir) catch |err| {
+        std.fs.cwd.makePath(config.report_dir) catch |err| {
             if (err != error.PathAlreadyExists) return err;
         };
         
@@ -152,7 +152,7 @@ pub const CIRunner = struct {
         );
         defer self.allocator.free(report_filename);
         
-        const report_file = try std.fs.cwd().createFile(report_filename, .{});
+        const report_file = try std.fs.cwd.createFile(report_filename, .{});
         defer report_file.close();
         
         // 生成报告（直接传递文件）
@@ -263,8 +263,8 @@ test "CIRunner - basic functionality" {
         .update_baseline_on_main = false,
     };
     
-    defer std.fs.cwd().deleteTree(config.baseline_dir) catch {};
-    defer std.fs.cwd().deleteTree(config.report_dir) catch {};
+    defer std.fs.cwd.deleteTree(config.baseline_dir) catch {};
+    defer std.fs.cwd.deleteTree(config.report_dir) catch {};
     
     var runner = try CIRunner.init(allocator, config);
     

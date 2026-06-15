@@ -151,8 +151,8 @@ pub const DIE = struct {
         const die = try allocator.create(DIE);
         die.* = .{
             .tag = tag,
-            .attributes = std.ArrayList(Attribute){},
-            .children = std.ArrayList(*DIE){},
+            .attributes = std.ArrayList(Attribute).empty,
+            .children = std.ArrayList(*DIE).empty,
             .parent = null,
             .offset = 0,
         };
@@ -194,7 +194,7 @@ pub const StringTable = struct {
         return .{
             .allocator = allocator,
             .strings = std.StringHashMap(u32).init(allocator),
-            .buffer = std.ArrayList(u8){},
+            .buffer = std.ArrayList(u8).empty,
         };
     }
     
@@ -254,8 +254,8 @@ pub const LineTable = struct {
     pub fn init(allocator: Allocator) LineTable {
         return .{
             .allocator = allocator,
-            .entries = std.ArrayList(LineEntry){},
-            .files = std.ArrayList(FileEntry){},
+            .entries = std.ArrayList(LineEntry).empty,
+            .files = std.ArrayList(FileEntry).empty,
         };
     }
     
@@ -322,7 +322,7 @@ pub const DwarfDebugInfoBuilder = struct {
             .line_table = LineTable.init(allocator),
             .type_cache = std.AutoHashMap(IR.Type, *DIE).init(allocator),
             .current_function = null,
-            .address_ranges = std.ArrayList(AddressRange){},
+            .address_ranges = std.ArrayList(AddressRange).empty,
         };
         return self;
     }
@@ -674,7 +674,7 @@ pub const DwarfDebugInfoBuilder = struct {
     
     /// 编码位置表达式
     fn encodeLocation(self: *DwarfDebugInfoBuilder, location: u64) ![]const u8 {
-        var buf = std.ArrayList(u8){};
+        var buf = std.ArrayList(u8).empty;
         
         // DW_OP_fbreg: 基于帧指针的偏移
         try buf.append(self.allocator, 0x91);
@@ -764,7 +764,7 @@ pub const DwarfDebugInfoBuilder = struct {
     
     /// 生成 .debug_info section
     fn generateDebugInfo(self: *DwarfDebugInfoBuilder) ![]u8 {
-        var buf = std.ArrayList(u8){};
+        var buf = std.ArrayList(u8).empty;
         
         // 编译单元头部
         try buf.appendSlice(self.allocator, &[_]u8{0} ** 4); // 长度（稍后填充）
@@ -833,7 +833,7 @@ pub const DwarfDebugInfoBuilder = struct {
     
     /// 生成 .debug_abbrev section
     fn generateDebugAbbrev(self: *DwarfDebugInfoBuilder) ![]u8 {
-        var buf = std.ArrayList(u8){};
+        var buf = std.ArrayList(u8).empty;
         
         // 编译单元缩写
         try encodeULEB128(&buf, self.allocator, 1); // 缩写代码
@@ -882,7 +882,7 @@ pub const DwarfDebugInfoBuilder = struct {
     
     /// 生成 .debug_line section
     fn generateDebugLine(self: *DwarfDebugInfoBuilder) ![]u8 {
-        var buf = std.ArrayList(u8){};
+        var buf = std.ArrayList(u8).empty;
         
         // 行号表头部
         try buf.appendSlice(&[_]u8{0} ** 4); // 长度（稍后填充）
@@ -945,7 +945,7 @@ pub const DwarfDebugInfoBuilder = struct {
     
     /// 生成 .debug_aranges section
     fn generateDebugAranges(self: *DwarfDebugInfoBuilder) ![]u8 {
-        var buf = std.ArrayList(u8){};
+        var buf = std.ArrayList(u8).empty;
         
         // 地址范围表头部
         try buf.appendSlice(&[_]u8{0} ** 4); // 长度（稍后填充）
@@ -1174,7 +1174,7 @@ test "LineTable - 行号映射" {
 test "ULEB128 编码" {
     const allocator = std.testing.allocator;
     
-    var buf = std.ArrayList(u8){};
+    var buf = std.ArrayList(u8).empty;
     defer buf.deinit(allocator);
     
     // 测试小值
@@ -1197,7 +1197,7 @@ test "ULEB128 编码" {
 test "SLEB128 编码" {
     const allocator = std.testing.allocator;
     
-    var buf = std.ArrayList(u8){};
+    var buf = std.ArrayList(u8).empty;
     defer buf.deinit(allocator);
     
     // 测试正数

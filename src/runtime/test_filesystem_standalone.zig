@@ -237,25 +237,25 @@ test "scandir - 实际目录测试" {
     const test_dir = "test_scandir_实际";
     
     // 创建测试目录
-    std.fs.cwd().makeDir(test_dir) catch |err| {
+    std.fs.cwd.makeDir(test_dir) catch |err| {
         if (err != error.PathAlreadyExists) return err;
     };
-    defer std.fs.cwd().deleteTree(test_dir) catch {};
+    defer std.fs.cwd.deleteTree(test_dir) catch {};
     
     // 创建测试文件
     {
-        const file1 = try std.fs.cwd().createFile(test_dir ++ "/zzz.txt", .{});
+        const file1 = try std.fs.cwd.createFile(test_dir ++ "/zzz.txt", .{});
         defer file1.close();
         
-        const file2 = try std.fs.cwd().createFile(test_dir ++ "/aaa.txt", .{});
+        const file2 = try std.fs.cwd.createFile(test_dir ++ "/aaa.txt", .{});
         defer file2.close();
         
-        const file3 = try std.fs.cwd().createFile(test_dir ++ "/mmm.txt", .{});
+        const file3 = try std.fs.cwd.createFile(test_dir ++ "/mmm.txt", .{});
         defer file3.close();
     }
     
     // 打开目录并读取条目
-    var dir = try std.fs.cwd().openDir(test_dir, .{ .iterate = true });
+    var dir = try std.fs.cwd.openDir(test_dir, .{ .iterate = true });
     defer dir.close();
     
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};

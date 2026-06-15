@@ -80,7 +80,7 @@ pub const CodeGenX64 = struct {
         return .{
             .allocator = allocator,
             .asm_ = Assembler.init(allocator),
-            .jump_patches = .{},
+            .jump_patches = .empty,
             .ip_to_offset = std.AutoHashMap(usize, usize).init(allocator),
         };
     }

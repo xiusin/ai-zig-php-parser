@@ -447,7 +447,7 @@ pub const BenchmarkFramework = struct {
     /// 加载性能基线
     /// @param baseline_path 基线文件路径
     pub fn loadBaselines(self: *Self, baseline_path: []const u8) !void {
-        const file = try std.fs.cwd().openFile(baseline_path, .{});
+        const file = try std.fs.cwd.openFile(baseline_path, .{});
         defer file.close();
         
         const content = try file.readToEndAlloc(self.allocator, 10 * 1024 * 1024); // 10MB max
@@ -463,7 +463,7 @@ pub const BenchmarkFramework = struct {
     /// 保存性能基线到文件
     /// @param baseline_path 基线文件路径
     pub fn saveBaselinesToFile(self: *Self, baseline_path: []const u8) !void {
-        const file = try std.fs.cwd().createFile(baseline_path, .{});
+        const file = try std.fs.cwd.createFile(baseline_path, .{});
         defer file.close();
         
         const writer = file.writer();
@@ -546,7 +546,7 @@ pub const BenchmarkFramework = struct {
         output_path: []const u8,
         format: ReportFormat,
     ) !void {
-        const file = try std.fs.cwd().createFile(output_path, .{});
+        const file = try std.fs.cwd.createFile(output_path, .{});
         defer file.close();
         
         const writer = file.writer();
@@ -573,7 +573,7 @@ pub const BenchmarkFramework = struct {
         output_path: []const u8,
         format: ReportFormat,
     ) !void {
-        const file = try std.fs.cwd().createFile(output_path, .{});
+        const file = try std.fs.cwd.createFile(output_path, .{});
         defer file.close();
         
         const writer = file.writer();

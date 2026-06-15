@@ -152,7 +152,7 @@ pub const StackTraceManager = struct {
         }
 
         pub fn format(self: *const CoroutineStackTrace, allocator: std.mem.Allocator) ![]u8 {
-            var buffer = std.ArrayListUnmanaged(u8){};
+            var buffer = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
             defer buffer.deinit(allocator);
             const writer = buffer.writer(allocator);
 
@@ -570,7 +570,7 @@ pub const CoroutinePerformanceMonitor = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        var blocked = std.ArrayListUnmanaged(u64){};
+        var blocked = std.ArrayListUnmanaged(u64){ .items = &.{}, .capacity = 0 };
         var iter = self.metrics.iterator();
         while (iter.next()) |entry| {
             if (entry.value_ptr.*.isBlocked()) {
@@ -585,7 +585,7 @@ pub const CoroutinePerformanceMonitor = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        var buffer = std.ArrayListUnmanaged(u8){};
+        var buffer = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
         defer buffer.deinit(self.allocator);
         const writer = buffer.writer(self.allocator);
 
@@ -723,7 +723,7 @@ pub const DeadlockDetector = struct {
         }
 
         pub fn format(self: *const DeadlockInfo, allocator: std.mem.Allocator) ![]u8 {
-            var buffer = std.ArrayListUnmanaged(u8){};
+            var buffer = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
             defer buffer.deinit(allocator);
             const writer = buffer.writer(allocator);
 
@@ -834,7 +834,7 @@ pub const DeadlockDetector = struct {
         defer visited.deinit();
         var rec_stack = std.AutoHashMap(u64, bool).init(self.allocator);
         defer rec_stack.deinit();
-        var cycle_path = std.ArrayListUnmanaged(u64){};
+        var cycle_path = std.ArrayListUnmanaged(u64){ .items = &.{}, .capacity = 0 };
         defer cycle_path.deinit(self.allocator);
 
         var adj_iter = adj.iterator();
@@ -896,7 +896,7 @@ pub const DeadlockDetector = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        var potential = std.ArrayListUnmanaged(WaitInfo){};
+        var potential = std.ArrayListUnmanaged(WaitInfo){ .items = &.{}, .capacity = 0 };
         const now = @as(i64, @truncate(std.time.nanoTimestamp()));
         const timeout_ns = @as(i64, @intCast(self.config.deadlock_timeout_ms * 1_000_000));
 
@@ -1070,7 +1070,7 @@ pub const CoroutineDebugCoordinator = struct {
 
     /// Generate comprehensive debug report
     pub fn generateReport(self: *CoroutineDebugCoordinator) ![]u8 {
-        var buffer = std.ArrayListUnmanaged(u8){};
+        var buffer = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
         defer buffer.deinit(self.allocator);
         const writer = buffer.writer(self.allocator);
 

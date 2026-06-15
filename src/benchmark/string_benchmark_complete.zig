@@ -103,7 +103,7 @@ pub fn generatePhpScript(benchmark: *StringBenchmark, test_name: []const u8, scr
     );
     defer benchmark.allocator.free(file_path);
     
-    const file = try std.fs.cwd().createFile(file_path, .{});
+    const file = try std.fs.cwd.createFile(file_path, .{});
     defer file.close();
     
     try file.writeAll(script_content);

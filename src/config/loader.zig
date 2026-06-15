@@ -61,6 +61,7 @@ pub const Config = struct {
 /// Requirements: 12.1, 12.2, 12.3
 pub const ConfigLoader = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
 
     /// Default config file names to search for
     pub const default_config_files = [_][]const u8{
@@ -69,31 +70,34 @@ pub const ConfigLoader = struct {
     };
 
     /// Initialize a new ConfigLoader
-    pub fn init(allocator: std.mem.Allocator) ConfigLoader {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) ConfigLoader {
         return ConfigLoader{
             .allocator = allocator,
+            .io = io,
         };
     }
 
     /// Load configuration from a specific file path
     /// Returns default config if file not found
     pub fn load(self: *ConfigLoader, path: []const u8) !Config {
-        const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+        const cwd = std.Io.Dir.cwd();
+        const file = cwd.openFile(self.io, path, .{}) catch |err| {
             if (err == error.FileNotFound) {
                 return Config{}; // Return default config
             }
             return err;
         };
-        defer file.close();
+        defer file.close(self.io);
 
-        const file_size = try file.getEndPos();
+        const st = try file.stat(self.io);
+        const file_size = st.size;
         if (file_size > 1024 * 1024) {
             return error.FileTooLarge;
         }
 
         const content = try self.allocator.alloc(u8, file_size);
         defer self.allocator.free(content);
-        _ = try file.readAll(content);
+        _ = try file.readPositionalAll(self.io, content, 0);
 
         return self.parseJson(content);
     }
@@ -101,23 +105,25 @@ pub const ConfigLoader = struct {
     /// Load configuration from default locations
     /// Searches for .zigphp.json and zigphp.config.json in current directory
     pub fn loadDefault(self: *ConfigLoader) !Config {
+        const cwd = std.Io.Dir.cwd();
         for (default_config_files) |filename| {
-            const file = std.fs.cwd().openFile(filename, .{}) catch |err| {
+            const file = cwd.openFile(self.io, filename, .{}) catch |err| {
                 if (err == error.FileNotFound) {
                     continue;
                 }
                 return err;
             };
-            defer file.close();
+            defer file.close(self.io);
 
-            const file_size = try file.getEndPos();
+            const st = try file.stat(self.io);
+            const file_size = st.size;
             if (file_size > 1024 * 1024) {
                 return error.FileTooLarge;
             }
 
             const content = try self.allocator.alloc(u8, file_size);
             defer self.allocator.free(content);
-            _ = try file.readAll(content);
+            _ = try file.readPositionalAll(self.io, content, 0);
 
             return self.parseJson(content);
         }
@@ -271,6 +277,17 @@ pub const MergedConfig = struct {
     }
 };
 
+/// Create an Io for testing purposes
+fn testIo() std.Io {
+    const environ: [0:null]?[*:0]u8 = [_:null]?[*:0]u8{};
+    const threaded = std.Io.Threaded.init(std.testing.allocator, .{
+        .argv0 = .init(.{ .vector = &.{} }),
+        .environ = .{ .block = .{ .slice = @constCast(&environ) } },
+    });
+    return threaded.io();
+}
+
+
 // ============================================================================
 // Unit Tests
 // ============================================================================
@@ -284,12 +301,12 @@ test "Config default values" {
 }
 
 test "ConfigLoader init" {
-    const loader = ConfigLoader.init(std.testing.allocator);
+    const loader = ConfigLoader.init(std.testing.allocator, testIo());
     _ = loader;
 }
 
 test "ConfigLoader parseJson empty object" {
-    var loader = ConfigLoader.init(std.testing.allocator);
+    var loader = ConfigLoader.init(std.testing.allocator, testIo());
     var config = try loader.parseFromString("{}");
     defer config.deinit(std.testing.allocator);
 
@@ -298,7 +315,7 @@ test "ConfigLoader parseJson empty object" {
 }
 
 test "ConfigLoader parseJson syntax mode php" {
-    var loader = ConfigLoader.init(std.testing.allocator);
+    var loader = ConfigLoader.init(std.testing.allocator, testIo());
     var config = try loader.parseFromString(
         \\{"syntax": "php"}
     );
@@ -308,7 +325,7 @@ test "ConfigLoader parseJson syntax mode php" {
 }
 
 test "ConfigLoader parseJson syntax mode go" {
-    var loader = ConfigLoader.init(std.testing.allocator);
+    var loader = ConfigLoader.init(std.testing.allocator, testIo());
     var config = try loader.parseFromString(
         \\{"syntax": "go"}
     );
@@ -318,7 +335,7 @@ test "ConfigLoader parseJson syntax mode go" {
 }
 
 test "ConfigLoader parseJson extensions array" {
-    var loader = ConfigLoader.init(std.testing.allocator);
+    var loader = ConfigLoader.init(std.testing.allocator, testIo());
     var config = try loader.parseFromString(
         \\{"extensions": ["./ext1.so", "./ext2.so"]}
     );
@@ -330,7 +347,7 @@ test "ConfigLoader parseJson extensions array" {
 }
 
 test "ConfigLoader parseJson include_paths array" {
-    var loader = ConfigLoader.init(std.testing.allocator);
+    var loader = ConfigLoader.init(std.testing.allocator, testIo());
     var config = try loader.parseFromString(
         \\{"include_paths": ["./lib", "./vendor"]}
     );
@@ -342,7 +359,7 @@ test "ConfigLoader parseJson include_paths array" {
 }
 
 test "ConfigLoader parseJson error_reporting" {
-    var loader = ConfigLoader.init(std.testing.allocator);
+    var loader = ConfigLoader.init(std.testing.allocator, testIo());
     var config = try loader.parseFromString(
         \\{"error_reporting": 32767}
     );
@@ -352,7 +369,7 @@ test "ConfigLoader parseJson error_reporting" {
 }
 
 test "ConfigLoader parseJson full config" {
-    var loader = ConfigLoader.init(std.testing.allocator);
+    var loader = ConfigLoader.init(std.testing.allocator, testIo());
     var config = try loader.parseFromString(
         \\{
         \\  "syntax": "go",
@@ -370,7 +387,7 @@ test "ConfigLoader parseJson full config" {
 }
 
 test "ConfigLoader parseJson invalid syntax mode ignored" {
-    var loader = ConfigLoader.init(std.testing.allocator);
+    var loader = ConfigLoader.init(std.testing.allocator, testIo());
     var config = try loader.parseFromString(
         \\{"syntax": "invalid"}
     );
@@ -381,7 +398,7 @@ test "ConfigLoader parseJson invalid syntax mode ignored" {
 }
 
 test "ConfigLoader parseJson empty content" {
-    var loader = ConfigLoader.init(std.testing.allocator);
+    var loader = ConfigLoader.init(std.testing.allocator, testIo());
     var config = try loader.parseFromString("");
     defer config.deinit(std.testing.allocator);
 
@@ -389,7 +406,7 @@ test "ConfigLoader parseJson empty content" {
 }
 
 test "ConfigLoader parseJson invalid json" {
-    var loader = ConfigLoader.init(std.testing.allocator);
+    var loader = ConfigLoader.init(std.testing.allocator, testIo());
     const result = loader.parseFromString("not valid json");
     try std.testing.expectError(error.InvalidJson, result);
 }
@@ -417,7 +434,7 @@ test "MergedConfig getSyntaxMode without CLI override" {
 }
 
 test "MergedConfig getExtensions combines file and CLI" {
-    var loader = ConfigLoader.init(std.testing.allocator);
+    var loader = ConfigLoader.init(std.testing.allocator, testIo());
     var file_config = try loader.parseFromString(
         \\{"extensions": ["./file_ext.so"]}
     );
@@ -448,7 +465,7 @@ test "MergedConfig getExtensions combines file and CLI" {
 
 test "Feature: multi-syntax-extension-system, Property 14: CLI syntax mode overrides config file" {
     // Test that CLI syntax mode takes precedence over config file
-    var loader = ConfigLoader.init(std.testing.allocator);
+    var loader = ConfigLoader.init(std.testing.allocator, testIo());
 
     // Config file specifies PHP mode
     var file_config = try loader.parseFromString(
@@ -468,7 +485,7 @@ test "Feature: multi-syntax-extension-system, Property 14: CLI syntax mode overr
 
 test "Feature: multi-syntax-extension-system, Property 14: config file used when CLI not specified" {
     // Test that config file value is used when CLI doesn't specify
-    var loader = ConfigLoader.init(std.testing.allocator);
+    var loader = ConfigLoader.init(std.testing.allocator, testIo());
 
     // Config file specifies Go mode
     var file_config = try loader.parseFromString(
@@ -488,7 +505,7 @@ test "Feature: multi-syntax-extension-system, Property 14: config file used when
 
 test "Feature: multi-syntax-extension-system, Property 14: default used when neither specified" {
     // Test that default is used when neither CLI nor config file specifies
-    var loader = ConfigLoader.init(std.testing.allocator);
+    var loader = ConfigLoader.init(std.testing.allocator, testIo());
 
     // Config file doesn't specify syntax mode (uses default)
     var file_config = try loader.parseFromString("{}");
@@ -506,7 +523,7 @@ test "Feature: multi-syntax-extension-system, Property 14: default used when nei
 
 test "Feature: multi-syntax-extension-system, Property 14: all syntax mode combinations" {
     // Test all combinations of CLI and config file syntax modes
-    var loader = ConfigLoader.init(std.testing.allocator);
+    var loader = ConfigLoader.init(std.testing.allocator, testIo());
 
     const modes = [_]SyntaxMode{ .php, .go };
     const cli_options = [_]?SyntaxMode{ null, .php, .go };
@@ -536,7 +553,7 @@ test "Feature: multi-syntax-extension-system, Property 14: all syntax mode combi
 }
 
 test "Feature: multi-syntax-extension-system, Property 14: MergedConfig getSyntaxMode precedence" {
-    var loader = ConfigLoader.init(std.testing.allocator);
+    var loader = ConfigLoader.init(std.testing.allocator, testIo());
 
     // Test with config file specifying PHP
     var file_config_php = try loader.parseFromString(
@@ -562,7 +579,7 @@ test "Feature: multi-syntax-extension-system, Property 14: MergedConfig getSynta
 }
 
 test "Feature: multi-syntax-extension-system, Property 14: extensions from both sources" {
-    var loader = ConfigLoader.init(std.testing.allocator);
+    var loader = ConfigLoader.init(std.testing.allocator, testIo());
 
     // Config file with extensions
     var file_config = try loader.parseFromString(
@@ -596,7 +613,7 @@ test "Feature: multi-syntax-extension-system, Property 14: extensions from both 
 }
 
 test "Feature: multi-syntax-extension-system, Property 14: include_paths from config" {
-    var loader = ConfigLoader.init(std.testing.allocator);
+    var loader = ConfigLoader.init(std.testing.allocator, testIo());
 
     // Config file with include paths
     var file_config = try loader.parseFromString(
@@ -618,7 +635,7 @@ test "Feature: multi-syntax-extension-system, Property 14: include_paths from co
 }
 
 test "Feature: multi-syntax-extension-system, Property 14: error_reporting from config" {
-    var loader = ConfigLoader.init(std.testing.allocator);
+    var loader = ConfigLoader.init(std.testing.allocator, testIo());
 
     // Config file with error_reporting
     var file_config = try loader.parseFromString(
@@ -636,7 +653,7 @@ test "Feature: multi-syntax-extension-system, Property 14: error_reporting from 
 }
 
 test "Feature: multi-syntax-extension-system, Property 14: empty config with CLI override" {
-    var loader = ConfigLoader.init(std.testing.allocator);
+    var loader = ConfigLoader.init(std.testing.allocator, testIo());
 
     // Empty config file
     var file_config = try loader.parseFromString("{}");
@@ -654,7 +671,7 @@ test "Feature: multi-syntax-extension-system, Property 14: empty config with CLI
 }
 
 test "Feature: multi-syntax-extension-system, Property 14: full config with full CLI override" {
-    var loader = ConfigLoader.init(std.testing.allocator);
+    var loader = ConfigLoader.init(std.testing.allocator, testIo());
 
     // Full config file
     var file_config = try loader.parseFromString(

@@ -139,7 +139,7 @@ pub const CIRunner = struct {
         errdefer scripts.deinit();
         
         // 打开测试目录
-        var dir = std.fs.cwd().openIterableDir(self.config.test_dir, .{}) catch |err| {
+        var dir = std.fs.cwd.openIterableDir(self.config.test_dir, .{}) catch |err| {
             std.debug.print("无法打开测试目录: {s}\n", .{@errorName(err)});
             return &[_][]const u8{};
         };
@@ -171,7 +171,7 @@ pub const CIRunner = struct {
         regression_results: []framework.RegressionResult,
     ) !void {
         // 创建输出目录
-        std.fs.cwd().makeDir(self.config.output_dir) catch {};
+        std.fs.cwd.makeDir(self.config.output_dir) catch {};
         
         // 生成批量测试报告
         const batch_md = try std.fmt.allocPrint(
@@ -208,7 +208,7 @@ pub const CIRunner = struct {
         output_path: []const u8,
         regression_results: []framework.RegressionResult,
     ) !void {
-        const file = try std.fs.cwd().createFile(output_path, .{});
+        const file = try std.fs.cwd.createFile(output_path, .{});
         defer file.close();
         
         const writer = file.writer();

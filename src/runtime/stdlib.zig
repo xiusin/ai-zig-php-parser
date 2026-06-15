@@ -1,3 +1,4 @@
+const time_compat = @import("time_compat.zig");
 const std = @import("std");
 const types = @import("types.zig");
 const Value = types.Value;
@@ -595,7 +596,7 @@ fn arrayMapFn(vm: *VM, args: []const Value) !Value {
         vm.allocator.destroy(result_array);
     }
     result_array.* = PHPArray.init(vm.allocator);
-    try result_array.getElements().ensureTotalCapacity(count);
+    try result_array.getElements().ensureTotalCapacity(vm.allocator, count);
 
     var iterator = source_array.getElements().iterator();
     while (iterator.next()) |entry| {
@@ -640,7 +641,7 @@ fn arrayFilterFn(vm: *VM, args: []const Value) !Value {
         vm.allocator.destroy(result_array);
     }
     result_array.* = PHPArray.init(vm.allocator);
-    try result_array.getElements().ensureTotalCapacity(count);
+    try result_array.getElements().ensureTotalCapacity(vm.allocator, count);
 
     const callback = if (args.len > 1) args[1] else null;
 
@@ -734,7 +735,7 @@ fn arrayMergeFn(vm: *VM, args: []const Value) !Value {
         vm.allocator.destroy(result_array);
     }
     result_array.* = PHPArray.init(vm.allocator);
-    try result_array.getElements().ensureTotalCapacity(total_count);
+    try result_array.getElements().ensureTotalCapacity(vm.allocator, total_count);
 
     // Second pass: merge all arrays with direct insertion
     for (args) |arg| {
@@ -802,7 +803,7 @@ fn arrayKeysFn(vm: *VM, args: []const Value) !Value {
         vm.allocator.destroy(result_array);
     }
     result_array.* = PHPArray.init(vm.allocator);
-    try result_array.getElements().ensureTotalCapacity(count);
+    try result_array.getElements().ensureTotalCapacity(vm.allocator, count);
 
     var iterator = source_array.getElements().iterator();
     var idx: i64 = 0;
@@ -870,7 +871,7 @@ fn arrayValuesFn(vm: *VM, args: []const Value) !Value {
         vm.allocator.destroy(result_array);
     }
     result_array.* = PHPArray.init(vm.allocator);
-    try result_array.getElements().ensureTotalCapacity(count);
+    try result_array.getElements().ensureTotalCapacity(vm.allocator, count);
 
     // Direct insertion - avoid push overhead
     var iterator = source_array.getElements().iterator();
@@ -1379,9 +1380,25 @@ fn striposFn(vm: *VM, args: []const Value) !Value {
     const haystack_str = haystack.getAsString().data.data;
     const needle_str = needle.getAsString().data.data;
 
-    // Use optimized std.ascii.indexOfIgnoreCasePos (no allocation needed)
-    if (std.ascii.indexOfIgnoreCasePos(haystack_str, offset, needle_str)) |pos| {
-        return Value.initInt(@intCast(pos));
+    // Manual case-insensitive search (indexOfIgnoreCasePos was removed in Zig 0.17)
+    if (needle_str.len == 0) {
+        return Value.initInt(@intCast(offset));
+    }
+    if (needle_str.len > haystack_str.len or offset > haystack_str.len - needle_str.len) {
+        return Value.initBool(false);
+    }
+    var search_idx: usize = offset;
+    while (search_idx <= haystack_str.len - needle_str.len) : (search_idx += 1) {
+        var match = true;
+        for (needle_str, 0..) |nc, ni| {
+            if (std.ascii.toLower(nc) != std.ascii.toLower(haystack_str[search_idx + ni])) {
+                match = false;
+                break;
+            }
+        }
+        if (match) {
+            return Value.initInt(@intCast(search_idx));
+        }
     }
     return Value.initBool(false);
 }
@@ -2018,7 +2035,7 @@ fn maxFn(vm: *VM, args: []const Value) !Value {
 }
 
 fn randFn(vm: *VM, args: []const Value) !Value {
-    var prng = std.Random.DefaultPrng.init(@intCast(std.time.timestamp()));
+    var prng = std.Random.DefaultPrng.init(@intCast(time_compat.timestamp()));
     const random = prng.random();
 
     if (args.len == 0) {
@@ -2110,7 +2127,7 @@ fn compareArrayKeys(a: ArrayKey, b: ArrayKey) i8 {
 }
 
 fn collectArraySortItems(vm: *VM, php_array: *types.PHPArray) !std.ArrayListUnmanaged(ArraySortItem) {
-    var items = std.ArrayListUnmanaged(ArraySortItem){};
+    var items = std.ArrayListUnmanaged(ArraySortItem){ .items = &.{}, .capacity = 0 };
     errdefer items.deinit(vm.allocator);
 
     var iterator = php_array.getElements().iterator();
@@ -2130,7 +2147,7 @@ fn rebuildArrayWithSortedItems(php_array: *types.PHPArray, items: []const ArrayS
     php_array.next_index = 0;
 
     for (items) |item| {
-        elements.put(item.key, item.value) catch {};
+        elements.put(php_array.allocator, item.key, item.value) catch {};
         if (item.key == .integer and item.key.integer >= php_array.next_index) {
             php_array.next_index = item.key.integer + 1;
         }
@@ -2148,7 +2165,7 @@ fn fileGetContentsFn(vm: *VM, args: []const Value) !Value {
 
     const file_path = filename.getAsString().data.data;
 
-    const file = std.fs.cwd().openFile(file_path, .{}) catch |err| {
+    const file = std.fs.cwd.openFile(file_path, .{}) catch |err| {
         switch (err) {
             error.FileNotFound => return Value.initBool(false),
             error.AccessDenied => return Value.initBool(false),
@@ -2193,12 +2210,12 @@ fn filePutContentsFn(vm: *VM, args: []const Value) !Value {
     const data_str = try data.toString(vm.allocator);
     defer data_str.deinit(vm.allocator);
 
-    const file = std.fs.cwd().createFile(file_path, .{}) catch |err| {
+    const file = std.fs.cwd.createFile(file_path, .{}) catch |err| {
         switch (err) {
             error.AccessDenied => return Value.initBool(false),
             error.PathAlreadyExists => {
                 // Try to open existing file for writing
-                const existing_file = std.fs.cwd().openFile(file_path, .{ .mode = .write_only }) catch {
+                const existing_file = std.fs.cwd.openFile(file_path, .{ .mode = .write_only }) catch {
                     return Value.initBool(false);
                 };
                 defer existing_file.close();
@@ -2225,7 +2242,7 @@ fn fileExistsFn(vm: *VM, args: []const Value) !Value {
 
     const file_path = filename.getAsString().data.data;
 
-    std.fs.cwd().access(file_path, .{}) catch {
+    std.fs.cwd.access(file_path, .{}) catch {
         return Value.initBool(false);
     };
 
@@ -2243,7 +2260,7 @@ fn isFileFn(vm: *VM, args: []const Value) !Value {
 
     const file_path = filename.getAsString().data.data;
 
-    const stat = std.fs.cwd().statFile(file_path) catch {
+    const stat = std.fs.cwd.statFile(file_path) catch {
         return Value.initBool(false);
     };
 
@@ -2261,7 +2278,7 @@ fn isDirFn(vm: *VM, args: []const Value) !Value {
 
     const dir_path = dirname.getAsString().data.data;
 
-    const stat = std.fs.cwd().statFile(dir_path) catch {
+    const stat = std.fs.cwd.statFile(dir_path) catch {
         return Value.initBool(false);
     };
 
@@ -2279,7 +2296,7 @@ fn filesizeFn(vm: *VM, args: []const Value) !Value {
 
     const file_path = filename.getAsString().data.data;
 
-    const stat = std.fs.cwd().statFile(file_path) catch {
+    const stat = std.fs.cwd.statFile(file_path) catch {
         return Value.initBool(false);
     };
 
@@ -2384,20 +2401,20 @@ fn microtimeFn(vm: *VM, args: []const Value) !Value {
 fn usleepFn(vm: *VM, args: []const Value) !Value {
     _ = vm;
     const microseconds = args[0].asInt();
-    std.Thread.sleep(@intCast(microseconds * 1000));
+    time_compat.sleep(@intCast(microseconds * 1000));
     return Value.initNull();
 }
 
 fn sleepFn(vm: *VM, args: []const Value) !Value {
     _ = vm;
     const seconds = args[0].asInt();
-    std.Thread.sleep(@intCast(seconds * 1_000_000_000));
+    time_compat.sleep(@intCast(seconds * 1_000_000_000));
     return Value.initInt(0);
 }
 
 fn dateFn(vm: *VM, args: []const Value) !Value {
     const format = args[0];
-    const timestamp = if (args.len > 1) args[1] else Value.initInt(std.time.timestamp());
+    const timestamp = if (args.len > 1) args[1] else Value.initInt(time_compat.timestamp());
 
     if (format.getTag() != .string) {
         const exception = try ExceptionFactory.createTypeError(vm.allocator, "date() expects parameter 1 to be string", "builtin", 0);
@@ -2428,13 +2445,13 @@ fn dateFn(vm: *VM, args: []const Value) !Value {
     while (i < format_str.len) : (i += 1) {
         const c = format_str[i];
         switch (c) {
-            'Y' => try result.writer(vm.allocator).print("{d:0>4}", .{year_day.year}),
-            'm' => try result.writer(vm.allocator).print("{d:0>2}", .{month_day.month.numeric()}),
-            'd' => try result.writer(vm.allocator).print("{d:0>2}", .{month_day.day_index + 1}),
-            'H' => try result.writer(vm.allocator).print("{d:0>2}", .{day_seconds.getHoursIntoDay()}),
-            'i' => try result.writer(vm.allocator).print("{d:0>2}", .{day_seconds.getMinutesIntoHour()}),
-            's' => try result.writer(vm.allocator).print("{d:0>2}", .{day_seconds.getSecondsIntoMinute()}),
-            'U' => try result.writer(vm.allocator).print("{d}", .{ts}),
+            'Y' => try result.print(vm.allocator,"{d:0>4}", .{year_day.year}),
+            'm' => try result.print(vm.allocator,"{d:0>2}", .{month_day.month.numeric()}),
+            'd' => try result.print(vm.allocator,"{d:0>2}", .{month_day.day_index + 1}),
+            'H' => try result.print(vm.allocator,"{d:0>2}", .{day_seconds.getHoursIntoDay()}),
+            'i' => try result.print(vm.allocator,"{d:0>2}", .{day_seconds.getMinutesIntoHour()}),
+            's' => try result.print(vm.allocator,"{d:0>2}", .{day_seconds.getSecondsIntoMinute()}),
+            'U' => try result.print(vm.allocator,"{d}", .{ts}),
             else => try result.append(vm.allocator, c),
         }
     }
@@ -2444,7 +2461,7 @@ fn dateFn(vm: *VM, args: []const Value) !Value {
 
 fn strtotimeFn(vm: *VM, args: []const Value) !Value {
     const time_str = args[0];
-    const now = if (args.len > 1) args[1].asInt() else std.time.timestamp();
+    const now = if (args.len > 1) args[1].asInt() else time_compat.timestamp();
 
     if (time_str.getTag() != .string) {
         const exception = try ExceptionFactory.createTypeError(vm.allocator, "strtotime() expects parameter 1 to be string", "builtin", 0);
@@ -2500,7 +2517,7 @@ fn mktimeFn(vm: *VM, args: []const Value) !Value {
     // Simplified implementation - would need full mktime logic
     _ = vm;
     _ = args;
-    return Value.initInt(std.time.timestamp());
+    return Value.initInt(time_compat.timestamp());
 }
 
 fn gmdateFn(vm: *VM, args: []const Value) !Value {
@@ -2602,7 +2619,7 @@ const JsonParser = struct {
 
     fn parseString(self: *JsonParser, allocator: std.mem.Allocator) !Value {
         self.pos += 1; // Skip opening quote
-        var result = std.ArrayListUnmanaged(u8){};
+        var result = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
         defer result.deinit(allocator);
 
         while (self.pos < self.input.len) {
@@ -2754,7 +2771,7 @@ const JsonParser = struct {
 
                 // Parse key
                 self.pos += 1;
-                var key_builder = std.ArrayListUnmanaged(u8){};
+                var key_builder = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
                 defer key_builder.deinit(allocator);
 
                 while (self.pos < self.input.len) {
@@ -2867,7 +2884,7 @@ fn encodeValueAsJson(value: Value, allocator: std.mem.Allocator) ![]u8 {
 
             // Pre-allocate with estimated capacity (avg 10 chars per element + overhead)
             const estimated_cap = if (len == 0) 2 else len * 12 + 4;
-            var result = std.ArrayListUnmanaged(u8){};
+            var result = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
             try result.ensureTotalCapacity(allocator, estimated_cap);
             defer result.deinit(allocator);
 
@@ -3027,7 +3044,7 @@ fn uniqidFn(vm: *VM, args: []const Value) !Value {
     const more_entropy = if (args.len > 1) args[1].toBool() else false;
 
     // Get current time in microseconds
-    const timestamp = std.time.nanoTimestamp();
+    const timestamp = time_compat.nanoTimestamp();
     const now = @divTrunc(timestamp, 1000); // Convert to microseconds
     const seconds = @as(u64, @intCast(@divTrunc(now, 1_000_000)));
     const microseconds = @as(u64, @intCast(@rem(now, 1_000_000)));
@@ -3038,7 +3055,10 @@ fn uniqidFn(vm: *VM, args: []const Value) !Value {
         var result_buf: [64]u8 = undefined;
         // Format: prefix + seconds (13 hex) + microseconds (6 hex) + random (4 hex)
         var rand_bytes: [2]u8 = undefined;
-        std.crypto.random.bytes(&rand_bytes);
+        {
+            var prng = std.Random.DefaultPrng.init(@intCast(time_compat.timestamp()));
+            prng.random().bytes(&rand_bytes);
+        }
         const rand_val = @as(u16, rand_bytes[0]) * 256 + rand_bytes[1];
         const formatted = try std.fmt.bufPrint(&result_buf, "{s}{x:0>13}{x:0>6}{x:0>4}", .{ prefix, seconds, microseconds, rand_val });
         result_str = try PHPString.init(vm.allocator, formatted);
@@ -3387,7 +3407,7 @@ fn arrayReverseFn(vm: *VM, args: []const Value) !Value {
         vm.allocator.destroy(result_array);
     }
     result_array.* = PHPArray.init(vm.allocator);
-    try result_array.getElements().ensureTotalCapacity(count);
+    try result_array.getElements().ensureTotalCapacity(vm.allocator, count);
 
     // Pre-allocate temp array with exact size
     const temp = try vm.allocator.alloc(struct { key: ArrayKey, value: Value }, count);
@@ -3488,7 +3508,7 @@ fn arrayFlipFn(vm: *VM, args: []const Value) !Value {
     result_array.* = PHPArray.init(vm.allocator);
 
     // Pre-allocate capacity
-    try result_array.getElements().ensureTotalCapacity(count);
+    try result_array.getElements().ensureTotalCapacity(vm.allocator, count);
 
     var iterator = arr.getElements().iterator();
     while (iterator.next()) |entry| {
@@ -3571,7 +3591,7 @@ fn arraySliceFn(vm: *VM, args: []const Value) !Value {
         vm.allocator.destroy(result_array);
     }
     result_array.* = PHPArray.init(vm.allocator);
-    try result_array.getElements().ensureTotalCapacity(slice_count);
+    try result_array.getElements().ensureTotalCapacity(vm.allocator, slice_count);
 
     // Direct insertion - collect and copy values
     var iterator = source_array.getElements().iterator();
@@ -3768,7 +3788,7 @@ fn sprintfFn(vm: *VM, args: []const Value) !Value {
             switch (spec) {
                 'd', 'i' => {
                     const val = if (arg.getTag() == .integer) arg.asInt() else 0;
-                    try std.fmt.format(result.writer(vm.allocator), "{d}", .{val});
+                    try result.print(vm.allocator, "{d}", .{val});
                 },
                 's' => {
                     const val = if (arg.getTag() == .string) arg.getAsString().data.data else "";
@@ -3776,7 +3796,7 @@ fn sprintfFn(vm: *VM, args: []const Value) !Value {
                 },
                 'f' => {
                     const val = if (arg.getTag() == .float) arg.asFloat() else 0.0;
-                    try std.fmt.format(result.writer(vm.allocator), "{d}", .{val});
+                    try result.print(vm.allocator, "{d}", .{val});
                 },
                 else => {
                     try result.append(vm.allocator, '%');
@@ -3993,7 +4013,7 @@ fn stripTagsFn(vm: *VM, args: []const Value) !Value {
 
 fn htmlspecialcharsFn(vm: *VM, args: []const Value) !Value {
     const str = if (args[0].getTag() == .string) args[0].getAsString().data.data else "";
-    var result = std.ArrayListUnmanaged(u8){};
+    var result = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
     defer result.deinit(vm.allocator);
     for (str) |c| {
         switch (c) {
@@ -4072,7 +4092,7 @@ fn varDumpFn(_: *VM, args: []const Value) !Value {
 }
 
 fn dumpValueDebug(value: Value, indent: usize) void {
-    const ind = "  " ** 10;
+    const ind: [20]u8 = @splat(' ');
     switch (value.getTag()) {
         .null => std.debug.print("NULL", .{}),
         .boolean => std.debug.print("bool({s})", .{if (value.asBool()) "true" else "false"}),
@@ -4106,7 +4126,7 @@ fn printRFn(_: *VM, args: []const Value) !Value {
 }
 
 fn printValueDebug(value: Value, indent: usize) void {
-    const ind = "    " ** 10;
+    const ind: [40]u8 = @splat(' ');
     switch (value.getTag()) {
         .null => {},
         .boolean => std.debug.print("{s}", .{if (value.asBool()) "1" else ""}),
@@ -4345,7 +4365,7 @@ fn boolvalFn(vm: *VM, args: []const Value) !Value {
 // Serialization Functions
 fn serializeFn(vm: *VM, args: []const Value) !Value {
     const value = args[0];
-    var buffer = std.ArrayListUnmanaged(u8){};
+    var buffer = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
     defer buffer.deinit(vm.allocator);
 
     try serializeValue(vm, &buffer, value);
@@ -4356,17 +4376,17 @@ fn serializeFn(vm: *VM, args: []const Value) !Value {
 fn serializeValue(vm: *VM, buffer: *std.ArrayListUnmanaged(u8), value: Value) !void {
     switch (value.getTag()) {
         .null => try buffer.appendSlice(vm.allocator, "N;"),
-        .boolean => try buffer.writer(vm.allocator).print("b:{d};", .{if (value.asBool()) @as(i64, 1) else @as(i64, 0)}),
-        .integer => try buffer.writer(vm.allocator).print("i:{d};", .{value.asInt()}),
-        .float => try buffer.writer(vm.allocator).print("d:{d};", .{value.asFloat()}),
+        .boolean => try buffer.print(vm.allocator, "b:{d};", .{if (value.asBool()) @as(i64, 1) else @as(i64, 0)}),
+        .integer => try buffer.print(vm.allocator, "i:{d};", .{value.asInt()}),
+        .float => try buffer.print(vm.allocator, "d:{d};", .{value.asFloat()}),
         .string => {
             const str = value.getAsString().data.data;
-            try buffer.writer(vm.allocator).print("s:{d}:\"{s}\";", .{ str.len, str });
+            try buffer.print(vm.allocator, "s:{d}:\"{s}\";", .{ str.len, str });
         },
         .array => {
             const arr = value.getAsArray().data;
             const count = arr.count();
-            try buffer.writer(vm.allocator).print("a:{d}:{{", .{count});
+            try buffer.print(vm.allocator, "a:{d}:{{", .{count});
 
             var iterator = arr.getElements().iterator();
             while (iterator.next()) |entry| {
@@ -4375,8 +4395,8 @@ fn serializeValue(vm: *VM, buffer: *std.ArrayListUnmanaged(u8), value: Value) !v
 
                 // Serialize key
                 switch (key) {
-                    .integer => |i| try buffer.writer(vm.allocator).print("i:{d};", .{i}),
-                    .string => |s| try buffer.writer(vm.allocator).print("s:{d}:\"{s}\";", .{ s.data.len, s.data }),
+                    .integer => |i| try buffer.print(vm.allocator, "i:{d};", .{i}),
+                    .string => |s| try buffer.print(vm.allocator, "s:{d}:\"{s}\";", .{ s.data.len, s.data }),
                 }
 
                 // Serialize value
@@ -4395,7 +4415,7 @@ fn serializeValue(vm: *VM, buffer: *std.ArrayListUnmanaged(u8), value: Value) !v
                 if (data_val.getTag() == .array) {
                     const arr = data_val.getAsArray().data;
                     const count = arr.count();
-                    try buffer.writer(vm.allocator).print("O:{d}:\"{s}\":{d}:{{", .{ class_name.len, class_name, count });
+                    try buffer.print(vm.allocator, "O:{d}:\"{s}\":{d}:{{", .{ class_name.len, class_name, count });
 
                     var it = arr.getElements().iterator();
                     while (it.next()) |entry| {
@@ -4403,8 +4423,8 @@ fn serializeValue(vm: *VM, buffer: *std.ArrayListUnmanaged(u8), value: Value) !v
                         const val = entry.value_ptr.*;
 
                         switch (key) {
-                            .integer => |i| try buffer.writer(vm.allocator).print("i:{d};", .{i}),
-                            .string => |s| try buffer.writer(vm.allocator).print("s:{d}:\"{s}\";", .{ s.data.len, s.data }),
+                            .integer => |i| try buffer.print(vm.allocator, "i:{d};", .{i}),
+                            .string => |s| try buffer.print(vm.allocator, "s:{d}:\"{s}\";", .{ s.data.len, s.data }),
                         }
 
                         try serializeValue(vm, buffer, val);
@@ -4427,7 +4447,7 @@ fn serializeValue(vm: *VM, buffer: *std.ArrayListUnmanaged(u8), value: Value) !v
             }
 
             const props_count: usize = if (allow_list) |list| list.count() else obj.shape.property_count;
-            try buffer.writer(vm.allocator).print("O:{d}:\"{s}\":{d}:{{", .{ class_name.len, class_name, props_count });
+            try buffer.print(vm.allocator, "O:{d}:\"{s}\":{d}:{{", .{ class_name.len, class_name, props_count });
 
             if (allow_list) |list| {
                 var it_allow = list.getElements().iterator();
@@ -4442,7 +4462,7 @@ fn serializeValue(vm: *VM, buffer: *std.ArrayListUnmanaged(u8), value: Value) !v
                         Value.initNull();
 
                     const full_len = class_name.len + prop_name.len + 2;
-                    try buffer.writer(vm.allocator).print("s:{d}:\"", .{full_len});
+                    try buffer.print(vm.allocator, "s:{d}:\"", .{full_len});
                     try buffer.appendSlice(vm.allocator, &[_]u8{0});
                     try buffer.appendSlice(vm.allocator, class_name);
                     try buffer.appendSlice(vm.allocator, &[_]u8{0});
@@ -4458,7 +4478,7 @@ fn serializeValue(vm: *VM, buffer: *std.ArrayListUnmanaged(u8), value: Value) !v
                     const val = obj.property_values.items[offset];
 
                     const full_len = class_name.len + prop_name.len + 2;
-                    try buffer.writer(vm.allocator).print("s:{d}:\"", .{full_len});
+                    try buffer.print(vm.allocator, "s:{d}:\"", .{full_len});
                     try buffer.appendSlice(vm.allocator, &[_]u8{0});
                     try buffer.appendSlice(vm.allocator, class_name);
                     try buffer.appendSlice(vm.allocator, &[_]u8{0});
@@ -4847,7 +4867,7 @@ fn sortFn(vm: *VM, args: []const Value) !Value {
     const php_array = array.getAsArray().data;
 
     // Collect values into a temporary list for sorting
-    var values = std.ArrayListUnmanaged(Value){};
+    var values = std.ArrayListUnmanaged(Value){ .items = &.{}, .capacity = 0 };
     defer values.deinit(vm.allocator);
 
     var iterator = php_array.getElements().iterator();
@@ -4868,7 +4888,7 @@ fn sortFn(vm: *VM, args: []const Value) !Value {
 
     for (values.items) |value| {
         const key = ArrayKey{ .integer = @intCast(php_array.next_index) };
-        php_array.getElements().put(key, value) catch {};
+        php_array.getElements().put(vm.allocator, key, value) catch {};
         php_array.next_index += 1;
     }
 
@@ -4887,7 +4907,7 @@ fn rsortFn(vm: *VM, args: []const Value) !Value {
 
     const php_array = array.getAsArray().data;
 
-    var values = std.ArrayListUnmanaged(Value){};
+    var values = std.ArrayListUnmanaged(Value){ .items = &.{}, .capacity = 0 };
     defer values.deinit(vm.allocator);
 
     var iterator = php_array.getElements().iterator();
@@ -4907,7 +4927,7 @@ fn rsortFn(vm: *VM, args: []const Value) !Value {
 
     for (values.items) |value| {
         const key = ArrayKey{ .integer = @intCast(php_array.next_index) };
-        php_array.getElements().put(key, value) catch {};
+        php_array.getElements().put(vm.allocator, key, value) catch {};
         php_array.next_index += 1;
     }
 
@@ -5303,7 +5323,7 @@ fn arrayRandFn(vm: *VM, args: []const Value) !Value {
 
     const num = if (args.len > 1) @as(usize, @intCast(@max(1, args[1].asInt()))) else 1;
 
-    var prng = std.Random.DefaultPrng.init(@intCast(std.time.timestamp()));
+    var prng = std.Random.DefaultPrng.init(@intCast(time_compat.timestamp()));
     const random = prng.random();
 
     if (num == 1) {
@@ -5566,7 +5586,7 @@ fn arrayChunkFn(vm: *VM, args: []const Value) !Value {
     const count = arr.count();
 
     // Pre-allocate temp ArrayList with exact size
-    var temp = std.ArrayListUnmanaged(struct { key: ArrayKey, value: Value }){};
+    var temp = std.ArrayListUnmanaged(struct { key: ArrayKey, value: Value }){ .items = &.{}, .capacity = 0 };
     try temp.ensureTotalCapacity(vm.allocator, count);
     defer temp.deinit(vm.allocator);
 
@@ -5659,7 +5679,7 @@ fn arrayPadFn(vm: *VM, args: []const Value) !Value {
         result.* = PHPArray.init(vm.allocator);
 
         // Pre-allocate capacity
-        try result.getElements().ensureTotalCapacity(count);
+        try result.getElements().ensureTotalCapacity(vm.allocator, count);
 
         var iter = arr.getElements().iterator();
         while (iter.next()) |entry| {
@@ -5691,7 +5711,7 @@ fn arrayPadFn(vm: *VM, args: []const Value) !Value {
     const after_pad = pad_needed - before_pad;
 
     // Pre-allocate capacity for all elements
-    try result.getElements().ensureTotalCapacity(target_size);
+    try result.getElements().ensureTotalCapacity(vm.allocator, target_size);
 
     // Add before padding
     var i: usize = 0;
@@ -6127,7 +6147,7 @@ fn fopenFn(vm: *VM, args: []const Value) !Value {
 
     // For simplicity, just try to open as read-only first
     // fopen in PHP returns false on failure, so we handle errors gracefully
-    const file = std.fs.cwd().openFile(filename_str, .{ .mode = .read_only }) catch {
+    const file = std.fs.cwd.openFile(filename_str, .{ .mode = .read_only }) catch {
         return Value.initBool(false); // PHP returns false on failure
     };
 

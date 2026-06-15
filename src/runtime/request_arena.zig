@@ -1,6 +1,7 @@
 const std = @import("std");
 const memory = @import("memory.zig");
 const ArenaAllocator = memory.ArenaAllocator;
+const time_compat = @import("time_compat.zig");
 
 /// 请求级Arena内存管理器
 /// 每个HTTP请求独立的内存池，请求结束时一次性释放
@@ -111,7 +112,7 @@ pub const RequestArena = struct {
         
         // 生成新的请求ID
         self.request_id = generateRequestId();
-        self.start_time_ns = @intCast(std.time.nanoTimestamp());
+        self.start_time_ns = @intCast(time_compat.nanoTimestamp());
         self.end_time_ns = 0;
         self.is_ended = false;
         
@@ -127,7 +128,7 @@ pub const RequestArena = struct {
     pub fn endRequest(self: *RequestArena) void {
         if (self.is_ended) return;
         
-        self.end_time_ns = @intCast(std.time.nanoTimestamp());
+        self.end_time_ns = @intCast(time_compat.nanoTimestamp());
         self.stats.request_duration_ns = @intCast(self.end_time_ns - self.start_time_ns);
         
         // 处理逃逸对象 - 晋升到全局堆
@@ -225,7 +226,7 @@ pub const RequestArena = struct {
         if (self.is_ended) {
             return @as(f64, @floatFromInt(self.stats.request_duration_ns)) / 1_000_000.0;
         }
-        const current: i64 = @intCast(std.time.nanoTimestamp());
+        const current: i64 = @intCast(time_compat.nanoTimestamp());
         const duration: u64 = @intCast(current - self.start_time_ns);
         return @as(f64, @floatFromInt(duration)) / 1_000_000.0;
     }

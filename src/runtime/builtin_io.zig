@@ -15,6 +15,16 @@ const ExceptionFactory = exceptions.ExceptionFactory;
 // Forward declaration for VM
 const VM = @import("vm.zig").VM;
 
+// Helper to get Io instance for Zig 0.17 API
+fn getIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
+// Helper to get cwd directory
+fn getCwd() std.Io.Dir {
+    return std.Io.Dir.cwd();
+}
+
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -27,19 +37,11 @@ var security_config = struct {
 /// Load security configuration from .zigphp.json
 pub fn loadConfig(alloc: std.mem.Allocator) !void {
     const config_file = ".zigphp.json";
-    const file = std.fs.cwd().openFile(config_file, .{}) catch |err| {
-        // If config file doesn't exist, use default values
-        if (err == error.FileNotFound) {
-            return;
-        }
-        return err;
-    };
-    defer file.close();
+    const io = getIo();
+    const cwd = getCwd();
 
-    const content = file.readToEndAlloc(alloc, 1024 * 1024) catch |err| {
-        if (err == error.OutOfMemory) {
-            return error.OutOfMemory;
-        }
+    const content = cwd.readFileAlloc(io, config_file, alloc, .limited(1024 * 1024)) catch {
+        // If config file doesn't exist or can't be read, use default values
         return;
     };
     defer alloc.free(content);
@@ -105,13 +107,15 @@ fn validatePath(path: []const u8) ![]const u8 {
 
 /// File handle for tracking open files
 pub const FileHandle = struct {
-    file: std.fs.File,
+    file: std.Io.File,
     path: []const u8,
     mode: []const u8,
     eof: bool = false,
+    pos: u64 = 0,
 
     pub fn close(self: *FileHandle) void {
-        self.file.close();
+        const io = getIo();
+        self.file.close(io);
         // Free the path and mode strings
         allocator.free(self.path);
         allocator.free(self.mode);
@@ -185,7 +189,6 @@ pub fn fileGetContentsFn(vm: *VM, args: []const Value) !Value {
     const safe_path = validatePath(file_path) catch |err| {
         switch (err) {
             error.InvalidPath => return Value.initBool(false),
-            else => return err,
         }
     };
 
@@ -201,30 +204,32 @@ pub fn fileGetContentsFn(vm: *VM, args: []const Value) !Value {
     else
         null;
 
-    const file = std.fs.cwd().openFile(safe_path, .{}) catch |err| {
-        switch (err) {
-            error.FileNotFound, error.AccessDenied, error.PermissionDenied => return Value.initBool(false),
-            else => return Value.initBool(false),
-        }
-    };
-    defer file.close();
+    const io = getIo();
+    const cwd = getCwd();
 
-    const file_size = try file.getEndPos();
+    const file = cwd.openFile(io, safe_path, .{}) catch {
+        return Value.initBool(false);
+    };
+    defer file.close(io);
+
+    const file_size = file.length(io) catch return Value.initBool(false);
 
     // Apply offset if specified
-    if (offset > 0) {
-        try file.seekTo(@intCast(offset));
-    }
+    const actual_offset: u64 = if (offset > 0) @intCast(offset) else 0;
+    const remaining = if (file_size > actual_offset) file_size - actual_offset else 0;
 
     // Determine read length
-    const read_len = if (maxlen) |ml| @min(ml, file_size) else file_size;
+    const read_len = if (maxlen) |ml| @min(ml, remaining) else remaining;
 
     if (read_len == 0) {
         return try Value.initString(vm.allocator, "");
     }
 
     const contents = try vm.allocator.alloc(u8, read_len);
-    const bytes_read = try file.readAll(contents);
+    const bytes_read = file.readPositionalAll(io, contents, actual_offset) catch {
+        vm.allocator.free(contents);
+        return Value.initBool(false);
+    };
 
     const result_str = try PHPString.init(vm.allocator, contents[0..bytes_read]);
     vm.allocator.free(contents);
@@ -261,7 +266,6 @@ pub fn filePutContentsFn(vm: *VM, args: []const Value) !Value {
     const safe_path = validatePath(file_path) catch |err| {
         switch (err) {
             error.InvalidPath => return Value.initBool(false),
-            else => return err,
         }
     };
 
@@ -274,45 +278,50 @@ pub fn filePutContentsFn(vm: *VM, args: []const Value) !Value {
     const FILE_APPEND = 8;
 
     const append = (flags & FILE_APPEND) != 0;
-    const lock_ex = (flags & LOCK_EX) != 0;
+    _ = (flags & LOCK_EX) != 0;
 
     const data_str = try data.toString(vm.allocator);
     defer data_str.deinit(vm.allocator);
 
+    const io = getIo();
+    const cwd = getCwd();
+
     const file = blk: {
         if (append) {
-            break :blk std.fs.cwd().openFile(safe_path, .{ .mode = .write_only }) catch |err| {
+            break :blk cwd.openFile(io, safe_path, .{ .mode = .write_only }) catch |err| {
                 switch (err) {
                     error.FileNotFound => {
                         // Create new file if it doesn't exist
-                        break :blk try std.fs.cwd().createFile(safe_path, .{});
+                        break :blk cwd.createFile(io, safe_path, .{}) catch {
+                            return Value.initBool(false);
+                        };
                     },
-                    else => return err,
+                    else => return Value.initBool(false),
                 }
             };
         } else {
-            break :blk try std.fs.cwd().createFile(safe_path, .{});
+            break :blk cwd.createFile(io, safe_path, .{}) catch {
+                return Value.initBool(false);
+            };
         }
     };
 
-    defer file.close();
-
-    // Implement file locking for LOCK_EX
-    if (lock_ex) {
-        // Try to acquire exclusive lock
-        // Note: File locking is platform-specific and may not be available on all systems
-        // For now, we skip actual locking to ensure cross-platform compatibility
-        // In a production environment, you would implement proper file locking here
-    }
+    defer file.close(io);
 
     // Seek to end if appending
     if (append) {
-        try file.seekFromEnd(0);
+        const end_pos = file.length(io) catch 0;
+        file.writePositionalAll(io, data_str.data, end_pos) catch {
+            return Value.initBool(false);
+        };
+        return Value.initInt(@intCast(data_str.data.len));
     }
 
-    const bytes_written = try file.write(data_str.data);
+    file.writeStreamingAll(io, data_str.data) catch {
+        return Value.initBool(false);
+    };
 
-    return Value.initInt(@intCast(bytes_written));
+    return Value.initInt(@intCast(data_str.data.len));
 }
 
 /// file_exists - Checks whether a file or directory exists
@@ -332,11 +341,13 @@ pub fn fileExistsFn(vm: *VM, args: []const Value) !Value {
     const safe_path = validatePath(file_path) catch |err| {
         switch (err) {
             error.InvalidPath => return Value.initBool(false),
-            else => return err,
         }
     };
 
-    std.fs.cwd().access(safe_path, .{}) catch {
+    const io = getIo();
+    const cwd = getCwd();
+
+    cwd.access(io, safe_path, .{}) catch {
         return Value.initBool(false);
     };
 
@@ -360,11 +371,13 @@ pub fn isFileFn(vm: *VM, args: []const Value) !Value {
     const safe_path = validatePath(file_path) catch |err| {
         switch (err) {
             error.InvalidPath => return Value.initBool(false),
-            else => return err,
         }
     };
 
-    const stat = std.fs.cwd().statFile(safe_path) catch {
+    const io = getIo();
+    const cwd = getCwd();
+
+    const stat = cwd.statFile(io, safe_path, .{}) catch {
         return Value.initBool(false);
     };
 
@@ -386,7 +399,10 @@ pub fn isDirFn(vm: *VM, args: []const Value) !Value {
 
     const safe_dir_path = dirname.getAsString().data.data;
 
-    const stat = std.fs.cwd().statFile(safe_dir_path) catch {
+    const io = getIo();
+    const cwd = getCwd();
+
+    const stat = cwd.statFile(io, safe_dir_path, .{}) catch {
         return Value.initBool(false);
     };
 
@@ -410,11 +426,13 @@ pub fn filesizeFn(vm: *VM, args: []const Value) !Value {
     const safe_path = validatePath(file_path) catch |err| {
         switch (err) {
             error.InvalidPath => return Value.initBool(false),
-            else => return err,
         }
     };
 
-    const stat = std.fs.cwd().statFile(safe_path) catch {
+    const io = getIo();
+    const cwd = getCwd();
+
+    const stat = cwd.statFile(io, safe_path, .{}) catch {
         return Value.initBool(false);
     };
 
@@ -438,15 +456,19 @@ pub fn filemtimeFn(vm: *VM, args: []const Value) !Value {
     const safe_path = validatePath(file_path) catch |err| {
         switch (err) {
             error.InvalidPath => return Value.initBool(false),
-            else => return err,
         }
     };
 
-    const stat = std.fs.cwd().statFile(safe_path) catch {
+    const io = getIo();
+    const cwd = getCwd();
+
+    const stat = cwd.statFile(io, safe_path, .{}) catch {
         return Value.initBool(false);
     };
 
-    return Value.initInt(@intCast(stat.mtime));
+    // mtime is Io.Timestamp with nanoseconds field (i96), convert to seconds
+    const mtime_seconds = @divFloor(stat.mtime.nanoseconds, std.time.ns_per_s);
+    return Value.initInt(@intCast(mtime_seconds));
 }
 
 // ============================================================================
@@ -470,11 +492,13 @@ pub fn unlinkFn(vm: *VM, args: []const Value) !Value {
     const safe_path = validatePath(file_path) catch |err| {
         switch (err) {
             error.InvalidPath => return Value.initBool(false),
-            else => return err,
         }
     };
 
-    std.fs.cwd().deleteFile(safe_path) catch {
+    const io = getIo();
+    const cwd = getCwd();
+
+    cwd.deleteFile(io, safe_path) catch {
         return Value.initBool(false);
     };
 
@@ -503,18 +527,19 @@ pub fn renameFn(vm: *VM, args: []const Value) !Value {
     _ = validatePath(old_path) catch |err| {
         switch (err) {
             error.InvalidPath => return Value.initBool(false),
-            else => return err,
         }
     };
 
     _ = validatePath(new_path) catch |err| {
         switch (err) {
             error.InvalidPath => return Value.initBool(false),
-            else => return err,
         }
     };
 
-    std.fs.cwd().rename(old_path, new_path) catch {
+    const io = getIo();
+    const cwd = getCwd();
+
+    std.Io.Dir.rename(cwd, old_path, cwd, new_path, io) catch {
         return Value.initBool(false);
     };
 
@@ -544,32 +569,33 @@ pub fn copyFn(vm: *VM, args: []const Value) !Value {
     _ = validatePath(source_path) catch |err| {
         switch (err) {
             error.InvalidPath => return Value.initBool(false),
-            else => return err,
         }
     };
 
     _ = validatePath(dest_path) catch |err| {
         switch (err) {
             error.InvalidPath => return Value.initBool(false),
-            else => return err,
         }
     };
 
-    const source_file = std.fs.cwd().openFile(source_path, .{}) catch {
+    const io = getIo();
+    const cwd = getCwd();
+
+    // Read source file content
+    const content = cwd.readFileAlloc(io, source_path, vm.allocator, .unlimited) catch {
         return Value.initBool(false);
     };
-    defer source_file.close();
+    defer vm.allocator.free(content);
 
-    const dest_file = std.fs.cwd().createFile(dest_path, .{}) catch {
+    // Create and write to destination file
+    const dest_file = cwd.createFile(io, dest_path, .{}) catch {
         return Value.initBool(false);
     };
-    defer dest_file.close();
+    defer dest_file.close(io);
 
-    const stat = source_file.stat() catch {
+    dest_file.writeStreamingAll(io, content) catch {
         return Value.initBool(false);
     };
-
-    _ = try source_file.copyRange(0, dest_file, 0, stat.size);
 
     return Value.initBool(true);
 }
@@ -599,7 +625,6 @@ pub fn mkdirFn(vm: *VM, args: []const Value) !Value {
     const safe_dir_path = validatePath(dir_path) catch |err| {
         switch (err) {
             error.InvalidPath => return Value.initBool(false),
-            else => return err,
         }
     };
 
@@ -609,12 +634,15 @@ pub fn mkdirFn(vm: *VM, args: []const Value) !Value {
     else
         false;
 
+    const io = getIo();
+    const cwd = getCwd();
+
     if (recursive) {
-        std.fs.cwd().makePath(safe_dir_path) catch {
+        cwd.createDirPath(io, safe_dir_path) catch {
             return Value.initBool(false);
         };
     } else {
-        std.fs.cwd().makeDir(safe_dir_path) catch {
+        cwd.createDir(io, safe_dir_path, .default_dir) catch {
             return Value.initBool(false);
         };
     }
@@ -642,11 +670,13 @@ pub fn rmdirFn(vm: *VM, args: []const Value) !Value {
     const safe_dir_path = validatePath(dir_path) catch |err| {
         switch (err) {
             error.InvalidPath => return Value.initBool(false),
-            else => return err,
         }
     };
 
-    std.fs.cwd().deleteDir(safe_dir_path) catch {
+    const io = getIo();
+    const cwd = getCwd();
+
+    cwd.deleteDir(io, safe_dir_path) catch {
         return Value.initBool(false);
     };
 
@@ -671,16 +701,18 @@ pub fn scandirFn(vm: *VM, args: []const Value) !Value {
     const safe_dir_path = validatePath(dir_path) catch |err| {
         switch (err) {
             error.InvalidPath => return Value.initBool(false),
-            else => return err,
         }
     };
 
-    var dir = std.fs.cwd().openDir(safe_dir_path, .{ .iterate = true }) catch {
+    const io = getIo();
+    const cwd = getCwd();
+
+    var dir = cwd.openDir(io, safe_dir_path, .{ .iterate = true }) catch {
         return Value.initBool(false);
     };
-    defer dir.close();
+    defer dir.close(io);
 
-    var entries = std.ArrayListUnmanaged([]const u8){};
+    var entries = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
     defer {
         for (entries.items) |entry| {
             vm.allocator.free(entry);
@@ -689,7 +721,7 @@ pub fn scandirFn(vm: *VM, args: []const Value) !Value {
     }
 
     var iter = dir.iterate();
-    while (try iter.next()) |entry| {
+    while (try iter.next(io)) |entry| {
         const name_copy = try vm.allocator.dupe(u8, entry.name);
         try entries.append(vm.allocator, name_copy);
     }
@@ -820,7 +852,10 @@ pub fn realpathFn(vm: *VM, args: []const Value) !Value {
 
     const path_str = path.getAsString().data.data;
 
-    const resolved = std.fs.cwd().realpathAlloc(vm.allocator, path_str) catch {
+    const io = getIo();
+    const cwd = getCwd();
+
+    const resolved = cwd.realPathFileAlloc(io, path_str, vm.allocator) catch {
         return Value.initBool(false);
     };
 
@@ -852,7 +887,6 @@ pub fn fopenFn(vm: *VM, args: []const Value) !Value {
     const safe_path = validatePath(file_path) catch |err| {
         switch (err) {
             error.InvalidPath => return Value.initBool(false),
-            else => return err,
         }
     };
     const mode_str = mode.getAsString().data.data;
@@ -868,34 +902,29 @@ pub fn fopenFn(vm: *VM, args: []const Value) !Value {
                    std.mem.indexOfScalar(u8, mode_str, 'c') != null;
     const truncate = std.mem.indexOfScalar(u8, mode_str, 'w') != null;
 
-    const file_flags: std.fs.File.OpenFlags = if (read and write)
-        .{ .mode = .read_write }
+    const open_mode: std.Io.Dir.OpenFileOptions.Mode = if (read and write)
+        .read_write
     else if (read)
-        .{ .mode = .read_only }
+        .read_only
     else if (write)
-        .{ .mode = .write_only }
+        .write_only
     else
-        .{ .mode = .read_only };
+        .read_only;
+
+    const io = getIo();
+    const cwd = getCwd();
 
     const file = if (create)
-        std.fs.cwd().createFile(safe_path, .{}) catch |err| {
+        cwd.createFile(io, safe_path, .{ .truncate = truncate, .read = read }) catch |err| {
             switch (err) {
                 error.PathAlreadyExists => {
-                    if (truncate) {
-                        // Truncate existing file
-                        const file = try std.fs.cwd().openFile(safe_path, file_flags);
-                        const file_handle = try vm.allocator.create(FileHandle);
-                        file_handle.* = .{ 
-                            .file = file,
-                            .path = try vm.allocator.dupe(u8, file_path),
-                            .mode = try vm.allocator.dupe(u8, mode_str),
-                        };
-                        return Value.initInt(@intCast(try registerFileHandle(file_handle)));
-                    }
-                    const file = try std.fs.cwd().openFile(safe_path, file_flags);
+                    // Open existing file
+                    const existing_file = cwd.openFile(io, safe_path, .{ .mode = open_mode }) catch {
+                        return Value.initBool(false);
+                    };
                     const file_handle = try vm.allocator.create(FileHandle);
-                    file_handle.* = .{ 
-                        .file = file,
+                    file_handle.* = .{
+                        .file = existing_file,
                         .path = try vm.allocator.dupe(u8, file_path),
                         .mode = try vm.allocator.dupe(u8, mode_str),
                     };
@@ -905,20 +934,19 @@ pub fn fopenFn(vm: *VM, args: []const Value) !Value {
             }
         }
     else
-        std.fs.cwd().openFile(safe_path, file_flags) catch {
+        cwd.openFile(io, safe_path, .{ .mode = open_mode }) catch {
             return Value.initBool(false);
         };
 
     // Seek to end if append mode
-    if (append) {
-        file.seekFromEnd(0) catch {};
-    }
+    const initial_pos: u64 = if (append) (file.length(io) catch 0) else 0;
 
     const handle = try vm.allocator.create(FileHandle);
     handle.* = .{
         .file = file,
         .path = try vm.allocator.dupe(u8, file_path),
         .mode = try vm.allocator.dupe(u8, mode_str),
+        .pos = initial_pos,
     };
 
     const handle_id = try registerFileHandle(handle);
@@ -972,7 +1000,8 @@ pub fn freadFn(vm: *VM, args: []const Value) !Value {
     const buffer = try vm.allocator.alloc(u8, length_int);
     defer vm.allocator.free(buffer);
 
-    const bytes_read = file_handle.file.readAll(buffer) catch {
+    const io = getIo();
+    const bytes_read = file_handle.file.readPositionalAll(io, buffer, file_handle.pos) catch {
         return Value.initBool(false);
     };
 
@@ -980,6 +1009,8 @@ pub fn freadFn(vm: *VM, args: []const Value) !Value {
         file_handle.eof = true;
         return try Value.initString(vm.allocator, "");
     }
+
+    file_handle.pos += bytes_read;
 
     return try Value.initString(vm.allocator, buffer[0..bytes_read]);
 }
@@ -1005,11 +1036,14 @@ pub fn fwriteFn(vm: *VM, args: []const Value) !Value {
 
     const file_handle = getFileHandle(handle_id) orelse return Value.initBool(false);
 
-    const bytes_written = file_handle.file.write(data_str) catch {
+    const io = getIo();
+    file_handle.file.writePositionalAll(io, data_str, file_handle.pos) catch {
         return Value.initBool(false);
     };
 
-    return Value.initInt(@intCast(bytes_written));
+    file_handle.pos += data_str.len;
+
+    return Value.initInt(@intCast(data_str.len));
 }
 
 /// feof - Tests for end-of-file on a file pointer
@@ -1030,10 +1064,10 @@ pub fn feofFn(vm: *VM, args: []const Value) !Value {
     const file_handle = getFileHandle(handle_id) orelse return Value.initBool(true);
 
     // Check if we're at end of file
-    const pos = file_handle.file.getPos() catch return Value.initBool(true);
-    const size = file_handle.file.getEndPos() catch return Value.initBool(true);
+    const io = getIo();
+    const size = file_handle.file.length(io) catch return Value.initBool(true);
 
-    return Value.initBool(pos >= size);
+    return Value.initBool(file_handle.pos >= size);
 }
 
 /// fseek - Seeks on a file pointer
@@ -1059,14 +1093,28 @@ pub fn fseekFn(vm: *VM, args: []const Value) !Value {
 
     const file_handle = getFileHandle(handle_id) orelse return Value.initInt(-1);
 
-    const result = switch (whence_int) {
-        0 => file_handle.file.seekTo(@as(u64, @intCast(offset_int))), // SEEK_SET
-        1 => file_handle.file.seekBy(offset_int), // SEEK_CUR
-        2 => file_handle.file.seekFromEnd(offset_int), // SEEK_END
+    switch (whence_int) {
+        0 => {
+            // SEEK_SET
+            if (offset_int < 0) return Value.initInt(-1);
+            file_handle.pos = @intCast(offset_int);
+        },
+        1 => {
+            // SEEK_CUR
+            const new_pos = @as(i64, @intCast(file_handle.pos)) + offset_int;
+            if (new_pos < 0) return Value.initInt(-1);
+            file_handle.pos = @intCast(new_pos);
+        },
+        2 => {
+            // SEEK_END
+            const io = getIo();
+            const end_pos = file_handle.file.length(io) catch return Value.initInt(-1);
+            const new_pos = @as(i64, @intCast(end_pos)) + offset_int;
+            if (new_pos < 0) return Value.initInt(-1);
+            file_handle.pos = @intCast(new_pos);
+        },
         else => return Value.initInt(-1),
-    };
-
-    result catch return Value.initInt(-1);
+    }
 
     return Value.initInt(0);
 }
@@ -1088,11 +1136,7 @@ pub fn ftellFn(vm: *VM, args: []const Value) !Value {
 
     const file_handle = getFileHandle(handle_id) orelse return Value.initBool(false);
 
-    const pos = file_handle.file.getPos() catch {
-        return Value.initBool(false);
-    };
-
-    return Value.initInt(@intCast(pos));
+    return Value.initInt(@intCast(file_handle.pos));
 }
 
 /// fgets - Gets line from file pointer
@@ -1119,79 +1163,75 @@ pub fn fgetsFn(vm: *VM, args: []const Value) !Value {
 
         defer vm.allocator.free(buffer);
 
-    
 
-        // Read line using file.readAll until newline
 
-    
+        // Read line using positional read byte by byte until newline
+
+
 
             var bytes_read: usize = 0;
 
-    
+
+
+            const io = getIo();
 
             while (bytes_read < length_int) {
 
-    
+
 
                 var byte_buf: [1]u8 = undefined;
 
-    
 
-                const n = file_handle.file.readAll(&byte_buf) catch |err| {
 
-    
-
-                    if (err == error.EndOfStream) break;
-
-    
-
-                    return Value.initBool(false);
-
-    
-
-                };
-
-    
-
-                if (n == 0) break;
-
-    
-
-                const byte = byte_buf[0];
-
-    
-
-                if (byte == '\n') {
-
-    
-
-                    buffer[bytes_read] = byte;
-
-    
-
-                    bytes_read += 1;
-
-    
+                const n = file_handle.file.readPositionalAll(io, &byte_buf, file_handle.pos) catch {
 
                     break;
 
-    
+                };
+
+
+
+                if (n == 0) break;
+
+
+
+                file_handle.pos += 1;
+
+                const byte = byte_buf[0];
+
+
+
+                if (byte == '\n') {
+
+
+
+                    buffer[bytes_read] = byte;
+
+
+
+                    bytes_read += 1;
+
+
+
+                    break;
+
+
 
                 }
 
-    
+
 
                 buffer[bytes_read] = byte;
 
-    
+
 
                 bytes_read += 1;
 
-    
+
 
             }
 
-    
+
 
         if (bytes_read == 0) {
 
@@ -1220,13 +1260,16 @@ pub fn fgetcFn(vm: *VM, args: []const Value) !Value {
     const file_handle = getFileHandle(handle_id) orelse return Value.initBool(false);
 
     var buffer: [1]u8 = undefined;
-    const bytes_read = file_handle.file.readAll(&buffer) catch {
+    const io = getIo();
+    const bytes_read = file_handle.file.readPositionalAll(io, &buffer, file_handle.pos) catch {
         return Value.initBool(false);
     };
 
     if (bytes_read == 0) {
         return Value.initBool(false);
     }
+
+    file_handle.pos += bytes_read;
 
     return try Value.initString(vm.allocator, buffer[0..bytes_read]);
 }
@@ -1248,10 +1291,7 @@ pub fn rewindFn(vm: *VM, args: []const Value) !Value {
 
     const file_handle = getFileHandle(handle_id) orelse return Value.initBool(false);
 
-    file_handle.file.seekTo(0) catch {
-        return Value.initBool(false);
-    };
-
+    file_handle.pos = 0;
     file_handle.eof = false;
 
     return Value.initBool(true);
@@ -1274,7 +1314,8 @@ pub fn fflushFn(vm: *VM, args: []const Value) !Value {
 
     const file_handle = getFileHandle(handle_id) orelse return Value.initBool(false);
 
-    file_handle.file.sync() catch {
+    const io = getIo();
+    file_handle.file.sync(io) catch {
         return Value.initBool(false);
     };
 
@@ -1306,16 +1347,29 @@ pub fn flockFn(vm: *VM, args: []const Value) !Value {
     const file_handle = getFileHandle(handle_id) orelse return Value.initBool(false);
 
     // Map PHP lock operations to Zig lock flags
-    const lock_flag: std.fs.File.Lock = if (operation & LOCK_EX != 0)
+    const lock_flag: std.Io.File.Lock = if (operation & LOCK_EX != 0)
         .exclusive
     else if (operation & LOCK_SH != 0)
         .shared
     else
         .none;
 
-    file_handle.file.lock(lock_flag) catch {
-        return Value.initBool(false);
-    };
+    const io = getIo();
+
+    if (lock_flag == .none) {
+        // LOCK_UN - unlock
+        file_handle.file.unlock(io);
+    } else if (operation & LOCK_NB != 0) {
+        // Non-blocking lock attempt
+        const locked = file_handle.file.tryLock(io, lock_flag) catch {
+            return Value.initBool(false);
+        };
+        if (!locked) return Value.initBool(false);
+    } else {
+        file_handle.file.lock(io, lock_flag) catch {
+            return Value.initBool(false);
+        };
+    }
 
     return Value.initBool(true);
 }
@@ -1342,7 +1396,8 @@ pub fn ftruncateFn(vm: *VM, args: []const Value) !Value {
         return Value.initBool(false);
     }
 
-    file_handle.file.setEndPos(@as(u64, @intCast(size))) catch {
+    const io = getIo();
+    file_handle.file.setLength(io, @as(u64, @intCast(size))) catch {
         return Value.initBool(false);
     };
 
@@ -1375,12 +1430,10 @@ pub fn fileFn(vm: *VM, args: []const Value) !Value {
 
     const path = try validatePath(file_path.data);
 
-    const file = std.fs.cwd().openFile(path, .{}) catch {
-        return Value.initBool(false);
-    };
-    defer file.close();
+    const io = getIo();
+    const cwd = getCwd();
 
-    const content = file.readToEndAlloc(vm.allocator, 1024 * 1024 * 10) catch {
+    const content = cwd.readFileAlloc(io, path, vm.allocator, .limited(1024 * 1024 * 10)) catch {
         return Value.initBool(false);
     };
     defer vm.allocator.free(content);
@@ -1392,7 +1445,7 @@ pub fn fileFn(vm: *VM, args: []const Value) !Value {
     var start: usize = 0;
     var line_num: usize = 0;
 
-    for (content, 0..content.len) |byte, i| {
+    for (content, 0..) |byte, i| {
         if (byte == '\n') {
             const line = content[start..i];
             const effective_line = if (flags & FILE_SKIP_EMPTY_LINES != 0 and line.len == 0)
@@ -1446,12 +1499,10 @@ pub fn readfileFn(vm: *VM, args: []const Value) !Value {
 
     const path = try validatePath(file_path.data);
 
-    const file = std.fs.cwd().openFile(path, .{}) catch {
-        return Value.initBool(false);
-    };
-    defer file.close();
+    const io = getIo();
+    const cwd = getCwd();
 
-    const content = file.readToEndAlloc(vm.allocator, 1024 * 1024 * 10) catch {
+    const content = cwd.readFileAlloc(io, path, vm.allocator, .limited(1024 * 1024 * 10)) catch {
         return Value.initBool(false);
     };
     defer vm.allocator.free(content);
@@ -1494,8 +1545,11 @@ pub fn isReadableFn(vm: *VM, args: []const Value) !Value {
 
     const path = try validatePath(file_path.data);
 
+    const io = getIo();
+    const cwd = getCwd();
+
     // Try to open the file for reading
-    _ = std.fs.cwd().openFile(path, .{}) catch {
+    _ = cwd.openFile(io, path, .{}) catch {
         return Value.initBool(false);
     };
 
@@ -1520,8 +1574,11 @@ pub fn isWritableFn(vm: *VM, args: []const Value) !Value {
 
     const path = try validatePath(file_path.data);
 
+    const io = getIo();
+    const cwd = getCwd();
+
     // Try to open the file for writing
-    _ = std.fs.cwd().openFile(path, .{ .mode = .read_write }) catch {
+    _ = cwd.openFile(io, path, .{ .mode = .read_write }) catch {
         return Value.initBool(false);
     };
 
@@ -1546,11 +1603,14 @@ pub fn isExecutableFn(vm: *VM, args: []const Value) !Value {
 
     const path = try validatePath(file_path.data);
 
+    const io = getIo();
+    const cwd = getCwd();
+
     // Check if file exists and is executable (simplified check)
-    const file = std.fs.cwd().openFile(path, .{}) catch {
+    const file = cwd.openFile(io, path, .{}) catch {
         return Value.initBool(false);
     };
-    defer file.close();
+    defer file.close(io);
 
     return Value.initBool(true);
 }
@@ -1629,16 +1689,19 @@ pub fn isLinkFn(vm: *VM, args: []const Value) !Value {
     const dir_path = std.fs.path.dirname(path) orelse ".";
     const basename = std.fs.path.basename(path);
 
-    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = false }) catch {
+    const io = getIo();
+    const cwd = getCwd();
+
+    var dir = cwd.openDir(io, dir_path, .{ .iterate = false }) catch {
         return Value.initBool(false);
     };
-    defer dir.close();
+    defer dir.close(io);
 
     // Try to read the link - if successful, it's a symlink
     const buffer = try vm.allocator.alloc(u8, 4096);
     defer vm.allocator.free(buffer);
 
-    _ = dir.readLink(basename, buffer) catch {
+    _ = dir.readLink(io, basename, buffer) catch {
         return Value.initBool(false);
     };
 
@@ -1817,13 +1880,16 @@ pub fn chmodFn(vm: *VM, args: []const Value) !Value {
 
     const path = try validatePath(file_path.data);
 
+    const io = getIo();
+    const cwd = getCwd();
+
     // Open file and chmod
-    const file = std.fs.cwd().openFile(path, .{}) catch {
+    const file = cwd.openFile(io, path, .{}) catch {
         return Value.initBool(false);
     };
-    defer file.close();
+    defer file.close(io);
 
-    file.chmod(@as(std.fs.File.Mode, @intCast(mode & 0o777))) catch {
+    file.setPermissions(io, std.Io.File.Permissions.fromMode(@intCast(mode & 0o777))) catch {
         return Value.initBool(false);
     };
 
@@ -1849,9 +1915,12 @@ pub fn chownFn(vm: *VM, args: []const Value) !Value {
 
     const path = try validatePath(file_path.data);
 
+    const io = getIo();
+    const cwd = getCwd();
+
     // Simplified: just try to change ownership
     // Full implementation would need user/group lookup
-    _ = std.fs.cwd().openFile(path, .{}) catch {
+    _ = cwd.openFile(io, path, .{}) catch {
         return Value.initBool(false);
     };
 
@@ -1879,8 +1948,11 @@ pub fn chgrpFn(vm: *VM, args: []const Value) !Value {
 
     const path = try validatePath(file_path.data);
 
+    const io = getIo();
+    const cwd = getCwd();
+
     // Simplified: just check if file exists
-    _ = std.fs.cwd().openFile(path, .{}) catch {
+    _ = cwd.openFile(io, path, .{}) catch {
         return Value.initBool(false);
     };
 
@@ -1910,9 +1982,20 @@ pub fn linkFn(vm: *VM, args: []const Value) !Value {
     const safe_target = try validatePath(target_path.data);
     const safe_link = try validatePath(link_path.data);
 
-    std.posix.link(safe_target, safe_link) catch {
+    // std.c.link requires null-terminated strings
+    const target_z = vm.allocator.dupeSentinel(u8, safe_target, 0) catch {
         return Value.initBool(false);
     };
+    defer vm.allocator.free(target_z);
+    const link_z = vm.allocator.dupeSentinel(u8, safe_link, 0) catch {
+        return Value.initBool(false);
+    };
+    defer vm.allocator.free(link_z);
+
+    const result = std.c.link(target_z.ptr, link_z.ptr);
+    if (result != 0) {
+        return Value.initBool(false);
+    }
 
     return Value.initBool(true);
 }
@@ -1945,12 +2028,15 @@ pub fn symlinkFn(vm: *VM, args: []const Value) !Value {
     const link_dir = std.fs.path.dirname(link_valid) orelse ".";
     const link_basename = std.fs.path.basename(link_valid);
 
-    var dir = std.fs.cwd().openDir(link_dir, .{ .iterate = false }) catch {
+    const io = getIo();
+    const cwd = getCwd();
+
+    var dir = cwd.openDir(io, link_dir, .{ .iterate = false }) catch {
         return Value.initBool(false);
     };
-    defer dir.close();
+    defer dir.close(io);
 
-    dir.symLink(target_valid, link_basename, .{}) catch {
+    dir.symLink(io, target_valid, link_basename, .{}) catch {
         return Value.initBool(false);
     };
 
@@ -1979,20 +2065,23 @@ pub fn readlinkFn(vm: *VM, args: []const Value) !Value {
     const dir_path = std.fs.path.dirname(path_valid) orelse ".";
     const basename = std.fs.path.basename(path_valid);
 
-    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = false }) catch {
+    const io = getIo();
+    const cwd = getCwd();
+
+    var dir = cwd.openDir(io, dir_path, .{ .iterate = false }) catch {
         return Value.initBool(false);
     };
-    defer dir.close();
+    defer dir.close(io);
 
     // readLink requires a buffer, allocate 4096 bytes
     const buffer = try vm.allocator.alloc(u8, 4096);
     defer vm.allocator.free(buffer);
 
-    const target = dir.readLink(basename, buffer) catch {
+    const target_len = dir.readLink(io, basename, buffer) catch {
         return Value.initBool(false);
     };
 
-    return try Value.initString(vm.allocator, target);
+    return try Value.initString(vm.allocator, buffer[0..target_len]);
 }
 
 /// lstat - Gives information about a file (does not follow symlinks)
@@ -2035,16 +2124,19 @@ fn statInternal(vm: *VM, args: []const Value, lstat_mode: bool) !Value {
     const dir_path = std.fs.path.dirname(path) orelse ".";
     const basename = std.fs.path.basename(path);
 
-    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = false }) catch {
+    const io = getIo();
+    const cwd = getCwd();
+
+    var dir = cwd.openDir(io, dir_path, .{ .iterate = false }) catch {
         return Value.initBool(false);
     };
-    defer dir.close();
+    defer dir.close(io);
 
     // Get file info (lstat or stat based on lstat_mode)
     const file_info = if (lstat_mode)
-        dir.statFile(basename)
+        dir.statFile(io, basename, .{ .follow_symlinks = false })
     else
-        dir.statFile(basename); // statFile doesn't have follow option, same as lstat in Zig stdlib
+        dir.statFile(io, basename, .{});
 
     const info = file_info catch {
         return Value.initBool(false);
@@ -2056,12 +2148,12 @@ fn statInternal(vm: *VM, args: []const Value, lstat_mode: bool) !Value {
 
     // 0 - device (not available, use 0)
     try stat_result.set(vm.allocator, ArrayKey{ .integer = 0 }, Value.initInt(0));
-    // 1 - inode (not available, use 0)
-    try stat_result.set(vm.allocator, ArrayKey{ .integer = 1 }, Value.initInt(0));
+    // 1 - inode
+    try stat_result.set(vm.allocator, ArrayKey{ .integer = 1 }, Value.initInt(@intCast(info.inode)));
     // 2 - mode (file type + permissions)
-    try stat_result.set(vm.allocator, ArrayKey{ .integer = 2 }, Value.initInt(@intCast(info.mode)));
-    // 3 - number of hard links (not available, use 1)
-    try stat_result.set(vm.allocator, ArrayKey{ .integer = 3 }, Value.initInt(1));
+    try stat_result.set(vm.allocator, ArrayKey{ .integer = 2 }, Value.initInt(@intCast(@intFromEnum(info.permissions))));
+    // 3 - number of hard links
+    try stat_result.set(vm.allocator, ArrayKey{ .integer = 3 }, Value.initInt(@intCast(info.nlink)));
     // 4 - user id (not available, use 0)
     try stat_result.set(vm.allocator, ArrayKey{ .integer = 4 }, Value.initInt(0));
     // 5 - group id (not available, use 0)
@@ -2070,14 +2162,15 @@ fn statInternal(vm: *VM, args: []const Value, lstat_mode: bool) !Value {
     try stat_result.set(vm.allocator, ArrayKey{ .integer = 6 }, Value.initInt(0));
     // 7 - size in bytes
     try stat_result.set(vm.allocator, ArrayKey{ .integer = 7 }, Value.initInt(@intCast(info.size)));
-    // 8 - atime (not available, use 0)
-    try stat_result.set(vm.allocator, ArrayKey{ .integer = 8 }, Value.initInt(0));
-    // 9 - mtime (not available, use 0)
-    try stat_result.set(vm.allocator, ArrayKey{ .integer = 9 }, Value.initInt(0));
-    // 10 - ctime (not available, use 0)
-    try stat_result.set(vm.allocator, ArrayKey{ .integer = 10 }, Value.initInt(0));
-    // 11 - blksize (not available, use 4096)
-    try stat_result.set(vm.allocator, ArrayKey{ .integer = 11 }, Value.initInt(4096));
+    // 8 - atime
+    const atime_ns: i64 = if (info.atime) |at| @intCast(@divFloor(at.nanoseconds, std.time.ns_per_s)) else 0;
+    try stat_result.set(vm.allocator, ArrayKey{ .integer = 8 }, Value.initInt(atime_ns));
+    // 9 - mtime
+    try stat_result.set(vm.allocator, ArrayKey{ .integer = 9 }, Value.initInt(@intCast(@divFloor(info.mtime.nanoseconds, std.time.ns_per_s))));
+    // 10 - ctime
+    try stat_result.set(vm.allocator, ArrayKey{ .integer = 10 }, Value.initInt(@intCast(@divFloor(info.ctime.nanoseconds, std.time.ns_per_s))));
+    // 11 - blksize
+    try stat_result.set(vm.allocator, ArrayKey{ .integer = 11 }, Value.initInt(@intCast(info.block_size)));
     // 12 - blocks (not available, use 0)
     try stat_result.set(vm.allocator, ArrayKey{ .integer = 12 }, Value.initInt(0));
 

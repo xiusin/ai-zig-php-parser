@@ -2,6 +2,7 @@ const std = @import("std");
 const types = @import("types.zig");
 const Value = types.Value;
 const Thread = std.Thread;
+const time_compat = @import("time_compat.zig");
 
 /// Optimized Coroutine structure with cache-friendly memory layout
 /// Designed for sub-microsecond context switching and minimal memory overhead
@@ -108,7 +109,7 @@ pub const OptimizedCoroutine = struct {
         pub fn init(allocator: std.mem.Allocator) ExecutionContext {
             return ExecutionContext{
                 .ip = 0,
-                .registers = [_]Value{Value.initNull()} ** 16,
+                .registers = @splat(Value.initNull()),
                 .locals = std.StringHashMap(Value).init(allocator),
             };
         }
@@ -205,10 +206,10 @@ pub const OptimizedCoroutine = struct {
             .id = id,
             .state = .created,
             .priority = 2, // Normal priority
-            ._padding1 = [_]u8{0} ** 6,
+            ._padding1 = @splat(0),
             .stack = try Stack.init(allocator, stack_size),
             .context = ExecutionContext.init(allocator),
-            .created_at = @intCast(std.time.nanoTimestamp()),
+            .created_at = @intCast(time_compat.nanoTimestamp()),
             .scheduled_count = 0,
             .callback = callback.retain(),
             .args = args_copy,
@@ -292,7 +293,7 @@ pub const OptimizedCoroutine = struct {
         self.id = id;
         self.state = .created;
         self.priority = 2; // Reset to normal priority
-        self.created_at = @intCast(std.time.nanoTimestamp());
+        self.created_at = @intCast(time_compat.nanoTimestamp());
         self.scheduled_count = 0;
         self.callback = callback.retain();
 
@@ -339,7 +340,7 @@ pub const OptimizedCoroutine = struct {
     /// Get execution time in nanoseconds
     pub fn getExecutionTime(self: *OptimizedCoroutine) i64 {
         if (self.state == .completed or self.state == .cancelled) {
-            return @as(i64, @intCast(std.time.nanoTimestamp())) - self.created_at;
+            return @as(i64, @intCast(time_compat.nanoTimestamp())) - self.created_at;
         }
         return 0;
     }
@@ -373,7 +374,7 @@ pub const OptimizedCoroutinePool = struct {
     total_reused: u64,
     total_destroyed: u64,
     stack_size: usize,
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex,
 
     // Pool configuration
     config: PoolConfig,
@@ -435,10 +436,10 @@ pub const OptimizedCoroutinePool = struct {
             .total_reused = 0,
             .total_destroyed = 0,
             .stack_size = config.default_stack_size,
-            .mutex = .{},
+            .mutex = .init,
             .config = config,
             .peak_usage = 0,
-            .last_cleanup = @intCast(std.time.milliTimestamp()),
+            .last_cleanup = @intCast(time_compat.milliTimestamp()),
             .memory_usage = std.atomic.Value(usize).init(0),
             .active_coroutines = std.atomic.Value(usize).init(0),
             .allocation_time_ns = 0,
@@ -464,8 +465,8 @@ pub const OptimizedCoroutinePool = struct {
     }
 
     pub fn deinit(self: *OptimizedCoroutinePool) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+        defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
 
         // Clean up all pooled coroutines
         for (self.available.items) |coroutine| {
@@ -482,10 +483,10 @@ pub const OptimizedCoroutinePool = struct {
 
     /// Get a coroutine from the pool or create a new one
     pub fn acquire(self: *OptimizedCoroutinePool, id: u64, callback: Value, args: []Value) !*OptimizedCoroutine {
-        const start_time = if (self.config.enable_performance_tracking) std.time.nanoTimestamp() else 0;
+        const start_time = if (self.config.enable_performance_tracking) time_compat.nanoTimestamp() else 0;
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+        defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
 
         // Perform automatic cleanup if enabled
         if (self.config.enable_auto_cleanup) {
@@ -501,7 +502,7 @@ pub const OptimizedCoroutinePool = struct {
             self.total_reused += 1;
 
             if (self.config.enable_performance_tracking) {
-                const elapsed = std.time.nanoTimestamp() - start_time;
+                const elapsed = time_compat.nanoTimestamp() - start_time;
                 self.reuse_time_ns = @as(u64, @intCast(@divTrunc(@as(i128, self.reuse_time_ns) + elapsed, 2))); // Running average
             }
         } else {
@@ -510,7 +511,7 @@ pub const OptimizedCoroutinePool = struct {
             self.total_created += 1;
 
             if (self.config.enable_performance_tracking) {
-                const elapsed = std.time.nanoTimestamp() - start_time;
+                const elapsed = time_compat.nanoTimestamp() - start_time;
                 self.allocation_time_ns = @as(u64, @intCast(@divTrunc(@as(i128, self.allocation_time_ns) + elapsed, 2))); // Running average
             }
         }
@@ -526,8 +527,8 @@ pub const OptimizedCoroutinePool = struct {
 
     /// Return a coroutine to the pool
     pub fn release(self: *OptimizedCoroutinePool, coroutine: *OptimizedCoroutine) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+        defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
 
         // Update active counter
         _ = self.active_coroutines.fetchSub(1, .monotonic);
@@ -562,8 +563,8 @@ pub const OptimizedCoroutinePool = struct {
 
     /// Add ready coroutine to ready queue (Requirement 6.8)
     pub fn addReady(self: *OptimizedCoroutinePool, coroutine: *OptimizedCoroutine) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+        defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
 
         coroutine.state = .ready;
         try self.ready_queue.append(self.allocator, coroutine);
@@ -571,8 +572,8 @@ pub const OptimizedCoroutinePool = struct {
 
     /// Get next ready coroutine (Requirement 6.8)
     pub fn getReady(self: *OptimizedCoroutinePool) ?*OptimizedCoroutine {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+        defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
 
         if (self.ready_queue.items.len > 0) {
             return self.ready_queue.orderedRemove(0);
@@ -582,8 +583,8 @@ pub const OptimizedCoroutinePool = struct {
 
     /// Get comprehensive pool statistics
     pub fn getStats(self: *OptimizedCoroutinePool) PoolStats {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+        defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
 
         return PoolStats{
             .available_count = self.available.items.len,
@@ -611,8 +612,8 @@ pub const OptimizedCoroutinePool = struct {
 
     /// Warm up the pool by pre-allocating coroutines
     pub fn warmUp(self: *OptimizedCoroutinePool, count: usize) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+        defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
 
         const target_count = @min(count, self.max_size);
         const callback = Value.initNull();
@@ -645,7 +646,7 @@ pub const OptimizedCoroutinePool = struct {
 
     /// Perform cleanup if needed based on time interval
     fn performCleanupIfNeeded(self: *OptimizedCoroutinePool) void {
-        const now = @as(i64, @intCast(std.time.milliTimestamp()));
+        const now = @as(i64, @intCast(time_compat.milliTimestamp()));
         if (now - self.last_cleanup > self.config.cleanup_interval_ms) {
             self.performCleanup();
             self.last_cleanup = now;
@@ -724,7 +725,7 @@ pub const Context = struct {
             .cancel_reason = null,
             .deadline = null,
             .values = std.StringHashMap(Value).init(allocator),
-            .children = .{},
+            .children = .empty,
             .on_cancel = null,
         };
     }
@@ -746,7 +747,7 @@ pub const Context = struct {
         const child = try self.allocator.create(Context);
         child.* = Context.init(self.allocator);
         child.parent = self;
-        child.deadline = std.time.milliTimestamp() + @as(i64, @intCast(timeout_ms));
+        child.deadline = time_compat.milliTimestamp() + @as(i64, @intCast(timeout_ms));
         try self.children.append(self.allocator, child);
         return child;
     }
@@ -781,7 +782,7 @@ pub const Context = struct {
     pub fn done(self: *Context) bool {
         if (self.cancelled.load(.seq_cst)) return true;
         if (self.deadline) |d| {
-            if (std.time.milliTimestamp() >= d) return true;
+            if (time_compat.milliTimestamp() >= d) return true;
         }
         if (self.parent) |p| return p.done();
         return false;
@@ -809,7 +810,7 @@ pub const Context = struct {
             return self.cancel_reason orelse "context cancelled";
         }
         if (self.deadline) |d| {
-            if (std.time.milliTimestamp() >= d) return "deadline exceeded";
+            if (time_compat.milliTimestamp() >= d) return "deadline exceeded";
         }
         if (self.parent) |p| return p.err();
         return null;
@@ -856,7 +857,7 @@ pub const PriorityQueue = struct {
 
     pub const SchedulerStats = struct {
         total_scheduled: u64 = 0,
-        priority_scheduled: [5]u64 = [_]u64{0} ** 5,
+        priority_scheduled: [5]u64 = @splat(0),
         starvation_prevented: u64 = 0,
     };
 
@@ -870,7 +871,7 @@ pub const PriorityQueue = struct {
             .stats = .{},
         };
         for (&pq.queues) |*q| {
-            q.* = .{};
+            q.* = .empty;
         }
         return pq;
     }
@@ -996,8 +997,8 @@ pub const CoroutineManager = struct {
     next_id: std.atomic.Value(u64),
     current_coroutine: ?*Coroutine,
     scheduler_running: std.atomic.Value(bool),
-    mutex: Thread.Mutex,
-    cond: Thread.Condition,
+    mutex: std.Io.Mutex,
+    cond: std.Io.Condition,
 
     // 协程池用于重用
     pool: std.ArrayList(*Coroutine),
@@ -1031,15 +1032,15 @@ pub const CoroutineManager = struct {
             .coroutines = std.AutoHashMap(u64, *Coroutine).init(allocator),
             .finished = std.AutoHashMap(u64, FinishedCoroutine).init(allocator),
             .priority_queue = PriorityQueue.init(allocator),
-            .ready_queue = .{},
-            .sleeping_queue = .{},
-            .io_waiting_queue = .{},
+            .ready_queue = .empty,
+            .sleeping_queue = .empty,
+            .io_waiting_queue = .empty,
             .next_id = std.atomic.Value(u64).init(1),
             .current_coroutine = null,
             .scheduler_running = std.atomic.Value(bool).init(false),
-            .mutex = .{},
-            .cond = .{},
-            .pool = .{},
+            .mutex = .init,
+            .cond = .init,
+            .pool = .empty,
             .pool_max_size = 1000,
             .scheduling_policy = .weighted_fair,
             .starvation_threshold = 100,
@@ -1104,14 +1105,14 @@ pub const CoroutineManager = struct {
         try self.coroutines.put(id, coroutine);
 
         // 加入优先级队列
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+        defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
 
         switch (self.scheduling_policy) {
             .fifo => try self.ready_queue.append(self.allocator, coroutine),
             .priority, .weighted_fair => try self.priority_queue.enqueue(coroutine),
         }
-        self.cond.signal();
+        self.cond.signal(std.Io.Threaded.global_single_threaded.io());
 
         return id;
     }
@@ -1150,17 +1151,17 @@ pub const CoroutineManager = struct {
                 self.recycleCoroutine(co);
             },
             .yielded => {
-                self.mutex.lock();
+                self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
                 switch (self.scheduling_policy) {
                     .fifo => self.ready_queue.append(self.allocator, co) catch {},
                     .priority, .weighted_fair => self.priority_queue.enqueue(co) catch {},
                 }
-                self.mutex.unlock();
+                self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
             },
             .sleeping => {
-                self.mutex.lock();
+                self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
                 self.sleeping_queue.append(self.allocator, co) catch {};
-                self.mutex.unlock();
+                self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
             },
             .waiting => {},
             else => {},
@@ -1178,7 +1179,7 @@ pub const CoroutineManager = struct {
             if (try self.processOneStep(vm)) continue;
             {
                 // 没有就绪协程，检查是否还有等待中的协程
-                self.mutex.lock();
+                self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
                 const has_ready = switch (self.scheduling_policy) {
                     .fifo => self.ready_queue.items.len > 0,
                     .priority, .weighted_fair => !self.priority_queue.isEmpty(),
@@ -1189,14 +1190,17 @@ pub const CoroutineManager = struct {
                 if (!has_ready and !has_sleeping and !has_io_waiting) {
                     // 没有任何等待中的协程，退出调度器
                     self.scheduler_running.store(false, .seq_cst);
-                    self.mutex.unlock();
+                    self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
                     break;
                 }
 
                 // 如果有IO等待的协程，使用较短的等待时间以便及时响应IO事件
                 const wait_time: u64 = if (has_io_waiting) 100_000 else 1_000_000; // 0.1ms or 1ms
-                self.cond.timedWait(&self.mutex, wait_time) catch {};
-                self.mutex.unlock();
+                {
+                    const sched_io = std.Io.Threaded.global_single_threaded.io();
+                    self.cond.waitTimeout(sched_io, &self.mutex, .{ .duration = .{ .raw = .{ .nanoseconds = @intCast(wait_time) }, .clock = .awake } }) catch {};
+                }
+                self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
             }
         }
     }
@@ -1212,7 +1216,7 @@ pub const CoroutineManager = struct {
     pub fn sleep(self: *CoroutineManager, duration_ms: u64) void {
         if (self.current_coroutine) |co| {
             co.state = .sleeping;
-            co.wake_time = std.time.milliTimestamp() + @as(i64, @intCast(duration_ms));
+            co.wake_time = time_compat.milliTimestamp() + @as(i64, @intCast(duration_ms));
         }
     }
 
@@ -1243,7 +1247,7 @@ pub const CoroutineManager = struct {
 
             if (try self.processOneStep(vm)) continue;
 
-            self.mutex.lock();
+            self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
             const has_ready = switch (self.scheduling_policy) {
                 .fifo => self.ready_queue.items.len > 0,
                 .priority, .weighted_fair => !self.priority_queue.isEmpty(),
@@ -1254,7 +1258,7 @@ pub const CoroutineManager = struct {
             if (has_ready or has_sleeping or has_io_waiting) {
                 self.cond.timedWait(&self.mutex, wait_time) catch {};
             }
-            self.mutex.unlock();
+            self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
         }
     }
 
@@ -1262,7 +1266,7 @@ pub const CoroutineManager = struct {
         while (true) {
             if (try self.processOneStep(vm)) continue;
 
-            self.mutex.lock();
+            self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
             const has_ready = switch (self.scheduling_policy) {
                 .fifo => self.ready_queue.items.len > 0,
                 .priority, .weighted_fair => !self.priority_queue.isEmpty(),
@@ -1270,12 +1274,12 @@ pub const CoroutineManager = struct {
             const has_sleeping = self.sleeping_queue.items.len > 0;
             const has_io_waiting = self.io_waiting_queue.items.len > 0;
             if (!has_ready and !has_sleeping and !has_io_waiting) {
-                self.mutex.unlock();
+                self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
                 return;
             }
             const wait_time: u64 = if (has_io_waiting) 100_000 else 1_000_000;
             self.cond.timedWait(&self.mutex, wait_time) catch {};
-            self.mutex.unlock();
+            self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
         }
     }
 
@@ -1307,8 +1311,8 @@ pub const CoroutineManager = struct {
     }
 
     fn getNextReady(self: *CoroutineManager) ?*Coroutine {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+        defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
 
         return switch (self.scheduling_policy) {
             .fifo => {
@@ -1325,8 +1329,8 @@ pub const CoroutineManager = struct {
     fn checkStarvation(self: *CoroutineManager) void {
         if (self.scheduling_policy == .fifo) return;
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+        defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
 
         // 检查低优先级队列中等待过久的协程
         for (3..5) |i| {
@@ -1340,10 +1344,10 @@ pub const CoroutineManager = struct {
     }
 
     fn wakeUpSleeping(self: *CoroutineManager) !void {
-        const now = std.time.milliTimestamp();
+        const now = time_compat.milliTimestamp();
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+        defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
 
         var i: usize = 0;
         while (i < self.sleeping_queue.items.len) {
@@ -1388,8 +1392,8 @@ pub const CoroutineManager = struct {
     /// 设置协程优先级
     pub fn setPriority(self: *CoroutineManager, id: u64, priority: Priority) bool {
         if (self.coroutines.get(id)) |co| {
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+            defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
 
             // 如果协程在优先级队列中，需要移动
             if (self.scheduling_policy != .fifo) {
@@ -1427,8 +1431,8 @@ pub const CoroutineManager = struct {
 
     /// 获取各优先级队列长度
     pub fn getQueueLengths(self: *CoroutineManager) [5]usize {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+        defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
 
         var lengths: [5]usize = undefined;
         for (0..5) |i| {
@@ -1472,9 +1476,9 @@ pub const CoroutineManager = struct {
             try self.io_reactor.?.registerFd(fd, event_type, co, timeout_ms);
 
             // 将协程加入IO等待队列
-            self.mutex.lock();
+            self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
             try self.io_waiting_queue.append(self.allocator, co);
-            self.mutex.unlock();
+            self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
         }
     }
 
@@ -1488,9 +1492,9 @@ pub const CoroutineManager = struct {
             try self.io_reactor.?.registerTimer(co, delay_ms, null);
 
             // 将协程加入IO等待队列
-            self.mutex.lock();
+            self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
             try self.io_waiting_queue.append(self.allocator, co);
-            self.mutex.unlock();
+            self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
         }
     }
 
@@ -1515,7 +1519,7 @@ pub const CoroutineManager = struct {
         for (events) |event| {
             if (event.coroutine_id) |co_id| {
                 if (self.coroutines.get(co_id)) |co| {
-                    self.mutex.lock();
+                    self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
 
                     // 从IO等待队列移除
                     for (self.io_waiting_queue.items, 0..) |waiting_co, i| {
@@ -1533,7 +1537,7 @@ pub const CoroutineManager = struct {
                         }
                     }
 
-                    self.mutex.unlock();
+                    self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
                 }
             }
         }
@@ -1541,15 +1545,15 @@ pub const CoroutineManager = struct {
 
     /// 检查是否有IO等待中的协程
     pub fn hasIOWaiting(self: *CoroutineManager) bool {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+        defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
         return self.io_waiting_queue.items.len > 0;
     }
 
     /// 获取IO等待队列长度
     pub fn getIOWaitingCount(self: *CoroutineManager) usize {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+        defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
         return self.io_waiting_queue.items.len;
     }
 
@@ -1651,7 +1655,7 @@ pub const Coroutine = struct {
             .scheduled_count = 0,
             .wait_count = 0,
             .task_locals = std.StringHashMap(Value).init(allocator),
-            .cleanup_hooks = .{},
+            .cleanup_hooks = .empty,
             .superglobals = .{},
             .context = ctx,
         };
@@ -1841,7 +1845,7 @@ pub const CoroutineStack = struct {
     pub fn init(allocator: std.mem.Allocator) CoroutineStack {
         return CoroutineStack{
             .allocator = allocator,
-            .frames = .{},
+            .frames = .empty,
         };
     }
 
@@ -1970,14 +1974,14 @@ pub fn GenericChannel(comptime T: type) type {
 /// WaitGroup - 等待一组协程完成
 pub const WaitGroup = struct {
     counter: std.atomic.Value(i32),
-    mutex: Thread.Mutex,
-    cond: Thread.Condition,
+    mutex: std.Io.Mutex,
+    cond: std.Io.Condition,
 
     pub fn init() WaitGroup {
         return WaitGroup{
             .counter = std.atomic.Value(i32).init(0),
-            .mutex = .{},
-            .cond = .{},
+            .mutex = .init,
+            .cond = .init,
         };
     }
 
@@ -1990,17 +1994,17 @@ pub const WaitGroup = struct {
     pub fn done(self: *WaitGroup) void {
         const prev = self.counter.fetchSub(1, .seq_cst);
         if (prev == 1) {
-            self.cond.broadcast();
+            self.cond.broadcast(std.Io.Threaded.global_single_threaded.io());
         }
     }
 
     /// 等待所有完成
     pub fn wait(self: *WaitGroup) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+        defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
 
         while (self.counter.load(.seq_cst) > 0) {
-            self.cond.wait(&self.mutex);
+            self.cond.wait(&self.mutex, std.Io.Threaded.global_single_threaded.io());
         }
     }
 };
@@ -2012,11 +2016,13 @@ pub const CoMutex = struct {
     waiting: std.ArrayListUnmanaged(u64),
     allocator: std.mem.Allocator,
 
+    const MAX_SPINS: u32 = 1024;
+
     pub fn init(allocator: std.mem.Allocator) CoMutex {
         return CoMutex{
             .locked = std.atomic.Value(bool).init(false),
             .owner = null,
-            .waiting = .{},
+            .waiting = .empty,
             .allocator = allocator,
         };
     }
@@ -2026,24 +2032,33 @@ pub const CoMutex = struct {
     }
 
     pub fn lock(self: *CoMutex, coroutine_id: u64) void {
+        var spins: u32 = 0;
         while (true) {
-            if (self.locked.cmpxchgWeak(false, true, .seq_cst, .seq_cst)) |_| {
-                self.waiting.append(self.allocator, coroutine_id) catch {};
-                std.Thread.sleep(1_000);
-            } else {
+            // cmpxchgWeak: null = 失败（已被锁），Some(旧值) = 成功（获取锁）
+            if (self.locked.cmpxchgWeak(false, true, .acquire, .monotonic)) |_| {
+                // 成功获取锁
                 self.owner = coroutine_id;
                 return;
+            } else |_| {
+                // 锁已被持有，自旋等待
+                spins += 1;
+                if (spins > MAX_SPINS) {
+                    std.Thread.yield() catch {};
+                    spins = 0;
+                } else {
+                    std.atomic.spinLoopHint();
+                }
             }
         }
     }
 
     pub fn unlock(self: *CoMutex) void {
         self.owner = null;
-        self.locked.store(false, .seq_cst);
+        self.locked.store(false, .release);
     }
 
     pub fn tryLock(self: *CoMutex, coroutine_id: u64) bool {
-        if (self.locked.cmpxchgWeak(false, true, .seq_cst, .seq_cst)) |_| {
+        if (self.locked.cmpxchgWeak(false, true, .acquire, .monotonic)) |_| {
             return false;
         }
         self.owner = coroutine_id;
@@ -2056,27 +2071,27 @@ pub const RWLock = struct {
     readers: std.atomic.Value(i32),
     writer_waiting: std.atomic.Value(bool),
     writer_active: std.atomic.Value(bool),
-    mutex: Thread.Mutex,
-    read_cond: Thread.Condition,
-    write_cond: Thread.Condition,
+    mutex: std.Io.Mutex,
+    read_cond: std.Io.Condition,
+    write_cond: std.Io.Condition,
 
     pub fn init() RWLock {
         return RWLock{
             .readers = std.atomic.Value(i32).init(0),
             .writer_waiting = std.atomic.Value(bool).init(false),
             .writer_active = std.atomic.Value(bool).init(false),
-            .mutex = .{},
-            .read_cond = .{},
-            .write_cond = .{},
+            .mutex = .init,
+            .read_cond = .init,
+            .write_cond = .init,
         };
     }
 
     pub fn readLock(self: *RWLock) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+        defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
 
         while (self.writer_active.load(.seq_cst) or self.writer_waiting.load(.seq_cst)) {
-            self.read_cond.wait(&self.mutex);
+            self.read_cond.wait(&self.mutex, std.Io.Threaded.global_single_threaded.io());
         }
         _ = self.readers.fetchAdd(1, .seq_cst);
     }
@@ -2084,17 +2099,17 @@ pub const RWLock = struct {
     pub fn readUnlock(self: *RWLock) void {
         const prev = self.readers.fetchSub(1, .seq_cst);
         if (prev == 1) {
-            self.write_cond.signal();
+            self.write_cond.signal(std.Io.Threaded.global_single_threaded.io());
         }
     }
 
     pub fn writeLock(self: *RWLock) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+        defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
 
         self.writer_waiting.store(true, .seq_cst);
         while (self.readers.load(.seq_cst) > 0 or self.writer_active.load(.seq_cst)) {
-            self.write_cond.wait(&self.mutex);
+            self.write_cond.wait(&self.mutex, std.Io.Threaded.global_single_threaded.io());
         }
         self.writer_waiting.store(false, .seq_cst);
         self.writer_active.store(true, .seq_cst);
@@ -2102,8 +2117,8 @@ pub const RWLock = struct {
 
     pub fn writeUnlock(self: *RWLock) void {
         self.writer_active.store(false, .seq_cst);
-        self.read_cond.broadcast();
-        self.write_cond.signal();
+        self.read_cond.broadcast(std.Io.Threaded.global_single_threaded.io());
+        self.write_cond.signal(std.Io.Threaded.global_single_threaded.io());
     }
 
     pub fn tryReadLock(self: *RWLock) bool {
@@ -2126,20 +2141,20 @@ pub const RWLock = struct {
 /// Once - 确保函数只执行一次
 pub const Once = struct {
     done: std.atomic.Value(bool),
-    mutex: Thread.Mutex,
+    mutex: std.Io.Mutex,
 
     pub fn init() Once {
         return Once{
             .done = std.atomic.Value(bool).init(false),
-            .mutex = .{},
+            .mutex = .init,
         };
     }
 
     pub fn do(self: *Once, func: *const fn () void) void {
         if (self.done.load(.seq_cst)) return;
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+        defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
 
         if (!self.done.load(.seq_cst)) {
             func();
@@ -2151,30 +2166,30 @@ pub const Once = struct {
 /// Semaphore - 信号量
 pub const Semaphore = struct {
     count: std.atomic.Value(i32),
-    mutex: Thread.Mutex,
-    cond: Thread.Condition,
+    mutex: std.Io.Mutex,
+    cond: std.Io.Condition,
 
     pub fn init(initial: i32) Semaphore {
         return Semaphore{
             .count = std.atomic.Value(i32).init(initial),
-            .mutex = .{},
-            .cond = .{},
+            .mutex = .init,
+            .cond = .init,
         };
     }
 
     pub fn acquire(self: *Semaphore) void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+        defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
 
         while (self.count.load(.seq_cst) <= 0) {
-            self.cond.wait(&self.mutex);
+            self.cond.wait(&self.mutex, std.Io.Threaded.global_single_threaded.io());
         }
         _ = self.count.fetchSub(1, .seq_cst);
     }
 
     pub fn release(self: *Semaphore) void {
         _ = self.count.fetchAdd(1, .seq_cst);
-        self.cond.signal();
+        self.cond.signal(std.Io.Threaded.global_single_threaded.io());
     }
 
     pub fn tryAcquire(self: *Semaphore) bool {
@@ -2234,7 +2249,7 @@ pub const AsyncIOReactor = struct {
     timer_queue: std.ArrayListUnmanaged(TimerEntry),
 
     /// 互斥锁保护共享状态
-    mutex: Thread.Mutex,
+    mutex: std.Io.Mutex,
 
     /// 是否正在运行
     running: std.atomic.Value(bool),
@@ -2277,8 +2292,8 @@ pub const AsyncIOReactor = struct {
             .allocator = allocator,
             .event_fd = event_fd,
             .waiting_coroutines = std.AutoHashMap(i32, IOWaitEntry).init(allocator),
-            .timer_queue = .{},
-            .mutex = .{},
+            .timer_queue = .empty,
+            .mutex = .init,
             .running = std.atomic.Value(bool).init(false),
             .stats = .{},
         };
@@ -2290,7 +2305,8 @@ pub const AsyncIOReactor = struct {
 
         // 关闭事件队列
         if (self.event_fd >= 0) {
-            std.posix.close(@intCast(self.event_fd));
+            const ef: std.Io.File = .{ .handle = @intCast(self.event_fd), .flags = .{ .nonblocking = false } };
+            ef.close(std.Io.Threaded.global_single_threaded.io());
         }
 
         self.waiting_coroutines.deinit();
@@ -2299,8 +2315,8 @@ pub const AsyncIOReactor = struct {
 
     /// 注册文件描述符等待IO事件
     pub fn registerFd(self: *AsyncIOReactor, fd: i32, event_type: IOEventType, coroutine: *Coroutine, timeout_ms: ?u64) IOError!void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+        defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
 
         // 检查是否已注册
         if (self.waiting_coroutines.contains(fd)) {
@@ -2316,7 +2332,7 @@ pub const AsyncIOReactor = struct {
             .event_type = event_type,
             .coroutine = coroutine,
             .timeout_ms = timeout_ms,
-            .registered_at = std.time.milliTimestamp(),
+            .registered_at = time_compat.milliTimestamp(),
         }) catch return IOError.OutOfMemory;
 
         // 设置协程状态为等待
@@ -2325,8 +2341,8 @@ pub const AsyncIOReactor = struct {
 
     /// 取消注册文件描述符
     pub fn unregisterFd(self: *AsyncIOReactor, fd: i32) IOError!void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+        defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
 
         if (!self.waiting_coroutines.contains(fd)) {
             return IOError.NotRegistered;
@@ -2341,10 +2357,10 @@ pub const AsyncIOReactor = struct {
 
     /// 注册定时器
     pub fn registerTimer(self: *AsyncIOReactor, coroutine: *Coroutine, delay_ms: u64, user_data: ?*anyopaque) IOError!void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+        defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
 
-        const deadline = std.time.milliTimestamp() + @as(i64, @intCast(delay_ms));
+        const deadline = time_compat.milliTimestamp() + @as(i64, @intCast(delay_ms));
 
         self.timer_queue.append(self.allocator, TimerEntry{
             .coroutine = coroutine,
@@ -2361,8 +2377,8 @@ pub const AsyncIOReactor = struct {
         var event_count: usize = 0;
 
         // 检查定时器
-        const now = std.time.milliTimestamp();
-        self.mutex.lock();
+        const now = time_compat.milliTimestamp();
+        self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
 
         var i: usize = 0;
         while (i < self.timer_queue.items.len) {
@@ -2387,7 +2403,7 @@ pub const AsyncIOReactor = struct {
         }
 
         // 检查超时的IO等待
-        var to_remove: std.ArrayListUnmanaged(i32) = .{};
+        var to_remove: std.ArrayListUnmanaged(i32) = .empty;
         defer to_remove.deinit(self.allocator);
 
         var iter = self.waiting_coroutines.iterator();
@@ -2409,13 +2425,13 @@ pub const AsyncIOReactor = struct {
             self.removeFromEventQueue(fd) catch {};
         }
 
-        self.mutex.unlock();
+        self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
 
         // 轮询内核事件
         const kernel_events = try self.pollKernelEvents(timeout_ms);
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+        defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
 
         for (kernel_events) |kevent| {
             if (event_count >= events_buf.len) break;
@@ -2460,9 +2476,9 @@ pub const AsyncIOReactor = struct {
 
         while (self.running.load(.seq_cst)) {
             // 检查是否还有等待的协程
-            self.mutex.lock();
+            self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
             const has_waiting = self.waiting_coroutines.count() > 0 or self.timer_queue.items.len > 0;
-            self.mutex.unlock();
+            self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
 
             if (!has_waiting) break;
 
@@ -2475,12 +2491,12 @@ pub const AsyncIOReactor = struct {
                 if (event.coroutine_id) |co_id| {
                     if (manager.coroutines.get(co_id)) |co| {
                         if (co.state == .ready) {
-                            manager.mutex.lock();
+                            manager.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
                             switch (manager.scheduling_policy) {
                                 .fifo => manager.ready_queue.append(manager.allocator, co) catch {},
                                 .priority, .weighted_fair => manager.priority_queue.enqueue(co) catch {},
                             }
-                            manager.mutex.unlock();
+                            manager.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
                         }
                     }
                 }
@@ -2510,8 +2526,8 @@ pub const AsyncIOReactor = struct {
 
     /// 获取等待中的协程数量
     pub fn getWaitingCount(self: *AsyncIOReactor) usize {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+        defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
         return self.waiting_coroutines.count() + self.timer_queue.items.len;
     }
 
@@ -2597,7 +2613,7 @@ pub const AsyncIOReactor = struct {
     /// 轮询内核事件
     fn pollKernelEvents(self: *AsyncIOReactor, timeout_ms: i32) ![]IOEvent {
         const builtin = @import("builtin");
-        var result: std.ArrayListUnmanaged(IOEvent) = .{};
+        var result: std.ArrayListUnmanaged(IOEvent) = .empty;
         errdefer result.deinit(self.allocator);
 
         if (builtin.os.tag == .macos or builtin.os.tag == .freebsd or builtin.os.tag == .netbsd or builtin.os.tag == .openbsd) {
@@ -2718,7 +2734,7 @@ test "waitgroup basic operations" {
     wg.add(2);
     wg.done();
     wg.done();
-    wg.wait();
+    wg.wait(std.Io.Threaded.global_single_threaded.io());
 }
 
 test "priority queue basic operations" {
@@ -2984,7 +3000,7 @@ test "io wait entry structure" {
         .event_type = .read,
         .coroutine = co,
         .timeout_ms = 5000,
-        .registered_at = std.time.milliTimestamp(),
+        .registered_at = time_compat.milliTimestamp(),
     };
 
     try std.testing.expectEqual(@as(i32, 10), entry.fd);

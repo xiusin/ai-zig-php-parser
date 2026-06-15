@@ -1,6 +1,9 @@
 // Runtime 模块统一入口
 // 用于解决 Zig 0.15.2 模块系统的导入问题
 
+// 时间兼容层
+pub const time_compat = @import("time_compat.zig");
+
 // 核心类型系统
 pub const types = @import("types.zig");
 pub const vm = @import("vm.zig");

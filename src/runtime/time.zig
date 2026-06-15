@@ -226,7 +226,7 @@ pub const Duration = struct {
 
     /// 格式化为字符串
     pub fn string(self: Duration, allocator: std.mem.Allocator) ![]u8 {
-        var buf = std.ArrayListUnmanaged(u8){};
+        var buf = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
         const writer = buf.writer(allocator);
 
         var d = self.nsec;
@@ -706,7 +706,7 @@ pub const Time = struct {
     /// Go风格的时间格式化
     /// 参考时间: Mon Jan 2 15:04:05 MST 2006
     pub fn format(self: Time, layout: []const u8, allocator: std.mem.Allocator) ![]u8 {
-        var buf = std.ArrayListUnmanaged(u8){};
+        var buf = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
         const writer = buf.writer(allocator);
 
         var i: usize = 0;
@@ -909,7 +909,7 @@ pub fn phpMicrotime() f64 {
 /// PHP date() - 格式化时间
 pub fn phpDate(format: []const u8, timestamp: ?i64, allocator: std.mem.Allocator) ![]u8 {
     const t = if (timestamp) |ts| Time.unix(ts, 0) else Time.now();
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
     const writer = buf.writer(allocator);
 
     for (format) |c| {

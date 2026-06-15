@@ -267,7 +267,7 @@ pub const ErrorHandler = struct {
     error_reporting: u32,
     display_errors: bool,
     log_errors: bool,
-    error_log: ?std.fs.File,
+    error_log: ?std.Io.File,
 
     pub fn init(allocator: std.mem.Allocator) ErrorHandler {
         return ErrorHandler{
@@ -283,7 +283,7 @@ pub const ErrorHandler = struct {
 
     pub fn deinit(self: *ErrorHandler) void {
         if (self.error_log) |log_file| {
-            log_file.close();
+            log_file.close(std.Io.Threaded.global_single_threaded.io());
         }
     }
 
@@ -307,9 +307,9 @@ pub const ErrorHandler = struct {
         self.log_errors = log;
     }
 
-    pub fn setErrorLog(self: *ErrorHandler, log_file: ?std.fs.File) void {
+    pub fn setErrorLog(self: *ErrorHandler, log_file: ?std.Io.File) void {
         if (self.error_log) |old_log| {
-            old_log.close();
+            old_log.close(std.Io.Threaded.global_single_threaded.io());
         }
         self.error_log = log_file;
     }
@@ -387,11 +387,13 @@ pub const ErrorHandler = struct {
 
     fn logError(self: *ErrorHandler, message: []const u8) !void {
         if (self.error_log) |log_file| {
-            const timestamp = std.time.timestamp();
-            const log_entry = try std.fmt.allocPrint(self.allocator, "[{d}] {s}\n", .{ timestamp, message });
+            const io = std.Io.Threaded.global_single_threaded.io();
+            const ts = std.Io.Clock.now(.real, io);
+            const secs = @divFloor(ts.nanoseconds, std.time.ns_per_s);
+            const log_entry = try std.fmt.allocPrint(self.allocator, "[{d}] {s}\n", .{ secs, message });
             defer self.allocator.free(log_entry);
 
-            _ = try log_file.writeAll(log_entry);
+            try log_file.writeStreamingAll(io, log_entry);
         }
     }
 };

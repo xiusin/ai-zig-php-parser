@@ -1,3 +1,4 @@
+const time_compat = @import("time_compat.zig");
 const std = @import("std");
 
 /// 增强型分代垃圾回收器
@@ -296,7 +297,7 @@ pub const OldGeneration = struct {
     pub fn init(allocator: std.mem.Allocator) OldGeneration {
         return .{
             .backing_allocator = allocator,
-            .free_lists = [_]?*FreeBlock{null} ** SIZE_CLASSES,
+            .free_lists = @splat(null),
             .allocated_chunks = .{},
             .live_objects = .{},
             .total_size = 0,
@@ -418,7 +419,7 @@ pub const OldGeneration = struct {
         var free_block_count: usize = 0;
         
         // 第一步：收集所有空闲块并按地址排序
-        var all_blocks = std.ArrayList(*FreeBlock){};
+        var all_blocks = std.ArrayList(*FreeBlock).empty;
         defer all_blocks.deinit(self.backing_allocator);
         
         for (self.free_lists) |maybe_block| {
@@ -780,7 +781,7 @@ pub const EnhancedGenerationalGC = struct {
 
     /// Minor GC - 收集 Nursery 和 Survivor
     pub fn collectMinor(self: *EnhancedGenerationalGC) !void {
-        const start_time = std.time.nanoTimestamp();
+        const start_time = time_compat.nanoTimestamp();
         self.stats.minor_gc_count += 1;
 
         // 1. 标记阶段 - 从根集合开始
@@ -811,7 +812,7 @@ pub const EnhancedGenerationalGC = struct {
             ct.clearAll();
         }
 
-        const end_time = std.time.nanoTimestamp();
+        const end_time = time_compat.nanoTimestamp();
         const gc_time: u64 = @intCast(end_time - start_time);
         self.stats.last_minor_gc_time_ns = gc_time;
         self.stats.total_gc_time_ns += gc_time;
@@ -822,7 +823,7 @@ pub const EnhancedGenerationalGC = struct {
 
     /// Major GC - 收集老年代
     pub fn collectMajor(self: *EnhancedGenerationalGC) !void {
-        const start_time = std.time.nanoTimestamp();
+        const start_time = time_compat.nanoTimestamp();
         self.stats.major_gc_count += 1;
 
         // 先执行 Minor GC
@@ -864,7 +865,7 @@ pub const EnhancedGenerationalGC = struct {
 
         self.stats.total_freed += freed;
 
-        const end_time = std.time.nanoTimestamp();
+        const end_time = time_compat.nanoTimestamp();
         const gc_time: u64 = @intCast(end_time - start_time);
         self.stats.last_major_gc_time_ns = gc_time;
         self.stats.total_gc_time_ns += gc_time;

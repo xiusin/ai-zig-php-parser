@@ -313,7 +313,7 @@ pub const CrashReport = struct {
         const report_text = try self.generateReport();
         defer self.allocator.free(report_text);
         
-        const file = try std.fs.cwd().createFile(path, .{});
+        const file = try std.fs.cwd.createFile(path, .{});
         defer file.close();
         
         try file.writeAll(report_text);
@@ -373,7 +373,7 @@ pub const CrashHandler = struct {
         }
         
         // 确保崩溃报告目录存在
-        std.fs.cwd().makePath(self.crash_report_dir) catch |err| {
+        std.fs.cwd.makePath(self.crash_report_dir) catch |err| {
             if (err != error.PathAlreadyExists) return err;
         };
         
@@ -609,16 +609,12 @@ fn captureStackAddresses(buffer: []usize) usize {
 /// 启用 core dump
 fn enableCoreDump() !void {
     if (builtin.os.tag == .linux or builtin.os.tag == .macos) {
-        const posix_c = @cImport({
-            @cInclude("sys/resource.h");
-        });
-        
-        var rlim = posix_c.rlimit{
-            .rlim_cur = posix_c.RLIM_INFINITY,
-            .rlim_max = posix_c.RLIM_INFINITY,
+        var rlim = std.os.linux.rlimit{
+            .cur = std.os.linux.RLIM.INFINITY,
+            .max = std.os.linux.RLIM.INFINITY,
         };
         
-        if (posix_c.setrlimit(posix_c.RLIMIT_CORE, &rlim) != 0) {
+        if (std.os.linux.setrlimit(.CORE, &rlim) != 0) {
             return error.SetRlimitFailed;
         }
     }
@@ -659,7 +655,7 @@ fn writeSimpleCrashReport(dir: []const u8, filename: []const u8, context: *const
     var path_buf: [512]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{dir, filename}) catch return;
     
-    const file = std.fs.cwd().createFile(path, .{}) catch return;
+    const file = std.fs.cwd.createFile(path, .{}) catch return;
     defer file.close();
     
     var buf: [4096]u8 = undefined;
@@ -711,7 +707,7 @@ fn signalHandler(sig: c_int, info: *std.posix.siginfo_t, ucontext: ?*anyopaque) 
 // ============================================================================
 
 var global_handler: ?*CrashHandler = null;
-var global_handler_mutex: std.Thread.Mutex = .{};
+var global_handler_mutex: std.Thread.Mutex = std.Thread.Mutex{};
 
 /// 初始化全局崩溃处理器
 pub fn initGlobalHandler(

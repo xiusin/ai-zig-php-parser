@@ -14,7 +14,7 @@ pub fn main() !void {
 }
 
 fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
-    const file = try std.fs.cwd().openFile(path, .{});
+    const file = try std.fs.cwd.openFile(path, .{});
     defer file.close();
     return try file.readToEndAlloc(allocator, 1024 * 1024 * 5);
 }
@@ -170,7 +170,7 @@ fn generateReport(
     aot_builtins: std.StringHashMap(void),
 ) !void {
     // Buffer the output
-    var buffer = std.ArrayListUnmanaged(u8){};
+    var buffer = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
     defer buffer.deinit(allocator);
     const writer = buffer.writer(allocator);
 
@@ -182,7 +182,7 @@ fn generateReport(
     try writer.print("| IR Op | Supported | Status |\n", .{});
     try writer.print("|---|---|---|\n", .{});
 
-    var ir_keys = std.ArrayListUnmanaged([]const u8){};
+    var ir_keys = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
     defer ir_keys.deinit(allocator);
     var ir_iter = ir_ops.keyIterator();
     while (ir_iter.next()) |key| {
@@ -213,7 +213,7 @@ fn generateReport(
     try writer.print("| Builtin Function | Supported | Status |\n", .{});
     try writer.print("|---|---|---|\n", .{});
 
-    var builtin_keys = std.ArrayListUnmanaged([]const u8){};
+    var builtin_keys = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
     defer builtin_keys.deinit(allocator);
     var b_iter = interpreter_builtins.keyIterator();
     while (b_iter.next()) |key| {
@@ -256,7 +256,7 @@ fn generateReport(
     }
 
     // Write to file
-    const file = try std.fs.cwd().createFile(".trae/documents/AOT_Coverage_Report.md", .{});
+    const file = try std.fs.cwd.createFile(".trae/documents/AOT_Coverage_Report.md", .{});
     defer file.close();
     try file.writeAll(buffer.items);
 }

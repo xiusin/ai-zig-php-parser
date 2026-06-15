@@ -41,6 +41,7 @@
 //!
 //! 需求：6.1, 6.5, 6.7
 //! ============================================================================
+const time_compat = @import("time_compat.zig");
 
 const std = @import("std");
 const types = @import("types.zig");
@@ -95,8 +96,8 @@ pub const Worker = struct {
             .park_count = std.atomic.Value(u64).init(0),
             .handoff_count = std.atomic.Value(u64).init(0),
             .total_execution_time_ns = std.atomic.Value(u64).init(0),
-            .created_at = @intCast(std.time.nanoTimestamp()),
-            .last_activity = std.atomic.Value(i64).init(@intCast(std.time.nanoTimestamp())),
+            .created_at = @intCast(time_compat.nanoTimestamp()),
+            .last_activity = std.atomic.Value(i64).init(@intCast(time_compat.nanoTimestamp())),
         };
     }
 
@@ -168,7 +169,7 @@ pub const Worker = struct {
         new_processor.worker = self;
 
         _ = self.handoff_count.fetchAdd(1, .monotonic);
-        _ = self.last_activity.store(@intCast(std.time.nanoTimestamp()), .monotonic);
+        _ = self.last_activity.store(@intCast(time_compat.nanoTimestamp()), .monotonic);
     }
 
     /// Detach from current processor
@@ -188,7 +189,7 @@ pub const Worker = struct {
 
     /// Get worker statistics
     pub fn getStats(self: *Worker) WorkerStats {
-        const now = @as(i64, @intCast(std.time.nanoTimestamp()));
+        const now = @as(i64, @intCast(time_compat.nanoTimestamp()));
         const uptime_ns = now - self.created_at;
         const executed = self.executed_count.load(.monotonic);
         const total_exec_time = self.total_execution_time_ns.load(.monotonic);
@@ -214,7 +215,7 @@ pub const Worker = struct {
         _ = self.park_count.store(0, .monotonic);
         _ = self.handoff_count.store(0, .monotonic);
         _ = self.total_execution_time_ns.store(0, .monotonic);
-        _ = self.last_activity.store(@intCast(std.time.nanoTimestamp()), .monotonic);
+        _ = self.last_activity.store(@intCast(time_compat.nanoTimestamp()), .monotonic);
     }
 
     /// Main worker thread loop
@@ -225,7 +226,7 @@ pub const Worker = struct {
         while (!self.should_stop.load(.monotonic)) {
             // Try to find work
             if (self.findWork()) |coro| {
-                const start_time = @as(i64, @intCast(std.time.nanoTimestamp()));
+                const start_time = @as(i64, @intCast(time_compat.nanoTimestamp()));
 
                 // Execute the coroutine
                 self.executeCoroutine(coro) catch |err| {
@@ -233,10 +234,10 @@ pub const Worker = struct {
                     std.log.err("Worker {d}: Error executing coroutine {d}: {}", .{ self.id, coro.id, err });
                 };
 
-                const execution_time = @as(u64, @intCast(@as(i64, @intCast(std.time.nanoTimestamp())) - start_time));
+                const execution_time = @as(u64, @intCast(@as(i64, @intCast(time_compat.nanoTimestamp())) - start_time));
                 _ = self.executed_count.fetchAdd(1, .monotonic);
                 _ = self.total_execution_time_ns.fetchAdd(execution_time, .monotonic);
-                _ = self.last_activity.store(@intCast(std.time.nanoTimestamp()), .monotonic);
+                _ = self.last_activity.store(@intCast(time_compat.nanoTimestamp()), .monotonic);
             } else {
                 // No work found, park the thread
                 self.park();
@@ -311,12 +312,12 @@ pub const Worker = struct {
 
     /// Get worker uptime in nanoseconds
     pub fn getUptime(self: *Worker) i64 {
-        return @as(i64, @intCast(std.time.nanoTimestamp())) - self.created_at;
+        return @as(i64, @intCast(time_compat.nanoTimestamp())) - self.created_at;
     }
 
     /// Get time since last activity
     pub fn getIdleTime(self: *Worker) i64 {
-        return @as(i64, @intCast(std.time.nanoTimestamp())) - self.last_activity.load(.monotonic);
+        return @as(i64, @intCast(time_compat.nanoTimestamp())) - self.last_activity.load(.monotonic);
     }
 };
 

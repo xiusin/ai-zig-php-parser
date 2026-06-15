@@ -191,7 +191,7 @@ pub const DiagnosticEngine = struct {
     /// Source code lines for context display (optional)
     source_lines: ?[]const []const u8 = null,
     /// Line start offsets for location calculation
-    line_offsets: std.ArrayListUnmanaged(usize) = .{},
+    line_offsets: std.ArrayListUnmanaged(usize) = .{ .items = &.{}, .capacity = 0 },
     path_base: ?[]const u8 = null,
 
     const Self = @This();
@@ -200,7 +200,7 @@ pub const DiagnosticEngine = struct {
     pub fn init(allocator: std.mem.Allocator) Self {
         return .{
             .allocator = allocator,
-            .diagnostics = .{},
+            .diagnostics = .{ .items = &.{}, .capacity = 0 },
         };
     }
 
@@ -225,7 +225,7 @@ pub const DiagnosticEngine = struct {
 
     /// Set source code for context display
     pub fn setSource(self: *Self, source: []const u8) !void {
-        var lines = std.ArrayListUnmanaged([]const u8){};
+        var lines = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
         errdefer lines.deinit(self.allocator);
 
         // Build line offsets

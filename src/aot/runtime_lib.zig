@@ -12,6 +12,8 @@
 //! These functions are designed to be statically linked into the final executable.
 
 const std = @import("std");
+const shared = @import("shared");
+const time_compat = shared.time_compat;
 const Allocator = std.mem.Allocator;
 
 // ============================================================================
@@ -20,12 +22,12 @@ const Allocator = std.mem.Allocator;
 
 /// Thread-local allocator for runtime operations
 /// In production, this would be initialized at program startup
-var global_gpa: ?std.heap.GeneralPurposeAllocator(.{}) = null;
+var global_gpa: ?std.heap.DebugAllocator(.{}) = null;
 
 /// Get the global allocator for runtime operations
 pub fn getGlobalAllocator() Allocator {
     if (global_gpa == null) {
-        global_gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        global_gpa = std.heap.DebugAllocator(.{}){};
     }
     return global_gpa.?.allocator();
 }
@@ -34,7 +36,7 @@ pub fn getGlobalAllocator() Allocator {
 pub fn initRuntime(allocator: Allocator) void {
     _ = allocator; // 忽略传入的allocator，使用内部GPA
     if (global_gpa == null) {
-        global_gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        global_gpa = std.heap.DebugAllocator(.{}){};
     }
 }
 
@@ -3252,7 +3254,7 @@ export fn php_round(value: *PHPValue, precision: *PHPValue) *PHPValue {
 
 export fn php_microtime(get_as_float: *PHPValue) *PHPValue {
     const as_float = php_value_to_bool(get_as_float);
-    const now = std.time.microTimestamp();
+    const now = time_compat.microTimestamp();
     
     if (as_float) {
         const seconds = @as(f64, @floatFromInt(now)) / 1_000_000.0;
@@ -3268,7 +3270,7 @@ export fn php_microtime(get_as_float: *PHPValue) *PHPValue {
 
 export fn php_date(format: *PHPValue, timestamp: *PHPValue) *PHPValue {
     _ = format;
-    const ts = if (timestamp.tag == .null) std.time.timestamp() else php_value_to_int(timestamp);
+    const ts = if (timestamp.tag == .null) time_compat.timestamp() else php_value_to_int(timestamp);
     
     const allocator = getGlobalAllocator();
     const epoch_seconds: u64 = @intCast(ts);
@@ -3288,7 +3290,7 @@ export fn php_date(format: *PHPValue, timestamp: *PHPValue) *PHPValue {
 export fn php_strtotime(time_str: *PHPValue, now: *PHPValue) *PHPValue {
     _ = time_str;
     _ = now;
-    return php_value_create_int(std.time.timestamp());
+    return php_value_create_int(time_compat.timestamp());
 }
 
 // ============================================================================

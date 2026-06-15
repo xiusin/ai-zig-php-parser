@@ -137,7 +137,7 @@ pub const PHPString = struct {
 
         // Pre-allocate result buffer (estimate: original + (replacement - search) * count)
         const size_estimate = self.length + (replacement.length -| search.length) * count;
-        var result = std.ArrayListUnmanaged(u8){};
+        var result = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
         try result.ensureTotalCapacity(allocator, @max(size_estimate, 16));
 
         // Perform replacement
@@ -261,7 +261,7 @@ pub const PHPArray = struct {
     };
 
     /// Mixed 模式存储 - 使用 ArrayHashMap
-    const MixedStorage = std.ArrayHashMap(ArrayKey, Value, ArrayContext, false);
+    const MixedStorage = std.ArrayHashMapUnmanaged(ArrayKey, Value, ArrayContext, false);
 
     pub const ArrayContext = struct {
         pub fn hash(_: ArrayContext, key: ArrayKey) u32 {
@@ -317,7 +317,7 @@ pub const PHPArray = struct {
                         entry.key_ptr.string.release(allocator);
                     }
                 }
-                self.storage.mixed_data.deinit();
+                self.storage.mixed_data.deinit(allocator);
             },
         }
     }
@@ -387,7 +387,7 @@ pub const PHPArray = struct {
                 self.next_index = key.integer + 1;
             }
         }
-        try self.storage.mixed_data.put(key, value);
+        try self.storage.mixed_data.put(allocator, key, value);
     }
 
     /// 追加元素（使用下一个整数索引）
@@ -400,7 +400,7 @@ pub const PHPArray = struct {
             .mixed_mode => {
                 const key = ArrayKey{ .integer = self.next_index };
                 _ = value.retain();
-                try self.storage.mixed_data.put(key, value);
+                try self.storage.mixed_data.put(allocator, key, value);
                 self.next_index += 1;
             },
         }
@@ -418,12 +418,12 @@ pub const PHPArray = struct {
     fn convertToMixed(self: *PHPArray) !void {
         if (self.mode == .mixed_mode) return;
 
-        var mixed = MixedStorage.initContext(self.allocator, .{});
+        var mixed: MixedStorage = .empty;
 
         // 复制所有元素
         for (self.storage.packed_data.data[0..self.storage.packed_data.len], 0..) |value, i| {
             // 不需要 retain，因为我们是移动而不是复制
-            try mixed.put(.{ .integer = @intCast(i) }, value);
+            try mixed.put(self.allocator, .{ .integer = @intCast(i) }, value);
         }
 
         // 释放 packed 存储（但不释放 Value，因为已移动）
@@ -1649,7 +1649,7 @@ pub const InlineCache = struct {
 
     /// 使缓存失效
     pub fn invalidate(self: *InlineCache, shape_id: u32) void {
-        var to_remove = std.ArrayListUnmanaged(u64){};
+        var to_remove = std.ArrayListUnmanaged(u64){ .items = &.{}, .capacity = 0 };
         defer to_remove.deinit(self.allocator);
 
         var iter = self.entries.iterator();
@@ -2834,7 +2834,13 @@ pub const Value = struct {
             .boolean => self.asBool(),
             .integer => self.asInt() != 0,
             .float => self.asFloat() != 0.0,
-            .string => self.getAsString().data.length > 0,
+            .string => {
+                const s = self.getAsString().data.data;
+                // PHP: "" 和 "0" → false，其余 → true
+                if (s.len == 0) return false;
+                if (std.mem.eql(u8, s, "0")) return false;
+                return true;
+            },
             .array => self.getAsArray().data.count() > 0,
             else => true,
         };
@@ -3066,15 +3072,27 @@ pub const Value = struct {
         return initInt(a.asInt() >> shift);
     }
 
-    /// 转换为浮点数
+    /// 转换为浮点数（PHP 语义：字符串尝试解析为数字）
     pub fn toFloat(self: Value) f64 {
         if (self.isFloat()) return self.asFloat();
         if (self.isInt()) return @floatFromInt(self.asInt());
         if (self.isBool()) return if (self.asBool()) 1.0 else 0.0;
+        if (self.isString()) {
+            const s = self.getAsString().data.data;
+            // PHP: 部分数字字符串如 "10abc" → 10
+            var end: usize = s.len;
+            while (end > 0) {
+                end -= 1;
+                const prefix = s[0 .. end + 1];
+                const f: ?f64 = std.fmt.parseFloat(f64, prefix) catch null;
+                if (f) |v| return v;
+            }
+            return 0.0;
+        }
         return 0.0;
     }
 
-    /// 转换为整数
+    /// 转换为整数（PHP 语义：字符串尝试解析为数字）
     pub fn toInt(self: Value) i64 {
         if (self.isInt()) return self.asInt();
         if (self.isFloat()) {
@@ -3087,6 +3105,34 @@ pub const Value = struct {
             return 0;
         }
         if (self.isBool()) return if (self.asBool()) 1 else 0;
+        if (self.isString()) {
+            const s = self.getAsString().data.data;
+            // 去除前导空白
+            var start: usize = 0;
+            while (start < s.len and (s[start] == ' ' or s[start] == '\t' or s[start] == '\n' or s[start] == '\r')) {
+                start += 1;
+            }
+            const trimmed = s[start..];
+            if (trimmed.len == 0) return 0;
+            // PHP: 部分数字字符串 "10abc" → 10
+            var end: usize = trimmed.len;
+            while (end > 0) {
+                end -= 1;
+                const prefix = trimmed[0 .. end + 1];
+                const i: ?i64 = std.fmt.parseInt(i64, prefix, 10) catch null;
+                if (i) |v| return v;
+                const f: ?f64 = std.fmt.parseFloat(f64, prefix) catch null;
+                if (f) |v| {
+                    if (v >= @as(f64, @floatFromInt(std.math.minInt(i64))) and
+                        v <= @as(f64, @floatFromInt(std.math.maxInt(i64))))
+                    {
+                        return @intFromFloat(v);
+                    }
+                    return 0;
+                }
+            }
+            return 0;
+        }
         return 0;
     }
 };

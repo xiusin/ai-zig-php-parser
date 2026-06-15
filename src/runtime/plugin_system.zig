@@ -98,9 +98,9 @@ pub const PluginInfo = struct {
             .author = &.{},
             .api_version = PLUGIN_API_VERSION,
             .plugin_type = .external,
-            .dependencies = std.ArrayListUnmanaged([]const u8){},
-            .functions = std.ArrayListUnmanaged(BuiltinFunction){},
-            .classes = std.ArrayListUnmanaged(PHPClass){},
+            .dependencies = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 },
+            .functions = std.ArrayListUnmanaged(BuiltinFunction){ .items = &.{}, .capacity = 0 },
+            .classes = std.ArrayListUnmanaged(PHPClass){ .items = &.{}, .capacity = 0 },
             .init_fn = null,
             .shutdown_fn = null,
         };
@@ -182,7 +182,7 @@ pub const PluginHook = struct {
         return .{
             .name = try allocator.dupe(u8, name),
             .hook_type = hook_type,
-            .handlers = std.ArrayListUnmanaged(HookHandler){},
+            .handlers = std.ArrayListUnmanaged(HookHandler){ .items = &.{}, .capacity = 0 },
             .allocator = allocator,
         };
     }

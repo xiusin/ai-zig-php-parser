@@ -31,10 +31,10 @@ pub const PHPContext = struct {
         return .{
             .allocator = allocator,
             .arena = std.heap.ArenaAllocator.init(allocator),
-            .nodes = .{},
-            .tokens = .{},
+            .nodes = .{ .items = &.{}, .capacity = 0 },
+            .tokens = .{ .items = &.{}, .capacity = 0 },
             .string_pool = .{},
-            .errors = .{},
+            .errors = .{ .items = &.{}, .capacity = 0 },
             .imports = .{},
             .fast_pool = null,
             .use_fast_pool = false,
@@ -48,10 +48,10 @@ pub const PHPContext = struct {
         return .{
             .allocator = allocator,
             .arena = std.heap.ArenaAllocator.init(allocator),
-            .nodes = .{},
-            .tokens = .{},
+            .nodes = .{ .items = &.{}, .capacity = 0 },
+            .tokens = .{ .items = &.{}, .capacity = 0 },
             .string_pool = .{},
-            .errors = .{},
+            .errors = .{ .items = &.{}, .capacity = 0 },
             .imports = .{},
             .fast_pool = pool,
             .use_fast_pool = true,
@@ -149,7 +149,7 @@ pub const PHPContext = struct {
         // 2. Append current namespace if exists
         if (self.current_namespace) |ns_id| {
             const ns_str = self.string_pool.keys()[ns_id];
-            var fqcn = std.ArrayListUnmanaged(u8){};
+            var fqcn = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
             defer fqcn.deinit(self.allocator);
             try fqcn.appendSlice(self.allocator, ns_str);
             try fqcn.append(self.allocator, '\\');
@@ -172,8 +172,9 @@ export fn php_parser_destroy(ctx_opt: ?*PHPContext) void {
 export fn php_parser_parse(ctx: *PHPContext, source: [*:0]const u8) i32 {
     ctx.reset();
     const src = std.mem.span(source);
-    const source_z = std.heap.c_allocator.dupeZ(u8, src) catch return -1;
-    defer std.heap.c_allocator.free(source_z);
+    const source_z = ctx.allocator.allocSentinel(u8, src.len, 0) catch return -1;
+    @memcpy(source_z[0..src.len], src);
+    defer ctx.allocator.free(source_z);
 
     const root_idx = ctx.parseSource(source_z) catch |err| {
         std.debug.print("Parse error: {}\n", .{err});

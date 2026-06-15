@@ -107,7 +107,7 @@ test "Property 37.1: Regression detection consistency" {
     const property = struct {
         fn check(input: TestInput) !bool {
             const test_dir = "test_prop_37_1";
-            defer std.fs.cwd().deleteTree(test_dir) catch {};
+            defer std.fs.cwd.deleteTree(test_dir) catch {};
             
             var detector = try RegressionDetector.init(
                 testing.allocator,
@@ -166,7 +166,7 @@ test "Property 37.2: Regression percentage calculation correctness" {
     const property = struct {
         fn check(input: TestInput) !bool {
             const test_dir = "test_prop_37_2";
-            defer std.fs.cwd().deleteTree(test_dir) catch {};
+            defer std.fs.cwd.deleteTree(test_dir) catch {};
             
             var detector = try RegressionDetector.init(
                 testing.allocator,
@@ -224,7 +224,7 @@ test "Property 37.3: Baseline persistence correctness" {
     const property = struct {
         fn check(input: TestInput) !bool {
             const test_dir = "test_prop_37_3";
-            defer std.fs.cwd().deleteTree(test_dir) catch {};
+            defer std.fs.cwd.deleteTree(test_dir) catch {};
             
             var detector = try RegressionDetector.init(
                 testing.allocator,
@@ -269,7 +269,7 @@ test "Property 37.4: Threshold sensitivity" {
     const allocator = testing.allocator;
     
     const test_dir = "test_prop_37_4";
-    defer std.fs.cwd().deleteTree(test_dir) catch {};
+    defer std.fs.cwd.deleteTree(test_dir) catch {};
     
     // 创建固定的测试数据
     const baseline_avg: u64 = 1000;
@@ -323,7 +323,7 @@ test "Property 37.5: Batch detection consistency" {
     const allocator = testing.allocator;
     
     const test_dir = "test_prop_37_5";
-    defer std.fs.cwd().deleteTree(test_dir) catch {};
+    defer std.fs.cwd.deleteTree(test_dir) catch {};
     
     var detector = try RegressionDetector.init(allocator, test_dir, 5.0);
     
@@ -414,7 +414,7 @@ test "Property 37.6: No baseline handling" {
     const property = struct {
         fn check(input: TestInput) !bool {
             const test_dir = "test_prop_37_6";
-            defer std.fs.cwd().deleteTree(test_dir) catch {};
+            defer std.fs.cwd.deleteTree(test_dir) catch {};
             
             var detector = try RegressionDetector.init(
                 testing.allocator,
@@ -452,7 +452,7 @@ test "Integration: Full regression detection workflow" {
     const allocator = testing.allocator;
     
     const test_dir = "test_integration";
-    defer std.fs.cwd().deleteTree(test_dir) catch {};
+    defer std.fs.cwd.deleteTree(test_dir) catch {};
     
     var detector = try RegressionDetector.init(allocator, test_dir, 5.0);
     

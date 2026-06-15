@@ -82,8 +82,8 @@ pub const BytecodeGenerator = struct {
         return BytecodeGenerator{
             .allocator = allocator,
             .context = context,
-            .instructions = .{},
-            .constants = .{},
+            .instructions = .empty,
+            .constants = .empty,
             .locals = .{},
             .globals = .{},
             .local_count = 0,
@@ -92,8 +92,8 @@ pub const BytecodeGenerator = struct {
             .current_stack = 0,
             .label_counter = 0,
             .labels = .{},
-            .pending_jumps = .{},
-            .loop_stack = .{},
+            .pending_jumps = .empty,
+            .loop_stack = .empty,
             .current_line = 1,
             .functions = .{},
             .anon_fn_counter = 0,
@@ -1664,7 +1664,7 @@ pub const BytecodeGenerator = struct {
         const closure_name_id = self.context.intern(closure_name_buf) catch return CompileError.OutOfMemory;
         const closure_name = self.getString(closure_name_id);
 
-        var capture_local_slots = std.ArrayListUnmanaged(u16){};
+        var capture_local_slots = std.ArrayListUnmanaged(u16){ .items = &.{}, .capacity = 0 };
         defer capture_local_slots.deinit(self.allocator);
 
         // 保存并重置状态：编译闭包体为独立 CompiledFunction
@@ -1681,14 +1681,14 @@ pub const BytecodeGenerator = struct {
 
         self.locals = .{};
         self.local_count = 0;
-        self.instructions = .{};
-        self.constants = .{};
+        self.instructions = .empty;
+        self.constants = .empty;
         self.max_stack = 0;
         self.current_stack = 0;
         self.label_counter = 0;
         self.labels = .{};
-        self.pending_jumps = .{};
-        self.loop_stack = .{};
+        self.pending_jumps = .empty;
+        self.loop_stack = .empty;
 
         for (closure_data.params) |param_idx| {
             const param_node = self.getNode(param_idx);
@@ -1804,7 +1804,7 @@ pub const BytecodeGenerator = struct {
             param_set.put(self.allocator, param_name, {}) catch return CompileError.OutOfMemory;
         }
 
-        var capture_names = std.ArrayListUnmanaged([]const u8){};
+        var capture_names = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
         defer capture_names.deinit(self.allocator);
         var iter = self.locals.iterator();
         while (iter.next()) |entry| {
@@ -1819,7 +1819,7 @@ pub const BytecodeGenerator = struct {
             }
         }.lessThan);
 
-        var capture_local_slots = std.ArrayListUnmanaged(u16){};
+        var capture_local_slots = std.ArrayListUnmanaged(u16){ .items = &.{}, .capacity = 0 };
         defer capture_local_slots.deinit(self.allocator);
 
         const saved_locals = self.locals;
@@ -1835,14 +1835,14 @@ pub const BytecodeGenerator = struct {
 
         self.locals = .{};
         self.local_count = 0;
-        self.instructions = .{};
-        self.constants = .{};
+        self.instructions = .empty;
+        self.constants = .empty;
         self.max_stack = 0;
         self.current_stack = 0;
         self.label_counter = 0;
         self.labels = .{};
-        self.pending_jumps = .{};
-        self.loop_stack = .{};
+        self.pending_jumps = .empty;
+        self.loop_stack = .empty;
 
         for (arrow_data.params) |param_idx| {
             const param_node = self.getNode(param_idx);
@@ -1945,14 +1945,14 @@ pub const BytecodeGenerator = struct {
                     // 重置状态
                     self.locals = .{};
                     self.local_count = 0;
-                    self.instructions = .{};
-                    self.constants = .{};
+                    self.instructions = .empty;
+                    self.constants = .empty;
                     self.max_stack = 0;
                     self.current_stack = 0;
                     self.label_counter = 0;
                     self.labels = .{};
-                    self.pending_jumps = .{};
-                    self.loop_stack = .{};
+                    self.pending_jumps = .empty;
+                    self.loop_stack = .empty;
 
                     // 如果是实例方法，第一个参数是 $this
                     if (!method_data.modifiers.is_static) {
@@ -2055,14 +2055,14 @@ pub const BytecodeGenerator = struct {
         // 重置状态 - 使用 Unmanaged 版本
         self.locals = .{};
         self.local_count = 0;
-        self.instructions = .{};
-        self.constants = .{};
+        self.instructions = .empty;
+        self.constants = .empty;
         self.max_stack = 0;
         self.current_stack = 0;
         self.label_counter = 0;
         self.labels = .{};
-        self.pending_jumps = .{};
-        self.loop_stack = .{};
+        self.pending_jumps = .empty;
+        self.loop_stack = .empty;
 
         // 处理参数
         for (func_data.params) |param_idx| {

@@ -10,6 +10,7 @@
 //!
 //! 需求：8.4
 //! ============================================================================
+const time_compat = @import("time_compat.zig");
 
 const std = @import("std");
 const types = @import("types.zig");
@@ -257,7 +258,7 @@ pub const WorkStealingScheduler = struct {
         // 分配任务ID
         task.id = self.next_task_id.fetchAdd(1, .monotonic);
         task.state = .pending;
-        task.created_at = @intCast(std.time.nanoTimestamp());
+        task.created_at = @intCast(time_compat.nanoTimestamp());
         
         _ = self.stats.total_tasks.fetchAdd(1, .monotonic);
         
@@ -318,9 +319,9 @@ pub const WorkStealingScheduler = struct {
         const task = @as(*Task, @ptrCast(@alignCast(coro)));
         
         task.state = .running;
-        task.started_at = @intCast(std.time.nanoTimestamp());
+        task.started_at = @intCast(time_compat.nanoTimestamp());
         
-        const start_time = std.time.nanoTimestamp();
+        const start_time = time_compat.nanoTimestamp();
         
         // 执行任务
         task.func(task.context) catch |err| {
@@ -329,7 +330,7 @@ pub const WorkStealingScheduler = struct {
             return err;
         };
         
-        const end_time = std.time.nanoTimestamp();
+        const end_time = time_compat.nanoTimestamp();
         const execution_time = @as(u64, @intCast(end_time - start_time));
         
         task.state = .completed;

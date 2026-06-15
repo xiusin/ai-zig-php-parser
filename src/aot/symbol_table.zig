@@ -364,8 +364,8 @@ pub const SymbolTable = struct {
         var self = Self{
             .allocator = allocator,
             .global_scope = undefined,
-            .scope_stack = .{},
-            .all_scopes = .{},
+            .scope_stack = .{ .items = &.{}, .capacity = 0 },
+            .all_scopes = .{ .items = &.{}, .capacity = 0 },
             .functions = .{},
             .classes = .{},
             .constants = .{},

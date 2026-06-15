@@ -159,7 +159,7 @@ pub const InlineCache = struct {
     entries: [SIZE]Entry,
 
     pub fn init() InlineCache {
-        return .{ .entries = [_]Entry{.{ .shape_id = 0, .offset = 0, .hits = 0 }} ** SIZE };
+        return .{ .entries = @splat(.{ .shape_id = 0, .offset = 0, .hits = 0 }) };
     }
 
     pub fn lookup(self: *InlineCache, cache_id: u8, shape_id: u32) ?u16 {
@@ -193,7 +193,7 @@ pub const TypeFeedback = struct {
     profiles: [SIZE]Profile,
 
     pub fn init() TypeFeedback {
-        return .{ .profiles = [_]Profile{.{ .int_count = 0, .float_count = 0, .string_count = 0, .other_count = 0 }} ** SIZE };
+        return .{ .profiles = @splat(.{ .int_count = 0, .float_count = 0, .string_count = 0, .other_count = 0 }) };
     }
 
     pub fn record(self: *TypeFeedback, site: u8, v: FastValue) void {
@@ -245,7 +245,7 @@ pub const FastVM = struct {
             .globals = .{},
             .ic = InlineCache.init(),
             .tf = TypeFeedback.init(),
-            .output = .{},
+            .output = .empty,
             .code_cache = code_cache,
             .jit_compiler = jit.Compiler.init(allocator),
         };

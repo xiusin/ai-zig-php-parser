@@ -35,7 +35,7 @@ pub const InlineCache = struct {
 
     /// 多态缓存（4 个条目）
     pub const Polymorphic = struct {
-        entries: [4]?Entry = [_]?Entry{null} ** 4,
+        entries: [4]?Entry = @splat(null),
 
         pub fn lookup(self: *Polymorphic, type_id: u32) ?Entry {
             for (self.entries) |maybe_entry| {

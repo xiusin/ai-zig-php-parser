@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const time_compat = @import("runtime").time_compat;
 
 /// JIT 编译错误类型
 pub const JITCompilationError = error{
@@ -123,7 +124,7 @@ pub const CompilationFailureRecord = struct {
             .function_name = name_copy,
             .reason = reason,
             .error_message = msg_copy,
-            .timestamp_ns = @intCast(std.time.nanoTimestamp()),
+            .timestamp_ns = @intCast(time_compat.nanoTimestamp()),
             .instruction_offset = instruction_offset,
             .stack_trace = null,
         };
@@ -151,7 +152,7 @@ pub const CompilationLogger = struct {
     log_file_path: ?[]const u8,
     
     /// 日志文件句柄
-    log_file: ?std.fs.File,
+    log_file: ?std.Io.File,
     
     /// 是否启用详细日志
     verbose: bool,
@@ -177,14 +178,15 @@ pub const CompilationLogger = struct {
         const path_copy = try allocator.dupe(u8, log_file_path);
         errdefer allocator.free(path_copy);
         
-        const file = try std.fs.cwd().createFile(log_file_path, .{
+        const io = std.Io.Threaded.global_single_threaded.io();
+        const file = try std.Io.Dir.cwd().createFile(io, log_file_path, .{
             .truncate = false,
             .read = true,
         });
-        errdefer file.close();
-        
+        errdefer file.close(io);
+
         // 移动到文件末尾以追加
-        try file.seekFromEnd(0);
+        _ = std.os.linux.lseek(file.handle, 0, std.posix.SEEK.END);
         
         return .{
             .allocator = allocator,
@@ -214,7 +216,7 @@ pub const CompilationLogger = struct {
         }
         
         if (self.log_file) |file| {
-            file.close();
+            file.close(std.Io.Threaded.global_single_threaded.io());
         }
     }
     
@@ -257,14 +259,15 @@ pub const CompilationLogger = struct {
     }
     
     /// 写入日志文件
-    fn writeToFile(self: *CompilationLogger, file: std.fs.File, record: *const CompilationFailureRecord) !void {
+    fn writeToFile(self: *CompilationLogger, file: std.Io.File, record: *const CompilationFailureRecord) !void {
         _ = self;
-        
+        const io = std.Io.Threaded.global_single_threaded.io();
+
         var buf: [4096]u8 = undefined;
         var fba = std.heap.FixedBufferAllocator.init(&buf);
         const allocator = fba.allocator();
-        
-        const msg = try std.fmt.allocPrint(allocator, 
+
+        const msg = try std.fmt.allocPrint(allocator,
             "[{d}] JIT 编译失败\n  函数: {s}\n  原因: {s}\n  错误: {s}\n",
             .{
                 record.timestamp_ns,
@@ -273,15 +276,15 @@ pub const CompilationLogger = struct {
                 record.error_message,
             }
         );
-        
-        try file.writeAll(msg);
-        
+
+        try file.writeStreamingAll(io, msg);
+
         if (record.instruction_offset) |offset| {
             const offset_msg = try std.fmt.allocPrint(allocator, "  指令偏移: {d}\n", .{offset});
-            try file.writeAll(offset_msg);
+            try file.writeStreamingAll(io, offset_msg);
         }
-        
-        try file.writeAll("\n");
+
+        try file.writeStreamingAll(io, "\n");
     }
     
     /// 打印到标准错误

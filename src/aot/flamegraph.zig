@@ -61,7 +61,7 @@ pub const FlameGraphGenerator = struct {
     root: *FlameGraphNode,
     sampling_interval_ns: u64,
     min_display_time_ns: u64,
-    mutex: std.Thread.Mutex,
+    mutex: std.atomic.Mutex,
     sampling_running: std.atomic.Value(bool),
     sampling_thread: ?std.Thread,
 
@@ -73,7 +73,7 @@ pub const FlameGraphGenerator = struct {
             .root = root,
             .sampling_interval_ns = 1_000_000,
             .min_display_time_ns = 0,
-            .mutex = .{},
+            .mutex = .unlocked,
             .sampling_running = std.atomic.Value(bool).init(false),
             .sampling_thread = null,
         };
@@ -90,7 +90,7 @@ pub const FlameGraphGenerator = struct {
     }
 
     pub fn setMinDisplayTime(self: *FlameGraphGenerator, min_time_ns: u64) void {
-        self.mutex.lock();
+        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
         defer self.mutex.unlock();
         self.min_display_time_ns = min_time_ns;
     }
@@ -112,7 +112,8 @@ pub const FlameGraphGenerator = struct {
     fn samplingThreadMain(self: *FlameGraphGenerator) void {
         while (self.sampling_running.load(.seq_cst)) {
             self.sampleFromProfilerCurrentStack(self.sampling_interval_ns) catch {};
-            std.Thread.sleep(self.sampling_interval_ns);
+            var req: std.posix.timespec = .{ .sec = @intCast(self.sampling_interval_ns / 1_000_000_000), .nsec = @intCast(self.sampling_interval_ns % 1_000_000_000) };
+            _ = std.posix.system.nanosleep(&req, null);
         }
     }
 
@@ -120,7 +121,7 @@ pub const FlameGraphGenerator = struct {
         const stack_names = try self.profiler.snapshotCallStackNames(self.allocator);
         defer self.allocator.free(stack_names);
 
-        self.mutex.lock();
+        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
         defer self.mutex.unlock();
 
         self.root.total_time_ns += weight_ns;
@@ -135,18 +136,16 @@ pub const FlameGraphGenerator = struct {
     }
 
     pub fn generateFoldedFormat(self: *FlameGraphGenerator, allocator: std.mem.Allocator) ![]u8 {
-        self.mutex.lock();
+        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
         defer self.mutex.unlock();
 
-        var buffer: std.ArrayListUnmanaged(u8) = .{};
-        errdefer buffer.deinit(allocator);
+        var buffer: std.ArrayListUnmanaged(u8) = .{ .items = &.{}, .capacity = 0 };errdefer buffer.deinit(allocator);
 
-        const writer = buffer.writer(allocator);
+        var aw = std.Io.Writer.Allocating.fromArrayList(allocator, &buffer);
 
-        var stack: std.ArrayListUnmanaged([]const u8) = .{};
-        defer stack.deinit(allocator);
+        var stack: std.ArrayListUnmanaged([]const u8) = .{ .items = &.{}, .capacity = 0 };defer stack.deinit(allocator);
 
-        try self.writeFoldedNode(writer, allocator, self.root, &stack);
+        try self.writeFoldedNode(&aw.writer, allocator, self.root, &stack);
 
         return buffer.toOwnedSlice(allocator);
     }

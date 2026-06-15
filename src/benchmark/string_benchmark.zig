@@ -85,7 +85,7 @@ pub const StringBenchmark = struct {
         
         // 创建测试脚本目录
         if (config.generate_php_scripts) {
-            std.fs.cwd().makePath(config.script_output_dir) catch |err| {
+            std.fs.cwd.makePath(config.script_output_dir) catch |err| {
                 if (err != error.PathAlreadyExists) return err;
             };
         }
@@ -950,7 +950,7 @@ pub const StringBenchmark = struct {
         );
         defer self.allocator.free(file_path);
         
-        const file = try std.fs.cwd().createFile(file_path, .{});
+        const file = try std.fs.cwd.createFile(file_path, .{});
         defer file.close();
         
         try file.writeAll(script_content);

@@ -1,3 +1,4 @@
+const time_compat = @import("time_compat.zig");
 const std = @import("std");
 
 /// 类型反馈系统
@@ -55,7 +56,7 @@ pub const TypeFeedback = struct {
     pub fn init(call_site_id: u32) TypeFeedback {
         return TypeFeedback{
             .call_site_id = call_site_id,
-            .observed_types = [_]TypeTag{.mixed_type} ** MAX_OBSERVED_TYPES,
+            .observed_types = @splat(.mixed_type),
             .type_count = 0,
             .call_count = 0,
             .last_call_timestamp = 0,
@@ -65,7 +66,7 @@ pub const TypeFeedback = struct {
     /// 记录观察到的类型
     pub fn recordType(self: *TypeFeedback, tag: TypeTag) void {
         self.call_count +|= 1; // 饱和加法，防止溢出
-        self.last_call_timestamp = std.time.timestamp();
+        self.last_call_timestamp = time_compat.timestamp();
 
         // 检查是否已记录此类型
         for (self.observed_types[0..self.type_count]) |t| {
@@ -115,7 +116,7 @@ pub const TypeFeedback = struct {
 
     /// 重置类型反馈（去优化后使用）
     pub fn reset(self: *TypeFeedback) void {
-        self.observed_types = [_]TypeTag{.mixed_type} ** MAX_OBSERVED_TYPES;
+        self.observed_types = @splat(.mixed_type);
         self.type_count = 0;
         self.call_count = 0;
     }
@@ -215,7 +216,7 @@ pub const TypeFeedbackCollector = struct {
 
     /// 获取所有热点调用点
     pub fn getHotSites(self: *TypeFeedbackCollector, threshold: u32, allocator: std.mem.Allocator) ![]u32 {
-        var hot_sites = std.ArrayListUnmanaged(u32){};
+        var hot_sites = std.ArrayListUnmanaged(u32){ .items = &.{}, .capacity = 0 };
         errdefer hot_sites.deinit(allocator);
 
         var iter = self.feedbacks.iterator();
@@ -265,7 +266,7 @@ pub const PropertyFeedback = struct {
     pub fn init(property_hash: u64) PropertyFeedback {
         return PropertyFeedback{
             .property_hash = property_hash,
-            .observed_shapes = [_]u64{0} ** MAX_SHAPES,
+            .observed_shapes = @splat(@as(u64, 0)),
             .shape_count = 0,
             .access_count = 0,
         };

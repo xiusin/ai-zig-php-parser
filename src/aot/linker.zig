@@ -250,8 +250,7 @@ pub const GlobalSymbolTable = struct {
         if (self.symbols.get(symbol.name)) |existing| {
             // 检测到重复定义
             const dups_ptr = self.duplicate_definitions.getPtr(symbol.name) orelse blk: {
-                var list: std.ArrayListUnmanaged(SymbolDefinition) = .{};
-                try list.append(self.allocator, existing);
+                var list: std.ArrayListUnmanaged(SymbolDefinition) = .{ .items = &.{}, .capacity = 0 };try list.append(self.allocator, existing);
                 try self.duplicate_definitions.put(symbol.name, list);
                 break :blk self.duplicate_definitions.getPtr(symbol.name).?;
             };
@@ -572,9 +571,7 @@ pub const StaticLinker = struct {
         }
         
         for (self.compilation_units.items) |unit| {
-            var deps: std.ArrayListUnmanaged([]const u8) = .{};
-            
-            var dep_iter = unit.dependencies.iterator();
+            var deps: std.ArrayListUnmanaged([]const u8) = .{ .items = &.{}, .capacity = 0 };var dep_iter = unit.dependencies.iterator();
             while (dep_iter.next()) |entry| {
                 try deps.append(self.allocator, entry.key_ptr.*);
             }

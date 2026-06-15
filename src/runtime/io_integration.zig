@@ -386,7 +386,7 @@ pub const FileIOManager = struct {
         
         switch (operation.type) {
             .read => {
-                const file = std.fs.cwd().openFile(operation.path, .{}) catch |err| {
+                const file = std.fs.cwd.openFile(operation.path, .{}) catch |err| {
                     return IOData{ .error_occurred = err };
                 };
                 defer file.close();
@@ -398,7 +398,7 @@ pub const FileIOManager = struct {
                 return IOData{ .bytes_read = bytes_read };
             },
             .write => {
-                const file = std.fs.cwd().createFile(operation.path, .{}) catch |err| {
+                const file = std.fs.cwd.createFile(operation.path, .{}) catch |err| {
                     return IOData{ .error_occurred = err };
                 };
                 defer file.close();
@@ -410,7 +410,7 @@ pub const FileIOManager = struct {
                 return IOData{ .bytes_written = bytes_written };
             },
             .stat => {
-                const stat = std.fs.cwd().statFile(operation.path) catch |err| {
+                const stat = std.fs.cwd.statFile(operation.path) catch |err| {
                     return IOData{ .error_occurred = err };
                 };
                 

@@ -267,9 +267,9 @@ pub const Debugger = struct {
 
     pub fn init(allocator: std.mem.Allocator) Debugger {
         return .{
-            .breakpoints = std.ArrayListUnmanaged(Breakpoint){},
-            .watches = std.ArrayListUnmanaged(Watchpoint){},
-            .call_stack = std.ArrayListUnmanaged(StackFrame){},
+            .breakpoints = std.ArrayListUnmanaged(Breakpoint){ .items = &.{}, .capacity = 0 },
+            .watches = std.ArrayListUnmanaged(Watchpoint){ .items = &.{}, .capacity = 0 },
+            .call_stack = std.ArrayListUnmanaged(StackFrame){ .items = &.{}, .capacity = 0 },
             .state = .running,
             .allocator = allocator,
             .stats = .{},

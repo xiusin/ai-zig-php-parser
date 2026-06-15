@@ -398,7 +398,7 @@ pub const FileLoader = struct {
 
     /// 加载文件内容
     pub fn loadFile(self: *FileLoader, filepath: []const u8) ![]const u8 {
-        const file = try std.fs.cwd().openFile(filepath, .{});
+        const file = try std.fs.cwd.openFile(filepath, .{});
         defer file.close();
 
         const file_size = try file.getEndPos();
@@ -471,7 +471,7 @@ pub const FileLoader = struct {
 
     fn fileExists(self: *FileLoader, path: []const u8) bool {
         _ = self;
-        std.fs.cwd().access(path, .{}) catch return false;
+        std.fs.cwd.access(path, .{}) catch return false;
         return true;
     }
 

@@ -109,7 +109,7 @@ pub const Uri = struct {
     }
     
     pub fn toString(self: *const Uri, allocator: std.mem.Allocator) !*PHPString {
-        var result = std.ArrayListUnmanaged(u8){};
+        var result = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
         defer result.deinit(allocator);
         
         if (self.scheme) |scheme| {

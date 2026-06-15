@@ -273,7 +273,7 @@ pub const PerfIntegration = struct {
     
     /// 生成 perf.data 文件
     pub fn generatePerfData(self: *const PerfIntegration, output_path: []const u8) !void {
-        const file = try std.fs.cwd().createFile(output_path, .{});
+        const file = try std.fs.cwd.createFile(output_path, .{});
         defer file.close();
         
         var writer = file.writer();

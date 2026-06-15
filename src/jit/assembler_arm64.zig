@@ -16,7 +16,7 @@ pub const Assembler = struct {
 
     pub fn init(allocator: std.mem.Allocator) Assembler {
         return .{
-            .code = .{},
+            .code = .empty,
             .allocator = allocator,
         };
     }

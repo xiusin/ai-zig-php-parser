@@ -4,6 +4,7 @@
 //!
 //! @ownership TRANSFER (返回的字符串由调用者负责释放)
 //! @thread-safety ISOLATED
+const time_compat = @import("../time_compat.zig");
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -13,13 +14,13 @@ const CoreContext = common.CoreContext;
 /// time - 返回当前 Unix 时间戳（秒）
 /// @return Unix 时间戳
 pub fn time() i64 {
-    return std.time.timestamp();
+    return time_compat.timestamp();
 }
 
 /// microtime - 返回当前时间（带微秒）
 /// @return 浮点数形式的时间戳
 pub fn microtime_float() f64 {
-    const now_ns = std.time.nanoTimestamp();
+    const now_ns = time_compat.nanoTimestamp();
     const sec: f64 = @floatFromInt(@divTrunc(now_ns, std.time.ns_per_s));
     const nsec: f64 = @floatFromInt(@mod(now_ns, std.time.ns_per_s));
     return sec + nsec / @as(f64, std.time.ns_per_s);
@@ -29,7 +30,7 @@ pub fn microtime_float() f64 {
 /// @param ctx 上下文
 /// @return "msec sec" 格式的字符串（调用者负责释放）
 pub fn microtime_string(ctx: *CoreContext) ![]u8 {
-    const now_ns = std.time.nanoTimestamp();
+    const now_ns = time_compat.nanoTimestamp();
     const sec = @divTrunc(now_ns, std.time.ns_per_s);
     const usec = @divTrunc(@mod(now_ns, std.time.ns_per_s), std.time.ns_per_us);
 

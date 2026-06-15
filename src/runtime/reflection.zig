@@ -69,7 +69,7 @@ pub const ReflectionClass = struct {
     }
     
     pub fn getMethods(self: *ReflectionClass) ![]ReflectionMethod {
-        var methods = std.ArrayList(ReflectionMethod){};
+        var methods = std.ArrayList(ReflectionMethod).empty;
         defer methods.deinit(self.allocator);
         
         // Get methods from this class
@@ -118,7 +118,7 @@ pub const ReflectionClass = struct {
     }
     
     pub fn getProperties(self: *ReflectionClass) ![]ReflectionProperty {
-        var properties = std.ArrayList(ReflectionProperty){};
+        var properties = std.ArrayList(ReflectionProperty).empty;
         defer properties.deinit(self.allocator);
         
         // Get properties from this class
@@ -345,7 +345,7 @@ pub const ReflectionClass = struct {
         const attributes = try self.getAttributes(filter_class);
         defer self.allocator.free(attributes);
         
-        var instances = std.ArrayList(Value){};
+        var instances = std.ArrayList(Value).empty;
         defer instances.deinit(self.allocator);
         
         for (attributes) |attr| {
@@ -526,7 +526,7 @@ pub const ReflectionMethod = struct {
         const attributes = try self.getAttributes(filter_class);
         defer self.allocator.free(attributes);
         
-        var instances = std.ArrayList(Value){};
+        var instances = std.ArrayList(Value).empty;
         defer instances.deinit(self.allocator);
         
         for (attributes) |attr| {
@@ -707,7 +707,7 @@ pub const ReflectionProperty = struct {
         const attributes = try self.getAttributes(filter_class);
         defer self.allocator.free(attributes);
         
-        var instances = std.ArrayList(Value){};
+        var instances = std.ArrayList(Value).empty;
         defer instances.deinit(self.allocator);
         
         for (attributes) |attr| {
@@ -845,7 +845,7 @@ pub const ReflectionParameter = struct {
         const attributes = try self.getAttributes(filter_class);
         defer self.allocator.free(attributes);
         
-        var instances = std.ArrayList(Value){};
+        var instances = std.ArrayList(Value).empty;
         defer instances.deinit(self.allocator);
         
         for (attributes) |attr| {
@@ -970,7 +970,7 @@ pub const ReflectionFunction = struct {
         const attributes = try self.getAttributes(filter_class);
         defer self.allocator.free(attributes);
         
-        var instances = std.ArrayList(Value){};
+        var instances = std.ArrayList(Value).empty;
         defer instances.deinit(self.allocator);
         
         for (attributes) |attr| {
@@ -1044,7 +1044,7 @@ pub const ReflectionType = struct {
     }
     
     pub fn toString(self: *const ReflectionType, allocator: std.mem.Allocator) !*PHPString {
-        var type_str = std.ArrayList(u8){};
+        var type_str = std.ArrayList(u8).empty;
         defer type_str.deinit(allocator);
         
         if (self.type_info.is_nullable) {

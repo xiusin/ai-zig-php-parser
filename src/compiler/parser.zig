@@ -125,7 +125,7 @@ pub const Parser = struct {
     }
 
     fn unescapeDoubleQuoted(self: *Parser, input: []const u8) anyerror![]u8 {
-        var out = std.ArrayListUnmanaged(u8){};
+        var out = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
         errdefer out.deinit(self.allocator);
         try out.ensureTotalCapacity(self.allocator, input.len);
 
@@ -270,7 +270,7 @@ pub const Parser = struct {
     }
 
     pub fn parse(self: *Parser) anyerror!ast.Node.Index {
-        var stmts = std.ArrayListUnmanaged(ast.Node.Index){};
+        var stmts = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
         defer stmts.deinit(self.allocator);
 
         var in_php_mode = false;
@@ -501,8 +501,8 @@ pub const Parser = struct {
     /// 解析带修饰符的容器（class/interface/trait等）
     fn parseTraitUse(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.k_use);
-        var traits = std.ArrayListUnmanaged(ast.Node.Index){};
-        var adaptations = std.ArrayListUnmanaged(ast.TraitAdaptation){};
+        var traits = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
+        var adaptations = std.ArrayListUnmanaged(ast.TraitAdaptation){ .items = &.{}, .capacity = 0 };
 
         while (true) {
             try traits.append(self.allocator, try self.parseType());
@@ -554,7 +554,7 @@ pub const Parser = struct {
             if (std.mem.eql(u8, keyword, "insteadof")) {
                 self.nextToken();
 
-                var excluded_traits = std.ArrayListUnmanaged(u32){};
+                var excluded_traits = std.ArrayListUnmanaged(u32){ .items = &.{}, .capacity = 0 };
                 defer excluded_traits.deinit(self.allocator);
 
                 while (true) {
@@ -679,7 +679,7 @@ pub const Parser = struct {
             self.nextToken();
             extends = try self.parseExpression(0);
         }
-        var implements = std.ArrayListUnmanaged(ast.Node.Index){};
+        var implements = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
         if (self.curr.tag == .k_implements) {
             self.nextToken();
             while (true) {
@@ -690,7 +690,7 @@ pub const Parser = struct {
         }
 
         _ = try self.eat(.l_brace);
-        var members = std.ArrayListUnmanaged(ast.Node.Index){};
+        var members = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
 
         const is_interface = (tag == .interface_decl);
 
@@ -734,7 +734,7 @@ pub const Parser = struct {
             else try self.eat(.t_string);
             const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
             _ = try self.eat(.l_paren);
-            var params = std.ArrayListUnmanaged(ast.Node.Index){};
+            var params = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
             while (self.curr.tag != .r_paren) {
                 try params.append(self.allocator, try self.parseParameter());
                 if (self.curr.tag == .comma) self.nextToken();
@@ -795,7 +795,7 @@ pub const Parser = struct {
             }
 
             // In Go mode, property names can be t_go_identifier (without $ prefix)
-            var properties = std.ArrayListUnmanaged(ast.Node.Index){};
+            var properties = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
             defer properties.deinit(self.allocator);
 
             // Parse first property
@@ -819,7 +819,7 @@ pub const Parser = struct {
                 default_value = try self.parseExpression(0);
             }
 
-            var hooks = std.ArrayListUnmanaged(ast.Node.Index){};
+            var hooks = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
             if (self.curr.tag == .l_brace) {
                 self.nextToken();
                 while (self.curr.tag != .r_brace) try hooks.append(self.allocator, try self.parsePropertyHook());
@@ -852,7 +852,7 @@ pub const Parser = struct {
                     prop_default = try self.parseExpression(0);
                 }
 
-                var prop_hooks = std.ArrayListUnmanaged(ast.Node.Index){};
+                var prop_hooks = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
                 if (self.curr.tag == .l_brace) {
                     self.nextToken();
                     while (self.curr.tag != .r_brace) try prop_hooks.append(self.allocator, try self.parsePropertyHook());
@@ -913,7 +913,7 @@ pub const Parser = struct {
             else try self.eat(.t_string);
             const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
             _ = try self.eat(.l_paren);
-            var params = std.ArrayListUnmanaged(ast.Node.Index){};
+            var params = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
             while (self.curr.tag != .r_paren) {
                 try params.append(self.allocator, try self.parseParameter());
                 if (self.curr.tag == .comma) self.nextToken();
@@ -977,7 +977,7 @@ pub const Parser = struct {
             }
 
             // In Go mode, property names can be t_go_identifier (without $ prefix)
-            var properties = std.ArrayListUnmanaged(ast.Node.Index){};
+            var properties = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
             defer properties.deinit(self.allocator);
 
             // Parse first property
@@ -1001,7 +1001,7 @@ pub const Parser = struct {
                 default_value = try self.parseExpression(0);
             }
 
-            var hooks = std.ArrayListUnmanaged(ast.Node.Index){};
+            var hooks = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
             if (self.curr.tag == .l_brace) {
                 self.nextToken();
                 while (self.curr.tag != .r_brace) try hooks.append(self.allocator, try self.parsePropertyHook());
@@ -1034,7 +1034,7 @@ pub const Parser = struct {
                     prop_default = try self.parseExpression(0);
                 }
 
-                var prop_hooks = std.ArrayListUnmanaged(ast.Node.Index){};
+                var prop_hooks = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
                 if (self.curr.tag == .l_brace) {
                     self.nextToken();
                     while (self.curr.tag != .r_brace) try prop_hooks.append(self.allocator, try self.parsePropertyHook());
@@ -1241,14 +1241,14 @@ pub const Parser = struct {
     }
 
     fn parseAttributes(self: *Parser) anyerror![]const ast.Node.Index {
-        var attrs = std.ArrayListUnmanaged(ast.Node.Index){};
+        var attrs = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
         while (self.curr.tag == .t_attribute_start) {
             self.nextToken();
             while (self.curr.tag != .r_bracket and self.curr.tag != .eof) {
                 const name_tok = try self.eat(.t_string);
                 const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
 
-                var args = std.ArrayListUnmanaged(ast.Node.Index){};
+                var args = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
 
                 if (self.curr.tag == .l_paren) {
                     self.nextToken();
@@ -1296,7 +1296,7 @@ pub const Parser = struct {
             extends = backed_type;
         }
 
-        var implements = std.ArrayListUnmanaged(ast.Node.Index){};
+        var implements = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
         if (self.curr.tag == .k_implements) {
             self.nextToken();
             while (true) {
@@ -1307,7 +1307,7 @@ pub const Parser = struct {
         }
 
         _ = try self.eat(.l_brace);
-        var members = std.ArrayListUnmanaged(ast.Node.Index){};
+        var members = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
 
         const is_interface = (tag == .interface_decl);
         const is_enum = (tag == .enum_decl);
@@ -1364,7 +1364,7 @@ pub const Parser = struct {
         const raw_name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
         const name_id = try self.context.resolveName(raw_name_id);
         _ = try self.eat(.l_paren);
-        var params = std.ArrayListUnmanaged(ast.Node.Index){};
+        var params = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
         while (self.curr.tag != .r_paren) {
             try params.append(self.allocator, try self.parseParameter());
             if (self.curr.tag == .comma) self.nextToken();
@@ -1547,7 +1547,7 @@ pub const Parser = struct {
     /// Parse statements until the specified end token, collecting them into a block node.
     /// Used for alternative syntax: while(): ... endwhile; / for(): ... endfor; / foreach(): ... endforeach;
     fn parseAlternativeBody(self: *Parser, end_tag: Token.Tag) anyerror!ast.Node.Index {
-        var stmts = std.ArrayListUnmanaged(ast.Node.Index){};
+        var stmts = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
         while (self.curr.tag != end_tag and self.curr.tag != .eof) {
             // Also stop at elseif/else/endif for if alternative syntax
             if (end_tag == .k_endif and (self.curr.tag == .k_elseif or self.curr.tag == .k_else)) break;
@@ -1639,7 +1639,7 @@ pub const Parser = struct {
         const token = try self.eat(.k_try);
         const body = try self.parseBlock();
 
-        var catch_clauses = std.ArrayListUnmanaged(ast.Node.Index){};
+        var catch_clauses = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
         defer catch_clauses.deinit(self.allocator);
 
         while (self.curr.tag == .k_catch) {
@@ -1725,7 +1725,7 @@ pub const Parser = struct {
         // Parse initialization (expr1, expr2, ...)
         var init_expr: ?ast.Node.Index = null;
         if (self.curr.tag != .semicolon) {
-            var init_exprs = std.ArrayListUnmanaged(ast.Node.Index){};
+            var init_exprs = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
             while (true) {
                 try init_exprs.append(self.allocator, try self.parseExpression(1)); // 优先级 > 逗号 (1)
                 if (self.curr.tag != .comma) break;
@@ -1753,7 +1753,7 @@ pub const Parser = struct {
         // Parse loop expression (expr3, expr4, ...)
         var loop: ?ast.Node.Index = null;
         if (self.curr.tag != .r_paren) {
-            var loop_exprs = std.ArrayListUnmanaged(ast.Node.Index){};
+            var loop_exprs = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
             while (true) {
                 try loop_exprs.append(self.allocator, try self.parseExpression(1)); // 优先级 > 逗号 (1)
                 if (self.curr.tag != .comma) break;
@@ -1786,7 +1786,7 @@ pub const Parser = struct {
 
     fn parseGlobal(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.k_global);
-        var vars = std.ArrayListUnmanaged(ast.Node.Index){};
+        var vars = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
         while (true) {
             try vars.append(self.allocator, try self.parseExpression(100));
             if (self.curr.tag != .comma) break;
@@ -1798,7 +1798,7 @@ pub const Parser = struct {
 
     fn parseStatic(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.k_static);
-        var vars = std.ArrayListUnmanaged(ast.Node.Index){};
+        var vars = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
         while (true) {
             try vars.append(self.allocator, try self.parseExpression(0));
             if (self.curr.tag != .comma) break;
@@ -1896,7 +1896,7 @@ pub const Parser = struct {
 
     fn parseEcho(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.k_echo);
-        var exprs = std.ArrayListUnmanaged(ast.Node.Index){};
+        var exprs = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
         defer exprs.deinit(self.allocator);
 
         // Parse first expression
@@ -1951,7 +1951,7 @@ pub const Parser = struct {
         const bracket_token = self.curr;
         _ = try self.eat(.l_bracket);
 
-        var targets = std.ArrayListUnmanaged(ast.Node.Index){};
+        var targets = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
 
         while (self.curr.tag != .r_bracket and self.curr.tag != .eof) {
             if (self.curr.tag == .comma) {
@@ -2026,7 +2026,7 @@ pub const Parser = struct {
     fn parseNestedDestructuringArray(self: *Parser) anyerror!ast.Node.Index {
         const bracket_token = self.curr;
         _ = try self.eat(.l_bracket);
-        var nested_targets = std.ArrayListUnmanaged(ast.Node.Index){};
+        var nested_targets = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
         
         while (self.curr.tag != .r_bracket and self.curr.tag != .eof) {
             if (self.curr.tag == .comma) {
@@ -2103,7 +2103,7 @@ pub const Parser = struct {
         _ = try self.eat(.k_list);
         _ = try self.eat(.l_paren);
 
-        var targets = std.ArrayListUnmanaged(ast.Node.Index){};
+        var targets = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
 
         // Parse list items
         while (self.curr.tag != .r_paren) {
@@ -2217,7 +2217,7 @@ pub const Parser = struct {
         _ = try self.eat(.k_list);
         _ = try self.eat(.l_paren);
 
-        var targets = std.ArrayListUnmanaged(ast.Node.Index){};
+        var targets = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
 
         while (self.curr.tag != .r_paren) {
             if (self.curr.tag == .comma) {
@@ -2327,7 +2327,7 @@ pub const Parser = struct {
 
     fn parseBlock(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.l_brace);
-        var stmts = std.ArrayListUnmanaged(ast.Node.Index){};
+        var stmts = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
         defer stmts.deinit(self.allocator);
         self.block_depth += 1;
         defer self.block_depth -= 1;
@@ -2416,7 +2416,7 @@ pub const Parser = struct {
                         left = try self.createNode(.{ .tag = .arrow_function, .main_token = op, .data = .{ .arrow_function = .{ .attributes = &.{}, .params = arrow_params, .return_type = null, .body = method_call, .is_static = false } } });
                     } else {
                         // 普通方法调用（包括 spread 参数 ...$var）
-                        var args = std.ArrayListUnmanaged(ast.Node.Index){};
+                        var args = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
                         while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
                             try args.append(self.allocator, try self.parseCallArg());
                             if (self.curr.tag == .comma) self.nextToken();
@@ -2506,7 +2506,7 @@ pub const Parser = struct {
                             });
                             continue;
                         }
-                        var args = std.ArrayListUnmanaged(ast.Node.Index){};
+                        var args = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
                         while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
                             try args.append(self.allocator, try self.parseCallArg());
                             if (self.curr.tag == .comma) self.nextToken();
@@ -2541,7 +2541,7 @@ pub const Parser = struct {
                     });
                     continue;
                 }
-                var args = std.ArrayListUnmanaged(ast.Node.Index){};
+                var args = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
                 while (self.curr.tag != .r_paren) {
                     // Check for named parameter: name: value
                     if (self.curr.tag == .t_string and self.peek.tag == .colon) {
@@ -2700,7 +2700,7 @@ pub const Parser = struct {
                     });
                     continue;
                 }
-                var args = std.ArrayList(ast.Node.Index){};
+                var args = std.ArrayList(ast.Node.Index){ .items = &.{}, .capacity = 0 };
                 while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
                     // Check for named argument: name: value
                     if (self.curr.tag == .t_string and self.peek.tag == .colon) {
@@ -2794,7 +2794,7 @@ pub const Parser = struct {
                         left = try self.createNode(.{ .tag = .arrow_function, .main_token = op, .data = .{ .arrow_function = .{ .attributes = &.{}, .params = arrow_params, .return_type = null, .body = method_call, .is_static = false } } });
                     } else {
                         // 普通方法调用
-                        var args = std.ArrayListUnmanaged(ast.Node.Index){};
+                        var args = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
                         while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
                             try args.append(self.allocator, try self.parseCallArg());
                             if (self.curr.tag == .comma) self.nextToken();
@@ -3232,7 +3232,7 @@ pub const Parser = struct {
         _ = try self.eat(.l_paren);
 
         // Parse parameters
-        var params = std.ArrayListUnmanaged(ast.Node.Index){};
+        var params = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
         while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
             try params.append(self.allocator, try self.parseParameter());
             if (self.curr.tag == .comma) self.nextToken();
@@ -3241,7 +3241,7 @@ pub const Parser = struct {
         _ = try self.eat(.r_paren);
 
         // Parse capture list (use clause)
-        var captures = std.ArrayListUnmanaged(ast.Node.Index){};
+        var captures = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
         if (self.curr.tag == .k_use) {
             self.nextToken();
             _ = try self.eat(.l_paren);
@@ -3282,7 +3282,7 @@ pub const Parser = struct {
         const expr = try self.parseExpression(0);
         _ = try self.eat(.r_paren);
         _ = try self.eat(.l_brace);
-        var arms = std.ArrayListUnmanaged(ast.Node.Index){};
+        var arms = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
         var default_arm: ?ast.Node.Index = null;
         const arena = self.context.arena.allocator();
 
@@ -3294,7 +3294,7 @@ pub const Parser = struct {
                 default_arm = try self.createNode(.{ .tag = .match_arm, .main_token = token, .data = .{ .match_arm = .{ .conditions = &.{}, .body = body } } });
             } else {
                 // Parse comma-separated conditions: expr1, expr2, ... => body
-                var conds = std.ArrayListUnmanaged(ast.Node.Index){};
+                var conds = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
                 const first_cond = try self.parseExpression(1);
                 try conds.append(self.allocator, first_cond);
                 while (self.curr.tag == .comma) {
@@ -3332,7 +3332,7 @@ pub const Parser = struct {
             _ = try self.eat(.l_brace);
         }
 
-        var cases = std.ArrayListUnmanaged(ast.Node.Index){};
+        var cases = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
         var default_case: ?ast.Node.Index = null;
 
         // 使用 Token.Tag 类型避免 comptime-only 错误
@@ -3342,7 +3342,7 @@ pub const Parser = struct {
                 self.nextToken();
                 const case_expr = try self.parseExpression(0);
                 _ = try self.eat(.colon); // or .fat_arrow
-                var stmts = std.ArrayListUnmanaged(ast.Node.Index){};
+                var stmts = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
                 while (self.curr.tag != .k_case and self.curr.tag != .k_default and self.curr.tag != end_token and self.curr.tag != .eof) {
                     try stmts.append(self.allocator, try self.parseStatement());
                 }
@@ -3354,7 +3354,7 @@ pub const Parser = struct {
             } else if (self.curr.tag == .k_default) {
                 self.nextToken();
                 _ = try self.eat(.colon); // or .fat_arrow
-                var stmts = std.ArrayListUnmanaged(ast.Node.Index){};
+                var stmts = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
                 while (self.curr.tag != .k_case and self.curr.tag != .k_default and self.curr.tag != end_token and self.curr.tag != .eof) {
                     try stmts.append(self.allocator, try self.parseStatement());
                 }
@@ -3427,7 +3427,7 @@ pub const Parser = struct {
             self.nextToken();
 
             // Parse constructor arguments
-            var args = std.ArrayListUnmanaged(ast.Node.Index){};
+            var args = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
             if (self.curr.tag == .l_paren) {
                 self.nextToken();
                 while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
@@ -3459,7 +3459,7 @@ pub const Parser = struct {
             }
 
             // Parse implements
-            var implements = std.ArrayListUnmanaged(ast.Node.Index){};
+            var implements = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
             if (self.curr.tag == .k_implements) {
                 self.nextToken();
                 while (self.curr.tag != .l_brace and self.curr.tag != .eof) {
@@ -3470,7 +3470,7 @@ pub const Parser = struct {
 
             // Parse class body
             _ = try self.eat(.l_brace);
-            var members = std.ArrayListUnmanaged(ast.Node.Index){};
+            var members = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
             while (self.curr.tag != .r_brace and self.curr.tag != .eof) {
                 try members.append(self.allocator, try self.parseStatement());
             }
@@ -3497,7 +3497,7 @@ pub const Parser = struct {
             break :blk self.createNode(.{ .tag = .variable, .main_token = name_tok, .data = .{ .variable = .{ .name = name_id } } });
         } else try self.parsePrimary();
 
-        var args = std.ArrayListUnmanaged(ast.Node.Index){};
+        var args = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
 
         if (self.curr.tag == .l_paren) {
             self.nextToken();
@@ -3536,7 +3536,7 @@ pub const Parser = struct {
             self.nextToken();
             _ = try self.eat(.l_brace);
 
-            var properties = std.ArrayListUnmanaged(ast.Node.Index){};
+            var properties = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
 
             while (self.curr.tag != .r_brace and self.curr.tag != .eof) {
                 const prop_name = try self.parseExpression(0);
@@ -3664,7 +3664,7 @@ pub const Parser = struct {
         const token = try self.eat(.k_fn);
         _ = try self.eat(.l_paren);
 
-        var params = std.ArrayListUnmanaged(ast.Node.Index){};
+        var params = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
 
         while (self.curr.tag != .r_paren) {
             try params.append(self.allocator, try self.parseParameter());
@@ -3703,7 +3703,7 @@ pub const Parser = struct {
         const token = try self.eat(.k_array);
         _ = try self.eat(.l_paren);
 
-        var elements = std.ArrayListUnmanaged(ast.Node.Index){};
+        var elements = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
         while (self.curr.tag != .r_paren) {
             // 使用优先级 1 来避免解析逗号运算符（逗号优先级为 0）
             const first_expr = try self.parseExpression(1);
@@ -3730,7 +3730,7 @@ pub const Parser = struct {
     fn parseArrayLiteral(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.l_bracket);
 
-        var elements = std.ArrayListUnmanaged(ast.Node.Index){};
+        var elements = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
 
         while (self.curr.tag != .r_bracket and self.curr.tag != .eof) {
             // 解析第一个表达式（可能是键或值）
@@ -3775,7 +3775,7 @@ pub const Parser = struct {
     fn parseJsonObjectLiteral(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.l_brace);
 
-        var elements = std.ArrayListUnmanaged(ast.Node.Index){};
+        var elements = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
 
         while (self.curr.tag != .r_brace and self.curr.tag != .eof) {
             // JSON 对象的键必须是字符串
@@ -3827,7 +3827,7 @@ pub const Parser = struct {
         const left = try self.parseIntersectionType();
 
         if (self.curr.tag == .pipe) {
-            var types = std.ArrayListUnmanaged(ast.Node.Index){};
+            var types = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
             try types.append(self.allocator, left);
 
             while (self.curr.tag == .pipe) {
@@ -3858,7 +3858,7 @@ pub const Parser = struct {
                 return left;
             }
 
-            var types = std.ArrayListUnmanaged(ast.Node.Index){};
+            var types = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
             try types.append(self.allocator, left);
 
             while (self.curr.tag == .ampersand) {

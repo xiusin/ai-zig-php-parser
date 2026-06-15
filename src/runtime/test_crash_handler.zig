@@ -118,17 +118,17 @@ test "CrashReport 保存到文件" {
     
     // 创建临时目录
     const temp_dir = "test_crash_reports";
-    std.fs.cwd().makePath(temp_dir) catch |err| {
+    std.fs.cwd.makePath(temp_dir) catch |err| {
         if (err != error.PathAlreadyExists) return err;
     };
-    defer std.fs.cwd().deleteTree(temp_dir) catch {};
+    defer std.fs.cwd.deleteTree(temp_dir) catch {};
     
     // 保存报告
     const report_path = temp_dir ++ "/test_crash.txt";
     try report.saveToFile(report_path);
     
     // 验证文件存在
-    const file = try std.fs.cwd().openFile(report_path, .{});
+    const file = try std.fs.cwd.openFile(report_path, .{});
     defer file.close();
     
     // 读取并验证内容
@@ -156,10 +156,10 @@ test "CrashHandler 初始化" {
 test "CrashHandler 安装和卸载" {
     // 创建临时目录
     const temp_dir = "test_crash_handler";
-    std.fs.cwd().makePath(temp_dir) catch |err| {
+    std.fs.cwd.makePath(temp_dir) catch |err| {
         if (err != error.PathAlreadyExists) return err;
     };
-    defer std.fs.cwd().deleteTree(temp_dir) catch {};
+    defer std.fs.cwd.deleteTree(temp_dir) catch {};
     
     var handler = crash_handler.CrashHandler.init(
         testing.allocator,
@@ -190,10 +190,10 @@ test "完整崩溃处理流程" {
     
     // 创建临时目录
     const temp_dir = "test_full_crash";
-    std.fs.cwd().makePath(temp_dir) catch |err| {
+    std.fs.cwd.makePath(temp_dir) catch |err| {
         if (err != error.PathAlreadyExists) return err;
     };
-    defer std.fs.cwd().deleteTree(temp_dir) catch {};
+    defer std.fs.cwd.deleteTree(temp_dir) catch {};
     
     // 初始化全局崩溃处理器
     try crash_handler.initGlobalHandler(testing.allocator, temp_dir, false);
@@ -238,10 +238,10 @@ test "CrashReport 包含堆栈跟踪" {
 
 test "多次崩溃统计" {
     const temp_dir = "test_multi_crash";
-    std.fs.cwd().makePath(temp_dir) catch |err| {
+    std.fs.cwd.makePath(temp_dir) catch |err| {
         if (err != error.PathAlreadyExists) return err;
     };
-    defer std.fs.cwd().deleteTree(temp_dir) catch {};
+    defer std.fs.cwd.deleteTree(temp_dir) catch {};
     
     var handler = crash_handler.CrashHandler.init(
         testing.allocator,

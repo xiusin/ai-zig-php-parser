@@ -242,7 +242,7 @@ pub const Select = struct {
         _ = self.stats.total_executions.fetchAdd(1, .acq_rel);
         
         // Phase 1: Check for immediately ready cases
-        var ready_cases_list = std.ArrayListUnmanaged(usize){};
+        var ready_cases_list = std.ArrayListUnmanaged(usize){ .items = &.{}, .capacity = 0 };
         defer ready_cases_list.deinit(self.allocator);
         
         for (self.cases.items, 0..) |*case, i| {
@@ -287,7 +287,7 @@ pub const Select = struct {
         
         while (true) {
             // Check for ready cases
-            var ready_cases_list = std.ArrayListUnmanaged(usize){};
+            var ready_cases_list = std.ArrayListUnmanaged(usize){ .items = &.{}, .capacity = 0 };
             defer ready_cases_list.deinit(self.allocator);
             
             for (self.cases.items, 0..) |*case, i| {

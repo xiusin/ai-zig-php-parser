@@ -92,7 +92,7 @@ pub const FileSystemFunctions = struct {
             else => return Value.initBool(false),
         };
 
-        const file = std.fs.cwd().openFile(filename, .{}) catch {
+        const file = std.fs.cwd.openFile(filename, .{}) catch {
             return Value.initBool(false);
         };
         defer file.close();
@@ -120,7 +120,7 @@ pub const FileSystemFunctions = struct {
             else => return Value.initBool(false),
         };
 
-        const file = std.fs.cwd().createFile(filename, .{}) catch {
+        const file = std.fs.cwd.createFile(filename, .{}) catch {
             return Value.initBool(false);
         };
         defer file.close();
@@ -144,7 +144,7 @@ pub const FileSystemFunctions = struct {
             else => return Value.initBool(false),
         };
 
-        std.fs.cwd().access(filename, .{}) catch {
+        std.fs.cwd.access(filename, .{}) catch {
             return Value.initBool(false);
         };
 
@@ -163,7 +163,7 @@ pub const FileSystemFunctions = struct {
             else => return Value.initBool(false),
         };
 
-        const stat = std.fs.cwd().statFile(filename) catch {
+        const stat = std.fs.cwd.statFile(filename) catch {
             return Value.initBool(false);
         };
 
@@ -182,7 +182,7 @@ pub const FileSystemFunctions = struct {
             else => return Value.initBool(false),
         };
 
-        var dir = std.fs.cwd().openDir(dirname, .{}) catch {
+        var dir = std.fs.cwd.openDir(dirname, .{}) catch {
             return Value.initBool(false);
         };
         dir.close();
@@ -202,7 +202,7 @@ pub const FileSystemFunctions = struct {
             else => return Value.initBool(false),
         };
 
-        std.fs.cwd().makeDir(dirname) catch {
+        std.fs.cwd.makeDir(dirname) catch {
             return Value.initBool(false);
         };
 
@@ -221,7 +221,7 @@ pub const FileSystemFunctions = struct {
             else => return Value.initBool(false),
         };
 
-        std.fs.cwd().deleteFile(filename) catch {
+        std.fs.cwd.deleteFile(filename) catch {
             return Value.initBool(false);
         };
 
@@ -240,7 +240,7 @@ pub const FileSystemFunctions = struct {
             else => return Value.initBool(false),
         };
 
-        std.fs.cwd().deleteDir(dirname) catch {
+        std.fs.cwd.deleteDir(dirname) catch {
             return Value.initBool(false);
         };
 
@@ -264,7 +264,7 @@ pub const FileSystemFunctions = struct {
             else => return Value.initBool(false),
         };
 
-        std.fs.cwd().rename(old_name, new_name) catch {
+        std.fs.cwd.rename(old_name, new_name) catch {
             return Value.initBool(false);
         };
 
@@ -283,7 +283,7 @@ pub const FileSystemFunctions = struct {
             else => return Value.initBool(false),
         };
 
-        const stat = std.fs.cwd().statFile(filename) catch {
+        const stat = std.fs.cwd.statFile(filename) catch {
             return Value.initBool(false);
         };
 
@@ -316,7 +316,7 @@ pub const FileSystemFunctions = struct {
             else => return Value.initBool(false),
         };
 
-        var dir = std.fs.cwd().openDir(dirname, .{ .iterate = true }) catch {
+        var dir = std.fs.cwd.openDir(dirname, .{ .iterate = true }) catch {
             return Value.initBool(false);
         };
         defer dir.close();

@@ -768,7 +768,7 @@ pub const FileIOManager = struct {
     /// 文件读取工作线程（使用 Promise 通知完成）
     fn fileReadWorker(self: *FileIOManager, operation_id: u64, operation: *FileOperation) void {
         // 执行实际的文件读取
-        const file = std.fs.cwd().openFile(operation.path, .{}) catch |err| {
+        const file = std.fs.cwd.openFile(operation.path, .{}) catch |err| {
             operation.error_code = err;
             operation.promise.reject(err);
             self.completeOperation(operation_id, operation);
@@ -808,7 +808,7 @@ pub const FileIOManager = struct {
     
     /// 文件写入工作线程（使用 Promise 通知完成）
     fn fileWriteWorker(self: *FileIOManager, operation_id: u64, operation: *FileOperation) void {
-        const file = std.fs.cwd().createFile(operation.path, .{}) catch |err| {
+        const file = std.fs.cwd.createFile(operation.path, .{}) catch |err| {
             operation.error_code = err;
             operation.write_promise.reject(err);
             self.completeOperation(operation_id, operation);

@@ -445,8 +445,8 @@ pub const BytecodeOptimizer = struct {
                 .store_local, .store_global => {
                     const var_id = inst.operand1;
                     var info = chain.get(var_id) orelse DefUseInfo{
-                        .definitions = std.ArrayListUnmanaged(usize){},
-                        .uses = std.ArrayListUnmanaged(usize){},
+                        .definitions = std.ArrayListUnmanaged(usize){ .items = &.{}, .capacity = 0 },
+                        .uses = std.ArrayListUnmanaged(usize){ .items = &.{}, .capacity = 0 },
                     };
                     try info.definitions.append(self.allocator, i);
                     try chain.put(var_id, info);
@@ -456,8 +456,8 @@ pub const BytecodeOptimizer = struct {
                 .push_local, .push_global => {
                     const var_id = inst.operand1;
                     var info = chain.get(var_id) orelse DefUseInfo{
-                        .definitions = std.ArrayListUnmanaged(usize){},
-                        .uses = std.ArrayListUnmanaged(usize){},
+                        .definitions = std.ArrayListUnmanaged(usize){ .items = &.{}, .capacity = 0 },
+                        .uses = std.ArrayListUnmanaged(usize){ .items = &.{}, .capacity = 0 },
                     };
                     try info.uses.append(self.allocator, i);
                     try chain.put(var_id, info);

@@ -230,7 +230,7 @@ pub const Compiler = struct {
         if (self.type_inference) |inference| {
             // 使用类型推断引擎
             // 从函数中提取变量名（简化版本 - 假设有局部变量）
-            var var_names = std.ArrayList([]const u8){};
+            var var_names = std.ArrayList([]const u8).empty;
             defer var_names.deinit(self.allocator);
             
             // 为每个局部变量槽位生成名称
@@ -304,7 +304,7 @@ pub const Compiler = struct {
         var asm_ = Assembler.init(self.allocator);
         defer asm_.deinit();
         
-        var jump_patches: std.ArrayListUnmanaged(JumpPatch) = .{};
+        var jump_patches: std.ArrayListUnmanaged(JumpPatch) = .empty;
         defer jump_patches.deinit(self.allocator);
 
         // --------------------------------------------------------------------

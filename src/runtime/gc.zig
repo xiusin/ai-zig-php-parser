@@ -1,3 +1,4 @@
+const time_compat = @import("time_compat.zig");
 const std = @import("std");
 const Value = @import("types.zig").Value;
 const PHPString = @import("types.zig").PHPString;
@@ -510,8 +511,8 @@ pub const GarbageCollector = struct {
             .allocator = allocator,
             .memory_threshold = memory_threshold,
             .allocated_memory = 0,
-            .gray_list = .{},
-            .write_barrier_buffer = .{},
+            .gray_list = .{ .items = &.{}, .capacity = 0 },
+            .write_barrier_buffer = .{ .items = &.{}, .capacity = 0 },
         };
     }
 
@@ -533,7 +534,7 @@ pub const GarbageCollector = struct {
     /// 增量标记步进：每次执行少量标记工作
     pub fn incrementalStep(self: *GarbageCollector, max_work: usize) bool {
         var work_done: usize = 0;
-        const step_start: i64 = @intCast(std.time.nanoTimestamp());
+        const step_start: i64 = @intCast(time_compat.nanoTimestamp());
 
         switch (self.incremental_state) {
             .idle => {
@@ -556,7 +557,7 @@ pub const GarbageCollector = struct {
                 }
 
                 if (self.gray_list.items.len == 0 and self.write_barrier_buffer.items.len == 0) {
-                    const mark_end: i64 = @intCast(std.time.nanoTimestamp());
+                    const mark_end: i64 = @intCast(time_compat.nanoTimestamp());
                     self.stats.timing.last_mark_time_ns = @intCast(mark_end - self.mark_start_time);
                     self.stats.timing.total_mark_time_ns += self.stats.timing.last_mark_time_ns;
                     self.incremental_state = .sweeping;
@@ -566,7 +567,7 @@ pub const GarbageCollector = struct {
                 return false;
             },
             .sweeping => {
-                const sweep_end: i64 = @intCast(std.time.nanoTimestamp());
+                const sweep_end: i64 = @intCast(time_compat.nanoTimestamp());
                 self.stats.timing.last_sweep_time_ns = @intCast(sweep_end - self.sweep_start_time);
                 self.stats.timing.total_sweep_time_ns += self.stats.timing.last_sweep_time_ns;
 
@@ -865,7 +866,7 @@ pub const MemoryManager = struct {
             .gc_mode = .adaptive,
             .adaptive_config = .{},
             .allocation_count = 0,
-            .last_check_time = std.time.milliTimestamp(),
+            .last_check_time = time_compat.milliTimestamp(),
             .last_check_memory = 0,
         };
     }
@@ -882,7 +883,7 @@ pub const MemoryManager = struct {
             .gc_mode = .adaptive,
             .adaptive_config = config,
             .allocation_count = 0,
-            .last_check_time = std.time.milliTimestamp(),
+            .last_check_time = time_compat.milliTimestamp(),
             .last_check_memory = 0,
         };
     }
@@ -1098,7 +1099,7 @@ pub const MemoryManager = struct {
         self.allocation_count = 0;
 
         const current_memory = self.gc.allocated_memory;
-        const current_time = std.time.milliTimestamp();
+        const current_time = time_compat.milliTimestamp();
 
         // 检查是否应该切换到分代 GC（高内存使用）
         if (current_memory >= self.adaptive_config.generational_threshold) {

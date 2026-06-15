@@ -6,7 +6,7 @@ const PHPArray = types.PHPArray;
 const PHPObject = types.PHPObject;
 const PHPClass = types.PHPClass;
 const gc = types.gc;
-const net = std.net;
+const net = std.Io.net;
 const Thread = std.Thread;
 const coroutine = @import("coroutine.zig");
 const CoroutineManager = coroutine.CoroutineManager;
@@ -32,7 +32,7 @@ const PHPResponse = response.PHPResponse;
 /// 提供类似Bun的高性能HTTP服务能力
 pub const HttpServer = struct {
     allocator: std.mem.Allocator,
-    address: net.Address,
+    address: net.IpAddress,
     server: ?net.Server,
     running: std.atomic.Value(bool),
     handler: ?Value,
@@ -140,7 +140,7 @@ pub const HttpServer = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator, config: Config, vm: *anyopaque) !HttpServer {
-        const address = try net.Address.parseIp4(config.host, config.port);
+        const address = try net.IpAddress.parseIp4(config.host, config.port);
 
         var server = HttpServer{
             .allocator = allocator,
@@ -249,13 +249,13 @@ pub const HttpServer = struct {
     pub fn stop(self: *HttpServer) void {
         self.running.store(false, .seq_cst);
         if (self.server) |*server| {
-            server.deinit();
+            server.deinit(std.Io.Threaded.global_single_threaded.io());
             self.server = null;
         }
     }
 
     /// 处理单个连接（支持协程上下文隔离）
-    fn handleConnection(self: *HttpServer, connection: net.Server.Connection) !void {
+    fn handleConnection(self: *HttpServer, connection: net.Stream) !void {
         defer connection.stream.close();
 
         // 获取或创建请求上下文

@@ -156,7 +156,7 @@ fn runList(allocator: std.mem.Allocator, args: []const []const u8) !void {
     
     std.debug.print("Performance Baselines in {s}:\n\n", .{baseline_dir});
     
-    var dir = try std.fs.cwd().openDir(baseline_dir, .{ .iterate = true });
+    var dir = try std.fs.cwd.openDir(baseline_dir, .{ .iterate = true });
     defer dir.close();
     
     var iter = dir.iterate();
@@ -212,10 +212,10 @@ fn runCompare(allocator: std.mem.Allocator, args: []const []const u8) !void {
     std.debug.print("  File 2: {s}\n\n", .{file2_path});
     
     // 读取两个文件
-    const file1 = try std.fs.cwd().openFile(file1_path, .{});
+    const file1 = try std.fs.cwd.openFile(file1_path, .{});
     defer file1.close();
     
-    const file2 = try std.fs.cwd().openFile(file2_path, .{});
+    const file2 = try std.fs.cwd.openFile(file2_path, .{});
     defer file2.close();
     
     const content1 = try file1.readToEndAlloc(allocator, 1024 * 1024);

@@ -10,3 +10,5 @@ pub const SyntaxMode = compiler.SyntaxMode;
 pub const Lexer = compiler.Lexer;
 pub const Token = compiler.Token;
 pub const ast = compiler.ast;
+
+pub const time_compat = @import("time_compat.zig");

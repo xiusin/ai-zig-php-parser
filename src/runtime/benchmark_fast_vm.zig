@@ -8,6 +8,7 @@
 //! 4. 类型特化指令性能
 //!
 //! 运行方式: zig test src/runtime/benchmark_fast_vm.zig -OReleaseFast
+const time_compat = @import("time_compat.zig");
 
 const std = @import("std");
 const fast_vm = @import("fast_vm.zig");
@@ -79,7 +80,7 @@ fn benchSimpleAdd(allocator: std.mem.Allocator) !u64 {
         .max_stack = 8,
     };
 
-    var timer = std.time.Timer.start() catch unreachable;
+    var timer = time_compat.Timer.start() catch unreachable;
     
     var acc: i64 = 0;
     for (0..ITERATIONS) |_| {
@@ -132,7 +133,7 @@ fn benchLoop(allocator: std.mem.Allocator) !u64 {
         .max_stack = 8,
     };
 
-    var timer = std.time.Timer.start() catch unreachable;
+    var timer = time_compat.Timer.start() catch unreachable;
     
     var acc: i64 = 0;
     for (0..ITERATIONS / 100) |_| { // 每次循环100次，所以减少外层迭代
@@ -150,7 +151,7 @@ fn benchSuperInstruction(allocator: std.mem.Allocator) !u64 {
     defer vm.deinit();
 
     // 使用超级指令 load_inc_store 进行 1000 次自增
-    var code_list = std.ArrayListUnmanaged(u8){};
+    var code_list = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
     defer code_list.deinit(allocator);
 
     // i = 0
@@ -178,7 +179,7 @@ fn benchSuperInstruction(allocator: std.mem.Allocator) !u64 {
         .max_stack = 8,
     };
 
-    var timer = std.time.Timer.start() catch unreachable;
+    var timer = time_compat.Timer.start() catch unreachable;
     
     var acc: i64 = 0;
     for (0..ITERATIONS / 1000) |_| {
@@ -212,7 +213,7 @@ fn benchTypeSpecialized(allocator: std.mem.Allocator) !u64 {
         .max_stack = 8,
     };
 
-    var timer = std.time.Timer.start() catch unreachable;
+    var timer = time_compat.Timer.start() catch unreachable;
     
     var acc: i64 = 0;
     for (0..ITERATIONS) |_| {
@@ -246,7 +247,7 @@ fn benchGenericAdd(allocator: std.mem.Allocator) !u64 {
         .max_stack = 8,
     };
 
-    var timer = std.time.Timer.start() catch unreachable;
+    var timer = time_compat.Timer.start() catch unreachable;
     
     var acc: i64 = 0;
     for (0..ITERATIONS) |_| {
@@ -289,7 +290,7 @@ fn benchFloatOps(allocator: std.mem.Allocator) !u64 {
         .max_stack = 8,
     };
 
-    var timer = std.time.Timer.start() catch unreachable;
+    var timer = time_compat.Timer.start() catch unreachable;
 
     var acc: f64 = 0;
     for (0..ITERATIONS) |_| {
@@ -326,7 +327,7 @@ fn benchStackOps(allocator: std.mem.Allocator) !u64 {
         .max_stack = 8,
     };
 
-    var timer = std.time.Timer.start() catch unreachable;
+    var timer = time_compat.Timer.start() catch unreachable;
 
     var acc: i64 = 0;
     for (0..ITERATIONS) |_| {
@@ -359,7 +360,7 @@ fn benchComparison(allocator: std.mem.Allocator) !u64 {
         .max_stack = 8,
     };
 
-    var timer = std.time.Timer.start() catch unreachable;
+    var timer = time_compat.Timer.start() catch unreachable;
 
     var acc: i64 = 0;
     for (0..ITERATIONS) |_| {

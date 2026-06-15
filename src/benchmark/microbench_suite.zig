@@ -365,7 +365,7 @@ fn compileSampleOnce(allocator: std.mem.Allocator) void {
         .link_executable = false,
     };
 
-    const c = aot.AOTCompiler.init(arena.allocator(), options) catch return;
+    const c = aot.AOTCompiler.init(arena.allocator(), undefined, options) catch return;
     defer c.deinit();
     _ = c.compile() catch {};
 }

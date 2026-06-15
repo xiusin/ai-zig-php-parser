@@ -83,11 +83,11 @@ const TickCallback = struct {
 pub fn initCallbacks(allocator: std.mem.Allocator) void {
     _ = allocator;
     if (!shutdown_functions_initialized) {
-        shutdown_functions = std.ArrayListUnmanaged(*ShutdownCallback){};
+        shutdown_functions = std.ArrayListUnmanaged(*ShutdownCallback){ .items = &.{}, .capacity = 0 };
         shutdown_functions_initialized = true;
     }
     if (!tick_functions_initialized) {
-        tick_functions = std.ArrayListUnmanaged(*TickCallback){};
+        tick_functions = std.ArrayListUnmanaged(*TickCallback){ .items = &.{}, .capacity = 0 };
         tick_functions_initialized = true;
     }
 }

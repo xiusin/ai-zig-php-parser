@@ -121,7 +121,7 @@ pub const MathBenchmark = struct {
         
         // 创建测试脚本目录
         if (config.generate_php_scripts) {
-            std.fs.cwd().makePath(config.script_output_dir) catch |err| {
+            std.fs.cwd.makePath(config.script_output_dir) catch |err| {
                 if (err != error.PathAlreadyExists) return err;
             };
         }
@@ -1633,7 +1633,7 @@ pub const MathBenchmark = struct {
     /// @param result 测试结果
     /// @param output_path 输出文件路径
     pub fn generateReport(self: *Self, result: MathBenchmarkResult, output_path: []const u8) !void {
-        const file = try std.fs.cwd().createFile(output_path, .{});
+        const file = try std.fs.cwd.createFile(output_path, .{});
         defer file.close();
         
         const writer = file.writer();

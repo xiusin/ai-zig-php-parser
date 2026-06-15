@@ -176,13 +176,13 @@ pub const IRGenerator = struct {
             .string_table = null,
             .source_buffer = null,
             .current_location = .{},
-            .var_registers = .{},
-            .ref_vars = .{},
-            .var_usage = .{},
-            .entry_allocas = .{},
+            .var_registers = .{ .items = &.{}, .capacity = 0 },
+            .ref_vars = .{ .items = &.{}, .capacity = 0 },
+            .var_usage = .{ .items = &.{}, .capacity = 0 },
+            .entry_allocas = .{ .items = &.{}, .capacity = 0 },
             .block_counter = 0,
-            .loop_stack = .{},
-            .try_stack = .{},
+            .loop_stack = .{ .items = &.{}, .capacity = 0 },
+            .try_stack = .{ .items = &.{}, .capacity = 0 },
             .constant_cache = .{},
             .global_vars = .{},
             .static_vars = .{},
@@ -192,7 +192,7 @@ pub const IRGenerator = struct {
             .namespace_imports = .{},
             .trait_methods = .{},
             .goto_labels = .{},
-            .pending_gotos = .{},
+            .pending_gotos = .{ .items = &.{}, .capacity = 0 },
         };
     }
 
@@ -285,7 +285,7 @@ pub const IRGenerator = struct {
     fn flushEntryAllocas(self: *Self, entry_block: *BasicBlock) !void {
         if (self.entry_allocas.items.len == 0) return;
 
-        var new_insts: std.ArrayListUnmanaged(*Instruction) = .{};
+        var new_insts: std.ArrayListUnmanaged(*Instruction) = .{ .items = &.{}, .capacity = 0 };
         try new_insts.appendSlice(self.allocator, self.entry_allocas.items);
         try new_insts.appendSlice(self.allocator, entry_block.instructions.items);
 
@@ -350,7 +350,7 @@ pub const IRGenerator = struct {
             try self.preRegisterFunctions(root_data.stmts);
 
             // Separate function declarations from top-level statements
-            var top_level_stmts = std.ArrayListUnmanaged(Node.Index){};
+            var top_level_stmts = std.ArrayListUnmanaged(Node.Index){ .items = &.{}, .capacity = 0 };
             defer top_level_stmts.deinit(self.allocator);
 
             for (root_data.stmts) |stmt_idx| {
@@ -401,10 +401,10 @@ pub const IRGenerator = struct {
 
         self.current_function = func;
         self.current_block = null;
-        self.var_registers = .{};
-        self.var_usage = .{};
+        self.var_registers = .{ .items = &.{}, .capacity = 0 };
+        self.var_usage = .{ .items = &.{}, .capacity = 0 };
         self.ref_vars.clearRetainingCapacity(); // 清空引用变量集合（foreach &$v）
-        self.entry_allocas = .{};
+        self.entry_allocas = .{ .items = &.{}, .capacity = 0 };
         self.block_counter = 0;
 
         // Create entry block
@@ -753,7 +753,7 @@ pub const IRGenerator = struct {
             const func_name = self.getString(func_data.name);
             if (func_name.len == 0) continue;
             // 收集引用参数索引
-            var ref_indices = std.ArrayListUnmanaged(u32){};
+            var ref_indices = std.ArrayListUnmanaged(u32){ .items = &.{}, .capacity = 0 };
             defer ref_indices.deinit(self.allocator);
             for (func_data.params, 0..) |param_idx, i| {
                 if (self.getNode(param_idx)) |pnode| {
@@ -820,9 +820,9 @@ pub const IRGenerator = struct {
 
         // Set up new context
         self.current_function = func;
-        self.var_registers = .{};
-        self.var_usage = .{}; // 初始化变量使用跟踪
-        self.entry_allocas = .{};
+        self.var_registers = .{ .items = &.{}, .capacity = 0 };
+        self.var_usage = .{ .items = &.{}, .capacity = 0 }; // 初始化变量使用跟踪
+        self.entry_allocas = .{ .items = &.{}, .capacity = 0 };
         self.ref_vars.clearRetainingCapacity(); // 清空引用变量集合（foreach &$v）
         self.block_counter = 0;
         self.static_vars.clearRetainingCapacity(); // 清空静态变量集合
@@ -864,7 +864,7 @@ pub const IRGenerator = struct {
         self.var_usage.deinit(self.allocator);
         self.entry_allocas.deinit(self.allocator);
         self.var_registers = prev_var_registers;
-        self.var_usage = .{};
+        self.var_usage = .{ .items = &.{}, .capacity = 0 };
         self.entry_allocas = prev_entry_allocas;
         self.current_function = prev_function;
         self.current_block = prev_block;
@@ -1191,11 +1191,11 @@ pub const IRGenerator = struct {
         // ✅ 获取完整的类名（包含命名空间）
         const class_name = try self.getFullClassName(short_class_name);
 
-        var methods = std.ArrayListUnmanaged(TypeDef.Method){};
-        var properties = std.ArrayListUnmanaged(TypeDef.Property){};
-        var constants = std.ArrayListUnmanaged(TypeDef.Constant){};
-        var traits = std.ArrayListUnmanaged([]const u8){};
-        var trait_adaptations = std.ArrayListUnmanaged(TypeDef.TraitAdaptation){};
+        var methods = std.ArrayListUnmanaged(TypeDef.Method){ .items = &.{}, .capacity = 0 };
+        var properties = std.ArrayListUnmanaged(TypeDef.Property){ .items = &.{}, .capacity = 0 };
+        var constants = std.ArrayListUnmanaged(TypeDef.Constant){ .items = &.{}, .capacity = 0 };
+        var traits = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
+        var trait_adaptations = std.ArrayListUnmanaged(TypeDef.TraitAdaptation){ .items = &.{}, .capacity = 0 };
         defer traits.deinit(self.allocator);
 
         // 收集接口名称
@@ -1399,7 +1399,7 @@ pub const IRGenerator = struct {
                         const prev_var_registers = self.var_registers;
                         self.current_function = hook_func;
                         self.current_class = class_name;
-                        self.var_registers = .{};
+                        self.var_registers = .{ .items = &.{}, .capacity = 0 };
                         self.block_counter = 0;
                         const entry = try hook_func.createBlock("entry");
                         self.setCurrentBlock(entry);
@@ -1498,13 +1498,13 @@ pub const IRGenerator = struct {
 
         // 收集类上的 PHP attributes (#[...])
         if (class_data.attributes.len > 0) {
-            var attrs = std.ArrayListUnmanaged(TypeDef.Attribute){};
+            var attrs = std.ArrayListUnmanaged(TypeDef.Attribute){ .items = &.{}, .capacity = 0 };
             for (class_data.attributes) |attr_idx| {
                 const attr_node = self.getNode(attr_idx) orelse continue;
                 if (attr_node.tag != .attribute) continue;
                 const attr_data = attr_node.data.attribute;
                 const attr_name = self.getString(attr_data.name);
-                var arg_strs = std.ArrayListUnmanaged([]const u8){};
+                var arg_strs = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
                 for (attr_data.args) |arg_idx| {
                     const arg_node = self.getNode(arg_idx) orelse continue;
                     const val = self.getConstantValue(arg_node);
@@ -1624,7 +1624,7 @@ pub const IRGenerator = struct {
         const interfaces_slice = try parent_interfaces.toOwnedSlice(self.allocator);
 
         // 收集接口常量（接口方法是抽象的，不生成函数体）
-        var constants = std.ArrayListUnmanaged(TypeDef.Constant){};
+        var constants = std.ArrayListUnmanaged(TypeDef.Constant){ .items = &.{}, .capacity = 0 };
         for (iface_data.members) |member_idx| {
             const member = self.getNode(member_idx) orelse continue;
             if (member.tag == .const_decl) {
@@ -1695,9 +1695,9 @@ pub const IRGenerator = struct {
         const short_name = self.getString(enum_data.name);
         const enum_name = try self.getFullClassName(short_name);
 
-        var methods = std.ArrayListUnmanaged(TypeDef.Method){};
-        var constants = std.ArrayListUnmanaged(TypeDef.Constant){};
-        var enum_cases = std.ArrayListUnmanaged(TypeDef.EnumCase){};
+        var methods = std.ArrayListUnmanaged(TypeDef.Method){ .items = &.{}, .capacity = 0 };
+        var constants = std.ArrayListUnmanaged(TypeDef.Constant){ .items = &.{}, .capacity = 0 };
+        var enum_cases = std.ArrayListUnmanaged(TypeDef.EnumCase){ .items = &.{}, .capacity = 0 };
 
         // Resolve backing type from extends field
         var backing_type: ?[]const u8 = null;
@@ -1835,11 +1835,11 @@ pub const IRGenerator = struct {
         const short_trait_name = self.getString(trait_data.name);
         const trait_name = try self.getFullClassName(short_trait_name);
 
-        var methods = std.ArrayListUnmanaged(TypeDef.Method){};
-        var properties = std.ArrayListUnmanaged(TypeDef.Property){};
-        var constants = std.ArrayListUnmanaged(TypeDef.Constant){};
-        var traits = std.ArrayListUnmanaged([]const u8){};
-        var trait_adaptations = std.ArrayListUnmanaged(TypeDef.TraitAdaptation){};
+        var methods = std.ArrayListUnmanaged(TypeDef.Method){ .items = &.{}, .capacity = 0 };
+        var properties = std.ArrayListUnmanaged(TypeDef.Property){ .items = &.{}, .capacity = 0 };
+        var constants = std.ArrayListUnmanaged(TypeDef.Constant){ .items = &.{}, .capacity = 0 };
+        var traits = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
+        var trait_adaptations = std.ArrayListUnmanaged(TypeDef.TraitAdaptation){ .items = &.{}, .capacity = 0 };
 
         const type_def = try self.allocator.create(TypeDef);
         type_def.* = .{
@@ -1981,7 +1981,7 @@ pub const IRGenerator = struct {
             },
             .union_type => {
                 // 拼接 union type: "int|string"
-                var buf = std.ArrayListUnmanaged(u8){};
+                var buf = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
                 for (type_node.data.union_type.types, 0..) |t, i| {
                     if (i > 0) buf.append(self.allocator, '|') catch {};
                     const sub = self.resolveTypeNodeToString(t);
@@ -1998,7 +1998,7 @@ pub const IRGenerator = struct {
             },
             .intersection_type => {
                 // 拼接 intersection type: "Countable&Traversable"
-                var buf = std.ArrayListUnmanaged(u8){};
+                var buf = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
                 for (type_node.data.intersection_type.types, 0..) |t, i| {
                     if (i > 0) buf.append(self.allocator, '&') catch {};
                     const sub = self.resolveTypeNodeToString(t);
@@ -2017,9 +2017,9 @@ pub const IRGenerator = struct {
         // 统计参数信息
         var param_count: u16 = 0;
         var required_params: u16 = 0;
-        var param_name_list = std.ArrayListUnmanaged([]const u8){};
-        var param_type_list = std.ArrayListUnmanaged([]const u8){};
-        var param_nullable_list = std.ArrayListUnmanaged(bool){};
+        var param_name_list = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
+        var param_type_list = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
+        var param_nullable_list = std.ArrayListUnmanaged(bool){ .items = &.{}, .capacity = 0 };
         for (method_data.params) |param_idx| {
             if (self.getNode(param_idx)) |param_node| {
                 if (param_node.tag == .parameter) {
@@ -2087,7 +2087,7 @@ pub const IRGenerator = struct {
     ) !TypeDef.TraitAdaptation {
         return switch (adaptation) {
             .insteadof => |data| blk: {
-                var excluded_traits = std.ArrayListUnmanaged([]const u8){};
+                var excluded_traits = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
                 for (data.excluded_traits) |excluded_trait_id| {
                     try excluded_traits.append(
                         self.allocator,
@@ -2179,9 +2179,9 @@ pub const IRGenerator = struct {
 
             self.current_function = func;
             self.current_class = class_name;
-            self.var_registers = .{};
+            self.var_registers = .{ .items = &.{}, .capacity = 0 };
             self.ref_vars.clearRetainingCapacity(); // 清空引用变量集合（foreach &$v）
-            self.entry_allocas = .{};
+            self.entry_allocas = .{ .items = &.{}, .capacity = 0 };
             self.block_counter = 0;
 
             const entry = try func.createBlock("entry");
@@ -2772,7 +2772,7 @@ pub const IRGenerator = struct {
             merge_block;
 
         // 为每个case创建基本块
-        var case_blocks = std.ArrayListUnmanaged(*BasicBlock){};
+        var case_blocks = std.ArrayListUnmanaged(*BasicBlock){ .items = &.{}, .capacity = 0 };
         defer case_blocks.deinit(self.allocator);
 
         for (switch_data.cases, 0..) |_, i| {
@@ -2783,7 +2783,7 @@ pub const IRGenerator = struct {
         }
 
         // 构建switch cases数组
-        var ir_cases = std.ArrayListUnmanaged(Terminator.SwitchCase){};
+        var ir_cases = std.ArrayListUnmanaged(Terminator.SwitchCase){ .items = &.{}, .capacity = 0 };
         defer ir_cases.deinit(self.allocator);
         var use_compare_chain = false;
 
@@ -2820,7 +2820,7 @@ pub const IRGenerator = struct {
         }
 
         if (use_compare_chain) {
-            var check_blocks = std.ArrayListUnmanaged(*BasicBlock){};
+            var check_blocks = std.ArrayListUnmanaged(*BasicBlock){ .items = &.{}, .capacity = 0 };
             defer check_blocks.deinit(self.allocator);
 
             for (switch_data.cases, 0..) |_, i| {
@@ -2971,7 +2971,7 @@ pub const IRGenerator = struct {
             }
         } else if (try_data.catch_clauses.len > 1) {
             // 多个 catch：为每个创建独立块，dispatcher 用 exception_matches 分支
-            var catch_blocks_list = std.ArrayListUnmanaged(*BasicBlock){};
+            var catch_blocks_list = std.ArrayListUnmanaged(*BasicBlock){ .items = &.{}, .capacity = 0 };
             defer catch_blocks_list.deinit(self.allocator);
             for (try_data.catch_clauses, 0..) |_, ci| {
                 var buf2: [64]u8 = undefined;
@@ -2986,7 +2986,7 @@ pub const IRGenerator = struct {
                 const cnode = self.getNode(catch_idx) orelse continue;
                 if (cnode.tag != .catch_clause) continue;
                 const cdata = cnode.data.catch_clause;
-                var exc_types: std.ArrayListUnmanaged([]const u8) = .{};
+                var exc_types: std.ArrayListUnmanaged([]const u8) = .{ .items = &.{}, .capacity = 0 };
                 defer exc_types.deinit(self.allocator);
                 
                 if (cdata.exception_type) |type_idx| {
@@ -3061,7 +3061,7 @@ pub const IRGenerator = struct {
                 const cdata2 = cnode2.data.catch_clause;
                 // 如果不是最后一个 catch 且有类型，需要在块入口也检查类型
                 // （因为可能从上一个 catch 的 else_block 直接跳过来）
-                var exc_types2: std.ArrayListUnmanaged([]const u8) = .{};
+                var exc_types2: std.ArrayListUnmanaged([]const u8) = .{ .items = &.{}, .capacity = 0 };
                 defer exc_types2.deinit(self.allocator);
                 
                 if (cdata2.exception_type) |type_idx2| {
@@ -3810,7 +3810,7 @@ pub const IRGenerator = struct {
             .array_init => {
                 // 短语法解构: [$a, $b] = $arr 或嵌套 [[$a,$b],[$c,$d]] = $nested
                 const inner_elements = target_node.data.array_init.elements;
-                var inner_targets = std.ArrayListUnmanaged(Node.Index){};
+                var inner_targets = std.ArrayListUnmanaged(Node.Index){ .items = &.{}, .capacity = 0 };
                 defer inner_targets.deinit(self.allocator);
                 for (inner_elements) |elem_idx| {
                     const elem_node = self.getNode(elem_idx) orelse continue;
@@ -5587,7 +5587,7 @@ pub const IRGenerator = struct {
 
         // Generate arguments (positional + named)
         var has_named: bool = false;
-        var positional_args = std.ArrayListUnmanaged(Node.Index){};
+        var positional_args = std.ArrayListUnmanaged(Node.Index){ .items = &.{}, .capacity = 0 };
         defer positional_args.deinit(self.allocator);
         var named_args = std.StringHashMapUnmanaged(Node.Index){};
         defer named_args.deinit(self.allocator);
@@ -5606,7 +5606,7 @@ pub const IRGenerator = struct {
         var args: []Register = &[_]Register{};
 
         // 记录需要写回的全局变量（用于引用参数）
-        var ref_writebacks = std.ArrayListUnmanaged(struct { var_name: []const u8, temp_reg: Register }){};
+        var ref_writebacks = std.ArrayListUnmanaged(struct { var_name: []const u8, temp_reg: Register }){ .items = &.{}, .capacity = 0 };
         defer ref_writebacks.deinit(self.allocator);
 
         const func_symbol = if (func_name.len > 0) self.symbol_table.lookupFunction(func_name) else null;
@@ -5628,7 +5628,7 @@ pub const IRGenerator = struct {
             // 使用 symbol_table 或 module 中的参数信息
             const use_symbol = func_symbol != null and func_symbol.?.metadata == .function;
             const param_count = if (use_symbol) func_symbol.?.metadata.function.params.len else module_func_params.?.len;
-            var final_args = std.ArrayListUnmanaged(Register){};
+            var final_args = std.ArrayListUnmanaged(Register){ .items = &.{}, .capacity = 0 };
             defer final_args.deinit(self.allocator);
             try final_args.ensureTotalCapacity(self.allocator, param_count + positional_args.items.len);
 
@@ -6316,7 +6316,7 @@ pub const IRGenerator = struct {
         if (has_named) {
             // 需要对命名参数进行重排序
             // 收集位置参数和命名参数
-            var positional_args = std.ArrayListUnmanaged(Node.Index){};
+            var positional_args = std.ArrayListUnmanaged(Node.Index){ .items = &.{}, .capacity = 0 };
             defer positional_args.deinit(self.allocator);
             var named_args = std.StringHashMapUnmanaged(Node.Index){};
             defer named_args.deinit(self.allocator);
@@ -6490,8 +6490,8 @@ pub const IRGenerator = struct {
         const anon_class_name = self.module.?.getString(anon_class_name_sid) orelse return error.StringNotFound;
 
         // 收集成员元数据
-        var methods = std.ArrayListUnmanaged(TypeDef.Method){};
-        var properties = std.ArrayListUnmanaged(TypeDef.Property){};
+        var methods = std.ArrayListUnmanaged(TypeDef.Method){ .items = &.{}, .capacity = 0 };
+        var properties = std.ArrayListUnmanaged(TypeDef.Property){ .items = &.{}, .capacity = 0 };
 
         // 解析父类名称
         const parent_name: ?[]const u8 = if (anon_data.extends) |ext_idx| blk: {
@@ -6505,7 +6505,7 @@ pub const IRGenerator = struct {
         } else null;
 
         // 解析接口名称
-        var iface_list = std.ArrayListUnmanaged([]const u8){};
+        var iface_list = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
         defer iface_list.deinit(self.allocator);
         for (anon_data.implements) |impl_idx| {
             const impl_node = self.getNode(impl_idx) orelse continue;
@@ -6593,7 +6593,7 @@ pub const IRGenerator = struct {
         type_def.properties = try properties.toOwnedSlice(self.allocator);
 
         // 生成构造函数参数
-        var ctor_args = std.ArrayListUnmanaged(Register){};
+        var ctor_args = std.ArrayListUnmanaged(Register){ .items = &.{}, .capacity = 0 };
         defer ctor_args.deinit(self.allocator);
 
         for (anon_data.args) |arg_idx| {
@@ -6632,7 +6632,7 @@ pub const IRGenerator = struct {
         }
 
         var has_named: bool = false;
-        var positional_args = std.ArrayListUnmanaged(Node.Index){};
+        var positional_args = std.ArrayListUnmanaged(Node.Index){ .items = &.{}, .capacity = 0 };
         defer positional_args.deinit(self.allocator);
         var named_args = std.StringHashMapUnmanaged(Node.Index){};
         defer named_args.deinit(self.allocator);
@@ -6661,7 +6661,7 @@ pub const IRGenerator = struct {
             null;
 
         if (has_named and ctor_func != null) {
-            var final_args = std.ArrayListUnmanaged(Register){};
+            var final_args = std.ArrayListUnmanaged(Register){ .items = &.{}, .capacity = 0 };
             defer final_args.deinit(self.allocator);
             try final_args.ensureTotalCapacity(self.allocator, ctor_func.?.params.items.len + positional_args.items.len);
 
@@ -6912,11 +6912,11 @@ pub const IRGenerator = struct {
         const closure_data = node.data.closure;
 
         // 1. Capture variables from parent scope (keep indices dense, handle &capture)
-        var cap_names = std.ArrayListUnmanaged([]const u8){};
+        var cap_names = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
         defer cap_names.deinit(self.allocator);
-        var captures = std.ArrayListUnmanaged(Register){};
+        var captures = std.ArrayListUnmanaged(Register){ .items = &.{}, .capacity = 0 };
         defer captures.deinit(self.allocator);
-        var cap_by_ref = std.ArrayListUnmanaged(bool){};
+        var cap_by_ref = std.ArrayListUnmanaged(bool){ .items = &.{}, .capacity = 0 };
         defer cap_by_ref.deinit(self.allocator);
 
         if (self.current_has_this_param) {
@@ -6929,7 +6929,7 @@ pub const IRGenerator = struct {
         }
 
         // 收集所有捕获节点索引（展开逗号分隔的 binary_expr）
-        var flat_cap_indices = std.ArrayListUnmanaged(Node.Index){};
+        var flat_cap_indices = std.ArrayListUnmanaged(Node.Index){ .items = &.{}, .capacity = 0 };
         defer flat_cap_indices.deinit(self.allocator);
         for (closure_data.captures) |cap_idx| {
             try self.flattenCaptureNode(cap_idx, &flat_cap_indices);
@@ -7020,7 +7020,7 @@ pub const IRGenerator = struct {
         const prev_has_this = self.current_has_this_param;
 
         self.current_function = func;
-        self.var_registers = .{};
+        self.var_registers = .{ .items = &.{}, .capacity = 0 };
         self.ref_vars.clearRetainingCapacity(); // 清空引用变量集合（foreach &$v）
         self.global_vars = .{};
         self.current_has_this_param = false;
@@ -7086,9 +7086,9 @@ pub const IRGenerator = struct {
 
         // Arrow functions are similar to closures but with implicit return and auto-capture.
         // For parity with the interpreter implementation, capture all visible locals from the parent scope.
-        var cap_names = std.ArrayListUnmanaged([]const u8){};
+        var cap_names = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
         defer cap_names.deinit(self.allocator);
-        var captures = std.ArrayListUnmanaged(Register){};
+        var captures = std.ArrayListUnmanaged(Register){ .items = &.{}, .capacity = 0 };
         defer captures.deinit(self.allocator);
 
         for (self.var_registers.items) |entry| {
@@ -7120,7 +7120,7 @@ pub const IRGenerator = struct {
         const prev_has_this = self.current_has_this_param;
 
         self.current_function = func;
-        self.var_registers = .{};
+        self.var_registers = .{ .items = &.{}, .capacity = 0 };
         self.ref_vars.clearRetainingCapacity(); // 清空引用变量集合（foreach &$v）
         self.global_vars = .{};
         self.current_has_this_param = false;
@@ -7222,13 +7222,13 @@ pub const IRGenerator = struct {
         const subject_reg = try self.generateExpression(match_data.expression);
         const merge_block = try self.createBlock("match_merge");
 
-        var phi_incoming = std.ArrayListUnmanaged(Instruction.PhiIncoming){};
+        var phi_incoming = std.ArrayListUnmanaged(Instruction.PhiIncoming){ .items = &.{}, .capacity = 0 };
         defer phi_incoming.deinit(self.allocator);
 
         // 创建检查块和 arm 块
-        var check_blocks = std.ArrayListUnmanaged(*BasicBlock){};
+        var check_blocks = std.ArrayListUnmanaged(*BasicBlock){ .items = &.{}, .capacity = 0 };
         defer check_blocks.deinit(self.allocator);
-        var arm_blocks = std.ArrayListUnmanaged(*BasicBlock){};
+        var arm_blocks = std.ArrayListUnmanaged(*BasicBlock){ .items = &.{}, .capacity = 0 };
         defer arm_blocks.deinit(self.allocator);
 
         for (0..match_data.arms.len) |_| {

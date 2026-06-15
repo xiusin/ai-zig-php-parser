@@ -2,6 +2,7 @@
 //! 
 //! 本模块实现了完整的 PHP 文件系统函数，消除所有简化实现
 //! 符合需求 5.1：实现完整的文件系统函数
+const time_compat = @import("time_compat.zig");
 
 const std = @import("std");
 const types = @import("types.zig");
@@ -201,7 +202,7 @@ pub fn scandirComplete(vm: *VM, args: []const Value) !Value {
     const dir_path = directory.getAsString().data.data;
     
     // 打开目录
-    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch {
+    var dir = std.fs.cwd.openDir(dir_path, .{ .iterate = true }) catch {
         return Value.initBool(false);
     };
     defer dir.close();
@@ -371,7 +372,7 @@ pub fn globFn(vm: *VM, args: []const Value) !Value {
     const file_pattern = std.fs.path.basename(pattern_str);
     
     // 打开目录
-    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch {
+    var dir = std.fs.cwd.openDir(dir_path, .{ .iterate = true }) catch {
         if (flags & 4 != 0) { // GLOB_NOCHECK
             // 返回模式本身
             const php_array = try vm.allocator.create(PHPArray);
@@ -703,7 +704,7 @@ pub fn tempnamFn(vm: *VM, args: []const Value) !Value {
     const prefix_str = prefix.getAsString().data.data;
     
     // 生成随机文件名
-    var prng = std.rand.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
+    var prng = std.rand.DefaultPrng.init(@intCast(time_compat.milliTimestamp()));
     const random = prng.random();
     
     var attempts: u32 = 0;
@@ -718,9 +719,9 @@ pub fn tempnamFn(vm: *VM, args: []const Value) !Value {
         );
         
         // 检查文件是否已存在
-        std.fs.cwd().access(filename, .{}) catch {
+        std.fs.cwd.access(filename, .{}) catch {
             // 文件不存在，创建它
-            const file = std.fs.cwd().createFile(filename, .{}) catch {
+            const file = std.fs.cwd.createFile(filename, .{}) catch {
                 continue;
             };
             file.close();
@@ -746,7 +747,7 @@ pub fn tmpfileFn(vm: *VM, args: []const Value) !Value {
     _ = args;
     
     // 生成临时文件名
-    var prng = std.rand.DefaultPrng.init(@intCast(std.time.milliTimestamp()));
+    var prng = std.rand.DefaultPrng.init(@intCast(time_compat.milliTimestamp()));
     const random = prng.random();
     const random_num = random.int(u32);
     
@@ -758,7 +759,7 @@ pub fn tmpfileFn(vm: *VM, args: []const Value) !Value {
     );
     
     // 创建临时文件
-    const file = std.fs.cwd().createFile(filename, .{}) catch {
+    const file = std.fs.cwd.createFile(filename, .{}) catch {
         return Value.initBool(false);
     };
     

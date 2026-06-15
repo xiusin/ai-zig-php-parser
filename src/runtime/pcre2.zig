@@ -7,8 +7,6 @@ const ArrayKey = types.ArrayKey;
 const gc = @import("gc.zig");
 const exceptions = @import("exceptions.zig");
 const ExceptionFactory = exceptions.ExceptionFactory;
-const c = @cImport({});
-
 // VM 前向声明
 const VM = @import("vm.zig").VM;
 
@@ -382,8 +380,7 @@ pub fn pregMatchAllFn(vm: *VM, args: []const Value) !Value {
     defer pcre_pattern.deinit();
 
     // 临时存储所有匹配
-    var all_matches = std.ArrayListUnmanaged(std.ArrayListUnmanaged([]const u8)){};
-    defer {
+    var all_matches = std.ArrayListUnmanaged(std.ArrayListUnmanaged([]const u8)).empty;    defer {
         for (all_matches.items) |*match_groups| {
             match_groups.deinit(vm.allocator);
         }
@@ -409,7 +406,7 @@ pub fn pregMatchAllFn(vm: *VM, args: []const Value) !Value {
         match_count += 1;
         const ovec = pcre_pattern.getOvector();
 
-        var match_groups = std.ArrayListUnmanaged([]const u8){};
+        var match_groups = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
         var i: usize = 0;
         while (i < @as(usize, @intCast(rc))) : (i += 1) {
             const start = ovec[i * 2];

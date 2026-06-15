@@ -68,7 +68,59 @@ pub var constants: std.StringHashMap(Value) = undefined;
 
 /// 静态变量表（函数名::变量名 -> 值）
 var static_vars: ?std.StringHashMap(Value) = null;
-var static_vars_mutex: std.Thread.Mutex = .{};
+var static_vars_mutex: std.atomic.Mutex = .unlocked;
+
+/// 自旋锁辅助函数（std.atomic.Mutex 没有 lock()，只有 tryLock()）
+inline fn spinLock(m: *std.atomic.Mutex) void {
+    while (!m.tryLock()) std.atomic.spinLoopHint();
+}
+
+/// Zig 0.17 兼容：替代 nanoTimestamp()（已移除）
+/// 使用 clock_gettime(CLOCK_REALTIME) 获取纳秒时间戳（syscall，无需 libc）
+pub inline fn nanoTimestamp() i128 {
+    var ts: std.posix.timespec = undefined;
+    _ = std.posix.system.clock_gettime(.REALTIME, &ts);
+    return @as(i128, @intCast(ts.sec)) * std.time.ns_per_s + @as(i128, @intCast(ts.nsec));
+}
+
+/// Zig 0.17 兼容：替代 unixTimestamp()（已移除）
+/// 返回 Unix 时间戳（秒）（syscall，无需 libc）
+pub inline fn unixTimestamp() i64 {
+    var ts: std.posix.timespec = undefined;
+    _ = std.posix.system.clock_gettime(.REALTIME, &ts);
+    return @intCast(ts.sec);
+}
+
+/// Zig 0.17 兼容：替代 milliTimestamp()（已移除）
+/// 返回自 Unix 纪元以来的毫秒时间戳（syscall，无需 libc）
+pub inline fn milliTimestamp() i64 {
+    return @intCast(@divFloor(nanoTimestamp(), 1_000_000));
+}
+
+/// Zig 0.17 兼容：替代 File.writeAll()（已移除）
+/// 使用 POSIX write() 系统调用直接写入文件描述符（忽略错误，无需 libc）
+pub inline fn fileWriteAll(fd: std.posix.fd_t, data: []const u8) void {
+    _ = std.posix.system.write(fd, data.ptr, data.len);
+}
+
+/// Zig 0.17 兼容：获取 Io 实例（用于 Condition.wait/signal 等 API）
+inline fn getIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
+/// Zig 0.17 兼容：替代 File.writeAll()（可传播错误的版本，无需 libc）
+const WriteError = error{WriteFailed};
+inline fn tryFileWriteAll(fd: std.posix.fd_t, data: []const u8) WriteError!void {
+    const result = std.posix.system.write(fd, data.ptr, data.len);
+    if (result < 0) return error.WriteFailed;
+}
+
+/// Zig 0.17 兼容：替代 std.process.getEnvVarOwned()（已移除）
+/// 简化实现：AOT 模式下直接返回 null（不支持运行时环境变量查询）
+pub inline fn getEnvVar(name: [*:0]const u8) ?[]const u8 {
+    _ = name;
+    return null;
+}
 
 var array_internal_pointers: ?std.AutoHashMap(*PHPArray, usize) = null;
 const StaticStringEntry = struct {
@@ -115,7 +167,7 @@ const StaticStringEntry = struct {
 };
 
 var static_string_pool: ?std.StringHashMap(*StaticStringEntry) = null;
-var static_string_entries: std.ArrayListUnmanaged(*StaticStringEntry) = .{};
+var static_string_entries: std.ArrayListUnmanaged(*StaticStringEntry) = .{ .items = &.{}, .capacity = 0 };
 var php_string_pool: ?std.heap.MemoryPool(PHPString) = null;
 var php_array_pool: ?std.heap.MemoryPool(PHPArray) = null;
 var php_closure_pool: ?std.heap.MemoryPool(PHPClosure) = null;
@@ -239,7 +291,7 @@ var stats_allocator: StatsAllocator = undefined;
 const GCColor = enum(u2) { white = 0, gray = 1, black = 2, purple = 3 };
 const GCInfo = packed struct { color: GCColor = .white, buffered: bool = false };
 const CycleRoot = union(enum) { array: *PHPArray, object: *PHPObject, closure: *PHPClosure };
-var cycle_roots: std.ArrayListUnmanaged(CycleRoot) = .{};
+var cycle_roots: std.ArrayListUnmanaged(CycleRoot) = .{ .items = &.{}, .capacity = 0 };
 var gc_in_progress: bool = false;
 var gc_enabled: bool = true;
 var gc_release_events: usize = 0;
@@ -271,7 +323,7 @@ pub fn restoreCurrentCallArgs(prev: ?[]const Value) void {
 }
 
 fn allocPHPString(allocator: Allocator) !*PHPString {
-    if (php_string_pool) |*p| return p.create();
+    if (php_string_pool) |*p| return p.create(allocator);
     return try allocator.create(PHPString);
 }
 
@@ -284,7 +336,7 @@ fn destroyPHPString(str: *PHPString, allocator: Allocator) void {
 }
 
 fn allocPHPArray(allocator: Allocator) !*PHPArray {
-    if (php_array_pool) |*p| return p.create();
+    if (php_array_pool) |*p| return p.create(allocator);
     return try allocator.create(PHPArray);
 }
 
@@ -297,7 +349,7 @@ fn destroyPHPArray(arr: *PHPArray, allocator: Allocator) void {
 }
 
 fn allocPHPClosure(allocator: Allocator) !*PHPClosure {
-    if (php_closure_pool) |*p| return p.create();
+    if (php_closure_pool) |*p| return p.create(allocator);
     return try allocator.create(PHPClosure);
 }
 
@@ -352,7 +404,7 @@ fn deltaU64(current: u64, base: u64) u64 {
 }
 
 /// 初始化运行时
-pub fn initRuntime(allocator: Allocator) void {
+pub fn initRuntime(allocator: Allocator) !void {
     alloc_counters = .{};
     alloc_baseline = .{};
     stats_allocator = StatsAllocator.init(allocator);
@@ -367,8 +419,8 @@ pub fn initRuntime(allocator: Allocator) void {
     static_vars = std.StringHashMap(Value).init(runtime_allocator);
     array_internal_pointers = std.AutoHashMap(*PHPArray, usize).init(runtime_allocator);
     static_string_pool = std.StringHashMap(*StaticStringEntry).init(runtime_allocator);
-    static_string_entries = .{};
-    cycle_roots = .{};
+    static_string_entries = .{ .items = &.{}, .capacity = 0 };
+    cycle_roots = .{ .items = &.{}, .capacity = 0 };
     gc_in_progress = false;
     gc_enabled = true;
 
@@ -385,9 +437,9 @@ pub fn initRuntime(allocator: Allocator) void {
     gc_release_events = 0;
     current_exception = Value.initNull();
     has_exception = false;
-    php_string_pool = std.heap.MemoryPool(PHPString).init(runtime_allocator);
-    php_array_pool = std.heap.MemoryPool(PHPArray).init(runtime_allocator);
-    php_closure_pool = std.heap.MemoryPool(PHPClosure).init(runtime_allocator);
+    php_string_pool = try std.heap.MemoryPool(PHPString).initCapacity(runtime_allocator, 64);
+    php_array_pool = try std.heap.MemoryPool(PHPArray).initCapacity(runtime_allocator, 64);
+    php_closure_pool = try std.heap.MemoryPool(PHPClosure).initCapacity(runtime_allocator, 16);
     resetAllocStats();
     initPredefinedConstants() catch {};
 }
@@ -660,8 +712,6 @@ pub fn php_handle_uncaught_exception() void {
             message = ex.asString().data;
         }
 
-        const stdout = std.fs.File{ .handle = 1 };
-        const stderr = std.fs.File{ .handle = 2 };
         // PHP 输出顺序：先 stderr，再 stdout
         var ebuf: [1024]u8 = undefined;
         const emsg = std.fmt.bufPrint(
@@ -671,7 +721,7 @@ pub fn php_handle_uncaught_exception() void {
                 "  thrown in {s} on line {d}\n",
             .{ class_name, message, src_file, src_line, src_file, src_line },
         ) catch "";
-        stderr.writeAll(emsg) catch {};
+        fileWriteAll(2, emsg);
         var buf: [1024]u8 = undefined;
         const msg = std.fmt.bufPrint(
             &buf,
@@ -680,7 +730,7 @@ pub fn php_handle_uncaught_exception() void {
                 "  thrown in {s} on line {d}\n",
             .{ class_name, message, src_file, src_line, src_file, src_line },
         ) catch "";
-        stdout.writeAll(msg) catch {};
+        fileWriteAll(1, msg);
         std.process.exit(255);
     }
 }
@@ -716,14 +766,14 @@ pub fn deinitRuntime() void {
     // 跳过循环收集，避免 iterator 整数溢出问题
     // gcCollectCycles(true);
     cycle_roots.deinit(runtime_allocator);
-    cycle_roots = .{};
+    cycle_roots = .{ .items = &.{}, .capacity = 0 };
     // std.debug.print("deinitRuntime: cleaning up {d} static strings\n", .{static_string_entries.items.len});
     for (static_string_entries.items) |e| {
         // std.debug.print("deinitRuntime: cleaning static string: {s}\n", .{e.php.data});
         e.deinit(runtime_allocator);
     }
     static_string_entries.deinit(runtime_allocator);
-    static_string_entries = .{};
+    static_string_entries = .{ .items = &.{}, .capacity = 0 };
     if (static_string_pool) |*pool| {
         pool.deinit();
         static_string_pool = null;
@@ -733,15 +783,15 @@ pub fn deinitRuntime() void {
         array_internal_pointers = null;
     }
     if (php_string_pool) |*p| {
-        p.deinit();
+        p.deinit(runtime_allocator);
         php_string_pool = null;
     }
     if (php_array_pool) |*p| {
-        p.deinit();
+        p.deinit(runtime_allocator);
         php_array_pool = null;
     }
     if (php_closure_pool) |*p| {
-        p.deinit();
+        p.deinit(runtime_allocator);
         php_closure_pool = null;
     }
 }
@@ -762,8 +812,6 @@ pub fn registerUserFunctionWithLocation(name: []const u8, func: *const fn (ctx: 
                     prev_line = loc.line;
                 }
             }
-            const stdout = std.fs.File{ .handle = 1 };
-            const stderr = std.fs.File{ .handle = 2 };
             // PHP 输出顺序：先 stderr，再 stdout
             var ebuf: [1024]u8 = undefined;
             const emsg = std.fmt.bufPrint(
@@ -771,14 +819,14 @@ pub fn registerUserFunctionWithLocation(name: []const u8, func: *const fn (ctx: 
                 "PHP Fatal error:  Cannot redeclare function {s}() (previously declared in {s}:{d}) in {s} on line {d}\n",
                 .{ name, prev_file, prev_line, file, line },
             ) catch "";
-            stderr.writeAll(emsg) catch {};
+            fileWriteAll(2, emsg);
             var buf: [1024]u8 = undefined;
             const msg = std.fmt.bufPrint(
                 &buf,
                 "\nFatal error: Cannot redeclare function {s}() (previously declared in {s}:{d}) in {s} on line {d}\n",
                 .{ name, prev_file, prev_line, file, line },
             ) catch "";
-            stdout.writeAll(msg) catch {};
+            fileWriteAll(1, msg);
             std.process.exit(255);
         }
         try registry.put(name, func);
@@ -846,7 +894,7 @@ fn gcCollectCycles(force: bool) usize {
     for (items) |r| gcMarkGray(r);
     for (items) |r| gcScan(r);
 
-    var white_items: std.ArrayListUnmanaged(CycleRoot) = .{};
+    var white_items: std.ArrayListUnmanaged(CycleRoot) = .{ .items = &.{}, .capacity = 0 };
     defer white_items.deinit(runtime_allocator);
     var seen_arrays = std.AutoHashMap(*PHPArray, void).init(runtime_allocator);
     defer seen_arrays.deinit();
@@ -1678,8 +1726,8 @@ pub const PHPArray = struct {
     pub const Elements = struct {
         allocator: Allocator,
         parent: ?*PHPArray = null, // 父数组引用
-        packed_values: std.ArrayListUnmanaged(Value) = .{},
-        mixed: ?std.ArrayHashMap(ArrayKey, Value, ArrayContext, true) = null,
+        packed_values: std.ArrayListUnmanaged(Value) = .{ .items = &.{}, .capacity = 0 },
+        mixed: ?std.ArrayHashMapUnmanaged(ArrayKey, Value, ArrayContext, true) = null,
 
         pub const Entry = struct { key_ptr: *const ArrayKey, value_ptr: *const Value };
 
@@ -1688,7 +1736,7 @@ pub const PHPArray = struct {
             index: usize = 0,
             key: ArrayKey = .{ .integer = 0 },
             value: Value = Value.initNull(),
-            mixed_it: ?std.ArrayHashMap(ArrayKey, Value, ArrayContext, true).Iterator = null,
+            mixed_it: ?std.ArrayHashMapUnmanaged(ArrayKey, Value, ArrayContext, true).Iterator = null,
 
             pub fn next(self: *Iterator) ?Entry {
                 if (self.mixed_it) |*it| {
@@ -1708,8 +1756,8 @@ pub const PHPArray = struct {
             return .{ .allocator = allocator };
         }
 
-        pub fn initMixed(allocator: Allocator, map: std.ArrayHashMap(ArrayKey, Value, ArrayContext, true)) Elements {
-            return .{ .allocator = allocator, .packed_values = .{}, .mixed = map };
+        pub fn initMixed(allocator: Allocator, map: std.ArrayHashMapUnmanaged(ArrayKey, Value, ArrayContext, true)) Elements {
+            return .{ .allocator = allocator, .packed_values = .{ .items = &.{}, .capacity = 0 }, .mixed = map };
         }
 
         pub fn count(self: *const Elements) usize {
@@ -1720,7 +1768,7 @@ pub const PHPArray = struct {
         /// 检查是否包含字符串键（关联数组）
         pub fn hasStringKeys(self: *const Elements) bool {
             const m = self.mixed orelse return false;
-            const keys = m.unmanaged.entries.items(.key);
+            const keys = m.entries.items(.key);
             for (keys) |k| {
                 if (k == .string) return true;
             }
@@ -1729,14 +1777,9 @@ pub const PHPArray = struct {
 
         pub fn iterator(self: *const Elements) Iterator {
             if (self.mixed) |*m| {
-                // 安全检查：直接检查unmanaged的entries
-                const unmanaged = &m.unmanaged;
-
-                // 如果entries的capacity异常，说明HashMap被破坏
-                // 这通常是由于use-after-free导致的
-                if (unmanaged.entries.capacity > 10_000_000) {
+                // 安全检查：检查entries的capacity
+                if (m.entries.capacity > 10_000_000) {
                     // HashMap被破坏，返回空迭代器
-                    // 注意：这会导致foreach跳过所有元素，但至少不会crash
                     return .{ .elements = self };
                 }
 
@@ -1758,14 +1801,14 @@ pub const PHPArray = struct {
 
         fn convertToMixed(self: *Elements) !void {
             if (self.mixed != null) return;
-            var map = std.ArrayHashMap(ArrayKey, Value, ArrayContext, true).init(self.allocator);
+            var map = std.ArrayHashMapUnmanaged(ArrayKey, Value, ArrayContext, true){};
             for (self.packed_values.items, 0..) |v, idx| {
                 const retained = v.retain();
                 _ = retained;
-                try map.put(.{ .integer = @intCast(idx) }, v);
+                try map.put(self.allocator, .{ .integer = @intCast(idx) }, v);
             }
             self.packed_values.deinit(self.allocator);
-            self.packed_values = .{};
+            self.packed_values = .{ .items = &.{}, .capacity = 0 };
             self.mixed = map;
         }
 
@@ -1778,7 +1821,7 @@ pub const PHPArray = struct {
             }
 
             if (self.mixed) |*m| {
-                try m.put(key, value);
+                try m.put(self.allocator, key, value);
                 return;
             }
             if (key == .integer) {
@@ -1796,7 +1839,7 @@ pub const PHPArray = struct {
                 }
             }
             try self.convertToMixed();
-            try self.mixed.?.put(key, value);
+            try self.mixed.?.put(self.allocator, key, value);
         }
 
         pub fn orderedRemove(self: *Elements, key: ArrayKey) bool {
@@ -1826,11 +1869,11 @@ pub const PHPArray = struct {
 
         pub fn deinit(self: *Elements) void {
             if (self.mixed) |*m| {
-                m.deinit();
+                m.deinit(self.allocator);
                 self.mixed = null;
             }
             self.packed_values.deinit(self.allocator);
-            self.packed_values = .{};
+            self.packed_values = .{ .items = &.{}, .capacity = 0 };
         }
     };
 
@@ -2785,7 +2828,7 @@ pub fn php_create_closure(name: Value, captures: Value, is_static_val: Value, al
 
     // Convert PHPArray to []Value slice
     // We need to iterate the array.
-    var cap_list = std.ArrayListUnmanaged(Value){};
+    var cap_list = std.ArrayListUnmanaged(Value){ .items = &.{}, .capacity = 0 };
     defer cap_list.deinit(allocator);
 
     // Assuming captures is a list (indexed 0..N)
@@ -3133,8 +3176,7 @@ pub fn php_system(args: []const Value, allocator: Allocator) !Value {
     
     // 输出到stdout（模拟PHP的system行为）
     if (result.stdout.len > 0) {
-        const stdout_file = std.fs.File{ .handle = 1 };
-        stdout_file.writeAll(result.stdout) catch {};
+        fileWriteAll(1, result.stdout);
     }
     
     // 如果有第二个参数（&$return_var引用），写回返回码
@@ -3318,15 +3360,15 @@ pub fn php_substr_replace(args: []const Value, allocator: Allocator) !Value {
     
     // 构建结果字符串
     var result = try std.ArrayList(u8).initCapacity(allocator, str.len + replacement.len);
-    errdefer result.deinit(allocator);
+    errdefer result.deinit();
     
-    try result.appendSlice(allocator, str[0..start_idx]);
-    try result.appendSlice(allocator, replacement);
+    try result.appendSlice(str[0..start_idx]);
+    try result.appendSlice(replacement);
     if (end_idx < str.len) {
-        try result.appendSlice(allocator, str[end_idx..]);
+        try result.appendSlice(str[end_idx..]);
     }
     
-    const output = try PHPString.init(allocator, try result.toOwnedSlice(allocator));
+    const output = try PHPString.init(allocator, try result.toOwnedSlice());
     return Value.initString(output);
 }
 
@@ -3346,9 +3388,9 @@ pub fn php_file_put_contents(filename: Value, data: Value, allocator: Allocator)
         break :blk temp.data;
     };
     
-    const file = std.fs.cwd().createFile(fname, .{}) catch return Value.initBool(false);
-    defer file.close();
-    file.writeAll(content_str) catch return Value.initBool(false);
+    const file = std.Io.Dir.cwd().createFile(getIo(), fname, .{}) catch return Value.initBool(false);
+    defer file.close(getIo());
+    fileWriteAll(file.handle, content_str);
     return Value.initInt(@intCast(content_str.len));
 }
 
@@ -3356,7 +3398,7 @@ pub fn php_file_get_contents(filename: Value, allocator: Allocator) !Value {
     if (!filename.isString()) return Value.initBool(false);
     const fname = filename.asString().data;
     
-    const content = std.fs.cwd().readFileAlloc(allocator, fname, 10 * 1024 * 1024) catch return Value.initBool(false);
+    const content = std.Io.Dir.cwd().readFileAlloc(getIo(), fname, allocator, 10 * 1024 * 1024) catch return Value.initBool(false);
     const output = try PHPString.init(allocator, content);
     return Value.initString(output);
 }
@@ -3372,15 +3414,15 @@ pub fn php_fopen(filename: Value, mode: Value, allocator: Allocator) !Value {
     }
     
     const file = if (std.mem.eql(u8, fmode, "r"))
-        std.fs.cwd().openFile(fname, .{}) catch return Value.initBool(false)
+        std.Io.Dir.cwd().openFile(getIo(), fname, .{}) catch return Value.initBool(false)
     else if (std.mem.eql(u8, fmode, "w"))
-        std.fs.cwd().createFile(fname, .{}) catch return Value.initBool(false)
+        std.Io.Dir.cwd().createFile(getIo(), fname, .{}) catch return Value.initBool(false)
     else if (std.mem.eql(u8, fmode, "a"))
-        std.fs.cwd().createFile(fname, .{ .truncate = false }) catch return Value.initBool(false)
+        std.Io.Dir.cwd().createFile(getIo(), fname, .{ .truncate = false }) catch return Value.initBool(false)
     else
         return Value.initBool(false);
     
-    const handle = allocator.create(std.fs.File) catch return Value.initBool(false);
+    const handle = allocator.create(std.Io.File) catch return Value.initBool(false);
     handle.* = file;
     return Value.initInt(@intCast(@intFromPtr(handle)));
 }
@@ -3390,14 +3432,14 @@ pub fn php_fwrite(handle: Value, data: Value, allocator: Allocator) !Value {
     const handle_ptr = handle.asInt();
     if (handle_ptr <= 1) return Value.initInt(0); // 虚拟句柄
     
-    const file_handle: *std.fs.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
+    const file_handle: *std.Io.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
     const content = if (data.isString()) data.asString().data else blk: {
         const temp = try data.toString(allocator);
         defer temp.release(allocator);
         break :blk temp.data;
     };
     
-    file_handle.writeAll(content) catch return Value.initBool(false);
+    fileWriteAll(file_handle.handle, content);
     return Value.initInt(@intCast(content.len));
 }
 
@@ -3406,7 +3448,7 @@ pub fn php_fread(handle: Value, length: Value, allocator: Allocator) !Value {
     const handle_ptr = handle.asInt();
     if (handle_ptr <= 1) return Value.initString(try PHPString.init(allocator, try allocator.dupe(u8, ""))); // 虚拟句柄
     
-    const file_handle: *std.fs.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
+    const file_handle: *std.Io.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
     const len = length.asInt();
     
     const buffer = allocator.alloc(u8, @intCast(len)) catch return Value.initBool(false);
@@ -3428,8 +3470,8 @@ pub fn php_fclose(handle: Value) !Value {
     const handle_ptr = handle.asInt();
     if (handle_ptr <= 1) return Value.initBool(true); // 虚拟句柄
     
-    const file_handle: *std.fs.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
-    file_handle.close();
+    const file_handle: *std.Io.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
+    file_handle.close(getIo());
     return Value.initBool(true);
 }
 
@@ -3446,7 +3488,7 @@ pub fn php_fgets(handle: Value) !Value {
     const handle_ptr = handle.asInt();
     if (handle_ptr <= 1) return Value.initBool(false);
     
-    const file_handle: *std.fs.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
+    const file_handle: *std.Io.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
     var buf: [4096]u8 = undefined;
     var pos: usize = 0;
     
@@ -3470,7 +3512,7 @@ pub fn php_fseek(handle: Value, offset: Value) !Value {
     const handle_ptr = handle.asInt();
     if (handle_ptr <= 1) return Value.initInt(-1);
     
-    const file_handle: *std.fs.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
+    const file_handle: *std.Io.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
     const off = offset.asInt();
     file_handle.seekTo(@intCast(off)) catch return Value.initInt(-1);
     return Value.initInt(0);
@@ -3480,8 +3522,8 @@ pub fn php_scandir(dir: Value, allocator: Allocator) !Value {
     if (!dir.isString()) return Value.initBool(false);
     const dirname = dir.asString().data;
     
-    var dir_handle = std.fs.cwd().openDir(dirname, .{ .iterate = true }) catch return Value.initBool(false);
-    defer dir_handle.close();
+    var dir_handle = std.Io.Dir.cwd().openDir(getIo(), dirname, .{ .iterate = true }) catch return Value.initBool(false);
+    defer dir_handle.close(getIo());
     
     var arr = try PHPArray.init(allocator);
     var iter = dir_handle.iterate();
@@ -3498,7 +3540,7 @@ pub fn php_scandir(dir: Value, allocator: Allocator) !Value {
 // ============================================================================
 
 pub fn php_getcwd(allocator: Allocator) !Value {
-    const cwd = std.fs.cwd().realpathAlloc(allocator, ".") catch return Value.initBool(false);
+    const cwd = std.Io.Dir.cwd().realpathAlloc(allocator, ".") catch return Value.initBool(false);
     const output = try PHPString.init(allocator, cwd);
     return Value.initString(output);
 }
@@ -3525,47 +3567,47 @@ pub fn php_uname(allocator: Allocator) !Value {
 pub fn php_unlink(filename: Value) !Value {
     if (!filename.isString()) return Value.initBool(false);
     const fname = filename.asString().data;
-    std.fs.cwd().deleteFile(fname) catch return Value.initBool(false);
+    std.Io.Dir.cwd().deleteFile(fname) catch return Value.initBool(false);
     return Value.initBool(true);
 }
 
 pub fn php_filesize(filename: Value) !Value {
     if (!filename.isString()) return Value.initBool(false);
     const fname = filename.asString().data;
-    const file = std.fs.cwd().openFile(fname, .{}) catch return Value.initBool(false);
-    defer file.close();
-    const stat = file.stat() catch return Value.initBool(false);
+    const file = std.Io.Dir.cwd().openFile(getIo(), fname, .{}) catch return Value.initBool(false);
+    defer file.close(getIo());
+    const stat = file.stat(getIo()) catch return Value.initBool(false);
     return Value.initInt(@intCast(stat.size));
 }
 
 pub fn php_is_file(filename: Value) !Value {
     if (!filename.isString()) return Value.initBool(false);
     const fname = filename.asString().data;
-    const stat = std.fs.cwd().statFile(fname) catch return Value.initBool(false);
+    const stat = std.Io.Dir.cwd().statFile(getIo(), fname, .{}) catch return Value.initBool(false);
     return Value.initBool(stat.kind == .file);
 }
 
 pub fn php_is_dir(filename: Value) !Value {
     if (!filename.isString()) return Value.initBool(false);
     const fname = filename.asString().data;
-    var dir = std.fs.cwd().openDir(fname, .{}) catch return Value.initBool(false);
-    dir.close();
+    var dir = std.Io.Dir.cwd().openDir(getIo(), fname, .{}) catch return Value.initBool(false);
+    dir.close(getIo());
     return Value.initBool(true);
 }
 
 pub fn php_is_readable(filename: Value) !Value {
     if (!filename.isString()) return Value.initBool(false);
     const fname = filename.asString().data;
-    const file = std.fs.cwd().openFile(fname, .{}) catch return Value.initBool(false);
-    file.close();
+    const file = std.Io.Dir.cwd().openFile(getIo(), fname, .{}) catch return Value.initBool(false);
+    file.close(getIo());
     return Value.initBool(true);
 }
 
 pub fn php_is_writable(filename: Value) !Value {
     if (!filename.isString()) return Value.initBool(false);
     const fname = filename.asString().data;
-    const file = std.fs.cwd().createFile(fname, .{ .truncate = false }) catch return Value.initBool(false);
-    file.close();
+    const file = std.Io.Dir.cwd().createFile(getIo(), fname, .{ .truncate = false }) catch return Value.initBool(false);
+    file.close(getIo());
     return Value.initBool(true);
 }
 
@@ -3573,31 +3615,31 @@ pub fn php_is_writable(filename: Value) !Value {
 pub fn php_filemtime(filename: Value) !Value {
     if (!filename.isString()) return Value.initBool(false);
     const fname = filename.asString().data;
-    const file = std.fs.cwd().openFile(fname, .{}) catch return Value.initBool(false);
-    defer file.close();
-    const stat = file.stat() catch return Value.initBool(false);
+    const file = std.Io.Dir.cwd().openFile(getIo(), fname, .{}) catch return Value.initBool(false);
+    defer file.close(getIo());
+    const stat = file.stat(getIo()) catch return Value.initBool(false);
     // 返回Unix时间戳
-    return Value.initInt(@intCast(stat.mtime));
+    return Value.initInt(@intCast(std.Io.Timestamp.toSeconds(stat.mtime)));
 }
 
 /// fileatime - 获取文件访问时间
 pub fn php_fileatime(filename: Value) !Value {
     if (!filename.isString()) return Value.initBool(false);
     const fname = filename.asString().data;
-    const file = std.fs.cwd().openFile(fname, .{}) catch return Value.initBool(false);
-    defer file.close();
-    const stat = file.stat() catch return Value.initBool(false);
-    return Value.initInt(@intCast(stat.atime));
+    const file = std.Io.Dir.cwd().openFile(getIo(), fname, .{}) catch return Value.initBool(false);
+    defer file.close(getIo());
+    const stat = file.stat(getIo()) catch return Value.initBool(false);
+    return Value.initInt(@intCast(if (stat.atime) |a| std.Io.Timestamp.toSeconds(a) else 0));
 }
 
 /// filectime - 获取文件创建时间（Unix下为inode修改时间）
 pub fn php_filectime(filename: Value) !Value {
     if (!filename.isString()) return Value.initBool(false);
     const fname = filename.asString().data;
-    const file = std.fs.cwd().openFile(fname, .{}) catch return Value.initBool(false);
-    defer file.close();
-    const stat = file.stat() catch return Value.initBool(false);
-    return Value.initInt(@intCast(stat.ctime));
+    const file = std.Io.Dir.cwd().openFile(getIo(), fname, .{}) catch return Value.initBool(false);
+    defer file.close(getIo());
+    const stat = file.stat(getIo()) catch return Value.initBool(false);
+    return Value.initInt(@intCast(std.Io.Timestamp.toSeconds(stat.ctime)));
 }
 
 // ============================================================================
@@ -3732,7 +3774,7 @@ pub fn php_file(filename: Value, allocator: Allocator) !Value {
     if (!filename.isString()) return Value.initBool(false);
     const fname = filename.asString().data;
     
-    const content = std.fs.cwd().readFileAlloc(allocator, fname, 10 * 1024 * 1024) catch return Value.initBool(false);
+    const content = std.Io.Dir.cwd().readFileAlloc(getIo(), fname, allocator, 10 * 1024 * 1024) catch return Value.initBool(false);
     defer allocator.free(content);
     
     const arr = try PHPArray.init(allocator);
@@ -3976,7 +4018,7 @@ fn wrapBuiltin_forward_static_call_array(ctx: Value, args: []const Value, alloca
     if (!args[1].isArray()) return error.InvalidArgument;
 
     const arr = args[1].asArray();
-    var list = std.ArrayListUnmanaged(Value){};
+    var list = std.ArrayListUnmanaged(Value){ .items = &.{}, .capacity = 0 };
     defer list.deinit(allocator);
 
     var iter = arr.elements.iterator();
@@ -4299,7 +4341,7 @@ fn php_select(args: []const Value, allocator: Allocator) !Value {
     }
 
     const array = cases_arg.asArray();
-    const start_time = std.time.milliTimestamp();
+    const start_time = milliTimestamp();
 
     while (true) {
         var iter = array.elements.iterator();
@@ -4341,7 +4383,7 @@ fn php_select(args: []const Value, allocator: Allocator) !Value {
         }
 
         if (timeout) |t| {
-            if (std.time.milliTimestamp() - start_time >= t) {
+            if (milliTimestamp() - start_time >= t) {
                 return Value.initNull();
             }
         }
@@ -4548,7 +4590,7 @@ pub fn php_object_call_named_args(obj_val: Value, method_name_val: Value, args_a
     _ = meta.findMethod(method_name) orelse return throwException("Call to undefined method", allocator);
 
     // 收集位置参数（整数键，按顺序）
-    var positional = std.ArrayListUnmanaged(Value){};
+    var positional = std.ArrayListUnmanaged(Value){ .items = &.{}, .capacity = 0 };
     defer positional.deinit(allocator);
     var pos_idx: usize = 0;
     while (true) : (pos_idx += 1) {
@@ -4841,8 +4883,6 @@ pub fn emitWarning(msg: []const u8) void {
     // @操作符：错误抑制时不输出警告
     if (isErrorSuppressed()) return;
 
-    const stdout = std.fs.File{ .handle = 1 };
-    const stderr = std.fs.File{ .handle = 2 };
     // PHP 输出顺序：先 stderr（PHP Warning:），再 stdout（Warning:）
     var ebuf: [1024]u8 = undefined;
     const emsg = std.fmt.bufPrint(
@@ -4850,19 +4890,17 @@ pub fn emitWarning(msg: []const u8) void {
         "PHP Warning:  {s} in {s} on line {d}\n",
         .{ msg, src_file, src_line },
     ) catch "";
-    stderr.writeAll(emsg) catch {};
+    fileWriteAll(2, emsg);
     var buf: [1024]u8 = undefined;
     const wmsg = std.fmt.bufPrint(
         &buf,
         "\nWarning: {s} in {s} on line {d}\n",
         .{ msg, src_file, src_line },
     ) catch "";
-    stdout.writeAll(wmsg) catch {};
+    fileWriteAll(1, wmsg);
 }
 
 pub fn emitDeprecatedStrGetcsvEscape() void {
-    const stdout = std.fs.File{ .handle = 1 };
-    const stderr = std.fs.File{ .handle = 2 };
     // PHP 输出顺序：先 stderr，再 stdout
     var ebuf: [1024]u8 = undefined;
     const emsg = std.fmt.bufPrint(
@@ -4870,19 +4908,17 @@ pub fn emitDeprecatedStrGetcsvEscape() void {
         "PHP Deprecated:  str_getcsv(): the $escape parameter must be provided as its default value will change in {s} on line {d}\n",
         .{ src_file, src_line },
     ) catch "";
-    stderr.writeAll(emsg) catch {};
+    fileWriteAll(2, emsg);
     var buf: [1024]u8 = undefined;
     const wmsg = std.fmt.bufPrint(
         &buf,
         "\nDeprecated: str_getcsv(): the $escape parameter must be provided as its default value will change in {s} on line {d}\n",
         .{ src_file, src_line },
     ) catch "";
-    stdout.writeAll(wmsg) catch {};
+    fileWriteAll(1, wmsg);
 }
 
 pub fn emitUndefinedVariableWarning(name: []const u8) void {
-    const stdout = std.fs.File{ .handle = 1 };
-    const stderr = std.fs.File{ .handle = 2 };
     // PHP 输出顺序：先 stderr，再 stdout
     var ebuf: [1024]u8 = undefined;
     const emsg = std.fmt.bufPrint(
@@ -4890,14 +4926,14 @@ pub fn emitUndefinedVariableWarning(name: []const u8) void {
         "PHP Warning:  Undefined variable {s} in {s} on line {d}\n",
         .{ name, src_file, src_line },
     ) catch "";
-    stderr.writeAll(emsg) catch {};
+    fileWriteAll(2, emsg);
     var buf: [1024]u8 = undefined;
     const wmsg = std.fmt.bufPrint(
         &buf,
         "\nWarning: Undefined variable {s} in {s} on line {d}\n",
         .{ name, src_file, src_line },
     ) catch "";
-    stdout.writeAll(wmsg) catch {};
+    fileWriteAll(1, wmsg);
 }
 
 /// 输出 Unsupported operand types TypeError 并终止
@@ -4906,8 +4942,6 @@ fn emitUnsupportedOperandError(
     rhs: Value,
     op: []const u8,
 ) noreturn {
-    const stdout = std.fs.File{ .handle = 1 };
-    const stderr = std.fs.File{ .handle = 2 };
     const ltype = valueTypeName(lhs);
     const rtype = valueTypeName(rhs);
     // PHP 输出顺序：先 stderr，再 stdout
@@ -4926,7 +4960,7 @@ fn emitUnsupportedOperandError(
     ) catch {
         std.process.exit(255);
     };
-    stderr.writeAll(emsg) catch {};
+    fileWriteAll(2, emsg);
     var buf: [1024]u8 = undefined;
     const msg = std.fmt.bufPrint(
         &buf,
@@ -4940,10 +4974,10 @@ fn emitUnsupportedOperandError(
             src_line,
         },
     ) catch {
-        stdout.writeAll("\nFatal error: TypeError\n") catch {};
+        fileWriteAll(1, "\nFatal error: TypeError\n");
         std.process.exit(255);
     };
-    stdout.writeAll(msg) catch {};
+    fileWriteAll(1, msg);
     std.process.exit(255);
 }
 
@@ -4961,8 +4995,6 @@ fn valueTypeName(v: Value) []const u8 {
 
 /// 输出 PHP Fatal TypeError 并终止执行
 fn emitTypeFatalError(func_name: []const u8, arg_num: u32, expected: []const u8, got: []const u8) noreturn {
-    const stdout = std.fs.File{ .handle = 1 };
-    const stderr = std.fs.File{ .handle = 2 };
     // PHP 输出顺序：先 stderr，再 stdout
     var ebuf: [1024]u8 = undefined;
     const stderr_msg = std.fmt.bufPrint(
@@ -4978,7 +5010,7 @@ fn emitTypeFatalError(func_name: []const u8, arg_num: u32, expected: []const u8,
     ) catch {
         std.process.exit(255);
     };
-    stderr.writeAll(stderr_msg) catch {};
+    fileWriteAll(2, stderr_msg);
     var buf: [1024]u8 = undefined;
     const stdout_msg = std.fmt.bufPrint(
         &buf,
@@ -4991,17 +5023,15 @@ fn emitTypeFatalError(func_name: []const u8, arg_num: u32, expected: []const u8,
             src_file,  src_line, src_file, src_line,
         },
     ) catch {
-        stdout.writeAll("\nFatal error: TypeError\n") catch {};
+        fileWriteAll(1, "\nFatal error: TypeError\n");
         std.process.exit(255);
     };
-    stdout.writeAll(stdout_msg) catch {};
+    fileWriteAll(1, stdout_msg);
     std.process.exit(255);
 }
 
 /// 调用未定义函数时输出 PHP Fatal error 并终止执行
 pub fn php_call_undefined_function(name: []const u8) noreturn {
-    const stdout = std.fs.File{ .handle = 1 };
-    const stderr = std.fs.File{ .handle = 2 };
     // PHP 输出顺序：先 stderr，再 stdout
     var ebuf: [1024]u8 = undefined;
     const stderr_msg = std.fmt.bufPrint(
@@ -5013,7 +5043,7 @@ pub fn php_call_undefined_function(name: []const u8) noreturn {
     ) catch {
         std.process.exit(255);
     };
-    stderr.writeAll(stderr_msg) catch {};
+    fileWriteAll(2, stderr_msg);
     var buf: [1024]u8 = undefined;
     const stdout_msg = std.fmt.bufPrint(
         &buf,
@@ -5022,17 +5052,15 @@ pub fn php_call_undefined_function(name: []const u8) noreturn {
             "#0 {{main}}\n  thrown in {s} on line {d}\n",
         .{ name, src_file, src_line, src_file, src_line },
     ) catch {
-        stdout.writeAll("\nFatal error: Call to undefined function\n") catch {};
+        fileWriteAll(1, "\nFatal error: Call to undefined function\n");
         std.process.exit(255);
     };
-    stdout.writeAll(stdout_msg) catch {};
+    fileWriteAll(1, stdout_msg);
     std.process.exit(255);
 }
 
 /// 输出 PHP 8.1+ Deprecated 警告到 stdout（匹配 display_errors=On）
 fn emitDeprecatedFloatToInt(f: f64) void {
-    const stdout = std.fs.File{ .handle = 1 };
-    const stderr = std.fs.File{ .handle = 2 };
     // 警告信息中使用完整精度（PHP serialize_precision），不是 echo 的 precision=14
     var fbuf: [64]u8 = undefined;
     const fstr = std.fmt.bufPrint(&fbuf, "{d}", .{f}) catch "?";
@@ -5045,7 +5073,7 @@ fn emitDeprecatedFloatToInt(f: f64) void {
             " on line {d}\n",
         .{ fstr, src_file, src_line },
     ) catch return;
-    stderr.writeAll(stderr_msg) catch {};
+    fileWriteAll(2, stderr_msg);
     var msg_buf: [512]u8 = undefined;
     const stdout_msg = std.fmt.bufPrint(
         &msg_buf,
@@ -5054,7 +5082,7 @@ fn emitDeprecatedFloatToInt(f: f64) void {
             " {d}\n",
         .{ fstr, src_file, src_line },
     ) catch return;
-    stdout.writeAll(stdout_msg) catch {};
+    fileWriteAll(1, stdout_msg);
 }
 
 /// 幂运算（PHP语义）
@@ -5582,8 +5610,7 @@ fn php_output_write(bytes: []const u8) !void {
         return;
     }
 
-    const stdout_file = std.fs.File{ .handle = 1 };
-    try stdout_file.writeAll(bytes);
+    fileWriteAll(1, bytes);
 }
 
 pub fn php_echo(value: Value) !void {
@@ -5608,8 +5635,6 @@ pub fn php_echo(value: Value) !void {
         try php_output_write(str.data);
     } else if (value.isArray()) {
         // PHP Warning: Array to string conversion
-        const stdout_file = std.fs.File{ .handle = 1 };
-        const stderr_file = std.fs.File{ .handle = 2 };
         var wbuf: [512]u8 = undefined;
         const wmsg = std.fmt.bufPrint(
             &wbuf,
@@ -5618,7 +5643,7 @@ pub fn php_echo(value: Value) !void {
             .{ src_file, src_line },
         ) catch "";
         if (wmsg.len > 0) {
-            stdout_file.writeAll(wmsg) catch {};
+            fileWriteAll(1, wmsg);
             var ebuf: [512]u8 = undefined;
             const emsg = std.fmt.bufPrint(
                 &ebuf,
@@ -5626,7 +5651,7 @@ pub fn php_echo(value: Value) !void {
                     " {s} on line {d}\n",
                 .{ src_file, src_line },
             ) catch "";
-            if (emsg.len > 0) stderr_file.writeAll(emsg) catch {};
+            if (emsg.len > 0) fileWriteAll(2, emsg);
         }
         try php_output_write("Array");
     }
@@ -5640,50 +5665,49 @@ pub fn php_print(value: Value) !Value {
 
 /// var_dump函数
 pub fn php_var_dump(value: Value) !Value {
-    const stdout_file = std.fs.File{ .handle = 1 };
     if (value.isNull()) {
-        try stdout_file.writeAll("NULL\n");
+        fileWriteAll(1, "NULL\n");
     } else if (value.isBool()) {
         var buf: [32]u8 = undefined;
         const str = try std.fmt.bufPrint(&buf, "bool({})\n", .{value.asBool()});
-        try stdout_file.writeAll(str);
+        fileWriteAll(1, str);
     } else if (value.isInt()) {
         var buf: [64]u8 = undefined;
         const str = try std.fmt.bufPrint(&buf, "int({})\n", .{value.asInt()});
-        try stdout_file.writeAll(str);
+        fileWriteAll(1, str);
     } else if (value.isFloat()) {
         var buf: [64]u8 = undefined;
         const str = try std.fmt.bufPrint(&buf, "float({})\n", .{value.asFloat()});
-        try stdout_file.writeAll(str);
+        fileWriteAll(1, str);
     } else if (value.isString()) {
         const str = value.asString();
         var buf: [256]u8 = undefined;
         const msg = try std.fmt.bufPrint(&buf, "string({}) \"{s}\"\n", .{ str.length, str.data });
-        try stdout_file.writeAll(msg);
+        fileWriteAll(1, msg);
     } else if (value.isArray()) {
         const arr = value.asArray();
         var buf: [64]u8 = undefined;
         const msg = try std.fmt.bufPrint(&buf, "array({d}) {{\n", .{arr.count()});
-        try stdout_file.writeAll(msg);
+        fileWriteAll(1, msg);
         // 遍历数组
         var iter = arr.elements.iterator();
         while (iter.next()) |entry| {
-            try stdout_file.writeAll("  ");
+            fileWriteAll(1, "  ");
             switch (entry.key_ptr.*) {
                 .integer => |i| {
                     const key_msg = try std.fmt.bufPrint(&buf, "[{d}]", .{i});
-                    try stdout_file.writeAll(key_msg);
+                    fileWriteAll(1, key_msg);
                 },
                 .string => |s| {
                     var key_buf: [256]u8 = undefined;
                     const key_msg = try std.fmt.bufPrint(&key_buf, "[\"{s}\"]", .{s.data});
-                    try stdout_file.writeAll(key_msg);
+                    fileWriteAll(1, key_msg);
                 },
             }
-            try stdout_file.writeAll("=>\n  ");
+            fileWriteAll(1, "=>\n  ");
             _ = php_var_dump(entry.value_ptr.*) catch {};
         }
-        try stdout_file.writeAll("}\n");
+        fileWriteAll(1, "}\n");
     }
     return Value.initNull();
 }
@@ -5695,31 +5719,29 @@ pub fn var_dump(value: Value) !Value {
 
 pub fn print_r(value: Value, return_output: Value) !Value {
     const want_return = return_output.toBool();
-    var buffer = try std.ArrayList(u8).initCapacity(runtime_allocator, 256);
-    defer buffer.deinit(runtime_allocator);
+    var aw = std.Io.Writer.Allocating.initCapacity(runtime_allocator, 256) catch return error.OutOfMemory;
+    defer aw.deinit();
 
-    try printValue(buffer.writer(runtime_allocator), value, 0, false);
+    try printValue(&aw.writer, value, 0, false);
 
     if (want_return) {
-        return Value.initString(try PHPString.init(runtime_allocator, buffer.items));
+        return Value.initString(try PHPString.init(runtime_allocator, aw.written()));
     }
-    const stdout_file = std.fs.File{ .handle = 1 };
-    try stdout_file.writeAll(buffer.items);
+    fileWriteAll(1, aw.written());
     return Value.initBool(true);
 }
 
 pub fn var_export(value: Value, return_output: Value) !Value {
     const want_return = return_output.toBool();
-    var buffer = try std.ArrayList(u8).initCapacity(runtime_allocator, 256);
-    defer buffer.deinit(runtime_allocator);
+    var aw = std.Io.Writer.Allocating.initCapacity(runtime_allocator, 256) catch return error.OutOfMemory;
+    defer aw.deinit();
 
-    try exportValue(buffer.writer(runtime_allocator), value, 0);
+    try exportValue(&aw.writer, value, 0);
 
     if (want_return) {
-        return Value.initString(try PHPString.init(runtime_allocator, buffer.items));
+        return Value.initString(try PHPString.init(runtime_allocator, aw.written()));
     }
-    const stdout_file = std.fs.File{ .handle = 1 };
-    try stdout_file.writeAll(buffer.items);
+    fileWriteAll(1, aw.written());
     return Value.initNull();
 }
 
@@ -7173,7 +7195,7 @@ fn arrayObject_asort(ctx: Value, args: []const Value, allocator: Allocator) !Val
             _ = flags;
 
             // 收集所有键
-            var keys = std.ArrayListUnmanaged(ArrayKey){};
+            var keys = std.ArrayListUnmanaged(ArrayKey){ .items = &.{}, .capacity = 0 };
             defer keys.deinit(allocator);
             var iter = arr.elements.iterator();
             while (iter.next()) |entry| try keys.append(allocator, entry.key_ptr.*);
@@ -7300,7 +7322,7 @@ fn arrayObject_ksort(ctx: Value, _: []const Value, allocator: Allocator) !Value 
     if (obj.getProperty("_storage")) |storage| {
         if (storage.isArray()) {
             const arr = storage.asArray();
-            var keys = std.ArrayListUnmanaged(ArrayKey){};
+            var keys = std.ArrayListUnmanaged(ArrayKey){ .items = &.{}, .capacity = 0 };
             defer keys.deinit(allocator);
             var iter = arr.elements.iterator();
             while (iter.next()) |entry| try keys.append(allocator, entry.key_ptr.*);
@@ -7425,36 +7447,36 @@ fn arrayObject_offsetUnset(ctx: Value, args: []const Value, _: Allocator) anyerr
 fn arrayObject_serialize(ctx: Value, _: []const Value, allocator: Allocator) anyerror!Value {
     const obj = Value_asObject(ctx);
     var result = try std.ArrayList(u8).initCapacity(allocator, 64);
-    defer result.deinit(allocator);
-    const writer = result.writer(allocator);
+    var aw = std.Io.Writer.Allocating.fromArrayList(allocator, &result);
+    defer aw.deinit();
 
-    try writer.writeAll("O:11:\"ArrayObject\":1:{");
+    try aw.writer.writeAll("O:11:\"ArrayObject\":1:{");
 
     if (obj.getProperty("_storage")) |storage| {
         if (storage.isArray()) {
             const arr = storage.asArray();
             const count = arr.count();
-            try writer.print("i:0;a:{d}:{{", .{count});
+            try aw.writer.print("i:0;a:{d}:{{", .{count});
             var iter = arr.elements.iterator();
             while (iter.next()) |entry| {
                 switch (entry.key_ptr.*) {
                     .integer => |i| {
-                        try writer.print("i:{d};", .{i});
+                        try aw.writer.print("i:{d};", .{i});
                     },
                     .string => |s| {
-                        try writer.print("s:{d}:\"{s}\";", .{ s.length, s.data });
+                        try aw.writer.print("s:{d}:\"{s}\";", .{ s.length, s.data });
                     },
                 }
                 // 简化值序列化
-                try writer.writeAll("N;");
+                try aw.writer.writeAll("N;");
             }
-            try writer.writeAll("}}");
+            try aw.writer.writeAll("}}");
         }
     }
 
-    try writer.writeAll("}");
+    try aw.writer.writeAll("}");
 
-    return Value.initString(try PHPString.init(allocator, try result.toOwnedSlice(allocator)));
+    return Value.initString(try PHPString.init(allocator, aw.written()));
 }
 
 /// ArrayObject::uasort
@@ -7937,7 +7959,7 @@ pub fn php_ltrim(str: Value, char_mask: Value, allocator: Allocator) !Value {
 
     const php_str = str.asString();
     const mask = if (char_mask.isString()) char_mask.asString().data else " \t\n\r";
-    const trimmed = std.mem.trimLeft(u8, php_str.data, mask);
+    const trimmed = std.mem.trimStart(u8, php_str.data, mask);
 
     const result = try PHPString.init(allocator, trimmed);
     return Value.initString(result);
@@ -7949,7 +7971,7 @@ pub fn php_rtrim(str: Value, char_mask: Value, allocator: Allocator) !Value {
 
     const php_str = str.asString();
     const mask = if (char_mask.isString()) char_mask.asString().data else " \t\n\r";
-    const trimmed = std.mem.trimRight(u8, php_str.data, mask);
+    const trimmed = std.mem.trimEnd(u8, php_str.data, mask);
 
     const result = try PHPString.init(allocator, trimmed);
     return Value.initString(result);
@@ -8346,12 +8368,12 @@ const RegexCacheEntry = struct {
     fn init(code: *pcre2_code) RegexCacheEntry {
         return .{
             .code = code,
-            .last_used = std.time.nanoTimestamp(),
+            .last_used = nanoTimestamp(),
         };
     }
 
     fn touch(self: *RegexCacheEntry) void {
-        self.last_used = std.time.nanoTimestamp();
+        self.last_used = nanoTimestamp();
     }
 
     fn deinit(self: *RegexCacheEntry) void {
@@ -8362,7 +8384,7 @@ const RegexCacheEntry = struct {
 // 全局正则缓存
 const REGEX_CACHE_SIZE = 128;
 var regex_cache: std.StringHashMap(RegexCacheEntry) = undefined;
-var regex_cache_mutex: std.Thread.Mutex = .{};
+var regex_cache_mutex: std.atomic.Mutex = .unlocked;
 var regex_cache_initialized: bool = false;
 
 fn initRegexCache(allocator: Allocator) !void {
@@ -8374,7 +8396,7 @@ fn initRegexCache(allocator: Allocator) !void {
 fn getOrCompileRegex(pattern: []const u8, options: c_uint, allocator: Allocator) !*pcre2_code {
     try initRegexCache(allocator);
 
-    regex_cache_mutex.lock();
+    spinLock(&regex_cache_mutex);
     defer regex_cache_mutex.unlock();
 
     // 查找缓存
@@ -8653,7 +8675,7 @@ pub fn preg_match_all(pattern_val: Value, subject_val: Value, matches_ref: *Valu
     defer pcre2_match_data_free_8(match_data);
 
     // 存储所有匹配（临时）
-    var all_matches = std.ArrayListUnmanaged(std.ArrayListUnmanaged([]const u8)){};
+    var all_matches = std.ArrayListUnmanaged(std.ArrayListUnmanaged([]const u8)){ .items = &.{}, .capacity = 0 };
     defer {
         for (all_matches.items) |*match_groups| {
             match_groups.deinit(allocator);
@@ -8682,7 +8704,7 @@ pub fn preg_match_all(pattern_val: Value, subject_val: Value, matches_ref: *Valu
         const ovec = pcre2_get_ovector_pointer_8(match_data);
 
         // 保存当前匹配的所有组
-        var match_groups = std.ArrayListUnmanaged([]const u8){};
+        var match_groups = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
         var i: usize = 0;
         while (i < @as(usize, @intCast(rc))) : (i += 1) {
             const start = ovec[i * 2];
@@ -9312,7 +9334,7 @@ pub fn php_str_getcsv(input: Value, separator: Value, enclosure: Value, escape: 
     const result = try PHPArray.init(allocator);
     errdefer result.release(allocator);
 
-    var field = std.ArrayList(u8){};
+    var field = std.ArrayList(u8).empty;
     defer field.deinit(allocator);
 
     var in_quotes = false;
@@ -10902,53 +10924,52 @@ pub const ClassMeta = struct {
             const minute = day_seconds.getMinutesIntoHour();
             const second = day_seconds.getSecondsIntoMinute();
 
-            var result = try std.ArrayList(u8).initCapacity(allocator, format_str.len * 3);
-            defer result.deinit(allocator);
-            const writer = result.writer(allocator);
+            var aw = std.Io.Writer.Allocating.initCapacity(allocator, format_str.len * 3) catch return Value.initNull();
+            defer aw.deinit();
 
             var i: usize = 0;
             while (i < format_str.len) : (i += 1) {
                 const c = format_str[i];
                 switch (c) {
-                    'Y' => try writer.print("{d:0>4}", .{year}),
-                    'y' => try writer.print("{d:0>2}", .{year % 100}),
-                    'L' => try writer.print("{d}", .{if (isLeapYear(year)) @as(u32, 1) else @as(u32, 0)}),
-                    'm' => try writer.print("{d:0>2}", .{month}),
-                    'n' => try writer.print("{d}", .{month}),
-                    'F' => try writer.writeAll(switch (month) { 1=>"January", 2=>"February", 3=>"March", 4=>"April", 5=>"May", 6=>"June", 7=>"July", 8=>"August", 9=>"September", 10=>"October", 11=>"November", 12=>"December", else=>"Unknown" }),
-                    'M' => try writer.writeAll(switch (month) { 1=>"Jan", 2=>"Feb", 3=>"Mar", 4=>"Apr", 5=>"May", 6=>"Jun", 7=>"Jul", 8=>"Aug", 9=>"Sep", 10=>"Oct", 11=>"Nov", 12=>"Dec", else=>"???" }),
-                    't' => try writer.print("{d}", .{getDaysInMonth(year, month)}),
-                    'd' => try writer.print("{d:0>2}", .{day}),
-                    'j' => try writer.print("{d}", .{day}),
-                    'S' => try writer.writeAll(if (day >= 11 and day <= 13) "th" else switch (day % 10) { 1=>"st", 2=>"nd", 3=>"rd", else=>"th" }),
-                    'z' => try writer.print("{d}", .{getDayOfYear(year, month, day) - 1}),
-                    'l' => try writer.writeAll(switch (getDayOfWeek(year, month, day)) { 0=>"Sunday", 1=>"Monday", 2=>"Tuesday", 3=>"Wednesday", 4=>"Thursday", 5=>"Friday", 6=>"Saturday", else=>"Unknown" }),
-                    'D' => try writer.writeAll(switch (getDayOfWeek(year, month, day)) { 0=>"Sun", 1=>"Mon", 2=>"Tue", 3=>"Wed", 4=>"Thu", 5=>"Fri", 6=>"Sat", else=>"???" }),
-                    'w' => try writer.print("{d}", .{getDayOfWeek(year, month, day)}),
-                    'N' => { const n = getDayOfWeek(year, month, day); try writer.print("{d}", .{if (n == 0) @as(u32, 7) else n}); },
-                    'W' => try writer.print("{d:0>2}", .{getIsoWeek(year, month, day)}),
-                    'H' => try writer.print("{d:0>2}", .{hour}),
-                    'G' => try writer.print("{d}", .{hour}),
-                    'h' => { const h12 = if (hour == 0) @as(u32, 12) else if (hour > 12) hour - 12 else hour; try writer.print("{d:0>2}", .{h12}); },
-                    'g' => { const h12 = if (hour == 0) @as(u32, 12) else if (hour > 12) hour - 12 else hour; try writer.print("{d}", .{h12}); },
-                    'a' => try writer.writeAll(if (hour < 12) "am" else "pm"),
-                    'A' => try writer.writeAll(if (hour < 12) "AM" else "PM"),
-                    'i' => try writer.print("{d:0>2}", .{minute}),
-                    's' => try writer.print("{d:0>2}", .{second}),
-                    'u' => try writer.print("{d:0>6}", .{self.microseconds}),
-                    'v' => try writer.print("{d:0>3}", .{@divFloor(self.microseconds, 1000)}),
-                    'T' => try writer.writeAll(self.timezone_name),
-                    'O' => { const oh = @divFloor(self.timezone_offset, 3600); const om = @divFloor(@rem(self.timezone_offset, 3600), 60); if (oh >= 0) try writer.print("+{d:0>2}{d:0>2}", .{oh, @abs(om)}) else try writer.print("{d:0>3}{d:0>2}", .{oh, @abs(om)}); },
-                    'P' => { const oh = @divFloor(self.timezone_offset, 3600); const om = @divFloor(@rem(self.timezone_offset, 3600), 60); if (oh >= 0) try writer.print("+{d:0>2}:{d:0>2}", .{oh, @abs(om)}) else try writer.print("{d:0>3}:{d:0>2}", .{oh, @abs(om)}); },
-                    'Z' => try writer.print("{d}", .{self.timezone_offset}),
-                    'U' => try writer.print("{d}", .{self.timestamp}),
-                    'c' => { try writer.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}", .{year, month, day, hour, minute, second}); const oh = @divFloor(self.timezone_offset, 3600); const om = @divFloor(@rem(self.timezone_offset, 3600), 60); if (oh >= 0) try writer.print("+{d:0>2}:{d:0>2}", .{oh, @abs(om)}) else try writer.print("{d:0>3}:{d:0>2}", .{oh, @abs(om)}); },
-                    'r' => { const wd = switch (getDayOfWeek(year, month, day)) { 0=>"Sun", 1=>"Mon", 2=>"Tue", 3=>"Wed", 4=>"Thu", 5=>"Fri", 6=>"Sat", else=>"???" }; const mon = switch (month) { 1=>"Jan", 2=>"Feb", 3=>"Mar", 4=>"Apr", 5=>"May", 6=>"Jun", 7=>"Jul", 8=>"Aug", 9=>"Sep", 10=>"Oct", 11=>"Nov", 12=>"Dec", else=>"???" }; const oh = @divFloor(self.timezone_offset, 3600); const om = @divFloor(@rem(self.timezone_offset, 3600), 60); if (oh >= 0) try writer.print("{s}, {d} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} +{d:0>2}{d:0>2}", .{wd, day, mon, year, hour, minute, second, oh, @abs(om)}) else try writer.print("{s}, {d} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} -{d:0>2}{d:0>2}", .{wd, day, mon, year, hour, minute, second, @abs(oh), @abs(om)}); },
-                    '\\' => { i += 1; if (i < format_str.len) try result.append(allocator, format_str[i]); },
-                    else => try result.append(allocator, c),
+                    'Y' => try aw.writer.print("{d:0>4}", .{year}),
+                    'y' => try aw.writer.print("{d:0>2}", .{year % 100}),
+                    'L' => try aw.writer.print("{d}", .{if (isLeapYear(year)) @as(u32, 1) else @as(u32, 0)}),
+                    'm' => try aw.writer.print("{d:0>2}", .{month}),
+                    'n' => try aw.writer.print("{d}", .{month}),
+                    'F' => try aw.writer.writeAll(switch (month) { 1=>"January", 2=>"February", 3=>"March", 4=>"April", 5=>"May", 6=>"June", 7=>"July", 8=>"August", 9=>"September", 10=>"October", 11=>"November", 12=>"December", else=>"Unknown" }),
+                    'M' => try aw.writer.writeAll(switch (month) { 1=>"Jan", 2=>"Feb", 3=>"Mar", 4=>"Apr", 5=>"May", 6=>"Jun", 7=>"Jul", 8=>"Aug", 9=>"Sep", 10=>"Oct", 11=>"Nov", 12=>"Dec", else=>"???" }),
+                    't' => try aw.writer.print("{d}", .{getDaysInMonth(year, month)}),
+                    'd' => try aw.writer.print("{d:0>2}", .{day}),
+                    'j' => try aw.writer.print("{d}", .{day}),
+                    'S' => try aw.writer.writeAll(if (day >= 11 and day <= 13) "th" else switch (day % 10) { 1=>"st", 2=>"nd", 3=>"rd", else=>"th" }),
+                    'z' => try aw.writer.print("{d}", .{getDayOfYear(year, month, day) - 1}),
+                    'l' => try aw.writer.writeAll(switch (getDayOfWeek(year, month, day)) { 0=>"Sunday", 1=>"Monday", 2=>"Tuesday", 3=>"Wednesday", 4=>"Thursday", 5=>"Friday", 6=>"Saturday", else=>"Unknown" }),
+                    'D' => try aw.writer.writeAll(switch (getDayOfWeek(year, month, day)) { 0=>"Sun", 1=>"Mon", 2=>"Tue", 3=>"Wed", 4=>"Thu", 5=>"Fri", 6=>"Sat", else=>"???" }),
+                    'w' => try aw.writer.print("{d}", .{getDayOfWeek(year, month, day)}),
+                    'N' => { const n = getDayOfWeek(year, month, day); try aw.writer.print("{d}", .{if (n == 0) @as(u32, 7) else n}); },
+                    'W' => try aw.writer.print("{d:0>2}", .{getIsoWeek(year, month, day)}),
+                    'H' => try aw.writer.print("{d:0>2}", .{hour}),
+                    'G' => try aw.writer.print("{d}", .{hour}),
+                    'h' => { const h12 = if (hour == 0) @as(u32, 12) else if (hour > 12) hour - 12 else hour; try aw.writer.print("{d:0>2}", .{h12}); },
+                    'g' => { const h12 = if (hour == 0) @as(u32, 12) else if (hour > 12) hour - 12 else hour; try aw.writer.print("{d}", .{h12}); },
+                    'a' => try aw.writer.writeAll(if (hour < 12) "am" else "pm"),
+                    'A' => try aw.writer.writeAll(if (hour < 12) "AM" else "PM"),
+                    'i' => try aw.writer.print("{d:0>2}", .{minute}),
+                    's' => try aw.writer.print("{d:0>2}", .{second}),
+                    'u' => try aw.writer.print("{d:0>6}", .{self.microseconds}),
+                    'v' => try aw.writer.print("{d:0>3}", .{@divFloor(self.microseconds, 1000)}),
+                    'T' => try aw.writer.writeAll(self.timezone_name),
+                    'O' => { const oh = @divFloor(self.timezone_offset, 3600); const om = @divFloor(@rem(self.timezone_offset, 3600), 60); if (oh >= 0) try aw.writer.print("+{d:0>2}{d:0>2}", .{oh, @abs(om)}) else try aw.writer.print("{d:0>3}{d:0>2}", .{oh, @abs(om)}); },
+                    'P' => { const oh = @divFloor(self.timezone_offset, 3600); const om = @divFloor(@rem(self.timezone_offset, 3600), 60); if (oh >= 0) try aw.writer.print("+{d:0>2}:{d:0>2}", .{oh, @abs(om)}) else try aw.writer.print("{d:0>3}:{d:0>2}", .{oh, @abs(om)}); },
+                    'Z' => try aw.writer.print("{d}", .{self.timezone_offset}),
+                    'U' => try aw.writer.print("{d}", .{self.timestamp}),
+                    'c' => { try aw.writer.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}", .{year, month, day, hour, minute, second}); const oh = @divFloor(self.timezone_offset, 3600); const om = @divFloor(@rem(self.timezone_offset, 3600), 60); if (oh >= 0) try aw.writer.print("+{d:0>2}:{d:0>2}", .{oh, @abs(om)}) else try aw.writer.print("{d:0>3}:{d:0>2}", .{oh, @abs(om)}); },
+                    'r' => { const wd = switch (getDayOfWeek(year, month, day)) { 0=>"Sun", 1=>"Mon", 2=>"Tue", 3=>"Wed", 4=>"Thu", 5=>"Fri", 6=>"Sat", else=>"???" }; const mon = switch (month) { 1=>"Jan", 2=>"Feb", 3=>"Mar", 4=>"Apr", 5=>"May", 6=>"Jun", 7=>"Jul", 8=>"Aug", 9=>"Sep", 10=>"Oct", 11=>"Nov", 12=>"Dec", else=>"???" }; const oh = @divFloor(self.timezone_offset, 3600); const om = @divFloor(@rem(self.timezone_offset, 3600), 60); if (oh >= 0) try aw.writer.print("{s}, {d} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} +{d:0>2}{d:0>2}", .{wd, day, mon, year, hour, minute, second, oh, @abs(om)}) else try aw.writer.print("{s}, {d} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} -{d:0>2}{d:0>2}", .{wd, day, mon, year, hour, minute, second, @abs(oh), @abs(om)}); },
+                    '\\' => { i += 1; if (i < format_str.len) try aw.writer.writeAll(format_str[i .. i + 1]); },
+                    else => try aw.writer.writeAll(&[_]u8{c}),
                 }
             }
-            return Value.initString(try PHPString.init(allocator, result.items));
+            return Value.initString(try PHPString.init(allocator, aw.written()));
         }
     };
 
@@ -11119,7 +11140,7 @@ pub const ClassMeta = struct {
                 const format_str = args[0].asString().data;
                 var result = try std.ArrayList(u8).initCapacity(alloc, format_str.len * 2);
                 defer result.deinit(alloc);
-                const writer = result.writer(alloc);
+                var aw = std.Io.Writer.Allocating.fromArrayList(alloc, &result);
 
                 const y = if (this.getProperty("y")) |v| v.toInt() else 0;
                 const m = if (this.getProperty("m")) |v| v.toInt() else 0;
@@ -11134,24 +11155,24 @@ pub const ClassMeta = struct {
                     if (format_str[fi] == '%' and fi + 1 < format_str.len) {
                         fi += 1;
                         switch (format_str[fi]) {
-                            'Y' => try writer.print("{d:0>2}", .{y}),
-                            'y' => try writer.print("{d}", .{y}),
-                            'M' => try writer.print("{d:0>2}", .{m}),
-                            'm' => try writer.print("{d}", .{m}),
-                            'D' => try writer.print("{d:0>2}", .{d}),
-                            'd' => try writer.print("{d}", .{d}),
-                            'H' => try writer.print("{d:0>2}", .{h}),
-                            'h' => try writer.print("{d}", .{h}),
-                            'I' => try writer.print("{d:0>2}", .{i}),
-                            'i' => try writer.print("{d}", .{i}),
-                            'S' => try writer.print("{d:0>2}", .{s}),
-                            's' => try writer.print("{d}", .{s}),
-                            'R' => try writer.writeAll(if (invert == 1) "-" else "+"),
-                            'r' => try writer.writeAll(if (invert == 1) "-" else ""),
+                            'Y' => try aw.writer.print("{d:0>2}", .{y}),
+                            'y' => try aw.writer.print("{d}", .{y}),
+                            'M' => try aw.writer.print("{d:0>2}", .{m}),
+                            'm' => try aw.writer.print("{d}", .{m}),
+                            'D' => try aw.writer.print("{d:0>2}", .{d}),
+                            'd' => try aw.writer.print("{d}", .{d}),
+                            'H' => try aw.writer.print("{d:0>2}", .{h}),
+                            'h' => try aw.writer.print("{d}", .{h}),
+                            'I' => try aw.writer.print("{d:0>2}", .{i}),
+                            'i' => try aw.writer.print("{d}", .{i}),
+                            'S' => try aw.writer.print("{d:0>2}", .{s}),
+                            's' => try aw.writer.print("{d}", .{s}),
+                            'R' => try aw.writer.writeAll(if (invert == 1) "-" else "+"),
+                            'r' => try aw.writer.writeAll(if (invert == 1) "-" else ""),
                             '%' => try result.append(alloc, '%'),
                             'a' => {
                                 const days_val = if (this.getProperty("days")) |v| v.toInt() else 0;
-                                try writer.print("{d}", .{days_val});
+                                try aw.writer.print("{d}", .{days_val});
                             },
                             else => {
                                 try result.append(alloc, '%');
@@ -11404,26 +11425,26 @@ pub const ClassMeta = struct {
                 if (args.len > 0 and !args[0].isNull()) {
                     const datetime_str = args[0].asString().data;
                     if (std.mem.eql(u8, datetime_str, "now")) {
-                        const now_ns = std.time.nanoTimestamp();
+                        const now_ns = nanoTimestamp();
                         const now_us = @divTrunc(now_ns, 1000);
                         try this.setProperty("timestamp", Value.initInt(@intCast(@divTrunc(now_us, 1_000_000))));
                         try this.setProperty("microseconds", Value.initInt(@intCast(@rem(now_us, 1_000_000))));
                     } else if (datetime_str.len > 0 and datetime_str[0] == '@') {
-                        const ts = std.fmt.parseInt(i64, datetime_str[1..], 10) catch std.time.timestamp();
+                        const ts = std.fmt.parseInt(i64, datetime_str[1..], 10) catch unixTimestamp();
                         try this.setProperty("timestamp", Value.initInt(ts));
                         try this.setProperty("microseconds", Value.initInt(0));
                     } else {
-                        const parsed = try php_strtotime(args[0], Value.initInt(std.time.timestamp()), runtime_alloc);
+                        const parsed = try php_strtotime(args[0], Value.initInt(unixTimestamp()), runtime_alloc);
                         if (parsed.isInt()) {
                             try this.setProperty("timestamp", Value.initInt(parsed.toInt() - tz_offset));
                             try this.setProperty("microseconds", Value.initInt(0));
                         } else {
-                            try this.setProperty("timestamp", Value.initInt(std.time.timestamp()));
+                            try this.setProperty("timestamp", Value.initInt(unixTimestamp()));
                             try this.setProperty("microseconds", Value.initInt(0));
                         }
                     }
                 } else {
-                    const now_ns = std.time.nanoTimestamp();
+                    const now_ns = nanoTimestamp();
                     const now_us = @divTrunc(now_ns, 1000);
                     try this.setProperty("timestamp", Value.initInt(@intCast(@divTrunc(now_us, 1_000_000))));
                     try this.setProperty("microseconds", Value.initInt(@intCast(@rem(now_us, 1_000_000))));
@@ -11436,7 +11457,7 @@ pub const ClassMeta = struct {
         try meta.addMethod(.{ .name = "format", .func = struct {
             fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
                 const this = Value_asObject(ctx);
-                const ts = if (this.getProperty("timestamp")) |ts_val| ts_val.toInt() else std.time.timestamp();
+                const ts = if (this.getProperty("timestamp")) |ts_val| ts_val.toInt() else unixTimestamp();
                 const us = if (this.getProperty("microseconds")) |us_val| us_val.toInt() else 0;
                 const tz_offset = if (this.getProperty("__offset")) |off| @as(i32, @intCast(off.toInt())) else 0;
 
@@ -11459,7 +11480,7 @@ pub const ClassMeta = struct {
             fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
                 const this = Value_asObject(ctx);
                 if (this.getProperty("timestamp")) |ts| return ts;
-                return Value.initInt(std.time.timestamp());
+                return Value.initInt(unixTimestamp());
             }
         }.call, .is_static = false });
 
@@ -11558,7 +11579,7 @@ pub const ClassMeta = struct {
             fn call(ctx: Value, args: []const Value, alloc: Allocator) anyerror!Value {
                 const this = Value_asObject(ctx);
                 if (args.len == 0 or !args[0].isString()) return Value.initBool(false);
-                const ts = if (this.getProperty("timestamp")) |t| t.toInt() else std.time.timestamp();
+                const ts = if (this.getProperty("timestamp")) |t| t.toInt() else unixTimestamp();
                 const new_ts = try php_strtotime(args[0], Value.initInt(ts), alloc);
                 if (new_ts.isInt()) {
                     try this.setProperty("timestamp", new_ts);
@@ -12230,7 +12251,7 @@ pub const ClassMeta = struct {
                                         alive_count += 1;
                                     }
                                 },
-                                .integer => |_| {
+                                .integer => {
                                     // 跳过非字符串键
                                 },
                             }
@@ -12543,7 +12564,7 @@ pub const ClassMeta = struct {
                                         }
                                     }
                                 },
-                                .integer => |_| {},
+                                .integer => {},
                             }
                         }
                     }
@@ -12587,7 +12608,7 @@ pub const ClassMeta = struct {
                                         }
                                     }
                                 },
-                                .integer => |_| {},
+                                .integer => {},
                             }
                         }
                     }
@@ -14839,9 +14860,9 @@ pub const ClassMeta = struct {
 
     /// Fiber 协程上下文 (线程 + 条件变量实现)
     const FiberContext = struct {
-        mutex: std.Thread.Mutex = .{},
-        caller_cond: std.Thread.Condition = .{},
-        fiber_cond: std.Thread.Condition = .{},
+        mutex: std.Io.Mutex = .init,
+        caller_cond: std.Io.Condition = .init,
+        fiber_cond: std.Io.Condition = .init,
         state: FiberState = .created,
         callback: Value = Value.initNull(),
         fiber_obj: Value = Value.initNull(),
@@ -14866,9 +14887,9 @@ pub const ClassMeta = struct {
         // 在 fiber 线程中设置 threadlocal
         current_fiber_obj = fctx.fiber_obj;
 
-        fctx.mutex.lock();
+        while (!fctx.mutex.tryLock()) std.atomic.spinLoopHint();
         while (fctx.state != .running) {
-            fctx.fiber_cond.wait(&fctx.mutex);
+            fctx.fiber_cond.wait(getIo(), &fctx.mutex) catch {};
         }
         fctx.mutex.unlock();
 
@@ -14884,10 +14905,10 @@ pub const ClassMeta = struct {
             ) catch Value.initNull();
         }
 
-        fctx.mutex.lock();
+        while (!fctx.mutex.tryLock()) std.atomic.spinLoopHint();
         fctx.return_value = result;
         fctx.state = .terminated;
-        fctx.caller_cond.signal();
+        fctx.caller_cond.signal(getIo());
         fctx.mutex.unlock();
     }
 
@@ -14941,7 +14962,7 @@ pub const ClassMeta = struct {
                     const this = Value_asObject(ctx);
                     const fctx = getFiberCtx(this) orelse
                         return Value.initNull();
-                    fctx.mutex.lock();
+                    while (!fctx.mutex.tryLock()) std.atomic.spinLoopHint();
                     if (fctx.state != .created) {
                         fctx.mutex.unlock();
                         return Value.initNull();
@@ -14962,10 +14983,10 @@ pub const ClassMeta = struct {
                         return Value.initNull();
                     };
                     // 信号唤醒 fiber 线程
-                    fctx.fiber_cond.signal();
+                    fctx.fiber_cond.signal(getIo());
                     // 等待 fiber suspend 或 terminate
                     while (fctx.state == .running) {
-                        fctx.caller_cond.wait(&fctx.mutex);
+                        fctx.caller_cond.wait(getIo(), &fctx.mutex) catch {};
                     }
                     const result = fctx.suspend_value;
                     fctx.suspend_value = Value.initNull();
@@ -14993,7 +15014,7 @@ pub const ClassMeta = struct {
                     const this = Value_asObject(ctx);
                     const fctx = getFiberCtx(this) orelse
                         return Value.initNull();
-                    fctx.mutex.lock();
+                    while (!fctx.mutex.tryLock()) std.atomic.spinLoopHint();
                     if (fctx.state != .suspended) {
                         fctx.mutex.unlock();
                         return Value.initNull();
@@ -15004,9 +15025,9 @@ pub const ClassMeta = struct {
                         fctx.resume_value = Value.initNull();
                     }
                     fctx.state = .running;
-                    fctx.fiber_cond.signal();
+                    fctx.fiber_cond.signal(getIo());
                     while (fctx.state == .running) {
-                        fctx.caller_cond.wait(&fctx.mutex);
+                        fctx.caller_cond.wait(getIo(), &fctx.mutex) catch {};
                     }
                     const result = fctx.suspend_value;
                     fctx.suspend_value = Value.initNull();
@@ -15039,15 +15060,15 @@ pub const ClassMeta = struct {
                     const this = Value_asObject(fiber_val);
                     const fctx = getFiberCtx(this) orelse
                         return Value.initNull();
-                    fctx.mutex.lock();
+                    while (!fctx.mutex.tryLock()) std.atomic.spinLoopHint();
                     if (args.len > 0) {
                         fctx.suspend_value = args[0];
                     }
                     fctx.state = .suspended;
-                    fctx.caller_cond.signal();
+                    fctx.caller_cond.signal(getIo());
                     // 等待 resume 或 throw
                     while (fctx.state == .suspended) {
-                        fctx.fiber_cond.wait(&fctx.mutex);
+                        fctx.fiber_cond.wait(getIo(), &fctx.mutex) catch {};
                     }
                     const result = fctx.resume_value;
                     fctx.resume_value = Value.initNull();
@@ -15182,7 +15203,7 @@ pub const ClassMeta = struct {
                     const this = Value_asObject(ctx);
                     const fctx = getFiberCtx(this) orelse
                         return Value.initNull();
-                    fctx.mutex.lock();
+                    while (!fctx.mutex.tryLock()) std.atomic.spinLoopHint();
                     if (fctx.state != .suspended) {
                         fctx.mutex.unlock();
                         return Value.initNull();
@@ -15193,9 +15214,9 @@ pub const ClassMeta = struct {
                     // 通过 FiberContext 传递异常
                     fctx.resume_value = Value.initNull();
                     fctx.state = .running;
-                    fctx.fiber_cond.signal();
+                    fctx.fiber_cond.signal(getIo());
                     while (fctx.state == .running) {
-                        fctx.caller_cond.wait(&fctx.mutex);
+                        fctx.caller_cond.wait(getIo(), &fctx.mutex) catch {};
                     }
                     const result = fctx.suspend_value;
                     fctx.suspend_value = Value.initNull();
@@ -15419,11 +15440,11 @@ fn weakref_cleanup() void {
     if (weakref_table) |*table| {
         var iter = table.iterator();
         var to_remove = try std.ArrayList(usize).initCapacity(runtime_allocator, 0);
-        defer to_remove.deinit(runtime_allocator);
+        defer to_remove.deinit();
 
         while (iter.next()) |entry| {
             if (!php_weak_is_alive(entry.key_ptr.*)) {
-                to_remove.append(runtime_allocator, entry.key_ptr.*) catch {};
+                to_remove.append(entry.key_ptr.*) catch {};
             }
         }
 
@@ -16187,32 +16208,27 @@ pub fn php_object_call(obj_val: Value, method_name: []const u8, args: []const Va
             }
         }
         // 未知闭包方法
-        const stderr = std.fs.File{ .handle = 2 };
-        stderr.writeAll("PHP Fatal error:  Call to undefined method Closure::") catch {};
-        stderr.writeAll(method_name) catch {};
-        stderr.writeAll("()\n") catch {};
+        fileWriteAll(2, "PHP Fatal error:  Call to undefined method Closure::");
+        fileWriteAll(2, method_name);
+        fileWriteAll(2, "()\n");
         return Value.initNull();
     }
 
     if (!Value_isObject(obj_val)) {
         // PHP: 对非对象调用方法时发出 Fatal error
-        const stderr = std.fs.File{ .handle = 2 };
-        stderr.writeAll("PHP Fatal error:  Call to a member function on a non-object\n") catch {};
-        const stdout = std.fs.File{ .handle = 1 };
-        stdout.writeAll("\nFatal error: Call to a member function on a non-object\n") catch {};
+        fileWriteAll(2, "PHP Fatal error:  Call to a member function on a non-object\n");
+        fileWriteAll(1, "\nFatal error: Call to a member function on a non-object\n");
         return Value.initNull();
     }
     const obj = Value_asObject(obj_val);
     return obj.callMethod(method_name, args) catch |err| {
         if (err == error.MethodNotFound) {
             const class_name = if (obj.class_meta) |m| m.name else "unknown";
-            const stderr = std.fs.File{ .handle = 2 };
             var buf: [512]u8 = undefined;
             const msg = std.fmt.bufPrint(&buf, "PHP Fatal error:  Uncaught Error: Call to undefined method {s}::{s}()\n", .{ class_name, method_name }) catch "PHP Fatal error: MethodNotFound\n";
-            stderr.writeAll(msg) catch {};
-            const stdout = std.fs.File{ .handle = 1 };
+            fileWriteAll(2, msg);
             const msg2 = std.fmt.bufPrint(&buf, "\nFatal error: Uncaught Error: Call to undefined method {s}::{s}()\n", .{ class_name, method_name }) catch "";
-            stdout.writeAll(msg2) catch {};
+            fileWriteAll(1, msg2);
             return Value.initNull();
         }
         return err;
@@ -16234,8 +16250,6 @@ pub fn php_object_new_with_constructor(class_name: []const u8, args: []const Val
 
     if (meta == null) {
         // PHP Fatal error: Class "X" not found
-        const stdout = std.fs.File{ .handle = 1 };
-        const stderr = std.fs.File{ .handle = 2 };
         // PHP 输出顺序：先 stderr，再 stdout
         var ebuf: [1024]u8 = undefined;
         const stderr_msg = std.fmt.bufPrint(
@@ -16247,7 +16261,7 @@ pub fn php_object_new_with_constructor(class_name: []const u8, args: []const Val
         ) catch {
             std.process.exit(255);
         };
-        stderr.writeAll(stderr_msg) catch {};
+        fileWriteAll(2, stderr_msg);
         var buf: [1024]u8 = undefined;
         const stdout_msg = std.fmt.bufPrint(
             &buf,
@@ -16256,10 +16270,10 @@ pub fn php_object_new_with_constructor(class_name: []const u8, args: []const Val
                 "#0 {{main}}\n  thrown in {s} on line {d}\n",
             .{ resolved, src_file, src_line, src_file, src_line },
         ) catch {
-            stdout.writeAll("\nFatal error: Class not found\n") catch {};
+            fileWriteAll(1, "\nFatal error: Class not found\n");
             std.process.exit(255);
         };
-        stdout.writeAll(stdout_msg) catch {};
+        fileWriteAll(1, stdout_msg);
         std.process.exit(255);
     }
 
@@ -16699,20 +16713,20 @@ fn serializeValue(buffer: *std.ArrayListUnmanaged(u8), value: Value, allocator: 
         return;
     }
     if (value.isBool()) {
-        try buffer.writer(allocator).print("b:{d};", .{if (value.toBool()) @as(i64, 1) else @as(i64, 0)});
+        try buffer.print("b:{d};", .{if (value.toBool()) @as(i64, 1) else @as(i64, 0)});
         return;
     }
     if (value.isInt()) {
-        try buffer.writer(allocator).print("i:{d};", .{value.toInt()});
+        try buffer.print("i:{d};", .{value.toInt()});
         return;
     }
     if (value.isFloat()) {
-        try buffer.writer(allocator).print("d:{d};", .{value.toFloat()});
+        try buffer.print("d:{d};", .{value.toFloat()});
         return;
     }
     if (value.isString()) {
         const str = value.asString().data;
-        try buffer.writer(allocator).print("s:{d}:\"", .{str.len});
+        try buffer.print("s:{d}:\"", .{str.len});
         try buffer.appendSlice(allocator, str);
         try buffer.appendSlice(allocator, "\";");
         return;
@@ -16720,15 +16734,15 @@ fn serializeValue(buffer: *std.ArrayListUnmanaged(u8), value: Value, allocator: 
     if (value.isArray()) {
         const arr = value.asArray();
         const count = arr.elements.count();
-        try buffer.writer(allocator).print("a:{d}:{{", .{count});
+        try buffer.print("a:{d}:{{", .{count});
         var it = arr.elements.iterator();
         while (it.next()) |entry| {
             const key = entry.key_ptr.*;
             switch (key) {
-                .integer => |i| try buffer.writer(allocator).print("i:{d};", .{i}),
+                .integer => |i| try buffer.print("i:{d};", .{i}),
                 .string => |s| {
                     const k = s.data;
-                    try buffer.writer(allocator).print("s:{d}:\"", .{k.len});
+                    try buffer.print("s:{d}:\"", .{k.len});
                     try buffer.appendSlice(allocator, k);
                     try buffer.appendSlice(allocator, "\";");
                 },
@@ -16750,18 +16764,18 @@ fn serializeValue(buffer: *std.ArrayListUnmanaged(u8), value: Value, allocator: 
                 if (arr_val.isArray()) {
                     const arr = arr_val.asArray();
                     const count = arr.elements.count();
-                    try buffer.writer(allocator).print("O:{d}:\"", .{class_name.len});
+                    try buffer.print("O:{d}:\"", .{class_name.len});
                     try buffer.appendSlice(allocator, class_name);
-                    try buffer.writer(allocator).print("\":{d}:{{", .{count});
+                    try buffer.print("\":{d}:{{", .{count});
 
                     var it = arr.elements.iterator();
                     while (it.next()) |entry| {
                         const key = entry.key_ptr.*;
                         switch (key) {
-                            .integer => |i| try buffer.writer(allocator).print("i:{d};", .{i}),
+                            .integer => |i| try buffer.print("i:{d};", .{i}),
                             .string => |s| {
                                 const k = s.data;
-                                try buffer.writer(allocator).print("s:{d}:\"", .{k.len});
+                                try buffer.print("s:{d}:\"", .{k.len});
                                 try buffer.appendSlice(allocator, k);
                                 try buffer.appendSlice(allocator, "\";");
                             },
@@ -16789,9 +16803,9 @@ fn serializeValue(buffer: *std.ArrayListUnmanaged(u8), value: Value, allocator: 
 
         const count: usize = if (allow_list) |list| list.elements.count() else obj.properties.count();
 
-        try buffer.writer(allocator).print("O:{d}:\"", .{class_name.len});
+        try buffer.print("O:{d}:\"", .{class_name.len});
         try buffer.appendSlice(allocator, class_name);
-        try buffer.writer(allocator).print("\":{d}:{{", .{count});
+        try buffer.print("\":{d}:{{", .{count});
 
         if (allow_list) |list| {
             var it_allow = list.elements.iterator();
@@ -16802,7 +16816,7 @@ fn serializeValue(buffer: *std.ArrayListUnmanaged(u8), value: Value, allocator: 
                 const prop_val = obj.properties.get(prop_name) orelse Value.initNull();
 
                 const full_len: usize = class_name.len + prop_name.len + 2;
-                try buffer.writer(allocator).print("s:{d}:\"", .{full_len});
+                try buffer.print("s:{d}:\"", .{full_len});
                 try buffer.appendSlice(allocator, &[_]u8{0});
                 try buffer.appendSlice(allocator, class_name);
                 try buffer.appendSlice(allocator, &[_]u8{0});
@@ -16818,7 +16832,7 @@ fn serializeValue(buffer: *std.ArrayListUnmanaged(u8), value: Value, allocator: 
                 const prop_val = entry.value_ptr.*;
 
                 const full_len: usize = class_name.len + prop_name.len + 2;
-                try buffer.writer(allocator).print("s:{d}:\"", .{full_len});
+                try buffer.print("s:{d}:\"", .{full_len});
                 try buffer.appendSlice(allocator, &[_]u8{0});
                 try buffer.appendSlice(allocator, class_name);
                 try buffer.appendSlice(allocator, &[_]u8{0});
@@ -16837,7 +16851,7 @@ fn serializeValue(buffer: *std.ArrayListUnmanaged(u8), value: Value, allocator: 
 }
 
 pub fn php_serialize(value: Value, allocator: Allocator) !Value {
-    var buffer = std.ArrayListUnmanaged(u8){};
+    var buffer = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
     defer buffer.deinit(allocator);
     try serializeValue(&buffer, value, allocator);
     const s = try PHPString.init(allocator, buffer.items);
@@ -17102,13 +17116,13 @@ pub fn hasException() bool {
 
 /// time - 返回当前Unix时间戳
 pub fn php_time() Value {
-    const timestamp = std.time.timestamp();
+    const timestamp = unixTimestamp();
     return Value.initInt(timestamp);
 }
 
 /// getdate - 获取日期/时间信息
 pub fn php_getdate(ts_val: Value, allocator: Allocator) !Value {
-    const timestamp = if (ts_val.isNull()) std.time.timestamp() else ts_val.toInt();
+    const timestamp = if (ts_val.isNull()) unixTimestamp() else ts_val.toInt();
     const epoch = std.time.epoch.EpochSeconds{ .secs = @intCast(@as(u64, @bitCast(timestamp))) };
     const day_seconds = epoch.getDaySeconds();
     const epoch_day = epoch.getEpochDay();
@@ -17151,7 +17165,7 @@ pub fn php_idate(format_val: Value, ts_val: Value, allocator: Allocator) !Value 
     if (!format_val.isString()) return Value.initInt(0);
     const fmt = format_val.asString().data;
     if (fmt.len == 0) return Value.initInt(0);
-    const timestamp = if (ts_val.isNull()) std.time.timestamp() else ts_val.toInt();
+    const timestamp = if (ts_val.isNull()) unixTimestamp() else ts_val.toInt();
     const epoch = std.time.epoch.EpochSeconds{ .secs = @intCast(@as(u64, @bitCast(timestamp))) };
     const day_seconds = epoch.getDaySeconds();
     const epoch_day = epoch.getEpochDay();
@@ -17234,13 +17248,13 @@ pub fn php_checkdate(month: Value, day: Value, year: Value) Value {
 pub fn php_gmdate(format: Value, timestamp: Value, allocator: Allocator) !Value {
     if (!format.isString()) return Value.initString(try PHPString.init(allocator, ""));
     const ts = if (timestamp.isNull())
-        std.time.timestamp()
+        unixTimestamp()
     else if (timestamp.isInt())
         timestamp.asInt()
     else if (timestamp.isFloat())
         @as(i64, @intFromFloat(timestamp.asFloat()))
     else
-        std.time.timestamp();
+        unixTimestamp();
     return formatPhpDateValue(ts, format.asString().data, allocator);
 }
 
@@ -17250,7 +17264,7 @@ pub fn php_gmdate(format: Value, timestamp: Value, allocator: Allocator) !Value 
 /// @param allocator 内存分配器
 /// @return 字符串格式 "0.microseconds seconds" 或浮点数时间戳
 pub fn php_microtime(get_as_float: Value, allocator: Allocator) !Value {
-    const now_ns = std.time.nanoTimestamp();
+    const now_ns = nanoTimestamp();
     const sec = @divTrunc(now_ns, std.time.ns_per_s);
     const usec = @divTrunc(@mod(now_ns, std.time.ns_per_s), std.time.ns_per_us);
 
@@ -17296,54 +17310,53 @@ fn formatPhpDateValue(timestamp: i64, format_str: []const u8, allocator: Allocat
     const month_full = [_][]const u8{ "", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
     const month_short = [_][]const u8{ "", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
 
-    var result = try std.ArrayList(u8).initCapacity(allocator, format_str.len * 2);
-    defer result.deinit(allocator);
-    const w = result.writer(allocator);
+    var aw2 = std.Io.Writer.Allocating.initCapacity(allocator, format_str.len * 2) catch return Value.initNull();
+    defer aw2.deinit();
 
     var i: usize = 0;
     while (i < format_str.len) : (i += 1) {
         const c = format_str[i];
         switch (c) {
             // Year
-            'Y' => try w.print("{d:0>4}", .{@as(u32, @intCast(year))}),
-            'y' => try w.print("{d:0>2}", .{@as(u32, @intCast(@mod(year, 100)))}),
+            'Y' => try aw2.writer.print("{d:0>4}", .{@as(u32, @intCast(year))}),
+            'y' => try aw2.writer.print("{d:0>2}", .{@as(u32, @intCast(@mod(year, 100)))}),
             // Month
-            'm' => try w.print("{d:0>2}", .{month}),
-            'n' => try w.print("{d}", .{month}),
-            'F' => try w.writeAll(month_full[month]),
-            'M' => try w.writeAll(month_short[month]),
+            'm' => try aw2.writer.print("{d:0>2}", .{month}),
+            'n' => try aw2.writer.print("{d}", .{month}),
+            'F' => try aw2.writer.writeAll(month_full[month]),
+            'M' => try aw2.writer.writeAll(month_short[month]),
             // Day
-            'd' => try w.print("{d:0>2}", .{day}),
-            'j' => try w.print("{d}", .{day}),
+            'd' => try aw2.writer.print("{d:0>2}", .{day}),
+            'j' => try aw2.writer.print("{d}", .{day}),
             // Weekday
-            'l' => try w.writeAll(weekday_full[wday]),
-            'D' => try w.writeAll(weekday_short[wday]),
-            'w' => try w.print("{d}", .{wday}),
-            'N' => try w.print("{d}", .{if (wday == 0) @as(usize, 7) else wday}), // ISO: Mon=1..Sun=7
+            'l' => try aw2.writer.writeAll(weekday_full[wday]),
+            'D' => try aw2.writer.writeAll(weekday_short[wday]),
+            'w' => try aw2.writer.print("{d}", .{wday}),
+            'N' => try aw2.writer.print("{d}", .{if (wday == 0) @as(usize, 7) else wday}), // ISO: Mon=1..Sun=7
             // Hour
-            'H' => try w.print("{d:0>2}", .{hour}),
-            'G' => try w.print("{d}", .{hour}),
-            'h' => try w.print("{d:0>2}", .{if (@mod(hour, 12) == 0) @as(usize, 12) else @mod(hour, 12)}),
-            'g' => try w.print("{d}", .{if (@mod(hour, 12) == 0) @as(usize, 12) else @mod(hour, 12)}),
-            'A' => try w.writeAll(if (hour < 12) "AM" else "PM"),
-            'a' => try w.writeAll(if (hour < 12) "am" else "pm"),
+            'H' => try aw2.writer.print("{d:0>2}", .{hour}),
+            'G' => try aw2.writer.print("{d}", .{hour}),
+            'h' => try aw2.writer.print("{d:0>2}", .{if (@mod(hour, 12) == 0) @as(usize, 12) else @mod(hour, 12)}),
+            'g' => try aw2.writer.print("{d}", .{if (@mod(hour, 12) == 0) @as(usize, 12) else @mod(hour, 12)}),
+            'A' => try aw2.writer.writeAll(if (hour < 12) "AM" else "PM"),
+            'a' => try aw2.writer.writeAll(if (hour < 12) "am" else "pm"),
             // Minute / second
-            'i' => try w.print("{d:0>2}", .{minute}),
-            's' => try w.print("{d:0>2}", .{second}),
+            'i' => try aw2.writer.print("{d:0>2}", .{minute}),
+            's' => try aw2.writer.print("{d:0>2}", .{second}),
             // Timestamp
-            'U' => try w.print("{d}", .{timestamp}),
+            'U' => try aw2.writer.print("{d}", .{timestamp}),
             // Day of year (0-based in PHP)
-            'z' => try w.print("{d}", .{year_day.day}),
+            'z' => try aw2.writer.print("{d}", .{year_day.day}),
             // Escape
             '\\' => {
                 i += 1;
-                if (i < format_str.len) try result.append(allocator, format_str[i]);
+                if (i < format_str.len) try aw2.writer.writeAll(format_str[i .. i + 1]);
             },
-            else => try result.append(allocator, c),
+            else => try aw2.writer.writeAll(&[_]u8{c}),
         }
     }
 
-    return Value.initString(try PHPString.init(allocator, result.items));
+    return Value.initString(try PHPString.init(allocator, aw2.written()));
 }
 
 /// date - 格式化日期时间
@@ -17362,13 +17375,13 @@ pub fn php_date(format: Value, timestamp: Value, allocator: Allocator) !Value {
 
     // 获取时间戳
     const ts = if (timestamp.isNull())
-        std.time.timestamp()
+        unixTimestamp()
     else if (timestamp.isInt())
         timestamp.asInt()
     else if (timestamp.isFloat())
         @as(i64, @intFromFloat(timestamp.asFloat()))
     else
-        std.time.timestamp();
+        unixTimestamp();
 
     return formatPhpDateValue(ts, format.asString().data, allocator);
 }
@@ -17426,7 +17439,7 @@ threadlocal var mt_state: ?MT19937 = null;
 
 fn nextRandom() u64 {
     if (mt_state == null) {
-        mt_state = MT19937.init(@intCast(@as(u64, @intCast(std.time.timestamp())) & 0xFFFFFFFF));
+        mt_state = MT19937.init(@intCast(@as(u64, @intCast(unixTimestamp())) & 0xFFFFFFFF));
     }
     return @as(u64, mt_state.?.generate());
 }
@@ -17467,7 +17480,7 @@ pub fn php_rand(min: Value, max: Value) !Value {
 pub fn php_mt_rand(min: Value, max: Value) !Value {
     // 确保mt_state已初始化
     if (mt_state == null) {
-        mt_state = MT19937.init(@intCast(@as(u64, @intCast(std.time.timestamp())) & 0xFFFFFFFF));
+        mt_state = MT19937.init(@intCast(@as(u64, @intCast(unixTimestamp())) & 0xFFFFFFFF));
     }
     
     // mt_rand() - 无参数，返回0到MT_RAND_MAX
@@ -17484,7 +17497,7 @@ pub fn php_mt_rand(min: Value, max: Value) !Value {
 /// @param seed 种子值（可选）
 pub fn php_srand(seed: Value) !Value {
     if (seed.isNull()) {
-        mt_state = MT19937.init(@intCast(@as(u64, @intCast(std.time.timestamp())) & 0xFFFFFFFF));
+        mt_state = MT19937.init(@intCast(@as(u64, @intCast(unixTimestamp())) & 0xFFFFFFFF));
     } else {
         mt_state = MT19937.init(@intCast(@as(u64, @intCast(@abs(seed.toInt()))) & 0xFFFFFFFF));
     }
@@ -18268,7 +18281,7 @@ pub fn php_array_splice(arr: Value, offset: Value, length: Value, replacement: V
     }
     defer if (rep_values) |vals| allocator.free(vals);
 
-    var new_elements = std.ArrayHashMap(ArrayKey, Value, PHPArray.ArrayContext, true).init(allocator);
+    var new_elements = std.ArrayHashMapUnmanaged(ArrayKey, Value, PHPArray.ArrayContext, true){};
     var next_int_key: i64 = 0;
 
     var idx: usize = 0;
@@ -18286,7 +18299,7 @@ pub fn php_array_splice(arr: Value, offset: Value, length: Value, replacement: V
             if (rep_values) |vals| {
                 for (vals) |v| {
                     _ = v.retain();
-                    try new_elements.put(.{ .integer = next_int_key }, v);
+                    try new_elements.put(allocator, .{ .integer = next_int_key }, v);
                     next_int_key += 1;
                 }
             }
@@ -18298,10 +18311,10 @@ pub fn php_array_splice(arr: Value, offset: Value, length: Value, replacement: V
         const kv = items[idx];
         switch (kv.key) {
             .string => {
-                try new_elements.put(kv.key, kv.value);
+                try new_elements.put(allocator, kv.key, kv.value);
             },
             .integer => {
-                try new_elements.put(.{ .integer = next_int_key }, kv.value);
+                try new_elements.put(allocator, .{ .integer = next_int_key }, kv.value);
                 next_int_key += 1;
             },
         }
@@ -18329,10 +18342,10 @@ pub fn php_sort(arr: Value, allocator: Allocator) !Value {
     while (it.next()) |entry| : (idx += 1) values[idx] = entry.value_ptr.*;
     try quickSortValues(values, allocator, false);
 
-    var new_elements = std.ArrayHashMap(ArrayKey, Value, PHPArray.ArrayContext, true).init(allocator);
+    var new_elements = std.ArrayHashMapUnmanaged(ArrayKey, Value, PHPArray.ArrayContext, true){};
     var i: usize = 0;
     while (i < values.len) : (i += 1) {
-        try new_elements.put(.{ .integer = @intCast(i) }, values[i]);
+        try new_elements.put(allocator, .{ .integer = @intCast(i) }, values[i]);
     }
 
     php_arr.elements.deinit();
@@ -18353,10 +18366,10 @@ pub fn php_rsort(arr: Value, allocator: Allocator) !Value {
     while (it.next()) |entry| : (idx += 1) values[idx] = entry.value_ptr.*;
     try quickSortValues(values, allocator, true);
 
-    var new_elements = std.ArrayHashMap(ArrayKey, Value, PHPArray.ArrayContext, true).init(allocator);
+    var new_elements = std.ArrayHashMapUnmanaged(ArrayKey, Value, PHPArray.ArrayContext, true){};
     var i: usize = 0;
     while (i < values.len) : (i += 1) {
-        try new_elements.put(.{ .integer = @intCast(i) }, values[i]);
+        try new_elements.put(allocator, .{ .integer = @intCast(i) }, values[i]);
     }
 
     php_arr.elements.deinit();
@@ -18372,9 +18385,9 @@ pub fn php_asort(arr: Value, allocator: Allocator) !Value {
     defer allocator.free(items);
     try quickSortEntriesByValue(items, allocator, false);
 
-    var new_elements = std.ArrayHashMap(ArrayKey, Value, PHPArray.ArrayContext, true).init(allocator);
+    var new_elements = std.ArrayHashMapUnmanaged(ArrayKey, Value, PHPArray.ArrayContext, true){};
     for (items) |kv| {
-        try new_elements.put(kv.key, kv.value);
+        try new_elements.put(allocator, kv.key, kv.value);
     }
     php_arr.elements.deinit();
     php_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
@@ -18388,9 +18401,9 @@ pub fn php_arsort(arr: Value, allocator: Allocator) !Value {
     defer allocator.free(items);
     try quickSortEntriesByValue(items, allocator, true);
 
-    var new_elements = std.ArrayHashMap(ArrayKey, Value, PHPArray.ArrayContext, true).init(allocator);
+    var new_elements = std.ArrayHashMapUnmanaged(ArrayKey, Value, PHPArray.ArrayContext, true){};
     for (items) |kv| {
-        try new_elements.put(kv.key, kv.value);
+        try new_elements.put(allocator, kv.key, kv.value);
     }
     php_arr.elements.deinit();
     php_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
@@ -18404,9 +18417,9 @@ pub fn php_ksort(arr: Value, allocator: Allocator) !Value {
     defer allocator.free(items);
     quickSortEntriesByKey(items, false);
 
-    var new_elements = std.ArrayHashMap(ArrayKey, Value, PHPArray.ArrayContext, true).init(allocator);
+    var new_elements = std.ArrayHashMapUnmanaged(ArrayKey, Value, PHPArray.ArrayContext, true){};
     for (items) |kv| {
-        try new_elements.put(kv.key, kv.value);
+        try new_elements.put(allocator, kv.key, kv.value);
     }
     php_arr.elements.deinit();
     php_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
@@ -18420,9 +18433,9 @@ pub fn php_krsort(arr: Value, allocator: Allocator) !Value {
     defer allocator.free(items);
     quickSortEntriesByKey(items, true);
 
-    var new_elements = std.ArrayHashMap(ArrayKey, Value, PHPArray.ArrayContext, true).init(allocator);
+    var new_elements = std.ArrayHashMapUnmanaged(ArrayKey, Value, PHPArray.ArrayContext, true){};
     for (items) |kv| {
-        try new_elements.put(kv.key, kv.value);
+        try new_elements.put(allocator, kv.key, kv.value);
     }
     php_arr.elements.deinit();
     php_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
@@ -18558,10 +18571,10 @@ pub fn php_usort(arr: Value, callback: Value, allocator: Allocator) !Value {
 
     try quickSortValuesWithCallback(values, callback, allocator, false);
 
-    var new_elements = std.ArrayHashMap(ArrayKey, Value, PHPArray.ArrayContext, true).init(allocator);
+    var new_elements = std.ArrayHashMapUnmanaged(ArrayKey, Value, PHPArray.ArrayContext, true){};
     var i: usize = 0;
     while (i < values.len) : (i += 1) {
-        try new_elements.put(.{ .integer = @intCast(i) }, values[i]);
+        try new_elements.put(allocator, .{ .integer = @intCast(i) }, values[i]);
     }
 
     php_arr.elements.deinit();
@@ -18578,9 +18591,9 @@ pub fn php_uasort(arr: Value, callback: Value, allocator: Allocator) !Value {
 
     try quickSortEntriesByValueWithCallback(items, callback, allocator, false);
 
-    var new_elements = std.ArrayHashMap(ArrayKey, Value, PHPArray.ArrayContext, true).init(allocator);
+    var new_elements = std.ArrayHashMapUnmanaged(ArrayKey, Value, PHPArray.ArrayContext, true){};
     for (items) |kv| {
-        try new_elements.put(kv.key, kv.value);
+        try new_elements.put(allocator, kv.key, kv.value);
     }
     php_arr.elements.deinit();
     php_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
@@ -18595,9 +18608,9 @@ pub fn php_uksort(arr: Value, callback: Value, allocator: Allocator) !Value {
 
     try quickSortEntriesByKeyWithCallback(items, callback, allocator, false);
 
-    var new_elements = std.ArrayHashMap(ArrayKey, Value, PHPArray.ArrayContext, true).init(allocator);
+    var new_elements = std.ArrayHashMapUnmanaged(ArrayKey, Value, PHPArray.ArrayContext, true){};
     for (items) |kv| {
-        try new_elements.put(kv.key, kv.value);
+        try new_elements.put(allocator, kv.key, kv.value);
     }
     php_arr.elements.deinit();
     php_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
@@ -18682,9 +18695,9 @@ pub fn php_array_multisort(arrays: []const Value, allocator: Allocator) !Value {
         var i: usize = 0;
         while (it.next()) |entry| : (i += 1) vals[i] = entry.value_ptr.*;
 
-        var new_elements = std.ArrayHashMap(ArrayKey, Value, PHPArray.ArrayContext, true).init(allocator);
+        var new_elements = std.ArrayHashMapUnmanaged(ArrayKey, Value, PHPArray.ArrayContext, true){};
         for (indices, 0..) |src, dst| {
-            try new_elements.put(.{ .integer = @intCast(dst) }, vals[src]);
+            try new_elements.put(allocator, .{ .integer = @intCast(dst) }, vals[src]);
         }
         a.elements.deinit();
         a.elements = PHPArray.Elements.initMixed(allocator, new_elements);
@@ -18841,7 +18854,7 @@ pub fn php_count_chars(str: Value, mode: Value, allocator: Allocator) !Value {
     }
 
     const bytes = str.asString().data;
-    var counts = [_]usize{0} ** 256;
+    var counts = [_]usize{0}**256;
     for (bytes) |b| {
         counts[b] += 1;
     }
@@ -18892,17 +18905,17 @@ pub fn php_urlencode(input: Value, allocator: Allocator) !Value {
     }
     const data = input.asString().data;
     var result = try std.ArrayList(u8).initCapacity(allocator, data.len);
-    defer result.deinit(allocator);
+    defer result.deinit();
     const hex = "0123456789ABCDEF";
     for (data) |c| {
         if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.') {
-            try result.append(allocator, c);
+            try result.append(c);
         } else if (c == ' ') {
-            try result.append(allocator, '+');
+            try result.append('+');
         } else {
-            try result.append(allocator, '%');
-            try result.append(allocator, hex[c >> 4]);
-            try result.append(allocator, hex[c & 0x0F]);
+            try result.append('%');
+            try result.append(hex[c >> 4]);
+            try result.append(hex[c & 0x0F]);
         }
     }
     const str = try PHPString.init(allocator, result.items);
@@ -18914,27 +18927,27 @@ pub fn php_urldecode(input: Value, allocator: Allocator) !Value {
     if (!input.isString()) return Value.initString(try PHPString.init(allocator, ""));
     const data = input.asString().data;
     var result = try std.ArrayList(u8).initCapacity(allocator, data.len);
-    defer result.deinit(allocator);
+    defer result.deinit();
     var i: usize = 0;
     while (i < data.len) {
         if (data[i] == '+') {
-            try result.append(allocator, ' ');
+            try result.append(' ');
             i += 1;
         } else if (data[i] == '%' and i + 2 < data.len) {
             const hi = std.fmt.charToDigit(data[i + 1], 16) catch {
-                try result.append(allocator, '%');
+                try result.append('%');
                 i += 1;
                 continue;
             };
             const lo = std.fmt.charToDigit(data[i + 2], 16) catch {
-                try result.append(allocator, '%');
+                try result.append('%');
                 i += 1;
                 continue;
             };
-            try result.append(allocator, (hi << 4) | lo);
+            try result.append((hi << 4) | lo);
             i += 3;
         } else {
-            try result.append(allocator, data[i]);
+            try result.append(data[i]);
             i += 1;
         }
     }
@@ -18951,15 +18964,15 @@ pub fn php_rawurlencode(input: Value, allocator: Allocator) !Value {
     }
     const data = input.asString().data;
     var result = try std.ArrayList(u8).initCapacity(allocator, data.len);
-    defer result.deinit(allocator);
+    defer result.deinit();
     const hex = "0123456789ABCDEF";
     for (data) |c| {
         if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~') {
-            try result.append(allocator, c);
+            try result.append(c);
         } else {
-            try result.append(allocator, '%');
-            try result.append(allocator, hex[c >> 4]);
-            try result.append(allocator, hex[c & 0x0F]);
+            try result.append('%');
+            try result.append(hex[c >> 4]);
+            try result.append(hex[c & 0x0F]);
         }
     }
     const str = try PHPString.init(allocator, result.items);
@@ -18971,24 +18984,24 @@ pub fn php_rawurldecode(input: Value, allocator: Allocator) !Value {
     if (!input.isString()) return Value.initString(try PHPString.init(allocator, ""));
     const data = input.asString().data;
     var result = try std.ArrayList(u8).initCapacity(allocator, data.len);
-    defer result.deinit(allocator);
+    defer result.deinit();
     var i: usize = 0;
     while (i < data.len) {
         if (data[i] == '%' and i + 2 < data.len) {
             const hi = std.fmt.charToDigit(data[i + 1], 16) catch {
-                try result.append(allocator, '%');
+                try result.append('%');
                 i += 1;
                 continue;
             };
             const lo = std.fmt.charToDigit(data[i + 2], 16) catch {
-                try result.append(allocator, '%');
+                try result.append('%');
                 i += 1;
                 continue;
             };
-            try result.append(allocator, (hi << 4) | lo);
+            try result.append((hi << 4) | lo);
             i += 3;
         } else {
-            try result.append(allocator, data[i]);
+            try result.append(data[i]);
             i += 1;
         }
     }
@@ -19005,8 +19018,10 @@ pub fn php_getenv(name_val: Value, allocator: Allocator) !Value {
     if (!name_val.isString()) return Value.initBool(false);
 
     const name = name_val.asString().data;
-    const env_val = std.process.getEnvVarOwned(allocator, name) catch return Value.initBool(false);
-    defer allocator.free(env_val);
+    // Zig 0.17: std.process.getEnvVarOwned 已移除，使用 std.c.getenv
+    const name_z = allocator.dupeSentinel(u8, name, 0) catch return Value.initBool(false);
+    defer allocator.free(name_z);
+    const env_val = getEnvVar(name_z.ptr) orelse return Value.initBool(false);
 
     return Value.initString(try PHPString.init(allocator, env_val));
 }
@@ -19017,7 +19032,7 @@ pub fn php_gethostbyname(hostname: Value, allocator: Allocator) !Value {
     const name = hostname.asString().data;
 
     // 使用 C 库 getaddrinfo 进行 DNS 解析
-    const c_name = try allocator.dupeZ(u8, name);
+    const c_name = try allocator.dupeSentinel(u8, name, 0);
     defer allocator.free(c_name);
 
     var hints: std.posix.addrinfo = std.mem.zeroes(std.posix.addrinfo);
@@ -19144,22 +19159,21 @@ pub fn php_http_build_query(data: Value, allocator: Allocator) !Value {
     if (!data.isArray()) return Value.initString(try PHPString.init(allocator, ""));
 
     const arr = data.asArray();
-    var result = try std.ArrayList(u8).initCapacity(allocator, 64);
-    defer result.deinit(allocator);
-    const writer = result.writer(allocator);
+    var aw = std.Io.Writer.Allocating.initCapacity(allocator, 64) catch return Value.initNull();
+    defer aw.deinit();
 
     var first = true;
     var iter = arr.elements.iterator();
     while (iter.next()) |entry| {
-        if (!first) try writer.writeAll("&");
+        if (!first) try aw.writer.writeAll("&");
         first = false;
 
         // 写入键
         switch (entry.key_ptr.*) {
-            .integer => |i| try writer.print("{d}", .{i}),
-            .string => |s| try writer.writeAll(s.data),
+            .integer => |i| try aw.writer.print("{d}", .{i}),
+            .string => |s| try aw.writer.writeAll(s.data),
         }
-        try writer.writeAll("=");
+        try aw.writer.writeAll("=");
 
         // 写入值
         const val = entry.value_ptr.*;
@@ -19167,23 +19181,23 @@ pub fn php_http_build_query(data: Value, allocator: Allocator) !Value {
             // URL 编码
             for (val.asString().data) |c| {
                 if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~') {
-                    try writer.writeByte(c);
+                    try aw.writer.writeByte(c);
                 } else if (c == ' ') {
-                    try writer.writeByte('+');
+                    try aw.writer.writeByte('+');
                 } else {
-                    try writer.print("%{X:0>2}", .{c});
+                    try aw.writer.print("%{X:0>2}", .{c});
                 }
             }
         } else if (val.isInt()) {
-            try writer.print("{d}", .{val.asInt()});
+            try aw.writer.print("{d}", .{val.asInt()});
         } else if (val.isFloat()) {
-            try writer.print("{d}", .{val.asFloat()});
+            try aw.writer.print("{d}", .{val.asFloat()});
         } else if (val.isBool()) {
-            if (val.asBool()) try writer.writeAll("1");
+            if (val.asBool()) try aw.writer.writeAll("1");
         }
     }
 
-    return Value.initString(try PHPString.init(allocator, result.items));
+    return Value.initString(try PHPString.init(allocator, aw.written()));
 }
 
 /// parse_str - 将查询字符串解析到变量中
@@ -19227,10 +19241,10 @@ pub fn php_glob(pattern: Value, allocator: Allocator) !Value {
     const dir_path = std.fs.path.dirname(pat) orelse ".";
     const file_pattern = std.fs.path.basename(pat);
 
-    var dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch {
+    var dir = std.Io.Dir.cwd().openDir(getIo(), dir_path, .{ .iterate = true }) catch {
         return Value.initArray(arr);
     };
-    defer dir.close();
+    defer dir.close(getIo());
 
     var dir_iter = dir.iterate();
     while (dir_iter.next() catch null) |entry| {
@@ -19420,20 +19434,19 @@ pub fn php_number_format(number: Value, decimals: Value, dec_point: Value, thous
     if (dec > 0) total += 1 + dec;
     _ = n_groups;
 
-    var buf = try std.ArrayList(u8).initCapacity(allocator, total + 4);
-    defer buf.deinit(allocator);
-    const w = buf.writer(allocator);
+    var aw3 = std.Io.Writer.Allocating.initCapacity(allocator, total + 4) catch return Value.initNull();
+    defer aw3.deinit();
 
-    if (negative) try w.writeByte('-');
+    if (negative) try aw3.writer.writeByte('-');
     // 写整数部分（带千分位）
     for (int_str, 0..) |ch, idx| {
         const remaining = int_str.len - idx;
-        if (idx > 0 and remaining % 3 == 0) try w.writeByte(ts);
-        try w.writeByte(ch);
+        if (idx > 0 and remaining % 3 == 0) try aw3.writer.writeByte(ts);
+        try aw3.writer.writeByte(ch);
     }
     // 写小数部分
     if (dec > 0) {
-        try w.writeByte(dp);
+        try aw3.writer.writeByte(dp);
         var tmp = frac_part;
         var digits = try allocator.alloc(u8, dec);
         defer allocator.free(digits);
@@ -19443,10 +19456,10 @@ pub fn php_number_format(number: Value, decimals: Value, dec_point: Value, thous
             digits[j] = '0' + @as(u8, @intCast(tmp % 10));
             tmp /= 10;
         }
-        try w.writeAll(digits);
+        try aw3.writer.writeAll(digits);
     }
 
-    return Value.initString(try PHPString.init(allocator, buf.items));
+    return Value.initString(try PHPString.init(allocator, aw3.written()));
 }
 
 /// nl2br - 将换行符转换为HTML <br>标签
@@ -19623,7 +19636,7 @@ pub fn php_file_exists(filename: Value) !Value {
     if (!filename.isString()) return Value.initBool(false);
 
     const path = filename.asString().data;
-    std.fs.cwd().access(path, .{}) catch {
+    std.Io.Dir.cwd().access(path, .{}) catch {
         return Value.initBool(false);
     };
 
@@ -19642,15 +19655,26 @@ pub fn php_mkdir(dirname: Value, permissions: Value, recursive: Value) !Value {
     _ = mode; // 权限在不同平台上处理不同，暂时忽略
     
     if (is_recursive) {
-        // 递归创建目录
-        std.fs.cwd().makePath(path) catch {
-            return Value.initBool(false);
-        };
+        // 递归创建目录（逐级创建）
+        var start: usize = 0;
+        while (start < path.len) {
+            if (path[start] == '/') {
+                start += 1;
+                continue;
+            }
+            const end = if (std.mem.indexOfScalarPos(u8, path, start, '/')) |i| i else path.len;
+            const component = path[0..end];
+            const z_path = std.mem.sliceAsBytes(component) ++ &[_]u8{0};
+            _ = std.posix.system.mkdir(z_path.ptr, 0o755);
+            start = end + 1;
+        }
     } else {
         // 非递归创建
-        std.fs.cwd().makeDir(path) catch {
+        const z_path = std.mem.sliceAsBytes(path) ++ &[_]u8{0};
+        const rc = std.posix.system.mkdir(z_path.ptr, 0o755);
+        if (@as(i32, @intCast(rc)) < 0) {
             return Value.initBool(false);
-        };
+        }
     }
 
     return Value.initBool(true);
@@ -19661,7 +19685,7 @@ pub fn php_rmdir(dirname: Value) !Value {
     if (!dirname.isString()) return Value.initBool(false);
 
     const path = dirname.asString().data;
-    std.fs.cwd().deleteDir(path) catch {
+    std.Io.Dir.cwd().deleteDir(path) catch {
         return Value.initBool(false);
     };
 
@@ -19675,7 +19699,7 @@ pub fn php_rename(oldname: Value, newname: Value) !Value {
     const old_path = oldname.asString().data;
     const new_path = newname.asString().data;
 
-    std.fs.cwd().rename(old_path, new_path) catch {
+    std.Io.Dir.cwd().rename(old_path, new_path) catch {
         return Value.initBool(false);
     };
 
@@ -19689,7 +19713,7 @@ pub fn php_copy(source: Value, dest: Value) !Value {
     const source_path = source.asString().data;
     const dest_path = dest.asString().data;
 
-    std.fs.cwd().copyFile(source_path, std.fs.cwd(), dest_path, .{}) catch {
+    std.Io.Dir.cwd().copyFile(source_path, std.fs.cwd, dest_path, .{}) catch {
         return Value.initBool(false);
     };
 
@@ -19718,7 +19742,7 @@ pub fn php_dirname(path: Value, allocator: Allocator) !Value {
 
 /// getmypid - 获取当前进程ID
 pub fn php_getmypid() Value {
-    const pid = std.c.getpid();
+    const pid = std.posix.system.getpid();
     return Value.initInt(@intCast(pid));
 }
 
@@ -19764,10 +19788,10 @@ pub fn php_touch(filename: Value) !Value {
     const path = filename.asString().data;
 
     // 如果文件不存在，创建空文件
-    const file = std.fs.cwd().createFile(path, .{ .exclusive = false, .truncate = false }) catch {
+    const file = std.Io.Dir.cwd().createFile(getIo(), path, .{ .exclusive = false, .truncate = false }) catch {
         return Value.initBool(false);
     };
-    file.close();
+    file.close(getIo());
     return Value.initBool(true);
 }
 
@@ -19804,7 +19828,7 @@ pub fn php_realpath(path_val: Value, allocator: Allocator) !Value {
     if (!path_val.isString()) return Value.initBool(false);
     const path = path_val.asString().data;
 
-    const c_path = try allocator.dupeZ(u8, path);
+    const c_path = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(c_path);
 
     var buf: [std.posix.PATH_MAX]u8 = undefined;
@@ -19821,8 +19845,8 @@ pub fn php_tempnam(dir: Value, prefix: Value, allocator: Allocator) !Value {
     const prefix_str = if (prefix.isString()) prefix.asString().data else "tmp";
 
     // 生成唯一文件名
-    const ts = std.time.milliTimestamp();
-    const pid = std.c.getpid();
+    const ts = milliTimestamp();
+    const pid = std.posix.system.getpid();
     const name = try std.fmt.allocPrint(allocator, "{s}/{s}{d}_{d}.tmp", .{ dir_str, prefix_str, pid, ts });
     defer allocator.free(name);
 
@@ -19831,31 +19855,30 @@ pub fn php_tempnam(dir: Value, prefix: Value, allocator: Allocator) !Value {
 
 /// debug_zval_dump - 输出变量的 zval 信息
 pub fn php_debug_zval_dump(value: Value) !Value {
-    const stdout_file = std.fs.File{ .handle = 1 };
     if (value.isString()) {
         const s = value.asString();
         var buf: [256]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "string({d}) \"{s}\" refcount(1)\n", .{ s.length, s.data }) catch "string(?)\n";
-        stdout_file.writeAll(msg) catch {};
+        fileWriteAll(1, msg);
     } else if (value.isInt()) {
         var buf: [64]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "int({d})\n", .{value.asInt()}) catch "int(?)\n";
-        stdout_file.writeAll(msg) catch {};
+        fileWriteAll(1, msg);
     } else if (value.isFloat()) {
         var buf: [64]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "float({d})\n", .{value.asFloat()}) catch "float(?)\n";
-        stdout_file.writeAll(msg) catch {};
+        fileWriteAll(1, msg);
     } else if (value.isBool()) {
-        stdout_file.writeAll(if (value.asBool()) "bool(true)\n" else "bool(false)\n") catch {};
+        fileWriteAll(1, if (value.asBool()) "bool(true)\n" else "bool(false)\n");
     } else if (value.isNull()) {
-        stdout_file.writeAll("NULL\n") catch {};
+        fileWriteAll(1, "NULL\n");
     } else if (value.isArray()) {
         const arr = value.asArray();
         var buf: [64]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "array({d}) refcount(1){{\n}}\n", .{arr.count()}) catch "array(?)\n";
-        stdout_file.writeAll(msg) catch {};
+        fileWriteAll(1, msg);
     } else {
-        stdout_file.writeAll("unknown type\n") catch {};
+        fileWriteAll(1, "unknown type\n");
     }
     return Value.initNull();
 }
@@ -19893,16 +19916,16 @@ pub fn php_http_response_code(code: Value) !Value {
 
 /// 输出缓冲栈
 const OBLevel = struct {
-    buffer: std.ArrayListUnmanaged(u8) = .{},
+    buffer: std.ArrayListUnmanaged(u8) = .{ .items = &.{}, .capacity = 0 },
     callback: ?Value = null,
 };
 
-threadlocal var ob_stack: std.ArrayListUnmanaged(OBLevel) = .{};
+threadlocal var ob_stack: std.ArrayListUnmanaged(OBLevel) = .{ .items = &.{}, .capacity = 0 };
 threadlocal var ob_initialized: bool = false;
 
 fn ensureObInit() void {
     if (!ob_initialized) {
-        ob_stack = .{};
+        ob_stack = .{ .items = &.{}, .capacity = 0 };
         ob_initialized = true;
     }
 }
@@ -19981,8 +20004,7 @@ pub fn php_ob_flush() !Value {
     if (ob_stack.items.len == 0) return Value.initBool(false);
     const level = &ob_stack.items[ob_stack.items.len - 1];
     if (level.buffer.items.len > 0) {
-        const stdout_file = std.fs.File{ .handle = 1 };
-        stdout_file.writeAll(level.buffer.items) catch {};
+        fileWriteAll(1, level.buffer.items);
         level.buffer.clearRetainingCapacity();
     }
     return Value.initBool(true);
@@ -19994,8 +20016,7 @@ pub fn php_ob_end_flush() !Value {
     if (ob_stack.items.len == 0) return Value.initBool(false);
     var level = ob_stack.pop().?;
     if (level.buffer.items.len > 0) {
-        const stdout_file = std.fs.File{ .handle = 1 };
-        stdout_file.writeAll(level.buffer.items) catch {};
+        fileWriteAll(1, level.buffer.items);
     }
     level.buffer.deinit(runtime_allocator);
     if (level.callback) |cb| cb.release(runtime_allocator);
@@ -20068,7 +20089,7 @@ pub fn php_json_encode(value: Value, flags: Value, depth: Value, allocator: Allo
     _ = flags_int; // TODO: 实现flags支持（JSON_PRETTY_PRINT等）
     _ = depth_int; // TODO: 实现depth检查
     
-    var buffer = std.ArrayListUnmanaged(u8){};
+    var buffer = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
     defer buffer.deinit(allocator);
 
     try jsonEncodeValue(value, &buffer, allocator);
@@ -20320,7 +20341,7 @@ fn jsonDecodeValue(json: []const u8, pos: *usize, assoc: bool, depth: usize, all
 fn jsonDecodeString(json: []const u8, pos: *usize, allocator: Allocator) !Value {
     pos.* += 1; // 跳过开头的引号
 
-    var buffer = std.ArrayListUnmanaged(u8){};
+    var buffer = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
     defer buffer.deinit(allocator);
 
     while (pos.* < json.len and json[pos.*] != '"') {
@@ -20493,7 +20514,7 @@ pub fn php_strtotime(time_str: Value, now: Value, allocator: Allocator) !Value {
 
     if (!time_str.isString()) return Value.initBool(false);
     const str = time_str.asString().data;
-    const base_ts: i64 = if (now.isInt()) now.asInt() else std.time.timestamp();
+    const base_ts: i64 = if (now.isInt()) now.asInt() else unixTimestamp();
 
     // 相对时间："+N unit" 或 "-N unit" 或 "next X"
     if (str.len > 0 and (str[0] == '+' or str[0] == '-')) {
@@ -20666,8 +20687,8 @@ const IPC_CREAT = 0o1000;
 const IPC_RMID = 0;
 const MAX_SIGNALS = 32;
 
-var signal_handlers: [MAX_SIGNALS]Value = .{Value.initNull()} ** MAX_SIGNALS;
-var pending_signals: [MAX_SIGNALS]bool = .{false} ** MAX_SIGNALS;
+var signal_handlers: [MAX_SIGNALS]Value = .{Value.initNull()}**MAX_SIGNALS;
+var pending_signals: [MAX_SIGNALS]bool = .{false}**MAX_SIGNALS;
 var last_wait_status: c_int = 0;
 
 /// C 信号处理函数（仅设置标志位）
@@ -20797,7 +20818,7 @@ pub fn php_posix_mkfifo(
     const mode: std.posix.mode_t = @intCast(
         @max(0, mode_val.toInt()),
     );
-    const path_z = try allocator.dupeZ(u8, path_str.data);
+    const path_z = try allocator.dupeSentinel(u8, path_str.data, 0);
     defer allocator.free(path_z);
     const ret = mkfifo(path_z, mode);
     return Value.initBool(ret == 0);
@@ -21312,7 +21333,7 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
 
     const fmt = format.asString().data;
     var result = try std.ArrayList(u8).initCapacity(allocator, 0);
-    defer result.deinit(allocator);
+    defer result.deinit();
 
     var arg_idx: usize = 0;
     var i: usize = 0;
@@ -21321,7 +21342,7 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
         if (fmt[i] == '%' and i + 1 < fmt.len) {
             i += 1;
             if (fmt[i] == '%') {
-                try result.append(allocator, '%');
+                try result.append('%');
                 i += 1;
                 continue;
             }
@@ -21465,8 +21486,8 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
                     try tmp_buf.appendSlice(allocator, str);
                 },
                 else => {
-                    try result.append(allocator, '%');
-                    try result.append(allocator, specifier);
+                    try result.append('%');
+                    try result.append(specifier);
                     continue;
                 },
             }
@@ -21477,25 +21498,25 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
                 const padding = width - content.len;
                 if (flag_minus) {
                     // Left-align: content first, then padding
-                    try result.appendSlice(allocator, content);
-                    for (0..padding) |_| try result.append(allocator, pad_char);
+                    try result.appendSlice(content);
+                    for (0..padding) |_| try result.append(pad_char);
                 } else {
                     // Right-align: padding first, then content
                     // For zero-padding with sign, put sign before zeros
                     if (pad_char == '0' and content.len > 0 and (content[0] == '-' or content[0] == '+' or content[0] == ' ')) {
-                        try result.append(allocator, content[0]);
-                        for (0..padding) |_| try result.append(allocator, '0');
-                        try result.appendSlice(allocator, content[1..]);
+                        try result.append(content[0]);
+                        for (0..padding) |_| try result.append('0');
+                        try result.appendSlice(content[1..]);
                     } else {
-                        for (0..padding) |_| try result.append(allocator, pad_char);
-                        try result.appendSlice(allocator, content);
+                        for (0..padding) |_| try result.append(pad_char);
+                        try result.appendSlice(content);
                     }
                 }
             } else {
-                try result.appendSlice(allocator, content);
+                try result.appendSlice(content);
             }
         } else {
-            try result.append(allocator, fmt[i]);
+            try result.append(fmt[i]);
             i += 1;
         }
     }
@@ -21664,7 +21685,7 @@ pub fn php_preg_match_all(pattern: Value, subject: Value, matches: *Value, flags
     defer pcre2_match_data_free_8(match_data);
 
     // 存储所有匹配（临时）
-    var all_matches = std.ArrayListUnmanaged(std.ArrayListUnmanaged([]const u8)){};
+    var all_matches = std.ArrayListUnmanaged(std.ArrayListUnmanaged([]const u8)){ .items = &.{}, .capacity = 0 };
     defer {
         for (all_matches.items) |*match_groups| {
             match_groups.deinit(allocator);
@@ -21693,7 +21714,7 @@ pub fn php_preg_match_all(pattern: Value, subject: Value, matches: *Value, flags
         const ovec = pcre2_get_ovector_pointer_8(match_data);
 
         // 保存当前匹配的所有组
-        var match_groups = std.ArrayListUnmanaged([]const u8){};
+        var match_groups = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
         var i: usize = 0;
         while (i < @as(usize, @intCast(rc))) : (i += 1) {
             const start = ovec[i * 2];
@@ -21757,21 +21778,21 @@ pub fn php_preg_replace(pattern: Value, replacement: Value, subject: Value, allo
     
     // 简单替换
     var result = try std.ArrayList(u8).initCapacity(allocator, subj.len);
-    defer result.deinit(allocator);
+    defer result.deinit();
     
     var pos: usize = 0;
     while (pos < subj.len) {
         if (std.mem.indexOf(u8, subj[pos..], actual_pat)) |idx| {
-            try result.appendSlice(allocator, subj[pos..pos+idx]);
-            try result.appendSlice(allocator, repl);
+            try result.appendSlice(subj[pos..pos+idx]);
+            try result.appendSlice(repl);
             pos += idx + actual_pat.len;
         } else {
-            try result.appendSlice(allocator, subj[pos..]);
+            try result.appendSlice(subj[pos..]);
             break;
         }
     }
     
-    const output = try PHPString.init(allocator, try result.toOwnedSlice(allocator));
+    const output = try PHPString.init(allocator, try result.toOwnedSlice());
     return Value.initString(output);
 }
 
@@ -21798,7 +21819,7 @@ pub fn php_preg_replace_callback(pattern: Value, callback: Value, subject: Value
     
     // 准备输出缓冲区
     var result = try std.ArrayList(u8).initCapacity(allocator, subject_str.len * 2);
-    defer result.deinit(allocator);
+    defer result.deinit();
     
     var subject_offset: usize = 0;
     var replace_count: usize = 0;
@@ -21823,7 +21844,7 @@ pub fn php_preg_replace_callback(pattern: Value, callback: Value, subject: Value
         
         // 添加匹配前的内容
         if (match_start > subject_offset) {
-            try result.appendSlice(allocator, subject_str[subject_offset..match_start]);
+            try result.appendSlice(subject_str[subject_offset..match_start]);
         }
         
         // 构建匹配数组
@@ -21846,17 +21867,17 @@ pub fn php_preg_replace_callback(pattern: Value, callback: Value, subject: Value
         
         // 将回调结果添加到输出
         if (callback_result.isString()) {
-            try result.appendSlice(allocator, callback_result.asString().data);
+            try result.appendSlice(callback_result.asString().data);
         } else if (callback_result.isInt()) {
             // 处理整数返回值
             const int_val = callback_result.asInt();
             var buf: [32]u8 = undefined;
             const int_str = try std.fmt.bufPrint(&buf, "{d}", .{int_val});
-            try result.appendSlice(allocator, int_str);
+            try result.appendSlice(int_str);
         } else {
             const str_result = try callback_result.toString(allocator);
             defer str_result.release(allocator);
-            try result.appendSlice(allocator, str_result.data);
+            try result.appendSlice(str_result.data);
         }
         
         subject_offset = match_end;
@@ -21865,10 +21886,10 @@ pub fn php_preg_replace_callback(pattern: Value, callback: Value, subject: Value
     
     // 添加剩余内容
     if (subject_offset < subject_str.len) {
-        try result.appendSlice(allocator, subject_str[subject_offset..]);
+        try result.appendSlice(subject_str[subject_offset..]);
     }
     
-    const output = try PHPString.init(allocator, try result.toOwnedSlice(allocator));
+    const output = try PHPString.init(allocator, try result.toOwnedSlice());
     return Value.initString(output);
 }
 
@@ -21923,16 +21944,16 @@ pub fn php_htmlspecialchars(str: Value, flags: Value, encoding: Value, double_en
 
     const input = str.asString().data;
     var result = try std.ArrayList(u8).initCapacity(allocator, 0);
-    defer result.deinit(allocator);
+    defer result.deinit();
 
     for (input) |c| {
         switch (c) {
-            '&' => try result.appendSlice(allocator, "&amp;"),
-            '"' => try result.appendSlice(allocator, "&quot;"),
-            '\'' => try result.appendSlice(allocator, "&#039;"),
-            '<' => try result.appendSlice(allocator, "&lt;"),
-            '>' => try result.appendSlice(allocator, "&gt;"),
-            else => try result.append(allocator, c),
+            '&' => try result.appendSlice("&amp;"),
+            '"' => try result.appendSlice("&quot;"),
+            '\'' => try result.appendSlice("&#039;"),
+            '<' => try result.appendSlice("&lt;"),
+            '>' => try result.appendSlice("&gt;"),
+            else => try result.append(c),
         }
     }
 
@@ -21952,32 +21973,32 @@ pub fn php_htmlspecialchars_decode(str: Value, flags: Value, allocator: Allocato
 
     const input = str.asString().data;
     var result = try std.ArrayList(u8).initCapacity(allocator, 0);
-    defer result.deinit(allocator);
+    defer result.deinit();
 
     var i: usize = 0;
     while (i < input.len) {
         if (input[i] == '&') {
             if (i + 4 <= input.len and std.mem.eql(u8, input[i .. i + 4], "&lt;")) {
-                try result.append(allocator, '<');
+                try result.append('<');
                 i += 4;
             } else if (i + 4 <= input.len and std.mem.eql(u8, input[i .. i + 4], "&gt;")) {
-                try result.append(allocator, '>');
+                try result.append('>');
                 i += 4;
             } else if (i + 5 <= input.len and std.mem.eql(u8, input[i .. i + 5], "&amp;")) {
-                try result.append(allocator, '&');
+                try result.append('&');
                 i += 5;
             } else if (i + 6 <= input.len and std.mem.eql(u8, input[i .. i + 6], "&quot;")) {
-                try result.append(allocator, '"');
+                try result.append('"');
                 i += 6;
             } else if (i + 6 <= input.len and std.mem.eql(u8, input[i .. i + 6], "&#039;")) {
-                try result.append(allocator, '\'');
+                try result.append('\'');
                 i += 6;
             } else {
-                try result.append(allocator, input[i]);
+                try result.append(input[i]);
                 i += 1;
             }
         } else {
-            try result.append(allocator, input[i]);
+            try result.append(input[i]);
             i += 1;
         }
     }
@@ -21996,7 +22017,7 @@ pub fn php_wordwrap(str: Value, width: Value, break_str: Value, cut: Value, allo
     const force_cut = cut.toBool();
 
     var result = try std.ArrayList(u8).initCapacity(allocator, 0);
-    defer result.deinit(allocator);
+    defer result.deinit();
 
     var line_len: usize = 0;
     var word_start: usize = 0;
@@ -22008,22 +22029,22 @@ pub fn php_wordwrap(str: Value, width: Value, break_str: Value, cut: Value, allo
             if (i > word_start) {
                 const word = input[word_start..i];
                 if (line_len + word.len > wrap_width and line_len > 0) {
-                    try result.appendSlice(allocator, break_chars);
+                    try result.appendSlice(break_chars);
                     line_len = 0;
                 }
-                try result.appendSlice(allocator, word);
+                try result.appendSlice(word);
                 line_len += word.len;
             }
             if (input[i] == '\n') {
-                try result.append(allocator, '\n');
+                try result.append('\n');
                 line_len = 0;
             } else {
-                try result.append(allocator, ' ');
+                try result.append(' ');
                 line_len += 1;
             }
             word_start = i + 1;
         } else if (force_cut and line_len >= wrap_width) {
-            try result.appendSlice(allocator, break_chars);
+            try result.appendSlice(break_chars);
             line_len = 0;
         }
         i += 1;
@@ -22033,9 +22054,9 @@ pub fn php_wordwrap(str: Value, width: Value, break_str: Value, cut: Value, allo
     if (i > word_start) {
         const word = input[word_start..i];
         if (line_len + word.len > wrap_width and line_len > 0) {
-            try result.appendSlice(allocator, break_chars);
+            try result.appendSlice(break_chars);
         }
-        try result.appendSlice(allocator, word);
+        try result.appendSlice(word);
     }
 
     const php_str = try PHPString.init(allocator, result.items);
@@ -22323,7 +22344,7 @@ pub fn php_uniqid(prefix: Value, more_entropy: Value, allocator: Allocator) !Val
     const ent = more_entropy.toBool();
 
     // PHP uniqid format: prefix + 8 hex chars (seconds) + 5 hex chars (microseconds/100)
-    const timestamp = std.time.nanoTimestamp();
+    const timestamp = nanoTimestamp();
     const now_us = @divTrunc(timestamp, 1000); // nanoseconds to microseconds
     const seconds = @as(u64, @intCast(@divTrunc(now_us, 1_000_000)));
     const microseconds = @as(u64, @intCast(@rem(now_us, 1_000_000)));
@@ -22670,14 +22691,14 @@ pub fn go_spawn(func_name: []const u8, args: []const Value, allocator: Allocator
 }
 
 pub const PHPMutex = struct {
-    mutex: std.Thread.Mutex,
+    mutex: std.atomic.Mutex,
     lock_count: std.atomic.Value(u32),
     allocator: Allocator,
 
     pub fn init(allocator: Allocator) !*PHPMutex {
         const self = try allocator.create(PHPMutex);
         self.* = .{
-            .mutex = .{},
+            .mutex = .unlocked,
             .lock_count = std.atomic.Value(u32).init(0),
             .allocator = allocator,
         };
@@ -22689,7 +22710,7 @@ pub const PHPMutex = struct {
     }
 
     pub fn lock(self: *PHPMutex) void {
-        self.mutex.lock();
+        spinLock(&self.mutex);
         _ = self.lock_count.fetchAdd(1, .monotonic);
     }
 
@@ -22762,7 +22783,7 @@ pub const PHPAtomic = struct {
 };
 
 pub const PHPRWLock = struct {
-    rwlock: std.Thread.RwLock,
+    mutex: std.atomic.Mutex,
     readers: std.atomic.Value(i32),
     writer: std.atomic.Value(bool),
     allocator: Allocator,
@@ -22770,7 +22791,7 @@ pub const PHPRWLock = struct {
     pub fn init(allocator: Allocator) !*PHPRWLock {
         const self = try allocator.create(PHPRWLock);
         self.* = .{
-            .rwlock = .{},
+            .mutex = .unlocked,
             .readers = std.atomic.Value(i32).init(0),
             .writer = std.atomic.Value(bool).init(false),
             .allocator = allocator,
@@ -22783,23 +22804,25 @@ pub const PHPRWLock = struct {
     }
 
     pub fn lockRead(self: *PHPRWLock) void {
-        self.rwlock.lockShared();
+        spinLock(&self.mutex);
         _ = self.readers.fetchAdd(1, .monotonic);
+        self.mutex.unlock();
     }
 
     pub fn unlockRead(self: *PHPRWLock) void {
+        spinLock(&self.mutex);
         _ = self.readers.fetchSub(1, .monotonic);
-        self.rwlock.unlockShared();
+        self.mutex.unlock();
     }
 
     pub fn lockWrite(self: *PHPRWLock) void {
-        self.rwlock.lock();
+        spinLock(&self.mutex);
         self.writer.store(true, .monotonic);
     }
 
     pub fn unlockWrite(self: *PHPRWLock) void {
         self.writer.store(false, .monotonic);
-        self.rwlock.unlock();
+        self.mutex.unlock();
     }
 
     pub fn getReaderCount(self: *const PHPRWLock) i32 {
@@ -22813,7 +22836,7 @@ pub const PHPRWLock = struct {
 
 pub const PHPSharedData = struct {
     data: std.StringHashMap([]const u8),
-    mutex: std.Thread.Mutex,
+    mutex: std.atomic.Mutex,
     allocator: Allocator,
     access_count: std.atomic.Value(u64),
 
@@ -22821,7 +22844,7 @@ pub const PHPSharedData = struct {
         const self = try allocator.create(PHPSharedData);
         self.* = .{
             .data = std.StringHashMap([]const u8).init(allocator),
-            .mutex = .{},
+            .mutex = .unlocked,
             .allocator = allocator,
             .access_count = std.atomic.Value(u64).init(0),
         };
@@ -22840,13 +22863,13 @@ pub const PHPSharedData = struct {
 
     pub fn get(self: *PHPSharedData, key: []const u8) ?[]const u8 {
         _ = self.access_count.fetchAdd(1, .monotonic);
-        self.mutex.lock();
+        spinLock(&self.mutex);
         defer self.mutex.unlock();
         return self.data.get(key);
     }
 
     pub fn set(self: *PHPSharedData, key: []const u8, value: []const u8) !void {
-        self.mutex.lock();
+        spinLock(&self.mutex);
         defer self.mutex.unlock();
 
         if (self.data.fetchRemove(key)) |kv| {
@@ -22863,7 +22886,7 @@ pub const PHPSharedData = struct {
     }
 
     pub fn remove(self: *PHPSharedData, key: []const u8) bool {
-        self.mutex.lock();
+        spinLock(&self.mutex);
         defer self.mutex.unlock();
 
         if (self.data.fetchRemove(key)) |kv| {
@@ -22875,19 +22898,19 @@ pub const PHPSharedData = struct {
     }
 
     pub fn has(self: *PHPSharedData, key: []const u8) bool {
-        self.mutex.lock();
+        spinLock(&self.mutex);
         defer self.mutex.unlock();
         return self.data.contains(key);
     }
 
     pub fn size(self: *PHPSharedData) usize {
-        self.mutex.lock();
+        spinLock(&self.mutex);
         defer self.mutex.unlock();
         return self.data.count();
     }
 
     pub fn clear(self: *PHPSharedData) void {
-        self.mutex.lock();
+        spinLock(&self.mutex);
         defer self.mutex.unlock();
 
         var iter = self.data.iterator();
@@ -23697,7 +23720,7 @@ fn registerZigSelect(allocator: Allocator) !void {
                 }
 
                 const array = cases_arg.asArray();
-                const start_time = std.time.milliTimestamp();
+                const start_time = milliTimestamp();
 
                 while (true) {
                     var iter = array.elements.iterator();
@@ -23742,7 +23765,7 @@ fn registerZigSelect(allocator: Allocator) !void {
                     }
 
                     if (timeout) |t| {
-                        if (std.time.milliTimestamp() - start_time >= t) {
+                        if (milliTimestamp() - start_time >= t) {
                             return Value.initNull();
                         }
                     }
@@ -23927,7 +23950,7 @@ pub fn php_natsort(arr: Value, allocator: Allocator) !Value {
     const php_arr = arr.asArray();
 
     const Entry = struct { key: ArrayKey, val: Value };
-    var entries = std.ArrayListUnmanaged(Entry){};
+    var entries = std.ArrayListUnmanaged(Entry){ .items = &.{}, .capacity = 0 };
     defer entries.deinit(allocator);
     var it = php_arr.elements.iterator();
     while (it.next()) |entry| {
@@ -24019,9 +24042,9 @@ const GeneratorState = enum(u8) {
 };
 
 pub const GeneratorContext = struct {
-    mutex: std.Thread.Mutex = .{},
-    caller_cond: std.Thread.Condition = .{},
-    gen_cond: std.Thread.Condition = .{},
+    mutex: std.Io.Mutex = .init,
+    caller_cond: std.Io.Condition = .init,
+    gen_cond: std.Io.Condition = .init,
     state: GeneratorState = .created,
     current_key: Value = Value.initNull(),
     current_value: Value = Value.initNull(),
@@ -24046,9 +24069,9 @@ pub fn php_generator_get_context() *GeneratorContext {
 fn generatorThreadRunner(gen_ctx: *GeneratorContext) void {
     tl_generator_ctx = gen_ctx;
     const body = gen_ctx.body_fn orelse {
-        gen_ctx.mutex.lock();
+        while (!gen_ctx.mutex.tryLock()) std.atomic.spinLoopHint();
         gen_ctx.state = .completed;
-        gen_ctx.caller_cond.signal();
+        gen_ctx.caller_cond.signal(getIo());
         gen_ctx.mutex.unlock();
         return;
     };
@@ -24057,17 +24080,17 @@ fn generatorThreadRunner(gen_ctx: *GeneratorContext) void {
         gen_ctx.caller_args_storage,
         runtime_allocator,
     ) catch {
-        gen_ctx.mutex.lock();
+        while (!gen_ctx.mutex.tryLock()) std.atomic.spinLoopHint();
         gen_ctx.has_error = true;
         gen_ctx.state = .completed;
-        gen_ctx.caller_cond.signal();
+        gen_ctx.caller_cond.signal(getIo());
         gen_ctx.mutex.unlock();
         return;
     };
-    gen_ctx.mutex.lock();
+    while (!gen_ctx.mutex.tryLock()) std.atomic.spinLoopHint();
     gen_ctx.return_value = result;
     gen_ctx.state = .completed;
-    gen_ctx.caller_cond.signal();
+    gen_ctx.caller_cond.signal(getIo());
     gen_ctx.mutex.unlock();
 }
 
@@ -24107,7 +24130,7 @@ fn getGenCtx(ctx: Value) ?*GeneratorContext {
 }
 
 fn generatorEnsureStarted(gen_ctx: *GeneratorContext) void {
-    gen_ctx.mutex.lock();
+    while (!gen_ctx.mutex.tryLock()) std.atomic.spinLoopHint();
     if (gen_ctx.state == .created) {
         gen_ctx.state = .running;
         gen_ctx.mutex.unlock();
@@ -24116,14 +24139,14 @@ fn generatorEnsureStarted(gen_ctx: *GeneratorContext) void {
             generatorThreadRunner,
             .{gen_ctx},
         ) catch {
-            gen_ctx.mutex.lock();
+            while (!gen_ctx.mutex.tryLock()) std.atomic.spinLoopHint();
             gen_ctx.state = .completed;
             gen_ctx.mutex.unlock();
             return;
         };
-        gen_ctx.mutex.lock();
+        while (!gen_ctx.mutex.tryLock()) std.atomic.spinLoopHint();
         while (gen_ctx.state == .running) {
-            gen_ctx.caller_cond.wait(&gen_ctx.mutex);
+            gen_ctx.caller_cond.wait(getIo(), &gen_ctx.mutex) catch {};
         }
         gen_ctx.mutex.unlock();
     } else {
@@ -24132,15 +24155,15 @@ fn generatorEnsureStarted(gen_ctx: *GeneratorContext) void {
 }
 
 fn generatorAdvance(gen_ctx: *GeneratorContext) void {
-    gen_ctx.mutex.lock();
+    while (!gen_ctx.mutex.tryLock()) std.atomic.spinLoopHint();
     if (gen_ctx.state != .suspended) {
         gen_ctx.mutex.unlock();
         return;
     }
     gen_ctx.state = .running;
-    gen_ctx.gen_cond.signal();
+    gen_ctx.gen_cond.signal(getIo());
     while (gen_ctx.state == .running) {
-        gen_ctx.caller_cond.wait(&gen_ctx.mutex);
+        gen_ctx.caller_cond.wait(getIo(), &gen_ctx.mutex) catch {};
     }
     gen_ctx.mutex.unlock();
 }
@@ -24150,7 +24173,7 @@ pub fn php_generator_yield(
     key: Value,
     value: Value,
 ) !Value {
-    gen_ctx.mutex.lock();
+    while (!gen_ctx.mutex.tryLock()) std.atomic.spinLoopHint();
     if (key.isNull()) {
         gen_ctx.current_key = Value.initInt(gen_ctx.auto_key);
         gen_ctx.auto_key += 1;
@@ -24159,9 +24182,9 @@ pub fn php_generator_yield(
     }
     gen_ctx.current_value = value;
     gen_ctx.state = .suspended;
-    gen_ctx.caller_cond.signal();
+    gen_ctx.caller_cond.signal(getIo());
     while (gen_ctx.state == .suspended) {
-        gen_ctx.gen_cond.wait(&gen_ctx.mutex);
+        gen_ctx.gen_cond.wait(getIo(), &gen_ctx.mutex);
     }
     if (gen_ctx.state == .completed) {
         gen_ctx.mutex.unlock();
@@ -24301,7 +24324,7 @@ fn registerGeneratorClass(allocator: Allocator) !void {
                 if (getGenCtx(ctx)) |gc| {
                     generatorEnsureStarted(gc);
                     if (args.len > 0) {
-                        gc.mutex.lock();
+                        while (!gc.mutex.tryLock()) std.atomic.spinLoopHint();
                         gc.sent_value = args[0];
                         gc.mutex.unlock();
                     }
@@ -24323,15 +24346,15 @@ fn registerGeneratorClass(allocator: Allocator) !void {
                 if (getGenCtx(ctx)) |gc| {
                     generatorEnsureStarted(gc);
                     if (gc.state == .completed) return Value.initNull();
-                    gc.mutex.lock();
+                    while (!gc.mutex.tryLock()) std.atomic.spinLoopHint();
                     if (args.len > 0) {
                         gc.throw_value = args[0];
                         gc.has_throw = true;
                     }
                     gc.state = .running;
-                    gc.gen_cond.signal();
+                    gc.gen_cond.signal(getIo());
                     while (gc.state == .running) {
-                        gc.caller_cond.wait(&gc.mutex);
+                        gc.caller_cond.wait(getIo(), &gc.mutex) catch {};
                     }
                     gc.mutex.unlock();
                     if (gc.state == .completed) return Value.initNull();
@@ -25394,7 +25417,7 @@ pub fn php_rewind(handle: Value) !Value {
     const handle_ptr = handle.asInt();
     if (handle_ptr <= 1) return Value.initBool(false);
 
-    const file_handle: *std.fs.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
+    const file_handle: *std.Io.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
     file_handle.seekTo(0) catch return Value.initBool(false);
     return Value.initBool(true);
 }
@@ -25419,8 +25442,8 @@ pub fn php_hash_file(algo: Value, filename: Value, allocator: Allocator) !Value 
     const fname = filename.asString().data;
 
     // 读取文件内容
-    const file = std.fs.cwd().openFile(fname, .{}) catch return Value.initBool(false);
-    defer file.close();
+    const file = std.Io.Dir.cwd().openFile(getIo(), fname, .{}) catch return Value.initBool(false);
+    defer file.close(getIo());
 
     const content = file.readToEndAlloc(allocator, 10 * 1024 * 1024) catch return Value.initBool(false);
     defer allocator.free(content);

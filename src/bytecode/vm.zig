@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("time_compat.zig");
 const instruction = @import("instruction.zig");
 const Instruction = instruction.Instruction;
 const OpCode = instruction.OpCode;
@@ -439,27 +440,27 @@ pub const BytecodeVM = struct {
             .frames = try allocator.alloc(CallFrame, FRAMES_MAX),
             .frame_count = 0,
             .globals = .{},
-            .global_names = .{},
+            .global_names = .empty,
             .functions = .{},
-            .function_table = .{},
+            .function_table = .empty,
             .classes = .{},
             .next_class_id = 0,
             .builtins = .{},
-            .builtin_array = .{},
-            .string_pool = .{},
-            .array_pool = .{},
-            .object_pool = .{},
-            .closure_pool = .{},
+            .builtin_array = .empty,
+            .string_pool = .empty,
+            .array_pool = .empty,
+            .object_pool = .empty,
+            .closure_pool = .empty,
             .string_cache = .{},
-            .free_strings = .{},
-            .free_arrays = .{},
-            .temp_strings = .{},
+            .free_strings = .empty,
+            .free_arrays = .empty,
+            .temp_strings = .empty,
             .temp_arena = std.heap.ArenaAllocator.init(allocator),
             .arena_alloc_count = 0,
             .gc_threshold = 1024 * 1024,
             .bytes_allocated = 0,
             .gc_count = 0,
-            .output_buffer = .{},
+            .output_buffer = .empty,
             // 类型反馈系统
             .type_feedback_collector = TypeFeedbackCollector.init(allocator),
             .enable_type_feedback = true,
@@ -911,7 +912,7 @@ pub const BytecodeVM = struct {
         self.stats.memory_allocations += 1;
         const arr = try self.allocator.create(Value.Array);
         arr.* = .{
-            .elements = .{},
+            .elements = .empty,
             .keys = .{},
             .ref_count = 1,
             .marked = false,
@@ -999,9 +1000,9 @@ pub const BytecodeVM = struct {
 
     /// 执行编译后的函数
     pub fn execute(self: *BytecodeVM, function: *CompiledFunction) VMError!Value {
-        const start_time = std.time.nanoTimestamp();
+        const start_time = time_compat.nanoTimestamp();
         defer {
-            const end_time = std.time.nanoTimestamp();
+            const end_time = time_compat.nanoTimestamp();
             self.stats.execution_time_ns += @intCast(end_time - start_time);
         }
 
@@ -2296,7 +2297,7 @@ pub const BytecodeVM = struct {
     /// @post 所有不可达对象被回收
     /// @post 内存碎片率 < 10%
     fn collectGarbage(self: *BytecodeVM) void {
-        const start_time = std.time.nanoTimestamp();
+        const start_time = time_compat.nanoTimestamp();
         
         // 1. 标记阶段：完整的对象图遍历
         self.markPhase() catch |err| {
@@ -2316,7 +2317,7 @@ pub const BytecodeVM = struct {
         
         self.gc_count += 1;
         
-        const end_time = std.time.nanoTimestamp();
+        const end_time = time_compat.nanoTimestamp();
         const pause_time_ns = @as(u64, @intCast(end_time - start_time));
         const pause_time_ms = pause_time_ns / 1_000_000;
         
@@ -2333,7 +2334,7 @@ pub const BytecodeVM = struct {
     /// @post 所有可达对象被标记
     fn markPhase(self: *BytecodeVM) !void {
         // 工作列表：待处理的值
-        var worklist = std.ArrayListUnmanaged(Value){};
+        var worklist = std.ArrayListUnmanaged(Value){ .items = &.{}, .capacity = 0 };
         defer worklist.deinit(self.allocator);
         
         // 1. 标记栈上的根对象
@@ -2685,13 +2686,13 @@ fn builtinVarDump(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
 fn builtinMicrotime(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
     // microtime(true)
     if (args.len == 1 and args[0].toBool()) {
-        const ns: i128 = std.time.nanoTimestamp();
+        const ns: i128 = time_compat.nanoTimestamp();
         const seconds = @as(f64, @floatFromInt(ns)) / 1_000_000_000.0;
         return .{ .float_val = seconds };
     }
 
     // microtime() 或 microtime(false)
-    const ns: i128 = std.time.nanoTimestamp();
+    const ns: i128 = time_compat.nanoTimestamp();
     const sec_i64: i64 = @intCast(@divTrunc(ns, 1_000_000_000));
     const ns_in_sec: i128 = @mod(ns, 1_000_000_000);
     const usec_i64: i64 = @intCast(@divTrunc(ns_in_sec, 1_000));
@@ -2892,7 +2893,7 @@ fn builtinSprintf(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
         else => valueToString(vm, args[0]) catch return BytecodeVM.VMError.OutOfMemory,
     };
 
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
     defer out.deinit(vm.allocator);
 
     var i: usize = 0;
@@ -3372,7 +3373,7 @@ fn builtinPregReplace(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
     };
     defer pcre2_match_data_free_8(match_data);
 
-    var out_buf = std.ArrayListUnmanaged(u8){};
+    var out_buf = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
     defer out_buf.deinit(vm.allocator);
 
     var offset: usize = 0;
@@ -3419,7 +3420,7 @@ fn builtinPregMatchAll(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value 
     defer pcre2_match_data_free_8(match_data);
 
     // 临时存储所有匹配
-    var all_matches = std.ArrayListUnmanaged(std.ArrayListUnmanaged([]const u8)){};
+    var all_matches = std.ArrayListUnmanaged(std.ArrayListUnmanaged([]const u8)).empty;
     defer {
         for (all_matches.items) |*match_groups| {
             match_groups.deinit(vm.allocator);
@@ -3437,7 +3438,7 @@ fn builtinPregMatchAll(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value 
         match_count += 1;
         const ovec = pcre2_get_ovector_pointer_8(match_data);
 
-        var match_groups = std.ArrayListUnmanaged([]const u8){};
+        var match_groups = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
         var i: usize = 0;
         while (i < @as(usize, @intCast(rc))) : (i += 1) {
             const start = ovec[i * 2];
@@ -3791,7 +3792,7 @@ fn replaceAllAlloc(
     repl: []const u8,
 ) ![]u8 {
     if (needle.len == 0) return allocator.dupe(u8, hay);
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
     errdefer out.deinit(allocator);
 
     var pos: usize = 0;
@@ -3834,7 +3835,7 @@ fn builtinStrIReplace(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
     defer vm.allocator.free(lower_search);
     for (lower_search) |*c| c.* = std.ascii.toLower(c.*);
 
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
     defer out.deinit(vm.allocator);
 
     var pos: usize = 0;
@@ -3991,7 +3992,7 @@ fn builtinImplode(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
         else => return .null_val,
     };
 
-    var out = std.ArrayListUnmanaged(u8){};
+    var out = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
     defer out.deinit(vm.allocator);
     for (arr.elements.items, 0..) |v, i| {
         if (i != 0) {
@@ -4165,7 +4166,7 @@ fn builtinShuffle(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
         .array_val => |a| a,
         else => return .{ .bool_val = false },
     };
-    var prng = std.Random.DefaultPrng.init(@intCast(std.time.nanoTimestamp()));
+    var prng = std.Random.DefaultPrng.init(@intCast(time_compat.nanoTimestamp()));
     const rnd = prng.random();
 
     var i: usize = arr.elements.items.len;
@@ -6480,7 +6481,7 @@ fn handlePassByValue(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) Byte
             // 复制数组
             const new_arr = vm.allocator.create(Value.Array) catch return BytecodeVM.VMError.OutOfMemory;
             new_arr.* = .{
-                .elements = .{},
+                .elements = .empty,
                 .keys = .{},
                 .ref_count = 1,
                 .marked = false,
@@ -6635,7 +6636,7 @@ fn handleCowCopy(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMEr
             // 创建新副本
             const new_arr = vm.allocator.create(Value.Array) catch return BytecodeVM.VMError.OutOfMemory;
             new_arr.* = .{
-                .elements = .{},
+                .elements = .empty,
                 .keys = .{},
                 .ref_count = 1,
                 .marked = false,

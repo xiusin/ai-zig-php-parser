@@ -387,7 +387,7 @@ pub const ParameterOptimizer = struct {
 
     /// 生成优化报告
     pub fn generateReport(self: *const ParameterOptimizer, allocator: std.mem.Allocator) ![]u8 {
-        var report = std.ArrayListUnmanaged(u8){};
+        var report = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
 
         try report.appendSlice(allocator, "=== Parameter Optimization Report ===\n");
         try std.fmt.format(report.writer(allocator), "Functions analyzed: {d}\n", .{self.stats.functions_analyzed});

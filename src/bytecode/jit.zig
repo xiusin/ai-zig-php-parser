@@ -585,10 +585,7 @@ pub const NativeCode = struct {
     /// @post self.code 被 munmap 释放
     pub fn deinit(self: *NativeCode, allocator: std.mem.Allocator) void {
         _ = allocator;
-        const c = @cImport({
-            @cInclude("sys/mman.h");
-        });
-        _ = c.munmap(self.code.ptr, self.code_len);
+        std.posix.munmap(@as([*]align(std.heap.page_size_min) const u8, @ptrCast(self.code.ptr))[0..self.code_len]);
     }
 };
 
@@ -627,21 +624,17 @@ const NativeCodegen = struct {
         try self.emitEpilogue();
 
         // 使用 mmap 分配可执行内存 (RWX)
-        const c = @cImport({
-            @cInclude("sys/mman.h");
-        });
         const code_len = self.code_buffer.items.len;
         const aligned_len = std.mem.alignForward(usize, code_len, PAGE_SIZE);
 
-        const ptr = c.mmap(
+        const ptr = std.posix.mmap(
             null,
             aligned_len,
-            c.PROT_READ | c.PROT_WRITE | c.PROT_EXEC,
-            c.MAP_PRIVATE | c.MAP_ANONYMOUS,
+            std.posix.PROT{ .READ = true, .WRITE = true, .EXEC = true },
+            .{ .TYPE = .PRIVATE, .ANONYMOUS = true },
             -1,
             0,
-        );
-        if (ptr == c.MAP_FAILED) return null;
+        ) catch return null;
 
         const code: []align(PAGE_SIZE) u8 = @alignCast(@as([*]u8, @ptrCast(ptr))[0..aligned_len]);
         @memcpy(code[0..code_len], self.code_buffer.items);

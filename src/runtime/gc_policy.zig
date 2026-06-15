@@ -127,7 +127,7 @@ pub const AllocationRateTracker = struct {
 
     pub fn init() AllocationRateTracker {
         return .{
-            .samples = [_]Sample{.{ .bytes = 0, .timestamp = 0 }} ** SAMPLE_COUNT,
+            .samples = @splat(.{ .bytes = 0, .timestamp = 0 }),
             .current_index = 0,
             .valid_samples = 0,
             .total_allocated = 0,
@@ -218,8 +218,8 @@ pub const GCOverheadTracker = struct {
 
     pub fn init() GCOverheadTracker {
         return .{
-            .gc_times = [_]u64{0} ** SAMPLE_COUNT,
-            .total_times = [_]u64{0} ** SAMPLE_COUNT,
+            .gc_times = @splat(@as(u64, 0)),
+            .total_times = @splat(@as(u64, 0)),
             .current_index = 0,
             .valid_samples = 0,
             .last_gc_end = std.time.milliTimestamp(),

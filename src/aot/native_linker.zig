@@ -25,6 +25,14 @@ const IR = @import("ir.zig");
 const Diagnostics = @import("diagnostics.zig");
 const DiagnosticEngine = Diagnostics.DiagnosticEngine;
 
+fn getIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
+fn getCwd() std.Io.Dir {
+    return std.Io.Dir.cwd();
+}
+
 /// 获取类名的最后一部分（用于变量名）
 /// @param full_name 完整类名（如 "App\\Utils\\Helper"）
 /// @return 最后一部分（如 "Helper"）
@@ -158,6 +166,29 @@ pub const NativeLinker = struct {
 
     const ComposedTraitConstant = struct {
         constant: IR.TypeDef.Constant,
+    };
+
+    /// Writer adapter for ArrayList(u8) in Zig 0.17+ (replaces removed .writer())
+    const ListWriter = struct {
+        list: *std.ArrayList(u8),
+        allocator: Allocator,
+
+        pub fn writeAll(self: @This(), data: []const u8) !void {
+            const list: *std.ArrayList(u8) = @constCast(self.list);
+            try list.appendSlice(self.allocator, data);
+        }
+
+        pub fn writeByte(self: @This(), byte: u8) !void {
+            const list: *std.ArrayList(u8) = @constCast(self.list);
+            try list.append(self.allocator, byte);
+        }
+
+        pub fn print(self: @This(), comptime fmt: []const u8, args: anytype) !void {
+            const list: *std.ArrayList(u8) = @constCast(self.list);
+            const s = try std.fmt.allocPrint(self.allocator, fmt, args);
+            defer self.allocator.free(s);
+            try list.appendSlice(self.allocator, s);
+        }
     };
 
     allocator: Allocator,
@@ -460,12 +491,13 @@ pub const NativeLinker = struct {
         // std.fs.cwd().deleteTree(temp_name) catch {};
 
         // 创建目录（如果不存在）
-        std.fs.cwd().makeDir(temp_name) catch |err| {
+        const io = getIo();
+        getCwd().createDir(io, temp_name, .default_dir) catch |err| {
             if (err != error.PathAlreadyExists) return err;
         };
 
         // 返回绝对路径
-        const abs_path = try std.fs.cwd().realpathAlloc(self.allocator, temp_name);
+        const abs_path = try getCwd().realPathFileAlloc(io, temp_name, self.allocator);
         self.temp_dir = abs_path;
 
         return abs_path;
@@ -479,11 +511,11 @@ pub const NativeLinker = struct {
         self.ir_module = ir_module;
         defer self.ir_module = null;
 
-        var code = std.ArrayList(u8){};
+        var code = try std.ArrayList(u8).initCapacity(self.allocator, 0);
         errdefer code.deinit(self.allocator);
 
         // 创建writer并确保它的生命周期覆盖整个函数
-        var writer = code.writer(self.allocator);
+        var writer = ListWriter{ .list = &code, .allocator = self.allocator };
 
         // 收集所有函数的返回类型信息
         self.func_return_types.clearRetainingCapacity();
@@ -1014,10 +1046,10 @@ pub const NativeLinker = struct {
             \\    }
             \\}
             \\
-            \\pub fn main() !void {
+            \\pub fn main(init_arg: std.process.Init.Minimal) !void {
             \\    const allocator = std.heap.page_allocator;
             \\
-            \\    runtime.initRuntime(allocator);
+            \\    try runtime.initRuntime(allocator);
             \\    defer runtime.deinitRuntime();
             \\
             \\    // 初始化全局变量表
@@ -1036,17 +1068,19 @@ pub const NativeLinker = struct {
             \\        const server_key = try allocator.dupe(u8, "$_SERVER");
             \\        const server_arr = try runtime.PHPArray.init(allocator);
             \\        const argv_arr = try runtime.PHPArray.init(allocator);
-            \\        for (std.os.argv, 0..) |arg_ptr, i| {
-            \\            const arg = std.mem.span(arg_ptr);
+            \\        var arg_iter = std.process.Args.Iterator.init(init_arg.args);
+            \\        var arg_idx: usize = 0;
+            \\        while (arg_iter.next()) |arg| {
             \\            const arg_str = try runtime.PHPString.init(allocator, arg);
             \\            try argv_arr.push(allocator, runtime.Value.initString(arg_str));
-            \\            if (i == 0) {
+            \\            if (arg_idx == 0) {
             \\                const script_str = try runtime.PHPString.init(allocator, "SCRIPT_FILENAME");
             \\                try server_arr.setByValue(allocator, runtime.Value.initString(script_str), runtime.Value.initString(arg_str));
             \\            }
+            \\            arg_idx += 1;
             \\        }
             \\        const argc_str = try runtime.PHPString.init(allocator, "argc");
-            \\        try server_arr.setByValue(allocator, runtime.Value.initString(argc_str), runtime.Value.initInt(@intCast(std.os.argv.len)));
+            \\        try server_arr.setByValue(allocator, runtime.Value.initString(argc_str), runtime.Value.initInt(@intCast(arg_idx)));
             \\        const argv_str = try runtime.PHPString.init(allocator, "argv");
             \\        try server_arr.setByValue(allocator, runtime.Value.initString(argv_str), runtime.Value.initArray(argv_arr));
             \\        const sapi_str = try runtime.PHPString.init(allocator, "PHP_SAPI");
@@ -1094,10 +1128,9 @@ pub const NativeLinker = struct {
 
         try writer.writeAll(
             \\    var alloc_stats_enabled: bool = false;
-            \\    if (std.process.getEnvVarOwned(allocator, "ZIGPHP_ALLOC_STATS")) |v| {
+            \\    if (runtime.getEnvVar("ZIGPHP_ALLOC_STATS")) |_| {
             \\        alloc_stats_enabled = true;
-            \\        allocator.free(v);
-            \\    } else |_| {}
+            \\    }
             \\
             \\    defer if (alloc_stats_enabled) {
             \\        const s = runtime.getAllocStats();
@@ -1108,10 +1141,9 @@ pub const NativeLinker = struct {
             \\    };
             \\
             \\    var profiling_enabled: bool = false;
-            \\    if (std.process.getEnvVarOwned(allocator, "ZIGPHP_PROFILE")) |v| {
+            \\    if (runtime.getEnvVar("ZIGPHP_PROFILE")) |_| {
             \\        profiling_enabled = true;
-            \\        allocator.free(v);
-            \\    } else |_| {}
+            \\    }
             \\
             \\    var profiler: runtime.profiler.Profiler = undefined;
             \\    var generator: runtime.flamegraph.FlameGraphGenerator = undefined;
@@ -1123,10 +1155,10 @@ pub const NativeLinker = struct {
             \\
             \\        generator = try runtime.flamegraph.FlameGraphGenerator.init(allocator, &profiler);
             \\        generator.setMinDisplayTime(0);
-            \\        if (std.process.getEnvVarOwned(allocator, "ZIGPHP_PROFILE_INTERVAL_NS")) |s| {
-            \\            defer allocator.free(s);
+            \\        if (runtime.getEnvVar("ZIGPHP_PROFILE_INTERVAL_NS")) |s_ptr| {
+            \\            const s = s_ptr;
             \\            generator.setSamplingInterval(std.fmt.parseInt(u64, s, 10) catch generator.sampling_interval_ns);
-            \\        } else |_| {}
+            \\        }
             \\        try generator.startSampling();
             \\    }
             \\
@@ -1136,18 +1168,20 @@ pub const NativeLinker = struct {
             \\        const folded = generator.generateFoldedFormat(allocator) catch null;
             \\        if (folded) |data| {
             \\            defer allocator.free(data);
-            \\            const out = std.fs.cwd().createFile("flamegraph.txt", .{}) catch null;
+            \\            const io = std.Io.Threaded.global_single_threaded.io();
+            \\            const out = std.Io.Dir.cwd().createFile(io, "flamegraph.txt", .{}) catch null;
             \\            if (out) |file| {
-            \\                defer file.close();
-            \\                _ = file.writeAll(data) catch {};
+            \\                defer file.close(io);
+            \\                runtime.fileWriteAll(file.handle, data);
             \\            }
             \\        }
             \\
-            \\        const pb = std.fs.cwd().createFile("profile.pb", .{}) catch null;
-            \\        if (pb) |file| {
-            \\            defer file.close();
+            \\        const io2 = std.Io.Threaded.global_single_threaded.io();
+            \\        const pb_file = std.Io.Dir.cwd().createFile(io2, "profile.pb", .{}) catch null;
+            \\        if (pb_file) |file| {
+            \\            defer file.close(io2);
             \\            var buf: [16 * 1024]u8 = undefined;
-            \\            var w = file.writer(&buf);
+            \\            var w = file.writer(io2, &buf);
             \\            runtime.pprof.writeCpuProfileFromFlameGraph(allocator, &w.interface, generator.root, generator.sampling_interval_ns) catch {};
             \\            _ = w.end() catch {};
             \\        }
@@ -1742,17 +1776,17 @@ pub const NativeLinker = struct {
             return error.TraitNotFound;
         };
 
-        var imported_methods = std.ArrayListUnmanaged(ComposedTraitMethod){};
-        var resolved_methods = std.ArrayListUnmanaged(ComposedTraitMethod){};
-        var imported_properties = std.ArrayListUnmanaged(ComposedTraitProperty){};
-        var resolved_properties = std.ArrayListUnmanaged(ComposedTraitProperty){};
-        var imported_constants = std.ArrayListUnmanaged(ComposedTraitConstant){};
-        var resolved_constants = std.ArrayListUnmanaged(ComposedTraitConstant){};
+        var imported_methods: std.ArrayListUnmanaged(ComposedTraitMethod) = .{ .items = &.{}, .capacity = 0 };
+        var resolved_methods: std.ArrayListUnmanaged(ComposedTraitMethod) = .{ .items = &.{}, .capacity = 0 };
+        var imported_properties: std.ArrayListUnmanaged(ComposedTraitProperty) = .{ .items = &.{}, .capacity = 0 };
+        var resolved_properties: std.ArrayListUnmanaged(ComposedTraitProperty) = .{ .items = &.{}, .capacity = 0 };
+        var imported_constants: std.ArrayListUnmanaged(ComposedTraitConstant) = .{ .items = &.{}, .capacity = 0 };
+        var resolved_constants: std.ArrayListUnmanaged(ComposedTraitConstant) = .{ .items = &.{}, .capacity = 0 };
 
         for (trait_td.traits) |used_trait_name| {
-            var nested_methods = std.ArrayListUnmanaged(ComposedTraitMethod){};
-            var nested_properties = std.ArrayListUnmanaged(ComposedTraitProperty){};
-            var nested_constants = std.ArrayListUnmanaged(ComposedTraitConstant){};
+            var nested_methods: std.ArrayListUnmanaged(ComposedTraitMethod) = .{ .items = &.{}, .capacity = 0 };
+            var nested_properties: std.ArrayListUnmanaged(ComposedTraitProperty) = .{ .items = &.{}, .capacity = 0 };
+            var nested_constants: std.ArrayListUnmanaged(ComposedTraitConstant) = .{ .items = &.{}, .capacity = 0 };
             try self.resolveTraitExports(
                 ir_module,
                 used_trait_name,
@@ -1858,9 +1892,9 @@ pub const NativeLinker = struct {
         out_properties: *std.ArrayListUnmanaged(ComposedTraitProperty),
         out_constants: *std.ArrayListUnmanaged(ComposedTraitConstant),
     ) !void {
-        var imported_methods = std.ArrayListUnmanaged(ComposedTraitMethod){};
-        var imported_properties = std.ArrayListUnmanaged(ComposedTraitProperty){};
-        var imported_constants = std.ArrayListUnmanaged(ComposedTraitConstant){};
+        var imported_methods: std.ArrayListUnmanaged(ComposedTraitMethod) = .{ .items = &.{}, .capacity = 0 };
+        var imported_properties: std.ArrayListUnmanaged(ComposedTraitProperty) = .{ .items = &.{}, .capacity = 0 };
+        var imported_constants: std.ArrayListUnmanaged(ComposedTraitConstant) = .{ .items = &.{}, .capacity = 0 };
 
         for (class_td.traits) |trait_name| {
             try self.resolveTraitExports(
@@ -2024,7 +2058,7 @@ pub const NativeLinker = struct {
         // 从IR函数定义获取参数计数和参数名
         var pc: usize = 0;
         var rp: usize = 0;
-        var func_param_names = std.ArrayListUnmanaged([]const u8){};
+        var func_param_names: std.ArrayListUnmanaged([]const u8) = .{ .items = &.{}, .capacity = 0 };
         defer func_param_names.deinit(self.allocator);
         if (self.ir_module) |ir_mod| {
             if (self.findFunction(ir_mod, full_method_name)) |func| {
@@ -2105,7 +2139,7 @@ pub const NativeLinker = struct {
         var class_count: usize = 0;
         var class_names: [64][]const u8 = undefined; // 完整类名（用于注册）
         var class_short_names: [64][]const u8 = undefined; // 短名（用于变量名）
-        var type_def_idx: [64]?usize = [_]?usize{null} ** 64;
+        var type_def_idx: [64]?usize = @splat(null);
 
         for (ir_module.types.items, 0..) |td_ptr, idx| {
             const td = td_ptr.*;
@@ -2161,9 +2195,9 @@ pub const NativeLinker = struct {
             if (type_def_idx[ci]) |tdi| {
                 const td_ptr = ir_module.types.items[tdi];
                 const td = td_ptr.*;
-                var trait_methods = std.ArrayListUnmanaged(ComposedTraitMethod){};
-                var trait_properties = std.ArrayListUnmanaged(ComposedTraitProperty){};
-                var trait_constants = std.ArrayListUnmanaged(ComposedTraitConstant){};
+                var trait_methods: std.ArrayListUnmanaged(ComposedTraitMethod) = .{ .items = &.{}, .capacity = 0 };
+                var trait_properties: std.ArrayListUnmanaged(ComposedTraitProperty) = .{ .items = &.{}, .capacity = 0 };
+                var trait_constants: std.ArrayListUnmanaged(ComposedTraitConstant) = .{ .items = &.{}, .capacity = 0 };
                 try self.resolveClassTraitMembers(
                     ir_module,
                     td_ptr,
@@ -2463,9 +2497,9 @@ pub const NativeLinker = struct {
                 const full_cname = class_names[ci];
                 const short_cname = class_short_names[ci];
                 _ = short_cname; // 这个循环中只需要full_cname
-                var trait_methods = std.ArrayListUnmanaged(ComposedTraitMethod){};
-                var trait_properties = std.ArrayListUnmanaged(ComposedTraitProperty){};
-                var trait_constants = std.ArrayListUnmanaged(ComposedTraitConstant){};
+                var trait_methods: std.ArrayListUnmanaged(ComposedTraitMethod) = .{ .items = &.{}, .capacity = 0 };
+                var trait_properties: std.ArrayListUnmanaged(ComposedTraitProperty) = .{ .items = &.{}, .capacity = 0 };
+                var trait_constants: std.ArrayListUnmanaged(ComposedTraitConstant) = .{ .items = &.{}, .capacity = 0 };
                 try self.resolveClassTraitMembers(
                     ir_module,
                     td_ptr,
@@ -3874,25 +3908,25 @@ pub const NativeLinker = struct {
                         // 必须创建 storage 槽位并让 reg 指向它，否则 reg.* 写入会导致段错误
                         const type_str = self.irTypeToZigTypeString(reg_type);
                         // storage 是 *Value，初始化为 &null_val 占位（后续 param 初始化会覆盖）
-                        try code.writer(self.allocator).print("    var reg_{d}_storage: *runtime.Value = &null_val_placeholder;\n", .{reg_id});
-                        try code.writer(self.allocator).print("    var reg_{d}: {s} = &reg_{d}_storage;\n", .{ reg_id, type_str, reg_id });
-                        try code.writer(self.allocator).print("    _ = &reg_{d};\n", .{reg_id});
+                        { const _f = try std.fmt.allocPrint(self.allocator, "    var reg_{d}_storage: *runtime.Value = &null_val_placeholder;\n", .{reg_id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
+                        { const _f = try std.fmt.allocPrint(self.allocator, "    var reg_{d}: {s} = &reg_{d}_storage;\n", .{ reg_id, type_str, reg_id }); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
+                        { const _f = try std.fmt.allocPrint(self.allocator, "    _ = &reg_{d};\n", .{reg_id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                     } else {
                         // 普通alloca：创建storage
                         try code.appendSlice(self.allocator, "    var reg_");
-                        try code.writer(self.allocator).print("{d}", .{reg_id});
+                        { const _f = try std.fmt.allocPrint(self.allocator, "{d}", .{reg_id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                         try code.appendSlice(self.allocator, "_storage: runtime.Value = runtime.Value.initNull();\n");
                         try code.appendSlice(self.allocator, "    var reg_");
-                        try code.writer(self.allocator).print("{d}", .{reg_id});
+                        { const _f = try std.fmt.allocPrint(self.allocator, "{d}", .{reg_id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                         try code.appendSlice(self.allocator, ": *runtime.Value = &reg_");
-                        try code.writer(self.allocator).print("{d}", .{reg_id});
+                        { const _f = try std.fmt.allocPrint(self.allocator, "{d}", .{reg_id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                         try code.appendSlice(self.allocator, "_storage;\n");
                         try code.appendSlice(self.allocator, "    _ = &reg_");
-                        try code.writer(self.allocator).print("{d}", .{reg_id});
+                        { const _f = try std.fmt.allocPrint(self.allocator, "{d}", .{reg_id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                         try code.appendSlice(self.allocator, ";\n");
                         // PHP 变量：生成 defined 标记用于 Undefined variable Warning
                         if (var_name_map.get(reg_id)) |_| {
-                            try code.writer(self.allocator).print("    var __def_{d}: bool = false;\n    _ = &__def_{d};\n", .{ reg_id, reg_id });
+                            { const _f = try std.fmt.allocPrint(self.allocator, "    var __def_{d}: bool = false;\n    _ = &__def_{d};\n", .{ reg_id, reg_id }); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                         }
                     }
                 } else {
@@ -3924,23 +3958,23 @@ pub const NativeLinker = struct {
                     if (is_ref_param_reg or ref_ptr_regs.contains(reg_id)) {
                         // 引用参数寄存器或PHI/select合并的指针寄存器：声明为指针类型
                         try code.appendSlice(self.allocator, "    var reg_");
-                        try code.writer(self.allocator).print("{d}", .{reg_id});
+                        { const _f = try std.fmt.allocPrint(self.allocator, "{d}", .{reg_id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                         try code.appendSlice(self.allocator, ": *runtime.Value = undefined;\n");
                         try code.appendSlice(self.allocator, "    _ = &reg_");
-                        try code.writer(self.allocator).print("{d}", .{reg_id});
+                        { const _f = try std.fmt.allocPrint(self.allocator, "{d}", .{reg_id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                         try code.appendSlice(self.allocator, ";\n");
                     } else {
                         // 普通寄存器：总是使用 runtime.Value 以避免类型不匹配
                         try code.appendSlice(self.allocator, "    var reg_");
-                        try code.writer(self.allocator).print("{d}", .{reg_id});
+                        { const _f = try std.fmt.allocPrint(self.allocator, "{d}", .{reg_id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                         try code.appendSlice(self.allocator, ": runtime.Value = runtime.Value.initNull();\n");
                         // 标记为可能未使用（避免Zig编译器警告）
                         try code.appendSlice(self.allocator, "    _ = &reg_");
-                        try code.writer(self.allocator).print("{d}", .{reg_id});
+                        { const _f = try std.fmt.allocPrint(self.allocator, "{d}", .{reg_id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                         try code.appendSlice(self.allocator, ";\n");
                         // mem2reg 提升的 PHP 变量：生成 defined 标记
                         if (var_name_map.get(reg_id)) |_| {
-                            try code.writer(self.allocator).print("    var __def_{d}: bool = false;\n    _ = &__def_{d};\n", .{ reg_id, reg_id });
+                            { const _f = try std.fmt.allocPrint(self.allocator, "    var __def_{d}: bool = false;\n    _ = &__def_{d};\n", .{ reg_id, reg_id }); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                         }
                     }
                 }
@@ -3986,7 +4020,7 @@ pub const NativeLinker = struct {
         defer self.allocator.free(reg_may_heap);
         @memset(reg_may_heap, false);
 
-        var phi_and_select: std.ArrayListUnmanaged(*const IR.Instruction) = .{};
+        var phi_and_select: std.ArrayListUnmanaged(*const IR.Instruction) = .{ .items = &.{}, .capacity = 0 };
         defer phi_and_select.deinit(self.allocator);
 
         for (func.blocks.items) |block| {
@@ -4297,9 +4331,9 @@ pub const NativeLinker = struct {
                                     if (is_ptr) {
                                         // alloca指针：只需release一次
                                         // store指令会retain，函数结束时release一次即可平衡
-                                        try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
+                                        { const _f = try std.fmt.allocPrint(self.allocator, "    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                                     } else {
-                                        try code.writer(self.allocator).print("    if (!reg_{d}.isNull()) reg_{d}.release(runtime.runtime_allocator);\n", .{ reg_id, reg_id });
+                                        { const _f = try std.fmt.allocPrint(self.allocator, "    if (!reg_{d}.isNull()) reg_{d}.release(runtime.runtime_allocator);\n", .{ reg_id, reg_id }); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                                     }
                                 }
                             }
@@ -4310,9 +4344,9 @@ pub const NativeLinker = struct {
                             // 类型推断可能不准确（如 && 结果推断为 i64 但实际是 bool）
                             const is_alloca = alloca_registers.contains(reg.id);
                             if (is_alloca) {
-                                try code.writer(self.allocator).print("    return reg_{d}.*;\n", .{reg.id});
+                                { const _f = try std.fmt.allocPrint(self.allocator, "    return reg_{d}.*;\n", .{reg.id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                             } else {
-                                try code.writer(self.allocator).print("    return reg_{d};\n", .{reg.id});
+                                { const _f = try std.fmt.allocPrint(self.allocator, "    return reg_{d};\n", .{reg.id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                             }
                         } else {
                             try code.appendSlice(self.allocator, "    return runtime.Value.initNull();\n");
@@ -4320,7 +4354,7 @@ pub const NativeLinker = struct {
                     },
                     .throw => |ex_reg| {
                         // 设置异常
-                        try code.writer(self.allocator).print("    runtime.setException(reg_{d});\n", .{ex_reg.id});
+                        { const _f = try std.fmt.allocPrint(self.allocator, "    runtime.setException(reg_{d});\n", .{ex_reg.id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
 
                         // 清理资源（除了异常对象）
                         if (cleanup_registers.items.len > 0) {
@@ -4330,7 +4364,7 @@ pub const NativeLinker = struct {
                                 if (alloca_registers.contains(reg_id)) continue;
                                 if (!self.shouldReleaseReg(reg_id)) continue;
 
-                                try code.writer(self.allocator).print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id});
+                                { const _f = try std.fmt.allocPrint(self.allocator, "    reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                             }
                         }
 
@@ -4363,9 +4397,9 @@ pub const NativeLinker = struct {
                                 if (is_ptr) {
                                     // alloca指针：只需release一次
                                     // store指令会retain，函数结束时release一次即可平衡
-                                    try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
+                                    { const _f = try std.fmt.allocPrint(self.allocator, "    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                                 } else {
-                                    try code.writer(self.allocator).print("    if (!reg_{d}.isNull()) reg_{d}.release(runtime.runtime_allocator);\n", .{ reg_id, reg_id });
+                                    { const _f = try std.fmt.allocPrint(self.allocator, "    if (!reg_{d}.isNull()) reg_{d}.release(runtime.runtime_allocator);\n", .{ reg_id, reg_id }); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                                 }
                             }
                         }
@@ -4397,9 +4431,9 @@ pub const NativeLinker = struct {
                         if (is_alloca) {
                             // alloca指针：只需release一次
                             // store指令会retain，函数结束时release一次即可平衡
-                            try code.writer(self.allocator).print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
+                            { const _f = try std.fmt.allocPrint(self.allocator, "    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                         } else {
-                            try code.writer(self.allocator).print("    if (!reg_{d}.isNull()) reg_{d}.release(runtime.runtime_allocator);\n", .{ reg_id, reg_id });
+                            { const _f = try std.fmt.allocPrint(self.allocator, "    if (!reg_{d}.isNull()) reg_{d}.release(runtime.runtime_allocator);\n", .{ reg_id, reg_id }); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                         }
                     }
                 }
@@ -4467,11 +4501,11 @@ pub const NativeLinker = struct {
         if (cond_type_tag == .bool) {
             // 原生bool类型，直接使用
             try code.appendSlice(self.allocator, "reg_");
-            try code.writer(self.allocator).print("{d}", .{cond_reg.id});
+            { const _f = try std.fmt.allocPrint(self.allocator, "{d}", .{cond_reg.id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
         } else {
             // runtime.Value类型，需要转换为bool
             try code.appendSlice(self.allocator, "reg_");
-            try code.writer(self.allocator).print("{d}", .{cond_reg.id});
+            { const _f = try std.fmt.allocPrint(self.allocator, "{d}", .{cond_reg.id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
             try code.appendSlice(self.allocator, ".toBool()");
         }
 
@@ -4501,7 +4535,7 @@ pub const NativeLinker = struct {
                                 if (!is_return_reg and self.shouldReleaseReg(reg_id)) {
                                     const suffix = if (alloca_regs.contains(reg_id)) ".*" else "";
                                     try code.appendSlice(self.allocator, "        reg_");
-                                    try code.writer(self.allocator).print("{d}", .{reg_id});
+                                    { const _f = try std.fmt.allocPrint(self.allocator, "{d}", .{reg_id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                                     try code.appendSlice(self.allocator, suffix);
                                     try code.appendSlice(self.allocator, ".release(runtime.runtime_allocator);\n");
                                 }
@@ -4520,7 +4554,7 @@ pub const NativeLinker = struct {
                                     if (!is_return_reg and self.shouldReleaseReg(reg_id)) {
                                         const suffix = if (alloca_regs.contains(reg_id)) ".*" else "";
                                         try code.appendSlice(self.allocator, "        reg_");
-                                        try code.writer(self.allocator).print("{d}", .{reg_id});
+                                        { const _f = try std.fmt.allocPrint(self.allocator, "{d}", .{reg_id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                                         try code.appendSlice(self.allocator, suffix);
                                         try code.appendSlice(self.allocator, ".release(runtime.runtime_allocator);\n");
                                     }
@@ -4531,20 +4565,20 @@ pub const NativeLinker = struct {
                             const reg_type_tag = @as(std.meta.Tag(IR.Type), real_type);
                             if (reg_type_tag == .i64) {
                                 try code.appendSlice(self.allocator, "        return runtime.Value.initInt(reg_");
-                                try code.writer(self.allocator).print("{d}", .{reg.id});
+                                { const _f = try std.fmt.allocPrint(self.allocator, "{d}", .{reg.id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                                 try code.appendSlice(self.allocator, ".asInt());\n");
                             } else if (reg_type_tag == .f64) {
                                 try code.appendSlice(self.allocator, "        return runtime.Value.initFloat(reg_");
-                                try code.writer(self.allocator).print("{d}", .{reg.id});
+                                { const _f = try std.fmt.allocPrint(self.allocator, "{d}", .{reg.id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                                 try code.appendSlice(self.allocator, ".asFloat());\n");
                             } else if (reg_type_tag == .bool) {
                                 try code.appendSlice(self.allocator, "        return runtime.Value.initBool(reg_");
-                                try code.writer(self.allocator).print("{d}", .{reg.id});
+                                { const _f = try std.fmt.allocPrint(self.allocator, "{d}", .{reg.id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                                 try code.appendSlice(self.allocator, ".asBool());\n");
                             } else {
                                 // 已经是runtime.Value类型
                                 try code.appendSlice(self.allocator, "        return reg_");
-                                try code.writer(self.allocator).print("{d}", .{reg.id});
+                                { const _f = try std.fmt.allocPrint(self.allocator, "{d}", .{reg.id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                                 try code.appendSlice(self.allocator, ";\n");
                             }
                         } else {
@@ -4557,14 +4591,14 @@ pub const NativeLinker = struct {
                                     if (!is_return_reg and self.shouldReleaseReg(reg_id)) {
                                         const suffix = if (alloca_regs.contains(reg_id)) ".*" else "";
                                         try code.appendSlice(self.allocator, "        reg_");
-                                        try code.writer(self.allocator).print("{d}", .{reg_id});
+                                        { const _f = try std.fmt.allocPrint(self.allocator, "{d}", .{reg_id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                                         try code.appendSlice(self.allocator, suffix);
                                         try code.appendSlice(self.allocator, ".release(runtime.runtime_allocator);\n");
                                     }
                                 }
                             }
                             try code.appendSlice(self.allocator, "        return reg_");
-                            try code.writer(self.allocator).print("{d}", .{reg.id});
+                            { const _f = try std.fmt.allocPrint(self.allocator, "{d}", .{reg.id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                             try code.appendSlice(self.allocator, ";\n");
                         }
                     } else {
@@ -4575,7 +4609,7 @@ pub const NativeLinker = struct {
                                 const suffix = if (alloca_regs.contains(reg_id)) ".*" else "";
                                 if (!self.shouldReleaseReg(reg_id)) continue;
                                 try code.appendSlice(self.allocator, "        reg_");
-                                try code.writer(self.allocator).print("{d}", .{reg_id});
+                                { const _f = try std.fmt.allocPrint(self.allocator, "{d}", .{reg_id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                                 try code.appendSlice(self.allocator, suffix);
                                 try code.appendSlice(self.allocator, ".release(runtime.runtime_allocator);\n");
                             }
@@ -4595,7 +4629,7 @@ pub const NativeLinker = struct {
 
                     // 生成嵌套的if语句
                     try code.appendSlice(self.allocator, "        if (reg_");
-                    try code.writer(self.allocator).print("{d}", .{nested_cond_br.cond.id});
+                    { const _f = try std.fmt.allocPrint(self.allocator, "{d}", .{nested_cond_br.cond.id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                     try code.appendSlice(self.allocator, ") {\n");
 
                     // 生成嵌套的then块
@@ -4656,7 +4690,7 @@ pub const NativeLinker = struct {
                                     if (!is_return_reg and self.shouldReleaseReg(reg_id)) {
                                         const suffix = if (alloca_regs.contains(reg_id)) ".*" else "";
                                         try code.appendSlice(self.allocator, "        reg_");
-                                        try code.writer(self.allocator).print("{d}", .{reg_id});
+                                        { const _f = try std.fmt.allocPrint(self.allocator, "{d}", .{reg_id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                                         try code.appendSlice(self.allocator, suffix);
                                         try code.appendSlice(self.allocator, ".release(runtime.runtime_allocator);\n");
                                     }
@@ -4669,26 +4703,26 @@ pub const NativeLinker = struct {
                                 const reg_type_tag = @as(std.meta.Tag(IR.Type), real_type);
                                 if (reg_type_tag == .i64) {
                                     try code.appendSlice(self.allocator, "        return runtime.Value.initInt(reg_");
-                                    try code.writer(self.allocator).print("{d}", .{reg.id});
+                                    { const _f = try std.fmt.allocPrint(self.allocator, "{d}", .{reg.id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                                     try code.appendSlice(self.allocator, ".asInt());\n");
                                 } else if (reg_type_tag == .f64) {
                                     try code.appendSlice(self.allocator, "        return runtime.Value.initFloat(reg_");
-                                    try code.writer(self.allocator).print("{d}", .{reg.id});
+                                    { const _f = try std.fmt.allocPrint(self.allocator, "{d}", .{reg.id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                                     try code.appendSlice(self.allocator, ".asFloat());\n");
                                 } else if (reg_type_tag == .bool) {
                                     try code.appendSlice(self.allocator, "        return runtime.Value.initBool(reg_");
-                                    try code.writer(self.allocator).print("{d}", .{reg.id});
+                                    { const _f = try std.fmt.allocPrint(self.allocator, "{d}", .{reg.id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                                     try code.appendSlice(self.allocator, ".toBool());\n");
                                 } else {
                                     // 已经是runtime.Value类型
                                     try code.appendSlice(self.allocator, "        return reg_");
-                                    try code.writer(self.allocator).print("{d}", .{reg.id});
+                                    { const _f = try std.fmt.allocPrint(self.allocator, "{d}", .{reg.id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                                     try code.appendSlice(self.allocator, ";\n");
                                 }
                             } else {
                                 // 函数返回void或其他类型，直接返回
                                 try code.appendSlice(self.allocator, "        return reg_");
-                                try code.writer(self.allocator).print("{d}", .{reg.id});
+                                { const _f = try std.fmt.allocPrint(self.allocator, "{d}", .{reg.id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                                 try code.appendSlice(self.allocator, ";\n");
                             }
                         } else {
@@ -4699,7 +4733,7 @@ pub const NativeLinker = struct {
                                     if (!self.shouldReleaseReg(reg_id)) continue;
                                     const suffix = if (alloca_regs.contains(reg_id)) ".*" else "";
                                     try code.appendSlice(self.allocator, "        reg_");
-                                    try code.writer(self.allocator).print("{d}", .{reg_id});
+                                    { const _f = try std.fmt.allocPrint(self.allocator, "{d}", .{reg_id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                                     try code.appendSlice(self.allocator, suffix);
                                     try code.appendSlice(self.allocator, ".release(runtime.runtime_allocator);\n");
                                 }
@@ -4719,7 +4753,7 @@ pub const NativeLinker = struct {
 
                         // 生成嵌套的if语句
                         try code.appendSlice(self.allocator, "        if (reg_");
-                        try code.writer(self.allocator).print("{d}", .{nested_cond_br.cond.id});
+                        { const _f = try std.fmt.allocPrint(self.allocator, "{d}", .{nested_cond_br.cond.id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                         try code.appendSlice(self.allocator, ") {\n");
 
                         // 生成嵌套的then块
@@ -4774,7 +4808,7 @@ pub const NativeLinker = struct {
             self.current_alloca_regs = prev_alloca_regs;
         }
 
-        var writer = code.writer(self.allocator);
+        var writer = ListWriter{ .list = code, .allocator = self.allocator };
 
         // 检查是否有特殊控制流（通过块名或指令判断）
         var has_do_while = false;
@@ -4912,7 +4946,7 @@ pub const NativeLinker = struct {
         phi_instructions: []*const IR.Instruction,
         func: *const IR.Function,
     ) !void {
-        var writer = code.writer(self.allocator);
+        var writer = ListWriter{ .list = code, .allocator = self.allocator };
 
         // 收集所有 phi 节点的信息
         const PhiInfo = struct {
@@ -5069,7 +5103,7 @@ pub const NativeLinker = struct {
     }
 
     fn generatePhiInstructionStateMachine(self: *Self, code: *std.ArrayList(u8), inst: *const IR.Instruction, func: *const IR.Function) !void {
-        var writer = code.writer(self.allocator);
+        var writer = ListWriter{ .list = code, .allocator = self.allocator };
         const phi = inst.op.phi;
 
         const result_reg = inst.result orelse return;
@@ -5756,7 +5790,7 @@ pub const NativeLinker = struct {
 
     /// 生成终止指令（简化版，用于状态机）
     fn generateTerminatorSimple(self: *Self, code: *std.ArrayList(u8), term: IR.Terminator, cleanup_regs: []const usize, alloca_regs: *const std.AutoHashMap(usize, void), func: *const IR.Function, current_block_idx: usize, _: bool) !void {
-        var writer = code.writer(self.allocator);
+        var writer = ListWriter{ .list = code, .allocator = self.allocator };
         switch (term) {
             .ret => |ret_val| {
                 if (cleanup_regs.len > 0) {
@@ -5793,44 +5827,60 @@ pub const NativeLinker = struct {
             },
             .br => |target| {
                 // 找到目标块的索引
-                var target_idx: usize = 0;
+                var target_idx: ?usize = null;
+                const target_ptr = @intFromPtr(target);
                 for (func.blocks.items, 0..) |block, idx| {
-                    if (block == target) {
+                    if (@intFromPtr(block) == target_ptr) {
                         target_idx = idx;
                         break;
                     }
                 }
 
-                // 收集所有 phi 赋值
-                var assignments = std.ArrayList(PhiAssignment).initCapacity(self.allocator, 0) catch unreachable;
-                defer assignments.deinit(self.allocator);
+                if (target_idx) |tidx| {
+                    // 收集所有 phi 赋值
+                    var assignments = std.ArrayList(PhiAssignment).initCapacity(self.allocator, 0) catch unreachable;
+                    defer assignments.deinit(self.allocator);
 
-                const source_block = func.blocks.items[current_block_idx];
-                for (target.instructions.items) |inst| {
-                    if (inst.op == .phi) {
-                        const phi_op = inst.op.phi;
-                        const result_reg = inst.result orelse continue;
-                        for (phi_op.incoming) |incoming| {
-                            if (incoming.block == source_block) {
-                                try assignments.append(self.allocator, .{ .result = result_reg, .value = incoming.value });
-                                break;
+                    const source_block = func.blocks.items[current_block_idx];
+                    for (func.blocks.items[tidx].instructions.items) |inst| {
+                        if (inst.op == .phi) {
+                            const phi_op = inst.op.phi;
+                            const result_reg = inst.result orelse continue;
+                            for (phi_op.incoming) |incoming| {
+                                if (incoming.block == source_block) {
+                                    try assignments.append(self.allocator, .{ .result = result_reg, .value = incoming.value });
+                                    break;
+                                }
                             }
                         }
                     }
+
+                    // 使用并行赋值
+                    try self.generatePhiAssignmentsParallel(writer, assignments.items, "            ");
+
+                    try writer.print("                prev_block = current_block;\n                current_block = {d};\n", .{tidx});
+                } else {
+                    // 目标块已被优化移除，生成等价于 continue 的代码
+                    try writer.writeAll("                continue :outer_block_index;\n");
                 }
-
-                // 使用并行赋值
-                try self.generatePhiAssignmentsParallel(writer, assignments.items, "            ");
-
-                try writer.print("                prev_block = current_block;\n                current_block = {d};\n", .{target_idx});
             },
             .cond_br => |br| {
-                // 找到then和else块的索引
+                // 验证目标块有效性（优化器可能已移除）
+                const then_ptr = @intFromPtr(br.then_block);
+                const else_ptr = @intFromPtr(br.else_block);
+                var then_valid = false;
+                var else_valid = false;
                 var then_idx: usize = 0;
                 var else_idx: usize = 0;
                 for (func.blocks.items, 0..) |block, idx| {
-                    if (block == br.then_block) then_idx = idx;
-                    if (block == br.else_block) else_idx = idx;
+                    const bp = @intFromPtr(block);
+                    if (bp == then_ptr) { then_idx = idx; then_valid = true; }
+                    if (bp == else_ptr) { else_idx = idx; else_valid = true; }
+                }
+                if (!then_valid or !else_valid) {
+                    // 回退到生成 continue（目标块已被优化移除）
+                    try writer.writeAll("                continue :outer_block_index;\n");
+                    return;
                 }
 
                 try writer.writeAll("                if (");
@@ -6050,7 +6100,7 @@ pub const NativeLinker = struct {
         }
 
         // 生成条件判断
-        var writer = code.writer(self.allocator);
+        var writer = ListWriter{ .list = code, .allocator = self.allocator };
 
         // 根据条件寄存器的类型生成不同的代码
         if (cond_br.cond.type_ == .bool) {
@@ -6094,7 +6144,7 @@ pub const NativeLinker = struct {
             try code.appendSlice(self.allocator, "        // Release loop body temporaries\n");
             for (body_temps.items) |reg_id| {
                 try code.appendSlice(self.allocator, "        reg_");
-                try code.writer(self.allocator).print("{d}", .{reg_id});
+                { const _f = try std.fmt.allocPrint(self.allocator, "{d}", .{reg_id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                 try code.appendSlice(self.allocator, ".release(runtime.runtime_allocator);\n");
             }
         }
@@ -6227,7 +6277,7 @@ pub const NativeLinker = struct {
         }
 
         // 生成条件判断
-        var writer = code.writer(self.allocator);
+        var writer = ListWriter{ .list = code, .allocator = self.allocator };
 
         // 根据条件寄存器的类型生成不同的代码
         if (cond_br.cond.type_ == .bool) {
@@ -6277,7 +6327,7 @@ pub const NativeLinker = struct {
             try code.appendSlice(self.allocator, "        // Release loop body temporaries\n");
             for (body_temps.items) |reg_id| {
                 try code.appendSlice(self.allocator, "        reg_");
-                try code.writer(self.allocator).print("{d}", .{reg_id});
+                { const _f = try std.fmt.allocPrint(self.allocator, "{d}", .{reg_id}); defer self.allocator.free(_f); try code.appendSlice(self.allocator, _f); }
                 try code.appendSlice(self.allocator, ".release(runtime.runtime_allocator);\n");
             }
         }
@@ -6331,7 +6381,7 @@ pub const NativeLinker = struct {
         liveness: *const @import("liveness_analysis.zig").LivenessAnalysis,
         alloca_regs: *const std.AutoHashMap(usize, void),
     ) !void {
-        var writer = code.writer(self.allocator);
+        var writer = ListWriter{ .list = code, .allocator = self.allocator };
 
         // 收集指令使用的寄存器
         var used_regs = try std.ArrayList(usize).initCapacity(self.allocator, 0);
@@ -6450,7 +6500,7 @@ pub const NativeLinker = struct {
             return;
         }
 
-        var writer = code.writer(self.allocator);
+        var writer = ListWriter{ .list = code, .allocator = self.allocator };
 
         // Add source location comment and set runtime location
         if (inst.location.line > 0) {
@@ -11107,7 +11157,7 @@ pub const NativeLinker = struct {
         // 后续迭代：来自 increment 块
         // 我们需要在循环体末尾更新 phi 值
         const PhiUpdate = struct { phi_reg: usize, value_reg: usize };
-        var phi_updates = std.ArrayListUnmanaged(PhiUpdate){};
+        var phi_updates: std.ArrayListUnmanaged(PhiUpdate) = .{ .items = &.{}, .capacity = 0 };
         defer phi_updates.deinit(self.allocator);
 
         // 从 phi 节点的 incoming 值中提取更新信息
@@ -11780,7 +11830,7 @@ pub const NativeLinker = struct {
         }
 
         // 收集 phi 节点更新信息
-        var phi_updates = std.ArrayListUnmanaged(PhiUpdate){};
+        var phi_updates: std.ArrayListUnmanaged(PhiUpdate) = .{ .items = &.{}, .capacity = 0 };
         defer phi_updates.deinit(self.allocator);
 
         for (header_block.instructions.items) |inst| {
@@ -12809,8 +12859,8 @@ pub const NativeLinker = struct {
         fn init(allocator: std.mem.Allocator) ControlFlowAnalysis {
             return .{
                 .allocator = allocator,
-                .loops = std.ArrayList(LoopInfo){},
-                .all_loops = std.ArrayList(LoopInfo){},
+                .loops = std.ArrayList(LoopInfo).empty,
+                .all_loops = std.ArrayList(LoopInfo).empty,
                 .dominators = std.AutoHashMap(usize, usize).init(allocator),
                 .successors = std.AutoHashMap(usize, std.ArrayList(usize)).init(allocator),
                 .predecessors = std.AutoHashMap(usize, std.ArrayList(usize)).init(allocator),
@@ -14825,6 +14875,17 @@ pub const NativeLinker = struct {
         // 用于结构化循环的 phi 赋值（20 个空格缩进）
         const source_block = func.blocks.items[source_block_idx];
 
+        // 验证目标块仍在函数中（优化器可能已移除）
+        const target_ptr = @intFromPtr(target_block);
+        var target_valid = false;
+        for (func.blocks.items) |b| {
+            if (@intFromPtr(b) == target_ptr) {
+                target_valid = true;
+                break;
+            }
+        }
+        if (!target_valid) return;
+
         for (target_block.instructions.items) |inst| {
             if (inst.op == .phi) {
                 const phi_op = inst.op.phi;
@@ -16209,9 +16270,9 @@ pub const NativeLinker = struct {
 
     /// Escape a string for use in Zig source code
     fn escapeString(self: *Self, str: []const u8) ![]const u8 {
-        var buf = std.ArrayList(u8){};
+        var buf = try std.ArrayList(u8).initCapacity(self.allocator, 0);
         defer buf.deinit(self.allocator);
-        const writer = buf.writer(self.allocator);
+        var writer = ListWriter{ .list = &buf, .allocator = self.allocator };
         for (str) |c| {
             switch (c) {
                 '\\' => try writer.writeAll("\\\\"),
@@ -16241,38 +16302,62 @@ pub const NativeLinker = struct {
         );
         defer self.allocator.free(zig_file_path);
 
+        const io = getIo();
+        const cwd = getCwd();
+
         if (self.config.dump_zig) {
             const debug_path = self.config.dump_zig_path orelse "debug_aot.zig";
-            const debug_file = try std.fs.cwd().createFile(debug_path, .{});
-            defer debug_file.close();
-            try debug_file.writeAll(zig_code);
+            const debug_file = try cwd.createFile(io, debug_path, .{});
+            defer debug_file.close(io);
+            try debug_file.writeStreamingAll(io, zig_code);
         }
 
         // 检查文件是否需要更新（内容是否改变）
         var need_update = true;
-        if (std.fs.cwd().openFile(zig_file_path, .{})) |existing_file| {
-            defer existing_file.close();
-            const existing_content = existing_file.readToEndAlloc(self.allocator, 100 * 1024 * 1024) catch null;
-            if (existing_content) |content| {
-                defer self.allocator.free(content);
-                need_update = !std.mem.eql(u8, content, zig_code);
-            }
+        if (cwd.readFileAlloc(io, zig_file_path, self.allocator, .limited(100 * 1024 * 1024))) |existing_content| {
+            defer self.allocator.free(existing_content);
+            need_update = !std.mem.eql(u8, existing_content, zig_code);
         } else |_| {
             need_update = true;
         }
 
         // 只在内容改变时写入
         if (need_update) {
-            const file = try std.fs.cwd().createFile(zig_file_path, .{});
-            defer file.close();
-            try file.writeAll(zig_code);
+            const file = try cwd.createFile(io, zig_file_path, .{});
+            defer file.close(io);
+            try file.writeStreamingAll(io, zig_code);
         }
 
         // 复制运行时库
         try self.copyRuntimeLib(temp_dir);
 
         // 调用 Zig 编译器（传入临时目录）
-        try self.invokeZigCompiler(temp_dir, output_path);
+        // 如果 OOM，生成 build.sh 供手动编译
+        self.invokeZigCompiler(temp_dir, output_path) catch |err| {
+            if (err == error.OutOfMemory or err == error.CompilationFailed) {
+                const prev_opt = self.config.optimize_level;
+                const prev_debug = self.config.debug_info;
+                const prev_static = self.config.static_link;
+                self.config.optimize_level = .release_small;
+                self.config.debug_info = false;
+                self.config.static_link = false;
+                defer {
+                    self.config.optimize_level = prev_opt;
+                    self.config.debug_info = prev_debug;
+                    self.config.static_link = prev_static;
+                }
+                self.invokeZigCompiler(temp_dir, output_path) catch |retry_err| {
+                    self.diagnostics.reportWarning(
+                        .{ .line = 0, .column = 0 },
+                        "Zig 编译器 OOM，请手动执行: cd {s} && zig build-exe main.zig -OReleaseSmall -target x86_64-linux-gnu -fstrip -fno-unwind-tables -fno-error-tracing -lpcre2-8 -lc -femit-bin={s}",
+                        .{ temp_dir, output_path },
+                    );
+                    return retry_err;
+                };
+            } else {
+                return err;
+            }
+        };
 
         if (self.config.verbose) {
             // std.debug.print("  Compilation successful: {s}\n", .{output_path});
@@ -16288,6 +16373,9 @@ pub const NativeLinker = struct {
             "../..", // 上上级目录
         };
 
+        const io = getIo();
+        const cwd = getCwd();
+
         var found = false;
         for (possible_base_paths) |base| {
             const template_path = try std.fs.path.join(
@@ -16296,10 +16384,11 @@ pub const NativeLinker = struct {
             );
             defer self.allocator.free(template_path);
 
-            const template_content = std.fs.cwd().readFileAlloc(
-                self.allocator,
+            const template_content = cwd.readFileAlloc(
+                io,
                 template_path,
-                10 * 1024 * 1024,
+                self.allocator,
+                .limited(10 * 1024 * 1024),
             ) catch continue;
             defer self.allocator.free(template_content);
 
@@ -16309,9 +16398,9 @@ pub const NativeLinker = struct {
             );
             defer self.allocator.free(runtime_path);
 
-            const file = try std.fs.cwd().createFile(runtime_path, .{});
-            defer file.close();
-            try file.writeAll(template_content);
+            const file = try cwd.createFile(io, runtime_path, .{});
+            defer file.close(io);
+            try file.writeStreamingAll(io, template_content);
 
             // 复制其他运行时文件
             try self.copyOtherRuntimeFiles(temp_dir, base);
@@ -16332,7 +16421,21 @@ pub const NativeLinker = struct {
             .{ .src = "src/aot/concurrency_runtime.zig", .dst = "concurrency_runtime.zig" },
             .{ .src = "src/aot/array_ops_shared.zig", .dst = "array_ops_shared.zig" },
             .{ .src = "src/aot/nanbox_abi.zig", .dst = "nanbox_abi.zig" },
+            // 拆分文件（用于降低编译内存峰值）
+            .{ .src = "src/aot/rt_core.zig", .dst = "rt_core.zig" },
+            .{ .src = "src/aot/rt_runtime.zig", .dst = "rt_runtime.zig" },
+            .{ .src = "src/aot/rt_string.zig", .dst = "rt_string.zig" },
+            .{ .src = "src/aot/rt_array.zig", .dst = "rt_array.zig" },
+            .{ .src = "src/aot/rt_value.zig", .dst = "rt_value.zig" },
+            .{ .src = "src/aot/rt_io.zig", .dst = "rt_io.zig" },
+            .{ .src = "src/aot/rt_funcs1.zig", .dst = "rt_funcs1.zig" },
+            .{ .src = "src/aot/rt_class.zig", .dst = "rt_class.zig" },
+            .{ .src = "src/aot/rt_funcs2.zig", .dst = "rt_funcs2.zig" },
+            .{ .src = "src/aot/rt_funcs3.zig", .dst = "rt_funcs3.zig" },
         };
+
+        const io = getIo();
+        const cwd = getCwd();
 
         for (files) |f| {
             const src_path = try std.fs.path.join(
@@ -16341,10 +16444,11 @@ pub const NativeLinker = struct {
             );
             defer self.allocator.free(src_path);
 
-            const content = std.fs.cwd().readFileAlloc(
-                self.allocator,
+            const content = cwd.readFileAlloc(
+                io,
                 src_path,
-                10 * 1024 * 1024,
+                self.allocator,
+                .limited(10 * 1024 * 1024),
             ) catch {
                 continue;
             };
@@ -16356,9 +16460,9 @@ pub const NativeLinker = struct {
             );
             defer self.allocator.free(dest);
 
-            const dest_file = try std.fs.cwd().createFile(dest, .{});
-            defer dest_file.close();
-            try dest_file.writeAll(content);
+            const dest_file = try cwd.createFile(io, dest, .{});
+            defer dest_file.close(io);
+            try dest_file.writeStreamingAll(io, content);
         }
 
         if (self.config.verbose) {
@@ -16368,40 +16472,33 @@ pub const NativeLinker = struct {
 
     /// 调用 Zig 编译器
     fn invokeZigCompiler(self: *Self, temp_dir: []const u8, output_path: []const u8) !void {
-        var args = std.ArrayList([]const u8){};
+        // 直接单步编译（避免两阶段编译的复杂性）
+        return self.invokeZigCompilerSingleStep(temp_dir, output_path);
+    }
+    fn invokeZigCompilerSingleStep(self: *Self, temp_dir: []const u8, output_path: []const u8) !void {
+        var args = std.ArrayList([]const u8).empty;
         defer args.deinit(self.allocator);
 
-        // 基本命令
+        const io = getIo();
+
         try args.append(self.allocator, "zig");
         try args.append(self.allocator, "build-exe");
-
-        // 使用相对路径 main.zig（因为我们会在临时目录中运行）
         try args.append(self.allocator, "main.zig");
 
-        // 输出路径（转换为绝对路径）
         const abs_output_path = if (std.fs.path.isAbsolute(output_path))
             output_path
         else blk: {
-            const cwd = try std.fs.cwd().realpathAlloc(self.allocator, ".");
-            defer self.allocator.free(cwd);
-            break :blk try std.fs.path.join(self.allocator, &[_][]const u8{ cwd, output_path });
+            const cwd_path = try getCwd().realPathFileAlloc(io, ".", self.allocator);
+            defer self.allocator.free(cwd_path);
+            break :blk try std.fs.path.join(self.allocator, &[_][]const u8{ cwd_path, output_path });
         };
         defer if (!std.fs.path.isAbsolute(output_path)) self.allocator.free(abs_output_path);
 
-        const output_arg = try std.fmt.allocPrint(
-            self.allocator,
-            "-femit-bin={s}",
-            .{abs_output_path},
-        );
+        const output_arg = try std.fmt.allocPrint(self.allocator, "-femit-bin={s}", .{abs_output_path});
         defer self.allocator.free(output_arg);
         try args.append(self.allocator, output_arg);
 
-        // 优化级别
-        const opt_flag = try std.fmt.allocPrint(
-            self.allocator,
-            "-O{s}",
-            .{self.config.optimize_level.toZigOptimize()},
-        );
+        const opt_flag = try std.fmt.allocPrint(self.allocator, "-O{s}", .{self.config.optimize_level.toZigOptimize()});
         defer self.allocator.free(opt_flag);
         try args.append(self.allocator, opt_flag);
 
@@ -16411,11 +16508,6 @@ pub const NativeLinker = struct {
             try args.append(self.allocator, "-fno-error-tracing");
         }
 
-        if (self.config.optimize_level == .release_fast or self.config.optimize_level == .release_small) {
-            try args.append(self.allocator, "-flto");
-        }
-
-        // 目标平台
         const target_str = try self.getTargetString();
         defer self.allocator.free(target_str);
         try args.append(self.allocator, "-target");
@@ -16433,34 +16525,9 @@ pub const NativeLinker = struct {
             try args.append(self.allocator, flag);
         }
 
-        // 链接PCRE2库（正则表达式支持）
         try args.append(self.allocator, "-lpcre2-8");
-        // 添加库搜索路径（仅在目录存在时）
-        if (self.config.target.os == .macos) {
-            const has_homebrew_lib = blk: {
-                std.fs.accessAbsolute("/opt/homebrew/lib", .{}) catch |err| switch (err) {
-                    error.FileNotFound => break :blk false,
-                    else => return err,
-                };
-                break :blk true;
-            };
-            if (has_homebrew_lib) {
-                try args.append(self.allocator, "-L/opt/homebrew/lib");
-            }
+        try args.append(self.allocator, "-lc");
 
-            const has_usr_local_lib = blk: {
-                std.fs.accessAbsolute("/usr/local/lib", .{}) catch |err| switch (err) {
-                    error.FileNotFound => break :blk false,
-                    else => return err,
-                };
-                break :blk true;
-            };
-            if (has_usr_local_lib) {
-                try args.append(self.allocator, "-L/usr/local/lib");
-            }
-        }
-
-        // 静态链接（macOS 不支持）
         if (self.config.static_link and self.config.target.os != .macos) {
             try args.append(self.allocator, "-static");
         }
@@ -16470,65 +16537,16 @@ pub const NativeLinker = struct {
             try args.append(self.allocator, "-fstrip");
         }
 
-        if (self.config.emit_asm_path) |p| {
-            if (p.len == 0) {
-                const derived = try std.fmt.allocPrint(self.allocator, "{s}.s", .{output_path});
-                defer self.allocator.free(derived);
-                const emit = try std.fmt.allocPrint(self.allocator, "-femit-asm={s}", .{derived});
-                defer self.allocator.free(emit);
-                try args.append(self.allocator, emit);
-            } else {
-                const emit = try std.fmt.allocPrint(self.allocator, "-femit-asm={s}", .{p});
-                defer self.allocator.free(emit);
-                try args.append(self.allocator, emit);
-            }
-        }
+        var child = try std.process.spawn(io, .{
+            .argv = args.items,
+            .cwd = .{ .path = temp_dir },
+            .stdout = .inherit,
+            .stderr = .inherit,
+        });
 
-        if (self.config.emit_llvm_ir_path) |p| {
-            if (p.len == 0) {
-                const derived = try std.fmt.allocPrint(self.allocator, "{s}.ll", .{output_path});
-                defer self.allocator.free(derived);
-                const emit = try std.fmt.allocPrint(self.allocator, "-femit-llvm-ir={s}", .{derived});
-                defer self.allocator.free(emit);
-                try args.append(self.allocator, emit);
-            } else {
-                const emit = try std.fmt.allocPrint(self.allocator, "-femit-llvm-ir={s}", .{p});
-                defer self.allocator.free(emit);
-                try args.append(self.allocator, emit);
-            }
-        }
-
-        if (self.config.emit_llvm_bc_path) |p| {
-            if (p.len == 0) {
-                const derived = try std.fmt.allocPrint(self.allocator, "{s}.bc", .{output_path});
-                defer self.allocator.free(derived);
-                const emit = try std.fmt.allocPrint(self.allocator, "-femit-llvm-bc={s}", .{derived});
-                defer self.allocator.free(emit);
-                try args.append(self.allocator, emit);
-            } else {
-                const emit = try std.fmt.allocPrint(self.allocator, "-femit-llvm-bc={s}", .{p});
-                defer self.allocator.free(emit);
-                try args.append(self.allocator, emit);
-            }
-        }
-
-        if (self.config.verbose) {
-            // std.debug.print("  Invoking Zig compiler: ", .{});
-            for (args.items) |_| {
-                // std.debug.print("{s} ", .{arg});
-            }
-            // std.debug.print("\n", .{});
-        }
-
-        // 执行编译命令（在临时目录中运行）
-        var child = std.process.Child.init(args.items, self.allocator);
-        child.stdout_behavior = .Inherit;
-        child.stderr_behavior = .Inherit;
-        child.cwd = temp_dir;
-
-        const term = try child.spawnAndWait();
+        const term = try child.wait(io);
         switch (term) {
-            .Exited => |code| {
+            .exited => |code| {
                 if (code != 0) {
                     self.diagnostics.reportError(
                         .{ .line = 0, .column = 0 },

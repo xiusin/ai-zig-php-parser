@@ -108,7 +108,7 @@ test "Property 21.2: Direct promotion when survivor is full" {
     var iteration: usize = 0;
     while (iteration < 50) : (iteration += 1) {
         // 分配多个对象填满 Survivor
-        var objects = std.ArrayListUnmanaged(*generational_gc.GCObjectHeader){};
+        var objects = std.ArrayListUnmanaged(*generational_gc.GCObjectHeader){ .items = &.{}, .capacity = 0 };
         defer objects.deinit(allocator);
         
         var i: usize = 0;

@@ -142,7 +142,7 @@ pub const AllocationTracker = struct {
 
     pub fn init(allocator: std.mem.Allocator) AllocationTracker {
         return .{
-            .allocations = std.ArrayListUnmanaged(AllocationRecord){},
+            .allocations = std.ArrayListUnmanaged(AllocationRecord){ .items = &.{}, .capacity = 0 },
             .current_allocated = 0,
             .peak_allocated = 0,
             .total_allocations = 0,
@@ -285,7 +285,7 @@ pub const GCTracker = struct {
 
     pub fn init(allocator: std.mem.Allocator) GCTracker {
         return .{
-            .gc_cycles = std.ArrayListUnmanaged(GCCycle){},
+            .gc_cycles = std.ArrayListUnmanaged(GCCycle){ .items = &.{}, .capacity = 0 },
             .current_phase = .idle,
             .gc_start_time = 0,
             .allocator = allocator,
@@ -435,7 +435,7 @@ pub const HotspotTracker = struct {
     pub fn init(allocator: std.mem.Allocator) HotspotTracker {
         return .{
             .function_stats = std.StringHashMap(FunctionStats).init(allocator),
-            .call_stack = std.ArrayListUnmanaged(CallFrame){},
+            .call_stack = std.ArrayListUnmanaged(CallFrame){ .items = &.{}, .capacity = 0 },
             .allocator = allocator,
         };
     }
@@ -573,7 +573,7 @@ pub const RealTimeProfiler = struct {
             .allocation_tracker = AllocationTracker.init(allocator),
             .gc_tracker = GCTracker.init(allocator),
             .hotspot_tracker = HotspotTracker.init(allocator),
-            .samples = std.ArrayListUnmanaged(PerformanceSample){},
+            .samples = std.ArrayListUnmanaged(PerformanceSample){ .items = &.{}, .capacity = 0 },
             .allocator = allocator,
             .running = std.atomic.Atomic(bool).init(false),
         };

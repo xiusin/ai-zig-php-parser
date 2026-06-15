@@ -136,12 +136,12 @@ pub const CompileOptions = struct {
     output_file: ?[]const u8 = null,
     /// Target platform triple
     target: Target = Target.native(),
-    /// Optimization level
-    optimize_level: OptimizeLevel = .debug,
+    /// Optimization level (默认 ReleaseSmall 以减少编译期内存占用)
+    optimize_level: OptimizeLevel = .release_small,
     /// Generate fully static linked executable
     static_link: bool = true,
-    /// Generate debug information
-    debug_info: bool = true,
+    /// Generate debug information (默认关闭以减少编译期内存占用)
+    debug_info: bool = false,
     /// Whether to invoke Zig to produce the final executable
     link_executable: bool = true,
     /// Dump generated IR for debugging
@@ -462,6 +462,7 @@ pub const CompileError = error{
 /// AOT Compiler - Main entry point for PHP to native compilation
 pub const AOTCompiler = struct {
     allocator: Allocator,
+    io: std.Io,
     options: CompileOptions,
     diagnostics: *DiagnosticEngine,
     symbol_table: ?*SymbolTable,
@@ -469,24 +470,16 @@ pub const AOTCompiler = struct {
     ir_generator: ?*IRGenerator,
     optimizer: ?*IROptimizer,
     native_linker: ?*NativeLinker,
-    /// Syntax configuration derived from options
     syntax_config: SyntaxConfig,
-
-    /// Source code (loaded from file)
     source: ?[]const u8,
-    /// Parsed AST nodes
     ast_nodes: ?[]const IRGeneratorMod.Node,
-    /// Root node index in AST
     root_index: u32,
-    /// String table from parser
     string_table: ?[]const []const u8,
-    /// Generated IR module
     ir_module: ?*IR.Module,
-
     const Self = @This();
 
     /// Initialize a new AOT compiler
-    pub fn init(allocator: Allocator, options: CompileOptions) !*Self {
+    pub fn init(allocator: Allocator, io: std.Io, options: CompileOptions) !*Self {
         const self = try allocator.create(Self);
         errdefer allocator.destroy(self);
 
@@ -501,6 +494,7 @@ pub const AOTCompiler = struct {
 
         self.* = .{
             .allocator = allocator,
+            .io = io,
             .options = options,
             .diagnostics = diagnostics,
             .symbol_table = null,
@@ -678,7 +672,7 @@ pub const AOTCompiler = struct {
 
     /// Main compilation entry point
     pub fn compile(self: *Self) !CompileResult {
-        var timer = if (self.options.timing) try std.time.Timer.start() else undefined;
+        var last_ts: std.Io.Timestamp = if (self.options.timing) std.Io.Timestamp.now(self.io, .awake) else undefined;
         var t_init: u64 = 0;
         var t_load: u64 = 0;
         var t_parse: u64 = 0;
@@ -693,18 +687,30 @@ pub const AOTCompiler = struct {
 
         // Initialize all components
         try self.initComponents();
-        if (self.options.timing) t_init = timer.lap();
+        if (self.options.timing) {
+            const now = std.Io.Timestamp.now(self.io, .awake);
+            t_init = @intCast(last_ts.durationTo(now).nanoseconds);
+            last_ts = now;
+        }
 
         // Step 1: Load and parse source file
         try self.loadSource();
-        if (self.options.timing) t_load = timer.lap();
+        if (self.options.timing) {
+            const now = std.Io.Timestamp.now(self.io, .awake);
+            t_load = @intCast(last_ts.durationTo(now).nanoseconds);
+            last_ts = now;
+        }
         if (self.diagnostics.hasErrors()) {
             return CompileResult.failed(self.diagnostics.error_count, self.diagnostics.warning_count);
         }
 
         // Step 2: Parse source into AST
         try self.parseSource();
-        if (self.options.timing) t_parse = timer.lap();
+        if (self.options.timing) {
+            const now = std.Io.Timestamp.now(self.io, .awake);
+            t_parse = @intCast(last_ts.durationTo(now).nanoseconds);
+            last_ts = now;
+        }
         if (self.diagnostics.hasErrors()) {
             return CompileResult.failed(self.diagnostics.error_count, self.diagnostics.warning_count);
         }
@@ -716,14 +722,22 @@ pub const AOTCompiler = struct {
 
         // Step 3: Generate IR
         try self.generateIR();
-        if (self.options.timing) t_ir = timer.lap();
+        if (self.options.timing) {
+            const now = std.Io.Timestamp.now(self.io, .awake);
+            t_ir = @intCast(last_ts.durationTo(now).nanoseconds);
+            last_ts = now;
+        }
         if (self.diagnostics.hasErrors()) {
             return CompileResult.failed(self.diagnostics.error_count, self.diagnostics.warning_count);
         }
 
         // Step 4: Optimize IR
         try self.optimizeIR();
-        if (self.options.timing) t_opt = timer.lap();
+        if (self.options.timing) {
+            const now = std.Io.Timestamp.now(self.io, .awake);
+            t_opt = @intCast(last_ts.durationTo(now).nanoseconds);
+            last_ts = now;
+        }
         if (self.diagnostics.hasErrors()) {
             return CompileResult.failed(self.diagnostics.error_count, self.diagnostics.warning_count);
         }
@@ -746,7 +760,11 @@ pub const AOTCompiler = struct {
 
         // Step 5: Generate native code
         try self.generateCode();
-        if (self.options.timing) t_codegen = timer.lap();
+        if (self.options.timing) {
+            const now = std.Io.Timestamp.now(self.io, .awake);
+            t_codegen = @intCast(last_ts.durationTo(now).nanoseconds);
+            last_ts = now;
+        }
         if (self.diagnostics.hasErrors()) {
             return CompileResult.failed(self.diagnostics.error_count, self.diagnostics.warning_count);
         }
@@ -754,7 +772,11 @@ pub const AOTCompiler = struct {
         // Step 6: Link executable (or just generate Zig code)
         var output_path = try self.options.getOutputPath(self.allocator);
         try self.linkExecutable(output_path);
-        if (self.options.timing) t_link = timer.lap();
+        if (self.options.timing) {
+            const now = std.Io.Timestamp.now(self.io, .awake);
+            t_link = @intCast(last_ts.durationTo(now).nanoseconds);
+            last_ts = now;
+        }
         if (self.diagnostics.hasErrors()) {
             self.allocator.free(output_path);
             return CompileResult.failed(self.diagnostics.error_count, self.diagnostics.warning_count);
@@ -813,7 +835,10 @@ pub const AOTCompiler = struct {
 
     /// Load source file
     fn loadSource(self: *Self) !void {
-        const file = std.fs.cwd().openFile(self.options.input_file, .{}) catch |err| {
+        // 如果源码已通过 setSource() 设置，跳过文件加载
+        if (self.source != null) return;
+
+        const file = std.Io.Dir.cwd().openFile(self.io, self.options.input_file, .{}) catch |err| {
             self.diagnostics.reportError(
                 .{ .file = self.options.input_file },
                 "cannot open file: {s}",
@@ -821,21 +846,14 @@ pub const AOTCompiler = struct {
             );
             return;
         };
-        defer file.close();
+        defer file.close(self.io);
 
-        const file_size = try file.getEndPos();
+        const file_stat = try file.stat(self.io);
+        const file_size: usize = @intCast(file_stat.size);
         const source = try self.allocator.alloc(u8, file_size);
         errdefer self.allocator.free(source);
 
-        const bytes_read = try file.readAll(source);
-        if (bytes_read != file_size) {
-            self.diagnostics.reportError(
-                .{ .file = self.options.input_file },
-                "incomplete file read",
-                .{},
-            );
-            return;
-        }
+        _ = try file.readPositionalAll(self.io, source, 0);
 
         self.source = source;
 
@@ -936,7 +954,7 @@ pub const AOTCompiler = struct {
 
         // Generate IR module using the correct root index
         const rel_path = self.diagnostics.relativizePath(self.options.input_file);
-        const abs_path = std.fs.cwd().realpathAlloc(self.allocator, self.options.input_file) catch self.options.input_file;
+        const abs_path = std.Io.Dir.cwd().realPathFileAlloc(self.io, self.options.input_file, self.allocator) catch self.options.input_file;
         self.ir_module = ir_gen.generateFromRoot(
             self.ast_nodes.?,
             self.string_table.?,
@@ -1107,9 +1125,9 @@ pub const AOTCompiler = struct {
                 try std.fmt.allocPrint(self.allocator, "{s}.zig", .{output_path});
             defer if (self.options.dump_zig_path == null) self.allocator.free(dump_path);
 
-            const f = try std.fs.cwd().createFile(dump_path, .{});
-            defer f.close();
-            try f.writeAll(zig_code);
+            const f = try std.Io.Dir.cwd().createFile(self.io, dump_path, .{});
+            defer f.close(self.io);
+            try f.writeStreamingAll(self.io, zig_code);
         }
 
         if (self.options.link_executable) {
@@ -1194,24 +1212,24 @@ pub const AOTCompiler = struct {
         const ir_text = try IR.serializeModule(self.allocator, module);
         defer self.allocator.free(ir_text);
 
-        const file = try std.fs.cwd().createFile(path, .{});
-        defer file.close();
-        try file.writeAll(ir_text);
+        const file = try std.Io.Dir.cwd().createFile(self.io, path, .{});
+        defer file.close(self.io);
+        try file.writeStreamingAll(self.io, ir_text);
     }
 
     fn emitTimings(self: *const Self, output_path: []const u8, t: CompileTimings) !void {
         const total: u64 = t.init + t.load + t.parse + t.ir_gen + t.ir_opt + t.codegen + t.link;
 
         if (self.options.timing_json_path) |path| {
-            const file = try std.fs.cwd().createFile(path, .{});
-            defer file.close();
+            const file = try std.Io.Dir.cwd().createFile(self.io, path, .{});
+            defer file.close(self.io);
             const json_line = try std.fmt.allocPrint(
                 self.allocator,
                 "{{\"output\":\"{s}\",\"init_ns\":{d},\"load_ns\":{d},\"parse_ns\":{d},\"ir_gen_ns\":{d},\"ir_opt_ns\":{d},\"codegen_ns\":{d},\"link_ns\":{d},\"total_ns\":{d}}}\n",
                 .{ output_path, t.init, t.load, t.parse, t.ir_gen, t.ir_opt, t.codegen, t.link, total },
             );
             defer self.allocator.free(json_line);
-            try file.writeAll(json_line);
+            try file.writeStreamingAll(self.io, json_line);
             return;
         }
 
@@ -1384,7 +1402,7 @@ test "AOTCompiler initializes syntax config from options" {
             .input_file = "test.php",
             .syntax_mode = .php,
         };
-        var aot_compiler = try AOTCompiler.init(allocator, opts);
+        var aot_compiler = try AOTCompiler.init(allocator, undefined, opts);
         defer aot_compiler.deinit();
 
         try std.testing.expectEqual(SyntaxMode.php, aot_compiler.getSyntaxMode());
@@ -1397,7 +1415,7 @@ test "AOTCompiler initializes syntax config from options" {
             .input_file = "test.php",
             .syntax_mode = .go,
         };
-        var aot_compiler = try AOTCompiler.init(allocator, opts);
+        var aot_compiler = try AOTCompiler.init(allocator, undefined, opts);
         defer aot_compiler.deinit();
 
         try std.testing.expectEqual(SyntaxMode.go, aot_compiler.getSyntaxMode());

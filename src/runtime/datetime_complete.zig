@@ -1,3 +1,4 @@
+const time_compat = @import("time_compat.zig");
 const std = @import("std");
 const types = @import("types.zig");
 const Value = types.Value;
@@ -15,7 +16,7 @@ pub const DateTimeFunctions = struct {
     /// time - 获取当前Unix时间戳
     /// @post 返回当前时间戳（秒）
     pub fn time(_: anytype, _: []const Value) !Value {
-        const timestamp = std.time.timestamp();
+        const timestamp = time_compat.timestamp();
         return Value.initInt(timestamp);
     }
 
@@ -27,7 +28,7 @@ pub const DateTimeFunctions = struct {
         else 
             false;
 
-        const nanos = std.time.nanoTimestamp();
+        const nanos = time_compat.nanoTimestamp();
         const secs = @divFloor(nanos, 1_000_000_000);
         const micro_part = @divFloor(@mod(nanos, 1_000_000_000), 1000);
 
@@ -63,7 +64,7 @@ pub const DateTimeFunctions = struct {
         const timestamp = if (args.len > 1 and args[1].tag == .integer)
             args[1].data.integer
         else
-            std.time.timestamp();
+            time_compat.timestamp();
 
         var result = std.ArrayList(u8){ .allocator = vm.allocator };
         defer result.deinit();
@@ -240,7 +241,7 @@ pub const DateTimeFunctions = struct {
         const base_time = if (args.len > 1 and args[1].tag == .integer)
             args[1].data.integer
         else
-            std.time.timestamp();
+            time_compat.timestamp();
 
         // 解析日期字符串
         const timestamp = parseDateTime(date_str, base_time) catch {

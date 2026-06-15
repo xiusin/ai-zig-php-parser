@@ -810,7 +810,7 @@ pub const IROptimizer = struct {
         // 1. It is side-effect free
         // 2. All operands are loop-invariant (constants or defined outside the loop)
 
-        var invariant_instrs = std.ArrayListUnmanaged(*Instruction){};
+        var invariant_instrs = std.ArrayListUnmanaged(*Instruction){ .items = &.{}, .capacity = 0 };
         defer invariant_instrs.deinit(self.allocator);
 
         // 两遍扫描：第一遍找出所有可能的不变量，第二遍按依赖顺序提升
@@ -1031,7 +1031,7 @@ pub const IROptimizer = struct {
         // and 'header' has only 'pre-header' as non-loop predecessor.
 
         // Count non-loop predecessors
-        var non_loop_preds = std.ArrayListUnmanaged(*BasicBlock){};
+        var non_loop_preds = std.ArrayListUnmanaged(*BasicBlock){ .items = &.{}, .capacity = 0 };
         defer non_loop_preds.deinit(self.allocator);
 
         for (header.predecessors.items) |pred| {
@@ -1537,14 +1537,19 @@ pub const IROptimizer = struct {
     /// Promote memory to registers in a single function
     fn promoteMemoryToRegisters(self: *Self, func: *Function) !bool {
 
-        // 超时保护：最多 5 秒
-        var timer = try std.time.Timer.start();
-        const timeout_ns = 5 * std.time.ns_per_s;
+    // 超时保护：最多 5 秒
+    var start_ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &start_ts);
+    const timeout_ns = 5 * std.time.ns_per_s;
 
-        // 0. Rebuild CFG (ensure predecessors/successors are up to date)
-        try Analysis.rebuildCFG(func);
+    // 0. Rebuild CFG (ensure predecessors/successors are up to date)
+    try Analysis.rebuildCFG(func);
 
-        if (timer.read() > timeout_ns) {
+    // Check timeout using clock_gettime
+    var now_ts: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &now_ts);
+    const elapsed_ns: u64 = @as(u64, @intCast(now_ts.sec - start_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(now_ts.nsec - start_ts.nsec));
+    if (elapsed_ns > timeout_ns) {
             return false;
         }
 
@@ -1553,7 +1558,7 @@ pub const IROptimizer = struct {
         defer dt.deinit();
 
         // 2. Find promotable allocas
-        var promotable_allocas = std.ArrayListUnmanaged(*Instruction){};
+        var promotable_allocas = std.ArrayListUnmanaged(*Instruction){ .items = &.{}, .capacity = 0 };
         defer promotable_allocas.deinit(self.allocator);
 
         // Map alloca -> list of definition blocks
@@ -1576,7 +1581,7 @@ pub const IROptimizer = struct {
                 if (inst.*.op == .alloca) {
                     if (self.isPromotable(inst, func)) {
                         try promotable_allocas.append(self.allocator, inst);
-                        try def_blocks.put(inst, .{});
+                        try def_blocks.put(inst, .{ .items = &.{}, .capacity = 0 });
                         if (inst.result) |res| {
                             try reg_to_alloca.put(res.id, inst);
                         }
@@ -1587,7 +1592,11 @@ pub const IROptimizer = struct {
 
         if (promotable_allocas.items.len == 0) return false;
 
-        if (timer.read() > timeout_ns) {
+        // Check timeout
+    var nt1: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &nt1);
+    const el1: u64 = @as(u64, @intCast(nt1.sec - start_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(nt1.nsec - start_ts.nsec));
+    if (el1 > timeout_ns) {
             return false;
         }
 
@@ -1614,7 +1623,11 @@ pub const IROptimizer = struct {
             }
         }
 
-        if (timer.read() > timeout_ns) {
+        // Check timeout
+    var nt2: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &nt2);
+    const el2: u64 = @as(u64, @intCast(nt2.sec - start_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(nt2.nsec - start_ts.nsec));
+    if (el2 > timeout_ns) {
             return false;
         }
 
@@ -1660,7 +1673,11 @@ pub const IROptimizer = struct {
             }
         }
 
-        if (timer.read() > timeout_ns) {
+        // Check timeout
+    var nt3: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &nt3);
+    const el3: u64 = @as(u64, @intCast(nt3.sec - start_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(nt3.nsec - start_ts.nsec));
+    if (el3 > timeout_ns) {
             return false;
         }
 
@@ -1718,7 +1735,11 @@ pub const IROptimizer = struct {
             try self.applyRegisterRenaming(func, &reg_rename_map);
         }
 
-        if (timer.read() > timeout_ns) {
+        // Check timeout
+    var nt4: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &nt4);
+    const el4: u64 = @as(u64, @intCast(nt4.sec - start_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(nt4.nsec - start_ts.nsec));
+    if (el4 > timeout_ns) {
             return false;
         }
 
@@ -1935,9 +1956,9 @@ pub const IROptimizer = struct {
 
     /// Compute Iterated Dominance Frontier
     fn computeIDF(self: *Self, defs: []const *BasicBlock, dt: *const Analysis.DominatorTree) !std.ArrayListUnmanaged(*BasicBlock) {
-        var idf = std.ArrayListUnmanaged(*BasicBlock){};
+        var idf = std.ArrayListUnmanaged(*BasicBlock){ .items = &.{}, .capacity = 0 };
 
-        var worklist = std.ArrayListUnmanaged(*BasicBlock){};
+        var worklist = std.ArrayListUnmanaged(*BasicBlock){ .items = &.{}, .capacity = 0 };
         defer worklist.deinit(self.allocator);
 
         var visited = std.AutoHashMap(*BasicBlock, void).init(self.allocator);
@@ -2071,7 +2092,7 @@ pub const IROptimizer = struct {
                 // Push phi result to stack
                 var stack = current_values.getPtr(alloca);
                 if (stack == null) {
-                    try current_values.put(alloca, .{});
+                    try current_values.put(alloca, .{ .items = &.{}, .capacity = 0 });
                     stack = current_values.getPtr(alloca);
                 }
 
@@ -2110,7 +2131,7 @@ pub const IROptimizer = struct {
                         // Push value to stack
                         var stack = current_values.getPtr(alloca);
                         if (stack == null) {
-                            try current_values.put(alloca, .{});
+                            try current_values.put(alloca, .{ .items = &.{}, .capacity = 0 });
                             stack = current_values.getPtr(alloca);
                         }
 
@@ -4384,8 +4405,7 @@ pub const IROptimizer = struct {
         var next_reg_id = caller.getNextRegisterId();
 
         // Collect instructions to inline (excluding terminators)
-        var inlined_instructions: std.ArrayListUnmanaged(*Instruction) = .{};
-        defer inlined_instructions.deinit(self.allocator);
+        var inlined_instructions: std.ArrayListUnmanaged(*Instruction) = .{ .items = &.{}, .capacity = 0 };defer inlined_instructions.deinit(self.allocator);
 
         // Process callee's entry block instructions
         for (callee_entry.instructions.items) |callee_inst| {
@@ -5682,7 +5702,7 @@ pub const LLVMPassManager = struct {
 
     /// Get the list of enabled passes (for debugging)
     pub fn getEnabledPasses(self: *const Self, allocator: Allocator) ![]const []const u8 {
-        var passes = std.ArrayListUnmanaged([]const u8){};
+        var passes = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
 
         if (self.config.basic_aa) try passes.append(allocator, "basic-aa");
         if (self.config.tbaa) try passes.append(allocator, "tbaa");

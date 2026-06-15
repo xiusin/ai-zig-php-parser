@@ -10,6 +10,7 @@
 //! 6. 48位大整数性能
 //!
 //! 运行方式: zig test src/runtime/benchmark_fast_value.zig -OReleaseFast
+const time_compat = @import("time_compat.zig");
 
 const std = @import("std");
 const fast_value = @import("fast_value.zig");
@@ -63,7 +64,7 @@ fn doNotOptimize(val: anytype) void {
 // ============================================================================
 
 fn benchIntCreate() u64 {
-    var timer = std.time.Timer.start() catch unreachable;
+    var timer = time_compat.Timer.start() catch unreachable;
 
     var acc: i64 = 0;
     for (0..ITERATIONS) |i| {
@@ -79,7 +80,7 @@ fn benchIntAdd() u64 {
     var a = FastValue.initInt(42);
     const b = FastValue.initInt(17);
 
-    var timer = std.time.Timer.start() catch unreachable;
+    var timer = time_compat.Timer.start() catch unreachable;
 
     for (0..ITERATIONS) |_| {
         a = FastOps.addInt(a, b);
@@ -93,7 +94,7 @@ fn benchIntMul() u64 {
     var result = FastValue.initInt(1);
     const factor = FastValue.initInt(1); // 乘以1保持值不变
 
-    var timer = std.time.Timer.start() catch unreachable;
+    var timer = time_compat.Timer.start() catch unreachable;
 
     for (0..ITERATIONS) |i| {
         _ = i;
@@ -108,7 +109,7 @@ fn benchIntDiv() u64 {
     const a = FastValue.initInt(1_000_000_000);
     const b = FastValue.initInt(7);
 
-    var timer = std.time.Timer.start() catch unreachable;
+    var timer = time_compat.Timer.start() catch unreachable;
 
     var acc: i64 = 0;
     for (0..ITERATIONS) |_| {
@@ -129,7 +130,7 @@ fn benchTypeCheck() u64 {
         FastValue.false,
     };
 
-    var timer = std.time.Timer.start() catch unreachable;
+    var timer = time_compat.Timer.start() catch unreachable;
 
     var count: u64 = 0;
     for (0..ITERATIONS) |i| {
@@ -148,7 +149,7 @@ fn benchFloatAdd() u64 {
     var a = FastValue.initFloat(3.14159);
     const b = FastValue.initFloat(0.00001);
 
-    var timer = std.time.Timer.start() catch unreachable;
+    var timer = time_compat.Timer.start() catch unreachable;
 
     for (0..ITERATIONS) |_| {
         a = FastOps.addFloat(a, b);
@@ -162,7 +163,7 @@ fn benchFloatMul() u64 {
     var a = FastValue.initFloat(1.0000001);
     const b = FastValue.initFloat(1.0000001);
 
-    var timer = std.time.Timer.start() catch unreachable;
+    var timer = time_compat.Timer.start() catch unreachable;
 
     for (0..ITERATIONS) |_| {
         a = FastOps.mulFloat(a, b);
@@ -176,7 +177,7 @@ fn benchMixedAdd() u64 {
     var a = FastValue.initInt(0);
     const b = FastValue.initFloat(0.1);
 
-    var timer = std.time.Timer.start() catch unreachable;
+    var timer = time_compat.Timer.start() catch unreachable;
 
     for (0..ITERATIONS) |i| {
         a = FastValue.initInt(@intCast(i & 0xFFFF));
@@ -192,7 +193,7 @@ fn benchInt48Add() u64 {
     var a = FastValue.initInt(100_000_000_000);
     const b = FastValue.initInt(1);
 
-    var timer = std.time.Timer.start() catch unreachable;
+    var timer = time_compat.Timer.start() catch unreachable;
 
     for (0..ITERATIONS) |_| {
         a = FastOps.add(a, b);
@@ -207,7 +208,7 @@ fn benchInt48Mul() u64 {
     const a = FastValue.initInt(1_000_000);
     const b = FastValue.initInt(1_000_000);
 
-    var timer = std.time.Timer.start() catch unreachable;
+    var timer = time_compat.Timer.start() catch unreachable;
 
     var acc: i64 = 0;
     for (0..ITERATIONS) |_| {
@@ -227,7 +228,7 @@ fn benchComparison() u64 {
         FastValue.initInt(0),
     };
 
-    var timer = std.time.Timer.start() catch unreachable;
+    var timer = time_compat.Timer.start() catch unreachable;
 
     var count: u64 = 0;
     for (0..ITERATIONS) |i| {
@@ -246,7 +247,7 @@ fn benchBitOps() u64 {
     var a = FastValue.initInt(0xABCDEF);
     const b = FastValue.initInt(0x123456);
 
-    var timer = std.time.Timer.start() catch unreachable;
+    var timer = time_compat.Timer.start() catch unreachable;
 
     for (0..ITERATIONS) |_| {
         a = FastOps.bitAnd(a, b);
@@ -259,7 +260,7 @@ fn benchBitOps() u64 {
 }
 
 fn benchSmallIntCache() u64 {
-    var timer = std.time.Timer.start() catch unreachable;
+    var timer = time_compat.Timer.start() catch unreachable;
 
     var acc: i64 = 0;
     for (0..ITERATIONS) |i| {

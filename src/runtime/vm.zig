@@ -1,3 +1,4 @@
+const time_compat = @import("time_compat.zig");
 const std = @import("std");
 const compiler = @import("compiler");
 const ast = compiler.ast;
@@ -94,8 +95,8 @@ pub const GeneratorState = struct {
     pub fn init(allocator: std.mem.Allocator) GeneratorState {
         return GeneratorState{
             .allocator = allocator,
-            .values = .{},
-            .keys = .{},
+            .values = .{ .items = &.{}, .capacity = 0 },
+            .keys = .{ .items = &.{}, .capacity = 0 },
             .current_index = 0,
             .function_body = null,
             .captured_vars = null,
@@ -221,7 +222,7 @@ pub const ErrorContext = struct {
     pub fn init(allocator: std.mem.Allocator) ErrorContext {
         _ = allocator; // Unused in this version
         return ErrorContext{
-            .recent_errors = std.ArrayList(ErrorInfo){},
+            .recent_errors = std.ArrayList(ErrorInfo).empty,
         };
     }
 
@@ -244,7 +245,7 @@ pub const ErrorContext = struct {
         }
 
         const error_info = ErrorInfo{
-            .timestamp = std.time.timestamp(),
+            .timestamp = time_compat.timestamp(),
             .error_type = error_type,
             .message = try allocator.dupe(u8, message),
             .file = try allocator.dupe(u8, file),
@@ -2230,12 +2231,12 @@ pub const VM = struct {
             .current_file = "unknown",
             .current_line = 0,
             .current_source = "",
-            .try_catch_stack = std.ArrayList(TryCatchContext){},
+            .try_catch_stack = std.ArrayList(TryCatchContext).empty,
             .stdlib = try StandardLibrary.init(allocator),
             .reflection_system = undefined, // Will be initialized after VM creation
             .memory_manager = try types.gc.MemoryManager.init(allocator),
-            .call_stack = .{},
-            .call_frame_pool = .{},
+            .call_stack = .{ .items = &.{}, .capacity = 0 },
+            .call_frame_pool = .{ .items = &.{}, .capacity = 0 },
             .fast_call_frame_pool = fast_pool.CallFramePool.init(allocator),
             .current_frame = null,
             .execution_stats = ExecutionStats{},
@@ -2262,7 +2263,7 @@ pub const VM = struct {
             .builtin_registry = BuiltinRegistry.init(allocator),
             .recursion_depth = 0,
             // Shutdown function registry
-            .shutdown_functions = std.ArrayList(ShutdownFunction){},
+            .shutdown_functions = std.ArrayList(ShutdownFunction).empty,
             // Initialize high-performance optimization modules
             .fast_pool_manager = fast_pool.PoolManager.init(allocator),
             .fast_string_pool = undefined, // Will be initialized below
@@ -2831,7 +2832,7 @@ pub const VM = struct {
     }
 
     pub fn registerStandardLibraryFunctions(self: *VM) !void {
-        const start_time = std.time.nanoTimestamp();
+        const start_time = time_compat.nanoTimestamp();
 
         var iterator = self.stdlib.functions.iterator();
         while (iterator.next()) |entry| {
@@ -2842,7 +2843,7 @@ pub const VM = struct {
             try self.global.set(name, value);
         }
 
-        const end_time = std.time.nanoTimestamp();
+        const end_time = time_compat.nanoTimestamp();
         self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
     }
 
@@ -3651,7 +3652,7 @@ pub const VM = struct {
             if (types_val.isArray()) {
                 const arr = types_val.getAsArray().data;
                 const count = arr.count();
-                var parts = std.ArrayList(u8){};
+                var parts = std.ArrayList(u8).empty;
                 defer parts.deinit(self.allocator);
                 var idx: usize = 0;
                 while (idx < count) : (idx += 1) {
@@ -3690,7 +3691,7 @@ pub const VM = struct {
             if (types_val.isArray()) {
                 const arr = types_val.getAsArray().data;
                 const count = arr.count();
-                var parts = std.ArrayList(u8){};
+                var parts = std.ArrayList(u8).empty;
                 defer parts.deinit(self.allocator);
                 var idx: usize = 0;
                 while (idx < count) : (idx += 1) {
@@ -3902,7 +3903,7 @@ pub const VM = struct {
     }
 
     fn cleanupStringInternPool(self: *VM) !void {
-        var to_remove = std.ArrayListUnmanaged([]const u8){};
+        var to_remove = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
         defer to_remove.deinit(self.allocator);
 
         var iterator = self.string_intern_pool.iterator();
@@ -4138,7 +4139,7 @@ pub const VM = struct {
     }
 
     fn addCallStackToException(self: *VM, exception: *PHPException) !void {
-        var stack_frames = std.ArrayList(exceptions.StackFrame){};
+        var stack_frames = std.ArrayList(exceptions.StackFrame).empty;
         errdefer {
             for (stack_frames.items) |*frame| {
                 frame.deinit(self.allocator);
@@ -4167,7 +4168,7 @@ pub const VM = struct {
     }
 
     fn generateStackTrace(self: *VM) ![]u8 {
-        var trace = std.ArrayList(u8){};
+        var trace = std.ArrayList(u8).empty;
         defer trace.deinit(self.allocator);
 
         // Add current location
@@ -4307,7 +4308,7 @@ pub const VM = struct {
     pub fn formatErrorMessage(self: *VM, message: []const u8) ![]const u8 {
         if (self.syntax_config.error_display_mode == .go) {
             // Replace -> with . for property access in Go mode
-            var result = std.ArrayList(u8){};
+            var result = std.ArrayList(u8).empty;
             errdefer result.deinit(self.allocator);
 
             var i: usize = 0;
@@ -4396,7 +4397,7 @@ pub const VM = struct {
     }
 
     pub fn createObject(self: *VM, class_name: []const u8) !Value {
-        const start_time = std.time.nanoTimestamp();
+        const start_time = time_compat.nanoTimestamp();
         self.execution_stats.memory_allocations += 1;
 
         // First, check extension classes (Requirements: 10.2)
@@ -4430,7 +4431,7 @@ pub const VM = struct {
         // Don't call constructor here - it will be called by evaluateObjectInstantiation
         // with the proper arguments
 
-        const end_time = std.time.nanoTimestamp();
+        const end_time = time_compat.nanoTimestamp();
         self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
 
         return value;
@@ -4617,7 +4618,7 @@ pub const VM = struct {
     }
 
     pub fn callObjectMethod(self: *VM, object_value: Value, method_name: []const u8, args: []const Value) !Value {
-        const start_time = std.time.nanoTimestamp();
+        const start_time = time_compat.nanoTimestamp();
         self.execution_stats.function_calls += 1;
 
         if (object_value.getTag() != .object) {
@@ -4644,7 +4645,7 @@ pub const VM = struct {
             },
             else => return err,
         };
-        const end_time = std.time.nanoTimestamp();
+        const end_time = time_compat.nanoTimestamp();
         self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
 
         return result;
@@ -4924,7 +4925,7 @@ pub const VM = struct {
     }
 
     pub fn callStructMethod(self: *VM, struct_value: Value, method_name: []const u8, args: []const Value) !Value {
-        const start_time = std.time.nanoTimestamp();
+        const start_time = time_compat.nanoTimestamp();
         self.execution_stats.function_calls += 1;
 
         if (struct_value.getTag() != .struct_instance) {
@@ -4936,7 +4937,7 @@ pub const VM = struct {
 
         const result = try struct_inst.callMethod(self, struct_value, method_name, args);
 
-        const end_time = std.time.nanoTimestamp();
+        const end_time = time_compat.nanoTimestamp();
         self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
 
         return result;
@@ -4981,7 +4982,6 @@ pub const VM = struct {
                 const exception = try ExceptionFactory.createUndefinedPropertyError(self.allocator, object.class.name.data, property_name, self.current_file, self.current_line);
                 return self.throwException(exception);
             },
-            else => return err,
         };
         self.retainValue(value);
         return value;
@@ -5210,7 +5210,7 @@ pub const VM = struct {
     }
 
     pub fn callUserFunctionWithNamedAndRefs(self: *VM, function: *types.UserFunction, positional_args: []const Value, named_args: ?*const std.StringHashMap(Value), ref_var_names: ?[]const []const u8) !Value {
-        const start_time = std.time.nanoTimestamp();
+        const start_time = time_compat.nanoTimestamp();
         self.execution_stats.function_calls += 1;
 
         // Set current_call_args for func_get_args(), func_get_arg(), func_num_args()
@@ -5272,7 +5272,7 @@ pub const VM = struct {
                 bound_args.deinit();
                 self.popCallFrame();
 
-                const end_time = std.time.nanoTimestamp();
+                const end_time = time_compat.nanoTimestamp();
                 self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
 
                 return generator_value;
@@ -5318,7 +5318,7 @@ pub const VM = struct {
         bound_args.deinit();
         self.popCallFrame();
 
-        const end_time = std.time.nanoTimestamp();
+        const end_time = time_compat.nanoTimestamp();
         self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
 
         return result;
@@ -5338,7 +5338,7 @@ pub const VM = struct {
     }
 
     pub fn callClosure(self: *VM, closure: *types.Closure, args: []const Value) !Value {
-        const start_time = std.time.nanoTimestamp();
+        const start_time = time_compat.nanoTimestamp();
         self.execution_stats.function_calls += 1;
 
         // Set current_call_args for func_get_args(), func_get_arg(), func_num_args()
@@ -5362,7 +5362,7 @@ pub const VM = struct {
             return err;
         };
 
-        const end_time = std.time.nanoTimestamp();
+        const end_time = time_compat.nanoTimestamp();
         self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
 
         return result;
@@ -5754,7 +5754,7 @@ pub const VM = struct {
     }
 
     pub fn callArrowFunction(self: *VM, arrow_function: *types.ArrowFunction, args: []const Value) !Value {
-        const start_time = std.time.nanoTimestamp();
+        const start_time = time_compat.nanoTimestamp();
         self.execution_stats.function_calls += 1;
 
         // Set current_call_args for func_get_args(), func_get_arg(), func_num_args()
@@ -5778,7 +5778,7 @@ pub const VM = struct {
             return err;
         };
 
-        const end_time = std.time.nanoTimestamp();
+        const end_time = time_compat.nanoTimestamp();
         self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
 
         return result;
@@ -6357,6 +6357,28 @@ pub const VM = struct {
                 // 快速路径：两个整数
                 if (left.isInt() and right.isInt()) {
                     return Value.addIntFast(left, right);
+                }
+                // 数组联合运算符：PHP 中 $a + $b 表示左数组优先的键合并
+                if (left.isArray() and right.isArray()) {
+                    const left_arr = left.getAsArray().data;
+                    const right_arr = right.getAsArray().data;
+                    const result_box = self.memory_manager.allocArray() catch {
+                        return Value.addGeneric(left, right);
+                    };
+                    const result_arr = result_box.data;
+                    // 先复制左数组所有元素
+                    var left_iter = left_arr.iterator();
+                    while (left_iter.next()) |entry| {
+                        result_arr.set(self.allocator, entry.key, entry.value.retain()) catch {};
+                    }
+                    // 再复制右数组中左数组没有的键
+                    var right_iter = right_arr.iterator();
+                    while (right_iter.next()) |entry| {
+                        if (result_arr.get(entry.key) == null) {
+                            result_arr.set(self.allocator, entry.key, entry.value.retain()) catch {};
+                        }
+                    }
+                    return Value.initPtr(result_box, Value.TYPE_ARRAY);
                 }
                 // 通用路径：带溢出检查
                 return Value.addGeneric(left, right);
@@ -7431,7 +7453,9 @@ pub const VM = struct {
                 const path_str = path_value.getAsString().data.data;
 
                 // Try to open and read the file
-                const file = std.fs.cwd().openFile(path_str, .{}) catch |err| {
+                const io = std.Io.Threaded.global_single_threaded.io();
+                const cwd_dir = std.Io.Dir.cwd();
+                const file = cwd_dir.openFile(io, path_str, .{}) catch |err| {
                     // Try relative to current file directory
                     if (self.current_file.len > 0) {
                         if (std.mem.lastIndexOf(u8, self.current_file, "/")) |dir_end| {
@@ -7441,16 +7465,11 @@ pub const VM = struct {
                             };
                             defer self.allocator.free(full_path);
 
-                            const file2 = std.fs.cwd().openFile(full_path, .{}) catch {
+                            const src = cwd_dir.readFileAlloc(io, full_path, self.allocator, .limited(10 * 1024 * 1024)) catch {
                                 if (ast_node.tag == .require_stmt) {
                                     std.debug.print("require failed: {s} ({any})\n", .{ full_path, err });
                                     std.debug.print("current_file: {s}\n", .{self.current_file});
                                 }
-                                return Value.initNull();
-                            };
-                            defer file2.close();
-
-                            const src = file2.readToEndAlloc(self.allocator, 10 * 1024 * 1024) catch {
                                 return Value.initNull();
                             };
                             defer self.allocator.free(src);
@@ -7464,9 +7483,10 @@ pub const VM = struct {
                     }
                     return Value.initNull();
                 };
-                defer file.close();
+                defer file.close(io);
 
-                const src = file.readToEndAlloc(self.allocator, 10 * 1024 * 1024) catch {
+                var file_reader = file.reader(io, &.{});
+                const src = file_reader.interface.allocRemaining(self.allocator, .limited(10 * 1024 * 1024)) catch {
                     return Value.initNull();
                 };
                 defer self.allocator.free(src);
@@ -7517,7 +7537,7 @@ pub const VM = struct {
         const name_node = self.context.nodes.items[call_data.name];
 
         // Prepare arguments
-        var args = std.ArrayList(Value){};
+        var args = std.ArrayList(Value).empty;
         try args.ensureTotalCapacity(self.allocator, call_data.args.len);
         defer {
             for (args.items) |arg| {
@@ -7527,7 +7547,7 @@ pub const VM = struct {
         }
 
         // Track variable names for reference parameter writeback
-        var ref_var_names = std.ArrayList([]const u8){};
+        var ref_var_names = std.ArrayList([]const u8).empty;
         try ref_var_names.ensureTotalCapacity(self.allocator, call_data.args.len);
         defer ref_var_names.deinit(self.allocator);
 
@@ -7993,7 +8013,7 @@ pub const VM = struct {
             std.mem.eql(u8, name, "Channel"))
         {
             // Call the builtin constructor directly based on the class name
-            var args = std.ArrayListUnmanaged(Value){};
+            var args = std.ArrayListUnmanaged(Value){ .items = &.{}, .capacity = 0 };
             defer {
                 for (args.items) |arg| {
                     self.releaseValue(arg);
@@ -8068,7 +8088,7 @@ pub const VM = struct {
         // Call constructor if it exists
         const object = value.getAsObject().data;
         if (object.class.hasMethod("__construct")) {
-            var args = std.ArrayList(Value){};
+            var args = std.ArrayList(Value).empty;
             defer {
                 for (args.items) |arg| {
                     self.releaseValue(arg);
@@ -8095,7 +8115,7 @@ pub const VM = struct {
 
     fn evaluateAnonymousClass(self: *VM, anon_data: anytype) !Value {
         // Generate a unique name for the anonymous class
-        const timestamp = std.time.timestamp();
+        const timestamp = time_compat.timestamp();
         self.anonymous_class_counter += 1;
         const anon_class_name = try std.fmt.allocPrint(self.allocator, "anonymous_class_{d}_{d}", .{ timestamp, self.anonymous_class_counter });
         defer self.allocator.free(anon_class_name);
@@ -8188,7 +8208,7 @@ pub const VM = struct {
 
         // Call constructor if it exists with the provided arguments
         if (object.class.hasMethod("__construct")) {
-            var args = std.ArrayList(Value){};
+            var args = std.ArrayList(Value).empty;
             defer {
                 for (args.items) |arg| {
                     self.releaseValue(arg);
@@ -8217,7 +8237,7 @@ pub const VM = struct {
 
         const method_name = self.context.string_pool.keys()[method_data.method_name];
 
-        var args = std.ArrayList(Value){};
+        var args = std.ArrayList(Value).empty;
         try args.ensureTotalCapacity(self.allocator, method_data.args.len);
         defer {
             for (args.items) |arg| {
@@ -8507,7 +8527,7 @@ pub const VM = struct {
 
         // Pre-allocate capacity for better performance
         if (self.optimization_flags.enable_memory_pooling) {
-            try php_array.getElements().ensureTotalCapacity(array_data.elements.len);
+            try php_array.getElements().ensureTotalCapacity(self.allocator, array_data.elements.len);
         }
 
         var auto_index: i64 = 0;
@@ -8916,7 +8936,7 @@ pub const VM = struct {
         switch (right_node.tag) {
             .function_call => {
                 // Modify the function call to include left as first argument
-                var args = std.ArrayList(Value){};
+                var args = std.ArrayList(Value).empty;
                 try args.ensureTotalCapacity(self.allocator, right_node.data.function_call.args.len + 1);
                 defer {
                     for (args.items) |arg| {
@@ -9985,7 +10005,7 @@ pub const VM = struct {
             }
 
             // Evaluate arguments
-            var args_list = std.ArrayListUnmanaged(Value){};
+            var args_list = std.ArrayListUnmanaged(Value){ .items = &.{}, .capacity = 0 };
             defer args_list.deinit(self.allocator);
             for (func_call.args) |arg_idx| {
                 const arg_value = try self.eval(arg_idx);
@@ -10001,7 +10021,7 @@ pub const VM = struct {
             const method_name = self.context.string_pool.keys()[method_call.method_name];
 
             // Create a closure that calls the method
-            var args_list = std.ArrayListUnmanaged(Value){};
+            var args_list = std.ArrayListUnmanaged(Value){ .items = &.{}, .capacity = 0 };
             for (method_call.args) |arg_idx| {
                 const arg_value = try self.eval(arg_idx);
                 try args_list.append(self.allocator, arg_value);
@@ -10711,7 +10731,7 @@ pub const VM = struct {
 
         try self.applyTraitAdaptations(methods, trait_use_data.adaptations);
 
-        var resolved_methods = std.ArrayListUnmanaged(ComposedTraitMethod){};
+        var resolved_methods = std.ArrayListUnmanaged(ComposedTraitMethod){ .items = &.{}, .capacity = 0 };
         defer resolved_methods.deinit(self.allocator);
         for (methods.items) |method| {
             try self.appendComposedTraitMethod(&resolved_methods, method);
@@ -10728,11 +10748,11 @@ pub const VM = struct {
         php_trait: *types.PHPTrait,
         trait_use_data: anytype,
     ) !void {
-        var methods = std.ArrayListUnmanaged(ComposedTraitMethod){};
+        var methods = std.ArrayListUnmanaged(ComposedTraitMethod){ .items = &.{}, .capacity = 0 };
         defer methods.deinit(self.allocator);
-        var properties = std.ArrayListUnmanaged(ComposedTraitProperty){};
+        var properties = std.ArrayListUnmanaged(ComposedTraitProperty){ .items = &.{}, .capacity = 0 };
         defer properties.deinit(self.allocator);
-        var constants = std.ArrayListUnmanaged(ComposedTraitConstant){};
+        var constants = std.ArrayListUnmanaged(ComposedTraitConstant){ .items = &.{}, .capacity = 0 };
         defer constants.deinit(self.allocator);
 
         self.collectTraitUseMembers(
@@ -10797,11 +10817,11 @@ pub const VM = struct {
         class: *types.PHPClass,
         trait_use_data: anytype,
     ) !void {
-        var methods = std.ArrayListUnmanaged(ComposedTraitMethod){};
+        var methods = std.ArrayListUnmanaged(ComposedTraitMethod){ .items = &.{}, .capacity = 0 };
         defer methods.deinit(self.allocator);
-        var properties = std.ArrayListUnmanaged(ComposedTraitProperty){};
+        var properties = std.ArrayListUnmanaged(ComposedTraitProperty){ .items = &.{}, .capacity = 0 };
         defer properties.deinit(self.allocator);
-        var constants = std.ArrayListUnmanaged(ComposedTraitConstant){};
+        var constants = std.ArrayListUnmanaged(ComposedTraitConstant){ .items = &.{}, .capacity = 0 };
         defer constants.deinit(self.allocator);
 
         self.collectTraitUseMembers(
@@ -10970,9 +10990,9 @@ pub const VM = struct {
     }
 
     fn evaluateClassDeclaration(self: *VM, class_data: anytype) !Value {
-        const start_time = std.time.nanoTimestamp();
+        const start_time = time_compat.nanoTimestamp();
         defer {
-            const end_time = std.time.nanoTimestamp();
+            const end_time = time_compat.nanoTimestamp();
             self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
         }
 
@@ -11318,9 +11338,9 @@ pub const VM = struct {
     }
 
     fn evaluateStructDeclaration(self: *VM, struct_data: anytype) !Value {
-        const start_time = std.time.nanoTimestamp();
+        const start_time = time_compat.nanoTimestamp();
         defer {
-            const end_time = std.time.nanoTimestamp();
+            const end_time = time_compat.nanoTimestamp();
             self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
         }
 
@@ -11357,9 +11377,9 @@ pub const VM = struct {
     }
 
     fn evaluateStructInstantiation(self: *VM, struct_data: anytype) !Value {
-        const start_time = std.time.nanoTimestamp();
+        const start_time = time_compat.nanoTimestamp();
         defer {
-            const end_time = std.time.nanoTimestamp();
+            const end_time = time_compat.nanoTimestamp();
             self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
         }
 
@@ -11381,7 +11401,7 @@ pub const VM = struct {
         struct_instance.* = types.StructInstance.init(self.allocator, struct_type);
 
         // Evaluate constructor arguments
-        var args = std.ArrayList(Value){};
+        var args = std.ArrayList(Value).empty;
         try args.ensureTotalCapacity(self.allocator, struct_data.args.len);
         defer {
             for (args.items) |arg| {
@@ -11531,9 +11551,9 @@ pub const VM = struct {
     }
 
     fn evaluateTryStatement(self: *VM, try_data: anytype) !Value {
-        const start_time = std.time.nanoTimestamp();
+        const start_time = time_compat.nanoTimestamp();
         defer {
-            const end_time = std.time.nanoTimestamp();
+            const end_time = time_compat.nanoTimestamp();
             self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
         }
 
@@ -11662,9 +11682,9 @@ pub const VM = struct {
     }
 
     fn evaluateThrowStatement(self: *VM, throw_data: anytype) !Value {
-        const start_time = std.time.nanoTimestamp();
+        const start_time = time_compat.nanoTimestamp();
         defer {
-            const end_time = std.time.nanoTimestamp();
+            const end_time = time_compat.nanoTimestamp();
             self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
         }
 
@@ -11764,9 +11784,9 @@ pub const VM = struct {
     }
 
     fn evaluateClosureCreation(self: *VM, closure_data: anytype) !Value {
-        const start_time = std.time.nanoTimestamp();
+        const start_time = time_compat.nanoTimestamp();
         defer {
-            const end_time = std.time.nanoTimestamp();
+            const end_time = time_compat.nanoTimestamp();
             self.execution_stats.execution_time_ns += @intCast(end_time - start_time);
         }
 
@@ -11798,7 +11818,7 @@ pub const VM = struct {
         user_function.max_args = max_args;
 
         // Process capture list
-        var captured_vars_list = std.ArrayList(CapturedVar){};
+        var captured_vars_list = std.ArrayList(CapturedVar).empty;
         try captured_vars_list.ensureTotalCapacity(self.allocator, closure_data.captures.len);
         defer captured_vars_list.deinit(self.allocator);
 
@@ -11850,7 +11870,7 @@ pub const VM = struct {
         // Special handling for Closure::fromCallable
         if (std.mem.eql(u8, class_name, "Closure") and std.mem.eql(u8, method_name, "fromCallable")) {
             // Evaluate arguments
-            var args = std.ArrayList(Value){};
+            var args = std.ArrayList(Value).empty;
             try args.ensureTotalCapacity(self.allocator, static_call_data.args.len);
             defer {
                 for (args.items) |arg| {
@@ -11928,7 +11948,7 @@ pub const VM = struct {
         };
 
         // Evaluate arguments
-        var args = std.ArrayList(Value){};
+        var args = std.ArrayList(Value).empty;
         try args.ensureTotalCapacity(self.allocator, static_call_data.args.len);
         defer {
             for (args.items) |arg| {

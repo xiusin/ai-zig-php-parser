@@ -11,6 +11,7 @@
 //!
 //! 需求：支持PHP标准库函数的统一管理和高效调用
 //! ============================================================================
+const time_compat = @import("time_compat.zig");
 
 const std = @import("std");
 const types = @import("types.zig");
@@ -185,9 +186,9 @@ pub const BuiltinRegistry = struct {
         var categories = std.EnumMap(Category, std.ArrayList(*const BuiltinFunction)){};
         
         // Initialize category lists
-        inline for (std.meta.fields(Category)) |field| {
-            const category = @field(Category, field.name);
-            categories.put(category, std.ArrayList(*const BuiltinFunction){});
+        inline for (@typeInfo(Category).@"enum".field_names) |field_name| {
+            const category = @field(Category, field_name);
+            categories.put(category, std.ArrayList(*const BuiltinFunction).empty);
         }
 
         return BuiltinRegistry{
@@ -282,7 +283,7 @@ pub const BuiltinRegistry = struct {
 fn testTimeFn(vm: *anyopaque, args: []const Value) !Value {
     _ = vm;
     _ = args;
-    return Value.initInt(std.time.timestamp());
+    return Value.initInt(time_compat.timestamp());
 }
 
 fn testMathFn(vm: *anyopaque, args: []const Value) !Value {

@@ -156,7 +156,7 @@ pub const PDO = struct {
     /// 转义字符串
     pub fn quote(self: *PDO, string: []const u8) ![]const u8 {
         // 简单的转义实现
-        var result = std.ArrayListUnmanaged(u8){};
+        var result = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
         try result.append(self.allocator, '\'');
 
         for (string) |c| {
@@ -293,7 +293,7 @@ pub const PDOStatement = struct {
     }
 
     fn buildSQL(self: *PDOStatement) ![]const u8 {
-        var result = std.ArrayListUnmanaged(u8){};
+        var result = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
         try result.ensureTotalCapacity(self.allocator, self.sql.len);
         defer result.deinit(self.allocator);
 
@@ -559,7 +559,7 @@ pub const ResultSet = struct {
     pub fn init(allocator: std.mem.Allocator) ResultSet {
         return ResultSet{
             .allocator = allocator,
-            .rows = .{},
+            .rows = .empty,
             .columns = &[_][]const u8{},
             .current_row = 0,
             .column_count = 0,
@@ -663,8 +663,8 @@ pub const Table = struct {
         return Table{
             .allocator = allocator,
             .name = try allocator.dupe(u8, name),
-            .columns = .{},
-            .rows = .{},
+            .columns = .empty,
+            .rows = .empty,
             .auto_increment = 1,
         };
     }
@@ -698,7 +698,7 @@ pub const Table = struct {
     }
 
     pub fn insertRow(self: *Table, values: []Value) !i64 {
-        var row = Row{ .values = .{} };
+        var row = Row{ .values = .empty };
 
         // Copy values and handle auto-increment
         for (values, 0..) |val, i| {
@@ -875,7 +875,7 @@ pub const MemoryDatabase = struct {
         i += 1; // Skip '('
 
         // Parse values (simplified - assumes string values)
-        var values = std.ArrayListUnmanaged(Value){};
+        var values = std.ArrayListUnmanaged(Value){ .items = &.{}, .capacity = 0 };
         defer values.deinit(self.allocator);
 
         var val_start = i;
@@ -1084,7 +1084,7 @@ pub const MySQLi = struct {
 
     /// 转义字符串
     pub fn realEscapeString(self: *MySQLi, string: []const u8) ![]const u8 {
-        var result = std.ArrayListUnmanaged(u8){};
+        var result = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
 
         for (string) |c| {
             switch (c) {

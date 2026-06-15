@@ -198,7 +198,7 @@ pub const StringFormatExtTests = struct {
         );
         defer self.allocator.free(file_path);
         
-        const file = try std.fs.cwd().createFile(file_path, .{});
+        const file = try std.fs.cwd.createFile(file_path, .{});
         defer file.close();
         
         try file.writeAll(script_content);

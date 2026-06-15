@@ -12,20 +12,25 @@ const builtin = @import("builtin");
 // C 导入 - 平台特定结构
 // ============================================================================
 
+// @cImport removed in Zig 0.17 - use native Zig types
 const c_defs = if (builtin.os.tag == .macos or builtin.os.tag == .ios or 
                    builtin.os.tag == .tvos or builtin.os.tag == .watchos or 
                    builtin.os.tag == .visionos)
-    @cImport({
-        @cInclude("signal.h");
-        @cInclude("sys/ucontext.h");
-    })
+    extern struct {
+        pub const ucontext_t = extern struct {
+            uc_mcontext: *anyopaque,
+        };
+        pub const siginfo_t = extern struct {
+            si_addr: ?*anyopaque,
+        };
+    }
 else if (builtin.os.tag == .linux)
-    @cImport({
-        @cInclude("signal.h");
-        @cInclude("ucontext.h");
-    })
+    extern struct {
+        pub const ucontext_t = std.os.linux.ucontext_t;
+        pub const siginfo_t = std.posix.siginfo_t;
+    }
 else
-    struct {};
+    extern struct {};
 
 // ============================================================================
 // 寄存器提取
@@ -51,7 +56,7 @@ pub const RegisterContext = struct {
             .instruction_pointer = 0,
             .stack_pointer = 0,
             .frame_pointer = 0,
-            .general_registers = [_]usize{0} ** 16,
+            .general_registers = @splat(@as(usize, 0)),
         };
     }
 };

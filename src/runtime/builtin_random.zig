@@ -15,6 +15,7 @@
 //! 特性：线程安全，支持线程本地存储
 //! 需求：4.1, 4.2, 4.3, 4.4, 4.5, 4.6
 //! ============================================================================
+const time_compat = @import("time_compat.zig");
 
 const std = @import("std");
 const types = @import("types.zig");
@@ -35,17 +36,17 @@ pub const RandomBuiltins = struct {
     threadlocal var mt_initialized: bool = false;
     
     // Global mutex for thread-safe seeding
-    var seed_mutex: std.Thread.Mutex = .{};
+    var seed_mutex: std.Io.Mutex = .init;
     var global_seed: u64 = 0;
     
     /// Initialize thread-local RNG if not already done
     fn ensureRngInitialized() void {
         if (!rng_initialized) {
-            seed_mutex.lock();
-            defer seed_mutex.unlock();
+            seed_mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+            defer seed_mutex.unlock(std.Io.Threaded.global_single_threaded.io());
             
             if (global_seed == 0) {
-                global_seed = @intCast(std.time.timestamp());
+                global_seed = @intCast(time_compat.timestamp());
             }
             
             rng = std.Random.DefaultPrng.init(global_seed);
@@ -56,11 +57,11 @@ pub const RandomBuiltins = struct {
     /// Initialize thread-local Mersenne Twister if not already done
     fn ensureMtInitialized() void {
         if (!mt_initialized) {
-            seed_mutex.lock();
-            defer seed_mutex.unlock();
+            seed_mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+            defer seed_mutex.unlock(std.Io.Threaded.global_single_threaded.io());
             
             if (global_seed == 0) {
-                global_seed = @intCast(std.time.timestamp());
+                global_seed = @intCast(time_compat.timestamp());
             }
             
             mt_rng = std.Random.Xoshiro256.init(global_seed);
@@ -155,10 +156,10 @@ pub const RandomBuiltins = struct {
                 .float => break :blk @as(u64, @intFromFloat(@abs(args[0].asFloat()))),
                 else => return BuiltinError.InvalidArgumentType,
             }
-        } else @intCast(std.time.timestamp());
+        } else @intCast(time_compat.timestamp());
         
-        seed_mutex.lock();
-        defer seed_mutex.unlock();
+        seed_mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+        defer seed_mutex.unlock(std.Io.Threaded.global_single_threaded.io());
         
         global_seed = seed_val;
         rng = std.Random.DefaultPrng.init(seed_val);
@@ -182,10 +183,10 @@ pub const RandomBuiltins = struct {
                 .float => break :blk @as(u64, @intFromFloat(@abs(args[0].asFloat()))),
                 else => return BuiltinError.InvalidArgumentType,
             }
-        } else @intCast(std.time.timestamp());
+        } else @intCast(time_compat.timestamp());
         
-        seed_mutex.lock();
-        defer seed_mutex.unlock();
+        seed_mutex.lockUncancelable(std.Io.Threaded.global_single_threaded.io());
+        defer seed_mutex.unlock(std.Io.Threaded.global_single_threaded.io());
         
         global_seed = seed_val;
         mt_rng = std.Random.Xoshiro256.init(seed_val);

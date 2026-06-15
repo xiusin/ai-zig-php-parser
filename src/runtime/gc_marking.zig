@@ -1,4 +1,5 @@
 const std = @import("std");
+const time_compat = @import("time_compat.zig");
 const GCObjectHeader = @import("generational_gc.zig").GCObjectHeader;
 const TypedGCObject = @import("gc_object_types.zig").TypedGCObject;
 const ObjectTraverser = @import("gc_object_types.zig").ObjectTraverser;
@@ -42,9 +43,9 @@ pub const GCMarker = struct {
         self: *GCMarker,
         roots: []const *GCObjectHeader
     ) !void {
-        const start_time = std.time.nanoTimestamp();
+        const start_time = time_compat.nanoTimestamp();
         defer {
-            const end_time = std.time.nanoTimestamp();
+            const end_time = time_compat.nanoTimestamp();
             self.stats.marking_time_ns = @intCast(end_time - start_time);
         }
         
@@ -54,7 +55,7 @@ pub const GCMarker = struct {
         self.stats.max_worklist_depth = 0;
         
         // 工作列表：使用显式栈避免递归栈溢出
-        var worklist = std.ArrayListUnmanaged(*GCObjectHeader){};
+        var worklist = std.ArrayListUnmanaged(*GCObjectHeader){ .items = &.{}, .capacity = 0 };
         defer worklist.deinit(self.allocator);
         
         // 第一阶段：将所有根对象加入工作列表
@@ -336,7 +337,7 @@ pub const MarkingValidator = struct {
         var reachable = std.AutoHashMapUnmanaged(*GCObjectHeader, void){};
         defer reachable.deinit(self.allocator);
         
-        var queue = std.ArrayListUnmanaged(*GCObjectHeader){};
+        var queue = std.ArrayListUnmanaged(*GCObjectHeader){ .items = &.{}, .capacity = 0 };
         defer queue.deinit(self.allocator);
         
         // 添加所有根对象
@@ -359,7 +360,7 @@ pub const MarkingValidator = struct {
             };
             
             // 使用 ObjectTraverser 遍历引用
-            var child_worklist = std.ArrayListUnmanaged(*GCObjectHeader){};
+            var child_worklist = std.ArrayListUnmanaged(*GCObjectHeader){ .items = &.{}, .capacity = 0 };
             defer child_worklist.deinit(self.allocator);
             
             self.traverser.traverseReferences(typed_obj, &child_worklist) catch |err| {

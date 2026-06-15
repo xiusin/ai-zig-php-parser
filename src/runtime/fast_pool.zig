@@ -28,7 +28,7 @@ pub fn SlabAllocator(comptime T: type) type {
 
         alloc: std.mem.Allocator,
         free_head: ?*Node,
-        chunks: std.ArrayListUnmanaged([*]u8),
+        chunks: std.ArrayListUnmanaged([]u8),
         stats: Stats,
 
         pub const Stats = struct {
@@ -40,14 +40,14 @@ pub fn SlabAllocator(comptime T: type) type {
             return .{
                 .alloc = allocator,
                 .free_head = null,
-                .chunks = .{},
+                .chunks = .{ .items = &.{}, .capacity = 0 },
                 .stats = .{},
             };
         }
 
         pub fn deinit(self: *Self) void {
             for (self.chunks.items) |chunk| {
-                self.alloc.free(chunk[0..SLAB_SIZE * @sizeOf(T)]);
+                self.alloc.free(chunk);
             }
             self.chunks.deinit(self.alloc);
         }
@@ -72,7 +72,7 @@ pub fn SlabAllocator(comptime T: type) type {
 
         fn allocChunk(self: *Self) !*T {
             const chunk = try self.alloc.alloc(u8, SLAB_SIZE * @sizeOf(T));
-            try self.chunks.append(self.alloc, chunk.ptr);
+            try self.chunks.append(self.alloc, chunk);
             self.stats.allocated += SLAB_SIZE;
 
             // 链接空闲节点（跳过第一个）
@@ -196,8 +196,8 @@ pub const MultiPool = struct {
     pub fn init(backing: std.mem.Allocator) MultiPool {
         return .{
             .backing = backing,
-            .lists = [_]?*FreeNode{null} ** SIZES.len,
-            .chunks = .{},
+            .lists = @splat(null),
+            .chunks = .{ .items = &.{}, .capacity = 0 },
         };
     }
 

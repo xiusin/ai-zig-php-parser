@@ -47,6 +47,8 @@ const FileCompileResult = struct {
 /// 多文件编译器
 pub const MultiFileCompiler = struct {
     allocator: Allocator,
+    io: std.Io,
+    cwd: std.Io.Dir,
     options: CompileOptions,
     diagnostics: *DiagnosticEngine,
     dependency_resolver: *DependencyResolver,
@@ -58,14 +60,18 @@ pub const MultiFileCompiler = struct {
     /// 初始化
     pub fn init(
         allocator: Allocator,
+        io: std.Io,
+        cwd: std.Io.Dir,
         options: CompileOptions,
         diagnostics: *DiagnosticEngine,
     ) !Self {
         return Self{
             .allocator = allocator,
+            .io = io,
+            .cwd = cwd,
             .options = options,
             .diagnostics = diagnostics,
-            .dependency_resolver = try DependencyResolver.init(allocator, diagnostics),
+            .dependency_resolver = try DependencyResolver.init(allocator, io, cwd, diagnostics),
             .compiled_files = std.StringHashMap(FileCompileResult).init(allocator),
             .merged_module = null,
         };
@@ -179,8 +185,9 @@ pub const MultiFileCompiler = struct {
             return false;
         };
         
-        // 确保源码是 null-terminated
-        const source_z = try self.allocator.dupeZ(u8, source);
+        // 确保源码是 null-terminated (dupeZ removed in Zig 0.17)
+        const source_z = try self.allocator.allocSentinel(u8, source.len, 0);
+        @memcpy(source_z[0..source.len], source);
         defer self.allocator.free(source_z);
 
         // 使用共享的 Parser 解析源码
@@ -218,7 +225,7 @@ pub const MultiFileCompiler = struct {
         var temp_options = self.options;
         temp_options.link_executable = false;
         
-        const aot_compiler = try CompilerMod.AOTCompiler.init(self.allocator, temp_options);
+        const aot_compiler = try CompilerMod.AOTCompiler.init(self.allocator, self.io, temp_options);
         
         try aot_compiler.setSource(source_z);
         try aot_compiler.setAST(context.nodes.items, string_table.items, root_index);

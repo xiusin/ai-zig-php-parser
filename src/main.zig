@@ -169,21 +169,21 @@ fn applyPassToggle(overrides: *aot.PassOverrides, name: []const u8, enabled: boo
     return error.UnknownPass;
 }
 
-pub fn main() !void {
-    // Use GPA with safety=false to avoid internal allocation leak warnings.
-    // These warnings from safety=true are false positives from Zig's runtime
-    // (thread-local storage, internal caches) and don't indicate real leaks.
-    var gpa = std.heap.GeneralPurposeAllocator(.{
-        .enable_memory_limit = false,
-        .safety = true,
-    }){};
-    defer {
-        const leaked = gpa.deinit();
-        if (leaked == .leak) {
-            std.debug.print("WARNING: Memory leak detected\n", .{});
-        }
-    }
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init.Minimal) !void {
+    // Use ArenaAllocator backed by page_allocator (GeneralPurposeAllocator removed in Zig 0.17)
+    var gpa_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer gpa_arena.deinit();
+    const allocator = gpa_arena.allocator();
+
+    // Create Threaded Io for file operations (Zig 0.17 API)
+    var io_environ: [0:null]?[*:0]u8 = [_:null]?[*:0]u8{};
+    var threaded_io = std.Io.Threaded.init(allocator, .{
+        .argv0 = .init(.{ .vector = &.{} }),
+        .environ = .{ .block = .{ .slice = &io_environ } },
+    });
+    defer threaded_io.deinit();
+    const io = threaded_io.io();
+    const cwd_dir = std.Io.Dir.cwd();
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -192,9 +192,15 @@ pub fn main() !void {
     var context = PHPContext.init(arena_allocator);
     defer context.deinit();
 
-    // Get command line arguments
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    // Get command line arguments (Zig 0.17 API)
+    var args_iter = try std.process.Args.Iterator.initAllocator(init.args, allocator);
+    defer args_iter.deinit();
+    var args_list = std.array_list.AlignedManaged([]const u8, null).init(allocator);
+    defer args_list.deinit();
+    while (args_iter.next()) |arg| {
+        try args_list.append(arg);
+    }
+    const args = args_list.items;
 
     // Track CLI overrides (null means not specified on CLI)
     var cli_syntax_mode: ?SyntaxMode = null;
@@ -369,7 +375,7 @@ pub fn main() !void {
 
     // Load configuration from file
     // Requirements: 12.1, 12.2, 12.3, 12.4
-    var loader = ConfigLoader.init(allocator);
+    var loader = ConfigLoader.init(allocator, io);
     var file_config = if (cli_config_file) |config_path|
         loader.load(config_path) catch |err| {
             std.debug.print("Error loading config file '{s}': {s}\n", .{ config_path, @errorName(err) });
@@ -418,7 +424,7 @@ pub fn main() !void {
                 .go => .go,
             };
             
-            try runAOTCompilation(aot_alloc, aot_options);
+            try runAOTCompilation(aot_alloc, io, cwd_dir, aot_options);
         } else {
             std.debug.print("Error: No input file specified for compilation.\n", .{});
             printUsage();
@@ -429,22 +435,22 @@ pub fn main() !void {
     // Regular interpreter mode
     const php_code: [:0]const u8 = if (php_file) |filename| blk: {
         // Read PHP file from command line argument
-        const file = std.fs.cwd().openFile(filename, .{}) catch |err| {
+        const file = cwd_dir.openFile(io, filename, .{}) catch |err| {
             std.debug.print("Error opening file '{s}': {s}\n", .{ filename, @errorName(err) });
             return;
         };
-        defer file.close();
+        defer file.close(io);
 
-        const file_size = file.getEndPos() catch |err| {
+        const st = file.stat(io) catch |err| {
             std.debug.print("Error getting file size: {s}\n", .{@errorName(err)});
             return;
         };
-        const contents = arena_allocator.allocSentinel(u8, file_size, 0) catch |err| {
+        const contents = arena_allocator.allocSentinel(u8, st.size, 0) catch |err| {
             std.debug.print("Error allocating memory: {s}\n", .{@errorName(err)});
             return;
         };
 
-        _ = file.readAll(contents) catch |err| {
+        _ = file.readPositionalAll(io, contents, 0) catch |err| {
             std.debug.print("Error reading file: {s}\n", .{@errorName(err)});
             return;
         };
@@ -546,7 +552,7 @@ pub fn main() !void {
 }
 
 /// Run AOT compilation
-fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) !void {
+fn runAOTCompilation(allocator: std.mem.Allocator, io: std.Io, cwd_dir: std.Io.Dir, options: aot.CompileOptions) !void {
     if (options.verbose) {
         std.debug.print("AOT Compiler starting...\n", .{});
         std.debug.print("  Input file: {s}\n", .{options.input_file});
@@ -565,17 +571,17 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
     }
 
     // 读取源文件
-    const file = std.fs.cwd().openFile(options.input_file, .{}) catch |err| {
+    const file = cwd_dir.openFile(io, options.input_file, .{}) catch |err| {
         std.debug.print("Error: Cannot open file '{s}': {s}\n", .{ options.input_file, @errorName(err) });
         return;
     };
-    defer file.close();
+    defer file.close(io);
 
-    const file_size = try file.getEndPos();
-    const source = try allocator.allocSentinel(u8, file_size, 0);
+    const st = try file.stat(io);
+    const source = try allocator.allocSentinel(u8, st.size, 0);
     defer allocator.free(source);
 
-    _ = try file.readAll(source);
+    _ = try file.readPositionalAll(io, source, 0);
 
     // 检测是否需要多文件编译
     const needs_multi_file = blk: {
@@ -641,7 +647,7 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
         var diagnostics = aot.DiagnosticEngine.init(allocator);
         defer diagnostics.deinit();
         
-        var multi_compiler = try aot.MultiFileCompiler.init(allocator, options, &diagnostics);
+        var multi_compiler = try aot.MultiFileCompiler.init(allocator, io, cwd_dir, options, &diagnostics);
         defer multi_compiler.deinit();
         
         const result = multi_compiler.compile(options.input_file, output_path) catch |err| {
@@ -688,38 +694,10 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
         return;
     };
 
-    // 检查解析错误：生成输出 PHP 格式 Parse error 的二进制
+    // 检查解析错误：AOT 编译模式下直接报告，不生成错误二进制
     if (context.errors.items.len > 0) {
-        const abs_path = std.fs.cwd().realpathAlloc(
-            allocator,
-            options.input_file,
-        ) catch options.input_file;
         const first_err = context.errors.items[0];
-        const line_num = first_err.line;
-        const err_msg = first_err.msg;
-
-        if (std.mem.eql(u8, err_msg, "Can't use function return value in write context") or
-            std.mem.eql(u8, err_msg, "strict_types declaration must be the very first statement in the script") or
-            std.mem.eql(u8, err_msg, "Cannot mix bracketed namespace declarations with unbracketed namespace declarations"))
-        {
-            try generateFatalErrorBinary(
-                allocator,
-                options,
-                abs_path,
-                err_msg,
-                line_num,
-            );
-            return;
-        }
-
-        // 生成 parse error 二进制
-        try generateParseErrorBinary(
-            allocator,
-            options,
-            abs_path,
-            err_msg,
-            line_num,
-        );
+        std.debug.print("Error: Parse error: {s} on line {d}\n", .{ first_err.msg, first_err.line });
         return;
     }
 
@@ -742,7 +720,7 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
     }
 
     // 创建 AOT 编译器实例
-    var aot_compiler = try aot.AOTCompiler.init(allocator, options);
+    var aot_compiler = try aot.AOTCompiler.init(allocator, io, options);
     defer aot_compiler.deinit();
 
     // 设置源码（用于报错定位）
@@ -781,12 +759,11 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
         if (diagnostics.diagnostics.items.len > 0) {
             const first_diag = diagnostics.diagnostics.items[0];
             if (std.mem.eql(u8, first_diag.message, "Can't use function return value in write context")) {
-                const abs_path = std.fs.cwd().realpathAlloc(
-                    allocator,
-                    options.input_file,
-                ) catch options.input_file;
+                const abs_path = cwd_dir.realPathFileAlloc(io, options.input_file, allocator) catch options.input_file;
                 try generateFatalErrorBinary(
                     allocator,
+                    io,
+                    cwd_dir,
                     options,
                     abs_path,
                     first_diag.message,
@@ -812,13 +789,15 @@ fn runAOTCompilation(allocator: std.mem.Allocator, options: aot.CompileOptions) 
 /// 生成输出 PHP 格式 Parse error 的最小二进制
 fn generateParseErrorBinary(
     allocator: std.mem.Allocator,
+    io: std.Io,
+    cwd_dir: std.Io.Dir,
     options: aot.CompileOptions,
     abs_path: []const u8,
     err_msg: []const u8,
     line_num: u32,
 ) !void {
     const build_dir = ".zigphp_aot_build";
-    std.fs.cwd().makeDir(build_dir) catch {};
+    cwd_dir.createDirPath(io, build_dir) catch {};
 
     // stdout 消息（PHP display_errors 格式，单空格）
     const stdout_msg = try std.fmt.allocPrint(
@@ -837,9 +816,9 @@ fn generateParseErrorBinary(
     defer allocator.free(stderr_msg);
 
     // 转义字符串中的特殊字符用于 Zig 字符串字面量
-    var zig_src = std.ArrayListUnmanaged(u8){};
-    defer zig_src.deinit(allocator);
-    const w = zig_src.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    const w = &aw.writer;
     try w.writeAll("const std = @import(\"std\");\n");
     try w.writeAll("pub fn main() void {\n");
     try w.writeAll("    const stdout = std.fs.File{ .handle = 1 };\n");
@@ -874,9 +853,12 @@ fn generateParseErrorBinary(
     );
     defer allocator.free(zig_path);
     {
-        const f = try std.fs.cwd().createFile(zig_path, .{});
-        defer f.close();
-        try f.writeAll(zig_src.items);
+        const f = try cwd_dir.createFile(io, zig_path, .{});
+        defer f.close(io);
+        var out_buf: [4096]u8 = undefined;
+        var writer = f.writer(io, &out_buf);
+        try writer.interface.writeAll(aw.writer.buffer[0..aw.writer.end]);
+        try writer.flush();
     }
 
     // 获取输出路径
@@ -899,23 +881,27 @@ fn generateParseErrorBinary(
         "zig", "build-exe", zig_path, emit_arg,
     };
 
-    var child = std.process.Child.init(&argv, allocator);
-    child.stderr_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    _ = try child.spawnAndWait();
+    var child = try std.process.spawn(io, .{
+        .argv = &argv,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    _ = try child.wait(io);
 
     std.debug.print("Success: Compiled to {s}\n", .{output_path});
 }
 
 fn generateFatalErrorBinary(
     allocator: std.mem.Allocator,
+    io: std.Io,
+    cwd_dir: std.Io.Dir,
     options: aot.CompileOptions,
     abs_path: []const u8,
     err_msg: []const u8,
     line_num: u32,
 ) !void {
     const build_dir = ".zigphp_aot_build";
-    std.fs.cwd().makeDir(build_dir) catch {};
+    cwd_dir.createDirPath(io, build_dir) catch {};
 
     const stdout_msg = try std.fmt.allocPrint(
         allocator,
@@ -931,9 +917,9 @@ fn generateFatalErrorBinary(
     );
     defer allocator.free(stderr_msg);
 
-    var zig_src = std.ArrayListUnmanaged(u8){};
-    defer zig_src.deinit(allocator);
-    const w = zig_src.writer(allocator);
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    const w = &aw.writer;
     try w.writeAll("const std = @import(\"std\");\n");
     try w.writeAll("pub fn main() void {\n");
     try w.writeAll("    const stdout = std.fs.File{ .handle = 1 };\n");
@@ -967,9 +953,12 @@ fn generateFatalErrorBinary(
     );
     defer allocator.free(zig_path);
     {
-        const f = try std.fs.cwd().createFile(zig_path, .{});
-        defer f.close();
-        try f.writeAll(zig_src.items);
+        const f = try cwd_dir.createFile(io, zig_path, .{});
+        defer f.close(io);
+        var out_buf: [4096]u8 = undefined;
+        var writer = f.writer(io, &out_buf);
+        try writer.interface.writeAll(aw.writer.buffer[0..aw.writer.end]);
+        try writer.flush();
     }
 
     const output_path = options.output_file orelse blk: {
@@ -990,10 +979,12 @@ fn generateFatalErrorBinary(
         "zig", "build-exe", zig_path, emit_arg,
     };
 
-    var child = std.process.Child.init(&argv, allocator);
-    child.stderr_behavior = .Ignore;
-    child.stdout_behavior = .Ignore;
-    _ = try child.spawnAndWait();
+    var child = try std.process.spawn(io, .{
+        .argv = &argv,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    _ = try child.wait(io);
 
     std.debug.print("Success: Compiled to {s}\n", .{output_path});
 }

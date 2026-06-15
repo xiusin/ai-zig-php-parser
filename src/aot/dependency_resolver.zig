@@ -54,8 +54,8 @@ pub const FileNode = struct {
     pub fn init() FileNode {
         return .{
             .path = "",
-            .dependencies = .{},
-            .includes = .{},
+            .dependencies = .{ .items = &.{}, .capacity = 0 },
+            .includes = .{ .items = &.{}, .capacity = 0 },
             .processed = false,
             .in_progress = false,
             .source = null,
@@ -118,6 +118,8 @@ pub const UnresolvedFile = struct {
 /// File Dependency Resolver
 pub const DependencyResolver = struct {
     allocator: Allocator,
+    io: std.Io,
+    cwd: std.Io.Dir,
     diagnostics: *DiagnosticEngine,
     /// Map of file path to FileNode
     files: std.StringHashMapUnmanaged(FileNode),
@@ -135,17 +137,19 @@ pub const DependencyResolver = struct {
     const Self = @This();
 
     /// Initialize a new dependency resolver
-    pub fn init(allocator: Allocator, diagnostics: *DiagnosticEngine) !*Self {
+    pub fn init(allocator: Allocator, io: std.Io, cwd: std.Io.Dir, diagnostics: *DiagnosticEngine) !*Self {
         const self = try allocator.create(Self);
         self.* = .{
             .allocator = allocator,
+            .io = io,
+            .cwd = cwd,
             .diagnostics = diagnostics,
             .files = .{},
             .base_dir = "",
-            .include_paths = .{},
-            .cycles = .{},
-            .unresolved = .{},
-            .visit_stack = .{},
+            .include_paths = .{ .items = &.{}, .capacity = 0 },
+            .cycles = .{ .items = &.{}, .capacity = 0 },
+            .unresolved = .{ .items = &.{}, .capacity = 0 },
+            .visit_stack = .{ .items = &.{}, .capacity = 0 },
         };
         return self;
     }
@@ -286,13 +290,13 @@ pub const DependencyResolver = struct {
 
     /// Load a file's contents
     fn loadFile(self: *Self, file_path: []const u8) ![]const u8 {
-        const file = try std.fs.cwd().openFile(file_path, .{});
-        defer file.close();
+        const file = try self.cwd.openFile(self.io, file_path, .{});
+        defer file.close(self.io);
 
-        const file_size = try file.getEndPos();
-        const source = try self.allocator.alloc(u8, file_size);
-        const bytes_read = try file.readAll(source);
-        if (bytes_read != file_size) {
+        const st = try file.stat(self.io);
+        const source = try self.allocator.alloc(u8, st.size);
+        const bytes_read = try file.readPositionalAll(self.io, source, 0);
+        if (bytes_read != st.size) {
             return error.IncompleteRead;
         }
         return source;
@@ -300,7 +304,7 @@ pub const DependencyResolver = struct {
 
     /// Extract include/require statements from source code
     pub fn extractIncludes(self: *Self, source: []const u8, file_path: []const u8) ![]IncludeStatement {
-        var includes = std.ArrayListUnmanaged(IncludeStatement){};
+        var includes = std.ArrayListUnmanaged(IncludeStatement){ .items = &.{}, .capacity = 0 };
         errdefer {
             for (includes.items) |inc| {
                 self.allocator.free(inc.path);
@@ -549,9 +553,9 @@ pub const DependencyResolver = struct {
 
         // Try current working directory
         if (self.fileExists(path)) {
-            const cwd = std.fs.cwd();
-            var buf: [std.fs.max_path_bytes]u8 = undefined;
-            const abs_path = cwd.realpath(path, &buf) catch return null;
+            var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const abs_path_len = self.cwd.realPathFile(self.io, path, &buf) catch return null;
+            const abs_path = buf[0..abs_path_len];
             return try self.allocator.dupe(u8, abs_path);
         }
 
@@ -560,8 +564,7 @@ pub const DependencyResolver = struct {
 
     /// Check if a file exists
     fn fileExists(self: *Self, path: []const u8) bool {
-        _ = self;
-        std.fs.cwd().access(path, .{}) catch return false;
+        self.cwd.access(self.io, path, .{}) catch return false;
         return true;
     }
 
@@ -599,7 +602,7 @@ pub const DependencyResolver = struct {
 
     /// Get the compilation order (topological sort)
     pub fn getCompilationOrder(self: *Self) ![]const []const u8 {
-        var order = std.ArrayListUnmanaged([]const u8){};
+        var order = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
         var visited = std.StringHashMapUnmanaged(void){};
         defer visited.deinit(self.allocator);
 
@@ -665,7 +668,7 @@ pub const DependencyResolver = struct {
 
     /// Get all file paths
     pub fn getAllFiles(self: *Self) ![]const []const u8 {
-        var paths = std.ArrayListUnmanaged([]const u8){};
+        var paths = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
         var it = self.files.iterator();
         while (it.next()) |entry| {
             try paths.append(self.allocator, entry.key_ptr.*);

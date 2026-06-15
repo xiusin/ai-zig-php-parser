@@ -10,20 +10,36 @@ const Command = enum {
     help,
 };
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init.Minimal) !void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    // Create thread-local Io for file operations (Zig 0.17 API)
+    var environ: [0:null]?[*:0]u8 = [_:null]?[*:0]u8{};
+    var threaded = std.Io.Threaded.init(allocator, .{
+        .argv0 = .init(.{ .vector = &.{} }),
+        .environ = .{ .block = .{ .slice = &environ } },
+    });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const cwd = std.Io.Dir.cwd();
+
+    var args_iter = try std.process.Args.Iterator.initAllocator(init.args, allocator);
+    defer args_iter.deinit();
+    var args_list = std.array_list.AlignedManaged([]const u8, null).init(allocator);
+    defer args_list.deinit();
+    while (args_iter.next()) |arg| {
+        try args_list.append(arg);
+    }
+    const args = args_list.items;
 
     if (args.len < 2) return printHelp();
 
     const command = std.meta.stringToEnum(Command, args[1]) orelse return printHelp();
     switch (command) {
-        .folded_to_svg => try runFoldedToSvg(allocator, args[2..]),
-        .folded_to_pprof => try runFoldedToPprof(allocator, args[2..]),
+        .folded_to_svg => try runFoldedToSvg(allocator, io, cwd, args[2..]),
+        .folded_to_pprof => try runFoldedToPprof(allocator, io, cwd, args[2..]),
         .help => try printHelp(),
     }
 }
@@ -44,7 +60,7 @@ fn parseUnit(s: []const u8) FlameGraphGenerator.FoldedUnit {
     return .microseconds;
 }
 
-fn runFoldedToSvg(allocator: std.mem.Allocator, args: []const []const u8) !void {
+fn runFoldedToSvg(allocator: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, args: []const []const u8) !void {
     if (args.len < 2) return printHelp();
 
     const input_path = args[0];
@@ -68,15 +84,13 @@ fn runFoldedToSvg(allocator: std.mem.Allocator, args: []const []const u8) !void 
         }
     }
 
-    const input_file = try std.fs.cwd().openFile(input_path, .{});
-    defer input_file.close();
-    const content = try input_file.readToEndAlloc(allocator, 64 * 1024 * 1024);
+    const content = try cwd.readFileAlloc(io, input_path, allocator, .unlimited);
     defer allocator.free(content);
 
     var profiler = try Profiler.init(allocator, .custom);
     defer profiler.deinit();
 
-    var gen = try FlameGraphGenerator.init(allocator, &profiler);
+    var gen = try FlameGraphGenerator.init(allocator, io, &profiler);
     defer gen.deinit();
     gen.setMinDisplayTime(0);
 
@@ -85,12 +99,15 @@ fn runFoldedToSvg(allocator: std.mem.Allocator, args: []const []const u8) !void 
     const svg = try gen.generateSVG(allocator, width, height);
     defer allocator.free(svg);
 
-    const out = try std.fs.cwd().createFile(output_path, .{});
-    defer out.close();
-    try out.writeAll(svg);
+    const out = try cwd.createFile(io, output_path, .{});
+    defer out.close(io);
+    var out_buf: [4096]u8 = undefined;
+    var writer = out.writer(io, &out_buf);
+    try writer.interface.writeAll(svg);
+    try writer.flush();
 }
 
-fn runFoldedToPprof(allocator: std.mem.Allocator, args: []const []const u8) !void {
+fn runFoldedToPprof(allocator: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, args: []const []const u8) !void {
     if (args.len < 2) return printHelp();
 
     const input_path = args[0];
@@ -110,23 +127,21 @@ fn runFoldedToPprof(allocator: std.mem.Allocator, args: []const []const u8) !voi
         }
     }
 
-    const input_file = try std.fs.cwd().openFile(input_path, .{});
-    defer input_file.close();
-    const content = try input_file.readToEndAlloc(allocator, 64 * 1024 * 1024);
+    const content = try cwd.readFileAlloc(io, input_path, allocator, .unlimited);
     defer allocator.free(content);
 
     var profiler = try Profiler.init(allocator, .custom);
     defer profiler.deinit();
 
-    var gen = try FlameGraphGenerator.init(allocator, &profiler);
+    var gen = try FlameGraphGenerator.init(allocator, io, &profiler);
     defer gen.deinit();
     gen.setMinDisplayTime(0);
     try gen.buildFromFoldedFormat(content, unit);
 
-    const out = try std.fs.cwd().createFile(output_path, .{});
-    defer out.close();
+    const out = try cwd.createFile(io, output_path, .{});
+    defer out.close(io);
     var out_buf: [16 * 1024]u8 = undefined;
-    var w = out.writer(&out_buf);
-    try runtime.pprof.writeCpuProfileFromFlameGraph(allocator, &w.interface, gen.root, period_ns);
-    try w.end();
+    var writer = out.writer(io, &out_buf);
+    try runtime.pprof.writeCpuProfileFromFlameGraph(allocator, &writer.interface, gen.root, period_ns);
+    try writer.flush();
 }

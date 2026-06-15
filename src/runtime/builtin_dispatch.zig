@@ -385,7 +385,7 @@ pub const BuiltinMeta = struct {
 /// 编译时生成的分发表
 /// 注意：实际的 handler 函数指针在运行时通过 initDispatchTable() 填充
 /// 这是因为 Zig 不支持在 comptime 中存储函数指针到全局变量
-pub var BUILTIN_DISPATCH_TABLE: [450]?BuiltinMeta = [_]?BuiltinMeta{null} ** 450;
+pub var BUILTIN_DISPATCH_TABLE: [450]?BuiltinMeta = @splat(null);
 
 /// 初始化分发表（在 VM 初始化时调用）
 /// 将 stdlib 中的函数注册到分发表中

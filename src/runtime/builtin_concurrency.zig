@@ -1,3 +1,4 @@
+const time_compat = @import("time_compat.zig");
 const std = @import("std");
 const types = @import("types.zig");
 const Value = types.Value;
@@ -384,7 +385,7 @@ pub fn selectFn(vm: anytype, args: []const Value) !Value {
     }
 
     const cases_arr = cases_arg.getAsArray().data;
-    const start_ms: u64 = @intCast(std.time.milliTimestamp());
+    const start_ms: u64 = @intCast(time_compat.milliTimestamp());
 
     while (true) {
         const n = cases_arr.count();
@@ -424,7 +425,7 @@ pub fn selectFn(vm: anytype, args: []const Value) !Value {
         }
 
         if (timeout_ms) |t| {
-            const now: u64 = @intCast(std.time.milliTimestamp());
+            const now: u64 = @intCast(time_compat.milliTimestamp());
             if (now - start_ms >= t) return Value.initNull();
         }
         std.Thread.yield() catch {};

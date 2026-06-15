@@ -1,6 +1,5 @@
 const std = @import("std");
-
-/// 增量标记垃圾回收器
+const time_compat = @import("time_compat.zig");
 /// 实现 Task 6.2: 增量标记避免长停顿
 ///
 /// 特性：
@@ -504,7 +503,7 @@ pub const IncrementalGC = struct {
     pub fn markStep(self: *IncrementalGC) !bool {
         if (self.state != .marking) return true;
 
-        const start_time = std.time.nanoTimestamp();
+        const start_time = time_compat.nanoTimestamp();
         var objects_processed: usize = 0;
 
         // 处理 SATB 缓冲区
@@ -516,7 +515,7 @@ pub const IncrementalGC = struct {
             if (objects_processed >= self.config.step_objects) break;
 
             if (self.config.use_time_limit) {
-                const elapsed: u64 = @intCast(std.time.nanoTimestamp() - start_time);
+                const elapsed: u64 = @intCast(time_compat.nanoTimestamp() - start_time);
                 if (elapsed >= self.config.step_time_us * 1000) break;
             }
 
@@ -545,7 +544,7 @@ pub const IncrementalGC = struct {
         self.stats.incremental_steps += 1;
 
         // 记录步进时间
-        const step_time: u64 = @intCast(std.time.nanoTimestamp() - start_time);
+        const step_time: u64 = @intCast(time_compat.nanoTimestamp() - start_time);
         if (step_time > self.stats.max_step_time_ns) {
             self.stats.max_step_time_ns = step_time;
         }
@@ -572,7 +571,7 @@ pub const IncrementalGC = struct {
     pub fn sweepStep(self: *IncrementalGC) bool {
         if (self.state != .sweeping) return true;
 
-        const start_time = std.time.nanoTimestamp();
+        const start_time = time_compat.nanoTimestamp();
         var objects_processed: usize = 0;
 
         while (self.sweep_cursor) |obj| {
@@ -580,7 +579,7 @@ pub const IncrementalGC = struct {
             if (objects_processed >= self.config.step_objects) break;
 
             if (self.config.use_time_limit) {
-                const elapsed: u64 = @intCast(std.time.nanoTimestamp() - start_time);
+                const elapsed: u64 = @intCast(time_compat.nanoTimestamp() - start_time);
                 if (elapsed >= self.config.step_time_us * 1000) break;
             }
 
@@ -623,7 +622,7 @@ pub const IncrementalGC = struct {
         self.stats.incremental_steps += 1;
 
         // 记录步进时间
-        const step_time: u64 = @intCast(std.time.nanoTimestamp() - start_time);
+        const step_time: u64 = @intCast(time_compat.nanoTimestamp() - start_time);
         if (step_time > self.stats.max_step_time_ns) {
             self.stats.max_step_time_ns = step_time;
         }

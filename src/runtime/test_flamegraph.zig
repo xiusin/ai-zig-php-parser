@@ -238,10 +238,10 @@ test "火焰图文件保存" {
     // 保存折叠格式
     const folded_path = "test_flamegraph_folded.txt";
     try generator.saveFoldedFormat(folded_path);
-    defer std.fs.cwd().deleteFile(folded_path) catch {};
+    defer std.fs.cwd.deleteFile(folded_path) catch {};
     
     // 验证文件存在
-    const folded_file = try std.fs.cwd().openFile(folded_path, .{});
+    const folded_file = try std.fs.cwd.openFile(folded_path, .{});
     defer folded_file.close();
     
     const folded_content = try folded_file.readToEndAlloc(allocator, 1024 * 1024);
@@ -253,10 +253,10 @@ test "火焰图文件保存" {
     // 保存 SVG
     const svg_path = "test_flamegraph.svg";
     try generator.saveSVG(svg_path, 1200, 800);
-    defer std.fs.cwd().deleteFile(svg_path) catch {};
+    defer std.fs.cwd.deleteFile(svg_path) catch {};
     
     // 验证文件存在
-    const svg_file = try std.fs.cwd().openFile(svg_path, .{});
+    const svg_file = try std.fs.cwd.openFile(svg_path, .{});
     defer svg_file.close();
     
     const svg_content = try svg_file.readToEndAlloc(allocator, 1024 * 1024);

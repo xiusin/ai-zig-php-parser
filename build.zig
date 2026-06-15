@@ -35,6 +35,7 @@ pub fn build(b: *std.Build) void {
     // 模块相互依赖
     runtime_mod.addImport("compiler", compiler_mod);
     runtime_mod.addImport("nanbox_abi", nanbox_abi_mod);
+    runtime_mod.addImport("shared", shared_mod);
     compiler_mod.addImport("runtime", runtime_mod);
     
     // 字节码模块
@@ -85,12 +86,8 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("jit", jit_mod);
     exe.root_module.addImport("extension", extension_mod);
     exe.root_module.addImport("shared", shared_mod);
-    exe.linkLibC();
-    // Detect platform for Homebrew PCRE2 paths
-    const pcre2_prefix = if (builtin.target.cpu.arch == .aarch64) "/opt/homebrew/opt/pcre2" else "/usr/local/opt/pcre2";
-    exe.addIncludePath(.{ .cwd_relative = pcre2_prefix ++ "/include" });
-    exe.addLibraryPath(.{ .cwd_relative = pcre2_prefix ++ "/lib" });
-    exe.linkSystemLibrary("pcre2-8");
+    exe.root_module.link_libc = true;
+    exe.root_module.linkSystemLibrary("pcre2-8", .{});
 
     b.installArtifact(exe);
 
@@ -116,10 +113,6 @@ pub fn build(b: *std.Build) void {
     // Run command
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
-
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
 
     const run_step = b.step("run", "Run the application");
     run_step.dependOn(&run_cmd.step);
@@ -155,10 +148,8 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
             }),
         });
-        test_exe.linkLibC();
-        test_exe.addIncludePath(.{ .cwd_relative = pcre2_prefix ++ "/include" });
-        test_exe.addLibraryPath(.{ .cwd_relative = pcre2_prefix ++ "/lib" });
-        test_exe.linkSystemLibrary("pcre2-8");
+        test_exe.root_module.link_libc = true;
+        test_exe.root_module.linkSystemLibrary("pcre2-8", .{});
         // 添加模块导入
         test_exe.root_module.addImport("compiler", compiler_mod);
         test_exe.root_module.addImport("runtime", runtime_mod);
@@ -190,7 +181,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    docs_exe.linkLibC();
+    docs_exe.root_module.link_libc = true;
     // 添加模块导入
     docs_exe.root_module.addImport("compiler", compiler_mod);
     docs_exe.root_module.addImport("runtime", runtime_mod);
@@ -225,7 +216,7 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseFast,
         }),
     });
-    bench_exe.linkLibC();
+    bench_exe.root_module.link_libc = true;
     // 添加模块导入
     bench_exe.root_module.addImport("compiler", compiler_mod);
     bench_exe.root_module.addImport("runtime", runtime_mod);
@@ -256,7 +247,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     string_bench_exe.root_module.addImport("string_benchmark", benchmark_module);
-    string_bench_exe.linkLibC();
+    string_bench_exe.root_module.link_libc = true;
     // 添加模块导入
     string_bench_exe.root_module.addImport("compiler", compiler_mod);
     string_bench_exe.root_module.addImport("runtime", runtime_mod);
@@ -277,7 +268,7 @@ pub fn build(b: *std.Build) void {
             .optimize = .Debug,
         }),
     });
-    leak_check_exe.linkLibC();
+    leak_check_exe.root_module.link_libc = true;
     // 添加模块导入
     leak_check_exe.root_module.addImport("compiler", compiler_mod);
     leak_check_exe.root_module.addImport("runtime", runtime_mod);
@@ -307,7 +298,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     array_bench_exe.root_module.addImport("array_benchmark", array_benchmark_module);
-    array_bench_exe.linkLibC();
+    array_bench_exe.root_module.link_libc = true;
     // 添加模块导入
     array_bench_exe.root_module.addImport("compiler", compiler_mod);
     array_bench_exe.root_module.addImport("runtime", runtime_mod);
@@ -329,7 +320,7 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseFast,
         }),
     });
-    jit_bench_exe.linkLibC();
+    jit_bench_exe.root_module.link_libc = true;
     // 添加模块导入
     jit_bench_exe.root_module.addImport("compiler", compiler_mod);
     jit_bench_exe.root_module.addImport("runtime", runtime_mod);
@@ -351,7 +342,7 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseFast,
         }),
     });
-    aot_bench_exe.linkLibC();
+    aot_bench_exe.root_module.link_libc = true;
     // 添加模块导入
     aot_bench_exe.root_module.addImport("compiler", compiler_mod);
     aot_bench_exe.root_module.addImport("runtime", runtime_mod);
@@ -422,7 +413,7 @@ pub fn build(b: *std.Build) void {
             .optimize = .ReleaseFast,
         }),
     });
-    profile_cli_exe.linkLibC();
+    profile_cli_exe.root_module.link_libc = true;
     profile_cli_exe.root_module.addImport("runtime", runtime_mod);
     b.installArtifact(profile_cli_exe);
 

@@ -450,7 +450,7 @@ pub const TypeInferencer = struct {
 
     /// Infer type from a union type declaration
     fn inferUnionType(self: *Self, node: *const InferenceNode) InferredType {
-        var concrete_types = std.ArrayListUnmanaged(ConcreteType){};
+        var concrete_types = std.ArrayListUnmanaged(ConcreteType){ .items = &.{}, .capacity = 0 };
         errdefer concrete_types.deinit(self.allocator);
 
         for (node.children) |type_idx| {

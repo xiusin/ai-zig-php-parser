@@ -169,7 +169,7 @@ pub const ConcurrentMarkingQueue = struct {
 
     pub fn init(allocator: std.mem.Allocator) ConcurrentMarkingQueue {
         return .{
-            .objects = std.ArrayListUnmanaged(*anyopaque){},
+            .objects = std.ArrayListUnmanaged(*anyopaque){ .items = &.{}, .capacity = 0 },
             .mutex = std.Thread.Mutex{},
             .cond = std.Thread.Condition{},
             .allocator = allocator,
@@ -208,7 +208,7 @@ pub const ConcurrentMarkingQueue = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        var batch = std.ArrayListUnmanaged(*anyopaque){};
+        var batch = std.ArrayListUnmanaged(*anyopaque){ .items = &.{}, .capacity = 0 };
         const count = @min(max_count, self.objects.items.len);
 
         for (0..count) |_| {
@@ -372,7 +372,7 @@ pub const ConcurrentGC = struct {
             .satb_barrier = SATBBarrier.init(allocator),
             .safepoint = Safepoint.init(thread_count),
             .phase = std.atomic.Atomic(Phase).init(.idle),
-            .roots = std.ArrayListUnmanaged(Value){},
+            .roots = std.ArrayListUnmanaged(Value){ .items = &.{}, .capacity = 0 },
             .allocator = allocator,
             .stats = .{},
         };

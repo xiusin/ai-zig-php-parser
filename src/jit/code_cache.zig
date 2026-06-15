@@ -32,7 +32,7 @@ pub const CodeCache = struct {
 
     pub fn init(allocator: std.mem.Allocator, size: usize) !CodeCache {
         // PROT_READ | PROT_WRITE | PROT_EXEC
-        const prot = os.PROT.READ | os.PROT.WRITE | os.PROT.EXEC;
+        const prot = os.PROT{ .READ = true, .WRITE = true, .EXEC = true };
         
         // Use struct initialization for MAP flags
         var flags = os.MAP{ .TYPE = .PRIVATE, .ANONYMOUS = true };

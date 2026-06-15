@@ -306,7 +306,7 @@ pub const CoroutineError = struct {
     }
 
     pub fn format(self: *const CoroutineError, allocator: std.mem.Allocator) ![]u8 {
-        var buffer = std.ArrayListUnmanaged(u8){};
+        var buffer = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
         defer buffer.deinit(allocator);
         const writer = buffer.writer(allocator);
 
@@ -804,7 +804,7 @@ pub const ErrorReporter = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        var result = std.ArrayListUnmanaged(*CoroutineError){};
+        var result = std.ArrayListUnmanaged(*CoroutineError){ .items = &.{}, .capacity = 0 };
         for (self.error_history.items) |err| {
             if (err.coroutine_id == coroutine_id) {
                 try result.append(self.allocator, err);
@@ -818,7 +818,7 @@ pub const ErrorReporter = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        var buffer = std.ArrayListUnmanaged(u8){};
+        var buffer = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
         defer buffer.deinit(self.allocator);
         const writer = buffer.writer(self.allocator);
 
@@ -1057,7 +1057,7 @@ pub const CoroutineErrorManager = struct {
 
     /// Generate comprehensive error report
     pub fn generateReport(self: *CoroutineErrorManager) ![]u8 {
-        var buffer = std.ArrayListUnmanaged(u8){};
+        var buffer = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
         defer buffer.deinit(self.allocator);
         const writer = buffer.writer(self.allocator);
 
