@@ -6352,6 +6352,26 @@ pub const IRGenerator = struct {
             }
         }
 
+        // empty($obj->prop)：需要调用 php_object_empty 以触发 __isset 魔术方法
+        if (func_name.len != 0 and indirect_callee == null and std.mem.eql(u8, func_name, "empty")) {
+            if (call_data.args.len >= 1) {
+                const arg_idx = call_data.args[0];
+                const arg_node = self.getNode(arg_idx);
+                if (arg_node != null and arg_node.?.tag == .property_access) {
+                    const object_reg = try self.generateExpression(arg_node.?.data.property_access.target);
+                    const property_name_reg = try self.emitPropertyNameValue(self.getString(arg_node.?.data.property_access.property_name));
+                    const empty_args = try self.allocator.alloc(Register, 2);
+                    empty_args[0] = object_reg;
+                    empty_args[1] = property_name_reg;
+                    return self.emitWithResult(.{ .call = .{
+                        .func_name = "php_object_empty",
+                        .args = empty_args,
+                        .return_type = .php_value,
+                    } }, .php_value);
+                }
+            }
+        }
+
         // unset($arr[$key])：这是语言结构而非真实函数，AOT 需要生成 array_unset 指令
         // 这里只做最小覆盖：单参数且为 array_access，并且带 index。
         if (func_name.len != 0 and indirect_callee == null and std.mem.eql(u8, func_name, "unset")) {

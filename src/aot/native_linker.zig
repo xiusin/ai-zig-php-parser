@@ -3336,6 +3336,7 @@ pub const NativeLinker = struct {
         .{ "php_create_closure", bi(.{ .runtime_name = "php_create_closure", .needs_allocator = true }) },
         .{ "php_object_unset", bi(.{ .runtime_name = "php_object_unset", .needs_allocator = true }) },
         .{ "php_object_isset", bi(.{ .runtime_name = "php_object_isset", .needs_allocator = false, .may_raise = true }) },
+.{ "php_object_empty", bi(.{ .runtime_name = "php_object_empty", .needs_allocator = false, .may_raise = true }) },
         .{ "php_array_isset", bi(.{ .runtime_name = "php_array_isset", .needs_allocator = false, .may_raise = true }) },
         .{ "php_args_append_spread", bi(.{ .runtime_name = "php_args_append_spread", .needs_allocator = true }) },
         .{ "php_invoke_callable_args_array", bi(.{ .runtime_name = "php_invoke_callable_args_array", .needs_allocator = true }) },

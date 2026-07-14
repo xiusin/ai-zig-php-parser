@@ -3132,6 +3132,54 @@ pub fn php_object_isset(obj_val: Value, property_name_val: Value) !Value {
     return Value.initBool(obj.hasProperty(prop_name));
 }
 
+/// empty($obj->prop): 先检查 __isset，若属性不存在则视为空
+/// 若 __isset 返回 true（属性存在），再取值判断是否为空
+pub fn php_object_empty(obj_val: Value, property_name_val: Value) !Value {
+    if (!Value_isObject(obj_val)) return Value.initBool(php_empty_val(obj_val));
+
+    const obj = Value_asObject(obj_val);
+    const prop_name = if (property_name_val.isString())
+        property_name_val.asString().data
+    else
+        return Value.initBool(true);
+
+    // 属性存在于 HashMap 中：直接取值判断
+    if (obj.properties.get(prop_name)) |val| {
+        return Value.initBool(php_empty_val(val));
+    }
+
+    // 属性不在 HashMap 中：检查是否声明
+    if (obj.class_meta) |meta| {
+        if (findPropertyDeclaringClass(meta, prop_name) != null) {
+            // 已声明但未初始化：视为 null（empty 返回 true）
+            return Value.initBool(true);
+        }
+        // 未声明属性：先调用 __isset
+        if (meta.findMethodLookup("__isset")) |lookup| {
+            const name_str = try PHPString.init(runtime_allocator, prop_name);
+            const name_val = Value.initString(name_str);
+            defer name_val.release(runtime_allocator);
+            const args = [_]Value{name_val};
+            const guard = ClassContext.init(meta, lookup.owner);
+            defer guard.deinit();
+            const isset_result = try lookup.method.func(obj_val, &args, runtime_allocator);
+            if (!isset_result.toBool()) {
+                // __isset 返回 false：属性不存在，empty 返回 true
+                return Value.initBool(true);
+            }
+            // __isset 返回 true：通过 __get 获取值
+            if (meta.findMethodLookup("__get")) |get_lookup| {
+                const get_guard = ClassContext.init(meta, get_lookup.owner);
+                defer get_guard.deinit();
+                const get_result = try get_lookup.method.func(obj_val, &args, runtime_allocator);
+                return Value.initBool(php_empty_val(get_result));
+            }
+        }
+    }
+
+    return Value.initBool(true);
+}
+
 pub fn php_object_unset(obj_val: Value, property_name_val: Value, allocator: Allocator) !Value {
     if (!Value_isObject(obj_val)) return Value.initNull();
 
@@ -17899,14 +17947,17 @@ pub const PHPObject = struct {
     pub fn hasProperty(self: *PHPObject, name: []const u8) bool {
         if (self.properties.contains(name)) return true;
         if (self.class_meta) |meta| {
-            if (meta.findMethodLookup("__isset")) |lookup| {
-                const this_val = Value_initObject(self);
-                const name_val = Value.initString(PHPString.initStatic(name));
-                const args = [_]Value{name_val};
-                const guard = ClassContext.init(meta, lookup.owner);
-                defer guard.deinit();
-                const result = lookup.method.func(this_val, &args, self.allocator) catch return false;
-                return result.toBool();
+            // PHP 语义：__isset 仅对未声明的属性触发
+            if (findPropertyDeclaringClass(meta, name) == null) {
+                if (meta.findMethodLookup("__isset")) |lookup| {
+                    const this_val = Value_initObject(self);
+                    const name_val = Value.initString(PHPString.initStatic(name));
+                    const args = [_]Value{name_val};
+                    const guard = ClassContext.init(meta, lookup.owner);
+                    defer guard.deinit();
+                    const result = lookup.method.func(this_val, &args, self.allocator) catch return false;
+                    return result.toBool();
+                }
             }
         }
         return false;
@@ -24021,6 +24072,17 @@ pub fn php_exit(status: Value) !noreturn {
     else
         0;
     std.process.exit(code);
+}
+
+/// php_empty_val - 纯 bool 版本的 empty 检查（不返回 Value，不触发错误）
+fn php_empty_val(val: Value) bool {
+    if (val.isNull()) return true;
+    if (val.isBool()) return !val.asBool();
+    if (val.isInt()) return val.asInt() == 0;
+    if (val.isFloat()) return val.asFloat() == 0;
+    if (val.isString()) return val.asString().length == 0 or std.mem.eql(u8, val.asString().data, "0");
+    if (val.isArray()) return val.asArray().count() == 0;
+    return false;
 }
 
 /// empty - 检查变量是否为空
