@@ -7212,7 +7212,10 @@ pub fn php_array_iter_init_snapshot(array_val: Value, allocator: Allocator) !Val
         return php_array_iter_init(array_val, allocator);
     }
 
-    const snapshot = try array_val.asArray().cloneDeep(allocator);
+    // 使用浅拷贝而非深拷贝：PHP by-value foreach 仅冻结顶层键列表，
+    // 嵌套数组通过 COW 共享，修改原数组嵌套元素时 COW 自动分离。
+    // cloneShallow: O(n) vs cloneDeep: O(n*d)，d 为嵌套深度。
+    const snapshot = try array_val.asArray().cloneShallow(allocator);
     errdefer snapshot.release(allocator);
 
     const iter_val = try php_array_iter_init(Value.initArray(snapshot), allocator);
