@@ -634,11 +634,17 @@ fn runAOTCompilation(allocator: std.mem.Allocator, io: std.Io, cwd_dir: std.Io.D
         std.debug.print("Detected require/include statements, using multi-file compiler...\n", .{});
 
         // 确定输出路径
+        // 宪法规则：AOT 编译产物必须以 aot_compile_{filename} 命名，防止误删 PHP 源代码
         const output_path = options.output_file orelse blk: {
-            // 默认输出路径：移除 .php 后缀
             const input = options.input_file;
             if (std.mem.endsWith(u8, input, ".php")) {
-                break :blk input[0 .. input.len - 4];
+                const dir = std.fs.path.dirname(input);
+                const basename = std.fs.path.stem(input);
+                if (dir) |d| {
+                    break :blk try std.fmt.allocPrint(allocator, "{s}/aot_compile_{s}", .{ d, basename });
+                } else {
+                    break :blk try std.fmt.allocPrint(allocator, "aot_compile_{s}", .{basename});
+                }
             }
             break :blk input;
         };

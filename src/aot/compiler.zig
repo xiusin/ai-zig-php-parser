@@ -174,10 +174,16 @@ pub const CompileOptions = struct {
             return try allocator.dupe(u8, out);
         }
 
-        // 使用输入文件的完整路径（去掉.php后缀）
+        // 宪法规则：AOT 编译产物必须以 aot_compile_{filename} 命名，防止误删 PHP 源代码
         const input = self.input_file;
         if (std.mem.endsWith(u8, input, ".php") and input.len > 4) {
-            return try allocator.dupe(u8, input[0 .. input.len - 4]);
+            const dir = std.fs.path.dirname(input);
+            const basename = std.fs.path.stem(input);
+            if (dir) |d| {
+                return try std.fmt.allocPrint(allocator, "{s}/aot_compile_{s}", .{ d, basename });
+            } else {
+                return try std.fmt.allocPrint(allocator, "aot_compile_{s}", .{basename});
+            }
         }
 
         // 如果没有.php后缀，添加默认后缀
