@@ -17793,20 +17793,23 @@ pub const PHPObject = struct {
         if (in_magic_method) return null;
 
         // 调用 __get 魔法函数
+        // PHP 语义：__get 仅对未声明的属性触发
         if (self.class_meta) |meta| {
-            if (meta.findMethodLookup("__get")) |lookup| {
-                in_magic_method = true;
-                defer in_magic_method = false;
+            if (findPropertyDeclaringClass(meta, name) == null) {
+                if (meta.findMethodLookup("__get")) |lookup| {
+                    in_magic_method = true;
+                    defer in_magic_method = false;
 
-                const this_val = Value_initObject(self);
-                const name_str = PHPString.init(self.allocator, name) catch return null;
-                const name_val = Value.initString(name_str);
-                defer name_val.release(self.allocator);
-                const args = [_]Value{name_val};
-                const guard = ClassContext.init(meta, lookup.owner);
-                defer guard.deinit();
-                const result = lookup.method.func(this_val, &args, self.allocator) catch return null;
-                return result;
+                    const this_val = Value_initObject(self);
+                    const name_str = PHPString.init(self.allocator, name) catch return null;
+                    const name_val = Value.initString(name_str);
+                    defer name_val.release(self.allocator);
+                    const args = [_]Value{name_val};
+                    const guard = ClassContext.init(meta, lookup.owner);
+                    defer guard.deinit();
+                    const result = lookup.method.func(this_val, &args, self.allocator) catch return null;
+                    return result;
+                }
             }
         }
         return null;
@@ -17916,19 +17919,22 @@ pub const PHPObject = struct {
 
         if (!in_magic_method) {
             if (self.class_meta) |meta| {
-                if (meta.findMethodLookup("__unset")) |lookup| {
-                    in_magic_method = true;
-                    defer in_magic_method = false;
+                // PHP 语义：__unset 仅对未声明的属性触发
+                if (findPropertyDeclaringClass(meta, name) == null) {
+                    if (meta.findMethodLookup("__unset")) |lookup| {
+                        in_magic_method = true;
+                        defer in_magic_method = false;
 
-                    const this_val = Value_initObject(self);
-                    const name_str = try PHPString.init(self.allocator, name);
-                    const name_val = Value.initString(name_str);
-                    defer name_val.release(self.allocator);
-                    const args = [_]Value{name_val};
-                    const guard = ClassContext.init(meta, lookup.owner);
-                    defer guard.deinit();
-                    _ = try lookup.method.func(this_val, &args, self.allocator);
-                    return true;
+                        const this_val = Value_initObject(self);
+                        const name_str = try PHPString.init(self.allocator, name);
+                        const name_val = Value.initString(name_str);
+                        defer name_val.release(self.allocator);
+                        const args = [_]Value{name_val};
+                        const guard = ClassContext.init(meta, lookup.owner);
+                        defer guard.deinit();
+                        _ = try lookup.method.func(this_val, &args, self.allocator);
+                        return true;
+                    }
                 }
             }
         }
