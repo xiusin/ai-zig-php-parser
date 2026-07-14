@@ -19,6 +19,9 @@ const ExceptionFactory = exceptions.ExceptionFactory;
 // Forward declaration for VM
 const VM = @import("vm.zig").VM;
 
+// fn_dispatch — O(1) builtin function lookup & dispatch
+const fn_dispatch = @import("fn_dispatch.zig");
+
 // ============================================================================
 // Configuration Constants
 // ============================================================================
@@ -173,13 +176,14 @@ inline fn isValidFunctionName(s: []const u8) bool {
 
 /// Check if string value represents a callable function
 fn isCallableString(vm: *VM, value: Value) bool {
+    _ = vm; // reserved for future user-function lookup
     const str = value.getAsString();
     const s = str.data.data;
 
     // Check if it's a simple function name
     if (isValidFunctionName(s)) {
-        // Check if builtin function exists (fast path)
-        if (vm.stdlib.getFunction(s)) |_| {
+        // Check if builtin function exists (fast path — fn_dispatch O(1) lookup)
+        if (fn_dispatch.lookup(s)) |_| {
             return true;
         }
         // Note: user functions are checked separately via closure/user_function tags
@@ -203,13 +207,30 @@ fn executeCallback(vm: *VM, callback: Value, args: []const Value) !Value {
         .user_function => try vm.callUserFunction(callback.getAsUserFunc().data, args),
         .closure => try vm.callClosure(callback.getAsClosure().data, args),
         .string => {
-            // Callback is a function name string
             const func_name = callback.getAsString().data.data;
-            // Try builtin function first
-            if (vm.stdlib.getFunction(func_name)) |builtin| {
-                return builtin.handler(vm, args);
+            if (fn_dispatch.lookup(func_name)) |id| {
+                if (try fn_dispatch.dispatch(@ptrCast(vm), id, args)) |result| {
+                    return result;
+                }
             }
-            return error.FunctionNotFound;
+            return vm.callUserFunc(func_name, args);
+        },
+        .array => {
+            const arr = callback.getAsArray().data;
+            var iter = arr.getElements().iterator();
+            const first = iter.next() orelse return error.InvalidCallback;
+            const second = iter.next() orelse return error.InvalidCallback;
+            if (first.value_ptr.*.getTag() == .string and second.value_ptr.*.getTag() == .string) {
+                const class_name = first.value_ptr.*.getAsString().data.data;
+                const method_name = second.value_ptr.*.getAsString().data.data;
+                var full_name = std.ArrayList(u8).initCapacity(vm.allocator, class_name.len + 2 + method_name.len) catch return error.OutOfMemory;
+                defer full_name.deinit(vm.allocator);
+                full_name.appendSlice(vm.allocator, class_name) catch return error.OutOfMemory;
+                full_name.appendSlice(vm.allocator, "::") catch return error.OutOfMemory;
+                full_name.appendSlice(vm.allocator, method_name) catch return error.OutOfMemory;
+                return vm.callUserFunc(full_name.items, args);
+            }
+            return error.InvalidCallback;
         },
         else => error.InvalidCallback,
     };
@@ -333,11 +354,11 @@ pub fn closureFromCallableFn(vm: *VM, args: []const Value) !Value {
     // If it's a user function, wrap it in a closure
     if (callable.getTag() == .user_function) {
         const user_func = callable.getAsUserFunc().data;
-        
+
         // Create a closure that wraps the user function
         const closure_data = Closure.init(vm.allocator, user_func.*);
         const closure = try vm.memory_manager.allocClosure(closure_data);
-        
+
         const closure_value = Value.fromBox(closure, Value.TYPE_CLOSURE);
         return closure_value;
     }
@@ -345,41 +366,41 @@ pub fn closureFromCallableFn(vm: *VM, args: []const Value) !Value {
     // If it's a string, parse it as function name or "Class::method"
     if (callable.getTag() == .string) {
         const callable_str = callable.getAsString().data.data;
-        
+
         // Check if it's a static method call: "ClassName::methodName"
         if (std.mem.indexOf(u8, callable_str, "::")) |sep_pos| {
             const class_name = callable_str[0..sep_pos];
             const method_name = callable_str[sep_pos + 2 ..];
-            
+
             // Get the class
             const class = vm.getClass(class_name) orelse {
                 const exception = try ExceptionFactory.createUndefinedClassError(vm.allocator, class_name, vm.current_file, vm.current_line);
                 return vm.throwException(exception);
             };
-            
+
             // Get the method
             const method_lookup = class.getMethodLookup(method_name) orelse {
                 const exception = try ExceptionFactory.createUndefinedMethodError(vm.allocator, class_name, method_name, vm.current_file, vm.current_line);
                 return vm.throwException(exception);
             };
-            
+
             _ = method_lookup;
-            
+
             // For static methods, we create an arrow function that calls the static method
             // This is a simplified approach - we store the callable string and call it later
             const callable_str_copy = try vm.memory_manager.allocString(callable_str);
             const callable_str_value = Value.fromBox(callable_str_copy, Value.TYPE_STRING);
-            
+
             // Return the string as a callable (PHP allows this)
             return callable_str_value;
         }
-        
+
         // It's a regular function name
         const func_val = vm.global.get(callable_str) orelse {
             const exception = try ExceptionFactory.createUndefinedFunctionError(vm.allocator, callable_str, vm.current_file, vm.current_line);
             return vm.throwException(exception);
         };
-        
+
         // Recursively call fromCallable on the function value
         return closureFromCallableFn(vm, &[_]Value{func_val});
     }
@@ -1517,80 +1538,124 @@ pub fn getTickCount() u64 {
 }
 
 // ============================================================================
-// Function Registration
+// Constant Functions
 // ============================================================================
 
-/// Register all variable/class/constant functions
-pub fn registerVariableFunctions(stdlib: anytype) !void {
-    const builtin_functions = [_]*const @import("stdlib.zig").BuiltinFunction{
-        // Variable functions
-        &.{ .name = "empty", .min_args = 1, .max_args = 1, .handler = emptyFn },
-        &.{ .name = "isset", .min_args = 1, .max_args = 255, .handler = issetFn },
-        &.{ .name = "unset", .min_args = 1, .max_args = 255, .handler = unsetFn },
-        &.{ .name = "is_callable", .min_args = 1, .max_args = 3, .handler = isCallableFn },
+/// User-defined constants storage
+var user_constants: std.StringHashMapUnmanaged([]const u8) = .{};
+var user_constants_initialized: bool = false;
 
-        // Callback functions
-        &.{ .name = "call_user_func", .min_args = 1, .max_args = 255, .handler = callUserFuncFn },
-        &.{ .name = "call_user_func_array", .min_args = 2, .max_args = 2, .handler = callUserFuncArrayFn },
-        &.{ .name = "Closure::fromCallable", .min_args = 1, .max_args = 1, .handler = closureFromCallableFn },
+/// user_error() — trigger_error 的别名
+pub fn userErrorFn(vm: *VM, args: []const Value) !Value {
+    return triggerErrorFn(vm, args);
+}
 
-        // Class/Object functions
-        &.{ .name = "class_exists", .min_args = 1, .max_args = 2, .handler = classExistsFn },
-        &.{ .name = "interface_exists", .min_args = 1, .max_args = 2, .handler = interfaceExistsFn },
-        &.{ .name = "trait_exists", .min_args = 1, .max_args = 2, .handler = traitExistsFn },
-        &.{ .name = "method_exists", .min_args = 2, .max_args = 2, .handler = methodExistsFn },
-        &.{ .name = "property_exists", .min_args = 2, .max_args = 2, .handler = propertyExistsFn },
-        &.{ .name = "is_a", .min_args = 2, .max_args = 3, .handler = isAFn },
-        &.{ .name = "is_subclass_of", .min_args = 2, .max_args = 2, .handler = isSubclassOfFn },
-        &.{ .name = "get_class", .min_args = 0, .max_args = 1, .handler = getClassFn },
-        &.{ .name = "get_parent_class", .min_args = 0, .max_args = 1, .handler = getParentClassFn },
-        &.{ .name = "get_class_methods", .min_args = 0, .max_args = 1, .handler = getClassMethodsFn },
+/// define() — 定义常量
+pub fn defineFn(vm: *VM, args: []const Value) !Value {
+    const name = args[0];
+    const value = args[1];
 
-        // Configuration functions
-        &.{ .name = "ini_get", .min_args = 1, .max_args = 1, .handler = iniGetFn },
-        &.{ .name = "ini_set", .min_args = 2, .max_args = 2, .handler = iniSetFn },
-        &.{ .name = "ini_restore", .min_args = 1, .max_args = 1, .handler = iniRestoreFn },
-        &.{ .name = "error_reporting", .min_args = 0, .max_args = 1, .handler = errorReportingFn },
+    if (name.getTag() != .string) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "define() expects parameter 1 to be string", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.InvalidArgumentType;
+    }
 
-        // Error functions
-        &.{ .name = "trigger_error", .min_args = 1, .max_args = 2, .handler = triggerErrorFn },
-        &.{ .name = "set_error_handler", .min_args = 1, .max_args = 2, .handler = setErrorHandlerFn },
-        &.{ .name = "set_exception_handler", .min_args = 1, .max_args = 1, .handler = setExceptionHandlerFn },
-        &.{ .name = "error_get_last", .min_args = 0, .max_args = 0, .handler = errorGetLastFn },
+    const name_str = name.getAsString().data.data;
 
-        // URL functions
-        &.{ .name = "parse_url", .min_args = 1, .max_args = 2, .handler = parseUrlFn },
-
-        // Definition/Reflection functions
-        &.{ .name = "get_defined_vars", .min_args = 0, .max_args = 0, .handler = getDefinedVarsFn },
-        &.{ .name = "get_defined_functions", .min_args = 0, .max_args = 0, .handler = getDefinedFunctionsFn },
-        &.{ .name = "get_defined_constants", .min_args = 0, .max_args = 1, .handler = getDefinedConstantsFn },
-        &.{ .name = "get_declared_classes", .min_args = 0, .max_args = 0, .handler = getDeclaredClassesFn },
-
-        // Shutdown/Tick functions
-        &.{ .name = "register_shutdown_function", .min_args = 1, .max_args = 255, .handler = registerShutdownFunctionFn },
-        &.{ .name = "register_tick_function", .min_args = 1, .max_args = 255, .handler = registerTickFunctionFn },
-        &.{ .name = "unregister_tick_function", .min_args = 1, .max_args = 1, .handler = unregisterTickFunctionFn },
-
-        // Function argument functions
-        &.{ .name = "func_num_args", .min_args = 0, .max_args = 0, .handler = funcNumArgsFn },
-        &.{ .name = "func_get_arg", .min_args = 1, .max_args = 1, .handler = funcGetArgFn },
-        &.{ .name = "func_get_args", .min_args = 0, .max_args = 0, .handler = funcGetArgsFn },
-
-        // String functions
-        &.{ .name = "strtr", .min_args = 2, .max_args = 3, .handler = strtrFn },
-
-        // Array functions
-
-        // URL functions
-        &.{ .name = "http_build_query", .min_args = 1, .max_args = 5, .handler = httpBuildQueryFn },
-
-        // Extension functions
-        &.{ .name = "get_loaded_extensions", .min_args = 0, .max_args = 0, .handler = getLoadedExtensionsFn },
-        &.{ .name = "extension_loaded", .min_args = 1, .max_args = 1, .handler = extensionLoadedFn },
+    // Convert value to string representation for storage
+    const val_str = switch (value.getTag()) {
+        .integer => try std.fmt.allocPrint(vm.allocator, "{d}", .{value.asInt()}),
+        .float => try std.fmt.allocPrint(vm.allocator, "{d}", .{value.asFloat()}),
+        .boolean => if (value.asBool()) try vm.allocator.dupe(u8, "true") else try vm.allocator.dupe(u8, "false"),
+        .string => try vm.allocator.dupe(u8, value.getAsString().data.data),
+        .null => try vm.allocator.dupe(u8, "null"),
+        else => try vm.allocator.dupe(u8, ""),
     };
 
-    for (builtin_functions) |func| {
-        try stdlib.registerFunction(func.name, func);
+    // Initialize constants map if needed
+    if (!user_constants_initialized) {
+        user_constants = std.StringHashMapUnmanaged([]const u8){};
+        user_constants_initialized = true;
     }
+
+    // Store the constant name (duplicated) and value
+    const name_owned = try vm.allocator.dupe(u8, name_str);
+    const existing = try user_constants.fetchPut(vm.allocator, name_owned, val_str);
+    if (existing) |old| {
+        vm.allocator.free(old.key);
+        vm.allocator.free(old.value);
+    }
+
+    return Value.initBool(true);
 }
+
+/// defined() — 检查常量是否已定义
+pub fn definedFn(vm: *VM, args: []const Value) !Value {
+    const name = args[0];
+
+    if (name.getTag() != .string) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "defined() expects parameter 1 to be string", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.InvalidArgumentType;
+    }
+
+    const name_str = name.getAsString().data.data;
+
+    // Check user-defined constants
+    if (user_constants_initialized) {
+        if (user_constants.contains(name_str)) {
+            return Value.initBool(true);
+        }
+    }
+
+    // Check built-in PHP constants
+    const builtin_constants = [_][]const u8{
+        "PHP_EOL",
+        "PHP_INT_MAX",
+        "PHP_INT_SIZE",
+        "PHP_FLOAT_MAX",
+        "PHP_VERSION",
+        "PHP_MAJOR_VERSION",
+        "PHP_MINOR_VERSION",
+        "PHP_RELEASE_VERSION",
+        "PHP_OS",
+        "PHP_SAPI",
+        "E_ERROR",
+        "E_WARNING",
+        "E_PARSE",
+        "E_NOTICE",
+        "E_CORE_ERROR",
+        "E_CORE_WARNING",
+        "E_COMPILE_ERROR",
+        "E_COMPILE_WARNING",
+        "E_USER_ERROR",
+        "E_USER_WARNING",
+        "E_USER_NOTICE",
+        "E_ALL",
+        "E_STRICT",
+        "E_RECOVERABLE_ERROR",
+        "E_DEPRECATED",
+        "E_USER_DEPRECATED",
+        "true",
+        "false",
+        "null",
+        "TRUE",
+        "FALSE",
+        "NULL",
+    };
+
+    for (builtin_constants) |constant| {
+        if (std.mem.eql(u8, constant, name_str)) {
+            return Value.initBool(true);
+        }
+    }
+
+    return Value.initBool(false);
+}
+
+// ============================================================================
+// Function Registration
+// ============================================================================
+// 注意：registerVariableFunctions() 已移除 — 所有函数通过 fn_dispatch comptime 数据注册
+// 新增函数只需在 fn_table.zig 添加声明 + 在 fn_dispatch.zig 的 HANDLER_MAP_KVS 添加 handler

@@ -358,7 +358,25 @@ pub const Lexer = struct {
                 self.pos += 1;
             }
         }
-        // TODO: 支持 $var[key] 语法
+
+        // 支持 $var[key] 语法：将 [key] 包含在 token 中
+        // 仅支持单层数组访问，不支持 $var[a][b] 嵌套（PHP 要求用 {$var[a][b]} 复杂语法）
+        if (self.pos < self.buffer.len and self.buffer[self.pos] == '[') {
+            self.pos += 1; // skip [
+            // 读取 key 内容直到 ]
+            while (self.pos < self.buffer.len and self.buffer[self.pos] != ']') {
+                // 处理转义字符
+                if (self.buffer[self.pos] == '\\') {
+                    self.pos += 1;
+                    if (self.pos < self.buffer.len) self.pos += 1;
+                } else {
+                    self.pos += 1;
+                }
+            }
+            if (self.pos < self.buffer.len and self.buffer[self.pos] == ']') {
+                self.pos += 1; // skip ]
+            }
+        }
 
         return .{ .tag = .t_variable, .loc = .{ .start = start, .end = self.pos } };
     }

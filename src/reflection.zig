@@ -53,7 +53,7 @@ pub const ReflectionManager = struct {
             }
         }
     }
-    
+
     pub fn linkTraits(self: *ReflectionManager, ctx: *PHPContext) !void {
         // Post-processing to mix in traits
         // This is a simplified version

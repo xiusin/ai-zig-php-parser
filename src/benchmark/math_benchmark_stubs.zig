@@ -6,16 +6,12 @@ const MathBenchmark = @import("math_benchmark.zig").MathBenchmark;
 
 /// 生成整数加法 PHP 脚本
 pub fn generateIntegerAdditionScript(self: *MathBenchmark) !void {
-    const path = try std.fmt.allocPrint(
-        self.allocator,
-        "{s}/integer_addition.php",
-        .{self.config.script_output_dir}
-    );
+    const path = try std.fmt.allocPrint(self.allocator, "{s}/integer_addition.php", .{self.config.script_output_dir});
     defer self.allocator.free(path);
-    
+
     const file = try std.fs.cwd.createFile(path, .{});
     defer file.close();
-    
+
     const writer = file.writer();
     try writer.print(
         \\<?php
@@ -30,16 +26,12 @@ pub fn generateIntegerAdditionScript(self: *MathBenchmark) !void {
 
 /// 生成整数减法 PHP 脚本
 pub fn generateIntegerSubtractionScript(self: *MathBenchmark) !void {
-    const path = try std.fmt.allocPrint(
-        self.allocator,
-        "{s}/integer_subtraction.php",
-        .{self.config.script_output_dir}
-    );
+    const path = try std.fmt.allocPrint(self.allocator, "{s}/integer_subtraction.php", .{self.config.script_output_dir});
     defer self.allocator.free(path);
-    
+
     const file = try std.fs.cwd.createFile(path, .{});
     defer file.close();
-    
+
     const writer = file.writer();
     try writer.print(
         \\<?php
@@ -162,7 +154,7 @@ pub fn generateMathAbsScript(self: *MathBenchmark) !void {
     defer self.allocator.free(path);
     const file = try std.fs.cwd.createFile(path, .{});
     defer file.close();
-    try file.writer().print("<?php\n$result = 0;\nfor ($i = -{d}; $i < {d}; $i++) {{ $result += abs($i); }}\n?>\n", .{self.config.iterations / 2, self.config.iterations / 2});
+    try file.writer().print("<?php\n$result = 0;\nfor ($i = -{d}; $i < {d}; $i++) {{ $result += abs($i); }}\n?>\n", .{ self.config.iterations / 2, self.config.iterations / 2 });
 }
 
 pub fn generateMathRoundScript(self: *MathBenchmark) !void {

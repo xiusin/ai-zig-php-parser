@@ -9,3 +9,14 @@ test/aot_diff/
 tests_*
 _debug*
 /.idea/*
+.arts/
+
+# 根目录编译产物（非源代码）
+/test*
+test_*
+.DS_Store
+*.txt
+debug_aot.zig
+aot_debug.zig
+.cursor
+.kiro/steering

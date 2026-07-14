@@ -44,7 +44,7 @@ pub const PHPType = enum {
 /// @return 整数值
 pub fn intval(str: []const u8, base: u8) i64 {
     if (str.len == 0) return 0;
-    
+
     var s = std.mem.trim(u8, str, " \t\n\r");
     if (s.len == 0) return 0;
 
@@ -107,7 +107,7 @@ fn skipBasePrefix(s: []const u8, base: u8) []const u8 {
 
 fn parsePartialInt(s: []const u8, base: u8) i64 {
     var result: i64 = 0;
-    
+
     for (s) |c| {
         if (charToDigit(c, base)) |d| {
             result = result * @as(i64, base) + d;
@@ -116,7 +116,7 @@ fn parsePartialInt(s: []const u8, base: u8) i64 {
             break;
         }
     }
-    
+
     return result;
 }
 
@@ -129,7 +129,7 @@ fn charToDigit(c: u8, base: u8) ?i64 {
         c - 'A' + 10
     else
         return null;
-    
+
     return if (digit < base) digit else null;
 }
 
@@ -138,7 +138,7 @@ fn charToDigit(c: u8, base: u8) ?i64 {
 /// @return 浮点数值
 pub fn floatval(str: []const u8) f64 {
     if (str.len == 0) return 0.0;
-    
+
     const trimmed = std.mem.trim(u8, str, " \t\n\r");
     if (trimmed.len == 0) return 0.0;
 
@@ -237,7 +237,7 @@ pub fn strval_bool(ctx: *CoreContext, value: bool) ![]u8 {
 /// @return 是否为有效数字
 pub fn is_numeric(str: []const u8) bool {
     if (str.len == 0) return false;
-    
+
     const trimmed = std.mem.trim(u8, str, " \t\n\r");
     if (trimmed.len == 0) return false;
 
@@ -288,7 +288,7 @@ test "boolval_str" {
 
 test "strval_int" {
     var ctx = CoreContext.init(std.testing.allocator);
-    
+
     const result = try strval_int(&ctx, 42);
     defer ctx.allocator.free(result);
     try std.testing.expectEqualStrings("42", result);
@@ -296,7 +296,7 @@ test "strval_int" {
 
 test "strval_float" {
     var ctx = CoreContext.init(std.testing.allocator);
-    
+
     const result = try strval_float(&ctx, 3.14);
     defer ctx.allocator.free(result);
     try std.testing.expect(std.mem.startsWith(u8, result, "3.14"));

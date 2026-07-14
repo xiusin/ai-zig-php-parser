@@ -585,7 +585,8 @@ pub const NativeCode = struct {
     /// @post self.code 被 munmap 释放
     pub fn deinit(self: *NativeCode, allocator: std.mem.Allocator) void {
         _ = allocator;
-        std.posix.munmap(@as([*]align(std.heap.page_size_min) const u8, @ptrCast(self.code.ptr))[0..self.code_len]);
+        const aligned_ptr: [*]align(std.heap.page_size_min) const u8 = @ptrCast(@alignCast(self.code.ptr));
+        std.posix.munmap(aligned_ptr[0..self.code_len]);
     }
 };
 

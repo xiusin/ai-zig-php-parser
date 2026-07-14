@@ -31,7 +31,7 @@ pub fn VMAdapter(comptime Value: type, comptime VM: type) type {
         pub fn strlen(vm: *VM, args: []const Value) !Value {
             _ = vm;
             if (args.len < 1) return Value.initNull();
-            
+
             const str = args[0].toString() catch return Value.initNull();
             return Value.initInt(core.string.strlen(str));
         }

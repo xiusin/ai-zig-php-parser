@@ -61,8 +61,9 @@ pub const StringWrapper = struct {
 
         var i: usize = 0;
         while (i < self.string.length) {
-            if (i + search.len <= self.string.length and 
-                std.mem.eql(u8, self.string.data[i..i + search.len], search)) {
+            if (i + search.len <= self.string.length and
+                std.mem.eql(u8, self.string.data[i .. i + search.len], search))
+            {
                 try result.appendSlice(replacement);
                 i += search.len;
             } else {
@@ -115,7 +116,7 @@ pub const StringWrapper = struct {
 
         var i: usize = 0;
         while (i <= self.string.length - needle.len) : (i += 1) {
-            if (std.mem.eql(u8, self.string.data[i..i + needle.len], needle)) {
+            if (std.mem.eql(u8, self.string.data[i .. i + needle.len], needle)) {
                 return @intCast(i);
             }
         }
@@ -139,7 +140,7 @@ pub const StringWrapper = struct {
         var start: usize = 0;
         var i: usize = 0;
         while (i <= self.string.length - delimiter.len) : (i += 1) {
-            if (std.mem.eql(u8, self.string.data[i..i + delimiter.len], delimiter)) {
+            if (std.mem.eql(u8, self.string.data[i .. i + delimiter.len], delimiter)) {
                 const part = try PHPString.init(self.allocator, self.string.data[start..i]);
                 const value = try Value.initString(self.allocator, part);
                 try array.push(self.allocator, value);

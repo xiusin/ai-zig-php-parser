@@ -41,13 +41,27 @@ pub const flamegraph = @import("flamegraph.zig");
 pub const pprof = @import("pprof.zig");
 
 // 内置函数
-pub const builtin_dispatch = @import("builtin_dispatch.zig");
+// Deprecated: builtin_dispatch 已废弃，使用 fn_dispatch 替代
+// 保留别名以兼容外部引用
+pub const builtin_dispatch = @import("fn_dispatch.zig");
+pub const fn_table = @import("fn_table.zig");
+pub const fn_dispatch = @import("fn_dispatch.zig");
 pub const builtin_methods = @import("builtin_methods.zig");
 pub const builtin_classes = @import("builtin_classes.zig");
 pub const builtin_math = @import("builtin_math.zig");
 pub const builtin_time = @import("builtin_time.zig");
 pub const builtin_io = @import("builtin_io.zig");
 pub const builtin_http = @import("builtin_http.zig");
+
+// stdlib 内置函数模块
+pub const stdlib_math = @import("stdlib_math.zig");
+pub const stdlib_string = @import("stdlib_string.zig");
+pub const stdlib_array = @import("stdlib_array.zig");
+pub const stdlib_datetime = @import("stdlib_datetime.zig");
+pub const stdlib_json = @import("stdlib_json.zig");
+pub const stdlib_hash = @import("stdlib_hash.zig");
+pub const stdlib_type = @import("stdlib_type.zig");
+pub const stdlib_misc = @import("stdlib_misc.zig");
 
 // 导出常用类型（方便外部使用）
 pub const Value = types.Value;

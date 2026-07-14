@@ -1194,11 +1194,10 @@ pub const CoroutineManager = struct {
                     break;
                 }
 
-                // 如果有IO等待的协程，使用较短的等待时间以便及时响应IO事件
-                const wait_time: u64 = if (has_io_waiting) 100_000 else 1_000_000; // 0.1ms or 1ms
+                // 等待条件变量唤醒（有新协程就绪时signal会唤醒）
                 {
                     const sched_io = std.Io.Threaded.global_single_threaded.io();
-                    self.cond.waitTimeout(sched_io, &self.mutex, .{ .duration = .{ .raw = .{ .nanoseconds = @intCast(wait_time) }, .clock = .awake } }) catch {};
+                    self.cond.waitUncancelable(sched_io, &self.mutex);
                 }
                 self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
             }
@@ -1254,9 +1253,9 @@ pub const CoroutineManager = struct {
             };
             const has_sleeping = self.sleeping_queue.items.len > 0;
             const has_io_waiting = self.io_waiting_queue.items.len > 0;
-            const wait_time: u64 = if (has_io_waiting) 100_000 else 1_000_000;
+
             if (has_ready or has_sleeping or has_io_waiting) {
-                self.cond.timedWait(&self.mutex, wait_time) catch {};
+                self.cond.waitUncancelable(std.Io.Threaded.global_single_threaded.io(), &self.mutex);
             }
             self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
         }
@@ -1277,8 +1276,8 @@ pub const CoroutineManager = struct {
                 self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
                 return;
             }
-            const wait_time: u64 = if (has_io_waiting) 100_000 else 1_000_000;
-            self.cond.timedWait(&self.mutex, wait_time) catch {};
+
+            self.cond.waitUncancelable(std.Io.Threaded.global_single_threaded.io(), &self.mutex);
             self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
         }
     }
@@ -2004,7 +2003,7 @@ pub const WaitGroup = struct {
         defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
 
         while (self.counter.load(.seq_cst) > 0) {
-            self.cond.wait(&self.mutex, std.Io.Threaded.global_single_threaded.io());
+            self.cond.wait(std.Io.Threaded.global_single_threaded.io(), &self.mutex);
         }
     }
 };
@@ -2091,7 +2090,7 @@ pub const RWLock = struct {
         defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
 
         while (self.writer_active.load(.seq_cst) or self.writer_waiting.load(.seq_cst)) {
-            self.read_cond.wait(&self.mutex, std.Io.Threaded.global_single_threaded.io());
+            self.read_cond.wait(std.Io.Threaded.global_single_threaded.io(), &self.mutex);
         }
         _ = self.readers.fetchAdd(1, .seq_cst);
     }
@@ -2109,7 +2108,7 @@ pub const RWLock = struct {
 
         self.writer_waiting.store(true, .seq_cst);
         while (self.readers.load(.seq_cst) > 0 or self.writer_active.load(.seq_cst)) {
-            self.write_cond.wait(&self.mutex, std.Io.Threaded.global_single_threaded.io());
+            self.write_cond.wait(std.Io.Threaded.global_single_threaded.io(), &self.mutex);
         }
         self.writer_waiting.store(false, .seq_cst);
         self.writer_active.store(true, .seq_cst);
@@ -2182,7 +2181,7 @@ pub const Semaphore = struct {
         defer self.mutex.unlock(std.Io.Threaded.global_single_threaded.io());
 
         while (self.count.load(.seq_cst) <= 0) {
-            self.cond.wait(&self.mutex, std.Io.Threaded.global_single_threaded.io());
+            self.cond.wait(std.Io.Threaded.global_single_threaded.io(), &self.mutex);
         }
         _ = self.count.fetchSub(1, .seq_cst);
     }
@@ -2603,7 +2602,14 @@ pub const AsyncIOReactor = struct {
                 .udata = 0,
             };
 
-            _ = std.posix.kevent(@intCast(self.event_fd), &changelist, &[_]std.posix.Kevent{}, null) catch {};
+            _ = std.posix.system.kevent(
+                @intCast(self.event_fd),
+                &changelist,
+                1,
+                &[_]std.posix.Kevent{},
+                0,
+                null,
+            );
         } else if (builtin.os.tag == .linux) {
             // epoll
             _ = std.os.linux.epoll_ctl(@intCast(self.event_fd), std.os.linux.EPOLL.CTL_DEL, @intCast(fd), null);
@@ -2625,7 +2631,15 @@ pub const AsyncIOReactor = struct {
             };
             const timeout_ptr: ?*const std.posix.timespec = if (timeout_ms >= 0) &timeout_spec else null;
 
-            const n = std.posix.kevent(@intCast(self.event_fd), &[_]std.posix.Kevent{}, &eventlist, timeout_ptr) catch 0;
+            const rc = std.posix.system.kevent(
+                @intCast(self.event_fd),
+                &[_]std.posix.Kevent{},
+                0,
+                &eventlist,
+                64,
+                timeout_ptr,
+            );
+            const n: usize = if (rc >= 0) @intCast(rc) else 0;
 
             for (eventlist[0..n]) |ev| {
                 const event_type: IOEventType = if (ev.filter == std.posix.system.EVFILT.READ)

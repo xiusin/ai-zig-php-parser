@@ -12,26 +12,26 @@ pub const StringMiscExtTests = struct {
     verbose: bool,
     generate_php_scripts: bool,
     script_output_dir: []const u8,
-    
+
     pub fn runAll(self: *@This()) ![]StringOpResult {
         var results = std.array_list.AlignedManaged(StringOpResult, null).init(self.allocator);
-        
+
         if (self.verbose) {
             std.debug.print("\n=== 字符串其他扩展性能测试 ===\n", .{});
         }
-        
+
         try results.append(self.allocator, try self.testQuotedPrintableEncode());
         try results.append(self.allocator, try self.testQuotedPrintableDecode());
         try results.append(self.allocator, try self.testConvertCyrString());
-        
+
         return results.toOwnedSlice();
     }
-    
+
     /// 测试 quoted_printable_encode (QP 编码)
     fn testQuotedPrintableEncode(self: *@This()) !StringOpResult {
         const test_name = "quoted_printable_encode";
         const test_string = "Hello World! This is a test string with special chars: äöü";
-        
+
         if (self.generate_php_scripts) {
             try self.generatePhpScript(test_name,
                 \\<?php
@@ -45,15 +45,15 @@ pub const StringMiscExtTests = struct {
                 \\echo "Time: " . (($end - $start) / 1000000) . " ms\n";
             );
         }
-        
+
         const start = std.time.nanoTimestamp();
-        
+
         var total_len: usize = 0;
         var i: u32 = 0;
         while (i < self.iterations) : (i += 1) {
             var result = std.array_list.AlignedManaged(u8, null).init(self.allocator);
             defer result.deinit(self.allocator);
-            
+
             // 简化的 QP 编码实现
             for (test_string) |c| {
                 if (c > 126 or c < 32 or c == '=') {
@@ -68,19 +68,19 @@ pub const StringMiscExtTests = struct {
             }
             total_len += result.items.len;
         }
-        
+
         const end = std.time.nanoTimestamp();
         const total_time = @as(u64, @intCast(end - start));
-        
+
         std.mem.doNotOptimizeAway(&total_len);
-        
-        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) / 
-                           (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
-        
+
+        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) /
+            (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+
         if (self.verbose) {
-            std.debug.print("  {s}: {d:.2} M ops/s\n", .{test_name, ops_per_sec / 1_000_000.0});
+            std.debug.print("  {s}: {d:.2} M ops/s\n", .{ test_name, ops_per_sec / 1_000_000.0 });
         }
-        
+
         return StringOpResult{
             .test_name = test_name,
             .operations_per_second = ops_per_sec,
@@ -89,12 +89,12 @@ pub const StringMiscExtTests = struct {
             .category = "misc_ext",
         };
     }
-    
+
     /// 测试 quoted_printable_decode (QP 解码)
     fn testQuotedPrintableDecode(self: *@This()) !StringOpResult {
         const test_name = "quoted_printable_decode";
         const test_string = "Hello=20World=21=20This=20is=20a=20test";
-        
+
         if (self.generate_php_scripts) {
             try self.generatePhpScript(test_name,
                 \\<?php
@@ -108,25 +108,25 @@ pub const StringMiscExtTests = struct {
                 \\echo "Time: " . (($end - $start) / 1000000) . " ms\n";
             );
         }
-        
+
         const start = std.time.nanoTimestamp();
-        
+
         var total_len: usize = 0;
         var i: u32 = 0;
         while (i < self.iterations) : (i += 1) {
             var result = std.array_list.AlignedManaged(u8, null).init(self.allocator);
             defer result.deinit(self.allocator);
-            
+
             // 简化的 QP 解码实现
             var idx: usize = 0;
             while (idx < test_string.len) : (idx += 1) {
                 if (test_string[idx] == '=' and idx + 2 < test_string.len) {
                     const h1 = test_string[idx + 1];
                     const h2 = test_string[idx + 2];
-                    
+
                     const v1 = if (h1 >= '0' and h1 <= '9') h1 - '0' else if (h1 >= 'A' and h1 <= 'F') h1 - 'A' + 10 else 0;
                     const v2 = if (h2 >= '0' and h2 <= '9') h2 - '0' else if (h2 >= 'A' and h2 <= 'F') h2 - 'A' + 10 else 0;
-                    
+
                     try result.append(self.allocator, (v1 << 4) | v2);
                     idx += 2;
                 } else {
@@ -135,19 +135,19 @@ pub const StringMiscExtTests = struct {
             }
             total_len += result.items.len;
         }
-        
+
         const end = std.time.nanoTimestamp();
         const total_time = @as(u64, @intCast(end - start));
-        
+
         std.mem.doNotOptimizeAway(&total_len);
-        
-        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) / 
-                           (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
-        
+
+        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) /
+            (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+
         if (self.verbose) {
-            std.debug.print("  {s}: {d:.2} M ops/s\n", .{test_name, ops_per_sec / 1_000_000.0});
+            std.debug.print("  {s}: {d:.2} M ops/s\n", .{ test_name, ops_per_sec / 1_000_000.0 });
         }
-        
+
         return StringOpResult{
             .test_name = test_name,
             .operations_per_second = ops_per_sec,
@@ -156,12 +156,12 @@ pub const StringMiscExtTests = struct {
             .category = "misc_ext",
         };
     }
-    
+
     /// 测试 convert_cyr_string (西里尔字符转换 - 完整实现)
     fn testConvertCyrString(self: *@This()) !StringOpResult {
         const test_name = "convert_cyr_string";
         const test_string = "Привет мир"; // "Hello World" in Russian
-        
+
         if (self.generate_php_scripts) {
             try self.generatePhpScript(test_name,
                 \\<?php
@@ -176,9 +176,9 @@ pub const StringMiscExtTests = struct {
                 \\echo "Time: " . (($end - $start) / 1000000) . " ms\n";
             );
         }
-        
+
         const start = std.time.nanoTimestamp();
-        
+
         var total_len: usize = 0;
         var i: u32 = 0;
         while (i < self.iterations) : (i += 1) {
@@ -187,19 +187,19 @@ pub const StringMiscExtTests = struct {
             defer self.allocator.free(result);
             total_len += result.len;
         }
-        
+
         const end = std.time.nanoTimestamp();
         const total_time = @as(u64, @intCast(end - start));
-        
+
         std.mem.doNotOptimizeAway(&total_len);
-        
-        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) / 
-                           (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
-        
+
+        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) /
+            (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+
         if (self.verbose) {
-            std.debug.print("  {s}: {d:.2} M ops/s\n", .{test_name, ops_per_sec / 1_000_000.0});
+            std.debug.print("  {s}: {d:.2} M ops/s\n", .{ test_name, ops_per_sec / 1_000_000.0 });
         }
-        
+
         return StringOpResult{
             .test_name = test_name,
             .operations_per_second = ops_per_sec,
@@ -208,7 +208,7 @@ pub const StringMiscExtTests = struct {
             .category = "misc_ext",
         };
     }
-    
+
     /// 西里尔字符编码转换（KOI8-R <-> Windows-1251）
     /// 完整实现：支持俄语西里尔字符集转换
     fn convertCyrillicEncoding(self: *@This(), input: []const u8) ![]u8 {
@@ -223,9 +223,9 @@ pub const StringMiscExtTests = struct {
             0xF0, 0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, // р-ч
             0xF8, 0xF9, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF, // ш-я
         };
-        
+
         var result = try self.allocator.alloc(u8, input.len);
-        
+
         for (input, 0..) |byte, i| {
             if (byte >= 0xC0 and byte <= 0xFF) {
                 // 西里尔字符范围 - 进行转换
@@ -239,10 +239,10 @@ pub const StringMiscExtTests = struct {
                 result[i] = byte;
             }
         }
-        
+
         return result;
     }
-    
+
     /// 生成 PHP 测试脚本
     fn generatePhpScript(self: *@This(), test_name: []const u8, script_content: []const u8) !void {
         const file_path = try std.fmt.allocPrint(
@@ -251,10 +251,10 @@ pub const StringMiscExtTests = struct {
             .{ self.script_output_dir, test_name },
         );
         defer self.allocator.free(file_path);
-        
+
         const file = try std.fs.cwd.createFile(file_path, .{});
         defer file.close();
-        
+
         try file.writeAll(script_content);
     }
 };

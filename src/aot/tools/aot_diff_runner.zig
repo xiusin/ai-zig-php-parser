@@ -12,10 +12,10 @@ pub fn main() !void {
     // Ensure interpreter exists
     const cwd = try std.fs.cwd.realpathAlloc(allocator, ".");
     defer allocator.free(cwd);
-    
-    const interpreter_path = try std.fs.path.join(allocator, &.{cwd, INTERPRETER_BIN});
+
+    const interpreter_path = try std.fs.path.join(allocator, &.{ cwd, INTERPRETER_BIN });
     defer allocator.free(interpreter_path);
-    
+
     std.fs.cwd.access(interpreter_path, .{}) catch {
         std.debug.print("Error: Interpreter not found at {s}\n", .{interpreter_path});
         std.debug.print("Please run 'zig build' first.\n", .{});
@@ -167,8 +167,8 @@ pub fn main() !void {
     xfailed_tests = xfailed_atomic.load(.acquire);
     xpassed_tests = xpassed_atomic.load(.acquire);
 
-    std.debug.print("\nSummary: {d} Tests, {d} Passed, {d} Failed, {d} Skipped, {d} XFailed, {d} XPassed\n", .{total_tests, passed_tests, failed_tests, skipped_tests, xfailed_tests, xpassed_tests});
-    
+    std.debug.print("\nSummary: {d} Tests, {d} Passed, {d} Failed, {d} Skipped, {d} XFailed, {d} XPassed\n", .{ total_tests, passed_tests, failed_tests, skipped_tests, xfailed_tests, xpassed_tests });
+
     if (failed_tests > 0 or xpassed_tests > 0) {
         std.process.exit(1);
     }

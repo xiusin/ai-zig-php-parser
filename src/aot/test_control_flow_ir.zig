@@ -32,13 +32,13 @@ const TestContext = struct {
 
         const st_ptr = try allocator.create(SymbolTable);
         st_ptr.* = try SymbolTable.init(allocator);
-        
+
         const diag_ptr = try allocator.create(DiagnosticEngine);
         diag_ptr.* = DiagnosticEngine.init(allocator);
-        
+
         const ti_ptr = try allocator.create(TypeInferencer);
         ti_ptr.* = TypeInferencer.init(allocator, st_ptr, diag_ptr);
-        
+
         const gen_ptr = try allocator.create(IRGenerator);
         gen_ptr.* = IRGenerator.init(allocator, st_ptr, ti_ptr, diag_ptr);
 
@@ -63,15 +63,8 @@ const TestContext = struct {
     pub fn compile(self: *TestContext, source: [:0]const u8) !*IR.Module {
         const root_idx = try self.php_ctx.parseSource(source);
         const keys = self.php_ctx.string_pool.keys();
-        
-        self.module = try self.gen_ptr.generateFromRoot(
-            self.php_ctx.nodes.items,
-            keys,
-            source,
-            root_idx,
-            "test_module",
-            "test.php"
-        );
+
+        self.module = try self.gen_ptr.generateFromRoot(self.php_ctx.nodes.items, keys, source, root_idx, "test_module", "test.php");
         return self.module.?;
     }
 };
@@ -81,7 +74,7 @@ test "IRGenerator: If-Else Control Flow" {
     var ctx = try TestContext.init(allocator);
     defer ctx.deinit();
 
-    const source = 
+    const source =
         \\<?php
         \\$cond = true;
         \\if ($cond) {
@@ -94,12 +87,12 @@ test "IRGenerator: If-Else Control Flow" {
     ;
 
     const module = try ctx.compile(source);
-    
+
     // Verify CFG structure
     const func = module.functions.items[0]; // Main function
-    
+
     try std.testing.expect(func.blocks.items.len >= 4);
-    
+
     // Check for cond_br in one of the blocks
     var found_cond_br = false;
     for (func.blocks.items) |block| {
@@ -111,7 +104,7 @@ test "IRGenerator: If-Else Control Flow" {
         }
     }
     try std.testing.expect(found_cond_br);
-    
+
     // Check for PHI nodes (currently disabled/not implemented)
     var found_phi = false;
     for (func.blocks.items) |block| {
@@ -121,7 +114,7 @@ test "IRGenerator: If-Else Control Flow" {
             }
         }
     }
-    
+
     if (!found_phi) {
         // PHI nodes not found. Mem2Reg pass required for SSA.
     }
@@ -132,7 +125,7 @@ test "IRGenerator: While Loop Control Flow" {
     var ctx = try TestContext.init(allocator);
     defer ctx.deinit();
 
-    const source = 
+    const source =
         \\<?php
         \\$i = 0;
         \\while ($i < 10) {
@@ -143,12 +136,12 @@ test "IRGenerator: While Loop Control Flow" {
 
     const module = try ctx.compile(source);
     const func = module.functions.items[0];
-    
+
     try std.testing.expect(func.blocks.items.len >= 3);
-    
+
     var found_cond_br = false;
     var found_br = false;
-    
+
     for (func.blocks.items) |block| {
         if (block.terminator) |term| {
             switch (term) {
@@ -158,7 +151,7 @@ test "IRGenerator: While Loop Control Flow" {
             }
         }
     }
-    
+
     try std.testing.expect(found_cond_br);
     try std.testing.expect(found_br);
 }
@@ -168,7 +161,7 @@ test "Optimizer: Mem2Reg on If-Else" {
     var ctx = try TestContext.init(allocator);
     defer ctx.deinit();
 
-    const source = 
+    const source =
         \\<?php
         \\function test_func($cond) {
         \\    if ($cond) {
@@ -182,33 +175,33 @@ test "Optimizer: Mem2Reg on If-Else" {
     ;
 
     const module = try ctx.compile(source);
-    
+
     // Run optimizer
     var config = PassConfig.releaseSafe();
     config.mem2reg = true;
     config.constant_propagation = false;
     config.sccp = false;
     config.cfg_cleanup = false;
-    
+
     // Use ctx.allocator (Arena) so that we can mix new instructions with old ones
     // and destroy calls will be no-ops (safe for Arena)
     var optimizer = IROptimizer.initWithConfig(ctx.allocator, config, null);
     defer optimizer.deinit();
-    
+
     // Debug: Print IR
     var list = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
     defer list.deinit(allocator);
     // var printer = IR.IRPrinter.initUnmanaged(&list, allocator);
-    
+
     // try printer.printModule(module);
     // std.debug.print("--- BEFORE ---\n{s}\n", .{list.items});
     list.clearRetainingCapacity();
-    
+
     try optimizer.optimize(module);
-    
+
     // try printer.printModule(module);
     // std.debug.print("--- AFTER ---\n{s}\n", .{list.items});
-    
+
     // Find test_func (not __main__)
     var func: ?*IR.Function = null;
     for (module.functions.items) |f| {
@@ -217,9 +210,9 @@ test "Optimizer: Mem2Reg on If-Else" {
             break;
         }
     }
-    
+
     try std.testing.expect(func != null);
-    
+
     // Check for Phi nodes
     // The variable $x should be converted to a Phi node in the merge block
     var found_phi = false;
@@ -232,6 +225,6 @@ test "Optimizer: Mem2Reg on If-Else" {
             }
         }
     }
-    
+
     try std.testing.expect(found_phi);
 }

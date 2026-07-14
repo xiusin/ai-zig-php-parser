@@ -838,9 +838,9 @@ pub const ErrorReporter = struct {
 
         try writer.print("\nBy Type:\n", .{});
         const error_types = [_]CoroutineErrorType{
-            .panic,       .stack_overflow, .timeout,       .deadlock,
+            .panic,         .stack_overflow, .timeout,      .deadlock,
             .channel_error, .mutex_error,    .memory_error, .invalid_state,
-            .cancelled,   .unknown,
+            .cancelled,     .unknown,
         };
         for (error_types, 0..) |t, i| {
             const count = self.stats.by_type[i].load(.monotonic);
@@ -1188,7 +1188,7 @@ test "ErrorPropagation registration and propagation" {
     const received = propagation.checkErrors(1);
     try std.testing.expect(received != null);
     try std.testing.expectEqual(@as(u64, 2), received.?.coroutine_id);
-    
+
     // Clean up the received error
     received.?.deinit();
 }

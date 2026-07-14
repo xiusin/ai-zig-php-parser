@@ -42,7 +42,7 @@ pub const HotspotAnalyzer = struct {
         while (it.next()) |key| {
             self.allocator.free(key.*);
         }
-        
+
         self.block_counters.deinit();
         self.edge_counters.deinit();
     }

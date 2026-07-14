@@ -12,14 +12,14 @@ pub const StringTransformExtTests = struct {
     verbose: bool,
     generate_php_scripts: bool,
     script_output_dir: []const u8,
-    
+
     pub fn runAll(self: *@This()) ![]StringOpResult {
         var results = std.array_list.AlignedManaged(StringOpResult, null).init(self.allocator);
-        
+
         if (self.verbose) {
             std.debug.print("\n=== 字符串转换扩展性能测试 ===\n", .{});
         }
-        
+
         try results.append(try self.testAddslashes());
         try results.append(try self.testStripslashes());
         try results.append(try self.testAddcslashes());
@@ -27,15 +27,15 @@ pub const StringTransformExtTests = struct {
         try results.append(try self.testQuotemeta());
         try results.append(try self.testStrIncrement());
         try results.append(try self.testStrDecrement());
-        
+
         return results.toOwnedSlice();
     }
-    
+
     /// 测试 addslashes (添加斜杠转义)
     fn testAddslashes(self: *@This()) !StringOpResult {
         const test_name = "addslashes";
         const test_string = "It's a \"test\" string with \\ backslash";
-        
+
         if (self.generate_php_scripts) {
             try self.generatePhpScript(test_name,
                 \\<?php
@@ -49,15 +49,15 @@ pub const StringTransformExtTests = struct {
                 \\echo "Time: " . (($end - $start) / 1000000) . " ms\n";
             );
         }
-        
+
         const start = std.time.nanoTimestamp();
-        
+
         var total_len: usize = 0;
         var i: u32 = 0;
         while (i < self.iterations) : (i += 1) {
             var result = std.array_list.AlignedManaged(u8, null).init(self.allocator);
             defer result.deinit();
-            
+
             for (test_string) |c| {
                 switch (c) {
                     '\'', '"', '\\' => {
@@ -73,19 +73,19 @@ pub const StringTransformExtTests = struct {
             }
             total_len += result.items.len;
         }
-        
+
         const end = std.time.nanoTimestamp();
         const total_time = @as(u64, @intCast(end - start));
-        
+
         std.mem.doNotOptimizeAway(&total_len);
-        
-        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) / 
-                           (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
-        
+
+        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) /
+            (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+
         if (self.verbose) {
-            std.debug.print("  {s}: {d:.2} M ops/s\n", .{test_name, ops_per_sec / 1_000_000.0});
+            std.debug.print("  {s}: {d:.2} M ops/s\n", .{ test_name, ops_per_sec / 1_000_000.0 });
         }
-        
+
         return StringOpResult{
             .test_name = test_name,
             .operations_per_second = ops_per_sec,
@@ -99,7 +99,7 @@ pub const StringTransformExtTests = struct {
     fn testStripslashes(self: *@This()) !StringOpResult {
         const test_name = "stripslashes";
         const test_string = "It\\'s a \\\"test\\\" string with \\\\ backslash";
-        
+
         if (self.generate_php_scripts) {
             try self.generatePhpScript(test_name,
                 \\<?php
@@ -113,15 +113,15 @@ pub const StringTransformExtTests = struct {
                 \\echo "Time: " . (($end - $start) / 1000000) . " ms\n";
             );
         }
-        
+
         const start = std.time.nanoTimestamp();
-        
+
         var total_len: usize = 0;
         var i: u32 = 0;
         while (i < self.iterations) : (i += 1) {
             var result = std.array_list.AlignedManaged(u8, null).init(self.allocator);
             defer result.deinit();
-            
+
             var idx: usize = 0;
             while (idx < test_string.len) : (idx += 1) {
                 if (test_string[idx] == '\\' and idx + 1 < test_string.len) {
@@ -143,19 +143,19 @@ pub const StringTransformExtTests = struct {
             }
             total_len += result.items.len;
         }
-        
+
         const end = std.time.nanoTimestamp();
         const total_time = @as(u64, @intCast(end - start));
-        
+
         std.mem.doNotOptimizeAway(&total_len);
-        
-        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) / 
-                           (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
-        
+
+        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) /
+            (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+
         if (self.verbose) {
-            std.debug.print("  {s}: {d:.2} M ops/s\n", .{test_name, ops_per_sec / 1_000_000.0});
+            std.debug.print("  {s}: {d:.2} M ops/s\n", .{ test_name, ops_per_sec / 1_000_000.0 });
         }
-        
+
         return StringOpResult{
             .test_name = test_name,
             .operations_per_second = ops_per_sec,
@@ -164,13 +164,13 @@ pub const StringTransformExtTests = struct {
             .category = "transform_ext",
         };
     }
-    
+
     /// 测试 addcslashes (C 风格添加斜杠)
     fn testAddcslashes(self: *@This()) !StringOpResult {
         const test_name = "addcslashes";
         const test_string = "Hello\nWorld\tTest\r\n";
         const charlist = "\n\r\t";
-        
+
         if (self.generate_php_scripts) {
             try self.generatePhpScript(test_name,
                 \\<?php
@@ -185,15 +185,15 @@ pub const StringTransformExtTests = struct {
                 \\echo "Time: " . (($end - $start) / 1000000) . " ms\n";
             );
         }
-        
+
         const start = std.time.nanoTimestamp();
-        
+
         var total_len: usize = 0;
         var i: u32 = 0;
         while (i < self.iterations) : (i += 1) {
             var result = std.array_list.AlignedManaged(u8, null).init(self.allocator);
             defer result.deinit();
-            
+
             for (test_string) |c| {
                 var should_escape = false;
                 for (charlist) |escape_char| {
@@ -202,7 +202,7 @@ pub const StringTransformExtTests = struct {
                         break;
                     }
                 }
-                
+
                 if (should_escape) {
                     try result.append('\\');
                     switch (c) {
@@ -217,19 +217,19 @@ pub const StringTransformExtTests = struct {
             }
             total_len += result.items.len;
         }
-        
+
         const end = std.time.nanoTimestamp();
         const total_time = @as(u64, @intCast(end - start));
-        
+
         std.mem.doNotOptimizeAway(&total_len);
-        
-        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) / 
-                           (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
-        
+
+        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) /
+            (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+
         if (self.verbose) {
-            std.debug.print("  {s}: {d:.2} M ops/s\n", .{test_name, ops_per_sec / 1_000_000.0});
+            std.debug.print("  {s}: {d:.2} M ops/s\n", .{ test_name, ops_per_sec / 1_000_000.0 });
         }
-        
+
         return StringOpResult{
             .test_name = test_name,
             .operations_per_second = ops_per_sec,
@@ -238,12 +238,12 @@ pub const StringTransformExtTests = struct {
             .category = "transform_ext",
         };
     }
-    
+
     /// 测试 stripcslashes (C 风格去除斜杠)
     fn testStripcslashes(self: *@This()) !StringOpResult {
         const test_name = "stripcslashes";
         const test_string = "Hello\\nWorld\\tTest\\r\\n";
-        
+
         if (self.generate_php_scripts) {
             try self.generatePhpScript(test_name,
                 \\<?php
@@ -257,15 +257,15 @@ pub const StringTransformExtTests = struct {
                 \\echo "Time: " . (($end - $start) / 1000000) . " ms\n";
             );
         }
-        
+
         const start = std.time.nanoTimestamp();
-        
+
         var total_len: usize = 0;
         var i: u32 = 0;
         while (i < self.iterations) : (i += 1) {
             var result = std.array_list.AlignedManaged(u8, null).init(self.allocator);
             defer result.deinit();
-            
+
             var idx: usize = 0;
             while (idx < test_string.len) : (idx += 1) {
                 if (test_string[idx] == '\\' and idx + 1 < test_string.len) {
@@ -295,19 +295,19 @@ pub const StringTransformExtTests = struct {
             }
             total_len += result.items.len;
         }
-        
+
         const end = std.time.nanoTimestamp();
         const total_time = @as(u64, @intCast(end - start));
-        
+
         std.mem.doNotOptimizeAway(&total_len);
-        
-        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) / 
-                           (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
-        
+
+        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) /
+            (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+
         if (self.verbose) {
-            std.debug.print("  {s}: {d:.2} M ops/s\n", .{test_name, ops_per_sec / 1_000_000.0});
+            std.debug.print("  {s}: {d:.2} M ops/s\n", .{ test_name, ops_per_sec / 1_000_000.0 });
         }
-        
+
         return StringOpResult{
             .test_name = test_name,
             .operations_per_second = ops_per_sec,
@@ -316,13 +316,13 @@ pub const StringTransformExtTests = struct {
             .category = "transform_ext",
         };
     }
-    
+
     /// 测试 quotemeta (转义元字符)
     fn testQuotemeta(self: *@This()) !StringOpResult {
         const test_name = "quotemeta";
         const test_string = "Hello. World? Test* [abc] (def) {ghi}";
         const meta_chars = ".\\+*?[^]($)";
-        
+
         if (self.generate_php_scripts) {
             try self.generatePhpScript(test_name,
                 \\<?php
@@ -336,15 +336,15 @@ pub const StringTransformExtTests = struct {
                 \\echo "Time: " . (($end - $start) / 1000000) . " ms\n";
             );
         }
-        
+
         const start = std.time.nanoTimestamp();
-        
+
         var total_len: usize = 0;
         var i: u32 = 0;
         while (i < self.iterations) : (i += 1) {
             var result = std.array_list.AlignedManaged(u8, null).init(self.allocator);
             defer result.deinit();
-            
+
             for (test_string) |c| {
                 var is_meta = false;
                 for (meta_chars) |meta| {
@@ -353,7 +353,7 @@ pub const StringTransformExtTests = struct {
                         break;
                     }
                 }
-                
+
                 if (is_meta) {
                     try result.append('\\');
                 }
@@ -361,19 +361,19 @@ pub const StringTransformExtTests = struct {
             }
             total_len += result.items.len;
         }
-        
+
         const end = std.time.nanoTimestamp();
         const total_time = @as(u64, @intCast(end - start));
-        
+
         std.mem.doNotOptimizeAway(&total_len);
-        
-        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) / 
-                           (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
-        
+
+        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) /
+            (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+
         if (self.verbose) {
-            std.debug.print("  {s}: {d:.2} M ops/s\n", .{test_name, ops_per_sec / 1_000_000.0});
+            std.debug.print("  {s}: {d:.2} M ops/s\n", .{ test_name, ops_per_sec / 1_000_000.0 });
         }
-        
+
         return StringOpResult{
             .test_name = test_name,
             .operations_per_second = ops_per_sec,
@@ -382,12 +382,12 @@ pub const StringTransformExtTests = struct {
             .category = "transform_ext",
         };
     }
-    
+
     /// 测试 str_increment (字符串递增 - PHP 8.3+)
     fn testStrIncrement(self: *@This()) !StringOpResult {
         const test_name = "str_increment";
         const test_string = "abc";
-        
+
         if (self.generate_php_scripts) {
             try self.generatePhpScript(test_name,
                 \\<?php
@@ -408,17 +408,17 @@ pub const StringTransformExtTests = struct {
                 \\echo "Time: " . (($end - $start) / 1000000) . " ms\n";
             );
         }
-        
+
         const start = std.time.nanoTimestamp();
-        
+
         var total_len: usize = 0;
         var i: u32 = 0;
         while (i < self.iterations) : (i += 1) {
             var result = try self.allocator.alloc(u8, test_string.len + 1);
             defer self.allocator.free(result);
-            
+
             @memcpy(result[0..test_string.len], test_string);
-            
+
             // 简单递增逻辑：从右到左递增字符
             var idx = test_string.len;
             var carry = true;
@@ -441,22 +441,22 @@ pub const StringTransformExtTests = struct {
                     result[idx] = '0';
                 }
             }
-            
+
             total_len += test_string.len;
         }
-        
+
         const end = std.time.nanoTimestamp();
         const total_time = @as(u64, @intCast(end - start));
-        
+
         std.mem.doNotOptimizeAway(&total_len);
-        
-        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) / 
-                           (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
-        
+
+        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) /
+            (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+
         if (self.verbose) {
-            std.debug.print("  {s}: {d:.2} M ops/s\n", .{test_name, ops_per_sec / 1_000_000.0});
+            std.debug.print("  {s}: {d:.2} M ops/s\n", .{ test_name, ops_per_sec / 1_000_000.0 });
         }
-        
+
         return StringOpResult{
             .test_name = test_name,
             .operations_per_second = ops_per_sec,
@@ -465,12 +465,12 @@ pub const StringTransformExtTests = struct {
             .category = "transform_ext",
         };
     }
-    
+
     /// 测试 str_decrement (字符串递减 - PHP 8.3+)
     fn testStrDecrement(self: *@This()) !StringOpResult {
         const test_name = "str_decrement";
         const test_string = "abc";
-        
+
         if (self.generate_php_scripts) {
             try self.generatePhpScript(test_name,
                 \\<?php
@@ -491,17 +491,17 @@ pub const StringTransformExtTests = struct {
                 \\echo "Time: " . (($end - $start) / 1000000) . " ms\n";
             );
         }
-        
+
         const start = std.time.nanoTimestamp();
-        
+
         var total_len: usize = 0;
         var i: u32 = 0;
         while (i < self.iterations) : (i += 1) {
             var result = try self.allocator.alloc(u8, test_string.len);
             defer self.allocator.free(result);
-            
+
             @memcpy(result[0..test_string.len], test_string);
-            
+
             // 简单递减逻辑：从右到左递减字符
             var idx = test_string.len;
             var borrow = true;
@@ -524,22 +524,22 @@ pub const StringTransformExtTests = struct {
                     result[idx] = '9';
                 }
             }
-            
+
             total_len += test_string.len;
         }
-        
+
         const end = std.time.nanoTimestamp();
         const total_time = @as(u64, @intCast(end - start));
-        
+
         std.mem.doNotOptimizeAway(&total_len);
-        
-        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) / 
-                           (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
-        
+
+        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) /
+            (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+
         if (self.verbose) {
-            std.debug.print("  {s}: {d:.2} M ops/s\n", .{test_name, ops_per_sec / 1_000_000.0});
+            std.debug.print("  {s}: {d:.2} M ops/s\n", .{ test_name, ops_per_sec / 1_000_000.0 });
         }
-        
+
         return StringOpResult{
             .test_name = test_name,
             .operations_per_second = ops_per_sec,
@@ -548,7 +548,7 @@ pub const StringTransformExtTests = struct {
             .category = "transform_ext",
         };
     }
-    
+
     /// 生成 PHP 测试脚本
     fn generatePhpScript(self: *@This(), test_name: []const u8, script_content: []const u8) !void {
         const file_path = try std.fmt.allocPrint(
@@ -557,10 +557,10 @@ pub const StringTransformExtTests = struct {
             .{ self.script_output_dir, test_name },
         );
         defer self.allocator.free(file_path);
-        
+
         const file = try std.fs.cwd.createFile(file_path, .{});
         defer file.close();
-        
+
         try file.writeAll(script_content);
     }
 };

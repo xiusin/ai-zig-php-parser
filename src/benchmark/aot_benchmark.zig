@@ -67,7 +67,7 @@ pub const CompileTimeStats = struct {
     max_ms: u64,
     /// 迭代次数
     iterations: u32,
-    
+
     pub fn compute(samples: []const u64) CompileTimeStats {
         if (samples.len == 0) {
             return .{
@@ -79,14 +79,14 @@ pub const CompileTimeStats = struct {
                 .iterations = 0,
             };
         }
-        
+
         // 计算平均值
         var sum: u128 = 0;
         for (samples) |sample| {
             sum += sample;
         }
         const mean = @as(f64, @floatFromInt(sum)) / @as(f64, @floatFromInt(samples.len));
-        
+
         // 计算标准差
         var variance_sum: f64 = 0;
         for (samples) |sample| {
@@ -95,14 +95,14 @@ pub const CompileTimeStats = struct {
         }
         const variance = variance_sum / @as(f64, @floatFromInt(samples.len));
         const std_dev = @sqrt(variance);
-        
+
         // 计算中位数
         const median_idx = samples.len / 2;
         const median = if (samples.len % 2 == 0)
             @as(f64, @floatFromInt(samples[median_idx - 1] + samples[median_idx])) / 2.0
         else
             @as(f64, @floatFromInt(samples[median_idx]));
-        
+
         return .{
             .mean_ms = mean,
             .median_ms = median,
@@ -124,13 +124,13 @@ pub const ExecutableSizeStats = struct {
     data_size_bytes: u64,
     /// BSS 段大小（字节）
     bss_size_bytes: u64,
-    
+
     pub fn measure(executable_path: []const u8) !ExecutableSizeStats {
         const file = try fs.cwd().openFile(executable_path, .{});
         defer file.close();
-        
+
         const stat = try file.stat();
-        
+
         // 完整实现：解析可执行文件格式
         var header_buf: [64]u8 = undefined;
         const bytes_read = try file.read(&header_buf);
@@ -143,23 +143,24 @@ pub const ExecutableSizeStats = struct {
                 .bss_size_bytes = 0,
             };
         }
-        
+
         // 检测文件格式
         if (bytes_read >= 4 and std.mem.eql(u8, header_buf[0..4], "\x7fELF")) {
             // ELF 格式（Linux）
             return try parseELF(file, stat.size);
-        } else if (bytes_read >= 4 and 
-                   (std.mem.eql(u8, header_buf[0..4], "\xfe\xed\xfa\xce") or
-                    std.mem.eql(u8, header_buf[0..4], "\xce\xfa\xed\xfe") or
-                    std.mem.eql(u8, header_buf[0..4], "\xfe\xed\xfa\xcf") or
-                    std.mem.eql(u8, header_buf[0..4], "\xcf\xfa\xed\xfe"))) {
+        } else if (bytes_read >= 4 and
+            (std.mem.eql(u8, header_buf[0..4], "\xfe\xed\xfa\xce") or
+                std.mem.eql(u8, header_buf[0..4], "\xce\xfa\xed\xfe") or
+                std.mem.eql(u8, header_buf[0..4], "\xfe\xed\xfa\xcf") or
+                std.mem.eql(u8, header_buf[0..4], "\xcf\xfa\xed\xfe")))
+        {
             // Mach-O 格式（macOS）
             return try parseMachO(file, stat.size);
         } else if (bytes_read >= 2 and std.mem.eql(u8, header_buf[0..2], "MZ")) {
             // PE 格式（Windows）
             return try parsePE(file, stat.size);
         }
-        
+
         // 未知格式，回退到简单实现
         return .{
             .size_bytes = stat.size,
@@ -168,61 +169,61 @@ pub const ExecutableSizeStats = struct {
             .bss_size_bytes = 0,
         };
     }
-    
+
     /// 解析 ELF 格式（Linux）
     fn parseELF(file: fs.File, total_size: u64) !ExecutableSizeStats {
         try file.seekTo(0);
-        
+
         var header: [64]u8 = undefined;
         _ = try file.read(&header);
-        
+
         // 检查是 32 位还是 64 位
         const is_64bit = header[4] == 2;
-        
+
         var text_size: u64 = 0;
         var data_size: u64 = 0;
         var bss_size: u64 = 0;
-        
+
         if (is_64bit) {
             // 64 位 ELF
             const shoff = std.mem.readInt(u64, header[40..48], .little);
             const shentsize = std.mem.readInt(u16, header[58..60], .little);
             const shnum = std.mem.readInt(u16, header[60..62], .little);
-            
+
             // 读取段头字符串表索引
             const shstrndx = std.mem.readInt(u16, header[62..64], .little);
-            
+
             // 读取段头字符串表
             try file.seekTo(shoff + @as(u64, shstrndx) * @as(u64, shentsize));
             var shstrtab_header: [64]u8 = undefined;
             _ = try file.read(&shstrtab_header);
-            
+
             const shstrtab_offset = std.mem.readInt(u64, shstrtab_header[24..32], .little);
             const shstrtab_size = std.mem.readInt(u64, shstrtab_header[32..40], .little);
-            
+
             // 读取段头字符串表内容
             const shstrtab = try std.heap.page_allocator.alloc(u8, @intCast(shstrtab_size));
             defer std.heap.page_allocator.free(shstrtab);
-            
+
             try file.seekTo(shstrtab_offset);
             _ = try file.read(shstrtab);
-            
+
             // 遍历所有段头
             var i: u16 = 0;
             while (i < shnum) : (i += 1) {
                 try file.seekTo(shoff + @as(u64, i) * @as(u64, shentsize));
                 var sh: [64]u8 = undefined;
                 _ = try file.read(&sh);
-                
+
                 const name_offset = std.mem.readInt(u32, sh[0..4], .little);
                 const sh_size = std.mem.readInt(u64, sh[32..40], .little);
                 const sh_type = std.mem.readInt(u32, sh[4..8], .little);
-                
+
                 // 获取段名称
                 if (name_offset < shstrtab.len) {
                     const name_end = std.mem.indexOfScalar(u8, shstrtab[name_offset..], 0) orelse (shstrtab.len - name_offset);
                     const name = shstrtab[name_offset..][0..name_end];
-                    
+
                     if (std.mem.eql(u8, name, ".text")) {
                         text_size = sh_size;
                     } else if (std.mem.eql(u8, name, ".data") or std.mem.eql(u8, name, ".rodata")) {
@@ -231,14 +232,14 @@ pub const ExecutableSizeStats = struct {
                         bss_size = sh_size;
                     }
                 }
-                
+
                 // SHT_NOBITS 类型的段（如 .bss）不占用文件空间
                 if (sh_type == 8) { // SHT_NOBITS
                     // BSS 段已经在上面处理了
                 }
             }
         }
-        
+
         return .{
             .size_bytes = total_size,
             .text_size_bytes = text_size,
@@ -246,61 +247,61 @@ pub const ExecutableSizeStats = struct {
             .bss_size_bytes = bss_size,
         };
     }
-    
+
     /// 解析 Mach-O 格式（macOS）
     fn parseMachO(file: fs.File, total_size: u64) !ExecutableSizeStats {
         try file.seekTo(0);
-        
+
         var header: [32]u8 = undefined;
         _ = try file.read(&header);
-        
+
         const magic = std.mem.readInt(u32, header[0..4], .little);
         const is_64bit = (magic == 0xfeedfacf or magic == 0xcffaedfe);
-        
+
         var text_size: u64 = 0;
         var data_size: u64 = 0;
         var bss_size: u64 = 0;
-        
+
         if (is_64bit) {
             const ncmds = std.mem.readInt(u32, header[16..20], .little);
             var offset: u64 = 32; // Mach-O 64 位头大小
-            
+
             var i: u32 = 0;
             while (i < ncmds) : (i += 1) {
                 try file.seekTo(offset);
                 var cmd_header: [8]u8 = undefined;
                 _ = try file.read(&cmd_header);
-                
+
                 const cmd = std.mem.readInt(u32, cmd_header[0..4], .little);
                 const cmdsize = std.mem.readInt(u32, cmd_header[4..8], .little);
-                
+
                 // LC_SEGMENT_64 = 0x19
                 if (cmd == 0x19) {
                     var segment: [72]u8 = undefined;
                     try file.seekTo(offset);
                     _ = try file.read(&segment);
-                    
+
                     const segname = segment[8..24];
                     const vmsize = std.mem.readInt(u64, segment[40..48], .little);
                     const filesize = std.mem.readInt(u64, segment[48..56], .little);
-                    
+
                     // 检查段名称
                     if (std.mem.startsWith(u8, segname, "__TEXT")) {
                         text_size += filesize;
                     } else if (std.mem.startsWith(u8, segname, "__DATA")) {
                         data_size += filesize;
                     }
-                    
+
                     // BSS 通常在 __DATA 段中，vmsize > filesize 的部分
                     if (vmsize > filesize) {
                         bss_size += (vmsize - filesize);
                     }
                 }
-                
+
                 offset += cmdsize;
             }
         }
-        
+
         return .{
             .size_bytes = total_size,
             .text_size_bytes = text_size,
@@ -308,51 +309,51 @@ pub const ExecutableSizeStats = struct {
             .bss_size_bytes = bss_size,
         };
     }
-    
+
     /// 解析 PE 格式（Windows）
     fn parsePE(file: fs.File, total_size: u64) !ExecutableSizeStats {
         try file.seekTo(0);
-        
+
         // 读取 DOS 头
         var dos_header: [64]u8 = undefined;
         _ = try file.read(&dos_header);
-        
+
         // 获取 PE 头偏移
         const pe_offset = std.mem.readInt(u32, dos_header[60..64], .little);
-        
+
         // 读取 PE 头
         try file.seekTo(pe_offset);
         var pe_sig: [4]u8 = undefined;
         _ = try file.read(&pe_sig);
-        
+
         if (!std.mem.eql(u8, &pe_sig, "PE\x00\x00")) {
             return error.InvalidPEFormat;
         }
-        
+
         // 读取 COFF 头
         var coff_header: [20]u8 = undefined;
         _ = try file.read(&coff_header);
-        
+
         const num_sections = std.mem.readInt(u16, coff_header[2..4], .little);
         const opt_header_size = std.mem.readInt(u16, coff_header[16..18], .little);
-        
+
         // 跳过可选头
         try file.seekTo(pe_offset + 24 + @as(u64, opt_header_size));
-        
+
         var text_size: u64 = 0;
         var data_size: u64 = 0;
         var bss_size: u64 = 0;
-        
+
         // 读取段表
         var i: u16 = 0;
         while (i < num_sections) : (i += 1) {
             var section: [40]u8 = undefined;
             _ = try file.read(&section);
-            
+
             const name = section[0..8];
             const virtual_size = std.mem.readInt(u32, section[8..12], .little);
             const size_of_raw_data = std.mem.readInt(u32, section[16..20], .little);
-            
+
             // 检查段名称
             if (std.mem.startsWith(u8, name, ".text")) {
                 text_size += size_of_raw_data;
@@ -362,7 +363,7 @@ pub const ExecutableSizeStats = struct {
                 bss_size += virtual_size;
             }
         }
-        
+
         return .{
             .size_bytes = total_size,
             .text_size_bytes = text_size,
@@ -386,7 +387,7 @@ pub const StartupTimeStats = struct {
     max_us: u64,
     /// 迭代次数
     iterations: u32,
-    
+
     pub fn compute(samples: []const u64) StartupTimeStats {
         if (samples.len == 0) {
             return .{
@@ -398,13 +399,13 @@ pub const StartupTimeStats = struct {
                 .iterations = 0,
             };
         }
-        
+
         var sum: u128 = 0;
         for (samples) |sample| {
             sum += sample;
         }
         const mean = @as(f64, @floatFromInt(sum)) / @as(f64, @floatFromInt(samples.len));
-        
+
         var variance_sum: f64 = 0;
         for (samples) |sample| {
             const diff = @as(f64, @floatFromInt(sample)) - mean;
@@ -412,13 +413,13 @@ pub const StartupTimeStats = struct {
         }
         const variance = variance_sum / @as(f64, @floatFromInt(samples.len));
         const std_dev = @sqrt(variance);
-        
+
         const median_idx = samples.len / 2;
         const median = if (samples.len % 2 == 0)
             @as(f64, @floatFromInt(samples[median_idx - 1] + samples[median_idx])) / 2.0
         else
             @as(f64, @floatFromInt(samples[median_idx]));
-        
+
         return .{
             .mean_us = mean,
             .median_us = median,
@@ -448,7 +449,7 @@ pub const ExecutionTimeStats = struct {
     p99_ns: u64,
     /// 迭代次数
     iterations: u32,
-    
+
     pub fn compute(samples: []const u64) ExecutionTimeStats {
         if (samples.len == 0) {
             return .{
@@ -462,13 +463,13 @@ pub const ExecutionTimeStats = struct {
                 .iterations = 0,
             };
         }
-        
+
         var sum: u128 = 0;
         for (samples) |sample| {
             sum += sample;
         }
         const mean = @as(f64, @floatFromInt(sum)) / @as(f64, @floatFromInt(samples.len));
-        
+
         var variance_sum: f64 = 0;
         for (samples) |sample| {
             const diff = @as(f64, @floatFromInt(sample)) - mean;
@@ -476,16 +477,16 @@ pub const ExecutionTimeStats = struct {
         }
         const variance = variance_sum / @as(f64, @floatFromInt(samples.len));
         const std_dev = @sqrt(variance);
-        
+
         const median_idx = samples.len / 2;
         const median = if (samples.len % 2 == 0)
             @as(f64, @floatFromInt(samples[median_idx - 1] + samples[median_idx])) / 2.0
         else
             @as(f64, @floatFromInt(samples[median_idx]));
-        
+
         const p95_idx = (samples.len * 95) / 100;
         const p99_idx = (samples.len * 99) / 100;
-        
+
         return .{
             .mean_ns = mean,
             .median_ns = median,
@@ -517,7 +518,7 @@ pub const AOTBenchmarkResult = struct {
     speedup: f64,
     /// 测试时间戳
     timestamp: i64,
-    
+
     pub fn compute(
         test_name: []const u8,
         compile_time: CompileTimeStats,
@@ -530,7 +531,7 @@ pub const AOTBenchmarkResult = struct {
             php_exec.mean_ns / aot_exec.mean_ns
         else
             0.0;
-        
+
         return .{
             .test_name = test_name,
             .compile_time = compile_time,
@@ -557,40 +558,40 @@ pub const AOTBenchmarkFramework = struct {
     allocator: Allocator,
     config: AOTBenchmarkConfig,
     results: std.ArrayList(AOTBenchmarkResult),
-    
+
     const Self = @This();
-    
+
     /// 初始化框架
     pub fn init(allocator: Allocator, config: AOTBenchmarkConfig) !*Self {
         const self = try allocator.create(Self);
         self.allocator = allocator;
         self.config = config;
         self.results = .{};
-        
+
         // 创建临时目录
         fs.cwd().makeDir(config.temp_dir) catch |err| {
             if (err != error.PathAlreadyExists) {
                 return err;
             }
         };
-        
+
         return self;
     }
-    
+
     /// 清理资源
     pub fn deinit(self: *Self) void {
         self.results.deinit(self.allocator);
-        
+
         // 清理临时目录
         fs.cwd().deleteTree(self.config.temp_dir) catch |err| {
             if (self.config.verbose) {
                 std.debug.print("警告: 无法删除临时目录: {s}\n", .{@errorName(err)});
             }
         };
-        
+
         self.allocator.destroy(self);
     }
-    
+
     /// 运行完整的 AOT 性能测试
     /// @param source_path PHP 源文件路径
     /// @return 完整测试结果
@@ -598,13 +599,13 @@ pub const AOTBenchmarkFramework = struct {
         if (self.config.verbose) {
             std.debug.print("\n=== 运行 AOT 性能测试: {s} ===\n", .{source_path});
         }
-        
+
         // 1. 测量编译时间
         if (self.config.verbose) {
             std.debug.print("\n[1/4] 测量编译时间...\n", .{});
         }
         const compile_time = try self.measureCompileTime(source_path);
-        
+
         // 2. 测量可执行文件大小
         if (self.config.verbose) {
             std.debug.print("\n[2/4] 测量可执行文件大小...\n", .{});
@@ -612,20 +613,20 @@ pub const AOTBenchmarkFramework = struct {
         const executable_path = try self.getExecutablePath(source_path);
         defer self.allocator.free(executable_path);
         const executable_size = try ExecutableSizeStats.measure(executable_path);
-        
+
         // 3. 测量启动时间
         if (self.config.verbose) {
             std.debug.print("\n[3/4] 测量启动时间...\n", .{});
         }
         const startup_time = try self.measureStartupTime(executable_path);
-        
+
         // 4. 测量执行时间
         if (self.config.verbose) {
             std.debug.print("\n[4/4] 测量执行时间...\n", .{});
         }
         const aot_exec_time = try self.measureExecutionTime(executable_path);
         const php_exec_time = try self.measurePHPExecutionTime(source_path);
-        
+
         // 计算结果
         const result = AOTBenchmarkResult.compute(
             source_path,
@@ -635,10 +636,10 @@ pub const AOTBenchmarkFramework = struct {
             aot_exec_time,
             php_exec_time,
         );
-        
+
         // 保存结果
         try self.results.append(self.allocator, result);
-        
+
         if (self.config.verbose) {
             std.debug.print("\n=== 测试完成 ===\n", .{});
             std.debug.print("编译时间: {d:.2} ms\n", .{compile_time.mean_ms});
@@ -648,57 +649,57 @@ pub const AOTBenchmarkFramework = struct {
             std.debug.print("执行时间 (PHP): {d:.2} ns\n", .{php_exec_time.mean_ns});
             std.debug.print("加速比: {d:.2}x\n", .{result.speedup});
         }
-        
+
         return result;
     }
-    
+
     /// 测量编译时间
     fn measureCompileTime(self: *Self, source_path: []const u8) !CompileTimeStats {
         var samples = try self.allocator.alloc(u64, self.config.test_iterations);
         defer self.allocator.free(samples);
-        
+
         const output_path = try self.getExecutablePath(source_path);
         defer self.allocator.free(output_path);
-        
+
         // 预热阶段
         if (self.config.verbose) {
             std.debug.print("  预热中... ({d} 次迭代)\n", .{self.config.warmup_iterations});
         }
-        
+
         var i: u32 = 0;
         while (i < self.config.warmup_iterations) : (i += 1) {
             _ = try self.compileSource(source_path, output_path);
             // 删除生成的文件
             fs.cwd().deleteFile(output_path) catch {};
         }
-        
+
         // 测试阶段
         if (self.config.verbose) {
             std.debug.print("  测试中... ({d} 次迭代)\n", .{self.config.test_iterations});
         }
-        
+
         i = 0;
         while (i < self.config.test_iterations) : (i += 1) {
             const start = std.time.milliTimestamp();
             _ = try self.compileSource(source_path, output_path);
             const end = std.time.milliTimestamp();
-            
+
             samples[i] = @intCast(end - start);
-            
+
             // 删除生成的文件
             fs.cwd().deleteFile(output_path) catch {};
-            
+
             if (self.config.verbose and (i + 1) % 10 == 0) {
                 std.debug.print("    完成 {d}/{d}\n", .{ i + 1, self.config.test_iterations });
             }
         }
-        
+
         // 排序样本
         std.mem.sort(u64, samples, {}, comptime std.sort.asc(u64));
-        
+
         return CompileTimeStats.compute(samples);
     }
-    
+
     /// 编译源文件
     fn compileSource(self: *Self, source_path: []const u8, output_path: []const u8) !void {
         var argv = [_][]const u8{
@@ -709,7 +710,7 @@ pub const AOTBenchmarkFramework = struct {
             "-O",
             self.config.optimize_level,
         };
-        
+
         const result = std.ChildProcess.exec(.{
             .allocator = self.allocator,
             .argv = &argv,
@@ -722,7 +723,7 @@ pub const AOTBenchmarkFramework = struct {
         };
         defer self.allocator.free(result.stdout);
         defer self.allocator.free(result.stderr);
-        
+
         if (result.term.Exited != 0) {
             if (self.config.verbose) {
                 std.debug.print("编译器退出码: {d}\n", .{result.term.Exited});
@@ -731,49 +732,49 @@ pub const AOTBenchmarkFramework = struct {
             return error.CompilationFailed;
         }
     }
-    
+
     /// 测量启动时间
     fn measureStartupTime(self: *Self, executable_path: []const u8) !StartupTimeStats {
         var samples = try self.allocator.alloc(u64, self.config.test_iterations);
         defer self.allocator.free(samples);
-        
+
         // 预热阶段
         if (self.config.verbose) {
             std.debug.print("  预热中... ({d} 次迭代)\n", .{self.config.warmup_iterations});
         }
-        
+
         var i: u32 = 0;
         while (i < self.config.warmup_iterations) : (i += 1) {
             _ = try self.executeWithStartupMeasurement(executable_path);
         }
-        
+
         // 测试阶段
         if (self.config.verbose) {
             std.debug.print("  测试中... ({d} 次迭代)\n", .{self.config.test_iterations});
         }
-        
+
         i = 0;
         while (i < self.config.test_iterations) : (i += 1) {
             samples[i] = try self.executeWithStartupMeasurement(executable_path);
-            
+
             if (self.config.verbose and (i + 1) % 10 == 0) {
                 std.debug.print("    完成 {d}/{d}\n", .{ i + 1, self.config.test_iterations });
             }
         }
-        
+
         // 排序样本
         std.mem.sort(u64, samples, {}, comptime std.sort.asc(u64));
-        
+
         return StartupTimeStats.compute(samples);
     }
-    
+
     /// 执行并测量启动时间（微秒）
     fn executeWithStartupMeasurement(self: *Self, executable_path: []const u8) !u64 {
         // 使用 time 命令或直接测量进程启动时间
         var argv = [_][]const u8{executable_path};
-        
+
         const start = std.time.microTimestamp();
-        
+
         const result = std.ChildProcess.exec(.{
             .allocator = self.allocator,
             .argv = &argv,
@@ -786,60 +787,60 @@ pub const AOTBenchmarkFramework = struct {
         };
         defer self.allocator.free(result.stdout);
         defer self.allocator.free(result.stderr);
-        
+
         const end = std.time.microTimestamp();
-        
+
         if (result.term.Exited != 0) {
             if (self.config.verbose) {
                 std.debug.print("程序退出码: {d}\n", .{result.term.Exited});
             }
             return error.ExecutionFailed;
         }
-        
+
         return @intCast(end - start);
     }
-    
+
     /// 测量执行时间（AOT）
     fn measureExecutionTime(self: *Self, executable_path: []const u8) !ExecutionTimeStats {
         var samples = try self.allocator.alloc(u64, self.config.test_iterations);
         defer self.allocator.free(samples);
-        
+
         // 预热阶段
         if (self.config.verbose) {
             std.debug.print("  预热中... ({d} 次迭代)\n", .{self.config.warmup_iterations});
         }
-        
+
         var i: u32 = 0;
         while (i < self.config.warmup_iterations) : (i += 1) {
             _ = try self.executeAndMeasure(executable_path);
         }
-        
+
         // 测试阶段
         if (self.config.verbose) {
             std.debug.print("  测试中... ({d} 次迭代)\n", .{self.config.test_iterations});
         }
-        
+
         i = 0;
         while (i < self.config.test_iterations) : (i += 1) {
             samples[i] = try self.executeAndMeasure(executable_path);
-            
+
             if (self.config.verbose and (i + 1) % 10 == 0) {
                 std.debug.print("    完成 {d}/{d}\n", .{ i + 1, self.config.test_iterations });
             }
         }
-        
+
         // 排序样本
         std.mem.sort(u64, samples, {}, comptime std.sort.asc(u64));
-        
+
         return ExecutionTimeStats.compute(samples);
     }
-    
+
     /// 执行并测量时间（纳秒）
     fn executeAndMeasure(self: *Self, executable_path: []const u8) !u64 {
         var argv = [_][]const u8{executable_path};
-        
+
         const start = std.time.nanoTimestamp();
-        
+
         const result = std.ChildProcess.exec(.{
             .allocator = self.allocator,
             .argv = &argv,
@@ -852,45 +853,45 @@ pub const AOTBenchmarkFramework = struct {
         };
         defer self.allocator.free(result.stdout);
         defer self.allocator.free(result.stderr);
-        
+
         const end = std.time.nanoTimestamp();
-        
+
         if (result.term.Exited != 0) {
             return error.ExecutionFailed;
         }
-        
+
         return @intCast(end - start);
     }
-    
+
     /// 测量 PHP 执行时间
     fn measurePHPExecutionTime(self: *Self, source_path: []const u8) !ExecutionTimeStats {
         var samples = try self.allocator.alloc(u64, self.config.test_iterations);
         defer self.allocator.free(samples);
-        
+
         // 预热阶段
         var i: u32 = 0;
         while (i < self.config.warmup_iterations) : (i += 1) {
             _ = try self.executePHP(source_path);
         }
-        
+
         // 测试阶段
         i = 0;
         while (i < self.config.test_iterations) : (i += 1) {
             samples[i] = try self.executePHP(source_path);
         }
-        
+
         // 排序样本
         std.mem.sort(u64, samples, {}, comptime std.sort.asc(u64));
-        
+
         return ExecutionTimeStats.compute(samples);
     }
-    
+
     /// 执行 PHP 脚本并测量时间
     fn executePHP(self: *Self, source_path: []const u8) !u64 {
         var argv = [_][]const u8{ self.config.php_executable, source_path };
-        
+
         const start = std.time.nanoTimestamp();
-        
+
         const result = std.ChildProcess.exec(.{
             .allocator = self.allocator,
             .argv = &argv,
@@ -903,16 +904,16 @@ pub const AOTBenchmarkFramework = struct {
         };
         defer self.allocator.free(result.stdout);
         defer self.allocator.free(result.stderr);
-        
+
         const end = std.time.nanoTimestamp();
-        
+
         if (result.term.Exited != 0) {
             return error.ExecutionFailed;
         }
-        
+
         return @intCast(end - start);
     }
-    
+
     /// 获取可执行文件路径
     fn getExecutablePath(self: *Self, source_path: []const u8) ![]u8 {
         const basename = fs.path.basename(source_path);
@@ -920,14 +921,14 @@ pub const AOTBenchmarkFramework = struct {
             basename[0..idx]
         else
             basename;
-        
+
         return std.fmt.allocPrint(
             self.allocator,
             "{s}/{s}_aot",
             .{ self.config.temp_dir, name_without_ext },
         );
     }
-    
+
     /// 生成报告
     pub fn generateReport(
         self: *Self,
@@ -937,30 +938,30 @@ pub const AOTBenchmarkFramework = struct {
     ) !void {
         const file = try fs.cwd().createFile(output_path, .{});
         defer file.close();
-        
+
         const writer = file.writer();
-        
+
         switch (format) {
             .json => try self.generateJsonReport(writer, result),
             .csv => try self.generateCsvReport(writer, result),
             .markdown => try self.generateMarkdownReport(writer, result),
             .html => try self.generateHtmlReport(writer, result),
         }
-        
+
         if (self.config.verbose) {
             std.debug.print("报告已生成: {s}\n", .{output_path});
         }
     }
-    
+
     /// 生成 JSON 报告
     fn generateJsonReport(self: *Self, writer: anytype, result: AOTBenchmarkResult) !void {
         _ = self;
-        
+
         try writer.writeAll("{\n");
         try writer.print("  \"test_name\": \"{s}\",\n", .{result.test_name});
         try writer.print("  \"timestamp\": {d},\n", .{result.timestamp});
         try writer.print("  \"speedup\": {d:.4},\n", .{result.speedup});
-        
+
         try writer.writeAll("  \"compile_time\": {\n");
         try writer.print("    \"mean_ms\": {d:.2},\n", .{result.compile_time.mean_ms});
         try writer.print("    \"median_ms\": {d:.2},\n", .{result.compile_time.median_ms});
@@ -968,36 +969,36 @@ pub const AOTBenchmarkFramework = struct {
         try writer.print("    \"min_ms\": {d},\n", .{result.compile_time.min_ms});
         try writer.print("    \"max_ms\": {d}\n", .{result.compile_time.max_ms});
         try writer.writeAll("  },\n");
-        
+
         try writer.writeAll("  \"executable_size\": {\n");
         try writer.print("    \"size_bytes\": {d}\n", .{result.executable_size.size_bytes});
         try writer.writeAll("  },\n");
-        
+
         try writer.writeAll("  \"startup_time\": {\n");
         try writer.print("    \"mean_us\": {d:.2},\n", .{result.startup_time.mean_us});
         try writer.print("    \"median_us\": {d:.2},\n", .{result.startup_time.median_us});
         try writer.print("    \"std_dev_us\": {d:.2}\n", .{result.startup_time.std_dev_us});
         try writer.writeAll("  },\n");
-        
+
         try writer.writeAll("  \"aot_execution_time\": {\n");
         try writer.print("    \"mean_ns\": {d:.2},\n", .{result.aot_execution_time.mean_ns});
         try writer.print("    \"median_ns\": {d:.2},\n", .{result.aot_execution_time.median_ns});
         try writer.print("    \"p95_ns\": {d},\n", .{result.aot_execution_time.p95_ns});
         try writer.print("    \"p99_ns\": {d}\n", .{result.aot_execution_time.p99_ns});
         try writer.writeAll("  },\n");
-        
+
         try writer.writeAll("  \"php_execution_time\": {\n");
         try writer.print("    \"mean_ns\": {d:.2},\n", .{result.php_execution_time.mean_ns});
         try writer.print("    \"median_ns\": {d:.2}\n", .{result.php_execution_time.median_ns});
         try writer.writeAll("  }\n");
-        
+
         try writer.writeAll("}\n");
     }
-    
+
     /// 生成 CSV 报告
     fn generateCsvReport(self: *Self, writer: anytype, result: AOTBenchmarkResult) !void {
         _ = self;
-        
+
         try writer.writeAll("metric,value,unit\n");
         try writer.print("compile_time_mean,{d:.2},ms\n", .{result.compile_time.mean_ms});
         try writer.print("compile_time_median,{d:.2},ms\n", .{result.compile_time.median_ms});
@@ -1011,17 +1012,17 @@ pub const AOTBenchmarkFramework = struct {
         try writer.print("php_execution_median,{d:.2},ns\n", .{result.php_execution_time.median_ns});
         try writer.print("speedup,{d:.4},x\n", .{result.speedup});
     }
-    
+
     /// 生成 Markdown 报告
     fn generateMarkdownReport(self: *Self, writer: anytype, result: AOTBenchmarkResult) !void {
         _ = self;
-        
+
         try writer.print("# AOT 性能测试报告: {s}\n\n", .{result.test_name});
         try writer.print("**测试时间**: {d}\n\n", .{result.timestamp});
-        
+
         try writer.writeAll("## 总体结果\n\n");
         try writer.print("- **加速比**: {d:.2}x\n\n", .{result.speedup});
-        
+
         try writer.writeAll("## 编译时间\n\n");
         try writer.writeAll("| 指标 | 值 |\n");
         try writer.writeAll("|------|----|\n");
@@ -1030,7 +1031,7 @@ pub const AOTBenchmarkFramework = struct {
         try writer.print("| 标准差 | {d:.2} ms |\n", .{result.compile_time.std_dev_ms});
         try writer.print("| 最小值 | {d} ms |\n", .{result.compile_time.min_ms});
         try writer.print("| 最大值 | {d} ms |\n\n", .{result.compile_time.max_ms});
-        
+
         try writer.writeAll("## 可执行文件大小\n\n");
         try writer.writeAll("| 指标 | 值 |\n");
         try writer.writeAll("|------|----|\n");
@@ -1038,42 +1039,42 @@ pub const AOTBenchmarkFramework = struct {
             result.executable_size.size_bytes,
             @as(f64, @floatFromInt(result.executable_size.size_bytes)) / 1024.0,
         });
-        
+
         try writer.writeAll("## 启动时间\n\n");
         try writer.writeAll("| 指标 | 值 |\n");
         try writer.writeAll("|------|----|\n");
         try writer.print("| 平均值 | {d:.2} μs |\n", .{result.startup_time.mean_us});
         try writer.print("| 中位数 | {d:.2} μs |\n", .{result.startup_time.median_us});
         try writer.print("| 标准差 | {d:.2} μs |\n\n", .{result.startup_time.std_dev_us});
-        
+
         try writer.writeAll("## 执行时间对比\n\n");
         try writer.writeAll("| 指标 | AOT | PHP | 改进 |\n");
         try writer.writeAll("|------|-----|-----|------|\n");
-        
-        const mean_improvement = (result.php_execution_time.mean_ns - result.aot_execution_time.mean_ns) / 
-                                 result.php_execution_time.mean_ns * 100;
+
+        const mean_improvement = (result.php_execution_time.mean_ns - result.aot_execution_time.mean_ns) /
+            result.php_execution_time.mean_ns * 100;
         try writer.print("| 平均值 (ns) | {d:.2} | {d:.2} | {d:.1}% |\n", .{
             result.aot_execution_time.mean_ns,
             result.php_execution_time.mean_ns,
             mean_improvement,
         });
-        
-        const median_improvement = (result.php_execution_time.median_ns - result.aot_execution_time.median_ns) / 
-                                   result.php_execution_time.median_ns * 100;
+
+        const median_improvement = (result.php_execution_time.median_ns - result.aot_execution_time.median_ns) /
+            result.php_execution_time.median_ns * 100;
         try writer.print("| 中位数 (ns) | {d:.2} | {d:.2} | {d:.1}% |\n", .{
             result.aot_execution_time.median_ns,
             result.php_execution_time.median_ns,
             median_improvement,
         });
-        
+
         try writer.print("| P95 (ns) | {d} | - | - |\n", .{result.aot_execution_time.p95_ns});
         try writer.print("| P99 (ns) | {d} | - | - |\n", .{result.aot_execution_time.p99_ns});
     }
-    
+
     /// 生成 HTML 报告
     fn generateHtmlReport(self: *Self, writer: anytype, result: AOTBenchmarkResult) !void {
         _ = self;
-        
+
         try writer.writeAll("<!DOCTYPE html>\n<html>\n<head>\n");
         try writer.writeAll("  <meta charset=\"UTF-8\">\n");
         try writer.print("  <title>AOT 性能测试报告: {s}</title>\n", .{result.test_name});
@@ -1087,15 +1088,15 @@ pub const AOTBenchmarkFramework = struct {
         try writer.writeAll("    .section { margin: 30px 0; }\n");
         try writer.writeAll("  </style>\n");
         try writer.writeAll("</head>\n<body>\n");
-        
+
         try writer.print("  <h1>AOT 性能测试报告: {s}</h1>\n", .{result.test_name});
         try writer.print("  <p>测试时间: {d}</p>\n", .{result.timestamp});
-        
+
         try writer.writeAll("  <div class=\"section\">\n");
         try writer.writeAll("    <h2>总体结果</h2>\n");
         try writer.print("    <p class=\"speedup\">加速比: {d:.2}x</p>\n", .{result.speedup});
         try writer.writeAll("  </div>\n");
-        
+
         try writer.writeAll("  <div class=\"section\">\n");
         try writer.writeAll("    <h2>编译时间</h2>\n");
         try writer.writeAll("    <table>\n");
@@ -1105,7 +1106,7 @@ pub const AOTBenchmarkFramework = struct {
         try writer.print("      <tr><td>标准差</td><td>{d:.2} ms</td></tr>\n", .{result.compile_time.std_dev_ms});
         try writer.writeAll("    </table>\n");
         try writer.writeAll("  </div>\n");
-        
+
         try writer.writeAll("  <div class=\"section\">\n");
         try writer.writeAll("    <h2>可执行文件大小</h2>\n");
         try writer.writeAll("    <table>\n");
@@ -1116,23 +1117,23 @@ pub const AOTBenchmarkFramework = struct {
         });
         try writer.writeAll("    </table>\n");
         try writer.writeAll("  </div>\n");
-        
+
         try writer.writeAll("  <div class=\"section\">\n");
         try writer.writeAll("    <h2>执行时间对比</h2>\n");
         try writer.writeAll("    <table>\n");
         try writer.writeAll("      <tr><th>指标</th><th>AOT</th><th>PHP</th><th>改进</th></tr>\n");
-        
-        const mean_improvement = (result.php_execution_time.mean_ns - result.aot_execution_time.mean_ns) / 
-                                 result.php_execution_time.mean_ns * 100;
+
+        const mean_improvement = (result.php_execution_time.mean_ns - result.aot_execution_time.mean_ns) /
+            result.php_execution_time.mean_ns * 100;
         try writer.print("      <tr><td>平均值 (ns)</td><td>{d:.2}</td><td>{d:.2}</td><td>{d:.1}%</td></tr>\n", .{
             result.aot_execution_time.mean_ns,
             result.php_execution_time.mean_ns,
             mean_improvement,
         });
-        
+
         try writer.writeAll("    </table>\n");
         try writer.writeAll("  </div>\n");
-        
+
         try writer.writeAll("</body>\n</html>\n");
     }
 };
@@ -1143,14 +1144,14 @@ pub const AOTBenchmarkFramework = struct {
 
 test "AOT benchmark framework initialization" {
     const allocator = std.testing.allocator;
-    
+
     var framework = try AOTBenchmarkFramework.init(allocator, .{
         .warmup_iterations = 5,
         .test_iterations = 10,
         .verbose = false,
     });
     defer framework.deinit();
-    
+
     try std.testing.expect(framework.config.warmup_iterations == 5);
     try std.testing.expect(framework.config.test_iterations == 10);
 }
@@ -1158,7 +1159,7 @@ test "AOT benchmark framework initialization" {
 test "CompileTimeStats computation" {
     const samples = [_]u64{ 100, 150, 200, 250, 300 };
     const stats = CompileTimeStats.compute(&samples);
-    
+
     try std.testing.expect(stats.mean_ms == 200.0);
     try std.testing.expect(stats.median_ms == 200.0);
     try std.testing.expect(stats.min_ms == 100);
@@ -1169,7 +1170,7 @@ test "CompileTimeStats computation" {
 test "ExecutionTimeStats computation" {
     const samples = [_]u64{ 1000, 1500, 2000, 2500, 3000 };
     const stats = ExecutionTimeStats.compute(&samples);
-    
+
     try std.testing.expect(stats.mean_ns == 2000.0);
     try std.testing.expect(stats.median_ns == 2000.0);
     try std.testing.expect(stats.min_ns == 1000);

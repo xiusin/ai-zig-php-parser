@@ -83,7 +83,7 @@ pub const BytecodeOptimizer = struct {
                     i += 1;
                     continue;
                 }
-                
+
                 const val1 = func.constants[inst1.operand1];
                 const val2 = func.constants[inst2.operand1];
 
@@ -113,13 +113,13 @@ pub const BytecodeOptimizer = struct {
             }
             i += 1;
         }
-        
+
         // 条件表达式折叠 (三元运算符优化)
         try self.foldConditionalExpressions(func);
     }
-    
+
     /// 条件表达式折叠 - 优化三元运算符 (true ? a : b)
-    /// 
+    ///
     /// 模式匹配：
     /// 1. push_const (bool), jz else_label, <then_branch>, jmp end_label, <else_branch>
     ///    -> 如果条件为常量true，直接执行then分支
@@ -129,33 +129,33 @@ pub const BytecodeOptimizer = struct {
         while (i + 1 < func.bytecode.len) {
             const inst1 = func.bytecode[i];
             const inst2 = func.bytecode[i + 1];
-            
+
             // 模式：push_const (bool), jz else_label
             if (inst1.opcode == .push_const and inst2.opcode == .jz) {
                 const cond_val = func.constants[inst1.operand1];
                 const else_label = inst2.operand1;
-                
+
                 // 检查条件是否为常量布尔值
                 const is_true = switch (cond_val) {
                     .bool_val => |b| b,
                     .int_val => |n| n != 0,
                     else => null,
                 };
-                
+
                 if (is_true) |cond| {
                     if (cond) {
                         // 条件为true：移除jz指令，保留then分支
                         // 需要找到对应的jmp end_label并移除
                         func.bytecode[i] = Instruction.init(.nop, 0, 0);
                         func.bytecode[i + 1] = Instruction.init(.nop, 0, 0);
-                        
+
                         // 查找并移除else分支的跳转
                         var j = i + 2;
                         while (j < func.bytecode.len and j < else_label) {
                             if (func.bytecode[j].opcode == .jmp) {
                                 const end_label = func.bytecode[j].operand1;
                                 func.bytecode[j] = Instruction.init(.nop, 0, 0);
-                                
+
                                 // 将else分支标记为死代码
                                 var k = else_label;
                                 while (k < end_label and k < func.bytecode.len) {
@@ -169,13 +169,13 @@ pub const BytecodeOptimizer = struct {
                             }
                             j += 1;
                         }
-                        
+
                         self.stats.constants_folded += 1;
                     } else {
                         // 条件为false：跳转到else分支，移除then分支
                         func.bytecode[i] = Instruction.init(.nop, 0, 0);
                         func.bytecode[i + 1] = Instruction.init(.jmp, else_label, 0);
-                        
+
                         // 将then分支标记为死代码
                         var j = i + 2;
                         while (j < else_label and j < func.bytecode.len) {
@@ -185,12 +185,12 @@ pub const BytecodeOptimizer = struct {
                             }
                             j += 1;
                         }
-                        
+
                         self.stats.constants_folded += 1;
                     }
                 }
             }
-            
+
             i += 1;
         }
     }
@@ -246,21 +246,21 @@ pub const BytecodeOptimizer = struct {
                 return @as(u16, @intCast(idx));
             }
         }
-        
+
         // 2. 不存在，添加到常量池
         const new_constants = try self.allocator.alloc(Value, func.constants.len + 1);
         @memcpy(new_constants[0..func.constants.len], func.constants);
         new_constants[func.constants.len] = value;
-        
+
         // 3. 释放旧常量池，更新指针
         if (func.constants.len > 0) {
             self.allocator.free(func.constants);
         }
         func.constants = new_constants;
-        
+
         return @as(u16, @intCast(func.constants.len - 1));
     }
-    
+
     /// 比较两个Value是否相等
     /// @pre val1 和 val2 必须有效
     /// @post 返回是否相等
@@ -269,7 +269,7 @@ pub const BytecodeOptimizer = struct {
         if (@as(std.meta.Tag(Value), val1) != @as(std.meta.Tag(Value), val2)) {
             return false;
         }
-        
+
         return switch (val1) {
             .null_val => true,
             .bool_val => |b1| val2.bool_val == b1,
@@ -403,43 +403,38 @@ pub const BytecodeOptimizer = struct {
         // 1. 分析循环内的指令，识别不变代码
         var invariant_instructions: std.ArrayListUnmanaged(usize) = .{};
         defer invariant_instructions.deinit(self.allocator);
-        
+
         // 2. 构建定义-使用链
         var def_use = try self.buildDefUseChain(func, start, end);
         defer def_use.deinit();
-        
+
         // 3. 识别循环不变量
         var i = start + 1;
         while (i < end) : (i += 1) {
             const inst = func.bytecode[i];
-            
+
             // 检查指令是否为循环不变
             if (try self.isLoopInvariant(func, inst, start, end, def_use)) {
                 try invariant_instructions.append(self.allocator, i);
             }
         }
-        
+
         // 4. 提升不变代码到循环前
         if (invariant_instructions.items.len > 0) {
             try self.hoistInstructions(func, invariant_instructions.items, start);
         }
     }
-    
+
     /// 构建定义-使用链
     /// @pre func, start, end 必须有效
     /// @post 返回变量的定义和使用位置映射
-    fn buildDefUseChain(
-        self: *BytecodeOptimizer,
-        func: *CompiledFunction,
-        start: usize,
-        end: usize
-    ) !std.AutoHashMap(u16, DefUseInfo) {
+    fn buildDefUseChain(self: *BytecodeOptimizer, func: *CompiledFunction, start: usize, end: usize) !std.AutoHashMap(u16, DefUseInfo) {
         var chain = std.AutoHashMap(u16, DefUseInfo).init(self.allocator);
-        
+
         var i = start;
         while (i < end) : (i += 1) {
             const inst = func.bytecode[i];
-            
+
             // 记录定义
             switch (inst.opcode) {
                 .store_local, .store_global => {
@@ -451,7 +446,7 @@ pub const BytecodeOptimizer = struct {
                     try info.definitions.append(self.allocator, i);
                     try chain.put(var_id, info);
                 },
-                
+
                 // 记录使用
                 .push_local, .push_global => {
                     const var_id = inst.operand1;
@@ -462,49 +457,42 @@ pub const BytecodeOptimizer = struct {
                     try info.uses.append(self.allocator, i);
                     try chain.put(var_id, info);
                 },
-                
+
                 else => {},
             }
         }
-        
+
         return chain;
     }
-    
+
     /// 定义-使用信息
     const DefUseInfo = struct {
         definitions: std.ArrayListUnmanaged(usize),
         uses: std.ArrayListUnmanaged(usize),
-        
+
         pub fn deinit(self: *DefUseInfo, allocator: std.mem.Allocator) void {
             self.definitions.deinit(allocator);
             self.uses.deinit(allocator);
         }
     };
-    
+
     /// 判断指令是否为循环不变
     /// @pre inst, start, end, def_use 必须有效
     /// @post 返回指令是否不依赖循环变量
-    fn isLoopInvariant(
-        _: *BytecodeOptimizer,
-        func: *CompiledFunction,
-        inst: Instruction,
-        start: usize,
-        end: usize,
-        def_use: std.AutoHashMap(u16, DefUseInfo)
-    ) !bool {
+    fn isLoopInvariant(_: *BytecodeOptimizer, func: *CompiledFunction, inst: Instruction, start: usize, end: usize, def_use: std.AutoHashMap(u16, DefUseInfo)) !bool {
         _ = func;
-        
+
         // 1. 不能有副作用（调用、I/O、异常）
         if (inst.opcode.isCall() or inst.opcode == .throw or inst.opcode == .yield_val) {
             return false;
         }
-        
+
         // 2. 不能修改循环变量
         switch (inst.opcode) {
             .store_local, .store_global => return false,
             else => {},
         }
-        
+
         // 3. 操作数必须是常量或循环外定义的变量
         switch (inst.opcode) {
             .push_local, .push_global => {
@@ -518,54 +506,46 @@ pub const BytecodeOptimizer = struct {
                     }
                 }
             },
-            
+
             .push_const => {
                 // 常量总是不变的
                 return true;
             },
-            
+
             else => {},
         }
-        
+
         return true;
     }
-    
+
     /// 提升指令到循环前
     /// @pre positions 必须有效且排序
     /// @post 指令被移动到 loop_start 之前
-    fn hoistInstructions(
-        self: *BytecodeOptimizer,
-        func: *CompiledFunction,
-        positions: []const usize,
-        loop_start: usize
-    ) !void {
+    fn hoistInstructions(self: *BytecodeOptimizer, func: *CompiledFunction, positions: []const usize, loop_start: usize) !void {
         // 1. 收集要提升的指令
         var hoisted: std.ArrayListUnmanaged(Instruction) = .{};
         defer hoisted.deinit(self.allocator);
-        
+
         for (positions) |pos| {
             try hoisted.append(self.allocator, func.bytecode[pos]);
             // 将原位置标记为nop
             func.bytecode[pos] = Instruction.init(.nop, 0, 0);
         }
-        
+
         // 2. 在循环前插入提升的指令
         // 注意：这需要重新分配字节码数组
         const new_len = func.bytecode.len + hoisted.items.len;
         const new_bytecode = try self.allocator.alloc(Instruction, new_len);
-        
+
         // 复制循环前的代码
         @memcpy(new_bytecode[0..loop_start], func.bytecode[0..loop_start]);
-        
+
         // 插入提升的指令
-        @memcpy(new_bytecode[loop_start..loop_start + hoisted.items.len], hoisted.items);
-        
+        @memcpy(new_bytecode[loop_start .. loop_start + hoisted.items.len], hoisted.items);
+
         // 复制循环及之后的代码
-        @memcpy(
-            new_bytecode[loop_start + hoisted.items.len..],
-            func.bytecode[loop_start..]
-        );
-        
+        @memcpy(new_bytecode[loop_start + hoisted.items.len ..], func.bytecode[loop_start..]);
+
         // 更新字节码
         self.allocator.free(func.bytecode);
         func.bytecode = new_bytecode;
@@ -596,7 +576,7 @@ pub const BytecodeOptimizer = struct {
         var i: usize = 0;
         while (i + 1 < func.bytecode.len) : (i += 1) {
             const inst = func.bytecode[i];
-            
+
             switch (inst.opcode) {
                 // 乘法优化
                 .mul_int => {
@@ -607,7 +587,7 @@ pub const BytecodeOptimizer = struct {
                             const val = func.constants[const_idx];
                             if (val == .int_val) {
                                 const n = val.int_val;
-                                
+
                                 // 乘以0 -> pop + push_int_0
                                 if (n == 0) {
                                     func.bytecode[i - 1] = Instruction.init(.pop, 0, 0);
@@ -618,22 +598,22 @@ pub const BytecodeOptimizer = struct {
                                 else if (n > 0 and (n & (n - 1)) == 0) {
                                     // 计算移位量
                                     const shift = @ctz(n);
-                                    
+
                                     // 创建移位量常量
                                     const shift_val = Value{ .int_val = shift };
                                     const shift_idx = try self.addConstant(func, shift_val);
-                                    
+
                                     // 替换为左移
                                     func.bytecode[i - 1] = Instruction.init(.push_const, shift_idx, 0);
                                     func.bytecode[i] = Instruction.init(.shl, 0, 0);
-                                    
+
                                     self.stats.constants_folded += 1;
                                 }
                             }
                         }
                     }
                 },
-                
+
                 // 浮点乘法优化
                 .mul_float => {
                     if (i > 0 and func.bytecode[i - 1].opcode == .push_const) {
@@ -652,7 +632,7 @@ pub const BytecodeOptimizer = struct {
                         }
                     }
                 },
-                
+
                 // 除以2的幂 -> 右移
                 .div_int => {
                     if (i > 0 and func.bytecode[i - 1].opcode == .push_const) {
@@ -665,17 +645,17 @@ pub const BytecodeOptimizer = struct {
                                     const shift = @ctz(n);
                                     const shift_val = Value{ .int_val = shift };
                                     const shift_idx = try self.addConstant(func, shift_val);
-                                    
+
                                     func.bytecode[i - 1] = Instruction.init(.push_const, shift_idx, 0);
                                     func.bytecode[i] = Instruction.init(.shr, 0, 0);
-                                    
+
                                     self.stats.constants_folded += 1;
                                 }
                             }
                         }
                     }
                 },
-                
+
                 // 模2的幂 -> 位与
                 .mod_int => {
                     if (i > 0 and func.bytecode[i - 1].opcode == .push_const) {
@@ -689,17 +669,17 @@ pub const BytecodeOptimizer = struct {
                                     const mask = n - 1;
                                     const mask_val = Value{ .int_val = mask };
                                     const mask_idx = try self.addConstant(func, mask_val);
-                                    
+
                                     func.bytecode[i - 1] = Instruction.init(.push_const, mask_idx, 0);
                                     func.bytecode[i] = Instruction.init(.bit_and, 0, 0);
-                                    
+
                                     self.stats.constants_folded += 1;
                                 }
                             }
                         }
                     }
                 },
-                
+
                 // 幂运算优化
                 .pow_int => {
                     if (i > 0 and func.bytecode[i - 1].opcode == .push_const) {
@@ -708,7 +688,7 @@ pub const BytecodeOptimizer = struct {
                             const val = func.constants[const_idx];
                             if (val == .int_val) {
                                 const exp = val.int_val;
-                                
+
                                 // x^0 -> 1
                                 if (exp == 0) {
                                     func.bytecode[i - 1] = Instruction.init(.pop, 0, 0);
@@ -731,7 +711,7 @@ pub const BytecodeOptimizer = struct {
                         }
                     }
                 },
-                
+
                 else => {},
             }
         }
@@ -1028,28 +1008,28 @@ test "conditional expression folding - true condition" {
         .line_table = &[_]CompiledFunction.LineInfo{},
         .exception_table = &[_]CompiledFunction.ExceptionEntry{},
     };
-    
+
     // 模拟字节码：push_const(true), jz(5), push_const(10), jmp(6), push_const(20)
     var bytecode = [_]Instruction{
         Instruction.init(.push_const, 0, 0), // true
-        Instruction.init(.jz, 4, 0),         // jump to else if false
+        Instruction.init(.jz, 4, 0), // jump to else if false
         Instruction.init(.push_const, 1, 0), // then: 10
-        Instruction.init(.jmp, 5, 0),        // jump to end
+        Instruction.init(.jmp, 5, 0), // jump to end
         Instruction.init(.push_const, 2, 0), // else: 20
-        Instruction.init(.nop, 0, 0),        // end
+        Instruction.init(.nop, 0, 0), // end
     };
     func.bytecode = &bytecode;
-    
+
     var constants = [_]Value{
-        Value{ .bool_val = true },  // 0
-        Value{ .int_val = 10 },     // 1
-        Value{ .int_val = 20 },     // 2
+        Value{ .bool_val = true }, // 0
+        Value{ .int_val = 10 }, // 1
+        Value{ .int_val = 20 }, // 2
     };
     func.constants = &constants;
-    
+
     var opt = BytecodeOptimizer.init(std.testing.allocator, .basic);
     try opt.constantFolding(&func);
-    
+
     // 验证：条件和jz应该被移除，else分支应该被标记为nop
     try std.testing.expect(func.bytecode[0].opcode == .nop);
     try std.testing.expect(func.bytecode[1].opcode == .nop);
@@ -1069,28 +1049,28 @@ test "conditional expression folding - false condition" {
         .line_table = &[_]CompiledFunction.LineInfo{},
         .exception_table = &[_]CompiledFunction.ExceptionEntry{},
     };
-    
+
     // 模拟字节码：push_const(false), jz(5), push_const(10), jmp(6), push_const(20)
     var bytecode = [_]Instruction{
         Instruction.init(.push_const, 0, 0), // false
-        Instruction.init(.jz, 4, 0),         // jump to else if false
+        Instruction.init(.jz, 4, 0), // jump to else if false
         Instruction.init(.push_const, 1, 0), // then: 10
-        Instruction.init(.jmp, 5, 0),        // jump to end
+        Instruction.init(.jmp, 5, 0), // jump to end
         Instruction.init(.push_const, 2, 0), // else: 20
-        Instruction.init(.nop, 0, 0),        // end
+        Instruction.init(.nop, 0, 0), // end
     };
     func.bytecode = &bytecode;
-    
+
     var constants = [_]Value{
         Value{ .bool_val = false }, // 0
-        Value{ .int_val = 10 },     // 1
-        Value{ .int_val = 20 },     // 2
+        Value{ .int_val = 10 }, // 1
+        Value{ .int_val = 20 }, // 2
     };
     func.constants = &constants;
-    
+
     var opt = BytecodeOptimizer.init(std.testing.allocator, .basic);
     try opt.constantFolding(&func);
-    
+
     // 验证：条件应该被移除，jz变为jmp，then分支应该被标记为nop
     try std.testing.expect(func.bytecode[0].opcode == .nop);
     try std.testing.expect(func.bytecode[1].opcode == .jmp);
@@ -1110,7 +1090,7 @@ test "conditional expression folding - integer condition" {
         .line_table = &[_]CompiledFunction.LineInfo{},
         .exception_table = &[_]CompiledFunction.ExceptionEntry{},
     };
-    
+
     var bytecode = [_]Instruction{
         Instruction.init(.push_const, 0, 0), // 1 (true)
         Instruction.init(.jz, 4, 0),
@@ -1120,17 +1100,17 @@ test "conditional expression folding - integer condition" {
         Instruction.init(.nop, 0, 0),
     };
     func.bytecode = &bytecode;
-    
+
     var constants = [_]Value{
-        Value{ .int_val = 1 },      // 0 (非零 = true)
-        Value{ .int_val = 10 },     // 1
-        Value{ .int_val = 20 },     // 2
+        Value{ .int_val = 1 }, // 0 (非零 = true)
+        Value{ .int_val = 10 }, // 1
+        Value{ .int_val = 20 }, // 2
     };
     func.constants = &constants;
-    
+
     var opt = BytecodeOptimizer.init(std.testing.allocator, .basic);
     try opt.constantFolding(&func);
-    
+
     // 验证：整数1应该被当作true处理
     try std.testing.expect(func.bytecode[0].opcode == .nop);
     try std.testing.expect(func.bytecode[1].opcode == .nop);

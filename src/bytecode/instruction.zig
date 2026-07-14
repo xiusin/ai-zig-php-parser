@@ -91,6 +91,8 @@ pub const OpCode = enum(u8) {
     bit_not = 0x1C,
     shl = 0x1D, // 左移
     shr = 0x1E, // 右移
+    inc_global = 0x1F, // 全局变量自增（operand1 = 常量池索引）
+    dec_global = 0x0E, // 全局变量自减（operand1 = 常量池索引）
 
     // ========== 浮点算术 (0x20-0x2F) ==========
     add_float = 0x20,
@@ -348,7 +350,7 @@ pub const CompiledFunction = struct {
     flags: FunctionFlags,
     line_table: []LineInfo,
     exception_table: []ExceptionEntry,
-    
+
     // 新增：参数信息（用于完整的参数处理）
     param_info: []ParameterInfo = &[_]ParameterInfo{},
     param_count: u16 = 0,
@@ -367,19 +369,19 @@ pub const CompiledFunction = struct {
         is_closure: bool = false,
         _padding: u1 = 0,
     };
-    
+
     /// 参数信息
     pub const ParameterInfo = struct {
         name: []const u8,
         pass_mode: PassMode,
         default_value: ?Value,
         type_hint: ?TypeHint,
-        
+
         pub const PassMode = enum {
             by_value,
             by_reference,
         };
-        
+
         pub const TypeHint = enum {
             int,
             float,

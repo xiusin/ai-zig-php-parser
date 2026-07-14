@@ -155,6 +155,33 @@ pub const Parser = struct {
         return out.toOwnedSlice(self.allocator);
     }
 
+    /// 单引号字符串转义处理：仅 \\ -> \，\' -> '
+    fn unescapeSingleQuoted(self: *Parser, input: []const u8) anyerror![]u8 {
+        var out = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+        errdefer out.deinit(self.allocator);
+        try out.ensureTotalCapacity(self.allocator, input.len);
+
+        var i: usize = 0;
+        while (i < input.len) : (i += 1) {
+            const c = input[i];
+            if (c == '\\' and i + 1 < input.len) {
+                const n = input[i + 1];
+                if (n == '\\') {
+                    try out.append(self.allocator, '\\');
+                    i += 1;
+                    continue;
+                } else if (n == '\'') {
+                    try out.append(self.allocator, '\'');
+                    i += 1;
+                    continue;
+                }
+            }
+            try out.append(self.allocator, c);
+        }
+
+        return out.toOwnedSlice(self.allocator);
+    }
+
     fn eat(self: *Parser, tag: Token.Tag) anyerror!Token {
         if (self.curr.tag == tag) {
             const t = self.curr;
@@ -723,7 +750,10 @@ pub const Parser = struct {
             const is_arrow = self.curr.tag == .k_fn;
             const token = try self.eat(if (is_arrow) .k_fn else .k_function);
             // Support return-by-reference: function &methodName()
-            if (self.curr.tag == .ampersand) self.nextToken();
+            const method_returns_ref = if (self.curr.tag == .ampersand) blk: {
+                self.nextToken();
+                break :blk true;
+            } else false;
             // Method name: t_string, t_go_identifier, or any PHP keyword (context-sensitive)
             const name_tok = if (self.curr.tag == .t_go_identifier)
                 try self.eat(.t_go_identifier)
@@ -731,7 +761,8 @@ pub const Parser = struct {
                 try self.eat(.t_string)
             else if (self.eatKeywordAsIdentifier()) |tok|
                 tok
-            else try self.eat(.t_string);
+            else
+                try self.eat(.t_string);
             const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
             _ = try self.eat(.l_paren);
             var params = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
@@ -768,7 +799,7 @@ pub const Parser = struct {
                 }
                 break :blk try self.parseBlock();
             };
-            return self.createNode(.{ .tag = .method_decl, .main_token = token, .data = .{ .method_decl = .{ .attributes = attributes, .name = name_id, .modifiers = modifiers, .params = try self.context.arena.allocator().dupe(ast.Node.Index, params.items), .return_type = return_type, .body = body } } });
+            return self.createNode(.{ .tag = .method_decl, .main_token = token, .data = .{ .method_decl = .{ .attributes = attributes, .name = name_id, .modifiers = modifiers, .params = try self.context.arena.allocator().dupe(ast.Node.Index, params.items), .return_type = return_type, .body = body, .returns_reference = method_returns_ref } } });
         } else {
             const token = self.curr;
             var type_node: ?ast.Node.Index = null;
@@ -779,7 +810,8 @@ pub const Parser = struct {
                 self.curr.tag == .k_static or self.curr.tag == .k_self or self.curr.tag == .k_parent or
                 self.curr.tag == .k_void or self.curr.tag == .k_mixed or self.curr.tag == .k_never or
                 self.curr.tag == .k_object or self.curr.tag == .k_iterable or self.curr.tag == .k_null or
-                self.curr.tag == .k_true or self.curr.tag == .k_false)
+                self.curr.tag == .k_true or self.curr.tag == .k_false or
+                self.curr.tag == .l_paren)
             {
                 // In Go mode, we need to check if this is a type or a property name
                 // If followed by another identifier or $variable, it's a type
@@ -902,7 +934,10 @@ pub const Parser = struct {
             const is_arrow = self.curr.tag == .k_fn;
             const token = try self.eat(if (is_arrow) .k_fn else .k_function);
             // Support return-by-reference: function &methodName()
-            if (self.curr.tag == .ampersand) self.nextToken();
+            const method_returns_ref = if (self.curr.tag == .ampersand) blk: {
+                self.nextToken();
+                break :blk true;
+            } else false;
             // Method name: t_string, t_go_identifier, or any PHP keyword (context-sensitive)
             const name_tok = if (self.curr.tag == .t_go_identifier)
                 try self.eat(.t_go_identifier)
@@ -910,7 +945,8 @@ pub const Parser = struct {
                 try self.eat(.t_string)
             else if (self.eatKeywordAsIdentifier()) |tok|
                 tok
-            else try self.eat(.t_string);
+            else
+                try self.eat(.t_string);
             const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
             _ = try self.eat(.l_paren);
             var params = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
@@ -950,7 +986,7 @@ pub const Parser = struct {
 
             // For arrow functions, we need to create a method_decl node
             // For now, create a method_decl with the arrow function as body
-            return self.createNode(.{ .tag = .method_decl, .main_token = token, .data = .{ .method_decl = .{ .attributes = attributes, .name = name_id, .modifiers = modifiers, .params = try self.context.arena.allocator().dupe(ast.Node.Index, params.items), .return_type = return_type, .body = body } } });
+            return self.createNode(.{ .tag = .method_decl, .main_token = token, .data = .{ .method_decl = .{ .attributes = attributes, .name = name_id, .modifiers = modifiers, .params = try self.context.arena.allocator().dupe(ast.Node.Index, params.items), .return_type = return_type, .body = body, .returns_reference = method_returns_ref } } });
         } else {
             const token = self.curr;
             var type_node: ?ast.Node.Index = null;
@@ -961,7 +997,8 @@ pub const Parser = struct {
                 self.curr.tag == .k_static or self.curr.tag == .k_self or self.curr.tag == .k_parent or
                 self.curr.tag == .k_void or self.curr.tag == .k_mixed or self.curr.tag == .k_never or
                 self.curr.tag == .k_object or self.curr.tag == .k_iterable or self.curr.tag == .k_null or
-                self.curr.tag == .k_true or self.curr.tag == .k_false)
+                self.curr.tag == .k_true or self.curr.tag == .k_false or
+                self.curr.tag == .l_paren)
             {
                 // In Go mode, we need to check if this is a type or a property name
                 // If followed by another identifier or $variable, it's a type
@@ -1096,7 +1133,8 @@ pub const Parser = struct {
             self.namespace_style = 2;
             self.context.current_namespace = null;
             const body = try self.parseBlock();
-            return body;
+            const empty_name = try self.context.intern("");
+            return self.createNode(.{ .tag = .namespace_stmt, .main_token = token, .data = .{ .namespace_stmt = .{ .name = empty_name, .body = body } } });
         }
 
         const name_tok = try self.eat(.t_string);
@@ -1111,7 +1149,7 @@ pub const Parser = struct {
             }
             self.namespace_style = 2;
             const body = try self.parseBlock();
-            return body;
+            return self.createNode(.{ .tag = .namespace_stmt, .main_token = token, .data = .{ .namespace_stmt = .{ .name = name_id, .body = body } } });
         }
 
         // Handle namespace with semicolon: namespace Foo;
@@ -1121,7 +1159,7 @@ pub const Parser = struct {
         }
         self.namespace_style = 1;
         _ = try self.eat(.semicolon);
-        return self.createNode(.{ .tag = .namespace_stmt, .main_token = token, .data = .{ .namespace_stmt = .{ .name = name_id } } });
+        return self.createNode(.{ .tag = .namespace_stmt, .main_token = token, .data = .{ .namespace_stmt = .{ .name = name_id, .body = null } } });
     }
 
     fn parseUse(self: *Parser) anyerror!ast.Node.Index {
@@ -1183,7 +1221,12 @@ pub const Parser = struct {
             const member_text = self.lexer.buffer[member_tok.loc.start..member_tok.loc.end];
 
             // Build full name: prefix + \\ + member
-            const full_name = try std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ prefix, member_text });
+            // Trim trailing backslash from prefix to avoid double backslash (e.g., "Test\Namespace\" + "\" + "myFunction" → "Test\Namespace\\myFunction")
+            const clean_prefix = if (prefix.len > 0 and prefix[prefix.len - 1] == '\\')
+                prefix[0 .. prefix.len - 1]
+            else
+                prefix;
+            const full_name = try std.fmt.allocPrint(self.allocator, "{s}\\{s}", .{ clean_prefix, member_text });
             const full_id = try self.context.intern(full_name);
 
             // Extract alias (last part or explicit)
@@ -1321,7 +1364,7 @@ pub const Parser = struct {
             } else if (self.curr.tag == .k_use) {
                 try members.append(self.allocator, try self.parseTraitUse());
             } else {
-                try members.append(self.allocator, try self.parseClassMember(&.{}, is_interface));
+                try members.append(self.allocator, try self.parseClassMember(member_attributes, is_interface));
             }
         }
         _ = try self.eat(.r_brace);
@@ -1400,12 +1443,14 @@ pub const Parser = struct {
         // Handle type declarations including nullable (?type), array, callable, etc.
         // t_string covers user types and built-in types like int, float, string, bool
         // In Go mode, t_go_identifier can also be a type name
+        // l_paren supports DNF types (PHP 8.2+): (A&B)|C
         if (self.curr.tag == .t_string or self.curr.tag == .t_go_identifier or self.curr.tag == .question or
             self.curr.tag == .k_array or self.curr.tag == .k_callable or
             self.curr.tag == .k_static or self.curr.tag == .k_self or self.curr.tag == .k_parent or
             self.curr.tag == .k_void or self.curr.tag == .k_mixed or self.curr.tag == .k_never or
             self.curr.tag == .k_object or self.curr.tag == .k_iterable or self.curr.tag == .k_null or
-            self.curr.tag == .k_true or self.curr.tag == .k_false)
+            self.curr.tag == .k_true or self.curr.tag == .k_false or
+            self.curr.tag == .l_paren)
         {
             type_node = try self.parseType();
         }
@@ -1447,16 +1492,16 @@ pub const Parser = struct {
         _ = try self.eat(.l_paren);
         const cond = try self.parseExpression(0);
         _ = try self.eat(.r_paren);
-        
+
         // 检查是否是替代语法 (if ...): ... endif;
         const is_alternative = self.curr.tag == .colon;
         if (is_alternative) {
             _ = try self.eat(.colon);
         }
-        
+
         const then = if (is_alternative) try self.parseAlternativeBody(.k_endif) else try self.parseStatement();
         var else_branch: ?ast.Node.Index = null;
-        
+
         if (is_alternative) {
             // 替代语法：处理 elseif/else 直到 endif
             if (self.curr.tag == .k_elseif) {
@@ -1529,7 +1574,7 @@ pub const Parser = struct {
         _ = try self.eat(.l_paren);
         const cond = try self.parseExpression(0);
         _ = try self.eat(.r_paren);
-        
+
         // 检查是否是替代语法 (while ...): ... endwhile;
         const is_alternative = self.curr.tag == .colon;
         if (is_alternative) {
@@ -1539,7 +1584,7 @@ pub const Parser = struct {
             _ = try self.eat(.semicolon);
             return self.createNode(.{ .tag = .while_stmt, .main_token = token, .data = .{ .while_stmt = .{ .condition = cond, .body = body } } });
         }
-        
+
         const body = try self.parseStatement();
         return self.createNode(.{ .tag = .while_stmt, .main_token = token, .data = .{ .while_stmt = .{ .condition = cond, .body = body } } });
     }
@@ -1586,7 +1631,7 @@ pub const Parser = struct {
 
         // 检查是否是 list() 解构语法
         const is_list_destruct = self.curr.tag == .k_list;
-        
+
         // 解析第一个表达式（可能是 list() 解构）
         const first_expr = if (is_list_destruct)
             try self.parseListExpression()
@@ -1608,7 +1653,7 @@ pub const Parser = struct {
                 _ = try self.eat(.ampersand);
                 value_by_ref = true;
             }
-            
+
             // 检查值是否也是 list() 解构
             value = if (self.curr.tag == .k_list)
                 try self.parseListExpression()
@@ -1810,6 +1855,18 @@ pub const Parser = struct {
 
     fn parseConst(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.k_const);
+        // 支持类型化常量: const TYPE NAME = value; (PHP 8.3+)
+        // 如果 curr 是类型 token 且 peek 不是 '=' 或 ',', 则为类型注解
+        const is_typed: bool = switch (self.curr.tag) {
+            .question => true,
+            .k_array, .k_callable, .k_self, .k_parent, .k_static, .k_iterable, .k_mixed, .k_void, .k_never, .k_object, .k_null, .k_true, .k_false => self.peek.tag != .equal and self.peek.tag != .comma,
+            .t_string => self.peek.tag != .equal and self.peek.tag != .comma,
+            .l_paren => true,
+            else => false,
+        };
+        if (is_typed) {
+            _ = try self.parseType();
+        }
         const name_tok = try self.eat(.t_string);
         const raw_name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
         const name_id = try self.context.resolveName(raw_name_id);
@@ -1899,13 +1956,14 @@ pub const Parser = struct {
         var exprs = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
         defer exprs.deinit(self.allocator);
 
-        // Parse first expression
-        try exprs.append(self.allocator, try self.parseExpression(0));
+        // Parse first expression (precedence 2 > comma operator precedence 1,
+        // so comma acts as echo separator, not comma operator)
+        try exprs.append(self.allocator, try self.parseExpression(2));
 
         // Parse additional expressions separated by commas
         while (self.curr.tag == .comma) {
             self.nextToken();
-            try exprs.append(self.allocator, try self.parseExpression(0));
+            try exprs.append(self.allocator, try self.parseExpression(2));
         }
 
         _ = try self.eat(.semicolon);
@@ -1917,6 +1975,9 @@ pub const Parser = struct {
         const node = self.context.nodes.items[node_idx];
         return switch (node.tag) {
             .variable, .variable_variable, .array_access, .property_access, .variable_property_access, .static_property_access => true,
+            // 引用返回的函数调用可以作为赋值目标：func() = value
+            // PHP要求函数声明为 function &func()，但parser阶段不检查返回引用标记
+            .function_call => true,
             else => false,
         };
     }
@@ -1931,7 +1992,13 @@ pub const Parser = struct {
         const op = try self.eat(.equal);
 
         if (!self.isValidAssignmentTarget(target)) {
-            self.reportError("Can't use function return value in write context");
+            // 对于函数调用，错误消息更具体
+            const target_node = self.context.nodes.items[target];
+            if (target_node.tag == .function_call) {
+                self.reportError("Can't use function return value in write context (function must be declared as returning reference)");
+            } else {
+                self.reportError("Can't use function return value in write context");
+            }
             return error.ParseError;
         }
 
@@ -1967,11 +2034,11 @@ pub const Parser = struct {
                 const key_token = self.curr;
                 const key_text = self.lexer.buffer[key_token.loc.start..key_token.loc.end];
                 self.nextToken();
-                
+
                 if (self.curr.tag == .fat_arrow) {
                     // Keyed destructuring: 'key' => target
                     self.nextToken(); // consume =>
-                    
+
                     // Parse key as string literal (strip quotes if present)
                     var key_content = key_text;
                     if (key_content.len >= 2 and (key_content[0] == '\'' or key_content[0] == '"')) {
@@ -1979,10 +2046,10 @@ pub const Parser = struct {
                     }
                     const key_id = try self.context.internLiteral(key_content);
                     const key_node = try self.createNode(.{ .tag = .literal_string, .main_token = key_token, .data = .{ .literal_string = .{ .value = key_id } } });
-                    
+
                     // Parse the target (variable or nested array)
                     const target_node = try self.parseDestructuringTarget();
-                    
+
                     // Create array_pair node
                     const pair_node = try self.createNode(.{ .tag = .array_pair, .main_token = key_token, .data = .{ .array_pair = .{ .key = key_node, .value = target_node } } });
                     try targets.append(self.allocator, pair_node);
@@ -1997,11 +2064,8 @@ pub const Parser = struct {
                 const nested_node = try self.parseNestedDestructuringArray();
                 try targets.append(self.allocator, nested_node);
             } else if (self.curr.tag == .t_variable) {
-                const var_name = self.curr;
-                const name_id = try self.context.intern(self.lexer.buffer[var_name.loc.start..var_name.loc.end]);
-                const var_node = try self.createNode(.{ .tag = .variable, .main_token = var_name, .data = .{ .variable = .{ .name = name_id } } });
-                try targets.append(self.allocator, var_node);
-                self.nextToken();
+                const target_node = try self.parseDestructuringTarget();
+                try targets.append(self.allocator, target_node);
             } else {
                 self.nextToken();
                 continue;
@@ -2027,7 +2091,7 @@ pub const Parser = struct {
         const bracket_token = self.curr;
         _ = try self.eat(.l_bracket);
         var nested_targets = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
-        
+
         while (self.curr.tag != .r_bracket and self.curr.tag != .eof) {
             if (self.curr.tag == .comma) {
                 const empty_token = Token{ .tag = .comma, .loc = .{ .start = self.lexer.pos, .end = self.lexer.pos } };
@@ -2036,13 +2100,13 @@ pub const Parser = struct {
                 self.nextToken();
                 continue;
             }
-            
+
             // Check for keyed destructuring in nested array
             if (self.curr.tag == .t_constant_encapsed_string or self.curr.tag == .t_string) {
                 const key_token = self.curr;
                 const key_text = self.lexer.buffer[key_token.loc.start..key_token.loc.end];
                 self.nextToken();
-                
+
                 if (self.curr.tag == .fat_arrow) {
                     self.nextToken(); // consume =>
                     var key_content = key_text;
@@ -2058,11 +2122,8 @@ pub const Parser = struct {
                     continue;
                 }
             } else if (self.curr.tag == .t_variable) {
-                const var_name = self.curr;
-                const name_id = try self.context.intern(self.lexer.buffer[var_name.loc.start..var_name.loc.end]);
-                const var_node = try self.createNode(.{ .tag = .variable, .main_token = var_name, .data = .{ .variable = .{ .name = name_id } } });
-                try nested_targets.append(self.allocator, var_node);
-                self.nextToken();
+                const target_node = try self.parseDestructuringTarget();
+                try nested_targets.append(self.allocator, target_node);
             } else if (self.curr.tag == .l_bracket) {
                 const inner_nested = try self.parseNestedDestructuringArray();
                 try nested_targets.append(self.allocator, inner_nested);
@@ -2070,7 +2131,7 @@ pub const Parser = struct {
                 self.nextToken();
                 continue;
             }
-            
+
             if (self.curr.tag == .comma) {
                 self.nextToken();
                 if (self.curr.tag == .r_bracket) break;
@@ -2081,13 +2142,43 @@ pub const Parser = struct {
         return self.createNode(.{ .tag = .list_assignment, .main_token = bracket_token, .data = .{ .list_assignment = .{ .targets = try arena.dupe(ast.Node.Index, nested_targets.items), .value = 0 } } });
     }
 
-    /// Parse a destructuring target (variable or nested array)
+    /// Parse a destructuring target (variable, array access, property access, or nested array)
     fn parseDestructuringTarget(self: *Parser) anyerror!ast.Node.Index {
         if (self.curr.tag == .t_variable) {
             const var_name = self.curr;
             const name_id = try self.context.intern(self.lexer.buffer[var_name.loc.start..var_name.loc.end]);
             self.nextToken();
-            return self.createNode(.{ .tag = .variable, .main_token = var_name, .data = .{ .variable = .{ .name = name_id } } });
+            var node = try self.createNode(.{ .tag = .variable, .main_token = var_name, .data = .{ .variable = .{ .name = name_id } } });
+            // Handle $var[$index] and $var->prop
+            while (true) {
+                if (self.curr.tag == .l_bracket) {
+                    const op = self.curr;
+                    self.nextToken();
+                    var index: ?ast.Node.Index = null;
+                    if (self.curr.tag != .r_bracket) {
+                        index = try self.parseExpression(1);
+                    }
+                    _ = try self.eat(.r_bracket);
+                    node = try self.createNode(.{ .tag = .array_access, .main_token = op, .data = .{ .array_access = .{ .target = node, .index = index } } });
+                } else if (self.curr.tag == .arrow) {
+                    const op = self.curr;
+                    self.nextToken();
+                    // Property name can be t_string or a keyword used as identifier
+                    const prop_token: Token = if (self.curr.tag == .t_string) blk: {
+                        const tok = self.curr;
+                        self.nextToken();
+                        break :blk tok;
+                    } else if (self.eatKeywordAsIdentifier()) |tok|
+                        tok
+                    else
+                        break;
+                    const prop_id = try self.context.intern(self.lexer.buffer[prop_token.loc.start..prop_token.loc.end]);
+                    node = try self.createNode(.{ .tag = .property_access, .main_token = op, .data = .{ .property_access = .{ .target = node, .property_name = prop_id } } });
+                } else {
+                    break;
+                }
+            }
+            return node;
         } else if (self.curr.tag == .l_bracket) {
             return self.parseNestedDestructuringArray();
         } else if (self.curr.tag == .k_list) {
@@ -2135,11 +2226,11 @@ pub const Parser = struct {
             } else {
                 // Check for keyed list: 'key' => $var or "key" => $var or 0 => $var
                 const is_keyed = (self.curr.tag == .t_string or self.curr.tag == .t_constant_encapsed_string or self.curr.tag == .t_lnumber or self.curr.tag == .t_dnumber) and self.peek.tag == .fat_arrow;
-                
+
                 if (is_keyed) {
                     // Parse keyed element: 'key' => $var
                     const key_token = self.curr;
-                    const key_tag = self.curr.tag;  // Save tag before nextToken
+                    const key_tag = self.curr.tag; // Save tag before nextToken
                     // Directly parse the key literal (string or number)
                     const key_expr = if (key_tag == .t_string or key_tag == .t_constant_encapsed_string) blk: {
                         const str_token = self.curr;
@@ -2147,7 +2238,7 @@ pub const Parser = struct {
                         // For t_constant_encapsed_string, remove quotes
                         const raw_str = self.lexer.buffer[str_token.loc.start..str_token.loc.end];
                         const str_content = if (key_tag == .t_constant_encapsed_string and raw_str.len >= 2)
-                            raw_str[1..raw_str.len-1]  // Remove quotes
+                            raw_str[1 .. raw_str.len - 1] // Remove quotes
                         else
                             raw_str;
                         const str_id = try self.context.intern(str_content);
@@ -2166,34 +2257,26 @@ pub const Parser = struct {
                         break :blk try self.createNode(.{ .tag = .literal_float, .main_token = num_token, .data = .{ .literal_float = .{ .value = num_val } } });
                     };
                     _ = try self.eat(.fat_arrow);
-                    
-                    // Parse the target (variable or nested list)
+
+                    // Parse the target (variable, array access, property access, or nested list)
                     const target_expr = if (self.curr.tag == .k_list)
                         try self.parseListExpression()
-                    else if (self.curr.tag == .t_variable) blk: {
-                        const var_name = self.curr;
-                        const name_id = try self.context.intern(self.lexer.buffer[var_name.loc.start..var_name.loc.end]);
-                        const var_node = try self.createNode(.{ .tag = .variable, .main_token = var_name, .data = .{ .variable = .{ .name = name_id } } });
-                        self.nextToken();
-                        break :blk var_node;
-                    } else {
+                    else if (self.curr.tag == .t_variable or self.curr.tag == .l_bracket)
+                        try self.parseDestructuringTarget()
+                    else {
                         return error.UnexpectedToken;
                     };
-                    
+
                     // Create array_pair node for keyed element
                     const pair_node = try self.createNode(.{ .tag = .array_pair, .main_token = key_token, .data = .{ .array_pair = .{ .key = key_expr, .value = target_expr } } });
                     try targets.append(self.allocator, pair_node);
-                    
+
                     // Skip comma if present
                     if (self.curr.tag == .comma) self.nextToken();
                 } else if (self.curr.tag == .t_variable) {
-                    // Single variable - get the variable name
-                    const var_name = self.curr;
-                    const name_id = try self.context.intern(self.lexer.buffer[var_name.loc.start..var_name.loc.end]);
-                    const var_node = try self.createNode(.{ .tag = .variable, .main_token = var_name, .data = .{ .variable = .{ .name = name_id } } });
-                    try targets.append(self.allocator, var_node);
-                    self.nextToken();
-                    
+                    const target_node = try self.parseDestructuringTarget();
+                    try targets.append(self.allocator, target_node);
+
                     // Skip comma if present
                     if (self.curr.tag == .comma) self.nextToken();
                 } else {
@@ -2247,11 +2330,11 @@ pub const Parser = struct {
             } else {
                 // Check for keyed list: 'key' => $var or "key" => $var or 0 => $var
                 const is_keyed = (self.curr.tag == .t_string or self.curr.tag == .t_constant_encapsed_string or self.curr.tag == .t_lnumber or self.curr.tag == .t_dnumber) and self.peek.tag == .fat_arrow;
-                
+
                 if (is_keyed) {
                     // Parse keyed element: 'key' => $var
                     const key_token = self.curr;
-                    const key_tag = self.curr.tag;  // Save tag before nextToken
+                    const key_tag = self.curr.tag; // Save tag before nextToken
                     // Directly parse the key literal (string or number)
                     const key_expr = if (key_tag == .t_string or key_tag == .t_constant_encapsed_string) blk: {
                         const str_token = self.curr;
@@ -2259,7 +2342,7 @@ pub const Parser = struct {
                         // For t_constant_encapsed_string, remove quotes
                         const raw_str = self.lexer.buffer[str_token.loc.start..str_token.loc.end];
                         const str_content = if (key_tag == .t_constant_encapsed_string and raw_str.len >= 2)
-                            raw_str[1..raw_str.len-1]  // Remove quotes
+                            raw_str[1 .. raw_str.len - 1] // Remove quotes
                         else
                             raw_str;
                         const str_id = try self.context.intern(str_content);
@@ -2278,33 +2361,26 @@ pub const Parser = struct {
                         break :blk try self.createNode(.{ .tag = .literal_float, .main_token = num_token, .data = .{ .literal_float = .{ .value = num_val } } });
                     };
                     _ = try self.eat(.fat_arrow);
-                    
-                    // Parse the target (variable or nested list)
+
+                    // Parse the target (variable, array access, property access, or nested list)
                     const target_expr = if (self.curr.tag == .k_list)
                         try self.parseListExpression()
-                    else if (self.curr.tag == .t_variable) blk: {
-                        const var_name = self.curr;
-                        const name_id = try self.context.intern(self.lexer.buffer[var_name.loc.start..var_name.loc.end]);
-                        const var_node = try self.createNode(.{ .tag = .variable, .main_token = var_name, .data = .{ .variable = .{ .name = name_id } } });
-                        self.nextToken();
-                        break :blk var_node;
-                    } else {
+                    else if (self.curr.tag == .t_variable or self.curr.tag == .l_bracket)
+                        try self.parseDestructuringTarget()
+                    else {
                         return error.UnexpectedToken;
                     };
-                    
+
                     // Create array_pair node for keyed element
                     const pair_node = try self.createNode(.{ .tag = .array_pair, .main_token = key_token, .data = .{ .array_pair = .{ .key = key_expr, .value = target_expr } } });
                     try targets.append(self.allocator, pair_node);
-                    
+
                     // Skip comma if present
                     if (self.curr.tag == .comma) self.nextToken();
                 } else if (self.curr.tag == .t_variable) {
-                    const var_name = self.curr;
-                    const name_id = try self.context.intern(self.lexer.buffer[var_name.loc.start..var_name.loc.end]);
-                    const var_node = try self.createNode(.{ .tag = .variable, .main_token = var_name, .data = .{ .variable = .{ .name = name_id } } });
-                    try targets.append(self.allocator, var_node);
-                    self.nextToken();
-                    
+                    const target_node = try self.parseDestructuringTarget();
+                    try targets.append(self.allocator, target_node);
+
                     // Skip comma if present
                     if (self.curr.tag == .comma) self.nextToken();
                 } else {
@@ -2379,37 +2455,40 @@ pub const Parser = struct {
                 else if (self.eatKeywordAsIdentifier()) |tok|
                     tok
                 else if (self.curr.tag == .t_variable) {
-                    // 可变属性: $obj->$varName
-                    const var_node = try self.parseUnary();
+                    // 可变属性: $obj->$varName — 只解析变量名，不解析后缀 (允许外层处理 $obj->$method() 的调用括号)
+                    const var_tok = try self.eat(.t_variable);
+                    const var_name = self.lexer.buffer[var_tok.loc.start..var_tok.loc.end];
+                    const var_name_id = try self.context.intern(var_name);
+                    const var_node = try self.createNode(.{ .tag = .variable, .main_token = var_tok, .data = .{ .variable = .{ .name = var_name_id } } });
                     left = try self.createNode(.{ .tag = .variable_property_access, .main_token = op, .data = .{ .variable_property_access = .{ .target = left, .prop_variable = var_node } } });
                     continue;
                 } else try self.eat(.t_string);
                 const member_id = try self.context.intern(self.lexer.buffer[member_name_tok.loc.start..member_name_tok.loc.end]);
                 if (self.curr.tag == .l_paren) {
                     self.nextToken();
-                    
+
                     // 检查是否是 first-class callable: $obj->method(...)
                     // 注意区分: method(...) 是 first-class callable, method(...$var) 是 spread
                     if (self.curr.tag == .ellipsis and self.peek.tag == .r_paren) {
                         self.nextToken();
                         _ = try self.eat(.r_paren);
-                        
+
                         // 创建一个闭包: fn(...$args) => $obj->method(...$args)
                         // 1. 创建可变参数 ...$args
                         const args_var_id = try self.context.intern("args");
                         const args_param = try self.createNode(.{ .tag = .parameter, .main_token = op, .data = .{ .parameter = .{ .attributes = &.{}, .name = args_var_id, .type = null, .default_value = null, .is_promoted = false, .modifiers = .{}, .is_variadic = true, .is_reference = false } } });
-                        
+
                         // 2. 创建 $args 变量引用
                         const args_var = try self.createNode(.{ .tag = .variable, .main_token = op, .data = .{ .variable = .{ .name = args_var_id } } });
-                        
+
                         // 3. 创建 ...$args (unpack)
                         const args_unpack = try self.createNode(.{ .tag = .unpacking_expr, .main_token = op, .data = .{ .unpacking_expr = .{ .expr = args_var } } });
-                        
+
                         // 4. 创建方法调用 $obj->method(...$args)
                         const method_call_args = try self.context.arena.allocator().alloc(ast.Node.Index, 1);
                         method_call_args[0] = args_unpack;
                         const method_call = try self.createNode(.{ .tag = .method_call, .main_token = op, .data = .{ .method_call = .{ .target = left, .method_name = member_id, .args = method_call_args } } });
-                        
+
                         // 5. 创建箭头函数
                         const arrow_params = try self.context.arena.allocator().alloc(ast.Node.Index, 1);
                         arrow_params[0] = args_param;
@@ -2434,7 +2513,8 @@ pub const Parser = struct {
                     try self.eat(.t_go_identifier)
                 else if (self.eatKeywordAsIdentifier()) |tok|
                     tok
-                else try self.eat(.t_string);
+                else
+                    try self.eat(.t_string);
                 const member_id = try self.context.intern(self.lexer.buffer[member_name_tok.loc.start..member_name_tok.loc.end]);
                 // 安全导航操作符目前只支持属性访问，不支持方法调用
                 left = try self.createNode(.{ .tag = .safe_property_access, .main_token = op, .data = .{ .safe_property_access = .{ .target = left, .property_name = member_id } } });
@@ -2491,7 +2571,7 @@ pub const Parser = struct {
                             });
                             const callable_args = try self.context.arena.allocator().alloc(ast.Node.Index, 1);
                             callable_args[0] = callable_node;
-                            
+
                             // Create a static method call to Closure::fromCallable
                             const closure_class_id = try self.context.intern("Closure");
                             const from_callable_id = try self.context.intern("fromCallable");
@@ -2526,7 +2606,7 @@ pub const Parser = struct {
                     const closure_name_node = left;
                     const callable_args = try self.context.arena.allocator().alloc(ast.Node.Index, 1);
                     callable_args[0] = closure_name_node;
-                    
+
                     // Create a static method call to Closure::fromCallable
                     const closure_class_id = try self.context.intern("Closure");
                     const from_callable_id = try self.context.intern("fromCallable");
@@ -2596,7 +2676,7 @@ pub const Parser = struct {
                 // For instanceof, the right operand should be a class name (identifier or variable)
                 // If it's a simple identifier, create a class name literal
                 var right: ast.Node.Index = undefined;
-                if (self.curr.tag == .t_string) {
+                if (self.curr.tag == .t_string or self.curr.tag == .k_self or self.curr.tag == .k_parent or self.curr.tag == .k_static_ref) {
                     // Class name is an identifier - create a string literal node
                     const name_tok = self.curr;
                     const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
@@ -2611,7 +2691,9 @@ pub const Parser = struct {
             } else if (tag == .plus_plus or tag == .minus_minus) {
                 left = try self.createNode(.{ .tag = .postfix_expr, .main_token = op, .data = .{ .postfix_expr = .{ .op = tag, .expr = left } } });
             } else {
-                const right = try self.parseExpression(next_p);
+                // ** (star_star) 是右结合操作符，右操作数用 next_p - 1 解析
+                const right_prec = if (tag == .star_star) next_p - 1 else next_p;
+                const right = try self.parseExpression(right_prec);
 
                 // In Go mode, + operator on strings should be concatenation (like PHP's .)
                 var effective_op = op.tag;
@@ -2640,15 +2722,16 @@ pub const Parser = struct {
             .bang, .minus, .plus, .ampersand, .tilde => {
                 const token = self.curr;
                 self.nextToken();
-                // Use parseUnary to handle cases like !!$x or !$obj->method()
-                const expr = try self.parseUnary();
+                // ** (star_star) 优先级(70)高于一元运算符，用 69 解析操作数使 ** 绑定到操作数
+                // 例如: -2 ** 2 → -(2 ** 2) = -4, 而非 (-2) ** 2 = 4
+                const expr = try self.parseExpression(69);
                 return self.createNode(.{ .tag = .unary_expr, .main_token = token, .data = .{ .unary_expr = .{ .op = tag, .expr = expr } } });
             },
             .at_sign => {
                 // @ error suppression: 生成 unary_expr 节点，IR generator 包装为错误抑制
                 const token = self.curr;
                 self.nextToken();
-                const expr = try self.parseUnary();
+                const expr = try self.parseExpression(69);
                 return self.createNode(.{ .tag = .unary_expr, .main_token = token, .data = .{ .unary_expr = .{ .op = .at_sign, .expr = expr } } });
             },
             .t_variable, .t_go_identifier => {
@@ -2685,7 +2768,7 @@ pub const Parser = struct {
                     const closure_name_node = left;
                     const callable_args = try self.context.arena.allocator().alloc(ast.Node.Index, 1);
                     callable_args[0] = closure_name_node;
-                    
+
                     // Create a static method call to Closure::fromCallable
                     const closure_class_id = try self.context.intern("Closure");
                     const from_callable_id = try self.context.intern("fromCallable");
@@ -2755,8 +2838,11 @@ pub const Parser = struct {
                 else if (self.eatKeywordAsIdentifier()) |tok|
                     tok
                 else if (self.curr.tag == .t_variable) {
-                    // 可变属性: $obj->$varName
-                    const var_node = try self.parseUnaryPostfix();
+                    // 可变属性: $obj->$varName — 只解析变量名，不解析后缀 (允许外层处理 $obj->$method() 的调用括号)
+                    const var_tok = try self.eat(.t_variable);
+                    const var_name = self.lexer.buffer[var_tok.loc.start..var_tok.loc.end];
+                    const var_name_id = try self.context.intern(var_name);
+                    const var_node = try self.createNode(.{ .tag = .variable, .main_token = var_tok, .data = .{ .variable = .{ .name = var_name_id } } });
                     left = try self.createNode(.{ .tag = .variable_property_access, .main_token = op, .data = .{ .variable_property_access = .{ .target = left, .prop_variable = var_node } } });
                     continue;
                 } else try self.eat(.t_string);
@@ -2765,29 +2851,29 @@ pub const Parser = struct {
 
                 if (self.curr.tag == .l_paren) {
                     self.nextToken();
-                    
+
                     // 检查是否是 first-class callable: $obj->method(...)
                     // 注意区分: method(...) 是 first-class callable, method(...$var) 是 spread
                     if (self.curr.tag == .ellipsis and self.peek.tag == .r_paren) {
                         self.nextToken();
                         _ = try self.eat(.r_paren);
-                        
+
                         // 创建一个闭包: fn(...$args) => $obj->method(...$args)
                         // 1. 创建可变参数 ...$args
                         const args_var_id = try self.context.intern("args");
                         const args_param = try self.createNode(.{ .tag = .parameter, .main_token = op, .data = .{ .parameter = .{ .attributes = &.{}, .name = args_var_id, .type = null, .default_value = null, .is_promoted = false, .modifiers = .{}, .is_variadic = true, .is_reference = false } } });
-                        
+
                         // 2. 创建 $args 变量引用
                         const args_var = try self.createNode(.{ .tag = .variable, .main_token = op, .data = .{ .variable = .{ .name = args_var_id } } });
-                        
+
                         // 3. 创建 ...$args (unpack)
                         const args_unpack = try self.createNode(.{ .tag = .unpacking_expr, .main_token = op, .data = .{ .unpacking_expr = .{ .expr = args_var } } });
-                        
+
                         // 4. 创建方法调用 $obj->method(...$args)
                         const method_call_args = try self.context.arena.allocator().alloc(ast.Node.Index, 1);
                         method_call_args[0] = args_unpack;
                         const method_call = try self.createNode(.{ .tag = .method_call, .main_token = op, .data = .{ .method_call = .{ .target = left, .method_name = member_id, .args = method_call_args } } });
-                        
+
                         // 5. 创建箭头函数
                         const arrow_params = try self.context.arena.allocator().alloc(ast.Node.Index, 1);
                         arrow_params[0] = args_param;
@@ -2879,6 +2965,15 @@ pub const Parser = struct {
                 self.nextToken();
                 return self.createNode(.{ .tag = .magic_constant, .main_token = t, .data = .{ .magic_constant = .{ .kind = kind } } });
             },
+            .k_print => {
+                const token = try self.eat(.k_print);
+                const expr = try self.parseExpression(1);
+                const name_id = try self.context.intern("print");
+                const name_node = try self.createNode(.{ .tag = .variable, .main_token = token, .data = .{ .variable = .{ .name = name_id } } });
+                const args = try self.context.arena.allocator().alloc(ast.Node.Index, 1);
+                args[0] = expr;
+                return self.createNode(.{ .tag = .function_call, .main_token = token, .data = .{ .function_call = .{ .name = name_node, .args = args } } });
+            },
             .k_yield => return self.parseYieldExpr(),
             .ellipsis => {
                 const token = self.curr;
@@ -2936,7 +3031,7 @@ pub const Parser = struct {
             .t_lnumber => {
                 const t = try self.eat(.t_lnumber);
                 const raw = self.lexer.buffer[t.loc.start..t.loc.end];
-                
+
                 // PHP 支持传统八进制格式 (0755) 和新格式 (0o755)
                 // Zig 的 parseInt(base=0) 只支持新格式，需要手动处理传统格式
                 const value = blk: {
@@ -2958,14 +3053,14 @@ pub const Parser = struct {
                             };
                         }
                     }
-                    
+
                     // 其他格式：使用 base 0 自动检测 (0x=hex, 0b=binary, 0o=octal, else=decimal)
                     break :blk std.fmt.parseInt(i64, raw, 0) catch |err| switch (err) {
                         error.Overflow => std.math.maxInt(i64),
                         else => return err,
                     };
                 };
-                
+
                 return self.createNode(.{ .tag = .literal_int, .main_token = t, .data = .{ .literal_int = .{ .value = value } } });
             },
             .t_dnumber => {
@@ -2990,6 +3085,10 @@ pub const Parser = struct {
 
                 const interned_id = if (quote_type == .double) blk: {
                     const unescaped = try self.unescapeDoubleQuoted(string_content);
+                    defer self.allocator.free(unescaped);
+                    break :blk try self.context.internLiteral(unescaped);
+                } else if (quote_type == .single) blk: {
+                    const unescaped = try self.unescapeSingleQuoted(string_content);
                     defer self.allocator.free(unescaped);
                     break :blk try self.context.internLiteral(unescaped);
                 } else try self.context.internLiteral(string_content);
@@ -3180,6 +3279,32 @@ pub const Parser = struct {
 
                         // 创建属性访问节点
                         part = try self.createNode(.{ .tag = .property_access, .main_token = t, .data = .{ .property_access = .{ .target = var_node, .property_name = try self.context.intern(prop_part) } } });
+                    } else if (std.mem.indexOfScalar(u8, var_text, '[')) |bracket_pos| {
+                        // $var[key] 格式：分割变量名和 key
+                        const var_part = var_text[0..bracket_pos]; // $var
+                        const key_part = var_text[bracket_pos + 1 ..]; // key] (需要去掉末尾 ])
+
+                        // 创建变量节点
+                        const var_node = try self.createNode(.{ .tag = .variable, .main_token = t, .data = .{ .variable = .{ .name = try self.context.intern(var_part) } } });
+
+                        // 去掉末尾的 ]
+                        const key_text = if (key_part.len > 0 and key_part[key_part.len - 1] == ']') key_part[0 .. key_part.len - 1] else key_part;
+
+                        // 创建 key 节点（整数或字符串）
+                        var index_node: ast.Node.Index = undefined;
+                        if (std.fmt.parseInt(i64, key_text, 10)) |int_val| {
+                            index_node = try self.createNode(.{ .tag = .literal_int, .main_token = t, .data = .{ .literal_int = .{ .value = int_val } } });
+                        } else |_| {
+                            // 字符串 key（去掉可能的引号）
+                            var key_str = key_text;
+                            if (key_str.len >= 2 and (key_str[0] == '\'' or key_str[0] == '"') and key_str[key_str.len - 1] == key_str[0]) {
+                                key_str = key_str[1 .. key_str.len - 1];
+                            }
+                            index_node = try self.createNode(.{ .tag = .literal_string, .main_token = t, .data = .{ .literal_string = .{ .value = try self.context.internLiteral(key_str) } } });
+                        }
+
+                        // 创建数组访问节点
+                        part = try self.createNode(.{ .tag = .array_access, .main_token = t, .data = .{ .array_access = .{ .target = var_node, .index = index_node } } });
                     } else {
                         // 普通变量
                         part = try self.createNode(.{ .tag = .variable, .main_token = t, .data = .{ .variable = .{ .name = try self.context.intern(var_text) } } });
@@ -3606,21 +3731,80 @@ pub const Parser = struct {
 
     fn isKeywordIdentifierTag(tag: Token.Tag) bool {
         return switch (tag) {
-            .k_set, .k_get, .k_unset, .k_clone, .k_list, .k_print,
-            .k_lock, .k_try, .k_catch, .k_finally, .k_throw, .k_match,
-            .k_default, .k_static, .k_class, .k_function, .k_array,
-            .k_new, .k_fn, .k_parent, .k_self, .k_public, .k_private,
-            .k_protected, .k_abstract, .k_final, .k_readonly,
-            .k_foreach, .k_for, .k_while, .k_do, .k_if, .k_else,
-            .k_elseif, .k_switch, .k_case, .k_break, .k_continue,
-            .k_return, .k_from, .k_enum, .k_interface, .k_trait,
-            .k_extends, .k_implements, .k_use, .k_namespace,
-            .k_echo, .k_global, .k_const, .k_var, .k_as,
-            .k_yield, .k_goto, .k_declare, .k_instanceof,
-            .k_include, .k_include_once, .k_require, .k_require_once,
-            .k_and, .k_or, .k_xor, .k_with, .k_go,
-            .k_callable, .k_iterable, .k_object, .k_mixed,
-            .k_never, .k_void, .k_true, .k_false, .k_null,
+            .k_set,
+            .k_get,
+            .k_unset,
+            .k_clone,
+            .k_list,
+            .k_print,
+            .k_lock,
+            .k_try,
+            .k_catch,
+            .k_finally,
+            .k_throw,
+            .k_match,
+            .k_default,
+            .k_static,
+            .k_class,
+            .k_function,
+            .k_array,
+            .k_new,
+            .k_fn,
+            .k_parent,
+            .k_self,
+            .k_public,
+            .k_private,
+            .k_protected,
+            .k_abstract,
+            .k_final,
+            .k_readonly,
+            .k_foreach,
+            .k_for,
+            .k_while,
+            .k_do,
+            .k_if,
+            .k_else,
+            .k_elseif,
+            .k_switch,
+            .k_case,
+            .k_break,
+            .k_continue,
+            .k_return,
+            .k_from,
+            .k_enum,
+            .k_interface,
+            .k_trait,
+            .k_extends,
+            .k_implements,
+            .k_use,
+            .k_namespace,
+            .k_echo,
+            .k_global,
+            .k_const,
+            .k_var,
+            .k_as,
+            .k_yield,
+            .k_goto,
+            .k_declare,
+            .k_instanceof,
+            .k_include,
+            .k_include_once,
+            .k_require,
+            .k_require_once,
+            .k_and,
+            .k_or,
+            .k_xor,
+            .k_with,
+            .k_go,
+            .k_callable,
+            .k_iterable,
+            .k_object,
+            .k_mixed,
+            .k_never,
+            .k_void,
+            .k_true,
+            .k_false,
+            .k_null,
             => true,
             else => false,
         };
@@ -3884,10 +4068,11 @@ pub const Parser = struct {
 
     fn parsePrimaryType(self: *Parser) anyerror!ast.Node.Index {
         // Handle nullable types (?type)
+        // For DNF types (PHP 8.2+): ?A&B is parsed as ?(A&B), so we call parseIntersectionType
         if (self.curr.tag == .question) {
             const q_tok = self.curr;
             self.nextToken();
-            const inner_type = try self.parsePrimaryType();
+            const inner_type = try self.parseIntersectionType();
             return self.createNode(.{ .tag = .nullable_type, .main_token = q_tok, .data = .{ .nullable_type = .{ .inner = inner_type } } });
         } else if (self.curr.tag == .l_paren) {
             self.nextToken();

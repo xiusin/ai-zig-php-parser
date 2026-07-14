@@ -38,7 +38,7 @@ pub const EscapeAnalysis = struct {
             for (block.instructions.items) |inst| {
                 try self.markEscaping(inst);
             }
-            
+
             // 检查终止符（返回值）
             if (block.terminator.ret) |ret_val| {
                 try self.markEscaped(ret_val.id);
@@ -48,7 +48,7 @@ pub const EscapeAnalysis = struct {
         // 传播逃逸信息（不动点迭代）
         while (self.worklist.items.len > 0) {
             const reg_id = self.worklist.pop();
-            
+
             // 查找所有使用此寄存器的指令
             for (func.blocks.items) |block| {
                 for (block.instructions.items) |inst| {

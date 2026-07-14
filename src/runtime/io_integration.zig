@@ -51,21 +51,21 @@ const Scheduler = @import("scheduler.zig").Scheduler;
 pub const IOIntegration = struct {
     allocator: std.mem.Allocator,
     scheduler: *Scheduler,
-    
+
     // Network poller for efficient I/O multiplexing
     netpoller: NetPoller,
-    
+
     // File I/O integration
     file_io: FileIOManager,
-    
+
     // I/O wait queues
     io_wait_queues: IOWaitQueues,
-    
+
     // Performance monitoring
     io_operations: std.atomic.Value(u64),
     blocked_operations: std.atomic.Value(u64),
     average_wait_time_ns: std.atomic.Value(u64),
-    
+
     pub fn init(allocator: std.mem.Allocator, scheduler: *Scheduler) !IOIntegration {
         return IOIntegration{
             .allocator = allocator,
@@ -78,23 +78,23 @@ pub const IOIntegration = struct {
             .average_wait_time_ns = std.atomic.Value(u64).init(0),
         };
     }
-    
+
     pub fn deinit(self: *IOIntegration) void {
         self.netpoller.deinit();
         self.file_io.deinit();
         self.io_wait_queues.deinit();
     }
-    
+
     /// Perform non-blocking network I/O operation
     /// Requirement 6.9 - use epoll/kqueue to efficiently wake waiting coroutines
     pub fn performNetworkIO(self: *IOIntegration, coroutine_id: u64, operation: NetworkOperation) !IOResult {
         _ = self.io_operations.fetchAdd(1, .monotonic);
-        
+
         const start_time = std.time.nanoTimestamp();
-        
+
         // Try non-blocking operation first
         const result = self.netpoller.tryOperation(operation);
-        
+
         switch (result) {
             .completed => |data| {
                 return IOResult{ .completed = data };
@@ -103,10 +103,10 @@ pub const IOIntegration = struct {
                 // Add to wait queue and park coroutine
                 try self.io_wait_queues.addNetworkWaiter(coroutine_id, operation, start_time);
                 try self.netpoller.addToEpoll(operation);
-                
+
                 _ = self.blocked_operations.fetchAdd(1, .monotonic);
                 self.scheduler.park(coroutine_id, .io_wait);
-                
+
                 return IOResult{ .pending = coroutine_id };
             },
             .error_occurred => |err| {
@@ -114,17 +114,17 @@ pub const IOIntegration = struct {
             },
         }
     }
-    
+
     /// Perform file I/O operation
     /// Requirement 5.6 - file I/O integration
     pub fn performFileIO(self: *IOIntegration, coroutine_id: u64, operation: FileOperation) !IOResult {
         _ = self.io_operations.fetchAdd(1, .monotonic);
-        
+
         const start_time = std.time.nanoTimestamp();
-        
+
         // File I/O operations are typically blocking, so we use thread pool
         const result = try self.file_io.submitOperation(operation);
-        
+
         switch (result) {
             .completed => |data| {
                 return IOResult{ .completed = data };
@@ -132,10 +132,10 @@ pub const IOIntegration = struct {
             .queued => {
                 // Add to wait queue and park coroutine
                 try self.io_wait_queues.addFileWaiter(coroutine_id, operation, start_time);
-                
+
                 _ = self.blocked_operations.fetchAdd(1, .monotonic);
                 self.scheduler.park(coroutine_id, .io_wait);
-                
+
                 return IOResult{ .pending = coroutine_id };
             },
             .error_occurred => |err| {
@@ -143,17 +143,17 @@ pub const IOIntegration = struct {
             },
         }
     }
-    
+
     /// Poll for completed I/O operations
     /// Requirement 6.9 - efficiently wake waiting coroutines
     pub fn pollCompletedOperations(self: *IOIntegration) ![]u64 {
         var completed_coroutines = std.ArrayList(u64){ .allocator = self.allocator };
         defer completed_coroutines.deinit();
-        
+
         // Poll network operations
         const network_ready = try self.netpoller.poll();
         defer self.allocator.free(network_ready);
-        
+
         for (network_ready) |ready_op| {
             if (self.io_wait_queues.removeNetworkWaiter(ready_op)) |waiter| {
                 try completed_coroutines.append(waiter.coroutine_id);
@@ -161,11 +161,11 @@ pub const IOIntegration = struct {
                 self.scheduler.unpark(waiter.coroutine_id);
             }
         }
-        
+
         // Poll file operations
         const file_ready = try self.file_io.pollCompleted();
         defer self.allocator.free(file_ready);
-        
+
         for (file_ready) |ready_op| {
             if (self.io_wait_queues.removeFileWaiter(ready_op)) |waiter| {
                 try completed_coroutines.append(waiter.coroutine_id);
@@ -173,10 +173,10 @@ pub const IOIntegration = struct {
                 self.scheduler.unpark(waiter.coroutine_id);
             }
         }
-        
+
         return completed_coroutines.toOwnedSlice();
     }
-    
+
     /// Update average wait time statistics
     fn updateWaitTime(self: *IOIntegration, start_time: i64) void {
         const wait_time = @as(u64, @intCast(std.time.nanoTimestamp() - start_time));
@@ -184,7 +184,7 @@ pub const IOIntegration = struct {
         const new_avg = (current_avg + wait_time) / 2;
         self.average_wait_time_ns.store(new_avg, .monotonic);
     }
-    
+
     /// Get I/O statistics
     pub fn getStats(self: *IOIntegration) IOStats {
         return IOStats{
@@ -201,20 +201,20 @@ pub const IOIntegration = struct {
 /// Requirement 6.9 - implement netpoller for network I/O
 pub const NetPoller = struct {
     allocator: std.mem.Allocator,
-    
+
     // Platform-specific I/O multiplexing
     epoll_fd: i32,
     events: []std.os.linux.epoll_event,
     max_events: u32,
-    
+
     // Operation tracking
     pending_operations: std.HashMap(i32, NetworkOperation, std.hash_map.DefaultContext(i32), std.hash_map.default_max_load_percentage),
-    
+
     pub fn init(allocator: std.mem.Allocator) !NetPoller {
         const epoll_fd = try std.os.epoll_create1(std.os.linux.EPOLL.CLOEXEC);
         const max_events = 1024;
         const events = try allocator.alloc(std.os.linux.epoll_event, max_events);
-        
+
         return NetPoller{
             .allocator = allocator,
             .epoll_fd = epoll_fd,
@@ -223,17 +223,17 @@ pub const NetPoller = struct {
             .pending_operations = std.HashMap(i32, NetworkOperation, std.hash_map.DefaultContext(i32), std.hash_map.default_max_load_percentage).init(allocator),
         };
     }
-    
+
     pub fn deinit(self: *NetPoller) void {
         std.os.close(self.epoll_fd);
         self.allocator.free(self.events);
         self.pending_operations.deinit();
     }
-    
+
     /// Try non-blocking network operation
     pub fn tryOperation(self: *NetPoller, operation: NetworkOperation) OperationResult {
         _ = self;
-        
+
         switch (operation.type) {
             .read => {
                 const bytes_read = std.os.read(operation.fd, operation.buffer) catch |err| {
@@ -242,7 +242,7 @@ pub const NetPoller = struct {
                     }
                     return OperationResult{ .error_occurred = err };
                 };
-                
+
                 return OperationResult{ .completed = IOData{ .bytes_read = bytes_read } };
             },
             .write => {
@@ -252,7 +252,7 @@ pub const NetPoller = struct {
                     }
                     return OperationResult{ .error_occurred = err };
                 };
-                
+
                 return OperationResult{ .completed = IOData{ .bytes_written = bytes_written } };
             },
             .accept => {
@@ -262,7 +262,7 @@ pub const NetPoller = struct {
                     }
                     return OperationResult{ .error_occurred = err };
                 };
-                
+
                 return OperationResult{ .completed = IOData{ .accepted_fd = client_fd } };
             },
             .connect => {
@@ -272,12 +272,12 @@ pub const NetPoller = struct {
                     }
                     return OperationResult{ .error_occurred = err };
                 };
-                
+
                 return OperationResult{ .completed = IOData{ .connected = true } };
             },
         }
     }
-    
+
     /// Add operation to epoll for monitoring
     pub fn addToEpoll(self: *NetPoller, operation: NetworkOperation) !void {
         var event = std.os.linux.epoll_event{
@@ -287,11 +287,11 @@ pub const NetPoller = struct {
             },
             .data = .{ .fd = operation.fd },
         };
-        
+
         try std.os.epoll_ctl(self.epoll_fd, std.os.linux.EPOLL.CTL_ADD, operation.fd, &event);
         try self.pending_operations.put(operation.fd, operation);
     }
-    
+
     /// Poll for ready operations
     pub fn poll(self: *NetPoller) ![]NetworkOperation {
         const ready_count = std.os.epoll_wait(self.epoll_fd, self.events, 0) catch |err| {
@@ -300,22 +300,22 @@ pub const NetPoller = struct {
             }
             return err;
         };
-        
+
         var ready_operations = try self.allocator.alloc(NetworkOperation, ready_count);
         var count: usize = 0;
-        
+
         for (self.events[0..ready_count]) |event| {
             const fd = event.data.fd;
             if (self.pending_operations.get(fd)) |operation| {
                 ready_operations[count] = operation;
                 count += 1;
-                
+
                 // Remove from epoll and pending operations
                 std.os.epoll_ctl(self.epoll_fd, std.os.linux.EPOLL.CTL_DEL, fd, null) catch {};
                 _ = self.pending_operations.remove(fd);
             }
         }
-        
+
         return ready_operations[0..count];
     }
 };
@@ -329,11 +329,11 @@ pub const FileIOManager = struct {
     completed_operations: std.ArrayList(FileOperationResult),
     next_operation_id: std.atomic.Value(u64),
     mutex: std.Thread.Mutex,
-    
+
     pub fn init(allocator: std.mem.Allocator) !FileIOManager {
         var thread_pool: std.Thread.Pool = undefined;
         try thread_pool.init(.{ .allocator = allocator, .n_jobs = 4 });
-        
+
         return FileIOManager{
             .allocator = allocator,
             .thread_pool = thread_pool,
@@ -343,58 +343,58 @@ pub const FileIOManager = struct {
             .mutex = .{},
         };
     }
-    
+
     pub fn deinit(self: *FileIOManager) void {
         self.thread_pool.deinit();
         self.pending_operations.deinit();
         self.completed_operations.deinit();
     }
-    
+
     /// Submit file operation to thread pool
     pub fn submitOperation(self: *FileIOManager, operation: FileOperation) !OperationResult {
         const operation_id = self.next_operation_id.fetchAdd(1, .monotonic);
-        
+
         self.mutex.lock();
         defer self.mutex.unlock();
-        
+
         try self.pending_operations.put(operation_id, operation);
-        
+
         // Submit to thread pool
         try self.thread_pool.spawn(fileOperationWorker, .{ self, operation_id, operation });
-        
+
         return OperationResult{ .queued = {} };
     }
-    
+
     /// Worker function for file operations
     fn fileOperationWorker(self: *FileIOManager, operation_id: u64, operation: FileOperation) void {
         const result = self.performFileOperation(operation);
-        
+
         self.mutex.lock();
         defer self.mutex.unlock();
-        
+
         self.completed_operations.append(FileOperationResult{
             .operation_id = operation_id,
             .result = result,
         }) catch {};
-        
+
         _ = self.pending_operations.remove(operation_id);
     }
-    
+
     /// Perform actual file operation
     fn performFileOperation(self: *FileIOManager, operation: FileOperation) IOData {
         _ = self;
-        
+
         switch (operation.type) {
             .read => {
                 const file = std.fs.cwd.openFile(operation.path, .{}) catch |err| {
                     return IOData{ .error_occurred = err };
                 };
                 defer file.close();
-                
+
                 const bytes_read = file.read(operation.buffer) catch |err| {
                     return IOData{ .error_occurred = err };
                 };
-                
+
                 return IOData{ .bytes_read = bytes_read };
             },
             .write => {
@@ -402,31 +402,31 @@ pub const FileIOManager = struct {
                     return IOData{ .error_occurred = err };
                 };
                 defer file.close();
-                
+
                 const bytes_written = file.write(operation.data) catch |err| {
                     return IOData{ .error_occurred = err };
                 };
-                
+
                 return IOData{ .bytes_written = bytes_written };
             },
             .stat => {
                 const stat = std.fs.cwd.statFile(operation.path) catch |err| {
                     return IOData{ .error_occurred = err };
                 };
-                
+
                 return IOData{ .file_stat = stat };
             },
         }
     }
-    
+
     /// Poll for completed operations
     pub fn pollCompleted(self: *FileIOManager) ![]FileOperationResult {
         self.mutex.lock();
         defer self.mutex.unlock();
-        
+
         const completed = try self.completed_operations.toOwnedSlice();
         self.completed_operations = std.ArrayList(FileOperationResult){ .allocator = self.allocator };
-        
+
         return completed;
     }
 };
@@ -438,12 +438,12 @@ pub const IOWaitQueues = struct {
     network_waiters: std.HashMap(i32, IOWaiter, std.hash_map.DefaultContext(i32), std.hash_map.default_max_load_percentage),
     file_waiters: std.HashMap(u64, IOWaiter, std.hash_map.DefaultContext(u64), std.hash_map.default_max_load_percentage),
     mutex: std.Thread.Mutex,
-    
+
     pub const IOWaiter = struct {
         coroutine_id: u64,
         start_time: i64,
         operation_type: IOOperationType,
-        
+
         pub const IOOperationType = enum {
             network_read,
             network_write,
@@ -454,7 +454,7 @@ pub const IOWaitQueues = struct {
             file_stat,
         };
     };
-    
+
     pub fn init(allocator: std.mem.Allocator) IOWaitQueues {
         return IOWaitQueues{
             .allocator = allocator,
@@ -463,17 +463,17 @@ pub const IOWaitQueues = struct {
             .mutex = .{},
         };
     }
-    
+
     pub fn deinit(self: *IOWaitQueues) void {
         self.network_waiters.deinit();
         self.file_waiters.deinit();
     }
-    
+
     /// Add network operation waiter
     pub fn addNetworkWaiter(self: *IOWaitQueues, coroutine_id: u64, operation: NetworkOperation, start_time: i64) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        
+
         const waiter = IOWaiter{
             .coroutine_id = coroutine_id,
             .start_time = start_time,
@@ -484,23 +484,23 @@ pub const IOWaitQueues = struct {
                 .connect => .network_connect,
             },
         };
-        
+
         try self.network_waiters.put(operation.fd, waiter);
     }
-    
+
     /// Remove network operation waiter
     pub fn removeNetworkWaiter(self: *IOWaitQueues, operation: NetworkOperation) ?IOWaiter {
         self.mutex.lock();
         defer self.mutex.unlock();
-        
+
         return self.network_waiters.fetchRemove(operation.fd);
     }
-    
+
     /// Add file operation waiter
     pub fn addFileWaiter(self: *IOWaitQueues, coroutine_id: u64, operation: FileOperation, start_time: i64) !void {
         self.mutex.lock();
         defer self.mutex.unlock();
-        
+
         const waiter = IOWaiter{
             .coroutine_id = coroutine_id,
             .start_time = start_time,
@@ -510,33 +510,33 @@ pub const IOWaitQueues = struct {
                 .stat => .file_stat,
             },
         };
-        
+
         // Use a hash of the operation as the key
         const key = std.hash_map.hashString(operation.path);
         try self.file_waiters.put(key, waiter);
     }
-    
+
     /// Remove file operation waiter
     pub fn removeFileWaiter(self: *IOWaitQueues, result: FileOperationResult) ?IOWaiter {
         self.mutex.lock();
         defer self.mutex.unlock();
-        
+
         return self.file_waiters.fetchRemove(result.operation_id);
     }
-    
+
     /// Get network waiter count
     pub fn getNetworkWaiterCount(self: *IOWaitQueues) usize {
         self.mutex.lock();
         defer self.mutex.unlock();
-        
+
         return self.network_waiters.count();
     }
-    
+
     /// Get file waiter count
     pub fn getFileWaiterCount(self: *IOWaitQueues) usize {
         self.mutex.lock();
         defer self.mutex.unlock();
-        
+
         return self.file_waiters.count();
     }
 };
@@ -549,7 +549,7 @@ pub const NetworkOperation = struct {
     buffer: []u8 = &[_]u8{},
     data: []const u8 = &[_]u8{},
     address: std.net.Address = undefined,
-    
+
     pub const Type = enum {
         read,
         write,
@@ -563,7 +563,7 @@ pub const FileOperation = struct {
     path: []const u8,
     buffer: []u8 = &[_]u8{},
     data: []const u8 = &[_]u8{},
-    
+
     pub const Type = enum {
         read,
         write,
@@ -604,11 +604,11 @@ pub const IOStats = struct {
     average_wait_time_ns: u64,
     pending_network_operations: usize,
     pending_file_operations: usize,
-    
+
     pub fn getBlockingRatio(self: IOStats) f64 {
-        return if (self.total_operations > 0) 
+        return if (self.total_operations > 0)
             @as(f64, @floatFromInt(self.blocked_operations)) / @as(f64, @floatFromInt(self.total_operations))
-        else 
+        else
             0.0;
     }
 };
@@ -616,7 +616,7 @@ pub const IOStats = struct {
 // Tests
 test "I/O integration initialization" {
     const allocator = std.testing.allocator;
-    
+
     // Create mock scheduler
     const config = Scheduler.SchedulerConfig{
         .num_processors = 1,
@@ -625,10 +625,10 @@ test "I/O integration initialization" {
     const mock_vm = @as(*anyopaque, @ptrFromInt(0x1000));
     var scheduler = try Scheduler.init(allocator, config, mock_vm);
     defer scheduler.deinit();
-    
+
     var io_integration = try IOIntegration.init(allocator, &scheduler);
     defer io_integration.deinit();
-    
+
     const stats = io_integration.getStats();
     try std.testing.expectEqual(@as(u64, 0), stats.total_operations);
     try std.testing.expectEqual(@as(u64, 0), stats.blocked_operations);
@@ -638,10 +638,10 @@ test "I/O integration initialization" {
 
 test "network poller initialization" {
     const allocator = std.testing.allocator;
-    
+
     var netpoller = try NetPoller.init(allocator);
     defer netpoller.deinit();
-    
+
     try std.testing.expect(netpoller.epoll_fd >= 0);
     try std.testing.expectEqual(@as(u32, 1024), netpoller.max_events);
     try std.testing.expectEqual(@as(usize, 0), netpoller.pending_operations.count());
@@ -649,10 +649,10 @@ test "network poller initialization" {
 
 test "file I/O manager initialization" {
     const allocator = std.testing.allocator;
-    
+
     var file_io = try FileIOManager.init(allocator);
     defer file_io.deinit();
-    
+
     try std.testing.expectEqual(@as(u64, 1), file_io.next_operation_id.load(.monotonic));
     try std.testing.expectEqual(@as(usize, 0), file_io.pending_operations.count());
     try std.testing.expectEqual(@as(usize, 0), file_io.completed_operations.items.len);
@@ -660,21 +660,21 @@ test "file I/O manager initialization" {
 
 test "I/O wait queues management" {
     const allocator = std.testing.allocator;
-    
+
     var wait_queues = IOWaitQueues.init(allocator);
     defer wait_queues.deinit();
-    
+
     try std.testing.expectEqual(@as(usize, 0), wait_queues.getNetworkWaiterCount());
     try std.testing.expectEqual(@as(usize, 0), wait_queues.getFileWaiterCount());
-    
+
     const network_op = NetworkOperation{
         .type = .read,
         .fd = 1,
     };
-    
+
     try wait_queues.addNetworkWaiter(123, network_op, std.time.nanoTimestamp());
     try std.testing.expectEqual(@as(usize, 1), wait_queues.getNetworkWaiterCount());
-    
+
     const waiter = wait_queues.removeNetworkWaiter(network_op);
     try std.testing.expect(waiter != null);
     try std.testing.expectEqual(@as(u64, 123), waiter.?.coroutine_id);

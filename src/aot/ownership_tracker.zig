@@ -6,20 +6,20 @@ pub const OwnershipTracker = struct {
     allocator: std.mem.Allocator,
     /// 寄存器是否需要cleanup（持有所有权）
     needs_cleanup: std.AutoHashMap(usize, bool),
-    
+
     const Self = @This();
-    
+
     pub fn init(allocator: std.mem.Allocator) Self {
         return .{
             .allocator = allocator,
             .needs_cleanup = std.AutoHashMap(usize, bool).init(allocator),
         };
     }
-    
+
     pub fn deinit(self: *Self) void {
         self.needs_cleanup.deinit();
     }
-    
+
     /// 分析函数的所有权
     pub fn analyze(self: *Self, func: *const IR.Function) !void {
         for (func.blocks.items) |block| {
@@ -28,18 +28,18 @@ pub const OwnershipTracker = struct {
             }
         }
     }
-    
+
     /// 分析单条指令
     fn analyzeInstruction(self: *Self, inst: IR.Instruction) !void {
         if (inst.result) |reg| {
             const needs = self.instructionCreatesOwnership(inst.op);
             try self.needs_cleanup.put(reg.id, needs);
         }
-        
+
         // 检查是否有所有权转移
         self.checkOwnershipTransfer(inst.op);
     }
-    
+
     /// 指令是否创建所有权
     fn instructionCreatesOwnership(_: *Self, op: anytype) bool {
         return switch (op) {
@@ -58,7 +58,7 @@ pub const OwnershipTracker = struct {
             else => false,
         };
     }
-    
+
     /// 检查所有权转移
     fn checkOwnershipTransfer(_: *Self, op: anytype) void {
         switch (op) {
@@ -67,7 +67,7 @@ pub const OwnershipTracker = struct {
             else => {},
         }
     }
-    
+
     /// 寄存器是否需要cleanup
     pub fn needsCleanup(self: *const Self, reg_id: usize) bool {
         return self.needs_cleanup.get(reg_id) orelse false;

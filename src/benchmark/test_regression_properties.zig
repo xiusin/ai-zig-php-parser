@@ -14,7 +14,7 @@ const PropertyTest = struct {
     allocator: std.mem.Allocator,
     rng: std.Random,
     iterations: u32 = 100,
-    
+
     fn init(allocator: std.mem.Allocator, seed: u64) PropertyTest {
         var prng = std.Random.DefaultPrng.init(seed);
         return PropertyTest{
@@ -23,7 +23,7 @@ const PropertyTest = struct {
             .iterations = 100,
         };
     }
-    
+
     fn run(
         self: *PropertyTest,
         comptime T: type,
@@ -32,17 +32,17 @@ const PropertyTest = struct {
     ) !bool {
         var passed: u32 = 0;
         var failed: u32 = 0;
-        
+
         var i: u32 = 0;
         while (i < self.iterations) : (i += 1) {
             const input = try generator(&self.rng, self.allocator);
-            
+
             const result = property(input) catch |err| {
-                std.debug.print("Property error at iteration {d}: {}\n", .{i, err});
+                std.debug.print("Property error at iteration {d}: {}\n", .{ i, err });
                 failed += 1;
                 continue;
             };
-            
+
             if (result) {
                 passed += 1;
             } else {
@@ -50,14 +50,14 @@ const PropertyTest = struct {
                 std.debug.print("Property failed at iteration {d}\n", .{i});
             }
         }
-        
+
         const success_rate = @as(f32, @floatFromInt(passed)) / @as(f32, @floatFromInt(self.iterations));
         std.debug.print("Property test: {d}/{d} passed ({d:.2}%)\n", .{
             passed,
             self.iterations,
             success_rate * 100.0,
         });
-        
+
         return failed == 0;
     }
 };
@@ -71,9 +71,9 @@ const TestInput = struct {
 
 fn generateTestInput(rng: *std.Random, allocator: std.mem.Allocator) !TestInput {
     _ = allocator;
-    
+
     const baseline_avg = rng.intRangeAtMost(u64, 100, 10000);
-    
+
     // 生成不同程度的性能变化
     const change_type = rng.intRangeAtMost(u8, 0, 2);
     const current_avg = switch (change_type) {
@@ -82,9 +82,9 @@ fn generateTestInput(rng: *std.Random, allocator: std.mem.Allocator) !TestInput 
         2 => baseline_avg + rng.intRangeAtMost(u64, baseline_avg / 5, baseline_avg / 2), // 大幅上升
         else => unreachable,
     };
-    
+
     const threshold = rng.float(f64) * 10.0 + 1.0; // 1-11%
-    
+
     return TestInput{
         .baseline_avg_ns = baseline_avg,
         .current_avg_ns = current_avg,
@@ -101,20 +101,20 @@ fn generateTestInput(rng: *std.Random, allocator: std.mem.Allocator) !TestInput 
 // 回归检测器应该始终报告回归
 test "Property 37.1: Regression detection consistency" {
     const allocator = testing.allocator;
-    
+
     var pt = PropertyTest.init(allocator, 12345);
-    
+
     const property = struct {
         fn check(input: TestInput) !bool {
             const test_dir = "test_prop_37_1";
             defer std.fs.cwd.deleteTree(test_dir) catch {};
-            
+
             var detector = try RegressionDetector.init(
                 testing.allocator,
                 test_dir,
                 input.threshold_percent,
             );
-            
+
             // 创建基线
             const baseline_result = BenchmarkResult{
                 .benchmark_name = "test_bench",
@@ -124,9 +124,9 @@ test "Property 37.1: Regression detection consistency" {
                 .stddev_ns = 50.0,
                 .iterations = 100,
             };
-            
+
             try detector.saveBaseline(baseline_result, "baseline_commit");
-            
+
             // 创建当前结果
             const current_result = BenchmarkResult{
                 .benchmark_name = "test_bench",
@@ -136,22 +136,22 @@ test "Property 37.1: Regression detection consistency" {
                 .stddev_ns = 50.0,
                 .iterations = 100,
             };
-            
+
             // 检测回归
             const regression = try detector.detectRegression(current_result);
-            
+
             // 计算预期的变化百分比
             const baseline_f = @as(f64, @floatFromInt(input.baseline_avg_ns));
             const current_f = @as(f64, @floatFromInt(input.current_avg_ns));
             const expected_change = ((current_f - baseline_f) / baseline_f) * 100.0;
-            
+
             // 验证回归检测结果
             const should_be_regression = expected_change > input.threshold_percent;
-            
+
             return regression.is_regression == should_be_regression;
         }
     }.check;
-    
+
     const passed = try pt.run(TestInput, property, generateTestInput);
     try testing.expect(passed);
 }
@@ -160,20 +160,20 @@ test "Property 37.1: Regression detection consistency" {
 // 对于任意基线和当前性能数据，回归百分比应该正确计算
 test "Property 37.2: Regression percentage calculation correctness" {
     const allocator = testing.allocator;
-    
+
     var pt = PropertyTest.init(allocator, 54321);
-    
+
     const property = struct {
         fn check(input: TestInput) !bool {
             const test_dir = "test_prop_37_2";
             defer std.fs.cwd.deleteTree(test_dir) catch {};
-            
+
             var detector = try RegressionDetector.init(
                 testing.allocator,
                 test_dir,
                 input.threshold_percent,
             );
-            
+
             // 创建基线
             const baseline_result = BenchmarkResult{
                 .benchmark_name = "test_bench",
@@ -183,9 +183,9 @@ test "Property 37.2: Regression percentage calculation correctness" {
                 .stddev_ns = 50.0,
                 .iterations = 100,
             };
-            
+
             try detector.saveBaseline(baseline_result, "baseline_commit");
-            
+
             // 创建当前结果
             const current_result = BenchmarkResult{
                 .benchmark_name = "test_bench",
@@ -195,21 +195,21 @@ test "Property 37.2: Regression percentage calculation correctness" {
                 .stddev_ns = 50.0,
                 .iterations = 100,
             };
-            
+
             // 检测回归
             const regression = try detector.detectRegression(current_result);
-            
+
             // 计算预期的变化百分比
             const baseline_f = @as(f64, @floatFromInt(input.baseline_avg_ns));
             const current_f = @as(f64, @floatFromInt(input.current_avg_ns));
             const expected_change = ((current_f - baseline_f) / baseline_f) * 100.0;
-            
+
             // 验证百分比计算（允许浮点误差）
             const diff = @abs(regression.regression_percent - expected_change);
             return diff < 0.01; // 0.01% 误差容忍度
         }
     }.check;
-    
+
     const passed = try pt.run(TestInput, property, generateTestInput);
     try testing.expect(passed);
 }
@@ -218,20 +218,20 @@ test "Property 37.2: Regression percentage calculation correctness" {
 // 对于任意基线数据，保存后应该能够正确加载
 test "Property 37.3: Baseline persistence correctness" {
     const allocator = testing.allocator;
-    
+
     var pt = PropertyTest.init(allocator, 98765);
-    
+
     const property = struct {
         fn check(input: TestInput) !bool {
             const test_dir = "test_prop_37_3";
             defer std.fs.cwd.deleteTree(test_dir) catch {};
-            
+
             var detector = try RegressionDetector.init(
                 testing.allocator,
                 test_dir,
                 input.threshold_percent,
             );
-            
+
             // 创建基线
             const baseline_result = BenchmarkResult{
                 .benchmark_name = "test_bench",
@@ -241,24 +241,24 @@ test "Property 37.3: Baseline persistence correctness" {
                 .stddev_ns = 50.0,
                 .iterations = 100,
             };
-            
+
             // 保存基线
             try detector.saveBaseline(baseline_result, "test_commit");
-            
+
             // 加载基线
             const loaded_baseline = try detector.loadBaseline("test_bench");
-            
+
             if (loaded_baseline) |baseline| {
                 // 验证数据一致性
                 return baseline.avg_time_ns == input.baseline_avg_ns and
                     baseline.min_time_ns == input.baseline_avg_ns - 100 and
                     baseline.max_time_ns == input.baseline_avg_ns + 100;
             }
-            
+
             return false;
         }
     }.check;
-    
+
     const passed = try pt.run(TestInput, property, generateTestInput);
     try testing.expect(passed);
 }
@@ -267,24 +267,24 @@ test "Property 37.3: Baseline persistence correctness" {
 // 对于任意阈值，回归检测应该正确响应阈值变化
 test "Property 37.4: Threshold sensitivity" {
     const allocator = testing.allocator;
-    
+
     const test_dir = "test_prop_37_4";
     defer std.fs.cwd.deleteTree(test_dir) catch {};
-    
+
     // 创建固定的测试数据
     const baseline_avg: u64 = 1000;
     const current_avg: u64 = 1080; // +8% 变化
-    
+
     // 测试不同阈值
     const thresholds = [_]f64{ 5.0, 7.0, 9.0, 10.0 };
-    
+
     for (thresholds) |threshold| {
         var detector = try RegressionDetector.init(
             allocator,
             test_dir,
             threshold,
         );
-        
+
         // 创建基线
         const baseline_result = BenchmarkResult{
             .benchmark_name = "test_bench",
@@ -294,9 +294,9 @@ test "Property 37.4: Threshold sensitivity" {
             .stddev_ns = 50.0,
             .iterations = 100,
         };
-        
+
         try detector.saveBaseline(baseline_result, "baseline_commit");
-        
+
         // 创建当前结果
         const current_result = BenchmarkResult{
             .benchmark_name = "test_bench",
@@ -306,13 +306,13 @@ test "Property 37.4: Threshold sensitivity" {
             .stddev_ns = 50.0,
             .iterations = 100,
         };
-        
+
         // 检测回归
         const regression = try detector.detectRegression(current_result);
-        
+
         // 8% 变化应该在 5% 和 7% 阈值下触发回归，但不在 9% 和 10% 阈值下
         const should_be_regression = threshold < 8.0;
-        
+
         try testing.expectEqual(should_be_regression, regression.is_regression);
     }
 }
@@ -321,12 +321,12 @@ test "Property 37.4: Threshold sensitivity" {
 // 对于任意多个基准测试，批量检测应该与单独检测结果一致
 test "Property 37.5: Batch detection consistency" {
     const allocator = testing.allocator;
-    
+
     const test_dir = "test_prop_37_5";
     defer std.fs.cwd.deleteTree(test_dir) catch {};
-    
+
     var detector = try RegressionDetector.init(allocator, test_dir, 5.0);
-    
+
     // 创建多个基线
     const baseline_results = [_]BenchmarkResult{
         .{
@@ -354,9 +354,9 @@ test "Property 37.5: Batch detection consistency" {
             .iterations = 100,
         },
     };
-    
+
     try detector.updateBaselines(&baseline_results, "baseline_commit");
-    
+
     // 创建新的测试结果
     const new_results = [_]BenchmarkResult{
         .{
@@ -384,20 +384,20 @@ test "Property 37.5: Batch detection consistency" {
             .iterations = 100,
         },
     };
-    
+
     // 批量检测
     const batch_regressions = try detector.detectRegressions(&new_results);
     defer allocator.free(batch_regressions);
-    
+
     // 单独检测并比较
     for (new_results, 0..) |result, i| {
         const single_regression = try detector.detectRegression(result);
-        
+
         // 验证批量检测和单独检测结果一致
         try testing.expectEqual(single_regression.is_regression, batch_regressions[i].is_regression);
         try testing.expectEqual(single_regression.baseline_avg_ns, batch_regressions[i].baseline_avg_ns);
         try testing.expectEqual(single_regression.current_avg_ns, batch_regressions[i].current_avg_ns);
-        
+
         // 验证百分比计算一致（允许浮点误差）
         const diff = @abs(single_regression.regression_percent - batch_regressions[i].regression_percent);
         try testing.expect(diff < 0.01);
@@ -408,20 +408,20 @@ test "Property 37.5: Batch detection consistency" {
 // 对于没有基线的基准测试，不应该报告回归
 test "Property 37.6: No baseline handling" {
     const allocator = testing.allocator;
-    
+
     var pt = PropertyTest.init(allocator, 11111);
-    
+
     const property = struct {
         fn check(input: TestInput) !bool {
             const test_dir = "test_prop_37_6";
             defer std.fs.cwd.deleteTree(test_dir) catch {};
-            
+
             var detector = try RegressionDetector.init(
                 testing.allocator,
                 test_dir,
                 input.threshold_percent,
             );
-            
+
             // 创建当前结果（没有基线）
             const current_result = BenchmarkResult{
                 .benchmark_name = "new_bench",
@@ -431,15 +431,15 @@ test "Property 37.6: No baseline handling" {
                 .stddev_ns = 50.0,
                 .iterations = 100,
             };
-            
+
             // 检测回归
             const regression = try detector.detectRegression(current_result);
-            
+
             // 没有基线时不应该报告回归
             return !regression.is_regression and regression.baseline_avg_ns == 0;
         }
     }.check;
-    
+
     const passed = try pt.run(TestInput, property, generateTestInput);
     try testing.expect(passed);
 }
@@ -450,12 +450,12 @@ test "Property 37.6: No baseline handling" {
 
 test "Integration: Full regression detection workflow" {
     const allocator = testing.allocator;
-    
+
     const test_dir = "test_integration";
     defer std.fs.cwd.deleteTree(test_dir) catch {};
-    
+
     var detector = try RegressionDetector.init(allocator, test_dir, 5.0);
-    
+
     // 第一次运行：建立基线
     const initial_results = [_]BenchmarkResult{
         .{
@@ -475,9 +475,9 @@ test "Integration: Full regression detection workflow" {
             .iterations = 1000,
         },
     };
-    
+
     try detector.updateBaselines(&initial_results, "commit_1");
-    
+
     // 第二次运行：性能正常
     const normal_results = [_]BenchmarkResult{
         .{
@@ -497,15 +497,15 @@ test "Integration: Full regression detection workflow" {
             .iterations = 1000,
         },
     };
-    
+
     const normal_regressions = try detector.detectRegressions(&normal_results);
     defer allocator.free(normal_regressions);
-    
+
     // 验证无回归
     for (normal_regressions) |reg| {
         try testing.expect(!reg.is_regression);
     }
-    
+
     // 第三次运行：性能回归
     const regression_results = [_]BenchmarkResult{
         .{
@@ -525,20 +525,20 @@ test "Integration: Full regression detection workflow" {
             .iterations = 1000,
         },
     };
-    
+
     const detected_regressions = try detector.detectRegressions(&regression_results);
     defer allocator.free(detected_regressions);
-    
+
     // 验证检测到回归
     try testing.expect(detected_regressions[0].is_regression); // string_ops 回归
     try testing.expect(!detected_regressions[1].is_regression); // array_ops 正常
-    
+
     // 生成报告
     var report_buffer = try std.ArrayList(u8).initCapacity(allocator, 4096);
     defer report_buffer.deinit(allocator);
-    
+
     try detector.generateReport(detected_regressions, report_buffer.writer(allocator));
-    
+
     const report = report_buffer.items;
     try testing.expect(report.len > 0);
     try testing.expect(std.mem.indexOf(u8, report, "REGRESSION") != null);

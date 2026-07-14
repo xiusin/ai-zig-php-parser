@@ -97,12 +97,12 @@ pub const Breakpoint = struct {
         if (self.condition) |cond| {
             // 使用表达式评估器评估条件
             _ = vm; // 可以从 VM 中提取变量值设置到 evaluator
-            
+
             const result = evaluator.evaluate(cond) catch {
                 // 评估失败，默认触发
                 return true;
             };
-            
+
             // 将结果转换为布尔值
             return switch (result.getTag()) {
                 .boolean => result.asBool(),

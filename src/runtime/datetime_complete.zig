@@ -23,9 +23,9 @@ pub const DateTimeFunctions = struct {
     /// microtime - 获取当前微秒时间
     /// @post 返回浮点数或字符串格式的微秒时间
     pub fn microtime(vm: anytype, args: []const Value) !Value {
-        const as_float = if (args.len > 0 and args[0].tag == .boolean) 
-            args[0].data.boolean 
-        else 
+        const as_float = if (args.len > 0 and args[0].tag == .boolean)
+            args[0].data.boolean
+        else
             false;
 
         const nanos = time_compat.nanoTimestamp();
@@ -33,15 +33,11 @@ pub const DateTimeFunctions = struct {
         const micro_part = @divFloor(@mod(nanos, 1_000_000_000), 1000);
 
         if (as_float) {
-            const result = @as(f64, @floatFromInt(secs)) + 
-                          @as(f64, @floatFromInt(micro_part)) / 1_000_000.0;
+            const result = @as(f64, @floatFromInt(secs)) +
+                @as(f64, @floatFromInt(micro_part)) / 1_000_000.0;
             return Value.initFloat(result);
         } else {
-            const result = try std.fmt.allocPrint(
-                vm.allocator, 
-                "0.{d:0>6} {d}", 
-                .{ micro_part, secs }
-            );
+            const result = try std.fmt.allocPrint(vm.allocator, "0.{d:0>6} {d}", .{ micro_part, secs });
             defer vm.allocator.free(result);
             return Value.initStringWithManager(&vm.memory_manager, result);
         }
@@ -78,7 +74,7 @@ pub const DateTimeFunctions = struct {
         var i: usize = 0;
         while (i < format.len) : (i += 1) {
             const c = format[i];
-            
+
             // 检查转义字符
             if (i > 0 and format[i - 1] == '\\') {
                 try result.append(c);
@@ -95,23 +91,23 @@ pub const DateTimeFunctions = struct {
                 'S' => try result.appendSlice(getDaySuffix(year_day.day)),
                 'w' => try result.writer().print("{d}", .{@intFromEnum(weekday)}),
                 'z' => try result.writer().print("{d}", .{getDayOfYear(year_day)}),
-                
+
                 // 周
                 'W' => try result.writer().print("{d:0>2}", .{getWeekNumber(epoch_day)}),
-                
+
                 // 月份
                 'F' => try result.appendSlice(getFullMonthName(year_day.month)),
                 'm' => try result.writer().print("{d:0>2}", .{year_day.month.numeric()}),
                 'M' => try result.appendSlice(getShortMonthName(year_day.month)),
                 'n' => try result.writer().print("{d}", .{year_day.month.numeric()}),
                 't' => try result.writer().print("{d}", .{getDaysInMonth(year_day.year, year_day.month)}),
-                
+
                 // 年份
                 'L' => try result.writer().print("{d}", .{if (isLeapYear(year_day.year)) @as(u8, 1) else @as(u8, 0)}),
                 'o' => try result.writer().print("{d}", .{getIsoYear(epoch_day)}),
                 'Y' => try result.writer().print("{d}", .{year_day.year}),
                 'y' => try result.writer().print("{d:0>2}", .{@mod(year_day.year, 100)}),
-                
+
                 // 时间部分
                 'a' => try result.appendSlice(if (day_seconds.getHoursIntoDay() < 12) "am" else "pm"),
                 'A' => try result.appendSlice(if (day_seconds.getHoursIntoDay() < 12) "AM" else "PM"),
@@ -142,7 +138,7 @@ pub const DateTimeFunctions = struct {
                     const ms = @mod(ns / std.time.ns_per_ms, std.time.ms_per_s);
                     try result.writer().print("{d:0>3}", .{ms});
                 },
-                
+
                 // 时区（改进实现，支持本地时区）
                 'e' => {
                     // 获取时区标识符
@@ -160,7 +156,7 @@ pub const DateTimeFunctions = struct {
                     const hours = @divTrunc(offset, 3600);
                     const mins = @divTrunc(@mod(@abs(offset), 3600), 60);
                     const sign: u8 = if (offset >= 0) '+' else '-';
-                    try result.writer().print("{c}{d:0>2}{d:0>2}", .{sign, @abs(hours), mins});
+                    try result.writer().print("{c}{d:0>2}{d:0>2}", .{ sign, @abs(hours), mins });
                 },
                 'P' => {
                     // 时区偏移（格式：+08:00）
@@ -168,7 +164,7 @@ pub const DateTimeFunctions = struct {
                     const hours = @divTrunc(offset, 3600);
                     const mins = @divTrunc(@mod(@abs(offset), 3600), 60);
                     const sign: u8 = if (offset >= 0) '+' else '-';
-                    try result.writer().print("{c}{d:0>2}:{d:0>2}", .{sign, @abs(hours), mins});
+                    try result.writer().print("{c}{d:0>2}:{d:0>2}", .{ sign, @abs(hours), mins });
                 },
                 'T' => {
                     // 时区缩写
@@ -180,39 +176,33 @@ pub const DateTimeFunctions = struct {
                     const offset = getTimezoneOffset(timestamp);
                     try result.writer().print("{d}", .{offset});
                 },
-                
+
                 // 完整日期/时间
                 'c' => {
                     // ISO 8601: 2004-02-12T15:19:21+00:00
-                    try result.writer().print(
-                        "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}+00:00",
-                        .{
-                            year_day.year,
-                            year_day.month.numeric(),
-                            year_day.day,
-                            day_seconds.getHoursIntoDay(),
-                            day_seconds.getMinutesIntoHour(),
-                            day_seconds.getSecondsIntoMinute(),
-                        }
-                    );
+                    try result.writer().print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}+00:00", .{
+                        year_day.year,
+                        year_day.month.numeric(),
+                        year_day.day,
+                        day_seconds.getHoursIntoDay(),
+                        day_seconds.getMinutesIntoHour(),
+                        day_seconds.getSecondsIntoMinute(),
+                    });
                 },
                 'r' => {
                     // RFC 2822: Thu, 21 Dec 2000 16:01:07 +0000
-                    try result.writer().print(
-                        "{s}, {d:0>2} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} +0000",
-                        .{
-                            getShortWeekdayName(weekday),
-                            year_day.day,
-                            getShortMonthName(year_day.month),
-                            year_day.year,
-                            day_seconds.getHoursIntoDay(),
-                            day_seconds.getMinutesIntoHour(),
-                            day_seconds.getSecondsIntoMinute(),
-                        }
-                    );
+                    try result.writer().print("{s}, {d:0>2} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} +0000", .{
+                        getShortWeekdayName(weekday),
+                        year_day.day,
+                        getShortMonthName(year_day.month),
+                        year_day.year,
+                        day_seconds.getHoursIntoDay(),
+                        day_seconds.getMinutesIntoHour(),
+                        day_seconds.getSecondsIntoMinute(),
+                    });
                 },
                 'U' => try result.writer().print("{d}", .{timestamp}),
-                
+
                 '\\' => {}, // 转义字符，跳过
                 else => try result.append(c),
             }
@@ -319,7 +309,7 @@ fn calculateTimestamp(year: i32, month: i32, day: i32, hour: i32, minute: i32, s
     // 规范化月份（PHP允许月份超出范围）
     var norm_year = year;
     var norm_month = month;
-    
+
     while (norm_month > 12) {
         norm_month -= 12;
         norm_year += 1;
@@ -331,28 +321,28 @@ fn calculateTimestamp(year: i32, month: i32, day: i32, hour: i32, minute: i32, s
 
     // 计算从1970年到目标年份的天数
     var days: i64 = 0;
-    
+
     // 计算完整年份的天数
     var y: i32 = 1970;
     while (y < norm_year) : (y += 1) {
         days += if (isLeapYear(y)) 366 else 365;
     }
-    
+
     // 计算当年已过月份的天数
     var m: i32 = 1;
     while (m < norm_month) : (m += 1) {
         days += getDaysInMonth(norm_year, @enumFromInt(m));
     }
-    
+
     // 加上当月天数
     days += day - 1;
-    
+
     // 计算总秒数
-    const total_seconds = days * 86400 + 
-                         @as(i64, hour) * 3600 + 
-                         @as(i64, minute) * 60 + 
-                         @as(i64, second);
-    
+    const total_seconds = days * 86400 +
+        @as(i64, hour) * 3600 +
+        @as(i64, minute) * 60 +
+        @as(i64, second);
+
     return total_seconds;
 }
 
@@ -361,7 +351,7 @@ fn calculateTimestamp(year: i32, month: i32, day: i32, hour: i32, minute: i32, s
 /// @post 返回Unix时间戳
 fn parseDateTime(date_str: []const u8, base_time: i64) !i64 {
     const trimmed = std.mem.trim(u8, date_str, " \t\n\r");
-    
+
     // 特殊关键字
     if (std.mem.eql(u8, trimmed, "now")) {
         return base_time;
@@ -381,27 +371,27 @@ fn parseDateTime(date_str: []const u8, base_time: i64) !i64 {
         const day_start = epoch.getEpochDay();
         return @intCast((day_start.day - 1) * 86400);
     }
-    
+
     // 相对时间："+1 day", "-2 weeks", etc.
     if (trimmed.len > 0 and (trimmed[0] == '+' or trimmed[0] == '-')) {
         return try parseRelativeTime(trimmed, base_time);
     }
-    
+
     // ISO 8601 格式：2024-01-19T10:30:00
     if (std.mem.indexOf(u8, trimmed, "T")) |_| {
         return try parseIso8601(trimmed);
     }
-    
+
     // 常见格式：YYYY-MM-DD HH:MM:SS
     if (std.mem.indexOf(u8, trimmed, "-")) |_| {
         return try parseCommonFormat(trimmed);
     }
-    
+
     // 美式格式：MM/DD/YYYY
     if (std.mem.indexOf(u8, trimmed, "/")) |_| {
         return try parseUsFormat(trimmed);
     }
-    
+
     return error.InvalidDateFormat;
 }
 
@@ -409,16 +399,16 @@ fn parseDateTime(date_str: []const u8, base_time: i64) !i64 {
 fn parseRelativeTime(str: []const u8, base_time: i64) !i64 {
     const sign: i64 = if (str[0] == '+') 1 else -1;
     const rest = str[1..];
-    
+
     // 简单解析：提取数字和单位
     var num_end: usize = 0;
     while (num_end < rest.len and std.ascii.isDigit(rest[num_end])) : (num_end += 1) {}
-    
+
     if (num_end == 0) return error.InvalidFormat;
-    
+
     const num = try std.fmt.parseInt(i64, rest[0..num_end], 10);
     const unit = std.mem.trim(u8, rest[num_end..], " \t");
-    
+
     const seconds: i64 = if (std.mem.startsWith(u8, unit, "second"))
         num
     else if (std.mem.startsWith(u8, unit, "minute"))
@@ -435,7 +425,7 @@ fn parseRelativeTime(str: []const u8, base_time: i64) !i64 {
         num * 31536000 // 365天近似
     else
         return error.InvalidUnit;
-    
+
     return base_time + (sign * seconds);
 }
 
@@ -443,27 +433,27 @@ fn parseRelativeTime(str: []const u8, base_time: i64) !i64 {
 fn parseIso8601(str: []const u8) !i64 {
     // 格式：2024-01-19T10:30:00 或 2024-01-19T10:30:00Z
     const t_pos = std.mem.indexOf(u8, str, "T") orelse return error.InvalidFormat;
-    
+
     const date_part = str[0..t_pos];
-    var time_part = str[t_pos + 1..];
-    
+    var time_part = str[t_pos + 1 ..];
+
     // 移除时区标记
     if (std.mem.endsWith(u8, time_part, "Z")) {
-        time_part = time_part[0..time_part.len - 1];
+        time_part = time_part[0 .. time_part.len - 1];
     }
-    
+
     // 解析日期部分
     var date_iter = std.mem.split(u8, date_part, "-");
     const year = try std.fmt.parseInt(i32, date_iter.next() orelse return error.InvalidFormat, 10);
     const month = try std.fmt.parseInt(i32, date_iter.next() orelse return error.InvalidFormat, 10);
     const day = try std.fmt.parseInt(i32, date_iter.next() orelse return error.InvalidFormat, 10);
-    
+
     // 解析时间部分
     var time_iter = std.mem.split(u8, time_part, ":");
     const hour = try std.fmt.parseInt(i32, time_iter.next() orelse "0", 10);
     const minute = try std.fmt.parseInt(i32, time_iter.next() orelse "0", 10);
     const second = try std.fmt.parseInt(i32, time_iter.next() orelse "0", 10);
-    
+
     return try calculateTimestamp(year, month, day, hour, minute, second);
 }
 
@@ -473,25 +463,25 @@ fn parseCommonFormat(str: []const u8) !i64 {
     var parts = std.mem.split(u8, str, " ");
     const date_part = parts.next() orelse return error.InvalidFormat;
     const time_part = parts.next();
-    
+
     // 解析日期
     var date_iter = std.mem.split(u8, date_part, "-");
     const year = try std.fmt.parseInt(i32, date_iter.next() orelse return error.InvalidFormat, 10);
     const month = try std.fmt.parseInt(i32, date_iter.next() orelse return error.InvalidFormat, 10);
     const day = try std.fmt.parseInt(i32, date_iter.next() orelse return error.InvalidFormat, 10);
-    
+
     // 解析时间（如果存在）
     var hour: i32 = 0;
     var minute: i32 = 0;
     var second: i32 = 0;
-    
+
     if (time_part) |tp| {
         var time_iter = std.mem.split(u8, tp, ":");
         hour = try std.fmt.parseInt(i32, time_iter.next() orelse "0", 10);
         minute = try std.fmt.parseInt(i32, time_iter.next() orelse "0", 10);
         second = try std.fmt.parseInt(i32, time_iter.next() orelse "0", 10);
     }
-    
+
     return try calculateTimestamp(year, month, day, hour, minute, second);
 }
 
@@ -501,7 +491,7 @@ fn parseUsFormat(str: []const u8) !i64 {
     const month = try std.fmt.parseInt(i32, parts.next() orelse return error.InvalidFormat, 10);
     const day = try std.fmt.parseInt(i32, parts.next() orelse return error.InvalidFormat, 10);
     const year = try std.fmt.parseInt(i32, parts.next() orelse return error.InvalidFormat, 10);
-    
+
     return try calculateTimestamp(year, month, day, 0, 0, 0);
 }
 
@@ -534,7 +524,7 @@ fn getWeekNumber(epoch: std.time.epoch.EpochSeconds) u8 {
     const year_day = epoch.getEpochDay().calculateYearDay();
     const day_of_year = getDayOfYear(year_day);
     const weekday = epoch.getEpochDay().calculateWeekDay();
-    
+
     // ISO 8601周数计算
     const week = @divFloor(day_of_year + 10 - getIsoWeekday(weekday), 7);
     return @intCast(@min(53, @max(1, week)));
@@ -544,7 +534,7 @@ fn getWeekNumber(epoch: std.time.epoch.EpochSeconds) u8 {
 fn getIsoYear(epoch: std.time.epoch.EpochSeconds) i32 {
     const year_day = epoch.getEpochDay().calculateYearDay();
     const week = getWeekNumber(epoch);
-    
+
     if (week == 1 and year_day.month == .dec) {
         return year_day.year + 1;
     } else if (week >= 52 and year_day.month == .jan) {
@@ -569,8 +559,8 @@ fn getIsoWeekday(weekday: std.time.epoch.WeekDay) u8 {
 /// 获取Swatch互联网时间
 fn getSwatchTime(day_seconds: std.time.epoch.DaySeconds) u16 {
     const total_seconds = day_seconds.getHoursIntoDay() * 3600 +
-                         day_seconds.getMinutesIntoHour() * 60 +
-                         day_seconds.getSecondsIntoMinute();
+        day_seconds.getMinutesIntoHour() * 60 +
+        day_seconds.getSecondsIntoMinute();
     return @intCast(@divFloor(total_seconds * 1000, 86400));
 }
 
@@ -681,7 +671,7 @@ fn getTimezoneOffset(timestamp: i64) i32 {
     // 1. 读取系统时区配置
     // 2. 根据时间戳判断是否夏令时
     // 3. 计算偏移量
-    
+
     // 示例：中国标准时间 (CST) = UTC+8 = 28800 秒
     // 示例：美国东部时间 (EST) = UTC-5 = -18000 秒
     return 0;

@@ -8,7 +8,7 @@ pub const CompiledFunc = struct {
     locals_count: u16,
     params_count: u16,
     max_stack: u16,
-    
+
     // JIT Cache
     jit_code: ?*const anyopaque = null,
     osr_entry_offset: usize = 0,

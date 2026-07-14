@@ -286,7 +286,7 @@ pub fn rebuildCFG(func: *Function) !void {
         try block_set.put(block, {});
     }
 
-    // Build edges
+    // Build edges from terminators
     for (func.blocks.items) |block| {
         if (block.terminator) |term| {
             switch (term) {
@@ -302,6 +302,19 @@ pub fn rebuildCFG(func: *Function) !void {
                     if (block_set.contains(sw.default)) try addEdge(block, sw.default);
                 },
                 else => {},
+            }
+        }
+    }
+
+    // Build exception handler edges (try → catch)
+    // These represent real control flow: an exception thrown in the try block
+    // transfers control to the catch block. Without these edges, catch blocks
+    // have no predecessors in the CFG, breaking dominator computation and
+    // mem2reg phi insertion for variables modified in catch blocks.
+    for (func.blocks.items) |block| {
+        if (block.exception_handler) |handler| {
+            if (block_set.contains(handler) and handler != block) {
+                try addEdge(block, handler);
             }
         }
     }

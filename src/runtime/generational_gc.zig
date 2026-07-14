@@ -417,11 +417,11 @@ pub const OldGeneration = struct {
         // 完整实现：合并相邻的空闲块以减少碎片
         var total_free: usize = 0;
         var free_block_count: usize = 0;
-        
+
         // 第一步：收集所有空闲块并按地址排序
         var all_blocks = std.ArrayList(*FreeBlock).empty;
         defer all_blocks.deinit(self.backing_allocator);
-        
+
         for (self.free_lists) |maybe_block| {
             var block = maybe_block;
             while (block) |b| {
@@ -431,38 +431,38 @@ pub const OldGeneration = struct {
                 block = b.next;
             }
         }
-        
+
         // 如果没有空闲块，直接返回
         if (all_blocks.items.len == 0) {
             self.fragmentation = 0.0;
             return;
         }
-        
+
         // 第二步：按地址排序
         std.sort.heap(*FreeBlock, all_blocks.items, {}, struct {
             fn lessThan(_: void, a: *FreeBlock, b: *FreeBlock) bool {
                 return @intFromPtr(a) < @intFromPtr(b);
             }
         }.lessThan);
-        
+
         // 第三步：清空所有空闲链表
         for (&self.free_lists) |*list| {
             list.* = null;
         }
-        
+
         // 第四步：合并相邻块
         var i: usize = 0;
         while (i < all_blocks.items.len) {
             var current = all_blocks.items[i];
             var merged_size = current.size;
-            
+
             // 检查后续块是否相邻
             var j = i + 1;
             while (j < all_blocks.items.len) {
                 const next = all_blocks.items[j];
                 const current_end = @intFromPtr(current) + merged_size;
                 const next_start = @intFromPtr(next);
-                
+
                 if (current_end == next_start) {
                     // 相邻块，合并
                     merged_size += next.size;
@@ -472,19 +472,19 @@ pub const OldGeneration = struct {
                     break;
                 }
             }
-            
+
             // 更新当前块的大小
             current.size = merged_size;
-            
+
             // 将合并后的块加入对应的空闲链表
             const size_class = getSizeClass(merged_size);
             current.next = self.free_lists[size_class];
             self.free_lists[size_class] = current;
-            
+
             // 跳过已合并的块
             i = j;
         }
-        
+
         // 第五步：重新计算碎片化程度
         if (total_free > 0 and free_block_count > 0) {
             // 计算合并后的块数
@@ -496,7 +496,7 @@ pub const OldGeneration = struct {
                     block = b.next;
                 }
             }
-            
+
             // 碎片化 = 1 - (合并后块数 / 合并前块数)
             // 值越小表示碎片越少
             if (free_block_count > 0) {
@@ -616,7 +616,6 @@ pub const LargeObjectSpace = struct {
         return freed;
     }
 };
-
 
 // ============================================================================
 // 增强型分代 GC 主结构
@@ -895,12 +894,12 @@ pub const EnhancedGenerationalGC = struct {
         // 使用完整的 GC 标记算法
         const GCMarker = @import("gc_marking.zig").GCMarker;
         var marker = GCMarker.init(self.allocator);
-        
+
         // 从单个对象开始标记
         const roots = [_]*GCObjectHeader{obj};
         marker.markFromRoots(&roots) catch return;
     }
-    
+
     /// 检查地址是否是有效的 GC 对象指针
     /// @pre ptr 是一个内存地址
     /// @post 返回该地址是否指向有效的 GC 对象
@@ -914,7 +913,7 @@ pub const EnhancedGenerationalGC = struct {
                 return true;
             }
         }
-        
+
         // 检查 Survivor
         const survivor_from_start = @intFromPtr(self.survivor.from_space.ptr);
         const survivor_from_end = survivor_from_start + self.survivor.space_size;
@@ -923,7 +922,7 @@ pub const EnhancedGenerationalGC = struct {
                 return true;
             }
         }
-        
+
         // 检查老年代
         for (self.old_gen.allocated_chunks.items) |chunk| {
             const chunk_start = @intFromPtr(chunk.data.ptr);
@@ -934,14 +933,14 @@ pub const EnhancedGenerationalGC = struct {
                 }
             }
         }
-        
+
         // 检查大对象空间
         for (self.large_space.objects.items) |obj| {
             if (ptr == @intFromPtr(&obj.header)) {
                 return true;
             }
         }
-        
+
         return false;
     }
 
@@ -1009,15 +1008,15 @@ pub const EnhancedGenerationalGC = struct {
         // 因为 flip 操作会清空 live_objects
         var survivor_ptr = self.survivor.from_space.ptr;
         const survivor_end = survivor_ptr + self.survivor.from_used;
-        
+
         while (@intFromPtr(survivor_ptr) < @intFromPtr(survivor_end)) {
             const header: *GCObjectHeader = @ptrCast(@alignCast(survivor_ptr));
-            
+
             if (header.mark == .black) {
                 // 对象存活
                 // 注意：copyObject 会增加 age，所以我们需要检查增加后的 age
                 const next_age = header.age + 1;
-                
+
                 if (next_age >= self.config.promotion_age) {
                     // 晋升到老年代
                     const new_header = try self.old_gen.alloc(header.size - @sizeOf(GCObjectHeader));
@@ -1060,16 +1059,16 @@ pub const EnhancedGenerationalGC = struct {
                 }
                 self.stats.total_freed += header.size;
             }
-            
+
             // 移动到下一个对象
             survivor_ptr += header.size;
         }
-        
+
         // 第二阶段：更新所有引用
         // 这是完整实现的关键部分：确保所有指向旧对象的引用都更新为指向新对象
         try self.updateAllReferences();
     }
-    
+
     /// 更新所有引用（完整实现）
     /// @post 所有引用都指向对象的新位置
     fn updateAllReferences(self: *EnhancedGenerationalGC) !void {
@@ -1079,22 +1078,22 @@ pub const EnhancedGenerationalGC = struct {
                 root_ptr.* = @ptrCast(@alignCast(root_ptr.*.forward_addr.?));
             }
         }
-        
+
         // 更新 Survivor 中对象的内部引用
         for (self.survivor.live_objects.items) |obj| {
             try self.updateObjectReferences(obj);
         }
-        
+
         // 更新老年代对象的内部引用
         for (self.old_gen.live_objects.items) |obj| {
             try self.updateObjectReferences(obj);
         }
-        
+
         // 更新大对象空间的内部引用
         for (self.large_space.objects.items) |large_obj| {
             try self.updateObjectReferences(&large_obj.header);
         }
-        
+
         // 更新 Remember Set 中的引用
         var new_remember_set = std.AutoHashMapUnmanaged(*GCObjectHeader, void){};
         var iter = self.remember_set.iterator();
@@ -1108,24 +1107,24 @@ pub const EnhancedGenerationalGC = struct {
         self.remember_set.deinit(self.allocator);
         self.remember_set = new_remember_set;
     }
-    
+
     /// 更新单个对象内部的引用
     /// @pre obj 必须是有效的 GC 对象
     /// @post obj 内部的所有引用都指向新位置
     fn updateObjectReferences(self: *EnhancedGenerationalGC, obj: *GCObjectHeader) !void {
         const data_ptr: [*]u8 = @ptrCast(obj.getDataPtr());
         const data_size = obj.size - @sizeOf(GCObjectHeader);
-        
+
         // 扫描对象数据区域，更新所有指针
         var offset: usize = 0;
         while (offset + @sizeOf(usize) <= data_size) : (offset += @alignOf(usize)) {
             const ptr_location = @as(*align(1) usize, @ptrCast(data_ptr + offset));
             const potential_ptr = ptr_location.*;
-            
+
             // 检查是否是有效的对象指针
             if (self.isValidObjectPointer(potential_ptr)) {
                 const referenced_obj = @as(*GCObjectHeader, @ptrFromInt(potential_ptr));
-                
+
                 // 如果引用的对象已转发，更新指针
                 if (referenced_obj.forwarded) {
                     ptr_location.* = @intFromPtr(referenced_obj.forward_addr.?);

@@ -17,33 +17,33 @@ pub const TypeSpecializer = struct {
     allocator: std.mem.Allocator,
     /// 寄存器的具体类型
     concrete_types: std.AutoHashMapUnmanaged(u32, ConcreteType),
-    
+
     pub const ConcreteType = enum {
-        int,      // 纯整数
-        float,    // 纯浮点
-        bool,     // 纯布尔
-        string,   // 纯字符串
-        mixed,    // 混合类型
+        int, // 纯整数
+        float, // 纯浮点
+        bool, // 纯布尔
+        string, // 纯字符串
+        mixed, // 混合类型
     };
-    
+
     pub fn init(allocator: std.mem.Allocator) TypeSpecializer {
         return .{
             .allocator = allocator,
             .concrete_types = .{},
         };
     }
-    
+
     pub fn deinit(self: *TypeSpecializer) void {
         self.concrete_types.deinit(self.allocator);
     }
-    
+
     /// 分析并特化函数
     pub fn specialize(self: *TypeSpecializer, func: *Function) !bool {
         var changed = false;
-        
+
         // 1. 类型推断
         try self.inferTypes(func);
-        
+
         // 2. 生成特化指令
         for (func.blocks.items) |block| {
             var i: usize = 0;
@@ -55,13 +55,13 @@ pub const TypeSpecializer = struct {
                 i += 1;
             }
         }
-        
+
         return changed;
     }
-    
+
     fn inferTypes(self: *TypeSpecializer, func: *Function) !void {
         self.concrete_types.clearRetainingCapacity();
-        
+
         for (func.blocks.items) |block| {
             for (block.instructions.items) |inst| {
                 if (inst.result) |result| {
@@ -71,7 +71,7 @@ pub const TypeSpecializer = struct {
             }
         }
     }
-    
+
     fn inferInstructionType(self: *const TypeSpecializer, inst: *Instruction) ConcreteType {
         return switch (inst.op) {
             .const_int => .int,
@@ -88,7 +88,7 @@ pub const TypeSpecializer = struct {
             else => .mixed,
         };
     }
-    
+
     fn specializeInstruction(
         self: *TypeSpecializer,
         inst: *Instruction,
@@ -99,7 +99,7 @@ pub const TypeSpecializer = struct {
         _ = inst;
         _ = block;
         _ = index;
-        
+
         // 特化逻辑将在 native_linker 中实现
         // 这里只做类型分析
         return false;

@@ -21,7 +21,7 @@ pub const PerformanceBaseline = struct {
     php_object_peak_live_objects: ?u64 = null,
     timestamp: i64,
     git_commit: []const u8,
-    
+
     pub fn format(
         self: PerformanceBaseline,
         comptime fmt: []const u8,
@@ -54,7 +54,7 @@ pub const BenchmarkResult = struct {
     php_object_objects: ?u64 = null,
     php_object_live_objects: ?u64 = null,
     php_object_peak_live_objects: ?u64 = null,
-    
+
     pub fn format(
         self: BenchmarkResult,
         comptime fmt: []const u8,
@@ -103,7 +103,7 @@ pub const RegressionResult = struct {
     baseline_php_object_peak_live_objects: ?u64 = null,
     current_php_object_peak_live_objects: ?u64 = null,
     php_object_peak_live_objects_change_percent: ?f64 = null,
-    
+
     pub fn format(
         self: RegressionResult,
         comptime fmt: []const u8,
@@ -140,7 +140,7 @@ pub const RegressionDetector = struct {
     baseline_dir: []const u8,
     threshold_percent: f64, // 时间回归阈值（百分比）
     mem_threshold_percent: f64, // 内存回归阈值（百分比）
-    
+
     /// 初始化回归检测器
     /// @param allocator 内存分配器
     /// @param baseline_dir 基线数据目录
@@ -156,7 +156,7 @@ pub const RegressionDetector = struct {
         fs.cwd().makePath(baseline_dir) catch |err| {
             if (err != error.PathAlreadyExists) return err;
         };
-        
+
         return RegressionDetector{
             .allocator = allocator,
             .baseline_dir = baseline_dir,
@@ -164,7 +164,7 @@ pub const RegressionDetector = struct {
             .mem_threshold_percent = mem_threshold_percent,
         };
     }
-    
+
     /// 加载基线数据
     pub fn loadBaseline(self: *RegressionDetector, benchmark_name: []const u8) !?PerformanceBaseline {
         const filename = try std.fmt.allocPrint(
@@ -173,16 +173,16 @@ pub const RegressionDetector = struct {
             .{ self.baseline_dir, benchmark_name },
         );
         defer self.allocator.free(filename);
-        
+
         const file = fs.cwd().openFile(filename, .{}) catch |err| {
             if (err == error.FileNotFound) return null;
             return err;
         };
         defer file.close();
-        
+
         const content = try file.readToEndAlloc(self.allocator, 1024 * 1024);
         defer self.allocator.free(content);
-        
+
         const parsed = try json.parseFromSlice(
             PerformanceBaseline,
             self.allocator,
@@ -190,11 +190,11 @@ pub const RegressionDetector = struct {
             .{ .allocate = .alloc_always },
         );
         defer parsed.deinit();
-        
+
         // 直接返回值类型，不需要额外分配
         return parsed.value;
     }
-    
+
     /// 保存基线数据
     pub fn saveBaseline(
         self: *RegressionDetector,
@@ -217,14 +217,14 @@ pub const RegressionDetector = struct {
             .timestamp = std.time.timestamp(),
             .git_commit = git_commit,
         };
-        
+
         const filename = try std.fmt.allocPrint(
             self.allocator,
             "{s}/{s}.json",
             .{ self.baseline_dir, result.benchmark_name },
         );
         defer self.allocator.free(filename);
-        
+
         const alloc_bytes_str = if (baseline.alloc_bytes) |v|
             try std.fmt.allocPrint(self.allocator, "{d}", .{v})
         else
@@ -267,8 +267,7 @@ pub const RegressionDetector = struct {
             try self.allocator.dupe(u8, "null");
         defer self.allocator.free(php_object_peak_live_objects_str);
 
-        const json_content = try std.fmt.allocPrint(
-            self.allocator,
+        const json_content = try std.fmt.allocPrint(self.allocator,
             \\{{
             \\  "benchmark_name": "{s}",
             \\  "avg_time_ns": {d},
@@ -303,24 +302,24 @@ pub const RegressionDetector = struct {
             baseline.git_commit,
         });
         defer self.allocator.free(json_content);
-        
+
         try fs.cwd().writeFile(.{
             .sub_path = filename,
             .data = json_content,
         });
     }
-    
+
     /// 检测性能回归
     pub fn detectRegression(
         self: *RegressionDetector,
         result: BenchmarkResult,
     ) !RegressionResult {
         const baseline_opt = try self.loadBaseline(result.benchmark_name);
-        
+
         if (baseline_opt) |baseline| {
             const baseline_avg = @as(f64, @floatFromInt(baseline.avg_time_ns));
             const current_avg = @as(f64, @floatFromInt(result.avg_time_ns));
-            
+
             // 计算性能变化百分比
             const change_percent = ((current_avg - baseline_avg) / baseline_avg) * 100.0;
 
@@ -424,7 +423,7 @@ pub const RegressionDetector = struct {
             }
 
             const is_regression = (change_percent > self.threshold_percent) or alloc_bytes_reg or alloc_count_reg or alloc_peak_live_bytes_reg or alloc_peak_live_allocs_reg or php_object_objects_reg or php_object_live_objects_reg or php_object_peak_live_objects_reg;
-            
+
             return RegressionResult{
                 .benchmark_name = result.benchmark_name,
                 .baseline_avg_ns = baseline.avg_time_ns,
@@ -485,22 +484,22 @@ pub const RegressionDetector = struct {
             };
         }
     }
-    
+
     /// 批量检测回归
     pub fn detectRegressions(
         self: *RegressionDetector,
         results: []const BenchmarkResult,
     ) ![]RegressionResult {
         var regressions = try std.ArrayList(RegressionResult).initCapacity(self.allocator, results.len);
-        
+
         for (results) |result| {
             const regression = try self.detectRegression(result);
             try regressions.append(self.allocator, regression);
         }
-        
+
         return regressions.toOwnedSlice(self.allocator);
     }
-    
+
     /// 生成回归报告
     pub fn generateReport(
         self: *RegressionDetector,
@@ -512,7 +511,7 @@ pub const RegressionDetector = struct {
         for (regressions) |reg| {
             if (reg.is_regression) regression_count += 1;
         }
-        
+
         // 生成报告头部
         const header = try std.fmt.allocPrint(self.allocator,
             \\# 性能回归检测报告
@@ -537,14 +536,14 @@ pub const RegressionDetector = struct {
             regressions.len - regression_count,
         });
         defer self.allocator.free(header);
-        
+
         try file.writeAll(header);
-        
+
         // 如果有回归，生成回归表格和摘要
         if (regression_count > 0) {
             // 生成 Top 回归摘要
             try file.writeAll("## 🚨 Top 回归摘要\n\n");
-            
+
             // 复制索引以便排序
             const indices = try self.allocator.alloc(usize, regressions.len);
             defer self.allocator.free(indices);
@@ -562,9 +561,7 @@ pub const RegressionDetector = struct {
             for (indices) |idx| {
                 const reg = regressions[idx];
                 if (reg.is_regression and reg.regression_percent > self.threshold_percent) {
-                    const line = try std.fmt.allocPrint(self.allocator, "- **{s}**: +{d:.2}% (当前: {d}ns)\n", .{
-                        reg.benchmark_name, reg.regression_percent, reg.current_avg_ns
-                    });
+                    const line = try std.fmt.allocPrint(self.allocator, "- **{s}**: +{d:.2}% (当前: {d}ns)\n", .{ reg.benchmark_name, reg.regression_percent, reg.current_avg_ns });
                     defer self.allocator.free(line);
                     try file.writeAll(line);
                     count += 1;
@@ -589,9 +586,7 @@ pub const RegressionDetector = struct {
                 const reg = regressions[idx];
                 const mem_pct = reg.alloc_bytes_change_percent orelse 0.0;
                 if (reg.is_regression and mem_pct > self.mem_threshold_percent) {
-                    const line = try std.fmt.allocPrint(self.allocator, "- **{s}**: +{d:.2}% (当前: {d} bytes)\n", .{
-                        reg.benchmark_name, mem_pct, reg.current_alloc_bytes orelse 0
-                    });
+                    const line = try std.fmt.allocPrint(self.allocator, "- **{s}**: +{d:.2}% (当前: {d} bytes)\n", .{ reg.benchmark_name, mem_pct, reg.current_alloc_bytes orelse 0 });
                     defer self.allocator.free(line);
                     try file.writeAll(line);
                     count += 1;
@@ -609,7 +604,7 @@ pub const RegressionDetector = struct {
                 \\
             ;
             try file.writeAll(regression_header);
-            
+
             for (regressions) |reg| {
                 if (reg.is_regression) {
                     const b_ab = reg.baseline_alloc_bytes orelse 0;
@@ -618,7 +613,7 @@ pub const RegressionDetector = struct {
                     const b_plb = reg.baseline_alloc_peak_live_bytes orelse 0;
                     const c_plb = reg.current_alloc_peak_live_bytes orelse 0;
                     const plbp = reg.alloc_peak_live_bytes_change_percent orelse 0.0;
-                    
+
                     const b_oa = reg.baseline_php_object_objects orelse 0;
                     const c_oa = reg.current_php_object_objects orelse 0;
                     const oap = reg.php_object_objects_change_percent orelse 0.0;
@@ -628,10 +623,10 @@ pub const RegressionDetector = struct {
 
                     // 判断状态详情
                     var status_slice: []const u8 = "❌ REGRESSION";
-                    
+
                     const time_reg = reg.regression_percent > self.threshold_percent;
                     const mem_reg = (abp > self.mem_threshold_percent) or (plbp > self.mem_threshold_percent) or (oap > self.mem_threshold_percent) or (opp > self.mem_threshold_percent);
-                    
+
                     if (time_reg and mem_reg) {
                         status_slice = "❌ TIME+MEM";
                     } else if (time_reg) {
@@ -640,7 +635,8 @@ pub const RegressionDetector = struct {
                         status_slice = "❌ MEM";
                     }
 
-                    const row = try std.fmt.allocPrint(self.allocator,
+                    const row = try std.fmt.allocPrint(
+                        self.allocator,
                         "| {s} | {d} | {d} | +{d:.2} | {d} | {d} | +{d:.2} | {d} | {d} | +{d:.2} | {d} | {d} | +{d:.2} | {d} | {d} | +{d:.2} | {s} |\n",
                         .{
                             reg.benchmark_name,
@@ -668,7 +664,7 @@ pub const RegressionDetector = struct {
             }
             try file.writeAll("\n");
         }
-        
+
         // 生成所有测试结果表格
         const all_results_header =
             \\## 所有测试结果
@@ -678,126 +674,120 @@ pub const RegressionDetector = struct {
             \\
         ;
         try file.writeAll(all_results_header);
-        
+
         for (regressions) |reg| {
             var status: []const u8 = "✅";
             if (reg.is_regression) {
-                 const abp = reg.alloc_bytes_change_percent orelse 0.0;
-                 const plbp = reg.alloc_peak_live_bytes_change_percent orelse 0.0;
-                 const oap = reg.php_object_objects_change_percent orelse 0.0;
-                 const opp = reg.php_object_peak_live_objects_change_percent orelse 0.0;
-                 const time_reg = reg.regression_percent > self.threshold_percent;
-                 const mem_reg = (abp > self.mem_threshold_percent) or (plbp > self.mem_threshold_percent) or (oap > self.mem_threshold_percent) or (opp > self.mem_threshold_percent);
-                 
-                 if (time_reg and mem_reg) {
-                     status = "❌ MIXED";
-                 } else if (time_reg) {
-                     status = "❌ TIME";
-                 } else if (mem_reg) {
-                     status = "❌ MEM";
-                 } else {
-                     status = "❌ REG";
-                 }
+                const abp = reg.alloc_bytes_change_percent orelse 0.0;
+                const plbp = reg.alloc_peak_live_bytes_change_percent orelse 0.0;
+                const oap = reg.php_object_objects_change_percent orelse 0.0;
+                const opp = reg.php_object_peak_live_objects_change_percent orelse 0.0;
+                const time_reg = reg.regression_percent > self.threshold_percent;
+                const mem_reg = (abp > self.mem_threshold_percent) or (plbp > self.mem_threshold_percent) or (oap > self.mem_threshold_percent) or (opp > self.mem_threshold_percent);
+
+                if (time_reg and mem_reg) {
+                    status = "❌ MIXED";
+                } else if (time_reg) {
+                    status = "❌ TIME";
+                } else if (mem_reg) {
+                    status = "❌ MEM";
+                } else {
+                    status = "❌ REG";
+                }
             }
-            
+
             const sign = if (reg.regression_percent >= 0) "+" else "";
             const ab_sign = if ((reg.alloc_bytes_change_percent orelse 0.0) >= 0) "+" else "";
             const plb_sign = if ((reg.alloc_peak_live_bytes_change_percent orelse 0.0) >= 0) "+" else "";
             const oa_sign = if ((reg.php_object_objects_change_percent orelse 0.0) >= 0) "+" else "";
             const op_sign = if ((reg.php_object_peak_live_objects_change_percent orelse 0.0) >= 0) "+" else "";
-            
-            const row = if (reg.baseline_avg_ns > 0)
-                blk: {
-                    const b_ab_str = if (reg.baseline_alloc_bytes) |v|
-                        try std.fmt.allocPrint(self.allocator, "{d}", .{v})
-                    else
-                        try self.allocator.dupe(u8, "N/A");
-                    defer self.allocator.free(b_ab_str);
 
-                    const c_ab_str = if (reg.current_alloc_bytes) |v|
-                        try std.fmt.allocPrint(self.allocator, "{d}", .{v})
-                    else
-                        try self.allocator.dupe(u8, "N/A");
-                    defer self.allocator.free(c_ab_str);
+            const row = if (reg.baseline_avg_ns > 0) blk: {
+                const b_ab_str = if (reg.baseline_alloc_bytes) |v|
+                    try std.fmt.allocPrint(self.allocator, "{d}", .{v})
+                else
+                    try self.allocator.dupe(u8, "N/A");
+                defer self.allocator.free(b_ab_str);
 
-                    const b_plb_str = if (reg.baseline_alloc_peak_live_bytes) |v|
-                        try std.fmt.allocPrint(self.allocator, "{d}", .{v})
-                    else
-                        try self.allocator.dupe(u8, "N/A");
-                    defer self.allocator.free(b_plb_str);
+                const c_ab_str = if (reg.current_alloc_bytes) |v|
+                    try std.fmt.allocPrint(self.allocator, "{d}", .{v})
+                else
+                    try self.allocator.dupe(u8, "N/A");
+                defer self.allocator.free(c_ab_str);
 
-                    const c_plb_str = if (reg.current_alloc_peak_live_bytes) |v|
-                        try std.fmt.allocPrint(self.allocator, "{d}", .{v})
-                    else
-                        try self.allocator.dupe(u8, "N/A");
-                    defer self.allocator.free(c_plb_str);
+                const b_plb_str = if (reg.baseline_alloc_peak_live_bytes) |v|
+                    try std.fmt.allocPrint(self.allocator, "{d}", .{v})
+                else
+                    try self.allocator.dupe(u8, "N/A");
+                defer self.allocator.free(b_plb_str);
 
-                    const b_oa_str = if (reg.baseline_php_object_objects) |v|
-                        try std.fmt.allocPrint(self.allocator, "{d}", .{v})
-                    else
-                        try self.allocator.dupe(u8, "N/A");
-                    defer self.allocator.free(b_oa_str);
+                const c_plb_str = if (reg.current_alloc_peak_live_bytes) |v|
+                    try std.fmt.allocPrint(self.allocator, "{d}", .{v})
+                else
+                    try self.allocator.dupe(u8, "N/A");
+                defer self.allocator.free(c_plb_str);
 
-                    const c_oa_str = if (reg.current_php_object_objects) |v|
-                        try std.fmt.allocPrint(self.allocator, "{d}", .{v})
-                    else
-                        try self.allocator.dupe(u8, "N/A");
-                    defer self.allocator.free(c_oa_str);
+                const b_oa_str = if (reg.baseline_php_object_objects) |v|
+                    try std.fmt.allocPrint(self.allocator, "{d}", .{v})
+                else
+                    try self.allocator.dupe(u8, "N/A");
+                defer self.allocator.free(b_oa_str);
 
-                    const b_op_str = if (reg.baseline_php_object_peak_live_objects) |v|
-                        try std.fmt.allocPrint(self.allocator, "{d}", .{v})
-                    else
-                        try self.allocator.dupe(u8, "N/A");
-                    defer self.allocator.free(b_op_str);
+                const c_oa_str = if (reg.current_php_object_objects) |v|
+                    try std.fmt.allocPrint(self.allocator, "{d}", .{v})
+                else
+                    try self.allocator.dupe(u8, "N/A");
+                defer self.allocator.free(c_oa_str);
 
-                    const c_op_str = if (reg.current_php_object_peak_live_objects) |v|
-                        try std.fmt.allocPrint(self.allocator, "{d}", .{v})
-                    else
-                        try self.allocator.dupe(u8, "N/A");
-                    defer self.allocator.free(c_op_str);
+                const b_op_str = if (reg.baseline_php_object_peak_live_objects) |v|
+                    try std.fmt.allocPrint(self.allocator, "{d}", .{v})
+                else
+                    try self.allocator.dupe(u8, "N/A");
+                defer self.allocator.free(b_op_str);
 
-                    break :blk try std.fmt.allocPrint(
-                        self.allocator,
-                        "| {s} | {d} | {d} | {s}{d:.2} | {s} | {s} | {s}{d:.2} | {s} | {s} | {s}{d:.2} | {s} | {s} | {s}{d:.2} | {s} | {s} | {s}{d:.2} | {s} |\n",
-                        .{
-                            reg.benchmark_name,
-                            reg.baseline_avg_ns,
-                            reg.current_avg_ns,
-                            sign,
-                            reg.regression_percent,
-                            b_ab_str,
-                            c_ab_str,
-                            ab_sign,
-                            reg.alloc_bytes_change_percent orelse 0.0,
-                            b_plb_str,
-                            c_plb_str,
-                            plb_sign,
-                            reg.alloc_peak_live_bytes_change_percent orelse 0.0,
-                            b_oa_str,
-                            c_oa_str,
-                            oa_sign,
-                            reg.php_object_objects_change_percent orelse 0.0,
-                            b_op_str,
-                            c_op_str,
-                            op_sign,
-                            reg.php_object_peak_live_objects_change_percent orelse 0.0,
-                            status,
-                        },
-                    );
-                }
-            else
-                try std.fmt.allocPrint(self.allocator,
-                    "| {s} | N/A | {d} | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | 🆕 NEW |\n",
+                const c_op_str = if (reg.current_php_object_peak_live_objects) |v|
+                    try std.fmt.allocPrint(self.allocator, "{d}", .{v})
+                else
+                    try self.allocator.dupe(u8, "N/A");
+                defer self.allocator.free(c_op_str);
+
+                break :blk try std.fmt.allocPrint(
+                    self.allocator,
+                    "| {s} | {d} | {d} | {s}{d:.2} | {s} | {s} | {s}{d:.2} | {s} | {s} | {s}{d:.2} | {s} | {s} | {s}{d:.2} | {s} | {s} | {s}{d:.2} | {s} |\n",
                     .{
                         reg.benchmark_name,
+                        reg.baseline_avg_ns,
                         reg.current_avg_ns,
-                    }
+                        sign,
+                        reg.regression_percent,
+                        b_ab_str,
+                        c_ab_str,
+                        ab_sign,
+                        reg.alloc_bytes_change_percent orelse 0.0,
+                        b_plb_str,
+                        c_plb_str,
+                        plb_sign,
+                        reg.alloc_peak_live_bytes_change_percent orelse 0.0,
+                        b_oa_str,
+                        c_oa_str,
+                        oa_sign,
+                        reg.php_object_objects_change_percent orelse 0.0,
+                        b_op_str,
+                        c_op_str,
+                        op_sign,
+                        reg.php_object_peak_live_objects_change_percent orelse 0.0,
+                        status,
+                    },
                 );
+            } else try std.fmt.allocPrint(self.allocator, "| {s} | N/A | {d} | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | N/A | 🆕 NEW |\n", .{
+                reg.benchmark_name,
+                reg.current_avg_ns,
+            });
             defer self.allocator.free(row);
             try file.writeAll(row);
         }
     }
-    
+
     /// 更新所有基线
     pub fn updateBaselines(
         self: *RegressionDetector,
@@ -813,13 +803,13 @@ pub const RegressionDetector = struct {
 // 测试
 test "RegressionDetector - basic functionality" {
     const allocator = std.testing.allocator;
-    
+
     // 创建临时目录
     const test_dir = "test_baselines";
     defer fs.cwd().deleteTree(test_dir) catch {};
-    
+
     var detector = try RegressionDetector.init(allocator, test_dir, 5.0, 1.0);
-    
+
     // 创建测试结果
     const result1 = BenchmarkResult{
         .benchmark_name = "test_benchmark",
@@ -829,15 +819,15 @@ test "RegressionDetector - basic functionality" {
         .stddev_ns = 50.0,
         .iterations = 100,
     };
-    
+
     // 保存基线
     try detector.saveBaseline(result1, "abc123");
-    
+
     // 加载基线
     const baseline = try detector.loadBaseline("test_benchmark");
     try std.testing.expect(baseline != null);
     try std.testing.expectEqual(@as(u64, 1000), baseline.?.avg_time_ns);
-    
+
     // 测试无回归情况
     const result2 = BenchmarkResult{
         .benchmark_name = "test_benchmark",
@@ -847,10 +837,10 @@ test "RegressionDetector - basic functionality" {
         .stddev_ns = 55.0,
         .iterations = 100,
     };
-    
+
     const regression1 = try detector.detectRegression(result2);
     try std.testing.expect(!regression1.is_regression);
-    
+
     // 测试回归情况
     const result3 = BenchmarkResult{
         .benchmark_name = "test_benchmark",
@@ -860,7 +850,7 @@ test "RegressionDetector - basic functionality" {
         .stddev_ns = 60.0,
         .iterations = 100,
     };
-    
+
     const regression2 = try detector.detectRegression(result3);
     try std.testing.expect(regression2.is_regression);
     try std.testing.expect(regression2.regression_percent > 5.0);
@@ -868,12 +858,12 @@ test "RegressionDetector - basic functionality" {
 
 test "RegressionDetector - batch detection" {
     const allocator = std.testing.allocator;
-    
+
     const test_dir = "test_baselines_batch";
     defer fs.cwd().deleteTree(test_dir) catch {};
-    
+
     var detector = try RegressionDetector.init(allocator, test_dir, 5.0, 1.0);
-    
+
     // 创建多个基线
     const baseline_results = [_]BenchmarkResult{
         .{
@@ -893,9 +883,9 @@ test "RegressionDetector - batch detection" {
             .iterations = 100,
         },
     };
-    
+
     try detector.updateBaselines(&baseline_results, "baseline_commit");
-    
+
     // 创建新的测试结果
     const new_results = [_]BenchmarkResult{
         .{
@@ -915,10 +905,10 @@ test "RegressionDetector - batch detection" {
             .iterations = 100,
         },
     };
-    
+
     const regressions = try detector.detectRegressions(&new_results);
     defer allocator.free(regressions);
-    
+
     try std.testing.expectEqual(@as(usize, 2), regressions.len);
     try std.testing.expect(regressions[0].is_regression); // bench1 回归
     try std.testing.expect(!regressions[1].is_regression); // bench2 正常

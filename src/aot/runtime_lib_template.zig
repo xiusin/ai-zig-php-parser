@@ -24,6 +24,31 @@ pub const flamegraph = @import("flamegraph.zig");
 pub const pprof = @import("pprof.zig");
 
 // ============================================================================
+// 随机数辅助函数（替代 std.crypto.random，兼容 Zig 0.16）
+// ============================================================================
+
+/// 填充缓冲区以密码学安全的随机字节
+fn getRandomBytes(buf: []u8) void {
+    if (builtin.os.tag == .linux) {
+        // Linux: 使用 getrandom 系统调用
+        std.c.getrandom(buf.ptr, buf.len, 0);
+    } else {
+        // macOS/BSD: 使用 arc4random_buf
+        std.c.arc4random_buf(buf.ptr, buf.len);
+    }
+}
+
+/// 生成指定范围内的随机整数（含两端）
+fn getRandomIntRange(comptime T: type, at_least: T, at_most: T) T {
+    if (at_most == at_least) return at_least;
+    var buf: [@sizeOf(T)]u8 = undefined;
+    getRandomBytes(&buf);
+    const rand_val = std.mem.readInt(T, &buf, .little);
+    const range = @as(u64, @intCast(at_most)) - @as(u64, @intCast(at_least)) + 1;
+    return at_least + @as(T, @intCast(@as(u64, @intCast(rand_val)) % range));
+}
+
+// ============================================================================
 // 全局运行时状态
 // ============================================================================
 
@@ -71,7 +96,7 @@ var static_vars: ?std.StringHashMap(Value) = null;
 var static_vars_mutex: std.atomic.Mutex = .unlocked;
 
 /// 自旋锁辅助函数（std.atomic.Mutex 没有 lock()，只有 tryLock()）
-inline fn spinLock(m: *std.atomic.Mutex) void {
+pub inline fn spinLock(m: *std.atomic.Mutex) void {
     while (!m.tryLock()) std.atomic.spinLoopHint();
 }
 
@@ -118,8 +143,9 @@ inline fn tryFileWriteAll(fd: std.posix.fd_t, data: []const u8) WriteError!void 
 /// Zig 0.17 兼容：替代 std.process.getEnvVarOwned()（已移除）
 /// 简化实现：AOT 模式下直接返回 null（不支持运行时环境变量查询）
 pub inline fn getEnvVar(name: [*:0]const u8) ?[]const u8 {
-    _ = name;
-    return null;
+    const c_val = std.c.getenv(name);
+    if (c_val == null) return null;
+    return std.mem.sliceTo(c_val.?, 0);
 }
 
 var array_internal_pointers: ?std.AutoHashMap(*PHPArray, usize) = null;
@@ -302,6 +328,9 @@ const GC_ROOT_THRESHOLD: usize = 256;
 threadlocal var current_exception: Value = undefined;
 threadlocal var has_exception: bool = false;
 threadlocal var current_call_args: ?[]const Value = null;
+
+/// __clone 上下文标志：在 __clone 魔术方法执行期间允许 readonly 属性重新初始化
+threadlocal var in_clone_context: bool = false;
 
 /// 源码位置跟踪（用于 Deprecated 警告输出）
 threadlocal var src_file: []const u8 = "";
@@ -497,7 +526,7 @@ fn initPredefinedConstants() !void {
         const maxpath_key = try runtime_allocator.dupe(u8, "PHP_MAXPATHLEN");
         try constants.put(maxpath_key, Value.initInt(4096));
     }
-    
+
     // 排序常量
     const sort_keys = [_][]const u8{ "SORT_ASC", "SORT_DESC", "SORT_REGULAR", "SORT_NUMERIC", "SORT_STRING", "SORT_NATURAL", "SORT_FLAG_CASE" };
     const sort_vals = [_]i64{ 1, 2, 0, 1, 2, 6, 8 };
@@ -505,7 +534,7 @@ fn initPredefinedConstants() !void {
         const key_copy = try runtime_allocator.dupe(u8, key);
         try constants.put(key_copy, Value.initInt(val));
     }
-    
+
     // 数组常量
     const array_keys = [_][]const u8{ "CASE_LOWER", "CASE_UPPER", "COUNT_NORMAL", "COUNT_RECURSIVE", "EXTR_OVERWRITE", "EXTR_SKIP", "EXTR_PREFIX_SAME", "EXTR_PREFIX_ALL" };
     const array_vals = [_]i64{ 0, 1, 0, 1, 0, 1, 3, 4 };
@@ -513,7 +542,7 @@ fn initPredefinedConstants() !void {
         const key_copy = try runtime_allocator.dupe(u8, key);
         try constants.put(key_copy, Value.initInt(val));
     }
-    
+
     const keys = [_][]const u8{ "STR_PAD_LEFT", "STR_PAD_RIGHT", "STR_PAD_BOTH" };
     const values = [_]i64{ 0, 1, 2 };
     for (keys, values) |key, val| {
@@ -560,7 +589,7 @@ fn initPredefinedConstants() !void {
         const k = try runtime_allocator.dupe(u8, sk2);
         try constants.put(k, Value.initInt(sv2));
     }
-    
+
     // Filter 常量
     const filter_keys = [_][]const u8{
         "FILTER_VALIDATE_EMAIL",
@@ -569,8 +598,9 @@ fn initPredefinedConstants() !void {
         "FILTER_VALIDATE_INT",
         "FILTER_VALIDATE_BOOLEAN",
         "FILTER_VALIDATE_FLOAT",
+        "FILTER_VALIDATE_REGEXP",
     };
-    const filter_vals = [_]i64{ 274, 273, 275, 257, 258, 259 };
+    const filter_vals = [_]i64{ 274, 273, 275, 257, 258, 259, 272 };
     for (filter_keys, filter_vals) |fk, fv| {
         const k = try runtime_allocator.dupe(u8, fk);
         try constants.put(k, Value.initInt(fv));
@@ -1931,16 +1961,65 @@ pub const PHPArray = struct {
         return new_arr;
     }
 
+    /// P2-1: 浅拷贝 + 延迟分离（Copy-On-Write 优化）
+    ///
+    /// 与 cloneDeep 不同，cloneShallow 不递归克隆子数组，
+    /// 而是对所有值调用 retain()（共享引用）。
+    /// 嵌套数组的 COW 由 writeCOWArrayModify 在实际修改时延迟处理。
+    ///
+    /// 性能：O(n) vs cloneDeep 的 O(n*d)，其中 d 为嵌套深度。
+    /// 正确性：retain() 增加子数组 ref_count，后续修改时 COW 检查会克隆。
+    ///
+    /// 优化：对 packed_values 模式使用快速路径，直接复制切片并批量 retain，
+    /// 避免通用迭代器的分支和键构造开销。
+    pub fn cloneShallow(self: *PHPArray, allocator: Allocator) !*PHPArray {
+        const new_arr = try PHPArray.init(allocator);
+        new_arr.next_index = self.next_index;
+
+        // 快速路径：packed_values 模式直接复制切片并批量 retain
+        if (self.elements.mixed == null) {
+            const src = self.elements.packed_values.items;
+            if (src.len > 0) {
+                // 预分配容量，避免多次扩容
+                try new_arr.elements.packed_values.ensureTotalCapacity(allocator, src.len);
+                // 直接复制原始值位模式（memcpy 级别）
+                new_arr.elements.packed_values.appendSliceAssumeCapacity(src);
+                // 批量 retain：遍历新数组中的值并增加引用计数
+                for (new_arr.elements.packed_values.items) |*v| {
+                    _ = v.retain();
+                }
+            }
+            return new_arr;
+        }
+
+        // 慢路径：mixed 模式使用通用迭代器（含字符串键的关联数组）
+        var iter = self.elements.iterator();
+        while (iter.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const val = entry.value_ptr.*;
+            // 所有值仅 retain（包括子数组），延迟分离
+            const new_val = val.retain();
+            // 若 key 为字符串，需要增加字符串的引用计数
+            const new_key: ArrayKey = switch (key) {
+                .string => |s| blk: {
+                    s.retain();
+                    break :blk .{ .string = s };
+                },
+                .integer => key,
+            };
+            try new_arr.elements.put(new_key, new_val);
+        }
+        return new_arr;
+    }
+
     /// 减少引用计数，必要时释放
     pub fn release(self: *PHPArray, allocator: Allocator) void {
-        // 检测内存破坏
         if (self.ref_count > 1000000) {
-            std.debug.print("ERROR: PHPArray corrupted! ref_count={d} (0x{x})\n", .{ self.ref_count, self.ref_count });
+            // 引用计数异常高，不递减以避免 use-after-free
             return;
         }
 
         if (self.ref_count == 0) {
-            std.debug.print("WARNING: PHPArray double free detected!\n", .{});
             return;
         }
 
@@ -2002,14 +2081,22 @@ pub const PHPArray = struct {
     }
 
     /// 设置元素
+    /// PHP 值语义：存储的数组值若被共享（ref_count > 1），执行浅拷贝（COW）
     pub fn set(self: *PHPArray, allocator: Allocator, key: ArrayKey, value: Value) !void {
         // 释放旧值
         if (self.elements.get(key)) |old_value| {
             old_value.release(allocator);
         }
 
-        // 保留新值
-        _ = value.retain();
+        // COW：若值是被共享的数组，浅拷贝后再存储（PHP 值语义）
+        var val_to_store: Value = undefined;
+        if (value.isArray() and !value.isRef() and value.asArray().ref_count > 1) {
+            const cloned = try value.asArray().cloneShallow(allocator);
+            val_to_store = Value.initArray(cloned);
+        } else {
+            _ = value.retain();
+            val_to_store = value;
+        }
 
         // 如果是字符串键，保留键
         if (key == .string) {
@@ -2021,16 +2108,23 @@ pub const PHPArray = struct {
             self.next_index = key.integer + 1;
         }
 
-        try self.elements.put(key, value);
+        try self.elements.put(key, val_to_store);
     }
 
     /// 追加元素（使用下一个整数索引）
+    /// PHP 值语义：存储的数组值若被共享（ref_count > 1），执行浅拷贝（COW）
     pub fn push(self: *PHPArray, allocator: Allocator, value: Value) !void {
         const key = ArrayKey{ .integer = self.next_index };
-        _ = value.retain();
-        try self.elements.put(key, value);
+        var val_to_store: Value = undefined;
+        if (value.isArray() and !value.isRef() and value.asArray().ref_count > 1) {
+            const cloned = try value.asArray().cloneShallow(allocator);
+            val_to_store = Value.initArray(cloned);
+        } else {
+            _ = value.retain();
+            val_to_store = value;
+        }
+        try self.elements.put(key, val_to_store);
         self.next_index += 1;
-        _ = allocator; // 避免未使用警告
     }
 
     /// 检查是否包含字符串键（关联数组）
@@ -2044,13 +2138,30 @@ pub const PHPArray = struct {
     }
 
     /// 删除元素（通过 ArrayKey）
+    /// 注意：必须释放数组中存储的键（stored key），而非查找键（lookup key）。
+    /// 查找键由调用方创建和管理，释放查找键会导致 double free。
     pub fn unset(self: *PHPArray, allocator: Allocator, key: ArrayKey) bool {
+        if (self.elements.mixed) |*m| {
+            const idx = m.getIndex(key) orelse return false;
+            // 在移除前获取存储键和值的副本（值类型拷贝，指针不受移除影响）
+            const entry = m.entries.get(idx);
+            const stored_key = entry.key;
+            const stored_value = entry.value;
+            if (stored_key == .string) {
+                stored_key.string.retain();
+            }
+            _ = stored_value.retain();
+            _ = m.orderedRemove(key);
+            stored_value.release(allocator);
+            if (stored_key == .string) {
+                stored_key.string.release(allocator);
+            }
+            return true;
+        }
+        // packed_values 路径：仅整数键，无字符串键需释放
         if (self.elements.get(key)) |old_value| {
             if (self.elements.remove(key)) {
                 old_value.release(allocator);
-                if (key == .string) {
-                    key.string.release(allocator);
-                }
                 return true;
             }
         }
@@ -2118,11 +2229,36 @@ pub const Value = struct {
     pub const TYPE_FUNCTION: u64 = nanbox_abi.TYPE_FUNCTION;
     pub const TYPE_REF: u64 = nanbox_abi.TYPE_REF;
     pub const TYPE_BIGINT: u64 = nanbox_abi.TYPE_BIGINT;
+    pub const TYPE_RESOURCE: u64 = nanbox_abi.TYPE_RESOURCE;
 
     // 堆装箱大整数（超出48位范围）
     pub const BoxedInt = struct {
         ref_count: u32,
         value: i64,
+    };
+
+    // PHP 资源类型（文件句柄等）
+    pub const PHPResource = struct {
+        ref_count: u32,
+        file_handle: ?*std.Io.File,
+        type_name: []const u8,
+        closed: bool = false,
+
+        pub fn retain(self: *PHPResource) void {
+            self.ref_count += 1;
+        }
+
+        pub fn release(self: *PHPResource, allocator: Allocator) void {
+            if (self.ref_count > 0) {
+                self.ref_count -= 1;
+                if (self.ref_count == 0) {
+                    if (self.file_handle) |fh| {
+                        allocator.destroy(fh);
+                    }
+                    allocator.destroy(self);
+                }
+            }
+        }
     };
 
     // 48位整数常量
@@ -2201,6 +2337,12 @@ pub const Value = struct {
         return .{ .val = nanbox_abi.encodePtr(addr, TYPE_REF) };
     }
 
+    /// 创建资源值
+    pub fn initResource(res: *PHPResource) Value {
+        const addr = @intFromPtr(res);
+        return .{ .val = nanbox_abi.encodePtr(addr, TYPE_RESOURCE) };
+    }
+
     // ========================================================================
     // 类型检查
     // ========================================================================
@@ -2261,6 +2403,12 @@ pub const Value = struct {
         if ((self.val & (SIGN_BIT | QNAN)) != QNAN) return false;
         // 然后检查类型标签
         return (self.val & TYPE_MASK) == TYPE_REF;
+    }
+
+    pub fn isResource(self: Value) bool {
+        if ((self.val & (SIGN_BIT | QNAN)) != QNAN) return false;
+        if ((self.val & TYPE_MASK) != TYPE_RESOURCE) return false;
+        return !self.asResource().closed;
     }
 
     // ========================================================================
@@ -2330,6 +2478,11 @@ pub const Value = struct {
         return @ptrFromInt(ptr_val);
     }
 
+    pub fn asResource(self: Value) *PHPResource {
+        const ptr_val = nanbox_abi.decodePtr(self.val);
+        return @ptrFromInt(ptr_val);
+    }
+
     pub fn asRef(self: Value) *Value {
         const ptr_val = nanbox_abi.decodePtr(self.val);
         return @ptrFromInt(ptr_val);
@@ -2366,6 +2519,8 @@ pub const Value = struct {
         } else if (self.isBigInt()) {
             const boxed: *BoxedInt = @ptrFromInt(nanbox_abi.decodePtr(self.val));
             boxed.ref_count += 1;
+        } else if (self.isResource()) {
+            self.asResource().retain();
         }
         return self;
     }
@@ -2397,6 +2552,8 @@ pub const Value = struct {
                     allocator.destroy(boxed);
                 }
             }
+        } else if (self.isResource()) {
+            self.asResource().release(allocator);
         }
     }
 
@@ -2410,8 +2567,12 @@ pub const Value = struct {
         if (self.isBool()) return self.asBool();
         if (self.isInt()) return self.asInt() != 0;
         if (self.isFloat()) return self.asFloat() != 0.0;
-        if (self.isString()) return self.asString().length > 0;
+        if (self.isString()) {
+            const s = self.asString();
+            return s.length > 0 and !std.mem.eql(u8, s.data, "0");
+        }
         if (self.isArray()) return self.asArray().count() > 0;
+        if (self.isResource()) return true;
         return true;
     }
 
@@ -2420,10 +2581,12 @@ pub const Value = struct {
         if (self.isInt()) return self.asInt();
         if (self.isFloat()) {
             const f = self.asFloat();
-            // 使用saturating转换避免panic
+            // PHP 语义：浮点溢出时返回 INT64_MIN（x86-64 行为）
+            // @floatFromInt(std.math.maxInt(i64)) = 9223372036854775808.0（f64 无法精确表示 9223372036854775807）
+            const max_as_float = @as(f64, @floatFromInt(std.math.maxInt(i64)));
+            const min_as_float = @as(f64, @floatFromInt(std.math.minInt(i64)));
             if (std.math.isNan(f)) return 0;
-            if (f >= @as(f64, @floatFromInt(std.math.maxInt(i64)))) return std.math.maxInt(i64);
-            if (f <= @as(f64, @floatFromInt(std.math.minInt(i64)))) return std.math.minInt(i64);
+            if (f >= max_as_float or f < min_as_float) return std.math.minInt(i64);
             return @intFromFloat(f);
         }
         if (self.isBool()) return if (self.asBool()) 1 else 0;
@@ -2433,31 +2596,55 @@ pub const Value = struct {
             const str = self.asString();
             if (str.length == 0) return 0;
 
-            // PHP行为：解析前导数字，遇到非数字停止
-            var result: i64 = 0;
-            var i: usize = 0;
-            var negative = false;
-
             // 跳过前导空格
+            var i: usize = 0;
             while (i < str.length and std.ascii.isWhitespace(str.data[i])) : (i += 1) {}
 
             // 处理符号
+            var negative = false;
             if (i < str.length and (str.data[i] == '+' or str.data[i] == '-')) {
                 negative = (str.data[i] == '-');
                 i += 1;
             }
 
-            // 解析数字（遇到非数字停止）
-            var has_digits = false;
-            while (i < str.length and std.ascii.isDigit(str.data[i])) : (i += 1) {
-                has_digits = true;
-                const digit = str.data[i] - '0';
-                result = result * 10 + digit;
+            if (i >= str.length) return 0;
+            const remaining = str.data[i..str.length];
+
+            // 如果包含小数点或科学记数法，先解析为浮点数
+            if (std.mem.indexOf(u8, remaining, ".") != null or
+                std.mem.indexOf(u8, remaining, "e") != null or
+                std.mem.indexOf(u8, remaining, "E") != null)
+            {
+                const num_str = if (negative) str.data[0..str.length] else remaining;
+                if (std.fmt.parseFloat(f64, num_str)) |float_val| {
+                    const max_as_float = @as(f64, @floatFromInt(std.math.maxInt(i64)));
+                    const min_as_float = @as(f64, @floatFromInt(std.math.minInt(i64)));
+                    if (float_val >= max_as_float or float_val < min_as_float) return std.math.minInt(i64);
+                    return @intFromFloat(float_val);
+                } else |_| {}
             }
 
-            // 如果没有数字，返回0
-            if (!has_digits) return 0;
+            // 解析整数（仅 0-9，处理溢出）
+            var result: i64 = 0;
+            var has_digits = false;
+            var overflow = false;
+            while (i < str.length and std.ascii.isDigit(str.data[i])) : (i += 1) {
+                has_digits = true;
+                if (result > 922337203685477580) {
+                    overflow = true;
+                    break;
+                }
+                result = result * 10 + (str.data[i] - '0');
+                if (result < 0) {
+                    overflow = true;
+                    break;
+                }
+            }
 
+            if (!has_digits) return 0;
+            if (overflow) {
+                return if (negative) std.math.minInt(i64) else std.math.maxInt(i64);
+            }
             return if (negative) -result else result;
         }
         // 数组转整数：非空数组返回1，空数组返回0
@@ -2469,6 +2656,7 @@ pub const Value = struct {
     }
 
     /// 转换为浮点数（PHP语义）
+    extern fn strtod(nptr: [*:0]const u8, endptr: ?*[*:0]u8) f64;
     pub fn toFloat(self: Value) f64 {
         if (self.isFloat()) return self.asFloat();
         if (self.isInt()) return @floatFromInt(self.asInt());
@@ -2483,44 +2671,53 @@ pub const Value = struct {
             const str = self.asString();
             if (str.length == 0) return 0.0;
 
-            // PHP行为：解析前导数字（支持浮点数）
-            var result: f64 = 0.0;
+            // 提取前导数字部分（PHP 语义：只解析前导数字，忽略后续字符）
             var i: usize = 0;
-            var negative = false;
-
             // 跳过前导空格
             while (i < str.length and std.ascii.isWhitespace(str.data[i])) : (i += 1) {}
-
             // 处理符号
             if (i < str.length and (str.data[i] == '+' or str.data[i] == '-')) {
-                negative = (str.data[i] == '-');
                 i += 1;
             }
-
-            // 解析整数部分
+            // 扫描数字部分（包括小数点和科学计数法）
+            const num_start = i;
             var has_digits = false;
-            while (i < str.length and std.ascii.isDigit(str.data[i])) : (i += 1) {
-                has_digits = true;
-                const digit = str.data[i] - '0';
-                result = result * 10.0 + @as(f64, @floatFromInt(digit));
+            while (i < str.length and (std.ascii.isDigit(str.data[i]) or str.data[i] == '.')) : (i += 1) {
+                if (std.ascii.isDigit(str.data[i])) has_digits = true;
             }
-
-            // 解析小数部分
-            if (i < str.length and str.data[i] == '.') {
+            // 科学计数法
+            if (has_digits and i < str.length and (str.data[i] == 'e' or str.data[i] == 'E')) {
                 i += 1;
-                var decimal_place: f64 = 0.1;
-                while (i < str.length and std.ascii.isDigit(str.data[i])) : (i += 1) {
-                    has_digits = true;
-                    const digit = str.data[i] - '0';
-                    result += @as(f64, @floatFromInt(digit)) * decimal_place;
-                    decimal_place *= 0.1;
-                }
+                if (i < str.length and (str.data[i] == '+' or str.data[i] == '-')) i += 1;
+                while (i < str.length and std.ascii.isDigit(str.data[i])) : (i += 1) {}
             }
 
-            // 如果没有数字，返回0
             if (!has_digits) return 0.0;
 
-            return if (negative) -result else result;
+            // 使用 std.fmt.parseFloat 解析（等价于 C strtod 的正确舍入）
+            const num_str = str.data[num_start..i];
+            const full_str = if (num_start > 0) blk: {
+                // 包含符号
+                var buf: [128]u8 = undefined;
+                const prefix = str.data[0..num_start];
+                if (prefix.len + num_str.len < buf.len) {
+                    @memcpy(buf[0..prefix.len], prefix);
+                    @memcpy(buf[prefix.len..][0..num_str.len], num_str);
+                    break :blk buf[0 .. prefix.len + num_str.len];
+                }
+                break :blk num_str;
+            } else num_str;
+
+            return std.fmt.parseFloat(f64, full_str) catch {
+                // 回退到 C strtod
+                var c_buf: [128]u8 = undefined;
+                if (full_str.len < c_buf.len) {
+                    @memcpy(c_buf[0..full_str.len], full_str);
+                    c_buf[full_str.len] = 0;
+                    return strtod(@ptrCast(&c_buf), null);
+                }
+                return 0.0;
+            };
         }
         return 0.0;
     }
@@ -2530,6 +2727,8 @@ pub const Value = struct {
     /// 将Value转换为字符串
     /// PHP 8+行为：数组转字符串抛出异常
     pub fn toString(self: Value, allocator: Allocator) !*PHPString {
+        // Ref 自动解引用
+        if (self.isRef()) return self.asRef().*.toString(allocator);
         if (self.isNull()) return PHPString.init(allocator, "");
         if (self.isBool()) return PHPString.init(allocator, if (self.asBool()) "1" else "");
         if (self.isInt()) {
@@ -2580,6 +2779,7 @@ pub const PHPClosure = struct {
     param_count: u16 = 0,
     required_params: u16 = 0,
     bound_this: Value = Value.initNull(), // Closure::bind/bindTo 绑定的 $this
+    bound_scope: ?*const ClassMeta = null, // Closure::bind/bindTo 绑定的作用域类
     is_static: bool = false, // static closure 不能绑定 $this
 
     pub fn init(
@@ -2606,7 +2806,7 @@ pub const PHPClosure = struct {
             alloc_counters.php_closure_live_objects,
         );
 
-        f.* = .{ .func = func, .captures = caps, .ref_count = 1, .gc_info = .{}, .allocator = allocator, .param_count = 0, .required_params = 0, .bound_this = Value.initNull(), .is_static = false };
+        f.* = .{ .func = func, .captures = caps, .ref_count = 1, .gc_info = .{}, .allocator = allocator, .param_count = 0, .required_params = 0, .bound_this = Value.initNull(), .bound_scope = null, .is_static = false };
         return f;
     }
 
@@ -2638,12 +2838,26 @@ pub const PHPClosure = struct {
 /// 为目标制作一份深拷贝，避免两个变量通过同一底层数组互相影响。
 /// 注意：调用者负责释放旧值和 retain 新值。若触发 clone，本函数会撤销调用者的 retain。
 pub fn val_assign(target: *Value, value: Value) void {
+    // 如果目标是 Ref，写穿到引用指向的位置
+    if (target.*.isRef()) {
+        const ptr = target.*.asRef();
+        ptr.release(runtime_allocator);
+        _ = value.retain();
+        val_assign(ptr, value);
+        return;
+    }
+
     if (value.isArray() and !value.isRef()) {
         const arr = value.asArray();
         // 调用者已经执行一次 retain，因此当 ref_count > 1 时，除本次引用外仍有其他持有者，
         // 需要分离（COW）以维持值语义。
+        // 如果 target 已经持有同一个数组（原地修改后写回），跳过 COW 克隆。
+        // 调用者的 release(target) 和 retain(value) 已抵消，无需额外操作。
+        if (target.*.isArray() and target.*.asArray() == arr) {
+            return;
+        }
         if (arr.ref_count > 1) {
-            const cloned = arr.cloneDeep(runtime_allocator) catch {
+            const cloned = arr.cloneShallow(runtime_allocator) catch {
                 target.* = value;
                 return;
             };
@@ -2663,17 +2877,19 @@ pub fn ref_aware_store(target: *Value, new_val: Value) void {
     const dest = val_deref(target);
     dest.*.release(runtime_allocator);
     _ = new_val.retain();
+    // 直接存储，不触发 COW：ref_aware_store 仅用于 make_ref'd alloca 和 foreach 引用变量，
+    // 这些场景需要共享（而非复制）数组，以保证引用写穿能正确传播到原变量。
+    // COW 由 val_assign 在普通赋值路径中处理。
     dest.* = new_val;
 }
 
-/// 变量解引用
+/// 变量解引用（跟随完整引用链）
 pub fn val_deref(val: *Value) *Value {
-    if (val.isRef()) {
-        // 直接返回指针指向的Value
-        const ptr = val.asRef();
-        return ptr;
+    var current = val;
+    while (current.isRef()) {
+        current = current.asRef();
     }
-    return val;
+    return current;
 }
 
 pub fn make_ref(ptr: *Value, allocator: Allocator) !Value {
@@ -2792,6 +3008,7 @@ const builtin_function_map = std.StaticStringMap(BuiltinFn).initComptime(.{
     .{ "stripos", wrapBuiltin_stripos },
     .{ "strstr", wrapBuiltin_strstr },
     .{ "str_split", wrapBuiltin_str_split },
+    .{ "mb_str_split", wrapBuiltin_str_split },
     .{ "implode", wrapBuiltin_implode },
     .{ "explode", wrapBuiltin_explode },
     // 回调函数
@@ -2864,6 +3081,8 @@ pub fn php_create_closure(name: Value, captures: Value, is_static_val: Value, al
         }
     }
     closure.is_static = is_static;
+    // 捕获当前作用域类：闭包在类方法内定义时自动绑定作用域
+    closure.bound_scope = getCurrentScopeClass();
     return Value.initFunction(closure);
 }
 
@@ -2876,6 +3095,40 @@ pub fn php_object_isset(obj_val: Value, property_name_val: Value) !Value {
     else
         return Value.initBool(false);
 
+    // 属性可见性检查 + __isset 魔术方法回退
+    if (obj.class_meta) |meta| {
+        if (findPropertyDeclaringClass(meta, prop_name)) |decl| {
+            if (!checkPropertyAccess(decl.class, decl.prop)) {
+                // 属性声明但不可访问：尝试 __isset 魔术方法
+                if (meta.findMethodLookup("__isset")) |lookup| {
+                    const name_str = try PHPString.init(runtime_allocator, prop_name);
+                    const name_val = Value.initString(name_str);
+                    defer name_val.release(runtime_allocator);
+                    const args = [_]Value{name_val};
+                    const guard = ClassContext.init(meta, lookup.owner);
+                    defer guard.deinit();
+                    return try lookup.method.func(obj_val, &args, runtime_allocator);
+                }
+                return Value.initBool(false);
+            }
+        } else {
+            // 属性未声明：先检查动态属性（直接查 HashMap，不触发 __isset），无则尝试 __isset
+            if (obj.properties.contains(prop_name)) {
+                return Value.initBool(true);
+            }
+            if (meta.findMethodLookup("__isset")) |lookup| {
+                const name_str = try PHPString.init(runtime_allocator, prop_name);
+                const name_val = Value.initString(name_str);
+                defer name_val.release(runtime_allocator);
+                const args = [_]Value{name_val};
+                const guard = ClassContext.init(meta, lookup.owner);
+                defer guard.deinit();
+                return try lookup.method.func(obj_val, &args, runtime_allocator);
+            }
+            return Value.initBool(false);
+        }
+    }
+
     return Value.initBool(obj.hasProperty(prop_name));
 }
 
@@ -2883,14 +3136,54 @@ pub fn php_object_unset(obj_val: Value, property_name_val: Value, allocator: All
     if (!Value_isObject(obj_val)) return Value.initNull();
 
     const obj = Value_asObject(obj_val);
-    if (property_name_val.isString()) {
-        _ = try obj.unsetProperty(property_name_val.asString().data);
-        return Value.initNull();
+    const name = if (property_name_val.isString())
+        property_name_val.asString().data
+    else {
+        const property_name = try property_name_val.toString(allocator);
+        defer property_name.release(allocator);
+        return try php_object_unset_impl(obj_val, obj, property_name.data);
+    };
+
+    return try php_object_unset_impl(obj_val, obj, name);
+}
+
+fn php_object_unset_impl(obj_val: Value, obj: *PHPObject, name: []const u8) !Value {
+    // 属性可见性检查 + __unset 魔术方法回退
+    if (obj.class_meta) |meta| {
+        if (findPropertyDeclaringClass(meta, name)) |decl| {
+            if (!checkPropertyAccess(decl.class, decl.prop)) {
+                // 属性声明但不可访问：尝试 __unset 魔术方法
+                if (meta.findMethodLookup("__unset")) |lookup| {
+                    const name_str = try PHPString.init(runtime_allocator, name);
+                    const name_val = Value.initString(name_str);
+                    defer name_val.release(runtime_allocator);
+                    const args = [_]Value{name_val};
+                    const guard = ClassContext.init(meta, lookup.owner);
+                    defer guard.deinit();
+                    _ = try lookup.method.func(obj_val, &args, runtime_allocator);
+                    return Value.initNull();
+                }
+                var buf: [256]u8 = undefined;
+                const vis = if (decl.prop.is_private) "private" else "protected";
+                const msg = std.fmt.bufPrint(&buf, "Cannot access {s} property {s}::${s}", .{ vis, meta.name, name }) catch "Cannot access property";
+                return throwThrowable("Error", msg, runtime_allocator);
+            }
+        } else {
+            // 属性未声明：尝试 __unset 魔术方法
+            if (meta.findMethodLookup("__unset")) |lookup| {
+                const name_str = try PHPString.init(runtime_allocator, name);
+                const name_val = Value.initString(name_str);
+                defer name_val.release(runtime_allocator);
+                const args = [_]Value{name_val};
+                const guard = ClassContext.init(meta, lookup.owner);
+                defer guard.deinit();
+                _ = try lookup.method.func(obj_val, &args, runtime_allocator);
+                return Value.initNull();
+            }
+        }
     }
 
-    const property_name = try property_name_val.toString(allocator);
-    defer property_name.release(allocator);
-    _ = try obj.unsetProperty(property_name.data);
+    _ = try obj.unsetProperty(name);
     return Value.initNull();
 }
 
@@ -3052,24 +3345,24 @@ pub fn php_memory_get_peak_usage(args: []const Value, allocator: Allocator) !Val
 /// shell_exec - 执行shell命令并返回完整输出
 pub fn php_shell_exec(args: []const Value, allocator: Allocator) !Value {
     if (args.len < 1) return Value.initNull();
-    
+
     const cmd_val = args[0];
     if (!cmd_val.isString()) return Value.initNull();
-    
+
     const cmd_str = cmd_val.asString().data;
-    
+
     // 执行命令
     const result = std.process.Child.run(.{
         .allocator = allocator,
         .argv = &[_][]const u8{ "/bin/sh", "-c", cmd_str },
         .max_output_bytes = 1024 * 1024,
     }) catch return Value.initNull();
-    
+
     defer {
         allocator.free(result.stdout);
         allocator.free(result.stderr);
     }
-    
+
     const output = try PHPString.init(allocator, result.stdout);
     return Value.initString(output);
 }
@@ -3078,24 +3371,24 @@ pub fn php_shell_exec(args: []const Value, allocator: Allocator) !Value {
 /// PHP签名: exec(string $command, array &$output = null, int &$result_code = null): string|false
 pub fn php_exec(args: []const Value, allocator: Allocator) !Value {
     if (args.len < 1) return Value.initNull();
-    
+
     const cmd_val = args[0];
     if (!cmd_val.isString()) return Value.initNull();
-    
+
     const cmd_str = cmd_val.asString().data;
-    
+
     // 执行命令
     const result = std.process.Child.run(.{
         .allocator = allocator,
         .argv = &[_][]const u8{ "/bin/sh", "-c", cmd_str },
         .max_output_bytes = 1024 * 1024,
     }) catch return Value.initBool(false);
-    
+
     defer {
         allocator.free(result.stdout);
         allocator.free(result.stderr);
     }
-    
+
     // 将输出按行分割成数组
     const arr = try PHPArray.init(allocator);
     var lines = std.mem.splitScalar(u8, result.stdout, '\n');
@@ -3108,7 +3401,7 @@ pub fn php_exec(args: []const Value, allocator: Allocator) !Value {
         try arr.set(allocator, ArrayKey{ .integer = idx }, Value.initString(line_str));
         idx += 1;
     }
-    
+
     // 如果有第二个参数（&$output引用），写回输出数组
     if (args.len >= 2) {
         const output_ref = args[1];
@@ -3132,7 +3425,7 @@ pub fn php_exec(args: []const Value, allocator: Allocator) !Value {
             }
         }
     }
-    
+
     // 如果有第三个参数（&$return_code引用），写回返回码
     if (args.len >= 3) {
         const return_code_ref = args[2];
@@ -3143,7 +3436,7 @@ pub fn php_exec(args: []const Value, allocator: Allocator) !Value {
             ptr.* = Value.initInt(exit_code);
         }
     }
-    
+
     // 返回最后一行输出
     if (last_line.len > 0) {
         const last_str = try PHPString.init(allocator, last_line);
@@ -3156,29 +3449,29 @@ pub fn php_exec(args: []const Value, allocator: Allocator) !Value {
 /// PHP签名: system(string $command, int &$result_code = null): string|false
 pub fn php_system(args: []const Value, allocator: Allocator) !Value {
     if (args.len < 1) return Value.initNull();
-    
+
     const cmd_val = args[0];
     if (!cmd_val.isString()) return Value.initNull();
-    
+
     const cmd_str = cmd_val.asString().data;
-    
+
     // 执行命令
     const result = std.process.Child.run(.{
         .allocator = allocator,
         .argv = &[_][]const u8{ "/bin/sh", "-c", cmd_str },
         .max_output_bytes = 1024 * 1024,
     }) catch return Value.initBool(false);
-    
+
     defer {
         allocator.free(result.stdout);
         allocator.free(result.stderr);
     }
-    
+
     // 输出到stdout（模拟PHP的system行为）
     if (result.stdout.len > 0) {
         fileWriteAll(1, result.stdout);
     }
-    
+
     // 如果有第二个参数（&$return_var引用），写回返回码
     if (args.len >= 2) {
         const return_var_ref = args[1];
@@ -3189,16 +3482,16 @@ pub fn php_system(args: []const Value, allocator: Allocator) !Value {
             ptr.* = Value.initInt(exit_code);
         }
     }
-    
+
     // 返回最后一行
     if (result.stdout.len == 0) return Value.initBool(false);
-    
+
     var lines = std.mem.splitScalar(u8, result.stdout, '\n');
     var last_line: []const u8 = "";
     while (lines.next()) |line| {
         if (line.len > 0) last_line = line;
     }
-    
+
     const last_str = try PHPString.init(allocator, last_line);
     return Value.initString(last_str);
 }
@@ -3211,9 +3504,9 @@ pub fn php_escapeshellarg(arg_val: Value, allocator: Allocator) !Value {
         defer str.release(allocator);
         return php_escapeshellarg(Value.initString(str), allocator);
     }
-    
+
     const arg = arg_val.asString().data;
-    
+
     // 计算结果长度：每个单引号需要转义为 '\''，加上首尾的单引号
     var result_len: usize = 2; // 首尾单引号
     for (arg) |c| {
@@ -3223,12 +3516,12 @@ pub fn php_escapeshellarg(arg_val: Value, allocator: Allocator) !Value {
             result_len += 1;
         }
     }
-    
+
     const result = try allocator.alloc(u8, result_len);
     var pos: usize = 0;
     result[pos] = '\'';
     pos += 1;
-    
+
     for (arg) |c| {
         if (c == '\'') {
             // 替换 ' 为 '\''
@@ -3242,9 +3535,9 @@ pub fn php_escapeshellarg(arg_val: Value, allocator: Allocator) !Value {
             pos += 1;
         }
     }
-    
+
     result[pos] = '\'';
-    
+
     const php_str = try PHPString.init(allocator, result);
     allocator.free(result);
     return Value.initString(php_str);
@@ -3258,21 +3551,21 @@ pub fn php_escapeshellcmd(cmd_val: Value, allocator: Allocator) !Value {
         defer str.release(allocator);
         return php_escapeshellcmd(Value.initString(str), allocator);
     }
-    
+
     const cmd = cmd_val.asString().data;
-    
+
     // 需要转义的字符: &#;`|*?~<>^()[]{}$\, \x0A, \xFF, 以及未配对的引号
     const special_chars = "&#;`|*?~<>^()[]{}$\\";
-    
+
     // 计算结果长度
     var result_len: usize = 0;
     var single_quote_count: usize = 0;
     var double_quote_count: usize = 0;
-    
+
     for (cmd) |c| {
         if (c == '\'') single_quote_count += 1;
         if (c == '"') double_quote_count += 1;
-        
+
         var is_special = false;
         for (special_chars) |sc| {
             if (c == sc) {
@@ -3286,16 +3579,16 @@ pub fn php_escapeshellcmd(cmd_val: Value, allocator: Allocator) !Value {
             result_len += 1;
         }
     }
-    
+
     // 处理未配对的引号
     const escape_single = (single_quote_count % 2) == 1;
     const escape_double = (double_quote_count % 2) == 1;
     if (escape_single) result_len += single_quote_count;
     if (escape_double) result_len += double_quote_count;
-    
+
     const result = try allocator.alloc(u8, result_len);
     var pos: usize = 0;
-    
+
     for (cmd) |c| {
         // 检查是否是特殊字符
         var is_special = false;
@@ -3305,7 +3598,7 @@ pub fn php_escapeshellcmd(cmd_val: Value, allocator: Allocator) !Value {
                 break;
             }
         }
-        
+
         if (c == '\'' and escape_single) {
             result[pos] = '\\';
             result[pos + 1] = '\'';
@@ -3323,7 +3616,7 @@ pub fn php_escapeshellcmd(cmd_val: Value, allocator: Allocator) !Value {
             pos += 1;
         }
     }
-    
+
     const php_str = try PHPString.init(allocator, result[0..pos]);
     allocator.free(result);
     return Value.initString(php_str);
@@ -3332,43 +3625,43 @@ pub fn php_escapeshellcmd(cmd_val: Value, allocator: Allocator) !Value {
 /// substr_replace - 替换字符串的子串
 pub fn php_substr_replace(args: []const Value, allocator: Allocator) !Value {
     if (args.len < 2) return Value.initNull();
-    
+
     const str_val = args[0];
     if (!str_val.isString()) return Value.initNull();
     const str = str_val.asString().data;
-    
+
     const replacement_val = args[1];
     if (!replacement_val.isString()) return Value.initNull();
     const replacement = replacement_val.asString().data;
-    
+
     const start = if (args.len >= 3) args[2].toInt() else 0;
     const length = if (args.len >= 4) args[3].toInt() else @as(i64, @intCast(str.len));
-    
+
     // 处理负数索引
-    const actual_start = if (start < 0) 
-        @max(0, @as(i64, @intCast(str.len)) + start) 
-    else 
+    const actual_start = if (start < 0)
+        @max(0, @as(i64, @intCast(str.len)) + start)
+    else
         @min(start, @as(i64, @intCast(str.len)));
-    
+
     const actual_length = if (length < 0)
         @max(0, @as(i64, @intCast(str.len)) - actual_start + length)
     else
         @min(length, @as(i64, @intCast(str.len)) - actual_start);
-    
+
     const start_idx = @as(usize, @intCast(actual_start));
     const end_idx = @as(usize, @intCast(actual_start + actual_length));
-    
+
     // 构建结果字符串
     var result = try std.ArrayList(u8).initCapacity(allocator, str.len + replacement.len);
-    errdefer result.deinit();
-    
-    try result.appendSlice(str[0..start_idx]);
-    try result.appendSlice(replacement);
+    errdefer result.deinit(allocator);
+
+    try result.appendSlice(allocator, str[0..start_idx]);
+    try result.appendSlice(allocator, replacement);
     if (end_idx < str.len) {
-        try result.appendSlice(str[end_idx..]);
+        try result.appendSlice(allocator, str[end_idx..]);
     }
-    
-    const output = try PHPString.init(allocator, try result.toOwnedSlice());
+
+    const output = try PHPString.init(allocator, try result.toOwnedSlice(allocator));
     return Value.initString(output);
 }
 
@@ -3379,15 +3672,15 @@ pub fn php_substr_replace(args: []const Value, allocator: Allocator) !Value {
 pub fn php_file_put_contents(filename: Value, data: Value, allocator: Allocator) !Value {
     if (!filename.isString()) return Value.initBool(false);
     const fname = filename.asString().data;
-    
-    const content_str = if (data.isString()) 
-        data.asString().data 
+
+    const content_str = if (data.isString())
+        data.asString().data
     else blk: {
         const temp = try data.toString(allocator);
         defer temp.release(allocator);
         break :blk temp.data;
     };
-    
+
     const file = std.Io.Dir.cwd().createFile(getIo(), fname, .{}) catch return Value.initBool(false);
     defer file.close(getIo());
     fileWriteAll(file.handle, content_str);
@@ -3397,7 +3690,7 @@ pub fn php_file_put_contents(filename: Value, data: Value, allocator: Allocator)
 pub fn php_file_get_contents(filename: Value, allocator: Allocator) !Value {
     if (!filename.isString()) return Value.initBool(false);
     const fname = filename.asString().data;
-    
+
     const content = std.Io.Dir.cwd().readFileAlloc(getIo(), fname, allocator, 10 * 1024 * 1024) catch return Value.initBool(false);
     const output = try PHPString.init(allocator, content);
     return Value.initString(output);
@@ -3407,12 +3700,14 @@ pub fn php_fopen(filename: Value, mode: Value, allocator: Allocator) !Value {
     if (!filename.isString() or !mode.isString()) return Value.initBool(false);
     const fname = filename.asString().data;
     const fmode = mode.asString().data;
-    
+
     // 特殊处理php://流
     if (std.mem.startsWith(u8, fname, "php://")) {
-        return Value.initInt(1);
+        const res = allocator.create(Value.PHPResource) catch return Value.initBool(false);
+        res.* = .{ .ref_count = 1, .file_handle = null, .type_name = "stream" };
+        return Value.initResource(res);
     }
-    
+
     const file = if (std.mem.eql(u8, fmode, "r"))
         std.Io.Dir.cwd().openFile(getIo(), fname, .{}) catch return Value.initBool(false)
     else if (std.mem.eql(u8, fmode, "w"))
@@ -3421,42 +3716,45 @@ pub fn php_fopen(filename: Value, mode: Value, allocator: Allocator) !Value {
         std.Io.Dir.cwd().createFile(getIo(), fname, .{ .truncate = false }) catch return Value.initBool(false)
     else
         return Value.initBool(false);
-    
+
     const handle = allocator.create(std.Io.File) catch return Value.initBool(false);
     handle.* = file;
-    return Value.initInt(@intCast(@intFromPtr(handle)));
+    const res = allocator.create(Value.PHPResource) catch {
+        allocator.destroy(handle);
+        return Value.initBool(false);
+    };
+    res.* = .{ .ref_count = 1, .file_handle = handle, .type_name = "stream" };
+    return Value.initResource(res);
 }
 
 pub fn php_fwrite(handle: Value, data: Value, allocator: Allocator) !Value {
-    if (!handle.isInt()) return Value.initBool(false);
-    const handle_ptr = handle.asInt();
-    if (handle_ptr <= 1) return Value.initInt(0); // 虚拟句柄
-    
-    const file_handle: *std.Io.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
+    if (!handle.isResource()) return Value.initBool(false);
+    const res = handle.asResource();
+    const fh = res.file_handle orelse return Value.initInt(0); // 虚拟句柄
+
     const content = if (data.isString()) data.asString().data else blk: {
         const temp = try data.toString(allocator);
         defer temp.release(allocator);
         break :blk temp.data;
     };
-    
-    fileWriteAll(file_handle.handle, content);
+
+    fileWriteAll(fh.handle, content);
     return Value.initInt(@intCast(content.len));
 }
 
 pub fn php_fread(handle: Value, length: Value, allocator: Allocator) !Value {
-    if (!handle.isInt() or !length.isInt()) return Value.initBool(false);
-    const handle_ptr = handle.asInt();
-    if (handle_ptr <= 1) return Value.initString(try PHPString.init(allocator, try allocator.dupe(u8, ""))); // 虚拟句柄
-    
-    const file_handle: *std.Io.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
+    if (!handle.isResource() or !length.isInt()) return Value.initBool(false);
+    const res = handle.asResource();
+    const fh = res.file_handle orelse return Value.initString(try PHPString.init(allocator, try allocator.dupe(u8, ""))); // 虚拟句柄
+
     const len = length.asInt();
-    
+
     const buffer = allocator.alloc(u8, @intCast(len)) catch return Value.initBool(false);
-    const bytes_read = file_handle.read(buffer) catch {
+    const bytes_read = std.posix.read(fh.handle, buffer) catch {
         allocator.free(buffer);
         return Value.initBool(false);
     };
-    
+
     const content = allocator.realloc(buffer, bytes_read) catch {
         allocator.free(buffer);
         return Value.initBool(false);
@@ -3466,41 +3764,37 @@ pub fn php_fread(handle: Value, length: Value, allocator: Allocator) !Value {
 }
 
 pub fn php_fclose(handle: Value) !Value {
-    if (!handle.isInt()) return Value.initBool(false);
-    const handle_ptr = handle.asInt();
-    if (handle_ptr <= 1) return Value.initBool(true); // 虚拟句柄
-    
-    const file_handle: *std.Io.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
-    file_handle.close(getIo());
+    if (!handle.isResource()) return Value.initBool(false);
+    const res = handle.asResource();
+    if (res.file_handle) |fh| {
+        fh.close(getIo());
+        res.file_handle = null;
+    }
+    res.closed = true;
     return Value.initBool(true);
 }
 
 pub fn php_is_resource(val: Value) !Value {
-    if (val.isInt()) {
-        const i = val.asInt();
-        return Value.initBool(i > 0);
-    }
-    return Value.initBool(false);
+    return Value.initBool(val.isResource());
 }
 
 pub fn php_fgets(handle: Value) !Value {
-    if (!handle.isInt()) return Value.initBool(false);
-    const handle_ptr = handle.asInt();
-    if (handle_ptr <= 1) return Value.initBool(false);
-    
-    const file_handle: *std.Io.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
+    if (!handle.isResource()) return Value.initBool(false);
+    const res = handle.asResource();
+    const fh = res.file_handle orelse return Value.initBool(false);
+
     var buf: [4096]u8 = undefined;
     var pos: usize = 0;
-    
+
     while (pos < buf.len) {
-        const n = file_handle.read(buf[pos..pos+1]) catch break;
+        const n = std.posix.read(fh.handle, buf[pos .. pos + 1]) catch break;
         if (n == 0) break;
         pos += 1;
-        if (buf[pos-1] == '\n') break;
+        if (buf[pos - 1] == '\n') break;
     }
-    
+
     if (pos == 0) return Value.initBool(false);
-    
+
     // 需要allocator但函数签名没有，使用全局allocator
     const global_alloc = std.heap.page_allocator;
     const output = try PHPString.init(global_alloc, try global_alloc.dupe(u8, buf[0..pos]));
@@ -3508,23 +3802,22 @@ pub fn php_fgets(handle: Value) !Value {
 }
 
 pub fn php_fseek(handle: Value, offset: Value) !Value {
-    if (!handle.isInt() or !offset.isInt()) return Value.initInt(-1);
-    const handle_ptr = handle.asInt();
-    if (handle_ptr <= 1) return Value.initInt(-1);
-    
-    const file_handle: *std.Io.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
+    if (!handle.isResource() or !offset.isInt()) return Value.initInt(-1);
+    const res = handle.asResource();
+    const fh = res.file_handle orelse return Value.initInt(-1);
+
     const off = offset.asInt();
-    file_handle.seekTo(@intCast(off)) catch return Value.initInt(-1);
+    fh.seekTo(@intCast(off)) catch return Value.initInt(-1);
     return Value.initInt(0);
 }
 
 pub fn php_scandir(dir: Value, allocator: Allocator) !Value {
     if (!dir.isString()) return Value.initBool(false);
     const dirname = dir.asString().data;
-    
+
     var dir_handle = std.Io.Dir.cwd().openDir(getIo(), dirname, .{ .iterate = true }) catch return Value.initBool(false);
     defer dir_handle.close(getIo());
-    
+
     var arr = try PHPArray.init(allocator);
     var iter = dir_handle.iterate();
     while (iter.next() catch null) |entry| {
@@ -3559,7 +3852,7 @@ pub fn php_uname(allocator: Allocator) !Value {
         "Windows"
     else
         "Unknown";
-    
+
     const output = try PHPString.init(allocator, try allocator.dupe(u8, uname_info));
     return Value.initString(output);
 }
@@ -3674,7 +3967,7 @@ pub fn php_set_error_handler(handler: Value, error_types: Value, allocator: Allo
     _ = allocator;
     // 返回之前设置的错误处理器
     const prev_handler = if (global_error_handler) |h| h else Value.initNull();
-    
+
     // 设置新的错误处理器
     if (handler.isNull()) {
         global_error_handler = null;
@@ -3682,12 +3975,12 @@ pub fn php_set_error_handler(handler: Value, error_types: Value, allocator: Allo
         _ = handler.retain();
         global_error_handler = handler;
     }
-    
+
     // 设置错误类型掩码
     if (!error_types.isNull()) {
         global_error_types = error_types.toInt();
     }
-    
+
     return prev_handler;
 }
 
@@ -3721,9 +4014,9 @@ pub fn php_restore_exception_handler() !Value {
 /// trigger_error - 触发用户错误
 pub fn php_trigger_error(message: Value, error_type: Value, allocator: Allocator) !Value {
     if (!message.isString()) return Value.initBool(false);
-    
+
     const err_type = if (error_type.isNull()) E_USER_NOTICE else error_type.toInt();
-    
+
     // 如果设置了自定义错误处理器
     if (global_error_handler) |handler| {
         // 检查是否在错误类型掩码内
@@ -3751,7 +4044,7 @@ pub fn php_trigger_error(message: Value, error_type: Value, allocator: Allocator
         };
         std.debug.print("{s}: {s}\n", .{ err_type_str, message.asString().data });
     }
-    
+
     return Value.initBool(true);
 }
 
@@ -3773,10 +4066,10 @@ pub fn php_sys_get_temp_dir(allocator: Allocator) !Value {
 pub fn php_file(filename: Value, allocator: Allocator) !Value {
     if (!filename.isString()) return Value.initBool(false);
     const fname = filename.asString().data;
-    
+
     const content = std.Io.Dir.cwd().readFileAlloc(getIo(), fname, allocator, 10 * 1024 * 1024) catch return Value.initBool(false);
     defer allocator.free(content);
-    
+
     const arr = try PHPArray.init(allocator);
     var lines = std.mem.splitScalar(u8, content, '\n');
     var idx: i64 = 0;
@@ -3903,6 +4196,7 @@ fn wrapBuiltin_json_last_error_msg(ctx: Value, args: []const Value, allocator: A
     return php_json_last_error_msg(allocator);
 }
 
+/// @enhancement AOT超越PHP: 首参数允许数组字面量
 fn wrapBuiltin_array_walk(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     _ = ctx;
     if (args.len < 2) return error.InvalidArgumentCount;
@@ -3910,6 +4204,7 @@ fn wrapBuiltin_array_walk(ctx: Value, args: []const Value, allocator: Allocator)
     return php_array_walk(args[0], args[1], userdata, allocator);
 }
 
+/// @enhancement AOT超越PHP: 首参数允许数组字面量
 fn wrapBuiltin_array_walk_recursive(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     _ = ctx;
     if (args.len < 2) return error.InvalidArgumentCount;
@@ -4185,12 +4480,17 @@ fn valueToArrayKey(val: Value, allocator: Allocator) !ArrayKey {
 }
 
 pub fn php_array_get(arr_val: Value, key_val: Value, allocator: Allocator) !Value {
-    if (Value_isObject(arr_val)) {
+    // 解引用：如果值是引用类型，先解引用获取实际值
+    var arr_resolved = arr_val;
+    if (arr_resolved.isRef()) {
+        arr_resolved = arr_resolved.asRef().*;
+    }
+    if (Value_isObject(arr_resolved)) {
         return php_object_call(arr_val, "offsetGet", &[_]Value{key_val});
     }
 
-    if (arr_val.isString()) {
-        const str = arr_val.asString();
+    if (arr_resolved.isString()) {
+        const str = arr_resolved.asString();
         const idx_i64 = key_val.toInt();
         if (idx_i64 < 0 or idx_i64 >= str.length) return Value.initNull();
         const idx = @as(usize, @intCast(idx_i64));
@@ -4198,35 +4498,67 @@ pub fn php_array_get(arr_val: Value, key_val: Value, allocator: Allocator) !Valu
         return Value.initString(try PHPString.init(allocator, ch_slice));
     }
 
-    if (arr_val.isArray()) {
-        return arr_val.asArray().getByValue(key_val) orelse Value.initNull();
+    if (arr_resolved.isArray()) {
+        const result = arr_resolved.asArray().getByValue(key_val) orelse Value.initNull();
+        _ = result.retain();
+        return result;
     }
 
     var buf: [256]u8 = undefined;
     const msg = std.fmt.bufPrint(
         &buf,
         "Trying to access array offset on {s}",
-        .{valueTypeName(arr_val)},
+        .{valueTypeName(arr_resolved)},
     ) catch "Trying to access array offset";
     emitWarning(msg);
 
     return Value.initNull();
 }
 
+/// isset($arr[$key]) - 检查数组键是否存在且非null（不产生警告）
+/// 对非数组值返回 false（与 PHP isset 语义一致）
+pub fn php_array_isset(arr_val: Value, key_val: Value) !Value {
+    var arr_resolved = arr_val;
+    if (arr_resolved.isRef()) {
+        arr_resolved = arr_resolved.asRef().*;
+    }
+    if (Value_isObject(arr_resolved)) {
+        const result = try php_object_call(arr_val, "offsetExists", &[_]Value{key_val});
+        return Value.initBool(result.toBool());
+    }
+    if (arr_resolved.isString()) {
+        const str = arr_resolved.asString();
+        const idx_i64 = key_val.toInt();
+        return Value.initBool(idx_i64 >= 0 and idx_i64 < str.length);
+    }
+    if (arr_resolved.isArray()) {
+        if (arr_resolved.asArray().getByValue(key_val)) |val| {
+            return Value.initBool(!val.isNull());
+        }
+        return Value.initBool(false);
+    }
+    return Value.initBool(false);
+}
+
 /// 获取数组元素的引用（用于引用返回）
 /// 参数：array, key
 /// 返回：Value.initRef(指向数组元素的指针)
 pub fn php_array_get_ref(arr_val: Value, key_val: Value, allocator: Allocator) !Value {
-    if (!arr_val.isArray()) return error.InvalidArgument;
-    const arr = arr_val.asArray();
+    // 解引用：如果值是引用类型，先解引用获取实际值
+    var arr_resolved = arr_val;
+    if (arr_resolved.isRef()) {
+        arr_resolved = arr_resolved.asRef().*;
+    }
+    if (!arr_resolved.isArray()) return error.InvalidArgument;
+    const arr = arr_resolved.asArray();
 
     const key = normalizeArrayKeyFromValue(key_val);
 
     // 获取或创建数组元素
-    const entry_ptr = arr.data.getPtr(key) orelse blk: {
+    const entry_ptr = arr.getPtr(key) orelse blk: {
         // 元素不存在，创建一个 null 值
-        try arr.data.put(allocator, key, Value.initNull());
-        break :blk arr.data.getPtr(key).?;
+        try arr.set(allocator, key, Value.initNull());
+        break :blk arr.getPtr(key).?;
     };
 
     // 返回指向数组元素的引用
@@ -4402,12 +4734,12 @@ pub fn getClosureBoundThis() Value {
 pub fn php_invoke_callable(callback: Value, args: []const Value, allocator: Allocator) !Value {
     // 引用透明：闭包自引用场景中 callback 可能是 Ref(cell)
     var actual_cb = if (callback.isRef()) callback.asRef().* else callback;
-    
+
     // 多层Ref解引用：捕获的闭包可能被多次包装
     while (actual_cb.isRef()) {
         actual_cb = actual_cb.asRef().*;
     }
-    
+
     if (actual_cb.isFunction()) {
         const closure = actual_cb.asFunction();
         // Closure::bind/bindTo: 如果有 bound_this，临时设置全局 $this
@@ -4415,6 +4747,20 @@ pub fn php_invoke_callable(callback: Value, args: []const Value, allocator: Allo
             const prev_this = closure_bound_this_stack;
             closure_bound_this_stack = closure.bound_this;
             defer closure_bound_this_stack = prev_this;
+            // 同时设置 bound_scope（bindTo 的第二个参数指定的作用域类）
+            if (closure.bound_scope) |scope_meta| {
+                const prev_scope = getCurrentScopeClass();
+                setCurrentScopeClass(scope_meta);
+                defer setCurrentScopeClass(prev_scope);
+                return closure.func(actual_cb, args, allocator);
+            }
+            return closure.func(actual_cb, args, allocator);
+        }
+        // 闭包在类方法内定义时自动绑定作用域（无 bound_this 但有 bound_scope）
+        if (closure.bound_scope) |scope_meta| {
+            const prev_scope = getCurrentScopeClass();
+            setCurrentScopeClass(scope_meta);
+            defer setCurrentScopeClass(prev_scope);
             return closure.func(actual_cb, args, allocator);
         }
         return closure.func(actual_cb, args, allocator);
@@ -4428,6 +4774,15 @@ pub fn php_invoke_callable(callback: Value, args: []const Value, allocator: Allo
     }
     if (actual_cb.isString()) {
         const func_name = actual_cb.asString().data;
+        // AOT hook 优先：支持所有 AOT 注册的函数（包括内置函数分发）
+        if (aot_callable_hook) |hook| {
+            if (hook(func_name, args, allocator)) |result| {
+                return result;
+            } else |err| {
+                // AOT hook 返回错误则尝试其他路径
+                if (err != error.UnknownFunction) return err;
+            }
+        }
         if (lookupBuiltinFunction(func_name)) |func| {
             return func(Value.initNull(), args, allocator);
         }
@@ -4435,10 +4790,6 @@ pub fn php_invoke_callable(callback: Value, args: []const Value, allocator: Allo
             if (registry.get(func_name)) |func| {
                 return func(Value.initNull(), args, allocator);
             }
-        }
-        // AOT hook：尝试调用AOT注册的函数
-        if (aot_callable_hook) |hook| {
-            return hook(func_name, args, allocator);
         }
         // PHP: 对不存在的函数发出 warning 并返回 false
         return Value.initBool(false);
@@ -4508,6 +4859,81 @@ pub fn php_invoke_callable_args_array(callback: Value, args_array: Value, alloca
         }
     }
     return php_invoke_callable(callback, tmp_args[0..used], allocator);
+}
+
+/// Closure::bind / $closure->bindTo — 创建新闭包并绑定 $this 和作用域
+pub fn php_closure_bind(closure_val: Value, new_this: Value, scope_val: Value) !Value {
+    if (!closure_val.isFunction()) return Value.initNull();
+    const orig = closure_val.asFunction();
+
+    // PHP: Cannot bind an instance to a static closure → warning + return null
+    if (orig.is_static and !new_this.isNull()) {
+        fileWriteAll(2, "PHP Warning:  Cannot bind an instance to a static closure\n");
+        return Value.initNull();
+    }
+
+    const bound_this = if (orig.is_static or new_this.isNull()) Value.initNull() else brk: {
+        _ = new_this.retain();
+        break :brk new_this;
+    };
+
+    const bound_scope: ?*const ClassMeta = blk: {
+        if (scope_val.isNull()) break :blk orig.bound_scope;
+        if (scope_val.isString()) {
+            const class_name = scope_val.asString().data;
+            if (std.mem.eql(u8, class_name, "static")) break :blk orig.bound_scope;
+            if (findClass(class_name)) |meta| break :blk meta;
+        }
+        break :blk orig.bound_scope;
+    };
+
+    const new_closure = try allocPHPClosure(runtime_allocator);
+    const caps = try runtime_allocator.alloc(Value, orig.captures.len);
+    @memcpy(caps, orig.captures);
+    for (caps) |c| {
+        _ = c.retain();
+    }
+
+    new_closure.* = .{
+        .func = orig.func,
+        .captures = caps,
+        .ref_count = 1,
+        .gc_info = .{},
+        .allocator = runtime_allocator,
+        .param_count = orig.param_count,
+        .required_params = orig.required_params,
+        .bound_this = bound_this,
+        .bound_scope = bound_scope,
+        .is_static = orig.is_static or new_this.isNull(),
+    };
+
+    alloc_counters.php_closure_objects += 1;
+    alloc_counters.php_closure_live_objects += 1;
+    alloc_counters.php_closure_peak_live_objects = @max(
+        alloc_counters.php_closure_peak_live_objects,
+        alloc_counters.php_closure_live_objects,
+    );
+
+    return Value.initFunction(new_closure);
+}
+
+/// Closure::call($closure, $newThis, ...$args) — 临时绑定 $this 并调用
+/// PHP 语义：Closure::call 自动将作用域设为 $newThis 的类，允许访问 private/protected 成员
+pub fn php_closure_call(closure_val: Value, new_this: Value, args_array: Value, allocator: Allocator) !Value {
+    // Closure::call 将 scope 设为 new_this 的类
+    var scope_val = Value.initNull();
+    var created_scope = false;
+    if (Value_isObject(new_this)) {
+        const obj = Value_asObject(new_this);
+        if (obj.class_meta) |meta| {
+            scope_val = Value.initString(try PHPString.init(allocator, meta.name));
+            created_scope = true;
+        }
+    }
+    defer if (created_scope) scope_val.release(allocator);
+    const bound = try php_closure_bind(closure_val, new_this, scope_val);
+    defer bound.release(allocator);
+    return php_invoke_callable_args_array(bound, args_array, allocator);
 }
 
 pub fn php_object_call_safe_args_array(obj_val: Value, method_name_val: Value, args_array: Value, allocator: Allocator) !Value {
@@ -4626,7 +5052,7 @@ pub fn php_object_call_named_args(obj_val: Value, method_name_val: Value, args_a
     // 获取方法参数名（从函数元数据）
     const full_method_name = try std.fmt.allocPrint(allocator, "{s}::{s}", .{ meta.name, method_name });
     defer allocator.free(full_method_name);
-    
+
     // 尝试获取参数信息
     const param_count: u16 = if (function_meta_registry) |meta_reg|
         (if (meta_reg.get(full_method_name)) |m| m.param_count else 0)
@@ -4664,18 +5090,18 @@ pub fn php_add(lhs: Value, rhs: Value) !Value {
     if (lhs.isArray() and rhs.isArray()) {
         return php_array_union(lhs, rhs, runtime_allocator);
     }
+    emitArithmeticStringWarningIfNeeded(lhs);
+    emitArithmeticStringWarningIfNeeded(rhs);
     if (!checkArithmeticOperand(lhs) or !checkArithmeticOperand(rhs)) {
         emitUnsupportedOperandError(lhs, rhs, "+");
     }
-    emitArithmeticStringWarningIfNeeded(lhs);
-    emitArithmeticStringWarningIfNeeded(rhs);
     // 整数 + 整数 = 整数（可能溢出为浮点）
     if (lhs.isInt() and rhs.isInt()) {
         const a = lhs.asInt();
         const b = rhs.asInt();
         const result = @addWithOverflow(a, b);
-        if (result[1] != 0 or result[0] < Value.INT48_MIN or result[0] > Value.INT48_MAX) {
-            // 溢出：转为浮点数
+        if (result[1] != 0) {
+            // i64 溢出：转为浮点数（PHP 语义）
             return Value.initFloat(@as(f64, @floatFromInt(a)) + @as(f64, @floatFromInt(b)));
         }
         return Value.initInt(result[0]);
@@ -4689,16 +5115,16 @@ pub fn php_add(lhs: Value, rhs: Value) !Value {
 
 /// 减法运算（PHP语义）
 pub fn php_sub(lhs: Value, rhs: Value) !Value {
+    emitArithmeticStringWarningIfNeeded(lhs);
+    emitArithmeticStringWarningIfNeeded(rhs);
     if (!checkArithmeticOperand(lhs) or !checkArithmeticOperand(rhs)) {
         emitUnsupportedOperandError(lhs, rhs, "-");
     }
-    emitArithmeticStringWarningIfNeeded(lhs);
-    emitArithmeticStringWarningIfNeeded(rhs);
     if (lhs.isInt() and rhs.isInt()) {
         const a = lhs.asInt();
         const b = rhs.asInt();
         const result = @subWithOverflow(a, b);
-        if (result[1] != 0 or result[0] < Value.INT48_MIN or result[0] > Value.INT48_MAX) {
+        if (result[1] != 0) {
             return Value.initFloat(@as(f64, @floatFromInt(a)) - @as(f64, @floatFromInt(b)));
         }
         return Value.initInt(result[0]);
@@ -4709,11 +5135,182 @@ pub fn php_sub(lhs: Value, rhs: Value) !Value {
     return Value.initFloat(a - b);
 }
 
+/// Perl-style string increment (用于 ++$str / $str++)
+fn perlStringIncrement(val: Value) !Value {
+    const str = val.asString();
+    const data = str.data[0..str.length];
+
+    // 空字符串 → 1（整数）
+    if (data.len == 0) return Value.initInt(1);
+
+    // 创建可变副本
+    var bytes = try runtime_allocator.alloc(u8, data.len);
+    defer runtime_allocator.free(bytes);
+    @memcpy(bytes, data);
+
+    const first = bytes[0];
+    var carry: bool = false;
+    var i: usize = bytes.len - 1;
+
+    // 递增最后一个字符
+    const last = bytes[i];
+    if (last >= 'a' and last <= 'z') {
+        if (last == 'z') {
+            bytes[i] = 'a';
+            carry = true;
+        } else {
+            bytes[i] = last + 1;
+        }
+    } else if (last >= 'A' and last <= 'Z') {
+        if (last == 'Z') {
+            bytes[i] = 'A';
+            carry = true;
+        } else {
+            bytes[i] = last + 1;
+        }
+    } else if (last >= '0' and last <= '9') {
+        if (last == '9') {
+            bytes[i] = '0';
+            carry = true;
+        } else {
+            bytes[i] = last + 1;
+        }
+    } else {
+        // 非字母数字字符：停止
+        carry = false;
+    }
+
+    // 进位传播
+    while (carry and i > 0) {
+        i -= 1;
+        if (bytes[i] >= 'a' and bytes[i] <= 'z') {
+            if (bytes[i] == 'z') {
+                bytes[i] = 'a';
+                carry = true;
+            } else {
+                bytes[i] += 1;
+                carry = false;
+            }
+        } else if (bytes[i] >= 'A' and bytes[i] <= 'Z') {
+            if (bytes[i] == 'Z') {
+                bytes[i] = 'A';
+                carry = true;
+            } else {
+                bytes[i] += 1;
+                carry = false;
+            }
+        } else if (bytes[i] >= '0' and bytes[i] <= '9') {
+            if (bytes[i] == '9') {
+                bytes[i] = '0';
+                carry = true;
+            } else {
+                bytes[i] += 1;
+                carry = false;
+            }
+        } else {
+            // 非字母数字：停止进位
+            carry = false;
+        }
+    }
+
+    if (carry) {
+        // 基于首字符类型决定前置字符
+        const new_bytes = try runtime_allocator.alloc(u8, bytes.len + 1);
+        var prepend: u8 = '1';
+        if (first >= 'a' and first <= 'z') {
+            prepend = 'a';
+        } else if (first >= 'A' and first <= 'Z') {
+            prepend = 'A';
+        } else if (first >= '0' and first <= '9') {
+            prepend = '1';
+        }
+        new_bytes[0] = prepend;
+        @memcpy(new_bytes[1..], bytes);
+        const result = try PHPString.init(runtime_allocator, new_bytes);
+        runtime_allocator.free(new_bytes);
+        return Value.initString(result);
+    }
+
+    return Value.initString(try PHPString.init(runtime_allocator, bytes));
+}
+
+/// 递增运算（PHP 语义：++$var / $var++）
+/// 整数/浮点：数值递增
+/// 数字字符串：转为数字后递增
+/// 非数字字母字符串：Perl 风格字符递增
+/// null：变为 1
+pub fn php_increment(val: Value) !Value {
+    if (val.isInt()) {
+        return try php_add(val, Value.initInt(1));
+    }
+    if (val.isFloat()) {
+        return Value.initFloat(val.asFloat() + 1.0);
+    }
+    if (val.isNull()) {
+        return Value.initInt(1);
+    }
+    if (val.isBool()) {
+        return Value.initInt(@as(i64, if (val.asBool()) 2 else 1));
+    }
+    if (val.isString()) {
+        const str = val.asString();
+        const data = str.data[0..str.length];
+        if (data.len == 0) return Value.initInt(1);
+        if (isNumericString(data)) {
+            const f = val.toFloat();
+            const int_val: i64 = @intFromFloat(f);
+            if (@as(f64, @floatFromInt(int_val)) == f) {
+                return Value.initInt(int_val + 1);
+            }
+            return Value.initFloat(f + 1.0);
+        }
+        return perlStringIncrement(val);
+    }
+    return try php_add(val, Value.initInt(1));
+}
+
+/// 递减运算（PHP 语义：--$var / $var--）
+/// 整数/浮点：数值递减
+/// 数字字符串：转为数字后递减
+/// 非数字字符串：无操作（PHP 行为）
+/// null：无操作（PHP 行为）
+pub fn php_decrement(val: Value) !Value {
+    if (val.isInt()) {
+        return try php_sub(val, Value.initInt(1));
+    }
+    if (val.isFloat()) {
+        return Value.initFloat(val.asFloat() - 1.0);
+    }
+    if (val.isNull()) {
+        return val;
+    }
+    if (val.isBool()) {
+        return val;
+    }
+    if (val.isString()) {
+        const str = val.asString();
+        const data = str.data[0..str.length];
+        if (data.len == 0) return val;
+        if (isNumericString(data)) {
+            const f = val.toFloat();
+            const int_val: i64 = @intFromFloat(f);
+            if (@as(f64, @floatFromInt(int_val)) == f) {
+                return Value.initInt(int_val - 1);
+            }
+            return Value.initFloat(f - 1.0);
+        }
+        // 非数字字符串：递减是 no-op
+        return val;
+    }
+    return try php_sub(val, Value.initInt(1));
+}
+
 /// Negate a value (unary minus)
 pub fn php_neg(val: Value) !Value {
     if (val.isInt()) {
         const a = val.asInt();
-        if (a == Value.INT48_MIN) {
+        // i64 最小值取负会溢出
+        if (a == std.math.minInt(i64)) {
             return Value.initFloat(-@as(f64, @floatFromInt(a)));
         }
         return Value.initInt(-a);
@@ -4723,16 +5320,16 @@ pub fn php_neg(val: Value) !Value {
 
 /// 乘法运算（PHP语义）
 pub fn php_mul(lhs: Value, rhs: Value) !Value {
+    emitArithmeticStringWarningIfNeeded(lhs);
+    emitArithmeticStringWarningIfNeeded(rhs);
     if (!checkArithmeticOperand(lhs) or !checkArithmeticOperand(rhs)) {
         emitUnsupportedOperandError(lhs, rhs, "*");
     }
-    emitArithmeticStringWarningIfNeeded(lhs);
-    emitArithmeticStringWarningIfNeeded(rhs);
     if (lhs.isInt() and rhs.isInt()) {
         const a = lhs.asInt();
         const b = rhs.asInt();
         const result = @mulWithOverflow(a, b);
-        if (result[1] != 0 or result[0] < Value.INT48_MIN or result[0] > Value.INT48_MAX) {
+        if (result[1] != 0) {
             return Value.initFloat(@as(f64, @floatFromInt(a)) * @as(f64, @floatFromInt(b)));
         }
         return Value.initInt(result[0]);
@@ -4745,11 +5342,11 @@ pub fn php_mul(lhs: Value, rhs: Value) !Value {
 
 /// 除法运算（PHP语义）
 pub fn php_div(lhs: Value, rhs: Value) !Value {
+    emitArithmeticStringWarningIfNeeded(lhs);
+    emitArithmeticStringWarningIfNeeded(rhs);
     if (!checkArithmeticOperand(lhs) or !checkArithmeticOperand(rhs)) {
         emitUnsupportedOperandError(lhs, rhs, "/");
     }
-    emitArithmeticStringWarningIfNeeded(lhs);
-    emitArithmeticStringWarningIfNeeded(rhs);
     // PHP 将 null/bool 视为整数参与整除判断
     const lhs_is_int = lhs.isInt() or lhs.isNull() or lhs.isBool();
     const rhs_is_int = rhs.isInt() or rhs.isNull() or rhs.isBool();
@@ -4779,11 +5376,11 @@ pub fn php_div(lhs: Value, rhs: Value) !Value {
 
 /// 取模运算（PHP语义）
 pub fn php_mod(lhs: Value, rhs: Value) !Value {
+    emitArithmeticStringWarningIfNeeded(lhs);
+    emitArithmeticStringWarningIfNeeded(rhs);
     if (!checkArithmeticOperand(lhs) or !checkArithmeticOperand(rhs)) {
         emitUnsupportedOperandError(lhs, rhs, "%");
     }
-    emitArithmeticStringWarningIfNeeded(lhs);
-    emitArithmeticStringWarningIfNeeded(rhs);
     // PHP 8.1+: float→int 隐式转换精度丢失时输出 Deprecated
     if (lhs.isFloat()) {
         const f = lhs.asFloat();
@@ -4870,11 +5467,14 @@ fn emitArithmeticStringWarningIfNeeded(v: Value) void {
 }
 
 /// 检查 Value 是否可参与算术运算（PHP 8.x）
+/// PHP 8.x: 无数字前缀的字符串参与算术运算时抛 TypeError
 fn checkArithmeticOperand(v: Value) bool {
+    // 字符串：只有有数字前缀的才是合法算术操作数
     if (v.isString()) {
-        const str = v.asString();
-        return hasNumericPrefix(str.data[0..str.length]);
+        const str = v.asString().data[0..v.asString().length];
+        return hasNumericPrefix(str);
     }
+    // 数组不能参与算术运算（会抛TypeError）
     return !v.isArray();
 }
 
@@ -5085,8 +5685,32 @@ fn emitDeprecatedFloatToInt(f: f64) void {
     fileWriteAll(1, stdout_msg);
 }
 
-/// 幂运算（PHP语义）
+/// 幂运算（PHP语义：两 int 操作数且结果不溢出 i64 时返回 int）
 pub fn php_pow(base: Value, exp: Value) !Value {
+    // 两 int 操作数：尝试整數幂
+    if (base.isInt() and exp.isInt()) {
+        const b = base.asInt();
+        const e = exp.asInt();
+        // 负指数 → 浮点
+        if (e < 0) {
+            return Value.initFloat(std.math.pow(f64, @as(f64, @floatFromInt(b)), @as(f64, @floatFromInt(e))));
+        }
+        // 0^0 = 1, 0^n = 0
+        if (e == 0) return Value.initInt(1);
+        if (b == 0) return Value.initInt(0);
+        // 逐次乘法 + 溢出检测
+        var result: i64 = 1;
+        var i: i64 = 0;
+        while (i < e) : (i += 1) {
+            const mul_res = @mulWithOverflow(result, b);
+            if (mul_res[1] != 0) {
+                // 溢出 → 浮点
+                return Value.initFloat(std.math.pow(f64, @as(f64, @floatFromInt(b)), @as(f64, @floatFromInt(e))));
+            }
+            result = mul_res[0];
+        }
+        return Value.initInt(result);
+    }
     const b = base.toFloat();
     const e = exp.toFloat();
     return Value.initFloat(std.math.pow(f64, b, e));
@@ -5268,6 +5892,52 @@ fn phpCompare(lhs: Value, rhs: Value) i2 {
         return 0;
     }
 
+    // Rule 6 (PHP 8): number vs string
+    // PHP 8: numeric string → compare as numbers
+    //        non-numeric string → convert number to string, compare as strings
+    if ((lhs.isInt() or lhs.isFloat()) and rhs.isString()) {
+        const rs = rhs.asString();
+        const r_data = rs.data[0..rs.length];
+        if (isNumericString(r_data)) {
+            const l = lhs.toFloat();
+            const r = rhs.toFloat();
+            if (l < r) return -1;
+            if (l > r) return 1;
+            return 0;
+        }
+        var num_buf: [64]u8 = undefined;
+        const num_str = if (lhs.isInt())
+            std.fmt.bufPrint(&num_buf, "{d}", .{lhs.asInt()}) catch "0"
+        else
+            phpFormatFloat(&num_buf, lhs.asFloat());
+        return switch (std.mem.order(u8, num_str, r_data)) {
+            .lt => -1,
+            .gt => 1,
+            .eq => 0,
+        };
+    }
+    if (lhs.isString() and (rhs.isInt() or rhs.isFloat())) {
+        const ls = lhs.asString();
+        const l_data = ls.data[0..ls.length];
+        if (isNumericString(l_data)) {
+            const l = lhs.toFloat();
+            const r = rhs.toFloat();
+            if (l < r) return -1;
+            if (l > r) return 1;
+            return 0;
+        }
+        var num_buf: [64]u8 = undefined;
+        const num_str = if (rhs.isInt())
+            std.fmt.bufPrint(&num_buf, "{d}", .{rhs.asInt()}) catch "0"
+        else
+            phpFormatFloat(&num_buf, rhs.asFloat());
+        return switch (std.mem.order(u8, l_data, num_str)) {
+            .lt => -1,
+            .gt => 1,
+            .eq => 0,
+        };
+    }
+
     // Rule 5: string vs string
     if (lhs.isString() and rhs.isString()) {
         const ls = lhs.asString();
@@ -5291,6 +5961,23 @@ fn phpCompare(lhs: Value, rhs: Value) i2 {
             .gt => 1,
             .eq => 0,
         };
+    }
+
+    // Rule 7a: array vs array — PHP 逐元素比较，短数组更小
+    if (lhs.isArray() and rhs.isArray()) {
+        const la = lhs.asArray();
+        const ra = rhs.asArray();
+        var lit = la.elements.iterator();
+        var rit = ra.elements.iterator();
+        while (true) {
+            const l_entry = lit.next();
+            const r_entry = rit.next();
+            if (l_entry == null and r_entry == null) return 0;
+            if (l_entry == null) return -1;
+            if (r_entry == null) return 1;
+            const cmp = phpCompare(l_entry.?.value_ptr.*, r_entry.?.value_ptr.*);
+            if (cmp != 0) return cmp;
+        }
     }
 
     // Rule 7: array vs non-array
@@ -5344,6 +6031,24 @@ pub fn php_spaceship(lhs: Value, rhs: Value) !Value {
             .gt => 1,
             .eq => 0,
         });
+    }
+    // 数组比较：先比元素个数，再逐元素比较
+    if (lhs.isArray() and rhs.isArray()) {
+        const la = lhs.asArray();
+        const ra = rhs.asArray();
+        if (la.elements.count() != ra.elements.count()) {
+            return Value.initInt(if (la.elements.count() < ra.elements.count()) -1 else 1);
+        }
+        var it = la.elements.iterator();
+        while (it.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const lval = entry.value_ptr.*;
+            const rval = ra.elements.get(key) orelse return Value.initInt(1); // key not in right → left is greater
+            const sub = try php_spaceship(lval, rval);
+            const sv = sub.asInt();
+            if (sv != 0) return Value.initInt(sv);
+        }
+        return Value.initInt(0);
     }
     const l = lhs.toFloat();
     const r = rhs.toFloat();
@@ -5508,9 +6213,12 @@ pub fn phpFormatFloat(buf: []u8, f: f64) []const u8 {
             const frac_copy = @min(frac_avail, dec_digits);
             @memcpy(buf[out_len .. out_len + frac_copy], mant_str[frac_start .. frac_start + frac_copy]);
             out_len += frac_copy;
-            // 去尾零
+            // 去尾零（保留至少一位小数，PHP 科学计数法始终含小数点）
             while (out_len > 0 and buf[out_len - 1] == '0') : (out_len -= 1) {}
-            if (out_len > 0 and buf[out_len - 1] == '.') out_len -= 1;
+            if (out_len > 0 and buf[out_len - 1] == '.') {
+                buf[out_len] = '0';
+                out_len += 1;
+            }
         }
         // 追加 E±XX 部分（PHP 用大写 E）
         const e_str = if (exp10 >= 0)
@@ -5708,6 +6416,19 @@ pub fn php_var_dump(value: Value) !Value {
             _ = php_var_dump(entry.value_ptr.*) catch {};
         }
         fileWriteAll(1, "}\n");
+    } else if (Value_isObject(value)) {
+        const obj = Value_asObject(value);
+        var buf: [256]u8 = undefined;
+        const header = try std.fmt.bufPrint(&buf, "object({s})#0 ({d}) {{\n", .{ obj.class_name, obj.properties.count() });
+        fileWriteAll(1, header);
+        var it = obj.properties.iterator();
+        while (it.next()) |entry| {
+            fileWriteAll(1, "  [\"");
+            fileWriteAll(1, entry.key_ptr.*);
+            fileWriteAll(1, "\"]=>\n  ");
+            _ = php_var_dump(entry.value_ptr.*) catch {};
+        }
+        fileWriteAll(1, "}\n");
     }
     return Value.initNull();
 }
@@ -5757,6 +6478,20 @@ fn writeExportIndent(writer: anytype, indent: usize) !void {
     while (i < indent * 2) : (i += 1) { // 2空格缩进 (var_export)
         try writer.writeByte(' ');
     }
+}
+
+fn writeExportStrKey(writer: anytype, s: []const u8) !void {
+    try writer.writeAll("'");
+    for (s) |c| {
+        if (c == '\'') {
+            try writer.writeAll("\\'");
+        } else if (c == '\\') {
+            try writer.writeAll("\\\\");
+        } else {
+            try writer.writeByte(c);
+        }
+    }
+    try writer.writeAll("'");
 }
 
 fn printValue(writer: anytype, value: Value, indent: usize, is_nested: bool) !void {
@@ -5838,6 +6573,43 @@ fn printValue(writer: anytype, value: Value, indent: usize, is_nested: bool) !vo
         }
         try writer.writeAll("(\n");
 
+        // __debugInfo 魔术方法：返回数组替代默认属性输出
+        if (obj.class_meta) |meta| {
+            if (meta.magic_debugInfo) |debug_fn| {
+                const debug_val = debug_fn(value, &.{}, runtime_allocator) catch Value.initNull();
+                if (debug_val.isArray()) {
+                    const arr = debug_val.asArray();
+                    var it = arr.elements.iterator();
+                    while (it.next()) |entry| {
+                        const elem_indent = if (is_nested) indent + 2 else indent + 1;
+                        try writeIndent(writer, elem_indent);
+                        switch (entry.key_ptr.*) {
+                            .integer => |i| try writer.print("[{d}] => ", .{i}),
+                            .string => |s| try writer.print("[{s}] => ", .{s.data}),
+                        }
+                        const val = entry.value_ptr.*;
+                        const is_complex = val.isArray() or Value_isObject(val);
+                        if (is_complex) {
+                            try printValue(writer, val, elem_indent, true);
+                            try writer.writeByte('\n');
+                        } else {
+                            try printValue(writer, val, elem_indent, false);
+                            try writer.writeByte('\n');
+                        }
+                    }
+                }
+                debug_val.release(runtime_allocator);
+
+                if (is_nested) {
+                    try writeIndent(writer, indent + 1);
+                } else {
+                    try writeIndent(writer, indent);
+                }
+                try writer.writeAll(")\n");
+                return;
+            }
+        }
+
         // DateTime 对象特殊处理: 输出 PHP 格式
         if (std.mem.eql(u8, obj.class_name, "DateTime")) {
             const elem_indent = if (is_nested) indent + 2 else indent + 1;
@@ -5866,13 +6638,42 @@ fn printValue(writer: anytype, value: Value, indent: usize, is_nested: bool) !vo
                 try writer.writeAll("[timezone] => UTC\n");
             }
         } else {
-            // 遍历属性
+            // 按声明顺序遍历属性（property_order），再遍历剩余动态属性
+            var printed = std.StringHashMap(void).init(runtime_allocator);
+            defer printed.deinit();
+
+            if (obj.class_meta) |meta| {
+                var current: ?*const ClassMeta = meta;
+                while (current) |m| {
+                    for (m.property_order.items) |prop_name| {
+                        if (printed.contains(prop_name)) continue;
+                        if (obj.properties.get(prop_name)) |val| {
+                            try printed.put(prop_name, {});
+                            const elem_indent = if (is_nested) indent + 2 else indent + 1;
+                            try writeIndent(writer, elem_indent);
+                            try writer.print("[{s}] => ", .{prop_name});
+
+                            const is_complex = val.isArray() or Value_isObject(val);
+                            if (is_complex) {
+                                try printValue(writer, val, elem_indent, true);
+                                try writer.writeByte('\n');
+                            } else {
+                                try printValue(writer, val, elem_indent, false);
+                                try writer.writeByte('\n');
+                            }
+                        }
+                    }
+                    current = m.parent;
+                }
+            }
+
+            // 遍历剩余动态属性
             var it = obj.properties.iterator();
             while (it.next()) |entry| {
+                if (printed.contains(entry.key_ptr.*)) continue;
                 const elem_indent = if (is_nested) indent + 2 else indent + 1;
                 try writeIndent(writer, elem_indent);
 
-                // 属性名格式化
                 const prop_name = entry.key_ptr.*;
                 try writer.print("[{s}] => ", .{prop_name});
 
@@ -5922,12 +6723,32 @@ fn exportValue(writer: anytype, value: Value, indent: usize) !void {
         } else if (std.math.isInf(f)) {
             try writer.writeAll(if (f > 0) "INF" else "-INF");
         } else {
+            // var_export 使用最短往返精度（17位有效数字）
             var buf: [64]u8 = undefined;
-            const str = phpFormatFloat(&buf, f);
-            try writer.writeAll(str);
-            // var_export 浮点数必须含小数点
-            if (std.mem.indexOf(u8, str, ".") == null and std.mem.indexOf(u8, str, "E") == null) {
-                try writer.writeAll(".0");
+            const str = std.fmt.bufPrint(&buf, "{d}", .{f}) catch "0";
+            if (std.mem.indexOf(u8, str, "e")) |idx| {
+                // 科学记数法：Zig 用 e，PHP var_export 用 E+
+                const mantissa = str[0..idx];
+                const exp_part = str[idx + 1 ..];
+                try writer.writeAll(mantissa);
+                if (std.mem.indexOf(u8, mantissa, ".") == null) {
+                    try writer.writeAll(".0");
+                }
+                if (exp_part.len > 0 and exp_part[0] == '-') {
+                    try writer.writeAll("E-");
+                    try writer.writeAll(exp_part[1..]);
+                } else if (exp_part.len > 0 and exp_part[0] == '+') {
+                    try writer.writeAll("E+");
+                    try writer.writeAll(exp_part[1..]);
+                } else {
+                    try writer.writeAll("E+");
+                    try writer.writeAll(exp_part);
+                }
+            } else {
+                try writer.writeAll(str);
+                if (std.mem.indexOf(u8, str, ".") == null) {
+                    try writer.writeAll(".0");
+                }
             }
         }
         return;
@@ -5989,20 +6810,40 @@ fn exportValue(writer: anytype, value: Value, indent: usize) !void {
         try writer.writeAll("\\");
         try writer.writeAll(class_name);
         try writer.writeAll("::__set_state(array(\n");
+
+        var exported = std.StringHashMap(void).init(runtime_allocator);
+        defer exported.deinit();
+
+        if (obj.class_meta) |meta| {
+            var current: ?*const ClassMeta = meta;
+            while (current) |m| {
+                for (m.property_order.items) |prop_name| {
+                    if (exported.contains(prop_name)) continue;
+                    if (obj.properties.get(prop_name)) |val| {
+                        try exported.put(prop_name, {});
+                        try writeExportIndent(writer, indent + 1);
+                        try writer.writeByte(' ');
+                        try writeExportStrKey(writer, prop_name);
+                        try writer.writeAll(" => ");
+                        if (val.isArray() or Value_isObject(val)) {
+                            try writer.writeAll("\n");
+                            try writeExportIndent(writer, indent + 1);
+                        }
+                        try exportValue(writer, val, indent + 1);
+                        try writer.writeAll(",\n");
+                    }
+                }
+                current = m.parent;
+            }
+        }
+
         var it = obj.properties.iterator();
         while (it.next()) |entry| {
+            if (exported.contains(entry.key_ptr.*)) continue;
             try writeExportIndent(writer, indent + 1);
-            try writer.writeAll("'");
-            for (entry.key_ptr.*) |c| {
-                if (c == '\'') {
-                    try writer.writeAll("\\'");
-                } else if (c == '\\') {
-                    try writer.writeAll("\\\\");
-                } else {
-                    try writer.writeByte(c);
-                }
-            }
-            try writer.writeAll("' => ");
+            try writer.writeByte(' ');
+            try writeExportStrKey(writer, entry.key_ptr.*);
+            try writer.writeAll(" => ");
             if (entry.value_ptr.*.isArray() or Value_isObject(entry.value_ptr.*)) {
                 try writer.writeAll("\n");
                 try writeExportIndent(writer, indent + 1);
@@ -6010,6 +6851,7 @@ fn exportValue(writer: anytype, value: Value, indent: usize) !void {
             try exportValue(writer, entry.value_ptr.*, indent + 1);
             try writer.writeAll(",\n");
         }
+
         try writeExportIndent(writer, indent);
         try writer.writeAll("))");
         return;
@@ -6292,7 +7134,7 @@ pub fn php_constant_get(name_val: Value, allocator: Allocator) !Value {
 
     // 未定义常量
     std.debug.print("Fatal error: Uncaught Error: Undefined constant \"{s}\"\n", .{name});
-    std.posix.exit(255);
+    std.process.exit(255);
     return Value.initNull();
 }
 
@@ -6333,11 +7175,37 @@ pub const ArrayIterator = struct {
 
 pub fn php_array_iter_init_snapshot(array_val: Value, allocator: Allocator) !Value {
     if (Value_isObject(array_val)) {
+        // 先检查是否是 Iterator 或 IteratorAggregate 对象
+        const obj = Value_asObject(array_val);
+        if (obj.class_meta) |meta| {
+            if (meta.findMethod("rewind") != null and
+                meta.findMethod("valid") != null and
+                meta.findMethod("current") != null and
+                meta.findMethod("key") != null and
+                meta.findMethod("next") != null)
+            {
+                // 是Iterator，调用rewind()
+                _ = try php_object_call(array_val, "rewind", &[_]Value{});
+                _ = array_val.retain();
+                return array_val;
+            }
+            if (meta.findMethod("getIterator") != null) {
+                const iter_val = try php_object_call(array_val, "getIterator", &[_]Value{});
+                if (Value_isObject(iter_val) and php_is_iterator(iter_val)) {
+                    _ = try php_object_call(iter_val, "rewind", &[_]Value{});
+                    return iter_val;
+                }
+                if (iter_val.isArray()) {
+                    defer iter_val.release(allocator);
+                    return php_array_iter_init_snapshot(iter_val, allocator);
+                }
+                iter_val.release(allocator);
+            }
+        }
+        // 普通对象：遍历公共属性
         const props_snapshot = try php_get_public_object_vars_snapshot(array_val, allocator);
         defer props_snapshot.release(allocator);
-
-        const iter_val = try php_array_iter_init(props_snapshot, allocator);
-        return iter_val;
+        return php_array_iter_init(props_snapshot, allocator);
     }
 
     if (!array_val.isArray()) {
@@ -6498,6 +7366,10 @@ pub fn php_array_iter_value(iter_val: Value) !Value {
     if (iter_addr == 0) return Value.initNull();
     const iter: *ArrayIterator = @ptrFromInt(@as(usize, @intCast(iter_addr)));
     if (iter.current) |entry| {
+        // 从数组实时读取值（PHP foreach 语义：不使用快照，引用修改可见）
+        if (iter.array.get(entry.key_ptr.*)) |v| {
+            return v;
+        }
         _ = entry.value_ptr.retain();
         return entry.value_ptr.*;
     }
@@ -6542,7 +7414,7 @@ pub fn php_ref_assign(ref_val: Value, new_val: Value) !Value {
         const ptr = ref_val.asRef();
         ptr.release(runtime_allocator);
         _ = new_val.retain();
-        ptr.* = new_val;
+        val_assign(ptr, new_val);
     }
     return Value.initNull();
 }
@@ -6552,9 +7424,8 @@ pub fn php_ref_assign_ptr(ref_ptr: *Value, new_val: Value) !Value {
     if (ref_ptr.isRef()) {
         const ptr = ref_ptr.asRef();
         ptr.release(runtime_allocator);
-        const retained = new_val.retain();
-        _ = retained;
-        ptr.* = new_val;
+        _ = new_val.retain();
+        val_assign(ptr, new_val);
     }
     return Value.initNull();
 }
@@ -6630,20 +7501,20 @@ pub fn php_iterator_to_array(iterator: Value, preserve_keys: Value, allocator: A
     // 处理默认参数：如果preserve_keys是null或missing，默认为true
     const use_keys = if (preserve_keys.isNull() or preserve_keys.isMissing()) true else preserve_keys.toBool();
     const result = try PHPArray.init(allocator);
-    
+
     // 调用rewind()重置迭代器
     _ = try php_object_call(iterator, "rewind", &[_]Value{});
-    
+
     var index: i64 = 0;
     while (true) {
         // 检查valid()
         const valid_result = try php_object_call(iterator, "valid", &[_]Value{});
         defer valid_result.release(allocator);
         if (!valid_result.toBool()) break;
-        
+
         // 获取current()
         const current = try php_object_call(iterator, "current", &[_]Value{});
-        
+
         if (use_keys) {
             // 获取key()并保留键
             const key = try php_object_call(iterator, "key", &[_]Value{});
@@ -6654,13 +7525,13 @@ pub fn php_iterator_to_array(iterator: Value, preserve_keys: Value, allocator: A
             try result.setByValue(allocator, Value.initInt(index), current);
             index += 1;
         }
-        
+
         current.release(allocator);
-        
+
         // 调用next()
         _ = try php_object_call(iterator, "next", &[_]Value{});
     }
-    
+
     return Value.initArray(result);
 }
 
@@ -6829,6 +7700,7 @@ pub fn registerArrayIterator(allocator: Allocator) !void {
         .parent = null,
         .methods = std.StringHashMap(ClassMethod).init(allocator),
         .properties = std.StringHashMap(ClassProperty).init(allocator),
+        .property_order = try std.ArrayList([]const u8).initCapacity(allocator, 0),
         .static_properties = std.StringHashMap(Value).init(allocator),
         .interfaces = &.{},
         .is_abstract = false,
@@ -7097,6 +7969,7 @@ pub fn registerSplFixedArray(allocator: Allocator) !void {
         .parent = null,
         .methods = std.StringHashMap(ClassMethod).init(allocator),
         .properties = std.StringHashMap(ClassProperty).init(allocator),
+        .property_order = try std.ArrayList([]const u8).initCapacity(allocator, 0),
         .static_properties = std.StringHashMap(Value).init(allocator),
         .interfaces = &.{},
         .is_abstract = false,
@@ -7690,6 +8563,7 @@ pub fn registerSplStack(allocator: Allocator) !void {
         .parent = null,
         .methods = std.StringHashMap(ClassMethod).init(allocator),
         .properties = std.StringHashMap(ClassProperty).init(allocator),
+        .property_order = try std.ArrayList([]const u8).initCapacity(allocator, 0),
         .static_properties = std.StringHashMap(Value).init(allocator),
         .interfaces = &.{},
         .is_abstract = false,
@@ -7794,6 +8668,7 @@ pub fn registerSplQueue(allocator: Allocator) !void {
         .parent = null,
         .methods = std.StringHashMap(ClassMethod).init(allocator),
         .properties = std.StringHashMap(ClassProperty).init(allocator),
+        .property_order = try std.ArrayList([]const u8).initCapacity(allocator, 0),
         .static_properties = std.StringHashMap(Value).init(allocator),
         .interfaces = &.{},
         .is_abstract = false,
@@ -7820,32 +8695,82 @@ pub fn php_strlen(str: Value) !Value {
     return Value.initInt(@intCast(str.asString().length));
 }
 
-/// str_word_count - 统计单词数量
-pub fn php_str_word_count(str: Value, format: Value, charlist: Value) !Value {
+/// str_word_count - 统计单词数量或返回单词数组
+/// format=0: 返回单词数量
+/// format=1: 返回单词数组（数字索引）
+/// format=2: 返回关联数组（偏移量 => 单词）
+pub fn php_str_word_count(str: Value, format: Value, charlist: Value, allocator: Allocator) !Value {
     _ = charlist;
-    if (!str.isString()) return Value.initInt(0);
+    if (!str.isString()) {
+        if (format.isInt() and format.asInt() != 0) {
+            return Value.initArray(try PHPArray.init(allocator));
+        }
+        return Value.initInt(0);
+    }
 
     const s = str.asString().data;
     const fmt = if (format.isInt()) format.asInt() else 0;
 
-    if (fmt != 0) return Value.initInt(0); // 简化：只支持format=0
-
-    var count: i64 = 0;
-    var in_word = false;
-
-    for (s) |c| {
-        const is_alpha = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9');
-        if (is_alpha) {
-            if (!in_word) {
-                count += 1;
-                in_word = true;
+    if (fmt == 0) {
+        var count: i64 = 0;
+        var in_word = false;
+        for (s) |c| {
+            const is_word_char = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '\'' or c == '-';
+            if (is_word_char) {
+                if (!in_word) {
+                    count += 1;
+                    in_word = true;
+                }
+            } else {
+                in_word = false;
             }
+        }
+        return Value.initInt(count);
+    }
+
+    // format=1: 数字索引数组；format=2: 偏移量=>单词
+    const result = try PHPArray.init(allocator);
+    errdefer result.release(allocator);
+
+    var word_buf = std.ArrayList(u8).empty;
+    defer word_buf.deinit(allocator);
+    var word_start: usize = 0;
+    var in_word = false;
+    var word_idx: i64 = 0;
+
+    for (s, 0..) |c, i| {
+        const is_word_char = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '\'' or c == '-';
+        if (is_word_char) {
+            if (!in_word) {
+                word_start = i;
+                in_word = true;
+                word_buf.clearRetainingCapacity();
+            }
+            word_buf.append(allocator, c) catch return error.OutOfMemory;
         } else {
-            in_word = false;
+            if (in_word) {
+                const word_str = try PHPString.init(allocator, word_buf.items);
+                if (fmt == 1) {
+                    try result.push(allocator, Value.initString(word_str));
+                } else {
+                    try result.set(allocator, .{ .integer = @intCast(word_start) }, Value.initString(word_str));
+                }
+                word_idx += 1;
+                in_word = false;
+            }
+        }
+    }
+    // 处理末尾单词
+    if (in_word) {
+        const word_str = try PHPString.init(allocator, word_buf.items);
+        if (fmt == 1) {
+            try result.push(allocator, Value.initString(word_str));
+        } else {
+            try result.set(allocator, .{ .integer = @intCast(word_start) }, Value.initString(word_str));
         }
     }
 
-    return Value.initInt(count);
+    return Value.initArray(result);
 }
 
 /// substr - 获取子字符串
@@ -7858,6 +8783,88 @@ pub fn php_substr(str: Value, start: Value, length: Value, allocator: Allocator)
 
     const result = try php_str.substring(start_int, length_int, allocator);
     return Value.initString(result);
+}
+
+/// fnmatch - 文件名模式匹配（支持 * ? [...] 等）
+pub fn php_fnmatch(pattern_val: Value, string_val: Value) !Value {
+    if (!pattern_val.isString() or !string_val.isString()) return Value.initBool(false);
+    const pat = pattern_val.asString();
+    const str = string_val.asString();
+    return Value.initBool(fnmatchImpl(pat.data[0..pat.length], str.data[0..str.length]));
+}
+
+fn fnmatchImpl(pattern: []const u8, string: []const u8) bool {
+    var pi: usize = 0;
+    var si: usize = 0;
+    var star_pi: ?usize = null;
+    var star_si: usize = 0;
+
+    while (si < string.len) {
+        if (pi < pattern.len) {
+            switch (pattern[pi]) {
+                '*' => {
+                    star_pi = pi;
+                    star_si = si;
+                    pi += 1;
+                    continue;
+                },
+                '?' => {
+                    pi += 1;
+                    si += 1;
+                    continue;
+                },
+                '[' => {
+                    // 字符类匹配
+                    var matched = false;
+                    var negate = false;
+                    pi += 1;
+                    if (pi < pattern.len and (pattern[pi] == '!' or pattern[pi] == '^')) {
+                        negate = true;
+                        pi += 1;
+                    }
+                    while (pi < pattern.len and pattern[pi] != ']') {
+                        if (pi + 2 < pattern.len and pattern[pi + 1] == '-') {
+                            if (string[si] >= pattern[pi] and string[si] <= pattern[pi + 2]) matched = true;
+                            pi += 3;
+                        } else {
+                            if (string[si] == pattern[pi]) matched = true;
+                            pi += 1;
+                        }
+                    }
+                    if (pi < pattern.len) pi += 1; // skip ']'
+                    if (matched != negate) {
+                        si += 1;
+                        continue;
+                    }
+                },
+                '\\' => {
+                    if (pi + 1 < pattern.len) pi += 1;
+                    if (pi < pattern.len and pattern[pi] == string[si]) {
+                        pi += 1;
+                        si += 1;
+                        continue;
+                    }
+                },
+                else => {
+                    if (pattern[pi] == string[si]) {
+                        pi += 1;
+                        si += 1;
+                        continue;
+                    }
+                },
+            }
+        }
+        // 回溯到上一个 *
+        if (star_pi) |sp| {
+            pi = sp + 1;
+            star_si += 1;
+            si = star_si;
+            continue;
+        }
+        return false;
+    }
+    while (pi < pattern.len and pattern[pi] == '*') pi += 1;
+    return pi == pattern.len;
 }
 
 /// strpos - 查找子字符串位置
@@ -8108,6 +9115,122 @@ pub fn php_str_ireplace(search: Value, replace: Value, subject: Value, count_out
     return php_str_replace_common(search, replace, subject, count_out, allocator, true);
 }
 
+/// strtr - 字符串替换
+/// 形式1: strtr(string $str, string $from, string $to) — 逐字符替换
+/// 形式2: strtr(string $str, array $replace_pairs) — 键值对替换
+pub fn php_strtr(str_val: Value, from_val: Value, to_val: Value, allocator: Allocator) !Value {
+    if (!str_val.isString()) return str_val;
+    const subject = str_val.asString();
+
+    // 形式2: from_val 是数组（键值对替换）
+    if (from_val.isArray()) {
+        const arr = from_val.asArray();
+        var result = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+        defer result.deinit(allocator);
+
+        var i: usize = 0;
+        while (i < subject.data.len) {
+            var matched = false;
+            // 遍历数组中的所有键值对
+            var iter = arr.iterator();
+            while (iter.next()) |entry| {
+                const key = entry.key_ptr.*;
+                const val = entry.value_ptr.*;
+                if (key == .string) {
+                    const key_str = key.string.data;
+                    if (key_str.len > 0 and i + key_str.len <= subject.data.len) {
+                        if (std.mem.eql(u8, subject.data[i .. i + key_str.len], key_str)) {
+                            if (val.isString()) {
+                                try result.appendSlice(allocator, val.asString().data);
+                            }
+                            i += key_str.len;
+                            matched = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!matched) {
+                try result.append(allocator, subject.data[i]);
+                i += 1;
+            }
+        }
+
+        return Value.initString(try PHPString.init(allocator, result.items));
+    }
+
+    // 形式1: 逐字符替换
+    if (!from_val.isString() or !to_val.isString()) return str_val;
+    const from = from_val.asString();
+    const to = to_val.asString();
+
+    // from 和 to 长度取较短者
+    const len = @min(from.data.len, to.data.len);
+
+    var result = try allocator.alloc(u8, subject.data.len);
+    defer allocator.free(result);
+
+    @memcpy(result, subject.data);
+
+    for (0..subject.data.len) |idx| {
+        for (0..len) |j| {
+            if (subject.data[idx] == from.data[j]) {
+                result[idx] = to.data[j];
+                break;
+            }
+        }
+    }
+
+    return Value.initString(try PHPString.init(allocator, result));
+}
+
+/// mb_strpos - 多字节字符串查找位置（UTF-8 感知）
+pub fn php_mb_strpos(haystack: Value, needle: Value, offset: Value, encoding: Value, allocator: Allocator) !Value {
+    _ = encoding; // 默认 UTF-8，忽略 encoding 参数
+    _ = allocator;
+    if (!haystack.isString() or !needle.isString()) return Value.initBool(false);
+
+    const hay = haystack.asString();
+    const need = needle.asString();
+
+    if (need.data.len == 0) return Value.initBool(false);
+
+    // 解析偏移量
+    var start_byte: usize = 0;
+    if (!offset.isNull()) {
+        const off = offset.toInt();
+        if (off < 0) return Value.initBool(false);
+        start_byte = @intCast(off);
+        if (start_byte > hay.data.len) return Value.initBool(false);
+    }
+
+    // 查找子串
+    if (start_byte + need.data.len > hay.data.len) return Value.initBool(false);
+
+    // 逐字符匹配（UTF-8 字节级匹配，因为 PHP 的 mb_strpos 默认按字节偏移返回）
+    if (std.mem.indexOf(u8, hay.data[start_byte..], need.data)) |pos| {
+        // 计算字符位置（UTF-8 字符数）
+        const abs_pos = start_byte + pos;
+        var char_count: i64 = 0;
+        var byte_idx: usize = 0;
+        while (byte_idx < abs_pos) {
+            const b = hay.data[byte_idx];
+            // UTF-8 字符长度判断
+            const char_len: usize = if (b < 0x80) 1 else if (b < 0xC0) 1 else if (b < 0xE0) 2 else if (b < 0xF0) 3 else 4;
+            byte_idx += char_len;
+            char_count += 1;
+        }
+        return Value.initInt(char_count);
+    }
+
+    return Value.initBool(false);
+}
+
+/// get_object_vars 包装器：适配 builtin_map 的调用约定 (arg0, allocator)
+pub fn php_get_object_vars_builtin_wrapper(obj: Value, allocator: Allocator) !Value {
+    return php_get_object_vars_builtin(Value.initNull(), &[_]Value{obj}, allocator);
+}
+
 /// str_repeat - 重复字符串
 pub fn php_str_repeat(str: Value, times: Value, allocator: Allocator) !Value {
     if (!str.isString()) return str;
@@ -8116,7 +9239,10 @@ pub fn php_str_repeat(str: Value, times: Value, allocator: Allocator) !Value {
     const repeat_times = times.toInt();
 
     if (repeat_times <= 0) return Value.initString(try PHPString.init(allocator, ""));
-    if (repeat_times == 1) return str;
+    if (repeat_times == 1) {
+        _ = str.retain();
+        return str;
+    }
 
     const new_len = php_str.length * @as(usize, @intCast(repeat_times));
     const buffer = try allocator.alloc(u8, new_len);
@@ -8187,7 +9313,7 @@ pub fn php_str_pad(str: Value, length: Value, pad_str: Value, pad_type: Value, a
 }
 
 /// strstr - 查找字符串首次出现的位置并返回剩余部分
-pub fn php_strstr(haystack: Value, needle: Value, allocator: Allocator) !Value {
+pub fn php_strstr(haystack: Value, needle: Value, before_needle: Value, allocator: Allocator) !Value {
     if (!haystack.isString() or !needle.isString()) return Value.initBool(false);
 
     const h = haystack.asString();
@@ -8196,12 +9322,22 @@ pub fn php_strstr(haystack: Value, needle: Value, allocator: Allocator) !Value {
 
     const pos = std.mem.indexOf(u8, h.data[0..h.length], n.data[0..n.length]) orelse return Value.initBool(false);
 
+    if (before_needle.toBool()) {
+        // 返回 needle 之前的部分
+        const result_len = pos;
+        const buffer = try allocator.alloc(u8, result_len);
+        @memcpy(buffer, h.data[0..pos]);
+        const result = try PHPString.init(allocator, buffer);
+        allocator.free(buffer);
+        return Value.initString(result);
+    }
+
     const result_len = h.length - pos;
     const buffer = try allocator.alloc(u8, result_len);
     @memcpy(buffer, h.data[pos..h.length]);
 
-    const result = try allocator.create(PHPString);
-    result.* = .{ .data = buffer, .length = result_len, .ref_count = 1, .is_static = false };
+    const result = try PHPString.init(allocator, buffer);
+    allocator.free(buffer);
     return Value.initString(result);
 }
 
@@ -8247,7 +9383,10 @@ pub fn php_stristr(haystack: Value, needle: Value, allocator: Allocator) !Value 
         while (j < n.length) : (j += 1) {
             const a = std.ascii.toLower(h.data[i + j]);
             const b = std.ascii.toLower(n.data[j]);
-            if (a != b) { matched = false; break; }
+            if (a != b) {
+                matched = false;
+                break;
+            }
         }
         if (matched) {
             const result_len = h.length - i;
@@ -8471,6 +9610,7 @@ extern fn pcre2_match_8(
 ) c_int;
 
 extern fn pcre2_get_ovector_pointer_8(?*pcre2_match_data) [*]usize;
+extern fn pcre2_pattern_info_8(?*const pcre2_code, c_uint, ?*anyopaque) c_int;
 
 extern fn pcre2_substitute_8(
     ?*const pcre2_code,
@@ -8495,6 +9635,9 @@ const PCRE2_UTF: c_uint = 0x00080000;
 const PCRE2_ERROR_NOMATCH: c_int = -1;
 const PCRE2_SUBSTITUTE_GLOBAL: c_uint = 0x00000100;
 const PCRE2_SUBSTITUTE_OVERFLOW_LENGTH: c_uint = 0x00001000;
+const PCRE2_INFO_NAMECOUNT: c_uint = 17;
+const PCRE2_INFO_NAMEENTRYSIZE: c_uint = 18;
+const PCRE2_INFO_NAMETABLE: c_uint = 19;
 
 const ParsedPattern = struct {
     pattern: []const u8,
@@ -8565,7 +9708,7 @@ pub fn preg_match(pattern_val: Value, subject_val: Value, matches_ref: *Value, f
     _ = flags; // TODO: 实现flags支持
     _ = offset; // TODO: 实现offset支持
     _ = matches_ref; // TODO: 实现matches填充
-    
+
     if (!pattern_val.isString() or !subject_val.isString()) {
         return Value.initInt(0);
     }
@@ -8642,6 +9785,43 @@ pub fn preg_match_with_matches(pattern_val: Value, subject_val: Value, matches_r
         }
     }
 
+    // 填充命名捕获组
+    var name_count: c_uint = 0;
+    if (pcre2_pattern_info_8(re, PCRE2_INFO_NAMECOUNT, &name_count) == 0 and name_count > 0) {
+        var name_entry_size: c_uint = 0;
+        if (pcre2_pattern_info_8(re, PCRE2_INFO_NAMEENTRYSIZE, &name_entry_size) == 0 and name_entry_size > 0) {
+            var name_table_ptr: ?*const u8 = null;
+            if (pcre2_pattern_info_8(re, PCRE2_INFO_NAMETABLE, @ptrCast(&name_table_ptr)) == 0 and name_table_ptr != null) {
+                const name_table = name_table_ptr.?;
+                const name_table_ptr_arr: [*]const u8 = @ptrCast(name_table);
+                var ni: usize = 0;
+                while (ni < name_count) : (ni += 1) {
+                    const entry = name_table_ptr_arr + ni * name_entry_size;
+                    const group_num: usize = (@as(usize, entry[0]) << 8) | @as(usize, entry[1]);
+                    const name_start: usize = 2;
+                    const name_end = blk: {
+                        var j: usize = name_start;
+                        while (j < name_entry_size) : (j += 1) {
+                            if (entry[j] == 0) break;
+                        }
+                        break :blk j;
+                    };
+                    const name = entry[name_start..name_end];
+                    if (group_num < @as(usize, @intCast(rc))) {
+                        const gs = ovec[group_num * 2];
+                        const ge = ovec[group_num * 2 + 1];
+                        if (gs < subject_str.length and ge <= subject_str.length and gs <= ge) {
+                            const capture = subject_str.data[gs..ge];
+                            const capture_str = try PHPString.init(allocator, capture);
+                            const name_str = try PHPString.init(allocator, name);
+                            try matches_arr.set(allocator, .{ .string = name_str }, Value.initString(capture_str));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     matches_ref.* = Value.initArray(matches_arr);
     return Value.initInt(1);
 }
@@ -8650,9 +9830,8 @@ pub fn preg_match_with_matches(pattern_val: Value, subject_val: Value, matches_r
 /// matches_ref: 引用参数，填充为二维数组
 /// 返回：匹配次数
 pub fn preg_match_all(pattern_val: Value, subject_val: Value, matches_ref: *Value, flags: Value, offset: Value, allocator: Allocator) !Value {
-    _ = flags; // TODO: 实现flags支持
-    _ = offset; // TODO: 实现offset支持
-    
+    _ = offset; // offset 暂未实现
+
     if (!pattern_val.isString() or !subject_val.isString()) {
         matches_ref.* = Value.initArray(try PHPArray.init(allocator));
         return Value.initInt(0);
@@ -8725,29 +9904,42 @@ pub fn preg_match_all(pattern_val: Value, subject_val: Value, matches_ref: *Valu
         }
     }
 
-    // 转换为PREG_PATTERN_ORDER格式
-    // matches[0] = [所有完整匹配]
-    // matches[1] = [所有第1个捕获组]
+    // PREG_SET_ORDER=2: matches[i] = [full_match, group1, group2, ...]
+    // PREG_PATTERN_ORDER=1 (default): matches[0] = [all full matches], matches[1] = [all group1], ...
+    const flags_val: i64 = if (flags.isNull()) 0 else flags.toInt();
+    const is_set_order = (flags_val == 2);
+
     const matches_arr = try PHPArray.init(allocator);
 
-    if (all_matches.items.len > 0) {
-        const num_groups = all_matches.items[0].items.len;
-
-        // 为每个组创建数组
-        var group_idx: usize = 0;
-        while (group_idx < num_groups) : (group_idx += 1) {
-            const group_arr = try PHPArray.init(allocator);
-
-            // 收集所有匹配中的该组
-            for (all_matches.items) |match_groups| {
-                if (group_idx < match_groups.items.len) {
-                    const capture = match_groups.items[group_idx];
-                    const capture_str = try PHPString.init(allocator, capture);
-                    try group_arr.push(allocator, Value.initString(capture_str));
-                }
+    if (is_set_order) {
+        // PREG_SET_ORDER: 每个元素是一个匹配的所有组
+        for (all_matches.items) |match_groups| {
+            const set_arr = try PHPArray.init(allocator);
+            for (match_groups.items) |capture| {
+                const capture_str = try PHPString.init(allocator, capture);
+                try set_arr.push(allocator, Value.initString(capture_str));
             }
+            try matches_arr.push(allocator, Value.initArray(set_arr));
+        }
+    } else {
+        // PREG_PATTERN_ORDER (默认)
+        if (all_matches.items.len > 0) {
+            const num_groups = all_matches.items[0].items.len;
 
-            try matches_arr.push(allocator, Value.initArray(group_arr));
+            var group_idx: usize = 0;
+            while (group_idx < num_groups) : (group_idx += 1) {
+                const group_arr = try PHPArray.init(allocator);
+
+                for (all_matches.items) |match_groups| {
+                    if (group_idx < match_groups.items.len) {
+                        const capture = match_groups.items[group_idx];
+                        const capture_str = try PHPString.init(allocator, capture);
+                        try group_arr.push(allocator, Value.initString(capture_str));
+                    }
+                }
+
+                try matches_arr.push(allocator, Value.initArray(group_arr));
+            }
         }
     }
 
@@ -8757,7 +9949,7 @@ pub fn preg_match_all(pattern_val: Value, subject_val: Value, matches_ref: *Valu
 
 /// preg_match_all - 返回所有匹配和捕获组
 /// 返回: [match_count, [[full_match, group1, group2, ...], ...]]
-pub fn preg_replace(pattern_val: Value, replacement_val: Value, subject_val: Value, allocator: Allocator) !Value {
+pub fn preg_replace(pattern_val: Value, replacement_val: Value, subject_val: Value, limit_val: Value, allocator: Allocator) !Value {
     if (!pattern_val.isString() or !replacement_val.isString() or !subject_val.isString()) {
         return Value.initNull();
     }
@@ -8765,6 +9957,10 @@ pub fn preg_replace(pattern_val: Value, replacement_val: Value, subject_val: Val
     const pattern_str = pattern_val.asString();
     const replacement_str = replacement_val.asString();
     const subject_str = subject_val.asString();
+
+    const limit: i64 = if (limit_val.isNull()) -1 else limit_val.toInt();
+
+    if (limit == 0) return subject_val;
 
     const parsed = parsePHPRegexPattern(pattern_str.data);
 
@@ -8774,21 +9970,151 @@ pub fn preg_replace(pattern_val: Value, replacement_val: Value, subject_val: Val
     const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse return subject_val;
     defer pcre2_match_data_free_8(match_data);
 
-    // 分配输出缓冲区
-    const output_len: usize = subject_str.length * 2;
-    const output = try allocator.alloc(u8, output_len);
-    errdefer allocator.free(output);
+    if (limit < 0) {
+        // 替换全部 — 使用 PCRE2_SUBSTITUTE_GLOBAL
+        const output_len: usize = subject_str.length * 2 + 1;
+        const output = try allocator.alloc(u8, output_len);
+        errdefer allocator.free(output);
 
-    var output_size: usize = output_len;
-    const rc = pcre2_substitute_8(re, subject_str.data.ptr, subject_str.length, 0, PCRE2_SUBSTITUTE_GLOBAL, match_data, null, replacement_str.data.ptr, replacement_str.length, output.ptr, @ptrCast(&output_size));
+        var output_size: usize = output_len;
+        const rc = pcre2_substitute_8(re, subject_str.data.ptr, subject_str.length, 0, PCRE2_SUBSTITUTE_GLOBAL, match_data, null, replacement_str.data.ptr, replacement_str.length, output.ptr, @ptrCast(&output_size));
 
-    if (rc < 0) {
-        allocator.free(output);
-        return subject_val;
+        if (rc < 0) {
+            allocator.free(output);
+            return subject_val;
+        }
+
+        const result = try allocator.realloc(output, output_size);
+        return Value.initString(try PHPString.init(allocator, result));
     }
 
-    const result = try allocator.realloc(output, output_size);
-    return Value.initString(try PHPString.init(allocator, result));
+    // limit > 0: 在原始 subject 中查找匹配位置，替换前 limit 个匹配
+    // 使用 pcre2_match 逐个查找，手动构建结果字符串以正确处理 limit 和反向引用
+    const limit_usize: usize = @intCast(limit);
+
+    var result_buf = try std.ArrayList(u8).initCapacity(allocator, subject_str.length + 64);
+    defer result_buf.deinit(allocator);
+
+    var last_end: usize = 0;
+    var search_offset: usize = 0;
+    var replacements_done: usize = 0;
+
+    while (replacements_done < limit_usize and search_offset <= subject_str.length) {
+        const rc = pcre2_match_8(re, subject_str.data.ptr, subject_str.length, @intCast(search_offset), 0, match_data, null);
+        if (rc < 0) break; // 无更多匹配
+
+        const ovec = pcre2_get_ovector_pointer_8(match_data);
+        const match_start = ovec[0];
+        const match_end = ovec[1];
+        const num_groups: usize = @intCast(rc);
+
+        // 复制匹配前的文本
+        if (match_start > last_end) {
+            try result_buf.appendSlice(allocator, subject_str.data[last_end..match_start]);
+        }
+
+        // 处理替换字符串中的反向引用 ($0, $1, ${1}, \0, \1 等)
+        try pregReplaceProcessBackrefs(&result_buf, allocator, replacement_str.data, subject_str.data, ovec, num_groups);
+
+        last_end = match_end;
+        replacements_done += 1;
+
+        if (match_end == match_start) {
+            // 空匹配 — 前进 1 字符避免无限循环
+            if (match_end < subject_str.length) {
+                try result_buf.appendSlice(allocator, subject_str.data[match_end .. match_end + 1]);
+            }
+            last_end = match_end + 1;
+            search_offset = match_end + 1;
+        } else {
+            search_offset = match_end;
+        }
+    }
+
+    // 复制最后一段未匹配文本
+    if (last_end < subject_str.length) {
+        try result_buf.appendSlice(allocator, subject_str.data[last_end..]);
+    }
+
+    if (replacements_done == 0) return subject_val;
+
+    const result_str = try result_buf.toOwnedSlice(allocator);
+    return Value.initString(try PHPString.init(allocator, result_str));
+}
+
+/// 处理替换字符串中的反向引用: $0, $1-$9, ${N}, \0-\9
+fn pregReplaceProcessBackrefs(
+    result_buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    replacement: []const u8,
+    subject: []const u8,
+    ovec: [*]usize,
+    num_groups: usize,
+) !void {
+    var i: usize = 0;
+    while (i < replacement.len) {
+        if (replacement[i] == '$' and i + 1 < replacement.len) {
+            if (replacement[i + 1] == '{') {
+                // ${N} 形式
+                var j = i + 2;
+                while (j < replacement.len and replacement[j] != '}') j += 1;
+                if (j < replacement.len) {
+                    const group_str = replacement[i + 2 .. j];
+                    const group_num = std.fmt.parseInt(usize, group_str, 10) catch {
+                        try result_buf.appendSlice(allocator, replacement[i .. j + 1]);
+                        i = j + 1;
+                        continue;
+                    };
+                    if (group_num < num_groups) {
+                        const start = ovec[group_num * 2];
+                        const end = ovec[group_num * 2 + 1];
+                        if (start != std.math.maxInt(usize) and end != std.math.maxInt(usize) and start < subject.len and end <= subject.len) {
+                            try result_buf.appendSlice(allocator, subject[start..end]);
+                        }
+                    }
+                    i = j + 1;
+                    continue;
+                }
+            } else if (replacement[i + 1] >= '0' and replacement[i + 1] <= '9') {
+                // $N 形式（单个数字）
+                const group_num: usize = replacement[i + 1] - '0';
+                if (group_num < num_groups) {
+                    const start = ovec[group_num * 2];
+                    const end = ovec[group_num * 2 + 1];
+                    if (start != std.math.maxInt(usize) and end != std.math.maxInt(usize) and start < subject.len and end <= subject.len) {
+                        try result_buf.appendSlice(allocator, subject[start..end]);
+                    }
+                }
+                i += 2;
+                continue;
+            }
+            try result_buf.append(allocator, '$');
+            i += 1;
+        } else if (replacement[i] == '\\' and i + 1 < replacement.len) {
+            if (replacement[i + 1] >= '0' and replacement[i + 1] <= '9') {
+                // \N 形式
+                const group_num: usize = replacement[i + 1] - '0';
+                if (group_num < num_groups) {
+                    const start = ovec[group_num * 2];
+                    const end = ovec[group_num * 2 + 1];
+                    if (start != std.math.maxInt(usize) and end != std.math.maxInt(usize) and start < subject.len and end <= subject.len) {
+                        try result_buf.appendSlice(allocator, subject[start..end]);
+                    }
+                }
+                i += 2;
+                continue;
+            } else if (replacement[i + 1] == '$') {
+                try result_buf.append(allocator, '$');
+                i += 2;
+                continue;
+            }
+            try result_buf.append(allocator, replacement[i]);
+            i += 1;
+        } else {
+            try result_buf.append(allocator, replacement[i]);
+            i += 1;
+        }
+    }
 }
 
 /// preg_filter - 类似 preg_replace，但只返回匹配的元素
@@ -8802,18 +10128,18 @@ pub fn preg_filter(pattern_val: Value, replacement_val: Value, subject_val: Valu
         while (iter.next()) |entry| {
             if (entry.value_ptr.isString()) {
                 const subject_str = entry.value_ptr.asString();
-                
+
                 if (pattern_val.isString() and replacement_val.isString()) {
                     const pattern_str = pattern_val.asString();
                     const parsed = parsePHPRegexPattern(pattern_str.data);
-                    
+
                     const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch continue;
                     const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse continue;
                     defer pcre2_match_data_free_8(match_data);
 
                     // 检查是否有匹配
                     const rc_check = pcre2_match_8(re, subject_str.data.ptr, subject_str.length, 0, 0, match_data, null);
-                    
+
                     // 只有匹配时才进行替换并添加到结果
                     if (rc_check >= 0) {
                         const replacement_str = replacement_val.asString();
@@ -8833,7 +10159,7 @@ pub fn preg_filter(pattern_val: Value, replacement_val: Value, subject_val: Valu
                                 allocator.free(result);
                                 continue;
                             });
-                            
+
                             // 保持原始键
                             switch (entry.key_ptr.*) {
                                 .integer => result_arr.set(allocator, entry.key_ptr.*, result_val) catch {},
@@ -8867,7 +10193,7 @@ pub fn preg_filter(pattern_val: Value, replacement_val: Value, subject_val: Valu
 
     // 检查是否有匹配
     const rc_check = pcre2_match_8(re, subject_str.data.ptr, subject_str.length, 0, 0, match_data, null);
-    
+
     // 如果没有匹配，返回 null（preg_filter 的特性）
     if (rc_check == PCRE2_ERROR_NOMATCH or rc_check < 0) {
         return Value.initNull();
@@ -9440,6 +10766,21 @@ pub fn php_strncasecmp(str1: Value, str2: Value, length: Value) !Value {
     return Value.initInt(php_string_compare_bytes(lhs, rhs, true));
 }
 
+/// strncmp - 二进制安全比较字符串前 n 个字符（区分大小写）
+pub fn php_strncmp(str1: Value, str2: Value, length: Value) !Value {
+    if (!str1.isString() or !str2.isString()) return Value.initInt(0);
+
+    const limit = length.toInt();
+    if (limit <= 0) return Value.initInt(0);
+
+    const compare_len: usize = @intCast(limit);
+    const s1 = str1.asString();
+    const s2 = str2.asString();
+    const lhs = s1.data[0..@min(s1.length, compare_len)];
+    const rhs = s2.data[0..@min(s2.length, compare_len)];
+    return Value.initInt(php_string_compare_bytes(lhs, rhs, false));
+}
+
 /// strnatcmp - 自然排序字符串比较（区分大小写）
 pub fn php_strnatcmp(str1: Value, str2: Value) !Value {
     if (!str1.isString() or !str2.isString()) return Value.initInt(0);
@@ -9629,11 +10970,12 @@ pub fn php_in_array(needle: Value, haystack: Value, strict: Value) !Value {
 /// array_slice($arr, -2);     // [4, 5]
 /// array_slice($arr, 1, -1);  // [2, 3, 4]
 /// ```
-pub fn php_array_slice(arr: Value, offset: Value, length: Value, allocator: Allocator) !Value {
+pub fn php_array_slice(arr: Value, offset: Value, length: Value, preserve_keys: Value, allocator: Allocator) !Value {
     if (!arr.isArray()) return Value.initNull();
 
     const php_arr = arr.asArray();
     const arr_count = php_arr.count();
+    const preserve = preserve_keys.asBool();
 
     if (arr_count == 0) {
         // 空数组，返回空数组
@@ -9682,22 +11024,44 @@ pub fn php_array_slice(arr: Value, offset: Value, length: Value, allocator: Allo
     }
 
     // 复制元素
-    // 注意：PHP的array_slice会重新索引数组（从0开始）
     var iter = php_arr.elements.iterator();
     var current_idx: usize = 0;
     var new_idx: i64 = 0;
 
     while (iter.next()) |entry| {
-        // 只处理整数键（保持顺序）
-        if (entry.key_ptr.* == .integer) {
-            if (current_idx >= start_idx and current_idx < end_idx) {
-                const new_key = ArrayKey{ .integer = new_idx };
+        if (current_idx >= start_idx and current_idx < end_idx) {
+            if (preserve) {
+                // 保留原始键
+                const key_copy = switch (entry.key_ptr.*) {
+                    .integer => |k| ArrayKey{ .integer = k },
+                    .string => |k| blk: {
+                        k.retain();
+                        break :blk ArrayKey{ .string = k };
+                    },
+                };
                 const value_copy = entry.value_ptr.*.retain();
-                try result.elements.put(new_key, value_copy);
-                new_idx += 1;
+                try result.elements.put(key_copy, value_copy);
+                if (key_copy == .integer and key_copy.integer >= new_idx) {
+                    new_idx = key_copy.integer + 1;
+                }
+            } else {
+                // 重新索引整数键，保留字符串键
+                switch (entry.key_ptr.*) {
+                    .integer => {
+                        const new_key = ArrayKey{ .integer = new_idx };
+                        const value_copy = entry.value_ptr.*.retain();
+                        try result.elements.put(new_key, value_copy);
+                        new_idx += 1;
+                    },
+                    .string => |k| {
+                        k.retain();
+                        const value_copy = entry.value_ptr.*.retain();
+                        try result.elements.put(.{ .string = k }, value_copy);
+                    },
+                }
             }
-            current_idx += 1;
         }
+        current_idx += 1;
     }
 
     result.next_index = new_idx;
@@ -9766,6 +11130,55 @@ pub fn php_array_merge(arrays: []const Value, allocator: Allocator) !Value {
     }
 
     result.next_index = next_int_key;
+
+    return Value.initArray(result);
+}
+
+/// array_replace - 替换数组元素（保留键名，递归替换）
+pub fn php_array_replace(arrays: []const Value, allocator: Allocator) !Value {
+    if (arrays.len == 0) {
+        return Value.initArray(try PHPArray.init(allocator));
+    }
+
+    // 以第一个数组为基础创建副本
+    const result = try PHPArray.init(allocator);
+    errdefer result.release(allocator);
+
+    // 先拷贝第一个数组
+    if (arrays[0].isArray()) {
+        const first_arr = arrays[0].asArray();
+        var iter = first_arr.elements.iterator();
+        var max_int: i64 = -1;
+        while (iter.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const value = entry.value_ptr.*.retain();
+            if (key == .integer and key.integer > max_int) max_int = key.integer;
+            try result.elements.put(key, value);
+        }
+        result.next_index = if (max_int >= 0) max_int + 1 else 0;
+    }
+
+    // 用后续数组的元素替换
+    for (arrays[1..]) |arr_val| {
+        if (!arr_val.isArray()) continue;
+        const arr = arr_val.asArray();
+        var it = arr.elements.iterator();
+        while (it.next()) |entry| {
+            const key = entry.key_ptr.*;
+            const value = entry.value_ptr.*.retain();
+
+            // 释放旧值
+            if (result.elements.get(key)) |old_value| {
+                old_value.release(allocator);
+            }
+
+            try result.elements.put(key, value);
+
+            if (key == .integer and key.integer >= result.next_index) {
+                result.next_index = key.integer + 1;
+            }
+        }
+    }
 
     return Value.initArray(result);
 }
@@ -9864,17 +11277,24 @@ pub fn php_array_merge_into(target: Value, source: Value, allocator: Allocator) 
 /// $arr = ['a' => 1, 'b' => 2, 0 => 3];
 /// array_keys($arr);  // ['a', 'b', 0]
 /// ```
-pub fn php_array_keys(arr: Value, allocator: Allocator) !Value {
+pub fn php_array_keys(arr: Value, search: Value, allocator: Allocator) !Value {
     if (!arr.isArray()) return Value.initNull();
 
     const php_arr = arr.asArray();
     const result = try PHPArray.init(allocator);
     errdefer result.release(allocator);
 
+    const has_search = !search.isNull();
+
     var iter = php_arr.elements.iterator();
     var idx: i64 = 0;
 
     while (iter.next()) |entry| {
+        if (has_search) {
+            const eq = try php_eq(entry.value_ptr.*, search);
+            if (!eq.asBool()) continue;
+        }
+
         const key = entry.key_ptr.*;
         const key_value = switch (key) {
             .integer => |i| Value.initInt(i),
@@ -9950,7 +11370,7 @@ pub fn php_array_is_list(arr: Value) Value {
     if (!arr.isArray()) return Value.initBool(false);
 
     const php_arr = arr.asArray();
-    
+
     // 空数组是列表
     if (php_arr.elements.count() == 0) return Value.initBool(true);
 
@@ -10056,7 +11476,7 @@ pub fn php_max(args: []const Value) !Value {
 
             var max_val = arr.elements.packed_values.items[0];
             for (arr.elements.packed_values.items[1..]) |val| {
-                if (val.toFloat() > max_val.toFloat()) {
+                if (phpCompare(max_val, val) < 0) {
                     max_val = val;
                 }
             }
@@ -10065,10 +11485,10 @@ pub fn php_max(args: []const Value) !Value {
         return args[0];
     }
 
-    // 多参数：找最大值
+    // 多参数：找最大值（使用 PHP 比较语义，而非纯数值比较）
     var max_val = args[0];
     for (args[1..]) |val| {
-        if (val.toFloat() > max_val.toFloat()) {
+        if (phpCompare(max_val, val) < 0) {
             max_val = val;
         }
     }
@@ -10086,7 +11506,7 @@ pub fn php_min(args: []const Value) !Value {
 
             var min_val = arr.elements.packed_values.items[0];
             for (arr.elements.packed_values.items[1..]) |val| {
-                if (val.toFloat() < min_val.toFloat()) {
+                if (phpCompare(val, min_val) < 0) {
                     min_val = val;
                 }
             }
@@ -10095,10 +11515,10 @@ pub fn php_min(args: []const Value) !Value {
         return args[0];
     }
 
-    // 多参数：找最小值
+    // 多参数：找最小值（使用 PHP 比较语义）
     var min_val = args[0];
     for (args[1..]) |val| {
-        if (val.toFloat() < min_val.toFloat()) {
+        if (phpCompare(val, min_val) < 0) {
             min_val = val;
         }
     }
@@ -10263,9 +11683,12 @@ pub fn php_pow_func(base: Value, exponent: Value) !Value {
     return Value.initFloat(std.math.pow(f64, base.toFloat(), exponent.toFloat()));
 }
 
-/// fmod - 浮点数取模
+/// fmod - 浮点数取模（结果符号与被除数相同，匹配 C/PHP fmod）
 pub fn php_fmod(x: Value, y: Value) !Value {
-    return Value.initFloat(@mod(x.toFloat(), y.toFloat()));
+    const xv = x.toFloat();
+    const yv = y.toFloat();
+    if (yv == 0.0) return Value.initFloat(std.math.nan(f64));
+    return Value.initFloat(xv - yv * @trunc(xv / yv));
 }
 
 /// intdiv - 整数除法
@@ -10356,8 +11779,18 @@ pub fn php_pi() !Value {
 pub fn php_intval(val: Value) !Value {
     // 使用完整的 PHP intval 语义
     if (val.isInt()) return val;
-    if (val.isFloat()) return Value.initInt(@intFromFloat(val.asFloat()));
+    if (val.isFloat()) {
+        const f = val.asFloat();
+        const max_as_float = @as(f64, @floatFromInt(std.math.maxInt(i64)));
+        const min_as_float = @as(f64, @floatFromInt(std.math.minInt(i64)));
+        if (f >= max_as_float or f < min_as_float) return Value.initInt(std.math.minInt(i64));
+        return Value.initInt(@intFromFloat(f));
+    }
     if (val.isBool()) return Value.initInt(if (val.asBool()) @as(i64, 1) else @as(i64, 0));
+    if (val.isArray()) {
+        const arr = val.asArray();
+        return Value.initInt(if (arr.elements.count() > 0) @as(i64, 1) else @as(i64, 0));
+    }
     if (val.isString()) {
         const str = val.asString().data;
         // 内联 intval 逻辑
@@ -10376,28 +11809,42 @@ pub fn php_intval(val: Value) !Value {
 
         if (s.len == 0) return Value.initInt(0);
 
-        // 如果包含小数点，先解析为浮点数
-        if (std.mem.indexOf(u8, s, ".") != null) {
+        // 如果包含小数点或科学记数法，先解析为浮点数
+        if (std.mem.indexOf(u8, s, ".") != null or
+            std.mem.indexOf(u8, s, "e") != null or
+            std.mem.indexOf(u8, s, "E") != null)
+        {
             if (std.fmt.parseFloat(f64, if (negative) str else s)) |float_val| {
+                const max_as_float: f64 = @floatFromInt(std.math.maxInt(i64));
+                const min_as_float: f64 = @floatFromInt(std.math.minInt(i64));
+                if (float_val >= max_as_float or float_val < min_as_float) return Value.initInt(std.math.minInt(i64));
                 return Value.initInt(@intFromFloat(float_val));
             } else |_| {}
         }
 
-        // 尝试完整解析
-        if (std.fmt.parseInt(i64, s, 10)) |int_val| {
-            return Value.initInt(if (negative) -int_val else int_val);
-        } else |_| {
-            // 部分解析：提取前导数字
-            var result: i64 = 0;
-            for (s) |c| {
-                if (c >= '0' and c <= '9') {
-                    result = result * 10 + (c - '0');
-                } else {
+        // 手动解析整数（仅接受 0-9，不接受下划线，处理溢出）
+        var result: i64 = 0;
+        var overflow = false;
+        for (s) |c| {
+            if (c >= '0' and c <= '9') {
+                if (result > 922337203685477580) {
+                    overflow = true;
                     break;
                 }
+                result = result * 10 + (c - '0');
+                if (result < 0) {
+                    overflow = true;
+                    break;
+                }
+            } else {
+                break;
             }
-            return Value.initInt(if (negative) -result else result);
         }
+
+        if (overflow) {
+            return Value.initInt(if (negative) -9223372036854775808 else 9223372036854775807);
+        }
+        return Value.initInt(if (negative) -result else result);
     }
     return Value.initInt(0);
 }
@@ -10482,7 +11929,32 @@ pub fn php_is_callable(val: Value) !Value {
     if (actual_val.isArray()) {
         // [obj/class, method] 形式
         const arr = actual_val.asArray();
-        if (arr.elements.count() == 2) return Value.initBool(true);
+        if (arr.elements.count() == 2) {
+            const k0 = ArrayKey{ .integer = 0 };
+            const k1 = ArrayKey{ .integer = 1 };
+            const elem0 = arr.elements.get(k0) orelse return Value.initBool(false);
+            const elem1 = arr.elements.get(k1) orelse return Value.initBool(false);
+            // 第二个元素必须是字符串（方法名）
+            if (!elem1.isString()) return Value.initBool(false);
+            const method_name = elem1.asString().data;
+            // 第一个元素是对象：检查方法是否存在
+            if (Value_isObject(elem0)) {
+                const obj = Value_asObject(elem0);
+                if (obj.class_meta) |meta| {
+                    return Value.initBool(meta.findMethodLookup(method_name) != null);
+                }
+                return Value.initBool(false);
+            }
+            // 第一个元素是字符串（类名）：检查静态方法是否存在
+            if (elem0.isString()) {
+                const class_name = elem0.asString().data;
+                if (findClass(class_name)) |meta| {
+                    return Value.initBool(meta.findMethodLookup(method_name) != null);
+                }
+                return Value.initBool(false);
+            }
+            return Value.initBool(false);
+        }
         return Value.initBool(false);
     }
     if (Value_isObject(actual_val)) {
@@ -10524,7 +11996,7 @@ pub fn php_is_finite(val: Value) !Value {
 pub fn php_is_countable(val: Value) !Value {
     // 数组总是可计数的
     if (val.isArray()) return Value.initBool(true);
-    
+
     // 对象需要实现Countable接口
     if (Value_isObject(val)) {
         const obj = Value_asObject(val);
@@ -10533,7 +12005,7 @@ pub fn php_is_countable(val: Value) !Value {
             return Value.initBool(meta.findMethod("count") != null);
         }
     }
-    
+
     return Value.initBool(false);
 }
 
@@ -10541,7 +12013,7 @@ pub fn php_is_countable(val: Value) !Value {
 pub fn php_is_iterable(val: Value) !Value {
     // 数组总是可迭代的
     if (val.isArray()) return Value.initBool(true);
-    
+
     // 对象需要实现Traversable接口（Iterator或IteratorAggregate）
     if (Value_isObject(val)) {
         const obj = Value_asObject(val);
@@ -10553,12 +12025,12 @@ pub fn php_is_iterable(val: Value) !Value {
             const has_rewind = meta.findMethod("rewind") != null;
             const has_valid = meta.findMethod("valid") != null;
             const has_getiterator = meta.findMethod("getIterator") != null;
-            
+
             // Iterator接口需要5个方法，IteratorAggregate需要getIterator
             return Value.initBool((has_current and has_key and has_next and has_rewind and has_valid) or has_getiterator);
         }
     }
-    
+
     return Value.initBool(false);
 }
 
@@ -10582,12 +12054,18 @@ pub fn php_clone(val: Value, allocator: Allocator) !Value {
     // 创建新对象
     const new_obj = try PHPObject.init(allocator, orig_obj.class_name);
 
-    // 复制属性
+    // 复制属性 — PHP 语义：数组属性做浅拷贝（复制数组结构），对象属性共享引用
     var iter = orig_obj.properties.iterator();
     while (iter.next()) |entry| {
         const key = entry.key_ptr.*;
         const value = entry.value_ptr.*;
-        try new_obj.properties.put(key, value.retain());
+        if (value.isArray()) {
+            // 数组是值类型，clone 时应复制一份（浅拷贝）
+            const cloned_arr = try value.asArray().cloneShallow(allocator);
+            try new_obj.properties.put(key, Value.initArray(cloned_arr));
+        } else {
+            try new_obj.properties.put(key, value.retain());
+        }
     }
 
     // 复制class_meta
@@ -10600,6 +12078,9 @@ pub fn php_clone(val: Value, allocator: Allocator) !Value {
         if (meta.findMethodLookup("__clone")) |lookup| {
             const guard = ClassContext.init(meta, lookup.owner);
             defer guard.deinit();
+            // PHP 8.1+: __clone 中允许重新初始化 readonly 属性
+            in_clone_context = true;
+            defer in_clone_context = false;
             _ = try lookup.method.func(new_val, &.{}, allocator);
         }
     }
@@ -10626,12 +12107,12 @@ pub fn php_array_set_ref(arr_val: Value, key_val: Value, ref_val: Value, _: Valu
 
 /// 从值创建引用（用于全局变量的引用）
 pub fn php_make_ref_from_value(val: Value) !Value {
-    // 这是一个简化实现：创建一个包含该值的临时位置并返回引用
-    // 在完整实现中，这需要更复杂的内存管理
-    _ = val.retain();
-    // 注意：这里返回的是值本身，不是真正的引用
-    // 全局变量的引用需要特殊处理
-    return val;
+    // 创建真正的引用：分配堆单元，将值放入，返回 Ref 指向该单元
+    // 调用方负责将返回的 Ref 存入目标变量，同时将源变量也更新为同一 Ref
+    const cell = try runtime_allocator.create(Value);
+    cell.* = val;
+    _ = cell.retain();
+    return Value.initRef(cell);
 }
 
 // ============================================================================
@@ -10735,6 +12216,8 @@ pub const ClassMethod = struct {
     return_type: ?[]const u8 = null,
     /// 返回类型是否 nullable
     return_nullable: bool = false,
+    /// PHP attributes (#[...]) — 存储为 PHPArray of ReflectionAttribute 对象
+    attributes: ?Value = null,
 };
 
 /// 类属性定义
@@ -10752,6 +12235,8 @@ pub const ClassProperty = struct {
     type_nullable: bool = false,
     /// 是否有默认值（class body 中声明了默认值）
     has_default: bool = false,
+    /// PHP attributes (#[...]) — 存储为 PHPArray of ReflectionAttribute 对象
+    attributes: ?Value = null,
 };
 
 /// 类元数据
@@ -10762,12 +12247,13 @@ pub const ClassMeta = struct {
     interfaces: []const []const u8 = &.{},
     methods: std.StringHashMap(ClassMethod),
     properties: std.StringHashMap(ClassProperty),
+    property_order: std.ArrayList([]const u8),
     static_properties: std.StringHashMap(Value),
     is_abstract: bool = false,
     is_final: bool = false,
-    is_interface: bool = false,  // 是否为接口
-    is_trait: bool = false,      // 是否为trait
-    is_enum: bool = false,       // 是否为enum
+    is_interface: bool = false, // 是否为接口
+    is_trait: bool = false, // 是否为trait
+    is_enum: bool = false, // 是否为enum
     allocator: Allocator,
 
     /// 魔法函数指针
@@ -10786,6 +12272,7 @@ pub const ClassMeta = struct {
     magic_wakeup: ?MethodFn = null,
     magic_serialize: ?MethodFn = null,
     magic_unserialize: ?MethodFn = null,
+    magic_debugInfo: ?MethodFn = null,
 
     pub fn init(allocator: Allocator, name: []const u8) !*ClassMeta {
         const meta = try allocator.create(ClassMeta);
@@ -10795,6 +12282,7 @@ pub const ClassMeta = struct {
             .name = try allocator.dupe(u8, name),
             .methods = std.StringHashMap(ClassMethod).init(allocator),
             .properties = std.StringHashMap(ClassProperty).init(allocator),
+            .property_order = try std.ArrayList([]const u8).initCapacity(allocator, 0),
             .static_properties = std.StringHashMap(Value).init(allocator),
             .allocator = allocator,
         };
@@ -10812,6 +12300,7 @@ pub const ClassMeta = struct {
         // 再释放其他资源
         self.methods.deinit();
         self.properties.deinit();
+        self.property_order.deinit(self.allocator);
         self.allocator.free(self.name);
         self.allocator.destroy(self);
     }
@@ -10834,6 +12323,7 @@ pub const ClassMeta = struct {
         if (std.mem.eql(u8, method.name, "__wakeup")) self.magic_wakeup = method.func;
         if (std.mem.eql(u8, method.name, "__serialize")) self.magic_serialize = method.func;
         if (std.mem.eql(u8, method.name, "__unserialize")) self.magic_unserialize = method.func;
+        if (std.mem.eql(u8, method.name, "__debugInfo")) self.magic_debugInfo = method.func;
     }
 
     pub const MethodLookup = struct {
@@ -10905,8 +12395,7 @@ pub const ClassMeta = struct {
             const wday = getDayOfWeek(year, month, day);
             const iso_wday = if (wday == 0) @as(i64, 7) else @as(i64, wday);
             var week = @divFloor(@as(i64, doy) - iso_wday + 10, 7);
-            if (week < 1) week = if (isLeapYear(year - 1)) 53 else 52
-            else if (week > 52 and doy - iso_wday > 365 - (if (isLeapYear(year)) @as(i64, 1) else @as(i64, 0))) week = 1;
+            if (week < 1) week = if (isLeapYear(year - 1)) 53 else 52 else if (week > 52 and doy - iso_wday > 365 - (if (isLeapYear(year)) @as(i64, 1) else @as(i64, 0))) week = 1;
             return @intCast(week);
         }
 
@@ -10936,22 +12425,82 @@ pub const ClassMeta = struct {
                     'L' => try aw.writer.print("{d}", .{if (isLeapYear(year)) @as(u32, 1) else @as(u32, 0)}),
                     'm' => try aw.writer.print("{d:0>2}", .{month}),
                     'n' => try aw.writer.print("{d}", .{month}),
-                    'F' => try aw.writer.writeAll(switch (month) { 1=>"January", 2=>"February", 3=>"March", 4=>"April", 5=>"May", 6=>"June", 7=>"July", 8=>"August", 9=>"September", 10=>"October", 11=>"November", 12=>"December", else=>"Unknown" }),
-                    'M' => try aw.writer.writeAll(switch (month) { 1=>"Jan", 2=>"Feb", 3=>"Mar", 4=>"Apr", 5=>"May", 6=>"Jun", 7=>"Jul", 8=>"Aug", 9=>"Sep", 10=>"Oct", 11=>"Nov", 12=>"Dec", else=>"???" }),
+                    'F' => try aw.writer.writeAll(switch (month) {
+                        1 => "January",
+                        2 => "February",
+                        3 => "March",
+                        4 => "April",
+                        5 => "May",
+                        6 => "June",
+                        7 => "July",
+                        8 => "August",
+                        9 => "September",
+                        10 => "October",
+                        11 => "November",
+                        12 => "December",
+                        else => "Unknown",
+                    }),
+                    'M' => try aw.writer.writeAll(switch (month) {
+                        1 => "Jan",
+                        2 => "Feb",
+                        3 => "Mar",
+                        4 => "Apr",
+                        5 => "May",
+                        6 => "Jun",
+                        7 => "Jul",
+                        8 => "Aug",
+                        9 => "Sep",
+                        10 => "Oct",
+                        11 => "Nov",
+                        12 => "Dec",
+                        else => "???",
+                    }),
                     't' => try aw.writer.print("{d}", .{getDaysInMonth(year, month)}),
                     'd' => try aw.writer.print("{d:0>2}", .{day}),
                     'j' => try aw.writer.print("{d}", .{day}),
-                    'S' => try aw.writer.writeAll(if (day >= 11 and day <= 13) "th" else switch (day % 10) { 1=>"st", 2=>"nd", 3=>"rd", else=>"th" }),
+                    'S' => try aw.writer.writeAll(if (day >= 11 and day <= 13) "th" else switch (day % 10) {
+                        1 => "st",
+                        2 => "nd",
+                        3 => "rd",
+                        else => "th",
+                    }),
                     'z' => try aw.writer.print("{d}", .{getDayOfYear(year, month, day) - 1}),
-                    'l' => try aw.writer.writeAll(switch (getDayOfWeek(year, month, day)) { 0=>"Sunday", 1=>"Monday", 2=>"Tuesday", 3=>"Wednesday", 4=>"Thursday", 5=>"Friday", 6=>"Saturday", else=>"Unknown" }),
-                    'D' => try aw.writer.writeAll(switch (getDayOfWeek(year, month, day)) { 0=>"Sun", 1=>"Mon", 2=>"Tue", 3=>"Wed", 4=>"Thu", 5=>"Fri", 6=>"Sat", else=>"???" }),
+                    'l' => try aw.writer.writeAll(switch (getDayOfWeek(year, month, day)) {
+                        0 => "Sunday",
+                        1 => "Monday",
+                        2 => "Tuesday",
+                        3 => "Wednesday",
+                        4 => "Thursday",
+                        5 => "Friday",
+                        6 => "Saturday",
+                        else => "Unknown",
+                    }),
+                    'D' => try aw.writer.writeAll(switch (getDayOfWeek(year, month, day)) {
+                        0 => "Sun",
+                        1 => "Mon",
+                        2 => "Tue",
+                        3 => "Wed",
+                        4 => "Thu",
+                        5 => "Fri",
+                        6 => "Sat",
+                        else => "???",
+                    }),
                     'w' => try aw.writer.print("{d}", .{getDayOfWeek(year, month, day)}),
-                    'N' => { const n = getDayOfWeek(year, month, day); try aw.writer.print("{d}", .{if (n == 0) @as(u32, 7) else n}); },
+                    'N' => {
+                        const n = getDayOfWeek(year, month, day);
+                        try aw.writer.print("{d}", .{if (n == 0) @as(u32, 7) else n});
+                    },
                     'W' => try aw.writer.print("{d:0>2}", .{getIsoWeek(year, month, day)}),
                     'H' => try aw.writer.print("{d:0>2}", .{hour}),
                     'G' => try aw.writer.print("{d}", .{hour}),
-                    'h' => { const h12 = if (hour == 0) @as(u32, 12) else if (hour > 12) hour - 12 else hour; try aw.writer.print("{d:0>2}", .{h12}); },
-                    'g' => { const h12 = if (hour == 0) @as(u32, 12) else if (hour > 12) hour - 12 else hour; try aw.writer.print("{d}", .{h12}); },
+                    'h' => {
+                        const h12 = if (hour == 0) @as(u32, 12) else if (hour > 12) hour - 12 else hour;
+                        try aw.writer.print("{d:0>2}", .{h12});
+                    },
+                    'g' => {
+                        const h12 = if (hour == 0) @as(u32, 12) else if (hour > 12) hour - 12 else hour;
+                        try aw.writer.print("{d}", .{h12});
+                    },
                     'a' => try aw.writer.writeAll(if (hour < 12) "am" else "pm"),
                     'A' => try aw.writer.writeAll(if (hour < 12) "AM" else "PM"),
                     'i' => try aw.writer.print("{d:0>2}", .{minute}),
@@ -10959,13 +12508,58 @@ pub const ClassMeta = struct {
                     'u' => try aw.writer.print("{d:0>6}", .{self.microseconds}),
                     'v' => try aw.writer.print("{d:0>3}", .{@divFloor(self.microseconds, 1000)}),
                     'T' => try aw.writer.writeAll(self.timezone_name),
-                    'O' => { const oh = @divFloor(self.timezone_offset, 3600); const om = @divFloor(@rem(self.timezone_offset, 3600), 60); if (oh >= 0) try aw.writer.print("+{d:0>2}{d:0>2}", .{oh, @abs(om)}) else try aw.writer.print("{d:0>3}{d:0>2}", .{oh, @abs(om)}); },
-                    'P' => { const oh = @divFloor(self.timezone_offset, 3600); const om = @divFloor(@rem(self.timezone_offset, 3600), 60); if (oh >= 0) try aw.writer.print("+{d:0>2}:{d:0>2}", .{oh, @abs(om)}) else try aw.writer.print("{d:0>3}:{d:0>2}", .{oh, @abs(om)}); },
+                    'O' => {
+                        const oh = @divFloor(self.timezone_offset, 3600);
+                        const om = @divFloor(@rem(self.timezone_offset, 3600), 60);
+                        if (oh >= 0) try aw.writer.print("+{d:0>2}{d:0>2}", .{ oh, @abs(om) }) else try aw.writer.print("{d:0>3}{d:0>2}", .{ oh, @abs(om) });
+                    },
+                    'P' => {
+                        const oh = @divFloor(self.timezone_offset, 3600);
+                        const om = @divFloor(@rem(self.timezone_offset, 3600), 60);
+                        if (oh >= 0) try aw.writer.print("+{d:0>2}:{d:0>2}", .{ oh, @abs(om) }) else try aw.writer.print("{d:0>3}:{d:0>2}", .{ oh, @abs(om) });
+                    },
                     'Z' => try aw.writer.print("{d}", .{self.timezone_offset}),
                     'U' => try aw.writer.print("{d}", .{self.timestamp}),
-                    'c' => { try aw.writer.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}", .{year, month, day, hour, minute, second}); const oh = @divFloor(self.timezone_offset, 3600); const om = @divFloor(@rem(self.timezone_offset, 3600), 60); if (oh >= 0) try aw.writer.print("+{d:0>2}:{d:0>2}", .{oh, @abs(om)}) else try aw.writer.print("{d:0>3}:{d:0>2}", .{oh, @abs(om)}); },
-                    'r' => { const wd = switch (getDayOfWeek(year, month, day)) { 0=>"Sun", 1=>"Mon", 2=>"Tue", 3=>"Wed", 4=>"Thu", 5=>"Fri", 6=>"Sat", else=>"???" }; const mon = switch (month) { 1=>"Jan", 2=>"Feb", 3=>"Mar", 4=>"Apr", 5=>"May", 6=>"Jun", 7=>"Jul", 8=>"Aug", 9=>"Sep", 10=>"Oct", 11=>"Nov", 12=>"Dec", else=>"???" }; const oh = @divFloor(self.timezone_offset, 3600); const om = @divFloor(@rem(self.timezone_offset, 3600), 60); if (oh >= 0) try aw.writer.print("{s}, {d} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} +{d:0>2}{d:0>2}", .{wd, day, mon, year, hour, minute, second, oh, @abs(om)}) else try aw.writer.print("{s}, {d} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} -{d:0>2}{d:0>2}", .{wd, day, mon, year, hour, minute, second, @abs(oh), @abs(om)}); },
-                    '\\' => { i += 1; if (i < format_str.len) try aw.writer.writeAll(format_str[i .. i + 1]); },
+                    'c' => {
+                        try aw.writer.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}", .{ year, month, day, hour, minute, second });
+                        const oh = @divFloor(self.timezone_offset, 3600);
+                        const om = @divFloor(@rem(self.timezone_offset, 3600), 60);
+                        if (oh >= 0) try aw.writer.print("+{d:0>2}:{d:0>2}", .{ oh, @abs(om) }) else try aw.writer.print("{d:0>3}:{d:0>2}", .{ oh, @abs(om) });
+                    },
+                    'r' => {
+                        const wd = switch (getDayOfWeek(year, month, day)) {
+                            0 => "Sun",
+                            1 => "Mon",
+                            2 => "Tue",
+                            3 => "Wed",
+                            4 => "Thu",
+                            5 => "Fri",
+                            6 => "Sat",
+                            else => "???",
+                        };
+                        const mon = switch (month) {
+                            1 => "Jan",
+                            2 => "Feb",
+                            3 => "Mar",
+                            4 => "Apr",
+                            5 => "May",
+                            6 => "Jun",
+                            7 => "Jul",
+                            8 => "Aug",
+                            9 => "Sep",
+                            10 => "Oct",
+                            11 => "Nov",
+                            12 => "Dec",
+                            else => "???",
+                        };
+                        const oh = @divFloor(self.timezone_offset, 3600);
+                        const om = @divFloor(@rem(self.timezone_offset, 3600), 60);
+                        if (oh >= 0) try aw.writer.print("{s}, {d} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} +{d:0>2}{d:0>2}", .{ wd, day, mon, year, hour, minute, second, oh, @abs(om) }) else try aw.writer.print("{s}, {d} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} -{d:0>2}{d:0>2}", .{ wd, day, mon, year, hour, minute, second, @abs(oh), @abs(om) });
+                    },
+                    '\\' => {
+                        i += 1;
+                        if (i < format_str.len) try aw.writer.writeAll(format_str[i .. i + 1]);
+                    },
                     else => try aw.writer.writeAll(&[_]u8{c}),
                 }
             }
@@ -10991,7 +12585,7 @@ pub const ClassMeta = struct {
     // ========================================================================
     // 时区数据库 (简化版)
     // ========================================================================
-    
+
     const TimezoneInfo = struct { name: []const u8, offset_seconds: i32, abbreviation: []const u8 };
     const TIMEZONE_DATABASE: []const TimezoneInfo = &[_]TimezoneInfo{
         .{ .name = "UTC", .offset_seconds = 0, .abbreviation = "UTC" },
@@ -11023,10 +12617,15 @@ pub const ClassMeta = struct {
         if (tz_str.len >= 3 and (tz_str[0] == '+' or tz_str[0] == '-')) {
             const sign: i32 = if (tz_str[0] == '+') 1 else -1;
             const rest = tz_str[1..];
-            var hours: i32 = 0; var minutes: i32 = 0;
-            if (rest.len == 2) hours = std.fmt.parseInt(i32, rest, 10) catch return null
-            else if (rest.len == 4) { hours = std.fmt.parseInt(i32, rest[0..2], 10) catch return null; minutes = std.fmt.parseInt(i32, rest[2..4], 10) catch return null; }
-            else if (rest.len == 5 and rest[2] == ':') { hours = std.fmt.parseInt(i32, rest[0..2], 10) catch return null; minutes = std.fmt.parseInt(i32, rest[3..5], 10) catch return null; }
+            var hours: i32 = 0;
+            var minutes: i32 = 0;
+            if (rest.len == 2) hours = std.fmt.parseInt(i32, rest, 10) catch return null else if (rest.len == 4) {
+                hours = std.fmt.parseInt(i32, rest[0..2], 10) catch return null;
+                minutes = std.fmt.parseInt(i32, rest[2..4], 10) catch return null;
+            } else if (rest.len == 5 and rest[2] == ':') {
+                hours = std.fmt.parseInt(i32, rest[0..2], 10) catch return null;
+                minutes = std.fmt.parseInt(i32, rest[3..5], 10) catch return null;
+            }
             return sign * (hours * 3600 + minutes * 60);
         }
         return null;
@@ -11058,7 +12657,10 @@ pub const ClassMeta = struct {
         try meta.addMethod(.{ .name = "getName", .func = struct {
             fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
                 const this = Value_asObject(ctx);
-                if (this.getProperty("timezone")) |tz| { _ = tz.retain(); return tz; }
+                if (this.getProperty("timezone")) |tz| {
+                    _ = tz.retain();
+                    return tz;
+                }
                 return Value.initString(try PHPString.init(runtime_allocator, "UTC"));
             }
         }.call, .is_static = false });
@@ -11099,27 +12701,52 @@ pub const ClassMeta = struct {
                 const spec = args[0].asString().data;
                 if (spec.len < 1 or spec[0] != 'P') return error.InvalidDateIntervalSpecification;
 
-                var y: i64 = 0; var m: i64 = 0; var d: i64 = 0;
-                var h: i64 = 0; var i: i64 = 0; var s: i64 = 0;
-                var in_time = false; var pos: usize = 1;
-                var num_buf: [32]u8 = undefined; var num_len: usize = 0;
+                var y: i64 = 0;
+                var m: i64 = 0;
+                var d: i64 = 0;
+                var h: i64 = 0;
+                var i: i64 = 0;
+                var s: i64 = 0;
+                var in_time = false;
+                var pos: usize = 1;
+                var num_buf: [32]u8 = undefined;
+                var num_len: usize = 0;
 
                 while (pos < spec.len) {
                     const c = spec[pos];
-                    if (c >= '0' and c <= '9' or c == '.') { if (num_len < 32) { num_buf[num_len] = c; num_len += 1; } pos += 1; }
-                    else if (c == 'T') { in_time = true; pos += 1; num_len = 0; }
-                    else {
+                    if (c >= '0' and c <= '9' or c == '.') {
+                        if (num_len < 32) {
+                            num_buf[num_len] = c;
+                            num_len += 1;
+                        }
+                        pos += 1;
+                    } else if (c == 'T') {
+                        in_time = true;
+                        pos += 1;
+                        num_len = 0;
+                    } else {
                         const num_str = num_buf[0..num_len];
                         const num_val = std.fmt.parseFloat(f64, num_str) catch 0;
                         switch (c) {
-                            'Y' => { y = @intFromFloat(num_val); },
-                            'M' => { if (in_time) i = @intFromFloat(num_val) else m = @intFromFloat(num_val); },
-                            'D' => { d = @intFromFloat(num_val); },
-                            'H' => { h = @intFromFloat(num_val); },
-                            'S' => { s = @intFromFloat(@floor(num_val)); },
+                            'Y' => {
+                                y = @intFromFloat(num_val);
+                            },
+                            'M' => {
+                                if (in_time) i = @intFromFloat(num_val) else m = @intFromFloat(num_val);
+                            },
+                            'D' => {
+                                d = @intFromFloat(num_val);
+                            },
+                            'H' => {
+                                h = @intFromFloat(num_val);
+                            },
+                            'S' => {
+                                s = @intFromFloat(@floor(num_val));
+                            },
                             else => {},
                         }
-                        pos += 1; num_len = 0;
+                        pos += 1;
+                        num_len = 0;
                     }
                 }
                 try this.setProperty("y", Value.initInt(y));
@@ -11138,9 +12765,8 @@ pub const ClassMeta = struct {
                 const this = Value_asObject(ctx);
                 if (args.len == 0 or !args[0].isString()) return Value.initString(try PHPString.init(alloc, ""));
                 const format_str = args[0].asString().data;
-                var result = try std.ArrayList(u8).initCapacity(alloc, format_str.len * 2);
-                defer result.deinit(alloc);
-                var aw = std.Io.Writer.Allocating.fromArrayList(alloc, &result);
+                var aw = std.Io.Writer.Allocating.initCapacity(alloc, format_str.len * 2) catch return Value.initString(try PHPString.init(alloc, ""));
+                defer aw.deinit();
 
                 const y = if (this.getProperty("y")) |v| v.toInt() else 0;
                 const m = if (this.getProperty("m")) |v| v.toInt() else 0;
@@ -11169,21 +12795,20 @@ pub const ClassMeta = struct {
                             's' => try aw.writer.print("{d}", .{s}),
                             'R' => try aw.writer.writeAll(if (invert == 1) "-" else "+"),
                             'r' => try aw.writer.writeAll(if (invert == 1) "-" else ""),
-                            '%' => try result.append(alloc, '%'),
+                            '%' => try aw.writer.writeAll("%"),
                             'a' => {
                                 const days_val = if (this.getProperty("days")) |v| v.toInt() else 0;
                                 try aw.writer.print("{d}", .{days_val});
                             },
                             else => {
-                                try result.append(alloc, '%');
-                                try result.append(alloc, format_str[fi]);
+                                try aw.writer.writeAll(&[_]u8{ '%', format_str[fi] });
                             },
                         }
                     } else {
-                        try result.append(alloc, format_str[fi]);
+                        try aw.writer.writeAll(&[_]u8{format_str[fi]});
                     }
                 }
-                return Value.initString(try PHPString.init(alloc, result.items));
+                return Value.initString(try PHPString.init(alloc, aw.written()));
             }
         }.call, .is_static = false });
 
@@ -11192,27 +12817,28 @@ pub const ClassMeta = struct {
             fn call(_: Value, args: []const Value, alloc: Allocator) anyerror!Value {
                 if (args.len == 0 or !args[0].isString()) return Value.initNull();
                 const spec = args[0].asString().data;
-                var y: i64 = 0; var m: i64 = 0; var d: i64 = 0;
-                var h: i64 = 0; var i: i64 = 0; var s: i64 = 0;
+                var y: i64 = 0;
+                var m: i64 = 0;
+                var d: i64 = 0;
+                var h: i64 = 0;
+                var i: i64 = 0;
+                var s: i64 = 0;
                 var pos: usize = 0;
 
                 while (pos < spec.len) {
                     while (pos < spec.len and spec[pos] == ' ') pos += 1;
                     if (pos >= spec.len) break;
                     var num: i64 = 0;
-                    while (pos < spec.len and spec[pos] >= '0' and spec[pos] <= '9') { num = num * 10 + (spec[pos] - '0'); pos += 1; }
+                    while (pos < spec.len and spec[pos] >= '0' and spec[pos] <= '9') {
+                        num = num * 10 + (spec[pos] - '0');
+                        pos += 1;
+                    }
                     while (pos < spec.len and spec[pos] == ' ') pos += 1;
                     const start = pos;
                     while (pos < spec.len and spec[pos] >= 'a' and spec[pos] <= 'z') pos += 1;
                     const unit = spec[start..pos];
 
-                    if (std.mem.startsWith(u8, unit, "year")) y += num
-                    else if (std.mem.startsWith(u8, unit, "month")) m += num
-                    else if (std.mem.startsWith(u8, unit, "day")) d += num
-                    else if (std.mem.startsWith(u8, unit, "hour")) h += num
-                    else if (std.mem.startsWith(u8, unit, "minute")) i += num
-                    else if (std.mem.startsWith(u8, unit, "second")) s += num
-                    else if (std.mem.startsWith(u8, unit, "week")) d += num * 7;
+                    if (std.mem.startsWith(u8, unit, "year")) y += num else if (std.mem.startsWith(u8, unit, "month")) m += num else if (std.mem.startsWith(u8, unit, "day")) d += num else if (std.mem.startsWith(u8, unit, "hour")) h += num else if (std.mem.startsWith(u8, unit, "minute")) i += num else if (std.mem.startsWith(u8, unit, "second")) s += num else if (std.mem.startsWith(u8, unit, "week")) d += num * 7;
                 }
 
                 const meta_ptr = findClass("DateInterval") orelse return Value.initNull();
@@ -11261,7 +12887,10 @@ pub const ClassMeta = struct {
         try meta.addMethod(.{ .name = "current", .func = struct {
             fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
                 const this = Value_asObject(ctx);
-                if (this.getProperty("_current")) |current| { _ = current.retain(); return current; }
+                if (this.getProperty("_current")) |current| {
+                    _ = current.retain();
+                    return current;
+                }
                 return Value.initNull();
             }
         }.call, .is_static = false });
@@ -11274,37 +12903,83 @@ pub const ClassMeta = struct {
             }
         }.call, .is_static = false });
 
-        try meta.addMethod(.{ .name = "next", .func = struct {
-            fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
-                const this = Value_asObject(ctx);
-                var current_ts: i64 = 0;
-                if (this.getProperty("_current")) |current| {
-                    if (Value_isObject(current)) {
-                        if (Value_asObject(current).getProperty("timestamp")) |ts| current_ts = ts.toInt();
+        try meta.addMethod(.{
+            .name = "next",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
+                    const this = Value_asObject(ctx);
+                    var current_ts: i64 = 0;
+                    if (this.getProperty("_current")) |current| {
+                        if (Value_isObject(current)) {
+                            if (Value_asObject(current).getProperty("timestamp")) |ts| current_ts = ts.toInt();
+                        }
                     }
-                }
-                var add_secs: i64 = 0;
-                if (this.getProperty("interval")) |interval| {
-                    if (Value_isObject(interval)) {
-                        const intv = Value_asObject(interval);
-                        const d = if (intv.getProperty("d")) |v| v.toInt() else 0;
-                        const h = if (intv.getProperty("h")) |v| v.toInt() else 0;
-                        const i = if (intv.getProperty("i")) |v| v.toInt() else 0;
-                        const s = if (intv.getProperty("s")) |v| v.toInt() else 0;
-                        add_secs = d * 86400 + h * 3600 + i * 60 + s;
+                    if (this.getProperty("interval")) |interval| {
+                        if (Value_isObject(interval)) {
+                            const intv = Value_asObject(interval);
+                            const iy = if (intv.getProperty("y")) |v| v.toInt() else 0;
+                            const im = if (intv.getProperty("m")) |v| v.toInt() else 0;
+                            const d = if (intv.getProperty("d")) |v| v.toInt() else 0;
+                            const h = if (intv.getProperty("h")) |v| v.toInt() else 0;
+                            const i = if (intv.getProperty("i")) |v| v.toInt() else 0;
+                            const s = if (intv.getProperty("s")) |v| v.toInt() else 0;
+
+                            if (iy != 0 or im != 0) {
+                                // 日历月/年加法（不能简单转为秒数）
+                                const month_delta = iy * 12 + im;
+                                const epoch_secs_u64: u64 = @intCast(@max(@as(i64, 0), current_ts));
+                                const epoch = std.time.epoch.EpochSeconds{ .secs = epoch_secs_u64 };
+                                const day_secs = epoch.getDaySeconds();
+                                const epoch_day = epoch.getEpochDay();
+                                const year_day = epoch_day.calculateYearDay();
+                                const month_day = year_day.calculateMonthDay();
+                                var year: i64 = @intCast(@as(i32, year_day.year));
+                                var month: i64 = @intCast(month_day.month.numeric());
+                                const day_val: i64 = @intCast(month_day.day_index + 1);
+                                const hour: i64 = @intCast(day_secs.getHoursIntoDay());
+                                const min: i64 = @intCast(day_secs.getMinutesIntoHour());
+                                const sec: i64 = @intCast(day_secs.getSecondsIntoMinute());
+
+                                var total_months = month + month_delta;
+                                while (total_months > 12) {
+                                    total_months -= 12;
+                                    year += 1;
+                                }
+                                while (total_months < 1) {
+                                    total_months += 12;
+                                    year -= 1;
+                                }
+                                month = total_months;
+
+                                const dim: i64 = switch (@as(u32, @intCast(month))) {
+                                    1, 3, 5, 7, 8, 10, 12 => 31,
+                                    4, 6, 9, 11 => 30,
+                                    2 => if (isLeapYearTop(year)) 29 else 28,
+                                    else => 30,
+                                };
+                                const clamped_day = @min(day_val, dim);
+
+                                const y2 = if (month <= 2) year - 1 else year;
+                                const m2 = if (month <= 2) month + 12 else month;
+                                const jd = 365 * y2 + @divFloor(y2, 4) - @divFloor(y2, 100) + @divFloor(y2, 400) + @divFloor(306 * (m2 + 1), 10) + clamped_day - 719591;
+                                current_ts = jd * 86400 + hour * 3600 + min * 60 + sec;
+                            }
+
+                            current_ts += d * 86400 + h * 3600 + i * 60 + s;
+                        }
                     }
+                    if (findClass("DateTime")) |dt_meta| {
+                        const new_dt = try PHPObject.initWithMeta(alloc, dt_meta);
+                        try new_dt.setProperty("timestamp", Value.initInt(current_ts));
+                        try new_dt.setProperty("microseconds", Value.initInt(0));
+                        try this.setProperty("_current", Value_initObject(new_dt));
+                    }
+                    if (this.getProperty("_key")) |key| try this.setProperty("_key", Value.initInt(key.toInt() + 1));
+                    return Value.initNull();
                 }
-                current_ts += add_secs;
-                if (findClass("DateTime")) |dt_meta| {
-                    const new_dt = try PHPObject.initWithMeta(alloc, dt_meta);
-                    try new_dt.setProperty("timestamp", Value.initInt(current_ts));
-                    try new_dt.setProperty("microseconds", Value.initInt(0));
-                    try this.setProperty("_current", Value_initObject(new_dt));
-                }
-                if (this.getProperty("_key")) |key| try this.setProperty("_key", Value.initInt(key.toInt() + 1));
-                return Value.initNull();
-            }
-        }.call, .is_static = false });
+            }.call,
+            .is_static = false,
+        });
 
         try meta.addMethod(.{ .name = "rewind", .func = struct {
             fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
@@ -11320,7 +12995,8 @@ pub const ClassMeta = struct {
                 const this = Value_asObject(ctx);
                 if (this.getProperty("end")) |end| {
                     if (!end.isNull()) {
-                        var current_ts: i64 = 0; var end_ts: i64 = 0;
+                        var current_ts: i64 = 0;
+                        var end_ts: i64 = 0;
                         if (this.getProperty("_current")) |current| {
                             if (Value_isObject(current)) {
                                 if (Value_asObject(current).getProperty("timestamp")) |ts| current_ts = ts.toInt();
@@ -11342,7 +13018,10 @@ pub const ClassMeta = struct {
         try meta.addMethod(.{ .name = "getStartDate", .func = struct {
             fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
                 const this = Value_asObject(ctx);
-                if (this.getProperty("start")) |start| { _ = start.retain(); return start; }
+                if (this.getProperty("start")) |start| {
+                    _ = start.retain();
+                    return start;
+                }
                 return Value.initNull();
             }
         }.call, .is_static = false });
@@ -11350,7 +13029,10 @@ pub const ClassMeta = struct {
         try meta.addMethod(.{ .name = "getEndDate", .func = struct {
             fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
                 const this = Value_asObject(ctx);
-                if (this.getProperty("end")) |end| { _ = end.retain(); return end; }
+                if (this.getProperty("end")) |end| {
+                    _ = end.retain();
+                    return end;
+                }
                 return Value.initNull();
             }
         }.call, .is_static = false });
@@ -11358,7 +13040,10 @@ pub const ClassMeta = struct {
         try meta.addMethod(.{ .name = "getDateInterval", .func = struct {
             fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
                 const this = Value_asObject(ctx);
-                if (this.getProperty("interval")) |interval| { _ = interval.retain(); return interval; }
+                if (this.getProperty("interval")) |interval| {
+                    _ = interval.retain();
+                    return interval;
+                }
                 return Value.initNull();
             }
         }.call, .is_static = false });
@@ -11412,12 +13097,19 @@ pub const ClassMeta = struct {
         try meta.addMethod(.{ .name = "__construct", .func = struct {
             fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
                 const this = Value_asObject(ctx);
-                var tz_offset: i32 = 0; var tz_name: []const u8 = "UTC";
+                var tz_offset: i32 = 0;
+                var tz_name: []const u8 = "UTC";
 
                 if (args.len > 1 and Value_isObject(args[1])) {
                     const tz_obj = Value_asObject(args[1]);
-                    if (tz_obj.getProperty("__offset")) |offset| { tz_offset = @intCast(offset.toInt()); }
-                    if (tz_obj.getProperty("timezone")) |tz| { if (tz.isString()) { tz_name = tz.asString().data; } }
+                    if (tz_obj.getProperty("__offset")) |offset| {
+                        tz_offset = @intCast(offset.toInt());
+                    }
+                    if (tz_obj.getProperty("timezone")) |tz| {
+                        if (tz.isString()) {
+                            tz_name = tz.asString().data;
+                        }
+                    }
                     try this.setProperty("timezone", args[1]);
                 } else try this.setProperty("timezone", Value.initString(try PHPString.init(runtime_alloc, "UTC")));
                 try this.setProperty("__offset", Value.initInt(tz_offset));
@@ -11463,9 +13155,14 @@ pub const ClassMeta = struct {
 
                 var tz_name: []const u8 = "UTC";
                 if (this.getProperty("timezone")) |tz| {
-                    if (tz.isString()) { tz_name = tz.asString().data; }
-                    else if (Value_isObject(tz)) {
-                        if (Value_asObject(tz).getProperty("timezone")) |tz_str| { if (tz_str.isString()) { tz_name = tz_str.asString().data; } }
+                    if (tz.isString()) {
+                        tz_name = tz.asString().data;
+                    } else if (Value_isObject(tz)) {
+                        if (Value_asObject(tz).getProperty("timezone")) |tz_str| {
+                            if (tz_str.isString()) {
+                                tz_name = tz_str.asString().data;
+                            }
+                        }
                     }
                 }
 
@@ -11489,7 +13186,8 @@ pub const ClassMeta = struct {
             fn call(ctx: Value, args: []const Value, _: Allocator) anyerror!Value {
                 const this = Value_asObject(ctx);
                 if (args.len > 0) try this.setProperty("timestamp", Value.initInt(args[0].toInt()));
-                _ = ctx.retain(); return ctx;
+                _ = ctx.retain();
+                return ctx;
             }
         }.call, .is_static = false });
 
@@ -11501,7 +13199,8 @@ pub const ClassMeta = struct {
                     try this.setProperty("timezone", args[0]);
                     if (Value_asObject(args[0]).getProperty("__offset")) |offset| try this.setProperty("__offset", offset);
                 }
-                _ = ctx.retain(); return ctx;
+                _ = ctx.retain();
+                return ctx;
             }
         }.call, .is_static = false });
 
@@ -11509,7 +13208,10 @@ pub const ClassMeta = struct {
         try meta.addMethod(.{ .name = "getTimezone", .func = struct {
             fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
                 const this = Value_asObject(ctx);
-                if (this.getProperty("timezone")) |tz| { _ = tz.retain(); return tz; }
+                if (this.getProperty("timezone")) |tz| {
+                    _ = tz.retain();
+                    return tz;
+                }
                 return Value.initBool(false);
             }
         }.call, .is_static = false });
@@ -11518,7 +13220,10 @@ pub const ClassMeta = struct {
         try meta.addMethod(.{ .name = "add", .func = struct {
             fn call(ctx: Value, args: []const Value, _: Allocator) anyerror!Value {
                 const this = Value_asObject(ctx);
-                if (args.len == 0 or !Value_isObject(args[0])) { _ = ctx.retain(); return ctx; }
+                if (args.len == 0 or !Value_isObject(args[0])) {
+                    _ = ctx.retain();
+                    return ctx;
+                }
                 const interval = Value_asObject(args[0]);
                 var ts = if (this.getProperty("timestamp")) |t| t.toInt() else 0;
                 const y = if (interval.getProperty("y")) |v| v.toInt() else 0;
@@ -11529,7 +13234,8 @@ pub const ClassMeta = struct {
                 const s = if (interval.getProperty("s")) |v| v.toInt() else 0;
                 ts += y * 31536000 + m * 2592000 + d * 86400 + h * 3600 + i * 60 + s;
                 try this.setProperty("timestamp", Value.initInt(ts));
-                _ = ctx.retain(); return ctx;
+                _ = ctx.retain();
+                return ctx;
             }
         }.call, .is_static = false });
 
@@ -11537,7 +13243,10 @@ pub const ClassMeta = struct {
         try meta.addMethod(.{ .name = "sub", .func = struct {
             fn call(ctx: Value, args: []const Value, _: Allocator) anyerror!Value {
                 const this = Value_asObject(ctx);
-                if (args.len == 0 or !Value_isObject(args[0])) { _ = ctx.retain(); return ctx; }
+                if (args.len == 0 or !Value_isObject(args[0])) {
+                    _ = ctx.retain();
+                    return ctx;
+                }
                 const interval = Value_asObject(args[0]);
                 var ts = if (this.getProperty("timestamp")) |t| t.toInt() else 0;
                 const y = if (interval.getProperty("y")) |v| v.toInt() else 0;
@@ -11548,7 +13257,8 @@ pub const ClassMeta = struct {
                 const s = if (interval.getProperty("s")) |v| v.toInt() else 0;
                 ts -= y * 31536000 + m * 2592000 + d * 86400 + h * 3600 + i * 60 + s;
                 try this.setProperty("timestamp", Value.initInt(ts));
-                _ = ctx.retain(); return ctx;
+                _ = ctx.retain();
+                return ctx;
             }
         }.call, .is_static = false });
 
@@ -11583,7 +13293,8 @@ pub const ClassMeta = struct {
                 const new_ts = try php_strtotime(args[0], Value.initInt(ts), alloc);
                 if (new_ts.isInt()) {
                     try this.setProperty("timestamp", new_ts);
-                    _ = ctx.retain(); return ctx;
+                    _ = ctx.retain();
+                    return ctx;
                 }
                 return Value.initBool(false);
             }
@@ -11593,13 +13304,19 @@ pub const ClassMeta = struct {
         try meta.addMethod(.{ .name = "setDate", .func = struct {
             fn call(ctx: Value, args: []const Value, _: Allocator) anyerror!Value {
                 const this = Value_asObject(ctx);
-                if (args.len < 3) { _ = ctx.retain(); return ctx; }
-                const year = args[0].toInt(); const month = args[1].toInt(); const day = args[2].toInt();
+                if (args.len < 3) {
+                    _ = ctx.retain();
+                    return ctx;
+                }
+                const year = args[0].toInt();
+                const month = args[1].toInt();
+                const day = args[2].toInt();
                 const y = if (month <= 2) year - 1 else year;
                 const m = if (month <= 2) month + 12 else month;
                 const jd = 365 * y + @divFloor(y, 4) - @divFloor(y, 100) + @divFloor(y, 400) + @divFloor(306 * (m + 1), 10) + day - 719591;
                 try this.setProperty("timestamp", Value.initInt(jd * 86400));
-                _ = ctx.retain(); return ctx;
+                _ = ctx.retain();
+                return ctx;
             }
         }.call, .is_static = false });
 
@@ -11607,66 +13324,122 @@ pub const ClassMeta = struct {
         try meta.addMethod(.{ .name = "setTime", .func = struct {
             fn call(ctx: Value, args: []const Value, _: Allocator) anyerror!Value {
                 const this = Value_asObject(ctx);
-                if (args.len < 2) { _ = ctx.retain(); return ctx; }
-                const hour = args[0].toInt(); const minute = args[1].toInt();
+                if (args.len < 2) {
+                    _ = ctx.retain();
+                    return ctx;
+                }
+                const hour = args[0].toInt();
+                const minute = args[1].toInt();
                 const second = if (args.len > 2) args[2].toInt() else 0;
                 var ts = if (this.getProperty("timestamp")) |t| t.toInt() else 0;
                 const day_ts = @divFloor(ts, 86400) * 86400;
                 ts = day_ts + hour * 3600 + minute * 60 + second;
                 try this.setProperty("timestamp", Value.initInt(ts));
-                _ = ctx.retain(); return ctx;
+                _ = ctx.retain();
+                return ctx;
             }
         }.call, .is_static = false });
 
         // createFromFormat(string $format, string $datetime, ?DateTimeZone $timezone = null): DateTime|false
-        try meta.addMethod(.{ .name = "createFromFormat", .func = struct {
-            fn call(_: Value, args: []const Value, alloc: Allocator) anyerror!Value {
-                if (args.len < 2) return Value.initBool(false);
-                if (!args[0].isString() or !args[1].isString()) return Value.initBool(false);
+        try meta.addMethod(.{
+            .name = "createFromFormat",
+            .func = struct {
+                fn call(_: Value, args: []const Value, alloc: Allocator) anyerror!Value {
+                    if (args.len < 2) return Value.initBool(false);
+                    if (!args[0].isString() or !args[1].isString()) return Value.initBool(false);
 
-                const format_str = args[0].asString().data;
-                const datetime_str = args[1].asString().data;
+                    const format_str = args[0].asString().data;
+                    const datetime_str = args[1].asString().data;
 
-                // 简单解析: Y-m-d H:i:s
-                var year: i64 = 1970; var month: i64 = 1; var day: i64 = 1;
-                var hour: i64 = 0; var minute: i64 = 0; var second: i64 = 0;
-                var fmt_pos: usize = 0; var dt_pos: usize = 0;
+                    // 简单解析: Y-m-d H:i:s
+                    var year: i64 = 1970;
+                    var month: i64 = 1;
+                    var day: i64 = 1;
+                    var hour: i64 = 0;
+                    var minute: i64 = 0;
+                    var second: i64 = 0;
+                    var fmt_pos: usize = 0;
+                    var dt_pos: usize = 0;
 
-                while (fmt_pos < format_str.len and dt_pos < datetime_str.len) {
-                    const fc = format_str[fmt_pos];
-                    switch (fc) {
-                        'Y' => { if (dt_pos + 4 <= datetime_str.len) { year = std.fmt.parseInt(i64, datetime_str[dt_pos..dt_pos+4], 10) catch 1970; dt_pos += 4; } fmt_pos += 1; },
-                        'm' => { if (dt_pos + 2 <= datetime_str.len) { month = std.fmt.parseInt(i64, datetime_str[dt_pos..dt_pos+2], 10) catch 1; dt_pos += 2; } fmt_pos += 1; },
-                        'd' => { if (dt_pos + 2 <= datetime_str.len) { day = std.fmt.parseInt(i64, datetime_str[dt_pos..dt_pos+2], 10) catch 1; dt_pos += 2; } fmt_pos += 1; },
-                        'H' => { if (dt_pos + 2 <= datetime_str.len) { hour = std.fmt.parseInt(i64, datetime_str[dt_pos..dt_pos+2], 10) catch 0; dt_pos += 2; } fmt_pos += 1; },
-                        'i' => { if (dt_pos + 2 <= datetime_str.len) { minute = std.fmt.parseInt(i64, datetime_str[dt_pos..dt_pos+2], 10) catch 0; dt_pos += 2; } fmt_pos += 1; },
-                        's' => { if (dt_pos + 2 <= datetime_str.len) { second = std.fmt.parseInt(i64, datetime_str[dt_pos..dt_pos+2], 10) catch 0; dt_pos += 2; } fmt_pos += 1; },
-                        else => { if (dt_pos < datetime_str.len and datetime_str[dt_pos] == fc) dt_pos += 1; fmt_pos += 1; },
+                    while (fmt_pos < format_str.len and dt_pos < datetime_str.len) {
+                        const fc = format_str[fmt_pos];
+                        switch (fc) {
+                            'Y' => {
+                                if (dt_pos + 4 <= datetime_str.len) {
+                                    year = std.fmt.parseInt(i64, datetime_str[dt_pos .. dt_pos + 4], 10) catch 1970;
+                                    dt_pos += 4;
+                                }
+                                fmt_pos += 1;
+                            },
+                            'm' => {
+                                if (dt_pos + 2 <= datetime_str.len) {
+                                    month = std.fmt.parseInt(i64, datetime_str[dt_pos .. dt_pos + 2], 10) catch 1;
+                                    dt_pos += 2;
+                                }
+                                fmt_pos += 1;
+                            },
+                            'd' => {
+                                if (dt_pos + 2 <= datetime_str.len) {
+                                    day = std.fmt.parseInt(i64, datetime_str[dt_pos .. dt_pos + 2], 10) catch 1;
+                                    dt_pos += 2;
+                                }
+                                fmt_pos += 1;
+                            },
+                            'H' => {
+                                if (dt_pos + 2 <= datetime_str.len) {
+                                    hour = std.fmt.parseInt(i64, datetime_str[dt_pos .. dt_pos + 2], 10) catch 0;
+                                    dt_pos += 2;
+                                }
+                                fmt_pos += 1;
+                            },
+                            'i' => {
+                                if (dt_pos + 2 <= datetime_str.len) {
+                                    minute = std.fmt.parseInt(i64, datetime_str[dt_pos .. dt_pos + 2], 10) catch 0;
+                                    dt_pos += 2;
+                                }
+                                fmt_pos += 1;
+                            },
+                            's' => {
+                                if (dt_pos + 2 <= datetime_str.len) {
+                                    second = std.fmt.parseInt(i64, datetime_str[dt_pos .. dt_pos + 2], 10) catch 0;
+                                    dt_pos += 2;
+                                }
+                                fmt_pos += 1;
+                            },
+                            else => {
+                                if (dt_pos < datetime_str.len and datetime_str[dt_pos] == fc) dt_pos += 1;
+                                fmt_pos += 1;
+                            },
+                        }
                     }
+
+                    const y = if (month <= 2) year - 1 else year;
+                    const m = if (month <= 2) month + 12 else month;
+                    const jd = 365 * y + @divFloor(y, 4) - @divFloor(y, 100) + @divFloor(y, 400) + @divFloor(306 * (m + 1), 10) + day - 719591;
+                    const ts: i64 = jd * 86400 + hour * 3600 + minute * 60 + second;
+
+                    const meta_ptr = findClass("DateTime") orelse return Value.initBool(false);
+                    const obj = try PHPObject.initWithMeta(alloc, meta_ptr);
+                    try obj.setProperty("timestamp", Value.initInt(ts));
+                    try obj.setProperty("microseconds", Value.initInt(0));
+                    if (args.len > 2) try obj.setProperty("timezone", args[2]) else try obj.setProperty("timezone", Value.initString(try PHPString.init(alloc, "UTC")));
+                    return Value_initObject(obj);
                 }
-
-                const y = if (month <= 2) year - 1 else year;
-                const m = if (month <= 2) month + 12 else month;
-                const jd = 365 * y + @divFloor(y, 4) - @divFloor(y, 100) + @divFloor(y, 400) + @divFloor(306 * (m + 1), 10) + day - 719591;
-                const ts: i64 = jd * 86400 + hour * 3600 + minute * 60 + second;
-
-                const meta_ptr = findClass("DateTime") orelse return Value.initBool(false);
-                const obj = try PHPObject.initWithMeta(alloc, meta_ptr);
-                try obj.setProperty("timestamp", Value.initInt(ts));
-                try obj.setProperty("microseconds", Value.initInt(0));
-                if (args.len > 2) try obj.setProperty("timezone", args[2])
-                else try obj.setProperty("timezone", Value.initString(try PHPString.init(alloc, "UTC")));
-                return Value_initObject(obj);
-            }
-        }.call, .is_static = true });
+            }.call,
+            .is_static = true,
+        });
 
         // __clone()
-        try meta.addMethod(.{ .name = "__clone", .func = struct {
-            fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
-                _ = ctx; // 克隆已由运行时处理
-                return Value.initNull();
-            }
-        }.call, .is_static = false });
+        try meta.addMethod(.{
+            .name = "__clone",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    _ = ctx; // 克隆已由运行时处理
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
 
         meta.magic_construct = meta.methods.get("__construct").?.func;
         try registerClass(meta);
@@ -11925,7 +13698,6 @@ pub const ClassMeta = struct {
     /// Closure Class Implementation
     /// ============================================================================
     /// PHP Closure class: Closure::bind(), Closure::fromCallable(), bindTo()
-
     fn registerClosureClass(allocator: Allocator) !void {
         const meta = try ClassMeta.init(allocator, "Closure");
 
@@ -11961,6 +13733,19 @@ pub const ClassMeta = struct {
                         _ = new_this.retain();
                         break :brk new_this;
                     };
+                    // 解析 newScope 参数，绑定作用域类
+                    const bound_scope = blk: {
+                        if (args.len > 2 and !args[2].isNull() and args[2].isString()) {
+                            const scope_name = args[2].asString().data;
+                            break :blk findClass(scope_name);
+                        }
+                        // 未指定 scope 时，从 newThis 推断
+                        if (Value_isObject(new_this)) {
+                            const obj = Value_asObject(new_this);
+                            break :blk obj.class_meta;
+                        }
+                        break :blk null;
+                    };
                     new_closure.* = .{
                         .func = orig_closure.func,
                         .captures = new_captures,
@@ -11970,6 +13755,7 @@ pub const ClassMeta = struct {
                         .param_count = orig_closure.param_count,
                         .required_params = orig_closure.required_params,
                         .bound_this = bound_this,
+                        .bound_scope = bound_scope,
                         .is_static = orig_closure.is_static,
                     };
 
@@ -12038,6 +13824,20 @@ pub const ClassMeta = struct {
                     const prev_this = closure_bound_this_stack;
                     closure_bound_this_stack = new_this;
                     defer closure_bound_this_stack = prev_this;
+                    // 设置 scope class：优先使用闭包已有的 bound_scope，否则从 new_this 推断
+                    const scope_meta = closure.bound_scope orelse blk: {
+                        if (Value_isObject(new_this)) {
+                            const obj = Value_asObject(new_this);
+                            break :blk obj.class_meta;
+                        }
+                        break :blk null;
+                    };
+                    if (scope_meta) |sm| {
+                        const prev_scope = getCurrentScopeClass();
+                        setCurrentScopeClass(sm);
+                        defer setCurrentScopeClass(prev_scope);
+                        return closure.func(ctx, args[1..], alloc);
+                    }
                     return closure.func(ctx, args[1..], alloc);
                 }
             }.call,
@@ -12056,7 +13856,6 @@ pub const ClassMeta = struct {
     /// PHP API:
     ///   WeakReference::create(object $object): WeakReference
     ///   WeakReference->get(): ?object
-
     fn registerWeakReferenceClass(allocator: Allocator) !void {
         const meta = try ClassMeta.init(allocator, "WeakReference");
 
@@ -12189,7 +13988,6 @@ pub const ClassMeta = struct {
     ///   - offsetExists(object $object): bool
     ///   - offsetUnset(object $object): void
     ///   - getIterator(): Iterator
-
     fn registerWeakMapClass(allocator: Allocator) !void {
         const meta = try ClassMeta.init(allocator, "WeakMap");
 
@@ -12752,8 +14550,8 @@ pub const ClassMeta = struct {
     /// 注意：self/static/parent 在 PHP 中不是 builtin type，isBuiltin() 返回 false
     fn isBuiltinType(type_name: []const u8) bool {
         const builtins = [_][]const u8{
-            "int", "float", "string", "bool", "array", "object", "callable",
-            "iterable", "void", "never", "null", "mixed", "true", "false",
+            "int",      "float", "string", "bool", "array", "object", "callable",
+            "iterable", "void",  "never",  "null", "mixed", "true",   "false",
         };
         for (builtins) |b| {
             if (std.mem.eql(u8, type_name, b)) return true;
@@ -12894,6 +14692,32 @@ pub const ClassMeta = struct {
                     if (!Value_isObject(ctx)) return Value.initNull();
                     const this = Value_asObject(ctx);
                     if (this.getPropertyDirect("__class_name")) |v| {
+                        _ = v.retain();
+                        return v;
+                    }
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
+        // getShortName() - 返回不带命名空间的短类名
+        try rc_meta.addMethod(.{
+            .name = "getShortName",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initNull();
+                    const this = Value_asObject(ctx);
+                    if (this.getPropertyDirect("__class_name")) |v| {
+                        if (v.isString()) {
+                            const full = v.asString().data;
+                            // 查找最后一个反斜杠
+                            if (std.mem.lastIndexOfScalar(u8, full, '\\')) |pos| {
+                                return Value.initString(try PHPString.init(alloc, full[pos + 1 ..]));
+                            }
+                            // 没有命名空间，返回完整名称
+                            _ = v.retain();
+                            return v;
+                        }
                         _ = v.retain();
                         return v;
                     }
@@ -13553,7 +15377,10 @@ pub const ClassMeta = struct {
                 fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
                     if (!Value_isObject(ctx)) return Value.initString(try PHPString.init(alloc, ""));
                     const this = Value_asObject(ctx);
-                    if (this.getPropertyDirect("__type_name")) |v| { _ = v.retain(); return v; }
+                    if (this.getPropertyDirect("__type_name")) |v| {
+                        _ = v.retain();
+                        return v;
+                    }
                     return Value.initString(try PHPString.init(alloc, ""));
                 }
             }.call,
@@ -13592,7 +15419,10 @@ pub const ClassMeta = struct {
                 fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
                     if (!Value_isObject(ctx)) return Value.initString(try PHPString.init(alloc, ""));
                     const this = Value_asObject(ctx);
-                    if (this.getPropertyDirect("__type_name")) |v| { _ = v.retain(); return v; }
+                    if (this.getPropertyDirect("__type_name")) |v| {
+                        _ = v.retain();
+                        return v;
+                    }
                     return Value.initString(try PHPString.init(alloc, ""));
                 }
             }.call,
@@ -13657,7 +15487,7 @@ pub const ClassMeta = struct {
                                         pos += 1;
                                     }
                                     const end = @min(pos + tname.len, buf.len);
-                                    @memcpy(buf[pos..end], tname[0..end - pos]);
+                                    @memcpy(buf[pos..end], tname[0 .. end - pos]);
                                     pos = end;
                                 }
                             }
@@ -13724,7 +15554,7 @@ pub const ClassMeta = struct {
                                         pos += 1;
                                     }
                                     const end = @min(pos + tname.len, buf.len);
-                                    @memcpy(buf[pos..end], tname[0..end - pos]);
+                                    @memcpy(buf[pos..end], tname[0 .. end - pos]);
                                     pos = end;
                                 }
                             }
@@ -13760,7 +15590,10 @@ pub const ClassMeta = struct {
                 fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
                     if (!Value_isObject(ctx)) return Value.initNull();
                     const this = Value_asObject(ctx);
-                    if (this.getPropertyDirect("__method_name")) |v| { _ = v.retain(); return v; }
+                    if (this.getPropertyDirect("__method_name")) |v| {
+                        _ = v.retain();
+                        return v;
+                    }
                     return Value.initNull();
                 }
             }.call,
@@ -14141,6 +15974,30 @@ pub const ClassMeta = struct {
             }.call,
             .is_static = false,
         });
+        // getAttributes() - 返回方法的 ReflectionAttribute 数组
+        try rm_meta.addMethod(.{
+            .name = "getAttributes",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initArray(try PHPArray.init(alloc));
+                    const this = Value_asObject(ctx);
+                    const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initArray(try PHPArray.init(alloc));
+                    const mname_val = this.getPropertyDirect("__method_name") orelse return Value.initArray(try PHPArray.init(alloc));
+                    if (cname_val.isString() and mname_val.isString()) {
+                        if (findClass(cname_val.asString().data)) |cmeta| {
+                            if (cmeta.methods.get(mname_val.asString().data)) |m| {
+                                if (m.attributes) |attrs| {
+                                    _ = attrs.retain();
+                                    return attrs;
+                                }
+                            }
+                        }
+                    }
+                    return Value.initArray(try PHPArray.init(alloc));
+                }
+            }.call,
+            .is_static = false,
+        });
         rm_meta.magic_construct = rm_meta.methods.get("__construct").?.func;
         try registerClass(rm_meta);
 
@@ -14172,7 +16029,10 @@ pub const ClassMeta = struct {
                 fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
                     if (!Value_isObject(ctx)) return Value.initNull();
                     const this = Value_asObject(ctx);
-                    if (this.getPropertyDirect("__name")) |v| { _ = v.retain(); return v; }
+                    if (this.getPropertyDirect("__name")) |v| {
+                        _ = v.retain();
+                        return v;
+                    }
                     // Fallback: generate name from position
                     const pos_val = this.getPropertyDirect("__position") orelse return Value.initString(try PHPString.init(alloc, "param0"));
                     const pos = pos_val.toInt();
@@ -14309,7 +16169,10 @@ pub const ClassMeta = struct {
                 fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
                     if (!Value_isObject(ctx)) return Value.initString(try PHPString.init(alloc, ""));
                     const this = Value_asObject(ctx);
-                    if (this.getPropertyDirect("__prop_name")) |v| { _ = v.retain(); return v; }
+                    if (this.getPropertyDirect("__prop_name")) |v| {
+                        _ = v.retain();
+                        return v;
+                    }
                     return Value.initString(try PHPString.init(alloc, ""));
                 }
             }.call,
@@ -14438,6 +16301,16 @@ pub const ClassMeta = struct {
                 .is_static = false,
             });
         }
+        // setAccessible($bool) — PHP 8.1+ 已默认可访问，此方法为兼容性 no-op
+        try rprop_meta.addMethod(.{
+            .name = "setAccessible",
+            .func = struct {
+                fn call(_: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
         // hasType()
         try rprop_meta.addMethod(.{
             .name = "hasType",
@@ -14566,6 +16439,30 @@ pub const ClassMeta = struct {
             .func = struct {
                 fn call(_: Value, _: []const Value, _: Allocator) anyerror!Value {
                     return Value.initBool(true);
+                }
+            }.call,
+            .is_static = false,
+        });
+        // getAttributes() - 返回属性的 ReflectionAttribute 数组
+        try rprop_meta.addMethod(.{
+            .name = "getAttributes",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initArray(try PHPArray.init(alloc));
+                    const this = Value_asObject(ctx);
+                    const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initArray(try PHPArray.init(alloc));
+                    const pname_val = this.getPropertyDirect("__prop_name") orelse return Value.initArray(try PHPArray.init(alloc));
+                    if (cname_val.isString() and pname_val.isString()) {
+                        if (findClass(cname_val.asString().data)) |cmeta| {
+                            if (cmeta.properties.get(pname_val.asString().data)) |p| {
+                                if (p.attributes) |attrs| {
+                                    _ = attrs.retain();
+                                    return attrs;
+                                }
+                            }
+                        }
+                    }
+                    return Value.initArray(try PHPArray.init(alloc));
                 }
             }.call,
             .is_static = false,
@@ -14891,7 +16788,7 @@ pub const ClassMeta = struct {
         while (fctx.state != .running) {
             fctx.fiber_cond.wait(getIo(), &fctx.mutex) catch {};
         }
-        fctx.mutex.unlock();
+        fctx.mutex.unlock(getIo());
 
         // 通过闭包函数指针调用 fiber 回调
         const cb = fctx.callback;
@@ -14909,7 +16806,7 @@ pub const ClassMeta = struct {
         fctx.return_value = result;
         fctx.state = .terminated;
         fctx.caller_cond.signal(getIo());
-        fctx.mutex.unlock();
+        fctx.mutex.unlock(getIo());
     }
 
     /// Register built-in Fiber class
@@ -14964,7 +16861,7 @@ pub const ClassMeta = struct {
                         return Value.initNull();
                     while (!fctx.mutex.tryLock()) std.atomic.spinLoopHint();
                     if (fctx.state != .created) {
-                        fctx.mutex.unlock();
+                        fctx.mutex.unlock(getIo());
                         return Value.initNull();
                     }
                     if (args.len > 0) {
@@ -14979,7 +16876,7 @@ pub const ClassMeta = struct {
                         fiberThreadMain,
                         .{fctx},
                     ) catch {
-                        fctx.mutex.unlock();
+                        fctx.mutex.unlock(getIo());
                         return Value.initNull();
                     };
                     // 信号唤醒 fiber 线程
@@ -14991,7 +16888,7 @@ pub const ClassMeta = struct {
                     const result = fctx.suspend_value;
                     fctx.suspend_value = Value.initNull();
                     setFiberState(this, fctx.state);
-                    fctx.mutex.unlock();
+                    fctx.mutex.unlock(getIo());
                     if (fctx.state == .terminated) {
                         if (fctx.thread) |t| t.join();
                         fctx.thread = null;
@@ -15016,7 +16913,7 @@ pub const ClassMeta = struct {
                         return Value.initNull();
                     while (!fctx.mutex.tryLock()) std.atomic.spinLoopHint();
                     if (fctx.state != .suspended) {
-                        fctx.mutex.unlock();
+                        fctx.mutex.unlock(getIo());
                         return Value.initNull();
                     }
                     if (args.len > 0) {
@@ -15032,7 +16929,7 @@ pub const ClassMeta = struct {
                     const result = fctx.suspend_value;
                     fctx.suspend_value = Value.initNull();
                     setFiberState(this, fctx.state);
-                    fctx.mutex.unlock();
+                    fctx.mutex.unlock(getIo());
                     if (fctx.state == .terminated) {
                         if (fctx.thread) |t| t.join();
                         fctx.thread = null;
@@ -15075,7 +16972,7 @@ pub const ClassMeta = struct {
                     // 检查是否有 throw 传入的异常
                     const thrown = fctx.throw_exception;
                     fctx.throw_exception = Value.initNull();
-                    fctx.mutex.unlock();
+                    fctx.mutex.unlock(getIo());
                     // 在 fiber 线程设置异常（不返回 Zig 错误，
                     // 由生成代码的 hasException() 路由到 catch）
                     if (!thrown.isNull()) {
@@ -15205,7 +17102,7 @@ pub const ClassMeta = struct {
                         return Value.initNull();
                     while (!fctx.mutex.tryLock()) std.atomic.spinLoopHint();
                     if (fctx.state != .suspended) {
-                        fctx.mutex.unlock();
+                        fctx.mutex.unlock(getIo());
                         return Value.initNull();
                     }
                     if (args.len > 0) {
@@ -15221,7 +17118,7 @@ pub const ClassMeta = struct {
                     const result = fctx.suspend_value;
                     fctx.suspend_value = Value.initNull();
                     setFiberState(this, fctx.state);
-                    fctx.mutex.unlock();
+                    fctx.mutex.unlock(getIo());
                     if (fctx.state == .terminated) {
                         if (fctx.thread) |t| t.join();
                         fctx.thread = null;
@@ -15261,6 +17158,9 @@ pub const ClassMeta = struct {
 
     /// 添加属性定义
     pub fn addProperty(self: *ClassMeta, prop: ClassProperty) !void {
+        if (!self.properties.contains(prop.name)) {
+            try self.property_order.append(self.allocator, prop.name);
+        }
         try self.properties.put(prop.name, prop);
     }
 
@@ -15318,6 +17218,48 @@ pub const ClassMeta = struct {
         return false;
     }
 };
+
+/// 查找属性的声明类及其可见性
+fn findPropertyDeclaringClass(meta: *const ClassMeta, name: []const u8) ?struct {
+    class: *const ClassMeta,
+    prop: *const ClassProperty,
+} {
+    if (meta.properties.getPtr(name)) |prop| {
+        return .{ .class = meta, .prop = prop };
+    }
+    if (meta.parent) |parent| {
+        return findPropertyDeclaringClass(parent, name);
+    }
+    return null;
+}
+
+/// 检查当前作用域是否可以访问属性
+fn checkPropertyAccess(declaring_class: *const ClassMeta, prop: *const ClassProperty) bool {
+    if (prop.is_public) return true;
+
+    const scope = getCurrentScopeClass() orelse return false;
+
+    // trait 方法上下文：trait 方法被复制到使用类中，trait 方法内访问使用类的 protected/private 属性应允许
+    // scope 是 trait 的 ClassMeta，declaring_class 是使用类的 ClassMeta
+    if (scope.is_trait) {
+        // protected 属性：trait 方法可以访问
+        if (prop.is_protected) return true;
+        // private 属性：仅当属性由 trait 本身声明时允许（declaring_class.name == scope.name 不可能，因为 trait 不是使用类）
+        // 实际上 PHP 中 trait 的 private 属性在 trait 方法中可访问
+        return true;
+    }
+
+    if (prop.is_protected) {
+        return scope.isSubclassOf(declaring_class.name) or
+            declaring_class.isSubclassOf(scope.name);
+    }
+
+    if (prop.is_private) {
+        return std.mem.eql(u8, scope.name, declaring_class.name);
+    }
+
+    return true;
+}
 
 /// 全局类注册表
 pub var class_registry: ?std.StringHashMap(*ClassMeta) = null;
@@ -15395,7 +17337,6 @@ fn php_weak_is_alive(addr: usize) bool {
 /// ============================================================================
 /// 用于存储弱引用的目标对象。当创建 WeakReference 时，目标对象会被注册到这里。
 /// 注意：这是一个简化实现，真正的弱引用应该在 GC 层面实现。
-
 /// 弱引用表：地址 -> Value（目标对象的引用）
 var weakref_table: ?std.AutoHashMap(usize, Value) = null;
 
@@ -15541,6 +17482,110 @@ pub fn registerClass(meta: *ClassMeta) !void {
     }
 }
 
+/// 检查 final class 继承：如果 child 类继承自 final 类，输出 fatal error 并退出
+pub fn php_check_final_inheritance(child_class_name: []const u8, parent_meta: *const ClassMeta, file: []const u8, line: u32) void {
+    if (parent_meta.is_final) {
+        var ebuf: [512]u8 = undefined;
+        const stderr_msg = std.fmt.bufPrint(
+            &ebuf,
+            "PHP Fatal error:  Class {s} cannot extend final class {s} in {s} on line {d}\n",
+            .{ child_class_name, parent_meta.name, file, line },
+        ) catch {
+            std.process.exit(255);
+        };
+        fileWriteAll(2, stderr_msg);
+        var buf: [512]u8 = undefined;
+        const stdout_msg = std.fmt.bufPrint(
+            &buf,
+            "\nFatal error: Class {s} cannot extend final class {s} in {s} on line {d}\n",
+            .{ child_class_name, parent_meta.name, file, line },
+        ) catch {
+            fileWriteAll(1, "\nFatal error: Class cannot extend final class\n");
+            std.process.exit(255);
+        };
+        fileWriteAll(1, stdout_msg);
+        std.process.exit(255);
+    }
+}
+
+/// 检查非抽象类是否实现了所有抽象方法
+/// 遍历继承链收集所有抽象方法，检查是否在子类中实现
+pub fn php_check_abstract_methods(child_class_name: []const u8, file: []const u8, line: u32) void {
+    const meta = findClass(child_class_name) orelse return;
+    // 抽象类本身不需要检查
+    if (meta.is_abstract) return;
+
+    // 收集所有未实现的抽象方法
+    var unimplemented: [64][]const u8 = undefined;
+    var unimplemented_owners: [64][]const u8 = undefined;
+    var count: usize = 0;
+
+    // 遍历继承链
+    var current: ?*const ClassMeta = meta;
+    while (current) |c| {
+        var iter = c.methods.iterator();
+        while (iter.next()) |entry| {
+            const method = entry.value_ptr.*;
+            if (method.is_abstract) {
+                // 使用 findMethod 遍历整个继承链检查是否已实现（非抽象版本）
+                const found = if (meta.findMethod(entry.key_ptr.*)) |impl| !impl.is_abstract else false;
+                if (!found and count < 64) {
+                    // 避免重复
+                    var dup = false;
+                    for (unimplemented[0..count]) |u| {
+                        if (std.mem.eql(u8, u, entry.key_ptr.*)) {
+                            dup = true;
+                            break;
+                        }
+                    }
+                    if (!dup) {
+                        unimplemented[count] = entry.key_ptr.*;
+                        unimplemented_owners[count] = c.name;
+                        count += 1;
+                    }
+                }
+            }
+        }
+        current = c.parent;
+    }
+
+    if (count == 0) return;
+
+    // 构建错误消息
+    // PHP 格式: Class B contains 1 abstract method and must therefore be declared abstract or implement the remaining methods (A::foo)
+    var msg_buf: [1024]u8 = undefined;
+    var pos: usize = 0;
+    const prefix = std.fmt.bufPrint(msg_buf[pos..], "Class {s} contains {d} abstract method{s} and must therefore be declared abstract or implement the remaining methods (", .{ child_class_name, count, if (count == 1) @as([]const u8, "") else @as([]const u8, "s") }) catch return;
+    pos += prefix.len;
+    for (unimplemented[0..count], 0..) |m, i| {
+        if (i > 0 and pos < msg_buf.len) {
+            msg_buf[pos] = ',';
+            msg_buf[pos + 1] = ' ';
+            pos += 2;
+        }
+        const part = std.fmt.bufPrint(msg_buf[pos..], "{s}::{s}", .{ unimplemented_owners[i], m }) catch break;
+        pos += part.len;
+    }
+    if (pos < msg_buf.len) {
+        msg_buf[pos] = ')';
+        pos += 1;
+    }
+    const full_msg = msg_buf[0..pos];
+
+    var ebuf: [1024]u8 = undefined;
+    const stderr_msg = std.fmt.bufPrint(&ebuf, "PHP Fatal error:  {s} in {s} on line {d}\n", .{ full_msg, file, line }) catch {
+        std.process.exit(255);
+    };
+    fileWriteAll(2, stderr_msg);
+    var buf: [1024]u8 = undefined;
+    const stdout_msg = std.fmt.bufPrint(&buf, "\nFatal error: {s} in {s} on line {d}\n", .{ full_msg, file, line }) catch {
+        fileWriteAll(1, "\nFatal error: Abstract method not implemented\n");
+        std.process.exit(255);
+    };
+    fileWriteAll(1, stdout_msg);
+    std.process.exit(255);
+}
+
 /// 查找类
 pub fn findClass(name: []const u8) ?*ClassMeta {
     if (class_registry) |registry| {
@@ -15621,27 +17666,31 @@ pub const PHPObject = struct {
             alloc_counters.php_object_peak_live_objects = alloc_counters.php_object_live_objects;
         }
 
-        // 初始化默认属性值（包括父类）
+        // 初始化默认属性值（包括父类），按声明顺序遍历
         var current_meta: ?*const ClassMeta = meta;
         while (current_meta) |m| {
-            var prop_iter = m.properties.iterator();
-            while (prop_iter.next()) |entry| {
-                if (!entry.value_ptr.is_static) {
-                    // 只初始化还不存在的属性（避免覆盖子类的属性）
-                    if (obj.properties.get(entry.key_ptr.*) == null) {
-                        if (entry.value_ptr.default_value) |default| {
-                            // 检查是否是数组标记（initInt(-1)）
-                            if (default.isInt() and default.asInt() == -1) {
-                                const new_array = try PHPArray.init(allocator);
-                                try obj.properties.put(entry.key_ptr.*, Value.initArray(new_array));
-                            } else if (default.isArray()) {
-                                // 旧代码路径：如果是数组，创建新实例
-                                const new_array = try PHPArray.init(allocator);
-                                try obj.properties.put(entry.key_ptr.*, Value.initArray(new_array));
-                            } else {
-                                // 其他类型可以共享（int/float/bool/string是不可变的）
-                                _ = default.retain();
-                                try obj.properties.put(entry.key_ptr.*, default);
+            for (m.property_order.items) |prop_name| {
+                if (m.properties.get(prop_name)) |prop_def| {
+                    if (!prop_def.is_static) {
+                        // readonly 属性跳过默认值初始化：由构造函数显式赋值
+                        // PHP 中 readonly 属性的"默认值"实际是构造函数参数默认值
+                        if (prop_def.is_readonly) continue;
+                        // PHP 8: typed property 无默认值时不初始化（uninitialized 状态）
+                        if (!prop_def.has_default) continue;
+                        // PHP 8: 子类已声明的属性，父类默认值不覆盖
+                        if (m != meta and meta.properties.get(prop_name) != null) continue;
+                        if (obj.properties.get(prop_name) == null) {
+                            if (prop_def.default_value) |default| {
+                                if (default.isInt() and default.asInt() == -1) {
+                                    const new_array = try PHPArray.init(allocator);
+                                    try obj.properties.put(prop_name, Value.initArray(new_array));
+                                } else if (default.isArray()) {
+                                    const cloned_array = try default.asArray().cloneDeep(allocator);
+                                    try obj.properties.put(prop_name, Value.initArray(cloned_array));
+                                } else {
+                                    _ = default.retain();
+                                    try obj.properties.put(prop_name, default);
+                                }
                             }
                         }
                     }
@@ -15660,11 +17709,10 @@ pub const PHPObject = struct {
     /// 减少引用计数，必要时释放
     pub fn release(self: *PHPObject) void {
         if (self.ref_count > 1000000) {
-            std.debug.print("ERROR: PHPObject corrupted! class={s} ref_count={d}\n", .{ self.class_name, self.ref_count });
+            // 引用计数异常高（参数 retain 泄漏），不递减以避免 use-after-free
             return;
         }
         if (self.ref_count == 0) {
-            std.debug.print("WARNING: PHPObject double free! class={s}\n", .{self.class_name});
             return;
         }
         self.ref_count -= 1;
@@ -15780,7 +17828,10 @@ pub const PHPObject = struct {
             // 检查是否有 __set 魔法函数且属性不存在
             if (self.properties.get(name) == null) {
                 if (self.class_meta) |meta| {
-                    if (meta.findMethodLookup("__set")) |lookup| {
+                    // 属性已在类中声明（即使未初始化）时，直接设置，不触发 __set
+                    // PHP 语义：__set 仅对未声明的属性触发
+                    if (findPropertyDeclaringClass(meta, name) == null) {
+                        if (meta.findMethodLookup("__set")) |lookup| {
                         in_magic_method = true;
                         defer in_magic_method = false;
 
@@ -15793,6 +17844,7 @@ pub const PHPObject = struct {
                         defer guard.deinit();
                         _ = try lookup.method.func(this_val, &args, self.allocator);
                         return;
+                    }
                     }
                 }
             }
@@ -15955,13 +18007,505 @@ pub fn php_object_new(class_name: []const u8, allocator: Allocator) !Value {
 /// @param obj_val 对象Value
 /// @param property_name 属性名
 /// @return 属性值，如果不存在返回null
+/// 尝试调用 __get 魔术方法，返回 ?Value
+/// 调用方负责检查返回值是否为 null
+fn tryMagicGet(obj_val: Value, meta: *const ClassMeta, property_name: []const u8) !?Value {
+    if (meta.findMethodLookup("__get")) |lookup| {
+        const name_str = try PHPString.init(runtime_allocator, property_name);
+        const name_val = Value.initString(name_str);
+        defer name_val.release(runtime_allocator);
+        const args = [_]Value{name_val};
+        const guard = ClassContext.init(meta, lookup.owner);
+        defer guard.deinit();
+        return try lookup.method.func(obj_val, &args, runtime_allocator);
+    }
+    return null;
+}
+
+/// 尝试调用 __set 魔术方法，返回 true 表示已处理
+fn tryMagicSet(obj_val: Value, meta: *const ClassMeta, property_name: []const u8, value: Value) !bool {
+    if (meta.findMethodLookup("__set")) |lookup| {
+        const name_str = try PHPString.init(runtime_allocator, property_name);
+        const name_val = Value.initString(name_str);
+        defer name_val.release(runtime_allocator);
+        const args = [_]Value{ name_val, value };
+        const guard = ClassContext.init(meta, lookup.owner);
+        defer guard.deinit();
+        _ = try lookup.method.func(obj_val, &args, runtime_allocator);
+        return true;
+    }
+    return false;
+}
+
+/// 将 union 类型名按 PHP 语义排序（字母序）生成规范化消息
+/// PHP 8.0: TypeError 消息中 union 类型按字母序排列
+fn sortUnionTypeName(buf: []u8, type_name: []const u8) []const u8 {
+    var parts: [16][]const u8 = undefined;
+    var count: usize = 0;
+    var it = std.mem.splitScalar(u8, type_name, '|');
+    while (it.next()) |part| {
+        if (count < 16) {
+            parts[count] = part;
+            count += 1;
+        }
+    }
+    // 插入排序（字母序）
+    var i: usize = 1;
+    while (i < count) : (i += 1) {
+        var j = i;
+        while (j > 0 and std.mem.lessThan(u8, parts[j], parts[j - 1])) {
+            const tmp = parts[j];
+            parts[j] = parts[j - 1];
+            parts[j - 1] = tmp;
+            j -= 1;
+        }
+    }
+    var pos: usize = 0;
+    for (parts[0..count], 0..) |part, idx| {
+        if (idx > 0) {
+            if (pos < buf.len) {
+                buf[pos] = '|';
+                pos += 1;
+            }
+        }
+        const len = @min(part.len, buf.len - pos);
+        @memcpy(buf[pos .. pos + len], part[0..len]);
+        pos += len;
+    }
+    return buf[0..pos];
+}
+
+/// Union 类型 coercion 优先级（PHP 8.0 语义）
+/// int > float > string > bool > array > object > class
+fn coercePriority(type_name: []const u8) u8 {
+    if (std.mem.eql(u8, type_name, "int") or std.mem.eql(u8, type_name, "integer")) return 1;
+    if (std.mem.eql(u8, type_name, "float") or std.mem.eql(u8, type_name, "double")) return 2;
+    if (std.mem.eql(u8, type_name, "string")) return 3;
+    if (std.mem.eql(u8, type_name, "bool") or std.mem.eql(u8, type_name, "boolean")) return 4;
+    if (std.mem.eql(u8, type_name, "false") or std.mem.eql(u8, type_name, "true")) return 4;
+    if (std.mem.eql(u8, type_name, "array")) return 5;
+    if (std.mem.eql(u8, type_name, "object")) return 6;
+    if (std.mem.eql(u8, type_name, "callable") or std.mem.eql(u8, type_name, "iterable")) return 7;
+    if (std.mem.eql(u8, type_name, "mixed")) return 8;
+    // 类名等其他类型：最低优先级
+    return 9;
+}
+
+/// 检查值是否精确匹配某个类型（不进行 coercion）
+fn typeExactMatch(type_name: []const u8, value: Value) bool {
+    if (std.mem.eql(u8, type_name, "int") or std.mem.eql(u8, type_name, "integer")) return value.isInt();
+    if (std.mem.eql(u8, type_name, "float") or std.mem.eql(u8, type_name, "double")) return value.isFloat();
+    if (std.mem.eql(u8, type_name, "string")) return value.isString();
+    if (std.mem.eql(u8, type_name, "bool") or std.mem.eql(u8, type_name, "boolean")) return value.isBool();
+    if (std.mem.eql(u8, type_name, "array")) return value.isArray();
+    if (std.mem.eql(u8, type_name, "object")) return Value_isObject(value);
+    if (std.mem.eql(u8, type_name, "null")) return value.isNull();
+    if (std.mem.eql(u8, type_name, "false")) return value.isBool() and !value.asBool();
+    if (std.mem.eql(u8, type_name, "true")) return value.isBool() and value.asBool();
+    if (std.mem.eql(u8, type_name, "mixed")) return true;
+    if (std.mem.eql(u8, type_name, "callable") or std.mem.eql(u8, type_name, "iterable")) return true;
+    // 类名/接口名类型：检查 instanceof（包括继承链和接口实现）
+    if (findClass(type_name)) |_| {
+        if (Value_isObject(value)) {
+            const obj = Value_asObject(value);
+            if (obj.class_meta) |meta| {
+                var current: ?*const ClassMeta = meta;
+                while (current) |m| {
+                    if (std.mem.eql(u8, m.name, type_name)) return true;
+                    current = m.parent;
+                }
+                if (meta.implementsInterface(type_name)) return true;
+            }
+        }
+        return false;
+    }
+    return false;
+}
+
+/// 尝试将值强制转换为单个类型（不抛出异常）
+/// 返回 null 表示类型不兼容，返回非 null 表示转换成功
+fn tryCoerceSingleType(type_name: []const u8, value: Value) ?Value {
+    if (std.mem.eql(u8, type_name, "int") or std.mem.eql(u8, type_name, "integer")) {
+        if (value.isInt()) return value;
+        if (value.isFloat()) return Value.initInt(@intFromFloat(value.toFloat()));
+        if (value.isBool()) return Value.initInt(if (value.asBool()) 1 else 0);
+        if (value.isString()) {
+            if (!isNumericString(value.asString().data)) return null;
+            return Value.initInt(value.toInt());
+        }
+        return null;
+    }
+    if (std.mem.eql(u8, type_name, "float") or std.mem.eql(u8, type_name, "double")) {
+        if (value.isFloat()) return value;
+        if (value.isInt()) return Value.initFloat(@floatFromInt(value.toInt()));
+        if (value.isBool()) return Value.initFloat(if (value.asBool()) 1.0 else 0.0);
+        if (value.isString()) {
+            if (!isNumericString(value.asString().data)) return null;
+            return Value.initFloat(value.toFloat());
+        }
+        return null;
+    }
+    if (std.mem.eql(u8, type_name, "string")) {
+        if (value.isString()) return value;
+        if (value.isInt() or value.isFloat() or value.isBool()) {
+            const str = value.toString(runtime_allocator) catch return null;
+            return Value.initString(str);
+        }
+        return null;
+    }
+    if (std.mem.eql(u8, type_name, "bool") or std.mem.eql(u8, type_name, "boolean")) {
+        if (value.isBool()) return value;
+        if (value.isInt() or value.isFloat() or value.isString()) return Value.initBool(value.toBool());
+        return null;
+    }
+    if (std.mem.eql(u8, type_name, "array")) {
+        if (value.isArray()) return value;
+        return null;
+    }
+    if (std.mem.eql(u8, type_name, "mixed")) return value;
+    if (std.mem.eql(u8, type_name, "object")) {
+        if (Value_isObject(value)) return value;
+        return null;
+    }
+    if (std.mem.eql(u8, type_name, "callable") or std.mem.eql(u8, type_name, "iterable")) return value;
+    // DNF 中的 intersection 子类型（如 Iterator&Countable）：值必须是对象且 instanceof 所有声明类型
+    if (std.mem.indexOfScalar(u8, type_name, '&') != null) {
+        if (!Value_isObject(value)) return null;
+        const obj = Value_asObject(value);
+        if (obj.class_meta) |meta| {
+            var it = std.mem.splitScalar(u8, type_name, '&');
+            while (it.next()) |sub_type| {
+                const trimmed = std.mem.trim(u8, sub_type, " \t()");
+                var current: ?*const ClassMeta = meta;
+                var found = false;
+                while (current) |m| {
+                    if (std.mem.eql(u8, m.name, trimmed)) {
+                        found = true;
+                        break;
+                    }
+                    current = m.parent;
+                }
+                if (!found) {
+                    if (meta.implementsInterface(trimmed)) found = true;
+                }
+                if (!found) return null;
+            }
+            return value;
+        }
+        return null;
+    }
+    // 类名/接口名类型：只接受精确 instanceof 匹配，不做 coercion
+    if (findClass(type_name)) |_| {
+        if (Value_isObject(value)) {
+            const obj = Value_asObject(value);
+            if (obj.class_meta) |meta| {
+                var current: ?*const ClassMeta = meta;
+                while (current) |m| {
+                    if (std.mem.eql(u8, m.name, type_name)) return value;
+                    current = m.parent;
+                }
+                if (meta.implementsInterface(type_name)) return value;
+            }
+        }
+        return null;
+    }
+    // 未知类型：不转换
+    return value;
+}
+
+/// 属性类型 coercion：根据声明的类型将值强制转换
+/// 不兼容类型抛出 TypeError
+/// class_name 用于错误消息
+fn coercePropertyType(prop: *const ClassProperty, value: Value, class_name: []const u8) !Value {
+    if (prop.type_name == null) return value;
+
+    const type_name = prop.type_name.?;
+
+    // mixed 类型：接受任何值（包括 null），无 coercion
+    if (std.mem.eql(u8, type_name, "mixed")) return value;
+
+    // never 类型：PHP 不允许作为属性类型，任何赋值即 TypeError
+    if (std.mem.eql(u8, type_name, "never")) {
+        var buf: [256]u8 = undefined;
+        const val_type = if (value.isNull()) "null" else if (value.isArray()) "array" else if (Value_isObject(value)) Value_asObject(value).class_name else if (value.isString()) "string" else if (value.isInt()) "int" else if (value.isFloat()) "float" else if (value.isBool()) "bool" else "unknown";
+        const msg = std.fmt.bufPrint(&buf, "Cannot assign {s} to property {s}::${s} of type never", .{ val_type, class_name, prop.name }) catch "Cannot assign to never property";
+        return throwThrowable("TypeError", msg, runtime_allocator);
+    }
+
+    // nullable 类型且值为 null：直接返回
+    if (prop.type_nullable and value.isNull()) return value;
+
+    // null 赋给非 nullable 属性：TypeError
+    if (value.isNull()) {
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Cannot assign null to property {s}::${s} of type {s}", .{ class_name, prop.name, type_name }) catch "Cannot assign null to property";
+        return throwThrowable("TypeError", msg, runtime_allocator);
+    }
+
+    // Intersection 类型（Iterator&Countable 等，不含 |）：值必须是对象且 instanceof 所有声明类型
+    // DNF 类型（含 |）走 union 分支，union 中的每个子类型通过 tryCoerceSingleType 处理 intersection
+    if (std.mem.indexOfScalar(u8, type_name, '&') != null and std.mem.indexOfScalar(u8, type_name, '|') == null) {
+        if (!Value_isObject(value)) {
+            var buf: [256]u8 = undefined;
+            const val_type = if (value.isArray()) "array" else if (value.isString()) "string" else if (value.isInt()) "int" else if (value.isFloat()) "float" else if (value.isBool()) "bool" else "unknown";
+            const msg = std.fmt.bufPrint(&buf, "Cannot assign {s} to property {s}::${s} of type {s}", .{ val_type, class_name, prop.name, type_name }) catch "Cannot assign: type mismatch";
+            return throwThrowable("TypeError", msg, runtime_allocator);
+        }
+        const obj = Value_asObject(value);
+        if (obj.class_meta) |meta| {
+            var it = std.mem.splitScalar(u8, type_name, '&');
+            while (it.next()) |sub_type| {
+                const trimmed = std.mem.trim(u8, sub_type, " \t");
+                // 检查继承链：类名匹配
+                var current: ?*const ClassMeta = meta;
+                var found = false;
+                while (current) |m| {
+                    if (std.mem.eql(u8, m.name, trimmed)) {
+                        found = true;
+                        break;
+                    }
+                    current = m.parent;
+                }
+                // 检查接口实现
+                if (!found) {
+                    if (meta.implementsInterface(trimmed)) {
+                        found = true;
+                    }
+                }
+                if (!found) {
+                    var buf: [256]u8 = undefined;
+                    const msg = std.fmt.bufPrint(&buf, "Cannot assign {s} to property {s}::${s} of type {s}", .{ obj.class_name, class_name, prop.name, type_name }) catch "Cannot assign: type mismatch";
+                    return throwThrowable("TypeError", msg, runtime_allocator);
+                }
+            }
+            return value;
+        }
+        // 对象无 class_meta：TypeError
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Cannot assign {s} to property {s}::${s} of type {s}", .{ obj.class_name, class_name, prop.name, type_name }) catch "Cannot assign: type mismatch";
+        return throwThrowable("TypeError", msg, runtime_allocator);
+    }
+
+    // Union 类型（int|string, int|float|null 等）：两阶段匹配
+    // Pass 1: 精确匹配（PHP 优先保留原始类型，不做不必要的 coercion）
+    // Pass 2: 按 PHP coercion 优先级尝试（int > float > string > bool > array > object > class）
+    if (std.mem.indexOfScalar(u8, type_name, '|') != null) {
+        var it = std.mem.splitScalar(u8, type_name, '|');
+        while (it.next()) |sub_type| {
+            if (std.mem.eql(u8, sub_type, "null")) continue;
+            if (typeExactMatch(sub_type, value)) return value;
+        }
+        // 收集子类型并按优先级排序
+        var sub_types: [16][]const u8 = undefined;
+        var sub_count: usize = 0;
+        it = std.mem.splitScalar(u8, type_name, '|');
+        while (it.next()) |sub_type| {
+            if (std.mem.eql(u8, sub_type, "null")) continue;
+            if (sub_count < 16) {
+                sub_types[sub_count] = sub_type;
+                sub_count += 1;
+            }
+        }
+        var i: usize = 1;
+        while (i < sub_count) : (i += 1) {
+            var j = i;
+            while (j > 0 and coercePriority(sub_types[j]) < coercePriority(sub_types[j - 1])) {
+                const tmp = sub_types[j];
+                sub_types[j] = sub_types[j - 1];
+                sub_types[j - 1] = tmp;
+                j -= 1;
+            }
+        }
+        for (sub_types[0..sub_count]) |sub_type| {
+            if (tryCoerceSingleType(sub_type, value)) |coerced| {
+                return coerced;
+            }
+        }
+        // 所有子类型都不匹配 → TypeError
+        var buf: [256]u8 = undefined;
+        var sort_buf: [256]u8 = undefined;
+        const sorted_type = sortUnionTypeName(&sort_buf, type_name);
+        const val_type = if (value.isArray()) "array" else if (Value_isObject(value)) Value_asObject(value).class_name else if (value.isString()) "string" else if (value.isInt()) "int" else if (value.isFloat()) "float" else if (value.isBool()) "bool" else "unknown";
+        const msg = std.fmt.bufPrint(&buf, "Cannot assign {s} to property {s}::${s} of type {s}", .{ val_type, class_name, prop.name, sorted_type }) catch "Cannot assign: type mismatch";
+        return throwThrowable("TypeError", msg, runtime_allocator);
+    }
+
+    if (std.mem.eql(u8, type_name, "int") or std.mem.eql(u8, type_name, "integer")) {
+        if (value.isInt()) return value;
+        if (value.isFloat()) return Value.initInt(@intFromFloat(value.toFloat()));
+        if (value.isBool()) return Value.initInt(if (value.asBool()) 1 else 0);
+        if (value.isString()) {
+            const str_data = value.asString().data;
+            if (!isNumericString(str_data)) {
+                var buf: [256]u8 = undefined;
+                const msg = std.fmt.bufPrint(&buf, "Cannot assign string to property {s}::${s} of type int", .{ class_name, prop.name }) catch "Cannot assign to int property";
+                return throwThrowable("TypeError", msg, runtime_allocator);
+            }
+            return Value.initInt(value.toInt());
+        }
+        // array/object → TypeError
+        var buf: [256]u8 = undefined;
+        const val_type = if (value.isArray()) "array" else if (Value_isObject(value)) Value_asObject(value).class_name else "unknown";
+        const msg = std.fmt.bufPrint(&buf, "Cannot assign {s} to property {s}::${s} of type int", .{ val_type, class_name, prop.name }) catch "Cannot assign to int property";
+        return throwThrowable("TypeError", msg, runtime_allocator);
+    }
+    if (std.mem.eql(u8, type_name, "float") or std.mem.eql(u8, type_name, "double")) {
+        if (value.isFloat()) return value;
+        if (value.isInt()) return Value.initFloat(@floatFromInt(value.toInt()));
+        if (value.isBool()) return Value.initFloat(if (value.asBool()) 1.0 else 0.0);
+        if (value.isString()) {
+            const str_data = value.asString().data;
+            if (!isNumericString(str_data)) {
+                var buf: [256]u8 = undefined;
+                const msg = std.fmt.bufPrint(&buf, "Cannot assign string to property {s}::${s} of type float", .{ class_name, prop.name }) catch "Cannot assign to float property";
+                return throwThrowable("TypeError", msg, runtime_allocator);
+            }
+            return Value.initFloat(value.toFloat());
+        }
+        var buf: [256]u8 = undefined;
+        const val_type = if (value.isArray()) "array" else if (Value_isObject(value)) Value_asObject(value).class_name else "unknown";
+        const msg = std.fmt.bufPrint(&buf, "Cannot assign {s} to property {s}::${s} of type float", .{ val_type, class_name, prop.name }) catch "Cannot assign to float property";
+        return throwThrowable("TypeError", msg, runtime_allocator);
+    }
+    if (std.mem.eql(u8, type_name, "string")) {
+        if (value.isString()) return value;
+        if (value.isInt() or value.isFloat() or value.isBool()) {
+            const str = try value.toString(runtime_allocator);
+            return Value.initString(str);
+        }
+        // array/object → TypeError
+        var buf: [256]u8 = undefined;
+        const val_type = if (value.isArray()) "array" else if (Value_isObject(value)) Value_asObject(value).class_name else "unknown";
+        const msg = std.fmt.bufPrint(&buf, "Cannot assign {s} to property {s}::${s} of type string", .{ val_type, class_name, prop.name }) catch "Cannot assign to string property";
+        return throwThrowable("TypeError", msg, runtime_allocator);
+    }
+    if (std.mem.eql(u8, type_name, "bool") or std.mem.eql(u8, type_name, "boolean")) {
+        if (value.isBool()) return value;
+        if (value.isInt() or value.isFloat() or value.isString()) return Value.initBool(value.toBool());
+        // array/object → TypeError
+        var buf: [256]u8 = undefined;
+        const val_type = if (value.isArray()) "array" else if (Value_isObject(value)) Value_asObject(value).class_name else "unknown";
+        const msg = std.fmt.bufPrint(&buf, "Cannot assign {s} to property {s}::${s} of type bool", .{ val_type, class_name, prop.name }) catch "Cannot assign to bool property";
+        return throwThrowable("TypeError", msg, runtime_allocator);
+    }
+    if (std.mem.eql(u8, type_name, "array")) {
+        if (value.isArray()) return value;
+        // 非数组赋给 array 属性：TypeError
+        var buf: [256]u8 = undefined;
+        const val_type = if (Value_isObject(value)) Value_asObject(value).class_name else if (value.isString()) "string" else if (value.isInt()) "int" else if (value.isFloat()) "float" else if (value.isBool()) "bool" else "unknown";
+        const msg = std.fmt.bufPrint(&buf, "Cannot assign {s} to property {s}::${s} of type array", .{ val_type, class_name, prop.name }) catch "Cannot assign to array property";
+        return throwThrowable("TypeError", msg, runtime_allocator);
+    }
+    if (std.mem.eql(u8, type_name, "mixed")) return value;
+    if (std.mem.eql(u8, type_name, "object")) {
+        if (Value_isObject(value)) return value;
+        var buf: [256]u8 = undefined;
+        const val_type = if (value.isArray()) "array" else if (value.isString()) "string" else if (value.isInt()) "int" else if (value.isFloat()) "float" else if (value.isBool()) "bool" else "unknown";
+        const msg = std.fmt.bufPrint(&buf, "Cannot assign {s} to property {s}::${s} of type object", .{ val_type, class_name, prop.name }) catch "Cannot assign to object property";
+        return throwThrowable("TypeError", msg, runtime_allocator);
+    }
+
+    // 类名/接口名类型：检查 instanceof（包括继承链和接口实现）
+    if (findClass(type_name)) |_| {
+        if (Value_isObject(value)) {
+            const obj = Value_asObject(value);
+            if (obj.class_meta) |meta| {
+                // 检查继承链
+                var current: ?*const ClassMeta = meta;
+                while (current) |m| {
+                    if (std.mem.eql(u8, m.name, type_name)) return value;
+                    current = m.parent;
+                }
+                // 检查接口实现
+                if (meta.implementsInterface(type_name)) return value;
+            }
+            // 类型不匹配：TypeError
+            var buf: [256]u8 = undefined;
+            const actual_class = if (obj.class_meta) |m| m.name else obj.class_name;
+            const msg = std.fmt.bufPrint(&buf, "Cannot assign {s} to property {s}::${s} of type {s}", .{ actual_class, class_name, prop.name, type_name }) catch "Cannot assign: type mismatch";
+            return throwThrowable("TypeError", msg, runtime_allocator);
+        }
+        // 非对象赋给类名属性：TypeError
+        var buf: [256]u8 = undefined;
+        const val_type = if (value.isArray()) "array" else if (value.isString()) "string" else if (value.isInt()) "int" else if (value.isFloat()) "float" else if (value.isBool()) "bool" else "unknown";
+        const msg = std.fmt.bufPrint(&buf, "Cannot assign {s} to property {s}::${s} of type {s}", .{ val_type, class_name, prop.name, type_name }) catch "Cannot assign: type mismatch";
+        return throwThrowable("TypeError", msg, runtime_allocator);
+    }
+
+    // 未知类型：不转换
+    return value;
+}
+
 pub fn php_object_get(obj_val: Value, property_name: []const u8) !Value {
     if (!Value_isObject(obj_val)) {
         return Value.initNull();
     }
 
     const obj = Value_asObject(obj_val);
+
+    // 属性可见性检查
+    if (obj.class_meta) |meta| {
+        if (findPropertyDeclaringClass(meta, property_name)) |decl| {
+            if (!checkPropertyAccess(decl.class, decl.prop)) {
+                // 属性声明但不可访问：尝试 __get 魔术方法
+                if (try tryMagicGet(obj_val, meta, property_name)) |result| {
+                    return result;
+                }
+                var buf: [256]u8 = undefined;
+                const vis = if (decl.prop.is_private) "private" else "protected";
+                const msg = std.fmt.bufPrint(&buf, "Cannot access {s} property {s}::${s}", .{ vis, meta.name, property_name }) catch "Cannot access property";
+                return throwThrowable("Error", msg, runtime_allocator);
+            }
+            // PHP 8: typed property 未初始化检查
+            if (decl.prop.type_name != null and !decl.prop.has_default) {
+                if (obj.getPropertyDirect(property_name) == null) {
+                    var buf: [256]u8 = undefined;
+                    const msg = std.fmt.bufPrint(&buf, "Typed property {s}::${s} must not be accessed before initialization", .{ decl.class.name, property_name }) catch "Typed property must not be accessed before initialization";
+                    return throwThrowable("Error", msg, runtime_allocator);
+                }
+            }
+        } else {
+            // 属性未声明：检查动态属性，若无则尝试 __get
+            if (obj.getProperty(property_name)) |val| {
+                return val;
+            }
+            if (try tryMagicGet(obj_val, meta, property_name)) |result| {
+                return result;
+            }
+            return Value.initNull();
+        }
+    }
+
     return obj.getProperty(property_name) orelse Value.initNull();
+}
+
+pub fn php_object_get_ref(obj_val: Value, prop_name_val: Value, allocator: Allocator) !Value {
+    if (!Value_isObject(obj_val)) return error.InvalidArgument;
+    if (!prop_name_val.isString()) return error.InvalidArgument;
+
+    const obj = Value_asObject(obj_val);
+    const name = prop_name_val.asString().data;
+
+    // 属性可见性检查
+    if (obj.class_meta) |meta| {
+        if (findPropertyDeclaringClass(meta, name)) |decl| {
+            if (!checkPropertyAccess(decl.class, decl.prop)) {
+                var buf: [256]u8 = undefined;
+                const vis = if (decl.prop.is_private) "private" else "protected";
+                const msg = std.fmt.bufPrint(&buf, "Cannot access {s} property {s}::${s}", .{ vis, meta.name, name }) catch "Cannot access property";
+                return throwThrowable("Error", msg, runtime_allocator);
+            }
+        }
+    }
+
+    // 获取属性值指针
+    const entry_ptr = obj.properties.getPtr(name) orelse blk: {
+        // 属性不存在，创建一个 null 值
+        try obj.properties.put(try allocator.dupe(u8, name), Value.initNull());
+        break :blk obj.properties.getPtr(name).?;
+    };
+
+    return Value.initRef(entry_ptr);
 }
 
 pub fn php_object_get_direct(obj_val: Value, property_name: []const u8) !Value {
@@ -15981,7 +18525,34 @@ pub fn php_object_get_safe_value(obj_val: Value, prop_name_val: Value) !Value {
         return Value.initNull();
     }
     const obj = Value_asObject(obj_val);
-    return obj.getProperty(prop_name_val.asString().data) orelse Value.initNull();
+    const name = prop_name_val.asString().data;
+
+    // 属性可见性检查
+    if (obj.class_meta) |meta| {
+        if (findPropertyDeclaringClass(meta, name)) |decl| {
+            if (!checkPropertyAccess(decl.class, decl.prop)) {
+                // 属性声明但不可访问：尝试 __get 魔术方法
+                if (try tryMagicGet(obj_val, meta, name)) |result| {
+                    return result;
+                }
+                var buf: [256]u8 = undefined;
+                const vis = if (decl.prop.is_private) "private" else "protected";
+                const msg = std.fmt.bufPrint(&buf, "Cannot access {s} property {s}::${s}", .{ vis, meta.name, name }) catch "Cannot access property";
+                return throwThrowable("Error", msg, runtime_allocator);
+            }
+        } else {
+            // 属性未声明：检查动态属性，若无则尝试 __get
+            if (obj.getProperty(name)) |val| {
+                return val;
+            }
+            if (try tryMagicGet(obj_val, meta, name)) |result| {
+                return result;
+            }
+            return Value.initNull();
+        }
+    }
+
+    return obj.getProperty(name) orelse Value.initNull();
 }
 
 pub fn php_object_get_dynamic(obj_val: Value, prop_name_val: Value) !Value {
@@ -15993,7 +18564,49 @@ pub fn php_object_get_dynamic(obj_val: Value, prop_name_val: Value) !Value {
     }
     const obj = Value_asObject(obj_val);
     const prop_str = prop_name_val.asString();
-    return obj.getProperty(prop_str.data) orelse Value.initNull();
+    const name = prop_str.data;
+
+    // 属性可见性检查
+    if (obj.class_meta) |meta| {
+        if (findPropertyDeclaringClass(meta, name)) |decl| {
+            if (!checkPropertyAccess(decl.class, decl.prop)) {
+                // 属性声明但不可访问：尝试 __get 魔术方法
+                if (try tryMagicGet(obj_val, meta, name)) |result| {
+                    return result;
+                }
+                var buf: [256]u8 = undefined;
+                const vis = if (decl.prop.is_private) "private" else "protected";
+                const msg = std.fmt.bufPrint(&buf, "Cannot access {s} property {s}::${s}", .{ vis, meta.name, name }) catch "Cannot access property";
+                return throwThrowable("Error", msg, runtime_allocator);
+            }
+        } else {
+            // 属性未声明：先检查动态属性
+            if (obj.getProperty(name)) |prop_val| {
+                return prop_val;
+            }
+            // 尝试 __get 魔术方法
+            if (try tryMagicGet(obj_val, meta, name)) |result| {
+                return result;
+            }
+            // 无 __get：返回 [obj, method_name] 数组供 php_invoke_callable 调用
+            const arr = try PHPArray.init(runtime_allocator);
+            errdefer arr.release(runtime_allocator);
+            try arr.push(runtime_allocator, obj_val);
+            try arr.push(runtime_allocator, prop_name_val);
+            return Value.initArray(arr);
+        }
+    }
+
+    // 先查找属性
+    if (obj.getProperty(name)) |prop_val| {
+        return prop_val;
+    }
+    // 属性不存在时，返回 [obj, method_name] 数组供 php_invoke_callable 调用
+    const arr = try PHPArray.init(runtime_allocator);
+    errdefer arr.release(runtime_allocator);
+    try arr.push(runtime_allocator, obj_val);
+    try arr.push(runtime_allocator, prop_name_val);
+    return Value.initArray(arr);
 }
 
 pub fn php_object_set_dynamic(obj_val: Value, prop_name_val: Value, value: Value) !Value {
@@ -16005,7 +18618,40 @@ pub fn php_object_set_dynamic(obj_val: Value, prop_name_val: Value, value: Value
     }
     const obj = Value_asObject(obj_val);
     const prop_str = prop_name_val.asString();
-    try obj.setProperty(prop_str.data, value);
+    const name = prop_str.data;
+
+    // 属性可见性检查
+    if (obj.class_meta) |meta| {
+        if (findPropertyDeclaringClass(meta, name)) |decl| {
+            if (!checkPropertyAccess(decl.class, decl.prop)) {
+                // 属性声明但不可访问：尝试 __set 魔术方法
+                if (try tryMagicSet(obj_val, meta, name, value)) {
+                    return Value.initNull();
+                }
+                var buf: [256]u8 = undefined;
+                const vis = if (decl.prop.is_private) "private" else "protected";
+                const msg = std.fmt.bufPrint(&buf, "Cannot access {s} property {s}::${s}", .{ vis, meta.name, name }) catch "Cannot access property";
+                return throwThrowable("Error", msg, runtime_allocator);
+            }
+            // readonly 属性 enforcement（__clone 上下文中允许重新初始化）
+            if (decl.prop.is_readonly and obj.hasProperty(name) and !in_clone_context) {
+                var buf: [256]u8 = undefined;
+                const msg = std.fmt.bufPrint(&buf, "Cannot modify readonly property {s}::${s}", .{ meta.name, name }) catch "Cannot modify readonly property";
+                return throwThrowable("Error", msg, runtime_allocator);
+            }
+            // 属性类型 coercion：将值转换为声明类型
+            const coerced = try coercePropertyType(decl.prop, value, meta.name);
+            try obj.setProperty(name, coerced);
+            return Value.initNull();
+        } else {
+            // 属性未声明：尝试 __set 魔术方法
+            if (try tryMagicSet(obj_val, meta, name, value)) {
+                return Value.initNull();
+            }
+        }
+    }
+
+    try obj.setProperty(name, value);
     return Value.initNull();
 }
 
@@ -16033,9 +18679,23 @@ pub fn php_cast_array(val: Value) !Value {
         return actual_val;
     }
     const arr = try PHPArray.init(runtime_allocator);
-    if (!actual_val.isNull()) {
-        try arr.push(runtime_allocator, actual_val);
+    if (actual_val.isNull()) {
+        return Value.initArray(arr);
     }
+    // 对象转数组：将属性名作为键，属性值作为数组元素
+    if (Value_isObject(actual_val)) {
+        const obj = Value_asObject(actual_val);
+        var it = obj.properties.iterator();
+        while (it.next()) |entry| {
+            const key_phpstr = try PHPString.init(runtime_allocator, entry.key_ptr.*);
+            const key_val = Value.initString(key_phpstr);
+            try arr.setByValue(runtime_allocator, key_val, entry.value_ptr.*);
+            key_val.release(runtime_allocator);
+        }
+        return Value.initArray(arr);
+    }
+    // 标量转数组：包装为单元素数组
+    try arr.push(runtime_allocator, actual_val);
     return Value.initArray(arr);
 }
 
@@ -16044,7 +18704,7 @@ pub fn php_cast_object(val: Value) !Value {
     if (Value_isObject(val)) {
         return val;
     }
-    
+
     // 数组转对象：将数组元素作为对象属性
     if (val.isArray()) {
         const obj_val = try php_object_new("stdClass", runtime_allocator);
@@ -16066,7 +18726,7 @@ pub fn php_cast_object(val: Value) !Value {
         }
         return obj_val;
     }
-    
+
     // 标量类型转对象：创建 stdClass 对象，值存储在 "scalar" 属性中
     // PHP 行为：(object)"test" 创建 stdClass { scalar: "test" }
     const obj_val = try php_object_new("stdClass", runtime_allocator);
@@ -16087,6 +18747,38 @@ pub fn php_object_set(obj_val: Value, property_name: []const u8, value: Value) !
     }
 
     const obj = Value_asObject(obj_val);
+
+    // 属性可见性检查
+    if (obj.class_meta) |meta| {
+        if (findPropertyDeclaringClass(meta, property_name)) |decl| {
+            if (!checkPropertyAccess(decl.class, decl.prop)) {
+                // 属性声明但不可访问：尝试 __set 魔术方法
+                if (try tryMagicSet(obj_val, meta, property_name, value)) {
+                    return Value.initNull();
+                }
+                var buf: [256]u8 = undefined;
+                const vis = if (decl.prop.is_private) "private" else "protected";
+                const msg = std.fmt.bufPrint(&buf, "Cannot access {s} property {s}::${s}", .{ vis, meta.name, property_name }) catch "Cannot access property";
+                return throwThrowable("Error", msg, runtime_allocator);
+            }
+            // readonly 属性 enforcement：已初始化的 readonly 属性不可修改（__clone 上下文中允许重新初始化）
+            if (decl.prop.is_readonly and obj.hasProperty(property_name) and !in_clone_context) {
+                var buf: [256]u8 = undefined;
+                const msg = std.fmt.bufPrint(&buf, "Cannot modify readonly property {s}::${s}", .{ meta.name, property_name }) catch "Cannot modify readonly property";
+                return throwThrowable("Error", msg, runtime_allocator);
+            }
+            // 属性类型 coercion：将值转换为声明类型
+            const coerced = try coercePropertyType(decl.prop, value, meta.name);
+            try obj.setProperty(property_name, coerced);
+            return Value.initNull();
+        } else {
+            // 属性未声明：尝试 __set 魔术方法
+            if (try tryMagicSet(obj_val, meta, property_name, value)) {
+                return Value.initNull();
+            }
+        }
+    }
+
     try obj.setProperty(property_name, value);
     return Value.initNull();
 }
@@ -16110,6 +18802,45 @@ pub fn php_property_array_push_with_obj(obj_val: Value, prop_name: Value, value:
     const arr = prop_val.asArray();
     _ = value.retain();
     try arr.push(runtime_allocator, value);
+}
+
+/// $obj->prop[key][] = value — 向对象属性子数组追加元素
+pub fn php_property_array_push_key_with_obj(obj_val: Value, prop_name: Value, key: Value, value: Value, _: Value) !void {
+    if (!Value_isObject(obj_val)) return;
+    const obj = Value_asObject(obj_val);
+    const name = if (prop_name.isString()) prop_name.asString().data else return;
+
+    // 获取属性值
+    var prop_val = obj.getPropertyDirect(name) orelse Value.initNull();
+
+    // 如果属性不是数组，创建一个新数组
+    if (!prop_val.isArray()) {
+        const arr = try PHPArray.init(runtime_allocator);
+        prop_val = Value.initArray(arr);
+        try obj.setProperty(name, prop_val);
+    }
+
+    const arr = prop_val.asArray();
+    const arr_key = normalizeArrayKeyFromValue(key);
+
+    // 获取或创建子数组
+    var sub_val = arr.get(arr_key) orelse Value.initNull();
+    if (sub_val.isNull()) {
+        const sub_arr = try PHPArray.init(runtime_allocator);
+        sub_val = Value.initArray(sub_arr);
+        try arr.set(runtime_allocator, arr_key, sub_val);
+    } else if (!sub_val.isArray()) {
+        // 原有值不是数组，替换为新数组
+        sub_val.release(runtime_allocator);
+        const sub_arr = try PHPArray.init(runtime_allocator);
+        sub_val = Value.initArray(sub_arr);
+        try arr.set(runtime_allocator, arr_key, sub_val);
+    }
+
+    // 追加到子数组
+    const sub_arr = sub_val.asArray();
+    _ = value.retain();
+    try sub_arr.push(runtime_allocator, value);
 }
 
 /// $obj->prop[key] = value — 向对象属性数组设置元素
@@ -16200,8 +18931,31 @@ pub fn php_object_call(obj_val: Value, method_name: []const u8, args: []const Va
         return error.UnknownMethod;
     }
 
-    // Closure 方法调用：bindTo/call/bind 等
+    // Closure 方法调用：bindTo/call/__invoke 等
     if (obj_val.isFunction()) {
+        if (std.mem.eql(u8, method_name, "bindTo") and args.len >= 1) {
+            const scope_val = if (args.len >= 2) args[1] else Value.initNull();
+            return php_closure_bind(obj_val, args[0], scope_val);
+        }
+        if (std.mem.eql(u8, method_name, "call") and args.len >= 1) {
+            // Closure::call: scope 自动设为 newThis 的类
+            var scope_val = Value.initNull();
+            var created_scope = false;
+            if (Value_isObject(args[0])) {
+                const call_obj = Value_asObject(args[0]);
+                if (call_obj.class_meta) |cm| {
+                    scope_val = Value.initString(try PHPString.init(runtime_allocator, cm.name));
+                    created_scope = true;
+                }
+            }
+            defer if (created_scope) scope_val.release(runtime_allocator);
+            const bound = try php_closure_bind(obj_val, args[0], scope_val);
+            defer bound.release(runtime_allocator);
+            return php_invoke_callable(bound, args[1..], runtime_allocator);
+        }
+        if (std.mem.eql(u8, method_name, "__invoke")) {
+            return php_invoke_callable(obj_val, args, runtime_allocator);
+        }
         if (findClass("Closure")) |closure_meta| {
             if (closure_meta.findMethod(method_name)) |method| {
                 return method.func(obj_val, args, runtime_allocator);
@@ -16233,6 +18987,32 @@ pub fn php_object_call(obj_val: Value, method_name: []const u8, args: []const Va
         }
         return err;
     };
+}
+
+/// 动态类名实例化: new $var()
+/// class_name_val 是类名（Value，通常是字符串），args 是构造函数参数
+pub fn php_new_object_dynamic(class_name_val: Value, args: []const Value, allocator: Allocator) !Value {
+    var class_name_buf: [256]u8 = undefined;
+    var class_name: []const u8 = "";
+
+    if (class_name_val.isString()) {
+        const s = class_name_val.asString();
+        if (s.length <= class_name_buf.len) {
+            @memcpy(class_name_buf[0..s.length], s.data[0..s.length]);
+            class_name = class_name_buf[0..s.length];
+        } else {
+            class_name = s.data[0..s.length];
+        }
+    } else {
+        return error.InvalidClassName;
+    }
+
+    // 去除前导反斜杠（PHP完全限定名）
+    if (class_name.len > 0 and class_name[0] == '\\') {
+        class_name = class_name[1..];
+    }
+
+    return php_object_new_with_constructor(class_name, args, allocator);
 }
 
 /// 创建新对象并调用构造函数
@@ -16275,6 +19055,13 @@ pub fn php_object_new_with_constructor(class_name: []const u8, args: []const Val
         };
         fileWriteAll(1, stdout_msg);
         std.process.exit(255);
+    }
+
+    // abstract class 实例化检查：new AbstractClass() 抛出 Error
+    if (meta.?.is_abstract) {
+        var msg_buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "Cannot instantiate abstract class {s}", .{resolved}) catch "Cannot instantiate abstract class";
+        return throwThrowable("Error", msg, allocator);
     }
 
     const obj = try PHPObject.initWithMeta(allocator, meta.?);
@@ -16361,7 +19148,7 @@ pub fn php_is_subclass_of(child: Value, parent: Value) !Value {
     // 第一个参数可以是对象或类名字符串
     var child_class_name: []const u8 = undefined;
     var child_meta: ?*const ClassMeta = null;
-    
+
     if (Value_isObject(child)) {
         const obj = Value_asObject(child);
         child_class_name = obj.class_name;
@@ -16372,31 +19159,31 @@ pub fn php_is_subclass_of(child: Value, parent: Value) !Value {
     } else {
         return Value.initBool(false);
     }
-    
+
     // 第二个参数必须是类名字符串
     if (!parent.isString()) return Value.initBool(false);
     const parent_class_name = parent.asString().data;
-    
+
     // 如果子类元数据不存在，返回 false
     if (child_meta == null) return Value.initBool(false);
-    
+
     // 检查是否相同（PHP 的 is_subclass_of 不包括自身）
     if (std.mem.eql(u8, child_class_name, parent_class_name)) {
         return Value.initBool(false);
     }
-    
+
     // 检查继承链
     if (child_meta.?.parent) |parent_meta| {
         if (parent_meta.isSubclassOf(parent_class_name)) {
             return Value.initBool(true);
         }
     }
-    
+
     // 检查接口实现
     if (child_meta.?.implementsInterface(parent_class_name)) {
         return Value.initBool(true);
     }
-    
+
     return Value.initBool(false);
 }
 
@@ -16456,6 +19243,60 @@ pub fn php_get_parent_class(obj_val: Value, allocator: Allocator) !Value {
         }
     }
     return Value.initBool(false);
+}
+
+/// class_implements — 返回类实现的所有接口
+pub fn php_class_implements(class_val: Value, allocator: Allocator) !Value {
+    // 解析类名：接受对象或类名字符串
+    var class_name: []const u8 = undefined;
+    if (Value_isObject(class_val)) {
+        const obj = Value_asObject(class_val);
+        class_name = obj.class_name;
+    } else if (class_val.isString()) {
+        class_name = class_val.asString().data;
+    } else {
+        return Value.initBool(false);
+    }
+
+    const meta = findClass(class_name) orelse return Value.initBool(false);
+
+    // 收集所有接口（包括继承链和接口的父接口）
+    const arr = try PHPArray.init(allocator);
+    errdefer destroyPHPArray(arr, allocator);
+
+    var visited = std.StringHashMap(void).init(allocator);
+    defer visited.deinit();
+
+    try collectInterfaces(meta, arr, &visited, allocator);
+    return Value.initArray(arr);
+}
+
+fn collectInterfaces(meta: *const ClassMeta, arr: *PHPArray, visited: *std.StringHashMap(void), allocator: Allocator) !void {
+    // 直接实现的接口
+    for (meta.interfaces) |iface| {
+        if (visited.contains(iface)) continue;
+        try visited.put(iface, {});
+        const val_str = try PHPString.init(allocator, iface);
+        try arr.push(allocator, Value.initString(val_str));
+    }
+    // 递归检查接口的父接口
+    for (meta.interfaces) |iface| {
+        if (class_registry) |reg| {
+            if (reg.get(iface)) |iface_meta| {
+                try collectInterfaces(iface_meta, arr, visited, allocator);
+            }
+        }
+    }
+    // 检查父类
+    if (meta.parent) |parent| {
+        try collectInterfaces(parent, arr, visited, allocator);
+    }
+}
+
+pub fn class_implements(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
+    _ = ctx;
+    if (args.len < 1) return error.MissingArgument;
+    return php_class_implements(args[0], allocator);
 }
 
 /// 检查方法是否存在
@@ -16580,6 +19421,15 @@ pub fn php_call_static(class_name: []const u8, method_name: []const u8, args: []
     return php_call_static_with_ctx(Value.initNull(), class_name, method_name, args, allocator);
 }
 
+/// 动态类名静态方法调用：$var::method() — 运行时从 Value 提取类名和方法名
+/// args[0] = 类名变量值, args[1] = 方法名 Value, args[2..] = 方法参数
+pub fn php_call_static_dynamic(args: []const Value, allocator: Allocator) !Value {
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const class_name = if (args[0].isString()) args[0].asString().data else "";
+    const method_name = if (args[1].isString()) args[1].asString().data else "";
+    return php_call_static_with_ctx(Value.initNull(), class_name, method_name, args[2..], allocator);
+}
+
 pub fn php_call_static_with_ctx(ctx: Value, class_name: []const u8, method_name: []const u8, args: []const Value, allocator: Allocator) !Value {
     const lookup_meta = blk: {
         if (std.mem.eql(u8, class_name, "self")) {
@@ -16681,11 +19531,28 @@ pub fn php_get_static_property(class_name: []const u8, property_name: []const u8
         }
         break :blk findClass(class_name) orelse return error.ClassNotFound;
     };
+
+    // 静态属性可见性检查
+    if (findPropertyDeclaringClass(meta, property_name)) |decl| {
+        if (decl.prop.is_static and !checkPropertyAccess(decl.class, decl.prop)) {
+            var buf: [256]u8 = undefined;
+            const vis = if (decl.prop.is_private) "private" else "protected";
+            const msg = std.fmt.bufPrint(&buf, "Cannot access {s} property {s}::${s}", .{ vis, decl.class.name, property_name }) catch "Cannot access property";
+            return throwThrowable("Error", msg, runtime_allocator);
+        }
+    }
+
     const val = meta.getStaticProperty(property_name);
     if (val == null) {
         std.debug.print("ERROR: Property {s}.{s} not found\n", .{ meta.name, property_name });
     }
-    return val orelse Value.initNull();
+    // retain：调用方（代码生成器）会在寄存器释放时 release，
+    // 如果不 retain，release 会减少静态属性本身的引用计数，可能导致数据丢失
+    if (val) |v| {
+        _ = v.retain();
+        return v;
+    }
+    return Value.initNull();
 }
 
 /// 设置静态属性
@@ -16703,6 +19570,17 @@ pub fn php_set_static_property(class_name: []const u8, property_name: []const u8
         }
         break :blk findClass(class_name) orelse return error.ClassNotFound;
     };
+
+    // 静态属性可见性检查
+    if (findPropertyDeclaringClass(meta, property_name)) |decl| {
+        if (decl.prop.is_static and !checkPropertyAccess(decl.class, decl.prop)) {
+            var buf: [256]u8 = undefined;
+            const vis = if (decl.prop.is_private) "private" else "protected";
+            const msg = std.fmt.bufPrint(&buf, "Cannot access {s} property {s}::${s}", .{ vis, decl.class.name, property_name }) catch "Cannot access property";
+            return throwThrowable("Error", msg, runtime_allocator);
+        }
+    }
+
     try meta.setStaticProperty(property_name, value);
     return Value.initNull();
 }
@@ -16713,20 +19591,20 @@ fn serializeValue(buffer: *std.ArrayListUnmanaged(u8), value: Value, allocator: 
         return;
     }
     if (value.isBool()) {
-        try buffer.print("b:{d};", .{if (value.toBool()) @as(i64, 1) else @as(i64, 0)});
+        try buffer.print(allocator, "b:{d};", .{if (value.toBool()) @as(i64, 1) else @as(i64, 0)});
         return;
     }
     if (value.isInt()) {
-        try buffer.print("i:{d};", .{value.toInt()});
+        try buffer.print(allocator, "i:{d};", .{value.toInt()});
         return;
     }
     if (value.isFloat()) {
-        try buffer.print("d:{d};", .{value.toFloat()});
+        try buffer.print(allocator, "d:{d};", .{value.toFloat()});
         return;
     }
     if (value.isString()) {
         const str = value.asString().data;
-        try buffer.print("s:{d}:\"", .{str.len});
+        try buffer.print(allocator, "s:{d}:\"", .{str.len});
         try buffer.appendSlice(allocator, str);
         try buffer.appendSlice(allocator, "\";");
         return;
@@ -16734,15 +19612,15 @@ fn serializeValue(buffer: *std.ArrayListUnmanaged(u8), value: Value, allocator: 
     if (value.isArray()) {
         const arr = value.asArray();
         const count = arr.elements.count();
-        try buffer.print("a:{d}:{{", .{count});
+        try buffer.print(allocator, "a:{d}:{{", .{count});
         var it = arr.elements.iterator();
         while (it.next()) |entry| {
             const key = entry.key_ptr.*;
             switch (key) {
-                .integer => |i| try buffer.print("i:{d};", .{i}),
+                .integer => |i| try buffer.print(allocator, "i:{d};", .{i}),
                 .string => |s| {
                     const k = s.data;
-                    try buffer.print("s:{d}:\"", .{k.len});
+                    try buffer.print(allocator, "s:{d}:\"", .{k.len});
                     try buffer.appendSlice(allocator, k);
                     try buffer.appendSlice(allocator, "\";");
                 },
@@ -16756,6 +19634,18 @@ fn serializeValue(buffer: *std.ArrayListUnmanaged(u8), value: Value, allocator: 
         const obj = Value_asObject(value);
         const class_name = obj.class_name;
 
+        // PHP 8.1+ Enum 序列化: E:<len>:"<ClassName>:<CaseName>";
+        if (obj.class_meta) |meta| {
+            if (meta.is_enum) {
+                const case_name_val = obj.properties.get("name") orelse Value.initNull();
+                const case_name = if (case_name_val.isString()) case_name_val.asString().data else "";
+                const combined = std.fmt.allocPrint(allocator, "{s}:{s}", .{ class_name, case_name }) catch return error.OutOfMemory;
+                defer allocator.free(combined);
+                try buffer.print(allocator, "E:{d}:\"{s}\";", .{ combined.len, combined });
+                return;
+            }
+        }
+
         if (obj.class_meta) |meta| {
             if (meta.magic_serialize) |serializer| {
                 const arr_val = try serializer(value, &.{}, allocator);
@@ -16764,18 +19654,18 @@ fn serializeValue(buffer: *std.ArrayListUnmanaged(u8), value: Value, allocator: 
                 if (arr_val.isArray()) {
                     const arr = arr_val.asArray();
                     const count = arr.elements.count();
-                    try buffer.print("O:{d}:\"", .{class_name.len});
+                    try buffer.print(allocator, "O:{d}:\"", .{class_name.len});
                     try buffer.appendSlice(allocator, class_name);
-                    try buffer.print("\":{d}:{{", .{count});
+                    try buffer.print(allocator, "\":{d}:{{", .{count});
 
                     var it = arr.elements.iterator();
                     while (it.next()) |entry| {
                         const key = entry.key_ptr.*;
                         switch (key) {
-                            .integer => |i| try buffer.print("i:{d};", .{i}),
+                            .integer => |i| try buffer.print(allocator, "i:{d};", .{i}),
                             .string => |s| {
                                 const k = s.data;
-                                try buffer.print("s:{d}:\"", .{k.len});
+                                try buffer.print(allocator, "s:{d}:\"", .{k.len});
                                 try buffer.appendSlice(allocator, k);
                                 try buffer.appendSlice(allocator, "\";");
                             },
@@ -16803,9 +19693,9 @@ fn serializeValue(buffer: *std.ArrayListUnmanaged(u8), value: Value, allocator: 
 
         const count: usize = if (allow_list) |list| list.elements.count() else obj.properties.count();
 
-        try buffer.print("O:{d}:\"", .{class_name.len});
+        try buffer.print(allocator, "O:{d}:\"", .{class_name.len});
         try buffer.appendSlice(allocator, class_name);
-        try buffer.print("\":{d}:{{", .{count});
+        try buffer.print(allocator, "\":{d}:{{", .{count});
 
         if (allow_list) |list| {
             var it_allow = list.elements.iterator();
@@ -16816,7 +19706,7 @@ fn serializeValue(buffer: *std.ArrayListUnmanaged(u8), value: Value, allocator: 
                 const prop_val = obj.properties.get(prop_name) orelse Value.initNull();
 
                 const full_len: usize = class_name.len + prop_name.len + 2;
-                try buffer.print("s:{d}:\"", .{full_len});
+                try buffer.print(allocator, "s:{d}:\"", .{full_len});
                 try buffer.appendSlice(allocator, &[_]u8{0});
                 try buffer.appendSlice(allocator, class_name);
                 try buffer.appendSlice(allocator, &[_]u8{0});
@@ -16832,7 +19722,7 @@ fn serializeValue(buffer: *std.ArrayListUnmanaged(u8), value: Value, allocator: 
                 const prop_val = entry.value_ptr.*;
 
                 const full_len: usize = class_name.len + prop_name.len + 2;
-                try buffer.print("s:{d}:\"", .{full_len});
+                try buffer.print(allocator, "s:{d}:\"", .{full_len});
                 try buffer.appendSlice(allocator, &[_]u8{0});
                 try buffer.appendSlice(allocator, class_name);
                 try buffer.appendSlice(allocator, &[_]u8{0});
@@ -16864,6 +19754,31 @@ fn unserializeValue(data: []const u8, pos: *usize, allocator: Allocator) !Value 
     pos.* += 1;
 
     switch (type_char) {
+        'E' => {
+            // E:<len>:"<ClassName>:<CaseName>";
+            pos.* += 1; // skip ':'
+            const colon1 = std.mem.indexOfScalarPos(u8, data, pos.*, ':') orelse data.len;
+            const len_str = data[pos.*..colon1];
+            pos.* = colon1 + 1; // skip ':'
+            const name_len = std.fmt.parseInt(usize, len_str, 10) catch 0;
+            pos.* += 1; // skip '"'
+            const combined = data[pos.* .. pos.* + name_len];
+            pos.* += name_len + 1; // skip combined and '"'
+            pos.* += 1; // skip ';'
+
+            // 分割 ClassName:CaseName
+            const sep = std.mem.indexOfScalar(u8, combined, ':') orelse return Value.initNull();
+            const class_name = combined[0..sep];
+            const case_name = combined[sep + 1 ..];
+
+            // 从类静态属性中查找 enum case
+            if (findClass(class_name)) |meta| {
+                if (meta.static_properties.get(case_name)) |case_val| {
+                    return case_val;
+                }
+            }
+            return Value.initNull();
+        },
         'N' => {
             pos.* += 1;
             return Value.initNull();
@@ -17103,6 +20018,14 @@ pub fn throwThrowable(class_name: []const u8, message: []const u8, allocator: Al
     return exception;
 }
 
+/// never 返回类型检查：never 函数不应正常返回，调用此函数即抛出 TypeError
+pub fn php_never_return(func_name_val: Value) !Value {
+    const func_name = if (func_name_val.isString()) func_name_val.asString().data else "unknown";
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s}(): never-returning function must not implicitly return", .{func_name}) catch "never-returning function must not implicitly return";
+    return throwThrowable("TypeError", msg, runtime_allocator);
+}
+
 /// 检查是否有异常
 ///
 /// @return 如果有异常返回true
@@ -17151,11 +20074,11 @@ pub fn php_getdate(ts_val: Value, allocator: Allocator) !Value {
     try arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "year")), Value.initInt(@intCast(@as(i32, year))));
     try arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "yday")), Value.initInt(yday));
     const weekday_names = [_][]const u8{ "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
-    const month_names   = [_][]const u8{ "", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
+    const month_names = [_][]const u8{ "", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
     const wday_idx = @as(usize, @intCast(@mod(wday, 7)));
-    const mon_idx  = @as(usize, @intCast(@min(@max(month, 1), 12)));
+    const mon_idx = @as(usize, @intCast(@min(@max(month, 1), 12)));
     try arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "weekday")), Value.initString(try PHPString.init(allocator, weekday_names[wday_idx])));
-    try arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "month")),   Value.initString(try PHPString.init(allocator, month_names[mon_idx])));
+    try arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "month")), Value.initString(try PHPString.init(allocator, month_names[mon_idx])));
     try arr.setByValue(allocator, Value.initInt(0), Value.initInt(timestamp));
     return Value.initArray(arr);
 }
@@ -17173,20 +20096,23 @@ pub fn php_idate(format_val: Value, ts_val: Value, allocator: Allocator) !Value 
     const month_day = year_day.calculateMonthDay();
     const hours: i64 = @intCast(day_seconds.getHoursIntoDay());
     const minutes: i64 = @intCast(day_seconds.getMinutesIntoHour());
-    const secs: i64   = @intCast(day_seconds.getSecondsIntoMinute());
-    const day: i64    = @intCast(month_day.day_index + 1);
-    const month: i64  = @intCast(@intFromEnum(month_day.month));
-    const year: i64   = @intCast(@as(i32, year_day.year));
+    const secs: i64 = @intCast(day_seconds.getSecondsIntoMinute());
+    const day: i64 = @intCast(month_day.day_index + 1);
+    const month: i64 = @intCast(@intFromEnum(month_day.month));
+    const year: i64 = @intCast(@as(i32, year_day.year));
     const days_since_epoch: i64 = @intCast(epoch_day.day);
-    const wday: i64   = @mod(days_since_epoch + 4, 7);
-    const yday: i64   = @intCast(year_day.day);
+    const wday: i64 = @mod(days_since_epoch + 4, 7);
+    const yday: i64 = @intCast(year_day.day);
     const result: i64 = switch (fmt[0]) {
         'Y' => year,
         'y' => @mod(year, 100),
         'n', 'm' => month,
         'j', 'd' => day,
         'H' => hours,
-        'h' => blk: { const h = @mod(hours, 12); break :blk if (h == 0) 12 else h; },
+        'h' => blk: {
+            const h = @mod(hours, 12);
+            break :blk if (h == 0) 12 else h;
+        },
         'i' => minutes,
         's' => secs,
         'w', 'l' => wday,
@@ -17289,6 +20215,10 @@ pub fn php_microtime(get_as_float: Value, allocator: Allocator) !Value {
     }
 }
 
+fn isLeapYearTop(year: i64) bool {
+    return (@rem(year, 4) == 0 and @rem(year, 100) != 0) or (@rem(year, 400) == 0);
+}
+
 fn formatPhpDateValue(timestamp: i64, format_str: []const u8, allocator: Allocator) !Value {
     const epoch_seconds: u64 = @intCast(@max(@as(i64, 0), timestamp));
     const epoch = std.time.epoch.EpochSeconds{ .secs = epoch_seconds };
@@ -17333,6 +20263,19 @@ fn formatPhpDateValue(timestamp: i64, format_str: []const u8, allocator: Allocat
             'D' => try aw2.writer.writeAll(weekday_short[wday]),
             'w' => try aw2.writer.print("{d}", .{wday}),
             'N' => try aw2.writer.print("{d}", .{if (wday == 0) @as(usize, 7) else wday}), // ISO: Mon=1..Sun=7
+            // ISO week number
+            'W' => {
+                const doy: i64 = @as(i64, @intCast(year_day.day)) + 1;
+                const iso_wday: i64 = if (wday == 0) 7 else @as(i64, @intCast(wday));
+                var week: i64 = @divFloor(doy - iso_wday + 10, 7);
+                if (week < 1) {
+                    week = if (isLeapYearTop(year - 1)) 53 else 52;
+                } else if (week > 52) {
+                    const days_in_year: i64 = if (isLeapYearTop(year)) 366 else 365;
+                    if (doy - iso_wday > days_in_year - 1) week = 1;
+                }
+                try aw2.writer.print("{d:0>2}", .{@as(u32, @intCast(week))});
+            },
             // Hour
             'H' => try aw2.writer.print("{d:0>2}", .{hour}),
             'G' => try aw2.writer.print("{d}", .{hour}),
@@ -17347,6 +20290,50 @@ fn formatPhpDateValue(timestamp: i64, format_str: []const u8, allocator: Allocat
             'U' => try aw2.writer.print("{d}", .{timestamp}),
             // Day of year (0-based in PHP)
             'z' => try aw2.writer.print("{d}", .{year_day.day}),
+            // ISO 8601 date: 2024-01-15T12:30:45+00:00
+            'c' => {
+                try aw2.writer.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}+00:00", .{
+                    @as(u32, @intCast(year)), month, day, hour, minute, second,
+                });
+            },
+            // RFC 2822 date: Mon, 15 Jan 2024 12:30:45 +0000
+            'r' => {
+                try aw2.writer.print("{s}, {d:0>2} {s} {d:0>4} {d:0>2}:{d:0>2}:{d:0>2} +0000", .{
+                    weekday_short[wday], day, month_short[month], @as(u32, @intCast(year)), hour, minute, second,
+                });
+            },
+            // Timezone offset with colon: +00:00
+            'P' => try aw2.writer.writeAll("+00:00"),
+            // Timezone offset without colon: +0000
+            'O' => try aw2.writer.writeAll("+0000"),
+            // Timezone abbreviation
+            'T' => try aw2.writer.writeAll("UTC"),
+            // Timezone offset in seconds
+            'Z' => try aw2.writer.writeAll("0"),
+            // English ordinal suffix for day
+            'S' => {
+                const suffix: []const u8 = switch (day) {
+                    1, 21, 31 => "st",
+                    2, 22 => "nd",
+                    3, 23 => "rd",
+                    else => "th",
+                };
+                try aw2.writer.writeAll(suffix);
+            },
+            // Number of days in the month
+            't' => {
+                const days_in_month: usize = switch (month) {
+                    1, 3, 5, 7, 8, 10, 12 => 31,
+                    4, 6, 9, 11 => 30,
+                    2 => if (isLeapYearTop(year)) 29 else 28,
+                    else => 30,
+                };
+                try aw2.writer.print("{d}", .{days_in_month});
+            },
+            // Leap year (1/0)
+            'L' => try aw2.writer.print("{d}", .{@as(usize, if (isLeapYearTop(year)) 1 else 0)}),
+            // ISO year (simplified: same as Y for UTC)
+            'o' => try aw2.writer.print("{d:0>4}", .{@as(u32, @intCast(year))}),
             // Escape
             '\\' => {
                 i += 1;
@@ -17482,7 +20469,7 @@ pub fn php_mt_rand(min: Value, max: Value) !Value {
     if (mt_state == null) {
         mt_state = MT19937.init(@intCast(@as(u64, @intCast(unixTimestamp())) & 0xFFFFFFFF));
     }
-    
+
     // mt_rand() - 无参数，返回0到MT_RAND_MAX
     // mt_rand(min, max) - 返回min到max之间的随机数
     if (min.isNull() and max.isNull()) {
@@ -17511,6 +20498,11 @@ pub fn php_mt_srand(seed: Value) !Value {
     return php_srand(seed);
 }
 
+/// mt_getrandmax - 返回 mt_rand() 的最大值
+pub fn php_mt_getrandmax() !Value {
+    return Value.initInt(2147483647);
+}
+
 /// random_int - 生成密码学安全的随机整数
 ///
 /// @param min 最小值
@@ -17525,7 +20517,7 @@ pub fn php_random_int(min: Value, max: Value) !Value {
     }
 
     // 使用密码学安全的随机数生成器
-    const random_val = std.crypto.random.intRangeAtMost(i64, min_val, max_val);
+    const random_val = getRandomIntRange(i64, min_val, max_val);
     return Value.initInt(random_val);
 }
 
@@ -17546,7 +20538,7 @@ pub fn php_random_bytes(length: Value, allocator: Allocator) !Value {
     errdefer allocator.free(buffer);
 
     // 填充密码学安全的随机字节
-    std.crypto.random.bytes(buffer);
+    getRandomBytes(buffer);
 
     const result = try PHPString.init(allocator, buffer);
     allocator.free(buffer);
@@ -17576,17 +20568,17 @@ pub fn php_array_unshift(arr: Value, values: []const Value, allocator: Allocator
 }
 
 /// array_search - 在数组中搜索值并返回键
-pub fn php_array_search(needle: Value, haystack: Value) !Value {
+pub fn php_array_search(needle: Value, haystack: Value, strict: Value) !Value {
     if (!haystack.isArray()) return Value.initBool(false);
 
     const arr = haystack.asArray();
     var it = arr.elements.iterator();
+    const is_strict = strict.asBool();
 
     while (it.next()) |entry| {
         const val = entry.value_ptr.*;
-        // 使用松散比较
-        const eq_result = try php_eq(needle, val);
-        if (eq_result.asBool()) {
+        const found = if (is_strict) (try php_identical(needle, val)).asBool() else (try php_eq(needle, val)).asBool();
+        if (found) {
             // 返回键
             return switch (entry.key_ptr.*) {
                 .integer => |k| Value.initInt(k),
@@ -17699,28 +20691,43 @@ pub fn php_array_product(arr: Value) !Value {
 }
 
 /// array_reverse - 反转数组
-pub fn php_array_reverse(arr: Value, allocator: Allocator) !Value {
+pub fn php_array_reverse(arr: Value, preserve_keys_val: Value, allocator: Allocator) !Value {
     if (!arr.isArray()) return Value.initArray(try PHPArray.init(allocator));
 
     const php_arr = arr.asArray();
     const result = try PHPArray.init(allocator);
+    const preserve_keys = preserve_keys_val.asBool();
 
-    // 收集所有元素
-    var values = try allocator.alloc(Value, php_arr.count());
-    defer allocator.free(values);
-
-    var idx: usize = 0;
-    var it = php_arr.elements.iterator();
-    while (it.next()) |entry| {
-        values[idx] = entry.value_ptr.*;
-        idx += 1;
-    }
-
-    // 反向添加
-    var i: usize = values.len;
-    while (i > 0) {
-        i -= 1;
-        try result.push(allocator, values[i]);
+    if (preserve_keys) {
+        // 保留原始键名
+        var entries = std.ArrayListUnmanaged(struct { key: ArrayKey, val: Value }){ .items = &.{}, .capacity = 0 };
+        defer entries.deinit(allocator);
+        var it = php_arr.elements.iterator();
+        while (it.next()) |entry| {
+            try entries.append(allocator, .{ .key = entry.key_ptr.*, .val = entry.value_ptr.* });
+        }
+        var i: usize = entries.items.len;
+        while (i > 0) {
+            i -= 1;
+            try result.set(allocator, entries.items[i].key, entries.items[i].val);
+        }
+    } else {
+        // 默认行为：数字键重新索引，字符串键保留
+        var entries = std.ArrayListUnmanaged(struct { key: ArrayKey, val: Value }){ .items = &.{}, .capacity = 0 };
+        defer entries.deinit(allocator);
+        var it = php_arr.elements.iterator();
+        while (it.next()) |entry| {
+            try entries.append(allocator, .{ .key = entry.key_ptr.*, .val = entry.value_ptr.* });
+        }
+        var i: usize = entries.items.len;
+        while (i > 0) {
+            i -= 1;
+            const k = entries.items[i].key;
+            switch (k) {
+                .integer => try result.push(allocator, entries.items[i].val),
+                else => try result.set(allocator, k, entries.items[i].val),
+            }
+        }
     }
 
     return Value.initArray(result);
@@ -17847,27 +20854,63 @@ pub fn php_array_fill(start_index: Value, num: Value, value: Value, allocator: A
 
     var i: i64 = 0;
     while (i < count) : (i += 1) {
-        try result.set(allocator, .{ .integer = start + i }, value);
+        // PHP 值语义：array_fill 对数组类型应深拷贝每个元素
+        if (value.isArray() and !value.isRef()) {
+            const cloned = try value.asArray().cloneDeep(allocator);
+            try result.set(allocator, .{ .integer = start + i }, Value.initArray(cloned));
+        } else {
+            try result.set(allocator, .{ .integer = start + i }, value);
+        }
     }
 
     return Value.initArray(result);
 }
 
 /// range - 创建包含指定范围元素的数组
-pub fn php_range(start: Value, end: Value, allocator: Allocator) !Value {
+pub fn php_range(start: Value, end: Value, step_val: Value, allocator: Allocator) !Value {
     const result = try PHPArray.init(allocator);
+
+    // 字符串范围：单个字符
+    if (start.isString() and end.isString()) {
+        const ss = start.asString().data;
+        const es = end.asString().data;
+        if (ss.len == 1 and es.len == 1) {
+            const step: i64 = if (step_val.isInt()) blk: {
+                const s = step_val.toInt();
+                break :blk if (s > 0) s else 1;
+            } else 1;
+            const sc = ss[0];
+            const ec = es[0];
+            if (sc <= ec) {
+                var c = sc;
+                while (c <= ec) : (c += @intCast(step)) {
+                    try result.push(allocator, Value.initString(try PHPString.init(allocator, &[_]u8{c})));
+                }
+            } else {
+                var c = sc;
+                while (c >= ec) : (c -= @intCast(step)) {
+                    try result.push(allocator, Value.initString(try PHPString.init(allocator, &[_]u8{c})));
+                }
+            }
+            return Value.initArray(result);
+        }
+    }
 
     const start_val = start.toInt();
     const end_val = end.toInt();
+    const step: i64 = if (step_val.isInt()) blk: {
+        const s = step_val.toInt();
+        break :blk if (s > 0) s else 1;
+    } else 1;
 
     if (start_val <= end_val) {
         var i = start_val;
-        while (i <= end_val) : (i += 1) {
+        while (i <= end_val) : (i += step) {
             try result.push(allocator, Value.initInt(i));
         }
     } else {
         var i = start_val;
-        while (i >= end_val) : (i -= 1) {
+        while (i >= end_val) : (i -= step) {
             try result.push(allocator, Value.initInt(i));
         }
     }
@@ -17971,7 +21014,7 @@ fn quickSortValues(values: []Value, allocator: Allocator, descending: bool) !voi
     if (i < values.len) try quickSortValues(values[i..], allocator, descending);
 }
 
-const KV = struct { key: ArrayKey, value: Value };
+const KV = struct { key: ArrayKey, value: Value, orig_idx: usize = 0 };
 
 fn collectEntries(arr: *PHPArray, allocator: Allocator) ![]KV {
     const n = arr.count();
@@ -17979,7 +21022,7 @@ fn collectEntries(arr: *PHPArray, allocator: Allocator) ![]KV {
     var it = arr.elements.iterator();
     var idx: usize = 0;
     while (it.next()) |entry| : (idx += 1) {
-        items[idx] = .{ .key = entry.key_ptr.*, .value = entry.value_ptr.* };
+        items[idx] = .{ .key = entry.key_ptr.*, .value = entry.value_ptr.*, .orig_idx = idx };
     }
     return items;
 }
@@ -17988,13 +21031,18 @@ fn quickSortEntriesByValue(items: []KV, allocator: Allocator, descending: bool) 
     if (items.len < 2) return;
 
     const pivot = items[items.len / 2].value;
+    const pivot_idx = items[items.len / 2].orig_idx;
     var i: usize = 0;
     var j: usize = items.len - 1;
 
     while (i <= j) {
         while (true) {
             const cmp = try valueCompare(items[i].value, pivot, allocator);
-            if ((!descending and cmp < 0) or (descending and cmp > 0)) {
+            // 稳定排序：值相等时用 orig_idx 做 tiebreaker（低索引在前）
+            const effective_cmp = if (cmp == 0)
+                (@as(i32, @intCast(items[i].orig_idx)) - @as(i32, @intCast(pivot_idx)))
+            else if (descending) -cmp else cmp;
+            if (effective_cmp < 0) {
                 i += 1;
                 if (i >= items.len) break;
                 continue;
@@ -18003,7 +21051,10 @@ fn quickSortEntriesByValue(items: []KV, allocator: Allocator, descending: bool) 
         }
         while (true) {
             const cmp = try valueCompare(items[j].value, pivot, allocator);
-            if ((!descending and cmp > 0) or (descending and cmp < 0)) {
+            const effective_cmp = if (cmp == 0)
+                (@as(i32, @intCast(items[j].orig_idx)) - @as(i32, @intCast(pivot_idx)))
+            else if (descending) -cmp else cmp;
+            if (effective_cmp > 0) {
                 if (j == 0) break;
                 j -= 1;
                 continue;
@@ -18213,19 +21264,49 @@ pub fn php_array_diff_key(arrays: []const Value, allocator: Allocator) !Value {
         const key = entry.key_ptr.*;
         const v = entry.value_ptr.*;
         var keep = true;
-        
+
         // 检查这个键是否在其他数组中存在
         for (arrays[1..]) |other_val| {
             if (!other_val.isArray()) continue;
             const other_arr = other_val.asArray();
-            
+
             // 如果其他数组中存在相同的键，则不保留
             if (other_arr.elements.get(key)) |_| {
                 keep = false;
                 break;
             }
         }
-        
+
+        if (keep) {
+            try result.set(allocator, key, v);
+        }
+    }
+
+    return Value.initArray(result);
+}
+
+pub fn php_array_intersect_key(arrays: []const Value, allocator: Allocator) !Value {
+    if (arrays.len == 0 or !arrays[0].isArray()) return Value.initArray(try PHPArray.init(allocator));
+
+    const first = arrays[0].asArray();
+    const result = try PHPArray.init(allocator);
+    errdefer result.release(allocator);
+
+    var it = first.elements.iterator();
+    while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        const v = entry.value_ptr.*;
+        var keep = true;
+        for (arrays[1..]) |other_val| {
+            if (!other_val.isArray()) {
+                keep = false;
+                break;
+            }
+            if (other_val.asArray().elements.get(key) == null) {
+                keep = false;
+                break;
+            }
+        }
         if (keep) {
             try result.set(allocator, key, v);
         }
@@ -18333,11 +21414,15 @@ pub fn php_sort(arr: Value, allocator: Allocator) !Value {
         emitTypeFatalError("sort", 1, "array", got);
     }
     const php_arr = arr.asArray();
-    const n = php_arr.count();
+
+    // 原地排序：直接修改 PHPArray，所有引用均可见排序结果
+    const sort_arr = php_arr;
+
+    const n = sort_arr.count();
     var values = try allocator.alloc(Value, n);
     defer allocator.free(values);
 
-    var it = php_arr.elements.iterator();
+    var it = sort_arr.elements.iterator();
     var idx: usize = 0;
     while (it.next()) |entry| : (idx += 1) values[idx] = entry.value_ptr.*;
     try quickSortValues(values, allocator, false);
@@ -18348,20 +21433,24 @@ pub fn php_sort(arr: Value, allocator: Allocator) !Value {
         try new_elements.put(allocator, .{ .integer = @intCast(i) }, values[i]);
     }
 
-    php_arr.elements.deinit();
-    php_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
-    php_arr.next_index = @intCast(values.len);
-    return Value.initBool(true);
+    sort_arr.elements.deinit();
+    sort_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
+    sort_arr.next_index = @intCast(values.len);
+    return Value.initArray(sort_arr);
 }
 
 pub fn php_rsort(arr: Value, allocator: Allocator) !Value {
     if (!arr.isArray()) return Value.initBool(false);
     const php_arr = arr.asArray();
-    const n = php_arr.count();
+
+    // 原地排序：直接修改 PHPArray，所有引用均可见排序结果
+    const sort_arr = php_arr;
+
+    const n = sort_arr.count();
     var values = try allocator.alloc(Value, n);
     defer allocator.free(values);
 
-    var it = php_arr.elements.iterator();
+    var it = sort_arr.elements.iterator();
     var idx: usize = 0;
     while (it.next()) |entry| : (idx += 1) values[idx] = entry.value_ptr.*;
     try quickSortValues(values, allocator, true);
@@ -18372,16 +21461,20 @@ pub fn php_rsort(arr: Value, allocator: Allocator) !Value {
         try new_elements.put(allocator, .{ .integer = @intCast(i) }, values[i]);
     }
 
-    php_arr.elements.deinit();
-    php_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
-    php_arr.next_index = @intCast(values.len);
-    return Value.initBool(true);
+    sort_arr.elements.deinit();
+    sort_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
+    sort_arr.next_index = @intCast(values.len);
+    return Value.initArray(sort_arr);
 }
 
 pub fn php_asort(arr: Value, allocator: Allocator) !Value {
     if (!arr.isArray()) return Value.initBool(false);
     const php_arr = arr.asArray();
-    const items = try collectEntries(php_arr, allocator);
+
+    // 原地排序：直接修改 PHPArray，所有引用均可见排序结果
+    const sort_arr = php_arr;
+
+    const items = try collectEntries(sort_arr, allocator);
     defer allocator.free(items);
     try quickSortEntriesByValue(items, allocator, false);
 
@@ -18389,15 +21482,19 @@ pub fn php_asort(arr: Value, allocator: Allocator) !Value {
     for (items) |kv| {
         try new_elements.put(allocator, kv.key, kv.value);
     }
-    php_arr.elements.deinit();
-    php_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
-    return Value.initBool(true);
+    sort_arr.elements.deinit();
+    sort_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
+    return Value.initArray(sort_arr);
 }
 
 pub fn php_arsort(arr: Value, allocator: Allocator) !Value {
     if (!arr.isArray()) return Value.initBool(false);
     const php_arr = arr.asArray();
-    const items = try collectEntries(php_arr, allocator);
+
+    // 原地排序：直接修改 PHPArray，所有引用均可见排序结果
+    const sort_arr = php_arr;
+
+    const items = try collectEntries(sort_arr, allocator);
     defer allocator.free(items);
     try quickSortEntriesByValue(items, allocator, true);
 
@@ -18405,15 +21502,19 @@ pub fn php_arsort(arr: Value, allocator: Allocator) !Value {
     for (items) |kv| {
         try new_elements.put(allocator, kv.key, kv.value);
     }
-    php_arr.elements.deinit();
-    php_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
-    return Value.initBool(true);
+    sort_arr.elements.deinit();
+    sort_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
+    return Value.initArray(sort_arr);
 }
 
 pub fn php_ksort(arr: Value, allocator: Allocator) !Value {
     if (!arr.isArray()) return Value.initBool(false);
     const php_arr = arr.asArray();
-    const items = try collectEntries(php_arr, allocator);
+
+    // 原地排序：直接修改 PHPArray，所有引用均可见排序结果
+    const sort_arr = php_arr;
+
+    const items = try collectEntries(sort_arr, allocator);
     defer allocator.free(items);
     quickSortEntriesByKey(items, false);
 
@@ -18421,15 +21522,19 @@ pub fn php_ksort(arr: Value, allocator: Allocator) !Value {
     for (items) |kv| {
         try new_elements.put(allocator, kv.key, kv.value);
     }
-    php_arr.elements.deinit();
-    php_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
-    return Value.initBool(true);
+    sort_arr.elements.deinit();
+    sort_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
+    return Value.initArray(sort_arr);
 }
 
 pub fn php_krsort(arr: Value, allocator: Allocator) !Value {
     if (!arr.isArray()) return Value.initBool(false);
     const php_arr = arr.asArray();
-    const items = try collectEntries(php_arr, allocator);
+
+    // 原地排序：直接修改 PHPArray，所有引用均可见排序结果
+    const sort_arr = php_arr;
+
+    const items = try collectEntries(sort_arr, allocator);
     defer allocator.free(items);
     quickSortEntriesByKey(items, true);
 
@@ -18437,9 +21542,9 @@ pub fn php_krsort(arr: Value, allocator: Allocator) !Value {
     for (items) |kv| {
         try new_elements.put(allocator, kv.key, kv.value);
     }
-    php_arr.elements.deinit();
-    php_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
-    return Value.initBool(true);
+    sort_arr.elements.deinit();
+    sort_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
+    return Value.initArray(sort_arr);
 }
 
 fn invokeUserCompare(callback: Value, a: Value, b: Value, allocator: Allocator) !i64 {
@@ -18561,11 +21666,15 @@ fn quickSortEntriesByKeyWithCallback(items: []KV, callback: Value, allocator: Al
 pub fn php_usort(arr: Value, callback: Value, allocator: Allocator) !Value {
     if (!arr.isArray()) return Value.initBool(false);
     const php_arr = arr.asArray();
-    const n = php_arr.count();
+
+    // 原地排序：直接修改 PHPArray，所有引用（对象属性/alloca/全局变量）均可见排序结果
+    const sort_arr = php_arr;
+
+    const n = sort_arr.count();
     var values = try allocator.alloc(Value, n);
     defer allocator.free(values);
 
-    var it = php_arr.elements.iterator();
+    var it = sort_arr.elements.iterator();
     var idx: usize = 0;
     while (it.next()) |entry| : (idx += 1) values[idx] = entry.value_ptr.*;
 
@@ -18577,16 +21686,20 @@ pub fn php_usort(arr: Value, callback: Value, allocator: Allocator) !Value {
         try new_elements.put(allocator, .{ .integer = @intCast(i) }, values[i]);
     }
 
-    php_arr.elements.deinit();
-    php_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
-    php_arr.next_index = @intCast(values.len);
-    return Value.initBool(true);
+    sort_arr.elements.deinit();
+    sort_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
+    sort_arr.next_index = @intCast(values.len);
+    return Value.initArray(sort_arr);
 }
 
 pub fn php_uasort(arr: Value, callback: Value, allocator: Allocator) !Value {
     if (!arr.isArray()) return Value.initBool(false);
     const php_arr = arr.asArray();
-    const items = try collectEntries(php_arr, allocator);
+
+    // 原地排序：直接修改 PHPArray，所有引用均可见排序结果
+    const sort_arr = php_arr;
+
+    const items = try collectEntries(sort_arr, allocator);
     defer allocator.free(items);
 
     try quickSortEntriesByValueWithCallback(items, callback, allocator, false);
@@ -18595,15 +21708,19 @@ pub fn php_uasort(arr: Value, callback: Value, allocator: Allocator) !Value {
     for (items) |kv| {
         try new_elements.put(allocator, kv.key, kv.value);
     }
-    php_arr.elements.deinit();
-    php_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
-    return Value.initBool(true);
+    sort_arr.elements.deinit();
+    sort_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
+    return Value.initArray(sort_arr);
 }
 
 pub fn php_uksort(arr: Value, callback: Value, allocator: Allocator) !Value {
     if (!arr.isArray()) return Value.initBool(false);
     const php_arr = arr.asArray();
-    const items = try collectEntries(php_arr, allocator);
+
+    // 原地排序：直接修改 PHPArray，所有引用均可见排序结果
+    const sort_arr = php_arr;
+
+    const items = try collectEntries(sort_arr, allocator);
     defer allocator.free(items);
 
     try quickSortEntriesByKeyWithCallback(items, callback, allocator, false);
@@ -18612,9 +21729,9 @@ pub fn php_uksort(arr: Value, callback: Value, allocator: Allocator) !Value {
     for (items) |kv| {
         try new_elements.put(allocator, kv.key, kv.value);
     }
-    php_arr.elements.deinit();
-    php_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
-    return Value.initBool(true);
+    sort_arr.elements.deinit();
+    sort_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
+    return Value.initArray(sort_arr);
 }
 
 fn quickSortIndicesByValues(indices: []usize, values: []Value, allocator: Allocator, descending: bool) !void {
@@ -18668,7 +21785,10 @@ pub fn php_array_multisort(arrays: []const Value, allocator: Allocator) !Value {
     var descending = false;
     // 检查SORT_DESC(2)
     for (arrays[1..]) |arg| {
-        if (arg.isInt() and arg.asInt() == 2) { descending = true; break; }
+        if (arg.isInt() and arg.asInt() == 2) {
+            descending = true;
+            break;
+        }
     }
 
     var first_vals = try allocator.alloc(Value, n);
@@ -18854,7 +21974,7 @@ pub fn php_count_chars(str: Value, mode: Value, allocator: Allocator) !Value {
     }
 
     const bytes = str.asString().data;
-    var counts = [_]usize{0}**256;
+    var counts = [_]usize{0} ** 256;
     for (bytes) |b| {
         counts[b] += 1;
     }
@@ -18905,17 +22025,17 @@ pub fn php_urlencode(input: Value, allocator: Allocator) !Value {
     }
     const data = input.asString().data;
     var result = try std.ArrayList(u8).initCapacity(allocator, data.len);
-    defer result.deinit();
+    defer result.deinit(allocator);
     const hex = "0123456789ABCDEF";
     for (data) |c| {
         if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.') {
-            try result.append(c);
+            try result.append(allocator, c);
         } else if (c == ' ') {
-            try result.append('+');
+            try result.append(allocator, '+');
         } else {
-            try result.append('%');
-            try result.append(hex[c >> 4]);
-            try result.append(hex[c & 0x0F]);
+            try result.append(allocator, '%');
+            try result.append(allocator, hex[c >> 4]);
+            try result.append(allocator, hex[c & 0x0F]);
         }
     }
     const str = try PHPString.init(allocator, result.items);
@@ -18927,27 +22047,27 @@ pub fn php_urldecode(input: Value, allocator: Allocator) !Value {
     if (!input.isString()) return Value.initString(try PHPString.init(allocator, ""));
     const data = input.asString().data;
     var result = try std.ArrayList(u8).initCapacity(allocator, data.len);
-    defer result.deinit();
+    defer result.deinit(allocator);
     var i: usize = 0;
     while (i < data.len) {
         if (data[i] == '+') {
-            try result.append(' ');
+            try result.append(allocator, ' ');
             i += 1;
         } else if (data[i] == '%' and i + 2 < data.len) {
             const hi = std.fmt.charToDigit(data[i + 1], 16) catch {
-                try result.append('%');
+                try result.append(allocator, '%');
                 i += 1;
                 continue;
             };
             const lo = std.fmt.charToDigit(data[i + 2], 16) catch {
-                try result.append('%');
+                try result.append(allocator, '%');
                 i += 1;
                 continue;
             };
-            try result.append((hi << 4) | lo);
+            try result.append(allocator, (hi << 4) | lo);
             i += 3;
         } else {
-            try result.append(data[i]);
+            try result.append(allocator, data[i]);
             i += 1;
         }
     }
@@ -18964,15 +22084,15 @@ pub fn php_rawurlencode(input: Value, allocator: Allocator) !Value {
     }
     const data = input.asString().data;
     var result = try std.ArrayList(u8).initCapacity(allocator, data.len);
-    defer result.deinit();
+    defer result.deinit(allocator);
     const hex = "0123456789ABCDEF";
     for (data) |c| {
         if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~') {
-            try result.append(c);
+            try result.append(allocator, c);
         } else {
-            try result.append('%');
-            try result.append(hex[c >> 4]);
-            try result.append(hex[c & 0x0F]);
+            try result.append(allocator, '%');
+            try result.append(allocator, hex[c >> 4]);
+            try result.append(allocator, hex[c & 0x0F]);
         }
     }
     const str = try PHPString.init(allocator, result.items);
@@ -18984,24 +22104,24 @@ pub fn php_rawurldecode(input: Value, allocator: Allocator) !Value {
     if (!input.isString()) return Value.initString(try PHPString.init(allocator, ""));
     const data = input.asString().data;
     var result = try std.ArrayList(u8).initCapacity(allocator, data.len);
-    defer result.deinit();
+    defer result.deinit(allocator);
     var i: usize = 0;
     while (i < data.len) {
         if (data[i] == '%' and i + 2 < data.len) {
             const hi = std.fmt.charToDigit(data[i + 1], 16) catch {
-                try result.append('%');
+                try result.append(allocator, '%');
                 i += 1;
                 continue;
             };
             const lo = std.fmt.charToDigit(data[i + 2], 16) catch {
-                try result.append('%');
+                try result.append(allocator, '%');
                 i += 1;
                 continue;
             };
-            try result.append((hi << 4) | lo);
+            try result.append(allocator, (hi << 4) | lo);
             i += 3;
         } else {
-            try result.append(data[i]);
+            try result.append(allocator, data[i]);
             i += 1;
         }
     }
@@ -19112,7 +22232,7 @@ pub fn php_parse_url(url: Value, allocator: Allocator) !Value {
     if (std.mem.indexOf(u8, rest, "://")) |scheme_end| {
         const scheme = rest[0..scheme_end];
         try arr.set(allocator, .{ .string = try PHPString.init(allocator, "scheme") }, Value.initString(try PHPString.init(allocator, scheme)));
-        rest = rest[scheme_end + 3..];
+        rest = rest[scheme_end + 3 ..];
     }
 
     // 解析host和port
@@ -19122,7 +22242,7 @@ pub fn php_parse_url(url: Value, allocator: Allocator) !Value {
 
         if (std.mem.indexOf(u8, host_port, ":")) |port_pos| {
             const host = host_port[0..port_pos];
-            const port = host_port[port_pos + 1..];
+            const port = host_port[port_pos + 1 ..];
             try arr.set(allocator, .{ .string = try PHPString.init(allocator, "host") }, Value.initString(try PHPString.init(allocator, host)));
             try arr.set(allocator, .{ .string = try PHPString.init(allocator, "port") }, Value.initInt(std.fmt.parseInt(i64, port, 10) catch 0));
         } else {
@@ -19134,12 +22254,12 @@ pub fn php_parse_url(url: Value, allocator: Allocator) !Value {
     if (std.mem.indexOf(u8, rest, "?")) |path_end| {
         const path = rest[0..path_end];
         try arr.set(allocator, .{ .string = try PHPString.init(allocator, "path") }, Value.initString(try PHPString.init(allocator, path)));
-        rest = rest[path_end + 1..];
+        rest = rest[path_end + 1 ..];
 
         // 解析query
         if (std.mem.indexOf(u8, rest, "#")) |query_end| {
             const query = rest[0..query_end];
-            const fragment = rest[query_end + 1..];
+            const fragment = rest[query_end + 1 ..];
             try arr.set(allocator, .{ .string = try PHPString.init(allocator, "query") }, Value.initString(try PHPString.init(allocator, query)));
             try arr.set(allocator, .{ .string = try PHPString.init(allocator, "fragment") }, Value.initString(try PHPString.init(allocator, fragment)));
         } else {
@@ -19407,11 +22527,12 @@ pub fn php_number_format(number: Value, decimals: Value, dec_point: Value, thous
     const num = number.toFloat();
     const dec: usize = @intCast(@max(0, decimals.toInt()));
     const dp: u8 = if (dec_point.isString() and dec_point.asString().data.len > 0)
-        dec_point.asString().data[0] else '.';
+        dec_point.asString().data[0]
+    else
+        '.';
     const ts: u8 = if (thousands_sep.isString() and thousands_sep.asString().data.len > 0)
         thousands_sep.asString().data[0]
-        else if (thousands_sep.isNull()) ','
-        else ',';
+    else if (thousands_sep.isNull()) ',' else ',';
 
     var pow10: u64 = 1;
     for (0..dec) |_| pow10 *= 10;
@@ -19569,6 +22690,8 @@ pub fn php_gettype(val: Value, allocator: Allocator) !Value {
         "array"
     else if (Value_isObject(val))
         "object"
+    else if (val.isResource())
+        "resource"
     else
         "unknown type";
 
@@ -19583,18 +22706,18 @@ pub fn php_settype(var_ref: Value, type_val: Value, allocator: Allocator) !Value
     if (!type_val.isString()) {
         return Value.initBool(false);
     }
-    
+
     // 检查第一个参数是否是引用
     if (!var_ref.isRef()) {
         return Value.initBool(false);
     }
-    
+
     const ptr = var_ref.asRef();
     const type_name = type_val.asString().data;
-    
+
     // 保存原始值用于转换
     const old_val = ptr.*;
-    
+
     // 根据类型名进行转换
     const new_val = if (std.mem.eql(u8, type_name, "bool") or std.mem.eql(u8, type_name, "boolean"))
         Value.initBool(old_val.toBool())
@@ -19602,12 +22725,10 @@ pub fn php_settype(var_ref: Value, type_val: Value, allocator: Allocator) !Value
         Value.initInt(old_val.toInt())
     else if (std.mem.eql(u8, type_name, "float") or std.mem.eql(u8, type_name, "double"))
         Value.initFloat(old_val.toFloat())
-    else if (std.mem.eql(u8, type_name, "string"))
-        blk: {
-            const str = try old_val.toString(allocator);
-            break :blk Value.initString(str);
-        }
-    else if (std.mem.eql(u8, type_name, "array"))
+    else if (std.mem.eql(u8, type_name, "string")) blk: {
+        const str = try old_val.toString(allocator);
+        break :blk Value.initString(str);
+    } else if (std.mem.eql(u8, type_name, "array"))
         try php_cast_array(old_val)
     else if (std.mem.eql(u8, type_name, "object"))
         try php_cast_object(old_val)
@@ -19616,12 +22737,12 @@ pub fn php_settype(var_ref: Value, type_val: Value, allocator: Allocator) !Value
     else
         // 未知类型，返回 false 但不修改变量
         return Value.initBool(false);
-    
+
     // 释放旧值，设置新值
     ptr.release(allocator);
     _ = new_val.retain();
     ptr.* = new_val;
-    
+
     // 返回 true 表示成功
     return Value.initBool(true);
 }
@@ -19651,9 +22772,9 @@ pub fn php_mkdir(dirname: Value, permissions: Value, recursive: Value) !Value {
     const path = dirname.asString().data;
     const mode = if (permissions.isInt()) @as(u32, @intCast(permissions.asInt() & 0o777)) else 0o777;
     const is_recursive = if (recursive.isBool()) recursive.asBool() else false;
-    
+
     _ = mode; // 权限在不同平台上处理不同，暂时忽略
-    
+
     if (is_recursive) {
         // 递归创建目录（逐级创建）
         var start: usize = 0;
@@ -19721,22 +22842,41 @@ pub fn php_copy(source: Value, dest: Value) !Value {
 }
 
 /// basename - 返回路径中的文件名部分
-pub fn php_basename(path: Value, allocator: Allocator) !Value {
+pub fn php_basename(path: Value, suffix: Value, allocator: Allocator) !Value {
     if (!path.isString()) return Value.initString(try PHPString.init(allocator, ""));
 
     const path_str = path.asString().data;
     const base = std.fs.path.basename(path_str);
-    const result = try PHPString.init(allocator, base);
-    return Value.initString(result);
+    // PHP basename 支持可选 suffix 参数：如果文件名以 suffix 结尾则去除
+    if (suffix.isString()) {
+        const suf = suffix.asString().data;
+        if (suf.len > 0 and base.len > suf.len and std.mem.endsWith(u8, base, suf)) {
+            return Value.initString(try PHPString.init(allocator, base[0 .. base.len - suf.len]));
+        }
+    }
+    return Value.initString(try PHPString.init(allocator, base));
 }
 
-/// dirname - 返回路径中的目录部分
-pub fn php_dirname(path: Value, allocator: Allocator) !Value {
+/// dirname - 返回路径中的目录部分，支持 levels 参数
+pub fn php_dirname(path: Value, levels: Value, allocator: Allocator) !Value {
     if (!path.isString()) return Value.initString(try PHPString.init(allocator, ""));
 
-    const path_str = path.asString().data;
-    const dir = std.fs.path.dirname(path_str) orelse ".";
-    const result = try PHPString.init(allocator, dir);
+    var path_str: []const u8 = path.asString().data;
+    var lvl: u32 = 1;
+    if (levels.isInt()) {
+        const v = levels.asInt();
+        if (v > 1) lvl = @intCast(v);
+    }
+    var i: u32 = 0;
+    while (i < lvl) : (i += 1) {
+        if (std.fs.path.dirname(path_str)) |dir| {
+            path_str = dir;
+        } else {
+            path_str = ".";
+            break;
+        }
+    }
+    const result = try PHPString.init(allocator, path_str);
     return Value.initString(result);
 }
 
@@ -19763,8 +22903,8 @@ pub fn php_extension_loaded(name: Value) Value {
     const ext = name.asString().data;
     // AOT 模式下模拟核心扩展已加载
     const core_exts = [_][]const u8{
-        "Core", "core", "standard", "date", "pcre", "json",
-        "ctype", "mbstring", "tokenizer", "SPL", "spl",
+        "Core",  "core",     "standard",  "date", "pcre", "json",
+        "ctype", "mbstring", "tokenizer", "SPL",  "spl",
     };
     for (core_exts) |e| {
         if (std.mem.eql(u8, ext, e)) return Value.initBool(true);
@@ -19932,13 +23072,20 @@ fn ensureObInit() void {
 
 /// mysqli_connect stub — AOT不支持数据库，仅供function_exists识别
 pub fn php_mysqli_connect(host: Value, user: Value, password: Value, db: Value, port: Value, socket: Value, allocator: Allocator) !Value {
-    _ = host; _ = user; _ = password; _ = db; _ = port; _ = socket; _ = allocator;
+    _ = host;
+    _ = user;
+    _ = password;
+    _ = db;
+    _ = port;
+    _ = socket;
+    _ = allocator;
     return Value.initBool(false);
 }
 
 /// token_get_all stub — AOT不支持PHP tokenizer，仅供function_exists识别
 pub fn php_token_get_all(source: Value, flags: Value, allocator: Allocator) !Value {
-    _ = source; _ = flags;
+    _ = source;
+    _ = flags;
     return Value.initArray(try PHPArray.init(allocator));
 }
 
@@ -20082,23 +23229,26 @@ pub fn php_get_resource_id(val: Value) !Value {
 pub fn php_json_encode(value: Value, flags: Value, depth: Value, allocator: Allocator) !Value {
     // 解析flags（可选，默认0）
     const flags_int = if (flags.isInt()) flags.asInt() else 0;
-    
+
     // 解析depth（可选，默认512）
     const depth_int = if (depth.isInt()) depth.asInt() else 512;
-    
-    _ = flags_int; // TODO: 实现flags支持（JSON_PRETTY_PRINT等）
-    _ = depth_int; // TODO: 实现depth检查
-    
+    _ = depth_int;
+
     var buffer = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
     defer buffer.deinit(allocator);
 
-    try jsonEncodeValue(value, &buffer, allocator);
+    const pretty = (flags_int & 128) != 0; // JSON_PRETTY_PRINT
+    if (pretty) {
+        try jsonEncodeValuePretty(value, &buffer, allocator, flags_int, 0);
+    } else {
+        try jsonEncodeValue(value, &buffer, allocator, flags_int);
+    }
 
     const result = try PHPString.init(allocator, buffer.items);
     return Value.initString(result);
 }
 
-fn jsonEncodeValue(value: Value, buffer: *std.ArrayListUnmanaged(u8), allocator: Allocator) !void {
+fn jsonEncodeValue(value: Value, buffer: *std.ArrayListUnmanaged(u8), allocator: Allocator, flags: i64) !void {
     if (value.isNull()) {
         try buffer.appendSlice(allocator, "null");
     } else if (value.isBool()) {
@@ -20114,15 +23264,98 @@ fn jsonEncodeValue(value: Value, buffer: *std.ArrayListUnmanaged(u8), allocator:
     } else if (value.isString()) {
         const str = value.asString();
         try buffer.append(allocator, '"');
-        for (str.data) |c| {
+        const unescape_unicode = (flags & 256) != 0; // JSON_UNESCAPED_UNICODE
+        const unescape_slashes = (flags & 64) != 0; // JSON_UNESCAPED_SLASHES
+        var i: usize = 0;
+        while (i < str.data.len) {
+            const c = str.data[i];
             switch (c) {
-                '"' => try buffer.appendSlice(allocator, "\\\""),
+                '"' => {
+                    if ((flags & 8) != 0) { // JSON_HEX_QUOT
+                        try buffer.appendSlice(allocator, "\\u0022");
+                    } else {
+                        try buffer.appendSlice(allocator, "\\\"");
+                    }
+                },
                 '\\' => try buffer.appendSlice(allocator, "\\\\"),
                 '\n' => try buffer.appendSlice(allocator, "\\n"),
                 '\r' => try buffer.appendSlice(allocator, "\\r"),
                 '\t' => try buffer.appendSlice(allocator, "\\t"),
-                else => try buffer.append(allocator, c),
+                '/' => {
+                    if (unescape_slashes) {
+                        try buffer.append(allocator, '/');
+                    } else {
+                        try buffer.appendSlice(allocator, "\\/");
+                    }
+                },
+                0x08 => try buffer.appendSlice(allocator, "\\b"),
+                0x0c => try buffer.appendSlice(allocator, "\\f"),
+                else => {
+                    if (c < 0x20) {
+                        // 控制字符用 \uXXXX 转义
+                        const hex = try std.fmt.allocPrint(allocator, "\\u{x:0>4}", .{c});
+                        defer allocator.free(hex);
+                        try buffer.appendSlice(allocator, hex);
+                    } else if (c < 0x80) {
+                        // ASCII 可打印字符
+                        try buffer.append(allocator, c);
+                    } else {
+                        // 多字节 UTF-8 字符
+                        if (unescape_unicode) {
+                            // 直接输出 UTF-8 字节
+                            try buffer.append(allocator, c);
+                            i += 1;
+                            while (i < str.data.len and (str.data[i] & 0xC0) == 0x80) {
+                                try buffer.append(allocator, str.data[i]);
+                                i += 1;
+                            }
+                            continue;
+                        } else {
+                            // 解码 UTF-8 并转义为 \uXXXX
+                            var cp: u21 = 0;
+                            var consumed: usize = 0;
+                            if (c & 0xE0 == 0xC0) {
+                                // 2字节
+                                if (i + 1 < str.data.len) {
+                                    cp = (@as(u21, c & 0x1F) << 6) | @as(u21, str.data[i + 1] & 0x3F);
+                                    consumed = 2;
+                                } else consumed = 1;
+                            } else if (c & 0xF0 == 0xE0) {
+                                // 3字节
+                                if (i + 2 < str.data.len) {
+                                    cp = (@as(u21, c & 0x0F) << 12) | (@as(u21, str.data[i + 1] & 0x3F) << 6) | @as(u21, str.data[i + 2] & 0x3F);
+                                    consumed = 3;
+                                } else consumed = 1;
+                            } else if (c & 0xF8 == 0xF0) {
+                                // 4字节
+                                if (i + 3 < str.data.len) {
+                                    cp = (@as(u21, c & 0x07) << 18) | (@as(u21, str.data[i + 1] & 0x3F) << 12) | (@as(u21, str.data[i + 2] & 0x3F) << 6) | @as(u21, str.data[i + 3] & 0x3F);
+                                    consumed = 4;
+                                } else consumed = 1;
+                            } else {
+                                consumed = 1;
+                                cp = c;
+                            }
+                            if (cp <= 0xFFFF) {
+                                const hex = try std.fmt.allocPrint(allocator, "\\u{x:0>4}", .{cp});
+                                defer allocator.free(hex);
+                                try buffer.appendSlice(allocator, hex);
+                            } else {
+                                // 代理对
+                                const adj = cp - 0x10000;
+                                const hi = 0xD800 + (adj >> 10);
+                                const lo = 0xDC00 + (adj & 0x3FF);
+                                const hex = try std.fmt.allocPrint(allocator, "\\u{x:0>4}\\u{x:0>4}", .{ hi, lo });
+                                defer allocator.free(hex);
+                                try buffer.appendSlice(allocator, hex);
+                            }
+                            i += consumed;
+                            continue;
+                        }
+                    }
+                },
             }
+            i += 1;
         }
         try buffer.append(allocator, '"');
     } else if (value.isArray()) {
@@ -20149,7 +23382,7 @@ fn jsonEncodeValue(value: Value, buffer: *std.ArrayListUnmanaged(u8), allocator:
             it = arr.elements.iterator();
             while (it.next()) |entry| {
                 if (!first) try buffer.append(allocator, ',');
-                try jsonEncodeValue(entry.value_ptr.*, buffer, allocator);
+                try jsonEncodeValue(entry.value_ptr.*, buffer, allocator, flags);
                 first = false;
             }
             try buffer.append(allocator, ']');
@@ -20187,7 +23420,7 @@ fn jsonEncodeValue(value: Value, buffer: *std.ArrayListUnmanaged(u8), allocator:
                 try buffer.appendSlice(allocator, ":");
 
                 // 写入值
-                try jsonEncodeValue(entry.value_ptr.*, buffer, allocator);
+                try jsonEncodeValue(entry.value_ptr.*, buffer, allocator, flags);
                 first = false;
             }
             try buffer.append(allocator, '}');
@@ -20200,7 +23433,7 @@ fn jsonEncodeValue(value: Value, buffer: *std.ArrayListUnmanaged(u8), allocator:
         var it = obj.properties.iterator();
         while (it.next()) |entry| {
             if (!first) try buffer.append(allocator, ',');
-            
+
             // 写入键
             try buffer.append(allocator, '"');
             for (entry.key_ptr.*) |c| {
@@ -20215,12 +23448,136 @@ fn jsonEncodeValue(value: Value, buffer: *std.ArrayListUnmanaged(u8), allocator:
             }
             try buffer.append(allocator, '"');
             try buffer.appendSlice(allocator, ":");
-            
+
             // 写入值
-            try jsonEncodeValue(entry.value_ptr.*, buffer, allocator);
+            try jsonEncodeValue(entry.value_ptr.*, buffer, allocator, flags);
             first = false;
         }
         try buffer.append(allocator, '}');
+    } else {
+        try buffer.appendSlice(allocator, "null");
+    }
+}
+
+fn jsonEncodeValuePretty(value: Value, buffer: *std.ArrayListUnmanaged(u8), allocator: Allocator, flags: i64, indent: usize) !void {
+    const indent_str = "    ";
+    if (value.isNull()) {
+        try buffer.appendSlice(allocator, "null");
+    } else if (value.isBool()) {
+        try buffer.appendSlice(allocator, if (value.asBool()) "true" else "false");
+    } else if (value.isInt()) {
+        const formatted = try std.fmt.allocPrint(allocator, "{d}", .{value.asInt()});
+        defer allocator.free(formatted);
+        try buffer.appendSlice(allocator, formatted);
+    } else if (value.isFloat()) {
+        const formatted = try std.fmt.allocPrint(allocator, "{d}", .{value.asFloat()});
+        defer allocator.free(formatted);
+        try buffer.appendSlice(allocator, formatted);
+    } else if (value.isString()) {
+        // 复用 jsonEncodeValue 的字符串编码逻辑
+        try jsonEncodeValue(value, buffer, allocator, flags);
+    } else if (value.isArray()) {
+        const arr = value.asArray();
+        var is_list = true;
+        var expected_index: i64 = 0;
+        var it = arr.elements.iterator();
+        while (it.next()) |entry| {
+            switch (entry.key_ptr.*) {
+                .integer => |k| {
+                    if (k != expected_index) is_list = false;
+                    expected_index += 1;
+                },
+                .string => is_list = false,
+            }
+            if (!is_list) break;
+        }
+        if (is_list) {
+            var count: usize = 0;
+            it = arr.elements.iterator();
+            while (it.next()) |_| count += 1;
+            if (count == 0) {
+                try buffer.appendSlice(allocator, "[]");
+                return;
+            }
+            try buffer.appendSlice(allocator, "[\n");
+            var first = true;
+            it = arr.elements.iterator();
+            while (it.next()) |entry| {
+                if (!first) try buffer.appendSlice(allocator, ",\n");
+                for (0..indent + 1) |_| try buffer.appendSlice(allocator, indent_str);
+                try jsonEncodeValuePretty(entry.value_ptr.*, buffer, allocator, flags, indent + 1);
+                first = false;
+            }
+            try buffer.appendSlice(allocator, "\n");
+            for (0..indent) |_| try buffer.appendSlice(allocator, indent_str);
+            try buffer.appendSlice(allocator, "]");
+        } else {
+            var count: usize = 0;
+            it = arr.elements.iterator();
+            while (it.next()) |_| count += 1;
+            if (count == 0) {
+                try buffer.appendSlice(allocator, "{}");
+                return;
+            }
+            try buffer.appendSlice(allocator, "{\n");
+            var first = true;
+            it = arr.elements.iterator();
+            while (it.next()) |entry| {
+                if (!first) try buffer.appendSlice(allocator, ",\n");
+                for (0..indent + 1) |_| try buffer.appendSlice(allocator, indent_str);
+                // 写入键
+                switch (entry.key_ptr.*) {
+                    .integer => |k| {
+                        try buffer.append(allocator, '"');
+                        const key_str = try std.fmt.allocPrint(allocator, "{d}", .{k});
+                        defer allocator.free(key_str);
+                        try buffer.appendSlice(allocator, key_str);
+                        try buffer.append(allocator, '"');
+                    },
+                    .string => |k| {
+                        try jsonEncodeValue(Value.initString(k), buffer, allocator, flags);
+                    },
+                }
+                try buffer.appendSlice(allocator, ": ");
+                try jsonEncodeValuePretty(entry.value_ptr.*, buffer, allocator, flags, indent + 1);
+                first = false;
+            }
+            try buffer.appendSlice(allocator, "\n");
+            for (0..indent) |_| try buffer.appendSlice(allocator, indent_str);
+            try buffer.appendSlice(allocator, "}");
+        }
+    } else if (Value_isObject(value)) {
+        const obj = Value_asObject(value);
+        var count: usize = 0;
+        var it = obj.properties.iterator();
+        while (it.next()) |_| count += 1;
+        if (count == 0) {
+            try buffer.appendSlice(allocator, "{}");
+            return;
+        }
+        try buffer.appendSlice(allocator, "{\n");
+        var first = true;
+        it = obj.properties.iterator();
+        while (it.next()) |entry| {
+            if (!first) try buffer.appendSlice(allocator, ",\n");
+            for (0..indent + 1) |_| try buffer.appendSlice(allocator, indent_str);
+            // 写入键
+            try buffer.append(allocator, '"');
+            for (entry.key_ptr.*) |c| {
+                switch (c) {
+                    '"' => try buffer.appendSlice(allocator, "\\\""),
+                    '\\' => try buffer.appendSlice(allocator, "\\\\"),
+                    else => try buffer.append(allocator, c),
+                }
+            }
+            try buffer.append(allocator, '"');
+            try buffer.appendSlice(allocator, ": ");
+            try jsonEncodeValuePretty(entry.value_ptr.*, buffer, allocator, flags, indent + 1);
+            first = false;
+        }
+        try buffer.appendSlice(allocator, "\n");
+        for (0..indent) |_| try buffer.appendSlice(allocator, indent_str);
+        try buffer.appendSlice(allocator, "}");
     } else {
         try buffer.appendSlice(allocator, "null");
     }
@@ -20527,14 +23884,53 @@ pub fn php_strtotime(time_str: Value, now: Value, allocator: Allocator) !Value {
         }
         while (i < str.len and str[i] == ' ') i += 1;
         const unit = str[i..];
-        const secs: i64 = if (std.mem.startsWith(u8, unit, "second")) num
-            else if (std.mem.startsWith(u8, unit, "minute")) num * 60
-            else if (std.mem.startsWith(u8, unit, "hour")) num * 3600
-            else if (std.mem.startsWith(u8, unit, "day")) num * 86400
-            else if (std.mem.startsWith(u8, unit, "week")) num * 604800
-            else if (std.mem.startsWith(u8, unit, "month")) num * 2592000
-            else if (std.mem.startsWith(u8, unit, "year")) num * 31536000
-            else 0;
+
+        // month 和 year 使用日历计算（非固定秒数）
+        if (std.mem.startsWith(u8, unit, "month") or std.mem.startsWith(u8, unit, "year")) {
+            const month_delta: i64 = if (std.mem.startsWith(u8, unit, "year")) sign * num * 12 else sign * num;
+            // 分解 base_ts 为年月日时分秒
+            const epoch_secs_u64: u64 = @intCast(@max(@as(i64, 0), base_ts));
+            const epoch = std.time.epoch.EpochSeconds{ .secs = epoch_secs_u64 };
+            const day_secs = epoch.getDaySeconds();
+            const epoch_day = epoch.getEpochDay();
+            const year_day = epoch_day.calculateYearDay();
+            const month_day = year_day.calculateMonthDay();
+            var year: i64 = @intCast(@as(i32, year_day.year));
+            var month: i64 = @intCast(month_day.month.numeric());
+            const day: i64 = @intCast(month_day.day_index + 1);
+            const hour: i64 = @intCast(day_secs.getHoursIntoDay());
+            const min: i64 = @intCast(day_secs.getMinutesIntoHour());
+            const sec: i64 = @intCast(day_secs.getSecondsIntoMinute());
+
+            // 日历月加法
+            var total_months = month + month_delta;
+            while (total_months > 12) {
+                total_months -= 12;
+                year += 1;
+            }
+            while (total_months < 1) {
+                total_months += 12;
+                year -= 1;
+            }
+            month = total_months;
+
+            // 限制 day 在目标月份的有效范围内
+            const dim: i64 = switch (@as(u32, @intCast(month))) {
+                1, 3, 5, 7, 8, 10, 12 => 31,
+                4, 6, 9, 11 => 30,
+                2 => if (isLeapYearTop(year)) 29 else 28,
+                else => 30,
+            };
+            const clamped_day = @min(day, dim);
+
+            // Julian Day 公式转回时间戳
+            const y2 = if (month <= 2) year - 1 else year;
+            const m2 = if (month <= 2) month + 12 else month;
+            const jd = 365 * y2 + @divFloor(y2, 4) - @divFloor(y2, 100) + @divFloor(y2, 400) + @divFloor(306 * (m2 + 1), 10) + clamped_day - 719591;
+            return Value.initInt(jd * 86400 + hour * 3600 + min * 60 + sec);
+        }
+
+        const secs: i64 = if (std.mem.startsWith(u8, unit, "second")) num else if (std.mem.startsWith(u8, unit, "minute")) num * 60 else if (std.mem.startsWith(u8, unit, "hour")) num * 3600 else if (std.mem.startsWith(u8, unit, "day")) num * 86400 else if (std.mem.startsWith(u8, unit, "week")) num * 604800 else 0;
         return Value.initInt(base_ts + sign * secs);
     }
 
@@ -20557,6 +23953,35 @@ pub fn php_strtotime(time_str: Value, now: Value, allocator: Allocator) !Value {
         const jd = 365 * y + @divFloor(y, 4) - @divFloor(y, 100) + @divFloor(y, 400) + @divFloor(306 * (m + 1), 10) + day - 719591;
         const ts: i64 = jd * 86400 + hour * 3600 + min * 60 + sec;
         return Value.initInt(ts);
+    }
+
+    // "next Monday" / "last Sunday" 等相对日期
+    if (std.mem.startsWith(u8, str, "next ") or std.mem.startsWith(u8, str, "last ")) {
+        const is_next = str[0] == 'n';
+        const day_name = std.mem.trim(u8, str[5..], " ");
+        const target_dow: i64 = blk: {
+            if (std.ascii.eqlIgnoreCase(day_name, "sunday")) break :blk 0;
+            if (std.ascii.eqlIgnoreCase(day_name, "monday")) break :blk 1;
+            if (std.ascii.eqlIgnoreCase(day_name, "tuesday")) break :blk 2;
+            if (std.ascii.eqlIgnoreCase(day_name, "wednesday")) break :blk 3;
+            if (std.ascii.eqlIgnoreCase(day_name, "thursday")) break :blk 4;
+            if (std.ascii.eqlIgnoreCase(day_name, "friday")) break :blk 5;
+            if (std.ascii.eqlIgnoreCase(day_name, "saturday")) break :blk 6;
+            break :blk -1;
+        };
+        if (target_dow >= 0) {
+            const epoch_secs_u64: u64 = @intCast(@max(@as(i64, 0), base_ts));
+            const epoch = std.time.epoch.EpochSeconds{ .secs = epoch_secs_u64 };
+            const epoch_day = epoch.getEpochDay();
+            const current_dow: i64 = @intCast(@mod(@as(i64, @intCast(epoch_day.day)) + 4, 7));
+            var delta: i64 = if (is_next)
+                @mod(target_dow - current_dow + 7, 7)
+            else
+                @mod(current_dow - target_dow + 7, 7);
+            if (delta == 0) delta = 7;
+            const signed_delta: i64 = if (is_next) delta else -delta;
+            return Value.initInt(base_ts + signed_delta * 86400);
+        }
     }
 
     // 返回当前时间戳作为fallback
@@ -20604,12 +24029,12 @@ pub fn php_empty(val: Value) !Value {
 pub fn php_isset(args: []const Value) !Value {
     // isset()需要至少1个参数
     if (args.len == 0) return Value.initBool(false);
-    
+
     // 所有参数都必须非null才返回true
     for (args) |val| {
         if (val.isNull()) return Value.initBool(false);
     }
-    
+
     return Value.initBool(true);
 }
 
@@ -20687,8 +24112,8 @@ const IPC_CREAT = 0o1000;
 const IPC_RMID = 0;
 const MAX_SIGNALS = 32;
 
-var signal_handlers: [MAX_SIGNALS]Value = .{Value.initNull()}**MAX_SIGNALS;
-var pending_signals: [MAX_SIGNALS]bool = .{false}**MAX_SIGNALS;
+var signal_handlers: [MAX_SIGNALS]Value = .{Value.initNull()} ** MAX_SIGNALS;
+var pending_signals: [MAX_SIGNALS]bool = .{false} ** MAX_SIGNALS;
 var last_wait_status: c_int = 0;
 
 /// C 信号处理函数（仅设置标志位）
@@ -21004,22 +24429,42 @@ pub fn php_array_map(args: []const Value, allocator: Allocator) !Value {
 
     const primary = arrays[0].asArray();
 
+    // 预提取所有数组的值列表（按位置索引）
+    // PHP array_map 多数组语义：按位置而非键匹配
+    const all_values = try allocator.alloc([]Value, arrays.len);
+    defer {
+        for (all_values) |vals| allocator.free(vals);
+        allocator.free(all_values);
+    }
+    for (arrays, 0..) |arr, ai| {
+        const cur = arr.asArray();
+        const vals = try allocator.alloc(Value, cur.count());
+        var ci: usize = 0;
+        var it = cur.elements.iterator();
+        while (it.next()) |e| : (ci += 1) {
+            vals[ci] = e.value_ptr.*;
+        }
+        all_values[ai] = vals;
+    }
+
     var iter = primary.elements.iterator();
+    var pos: usize = 0;
     while (iter.next()) |entry| {
         var callback_args = try allocator.alloc(Value, arrays.len);
         defer allocator.free(callback_args);
 
-        callback_args[0] = entry.value_ptr.*;
-
-        var i: usize = 1;
-        while (i < arrays.len) : (i += 1) {
-            const cur = arrays[i].asArray();
-            callback_args[i] = cur.elements.get(entry.key_ptr.*) orelse Value.initNull();
+        for (arrays, 0..) |_, ai| {
+            if (ai < all_values.len and pos < all_values[ai].len) {
+                callback_args[ai] = all_values[ai][pos];
+            } else {
+                callback_args[ai] = Value.initNull();
+            }
         }
 
         const result_value = try php_invoke_callable(callback, callback_args, allocator);
         try result_arr.set(allocator, entry.key_ptr.*, result_value);
         result_value.release(allocator);
+        pos += 1;
     }
 
     return Value.initArray(result_arr);
@@ -21240,6 +24685,7 @@ pub fn php_array_column(arr: Value, column_key: Value, index_key: Value, allocat
 }
 
 /// array_walk - 对数组中的每个元素应用用户自定义函数
+/// @enhancement AOT超越PHP: 首参数允许数组字面量(PHP解释器报Fatal Error: could not be passed by reference)
 pub fn php_array_walk(arr: Value, callback: Value, userdata: Value, allocator: Allocator) !Value {
     if (!arr.isArray()) return error.InvalidArgument;
 
@@ -21298,6 +24744,7 @@ fn php_array_walk_recursive_inner(arr: *PHPArray, callback: Value, userdata: Val
     }
 }
 
+/// @enhancement AOT超越PHP: 首参数允许数组字面量(PHP解释器报Fatal Error: could not be passed by reference)
 pub fn php_array_walk_recursive(arr: Value, callback: Value, userdata: Value, allocator: Allocator) !Value {
     if (!arr.isArray()) return error.InvalidArgument;
     try php_array_walk_recursive_inner(arr.asArray(), callback, userdata, allocator);
@@ -21309,22 +24756,16 @@ pub fn php_array_walk_recursive(arr: Value, callback: Value, userdata: Value, al
 // ============================================================================
 
 /// 格式化浮点数到指定精度（用于 sprintf %f）
+/// 使用 C 的 snprintf 以匹配 PHP 的浮点舍入行为
+extern fn snprintf(buf: [*]u8, size: usize, fmt: [*:0]const u8, ...) c_int;
 fn formatFloatPrecision(buf: []u8, val: f64, precision: usize) []const u8 {
-    // 使用 comptime 格式字符串处理常见精度值
-    return switch (precision) {
-        0 => std.fmt.bufPrint(buf, "{d:.0}", .{val}) catch "0",
-        1 => std.fmt.bufPrint(buf, "{d:.1}", .{val}) catch "0",
-        2 => std.fmt.bufPrint(buf, "{d:.2}", .{val}) catch "0",
-        3 => std.fmt.bufPrint(buf, "{d:.3}", .{val}) catch "0",
-        4 => std.fmt.bufPrint(buf, "{d:.4}", .{val}) catch "0",
-        5 => std.fmt.bufPrint(buf, "{d:.5}", .{val}) catch "0",
-        6 => std.fmt.bufPrint(buf, "{d:.6}", .{val}) catch "0",
-        7 => std.fmt.bufPrint(buf, "{d:.7}", .{val}) catch "0",
-        8 => std.fmt.bufPrint(buf, "{d:.8}", .{val}) catch "0",
-        9 => std.fmt.bufPrint(buf, "{d:.9}", .{val}) catch "0",
-        10 => std.fmt.bufPrint(buf, "{d:.10}", .{val}) catch "0",
-        else => std.fmt.bufPrint(buf, "{d:.6}", .{val}) catch "0",
-    };
+    var fmt_buf: [16]u8 = undefined;
+    const fmt_str = std.fmt.bufPrintZ(&fmt_buf, "%.{d}f", .{precision}) catch "%.6f";
+    const len = snprintf(buf.ptr, buf.len, fmt_str.ptr, val);
+    if (len > 0 and @as(usize, @intCast(len)) < buf.len) {
+        return buf[0..@intCast(len)];
+    }
+    return std.fmt.bufPrint(buf, "{d:.6}", .{val}) catch "0";
 }
 
 /// sprintf - 格式化字符串
@@ -21333,7 +24774,7 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
 
     const fmt = format.asString().data;
     var result = try std.ArrayList(u8).initCapacity(allocator, 0);
-    defer result.deinit();
+    defer result.deinit(allocator);
 
     var arg_idx: usize = 0;
     var i: usize = 0;
@@ -21342,9 +24783,27 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
         if (fmt[i] == '%' and i + 1 < fmt.len) {
             i += 1;
             if (fmt[i] == '%') {
-                try result.append('%');
+                try result.append(allocator, '%');
                 i += 1;
                 continue;
+            }
+
+            // 解析位置参数 (n$)
+            var explicit_arg_idx: ?usize = null;
+            if (i < fmt.len and fmt[i] >= '1' and fmt[i] <= '9') {
+                var pos: usize = 0;
+                const num_start = i;
+                while (i < fmt.len and fmt[i] >= '0' and fmt[i] <= '9') {
+                    pos = pos * 10 + (fmt[i] - '0');
+                    i += 1;
+                }
+                if (i < fmt.len and fmt[i] == '$') {
+                    explicit_arg_idx = pos - 1; // 转为 0-based
+                    i += 1;
+                } else {
+                    // 不是位置参数，回退
+                    i = num_start;
+                }
             }
 
             // 解析标志
@@ -21359,6 +24818,7 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
                     '+' => flag_plus = true,
                     ' ' => flag_space = true,
                     '0' => flag_zero = true,
+                    '#' => return throwThrowable("ValueError", "Unknown format specifier \"#\"", allocator),
                     '\'' => {
                         // PHP custom pad char: %'x10s
                         i += 1;
@@ -21396,9 +24856,11 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
             const specifier = fmt[i];
             i += 1;
 
-            if (arg_idx >= args.len) continue;
-            const arg = args[arg_idx];
-            arg_idx += 1;
+            // 使用位置参数或顺序参数
+            const use_idx = explicit_arg_idx orelse arg_idx;
+            if (explicit_arg_idx == null) arg_idx += 1;
+            if (use_idx >= args.len) continue;
+            const arg = args[use_idx];
 
             // Format the value into a temporary buffer, then apply width/padding
             var tmp_buf = try std.ArrayList(u8).initCapacity(allocator, 0);
@@ -21427,16 +24889,14 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
                 },
                 'd', 'i' => {
                     const val = arg.toInt();
-                    if (flag_plus and val >= 0) try tmp_buf.append(allocator, '+')
-                    else if (flag_space and val >= 0) try tmp_buf.append(allocator, ' ');
+                    if (flag_plus and val >= 0) try tmp_buf.append(allocator, '+') else if (flag_space and val >= 0) try tmp_buf.append(allocator, ' ');
                     const str = try std.fmt.allocPrint(allocator, "{d}", .{val});
                     defer allocator.free(str);
                     try tmp_buf.appendSlice(allocator, str);
                 },
                 'f' => {
                     const val = arg.toFloat();
-                    if (flag_plus and val >= 0) try tmp_buf.append(allocator, '+')
-                    else if (flag_space and val >= 0) try tmp_buf.append(allocator, ' ');
+                    if (flag_plus and val >= 0) try tmp_buf.append(allocator, '+') else if (flag_space and val >= 0) try tmp_buf.append(allocator, ' ');
                     const prec = precision orelse 6;
                     var fbuf: [128]u8 = undefined;
                     const fstr = formatFloatPrecision(&fbuf, val, prec);
@@ -21481,13 +24941,30 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
                 },
                 'e', 'E' => {
                     const val = arg.toFloat();
-                    const str = try std.fmt.allocPrint(allocator, "{e}", .{val});
-                    defer allocator.free(str);
-                    try tmp_buf.appendSlice(allocator, str);
+                    const prec = precision orelse 6;
+                    // PHP %e 格式：[-]d.dddddde[+-]dd
+                    var ebuf: [128]u8 = undefined;
+                    const abs_val = if (val < 0) -val else val;
+                    var exp: i32 = 0;
+                    var mantissa = abs_val;
+                    if (abs_val >= 1.0) {
+                        while (mantissa >= 10.0) : (mantissa /= 10.0) exp += 1;
+                    } else if (abs_val > 0.0) {
+                        while (mantissa < 1.0) : (mantissa *= 10.0) exp -= 1;
+                    }
+                    // 格式化尾数
+                    var fbuf: [64]u8 = undefined;
+                    const fstr = formatFloatPrecision(&fbuf, mantissa, prec);
+                    const sign_str = if (val < 0) "-" else if (flag_plus) "+" else if (flag_space) " " else "";
+                    const exp_sign = if (exp >= 0) "+" else "-";
+                    const exp_abs: u32 = @intCast(if (exp >= 0) exp else -exp);
+                    const e_char: u8 = if (specifier == 'E') 'E' else 'e';
+                    const formatted = std.fmt.bufPrint(&ebuf, "{s}{s}{c}{s}{d}", .{ sign_str, fstr, e_char, exp_sign, exp_abs }) catch "0";
+                    try tmp_buf.appendSlice(allocator, formatted);
                 },
                 else => {
-                    try result.append('%');
-                    try result.append(specifier);
+                    try result.append(allocator, '%');
+                    try result.append(allocator, specifier);
                     continue;
                 },
             }
@@ -21498,25 +24975,25 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
                 const padding = width - content.len;
                 if (flag_minus) {
                     // Left-align: content first, then padding
-                    try result.appendSlice(content);
-                    for (0..padding) |_| try result.append(pad_char);
+                    try result.appendSlice(allocator, content);
+                    for (0..padding) |_| try result.append(allocator, pad_char);
                 } else {
                     // Right-align: padding first, then content
                     // For zero-padding with sign, put sign before zeros
                     if (pad_char == '0' and content.len > 0 and (content[0] == '-' or content[0] == '+' or content[0] == ' ')) {
-                        try result.append(content[0]);
-                        for (0..padding) |_| try result.append('0');
-                        try result.appendSlice(content[1..]);
+                        try result.append(allocator, content[0]);
+                        for (0..padding) |_| try result.append(allocator, '0');
+                        try result.appendSlice(allocator, content[1..]);
                     } else {
-                        for (0..padding) |_| try result.append(pad_char);
-                        try result.appendSlice(content);
+                        for (0..padding) |_| try result.append(allocator, pad_char);
+                        try result.appendSlice(allocator, content);
                     }
                 }
             } else {
-                try result.appendSlice(content);
+                try result.appendSlice(allocator, content);
             }
         } else {
-            try result.append(fmt[i]);
+            try result.append(allocator, fmt[i]);
             i += 1;
         }
     }
@@ -21549,23 +25026,23 @@ pub fn php_vsprintf(format: Value, args_arr: Value, allocator: Allocator) !Value
 
 pub fn php_sscanf(str: Value, format: Value, allocator: Allocator) !Value {
     if (!str.isString() or !format.isString()) return Value.initBool(false);
-    
+
     const input = str.asString().data;
     const fmt = format.asString().data;
-    
+
     var arr = try PHPArray.init(allocator);
     var input_pos: usize = 0;
     var fmt_pos: usize = 0;
-    
+
     while (fmt_pos < fmt.len and input_pos < input.len) {
         if (fmt[fmt_pos] == '%' and fmt_pos + 1 < fmt.len) {
             fmt_pos += 1;
             const spec = fmt[fmt_pos];
             fmt_pos += 1;
-            
+
             // 跳过空白
             while (input_pos < input.len and input[input_pos] == ' ') input_pos += 1;
-            
+
             if (spec == 'd') {
                 // 解析整数
                 var num: i64 = 0;
@@ -21596,14 +25073,14 @@ pub fn php_sscanf(str: Value, format: Value, allocator: Allocator) !Value {
             fmt_pos += 1;
         }
     }
-    
+
     return Value.initArray(arr);
 }
 
 pub fn php_preg_match(pattern: Value, subject: Value, matches: *Value, flags: Value, offset: Value, allocator: Allocator) !Value {
-    _ = flags; // TODO: 实现flags支持
-    _ = offset; // TODO: 实现offset支持
-    
+    _ = flags;
+    _ = offset;
+
     if (!pattern.isString() or !subject.isString()) {
         matches.* = Value.initArray(try PHPArray.init(allocator));
         return Value.initInt(0);
@@ -21655,14 +25132,50 @@ pub fn php_preg_match(pattern: Value, subject: Value, matches: *Value, flags: Va
         }
     }
 
+    // 填充命名捕获组
+    var name_count: c_uint = 0;
+    if (pcre2_pattern_info_8(re, PCRE2_INFO_NAMECOUNT, &name_count) == 0 and name_count > 0) {
+        var name_entry_size: c_uint = 0;
+        if (pcre2_pattern_info_8(re, PCRE2_INFO_NAMEENTRYSIZE, &name_entry_size) == 0 and name_entry_size > 0) {
+            var name_table_ptr: ?*const u8 = null;
+            if (pcre2_pattern_info_8(re, PCRE2_INFO_NAMETABLE, @ptrCast(&name_table_ptr)) == 0 and name_table_ptr != null) {
+                const name_table = name_table_ptr.?;
+                const name_table_ptr_arr: [*]const u8 = @ptrCast(name_table);
+                var ni: usize = 0;
+                while (ni < name_count) : (ni += 1) {
+                    const entry = name_table_ptr_arr + ni * name_entry_size;
+                    const group_num: usize = (@as(usize, entry[0]) << 8) | @as(usize, entry[1]);
+                    const name_start: usize = 2;
+                    const name_end = blk: {
+                        var j: usize = name_start;
+                        while (j < name_entry_size) : (j += 1) {
+                            if (entry[j] == 0) break;
+                        }
+                        break :blk j;
+                    };
+                    const name = entry[name_start..name_end];
+                    if (group_num < @as(usize, @intCast(rc))) {
+                        const gs = ovec[group_num * 2];
+                        const ge = ovec[group_num * 2 + 1];
+                        if (gs < subject_str.length and ge <= subject_str.length and gs <= ge) {
+                            const capture = subject_str.data[gs..ge];
+                            const capture_str = try PHPString.init(allocator, capture);
+                            const name_str = try PHPString.init(allocator, name);
+                            try matches_arr.set(allocator, .{ .string = name_str }, Value.initString(capture_str));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     matches.* = Value.initArray(matches_arr);
     return Value.initInt(1);
 }
 
 pub fn php_preg_match_all(pattern: Value, subject: Value, matches: *Value, flags: Value, offset: Value, allocator: Allocator) !Value {
-    _ = flags;
     _ = offset;
-    
+
     if (!pattern.isString() or !subject.isString()) {
         matches.* = Value.initArray(try PHPArray.init(allocator));
         return Value.initInt(0);
@@ -21735,29 +25248,42 @@ pub fn php_preg_match_all(pattern: Value, subject: Value, matches: *Value, flags
         }
     }
 
-    // 转换为PREG_PATTERN_ORDER格式
-    // matches[0] = [所有完整匹配]
-    // matches[1] = [所有第1个捕获组]
+    // PREG_SET_ORDER=2: matches[i] = [full_match, group1, group2, ...]
+    // PREG_PATTERN_ORDER=1 (default): matches[0] = [all full matches], matches[1] = [all group1], ...
+    const flags_val: i64 = if (flags.isNull()) 0 else flags.toInt();
+    const is_set_order = (flags_val == 2);
+
     const matches_arr = try PHPArray.init(allocator);
 
-    if (all_matches.items.len > 0) {
-        const num_groups = all_matches.items[0].items.len;
-
-        // 为每个组创建数组
-        var group_idx: usize = 0;
-        while (group_idx < num_groups) : (group_idx += 1) {
-            const group_arr = try PHPArray.init(allocator);
-
-            // 收集所有匹配中的该组
-            for (all_matches.items) |match_groups| {
-                if (group_idx < match_groups.items.len) {
-                    const capture = match_groups.items[group_idx];
-                    const capture_str = try PHPString.init(allocator, capture);
-                    try group_arr.push(allocator, Value.initString(capture_str));
-                }
+    if (is_set_order) {
+        // PREG_SET_ORDER: 每个元素是一个匹配的所有组
+        for (all_matches.items) |match_groups| {
+            const set_arr = try PHPArray.init(allocator);
+            for (match_groups.items) |capture| {
+                const capture_str = try PHPString.init(allocator, capture);
+                try set_arr.push(allocator, Value.initString(capture_str));
             }
+            try matches_arr.push(allocator, Value.initArray(set_arr));
+        }
+    } else {
+        // PREG_PATTERN_ORDER (默认)
+        if (all_matches.items.len > 0) {
+            const num_groups = all_matches.items[0].items.len;
 
-            try matches_arr.push(allocator, Value.initArray(group_arr));
+            var group_idx: usize = 0;
+            while (group_idx < num_groups) : (group_idx += 1) {
+                const group_arr = try PHPArray.init(allocator);
+
+                for (all_matches.items) |match_groups| {
+                    if (group_idx < match_groups.items.len) {
+                        const capture = match_groups.items[group_idx];
+                        const capture_str = try PHPString.init(allocator, capture);
+                        try group_arr.push(allocator, Value.initString(capture_str));
+                    }
+                }
+
+                try matches_arr.push(allocator, Value.initArray(group_arr));
+            }
         }
     }
 
@@ -21766,65 +25292,65 @@ pub fn php_preg_match_all(pattern: Value, subject: Value, matches: *Value, flags
 }
 
 pub fn php_preg_replace(pattern: Value, replacement: Value, subject: Value, allocator: Allocator) !Value {
-    if (!pattern.isString() or !replacement.isString() or !subject.isString()) 
+    if (!pattern.isString() or !replacement.isString() or !subject.isString())
         return Value.initBool(false);
-    
+
     const pat = pattern.asString().data;
     const repl = replacement.asString().data;
     const subj = subject.asString().data;
-    
+
     if (pat.len < 3) return Value.initString(try PHPString.init(allocator, try allocator.dupe(u8, subj)));
-    const actual_pat = pat[1..pat.len-1];
-    
+    const actual_pat = pat[1 .. pat.len - 1];
+
     // 简单替换
     var result = try std.ArrayList(u8).initCapacity(allocator, subj.len);
-    defer result.deinit();
-    
+    defer result.deinit(allocator);
+
     var pos: usize = 0;
     while (pos < subj.len) {
         if (std.mem.indexOf(u8, subj[pos..], actual_pat)) |idx| {
-            try result.appendSlice(subj[pos..pos+idx]);
-            try result.appendSlice(repl);
+            try result.appendSlice(allocator, subj[pos .. pos + idx]);
+            try result.appendSlice(allocator, repl);
             pos += idx + actual_pat.len;
         } else {
-            try result.appendSlice(subj[pos..]);
+            try result.appendSlice(allocator, subj[pos..]);
             break;
         }
     }
-    
-    const output = try PHPString.init(allocator, try result.toOwnedSlice());
+
+    const output = try PHPString.init(allocator, try result.toOwnedSlice(allocator));
     return Value.initString(output);
 }
 
 pub fn php_preg_replace_callback(pattern: Value, callback: Value, subject: Value, allocator: Allocator) !Value {
-    if (!pattern.isString() or !subject.isString()) 
+    if (!pattern.isString() or !subject.isString())
         return Value.initBool(false);
-    
+
     const pattern_str = pattern.asString().data;
     const subject_str = subject.asString().data;
-    
+
     // 解析 PHP 正则模式
     const parsed = parsePHPRegexPattern(pattern_str);
-    
+
     // 编译正则表达式
     const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch {
         return Value.initString(try PHPString.init(allocator, try allocator.dupe(u8, subject_str)));
     };
-    
+
     // 创建匹配数据
     const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse {
         return Value.initString(try PHPString.init(allocator, try allocator.dupe(u8, subject_str)));
     };
     defer pcre2_match_data_free_8(match_data);
-    
+
     // 准备输出缓冲区
     var result = try std.ArrayList(u8).initCapacity(allocator, subject_str.len * 2);
-    defer result.deinit();
-    
+    defer result.deinit(allocator);
+
     var subject_offset: usize = 0;
     var replace_count: usize = 0;
     const limit: usize = std.math.maxInt(usize);
-    
+
     while (subject_offset < subject_str.len and replace_count < limit) {
         const rc = pcre2_match_8(
             re,
@@ -21835,22 +25361,22 @@ pub fn php_preg_replace_callback(pattern: Value, callback: Value, subject: Value
             match_data,
             null,
         );
-        
+
         if (rc == PCRE2_ERROR_NOMATCH or rc < 0) break;
-        
+
         const ovec = pcre2_get_ovector_pointer_8(match_data);
         const match_start = ovec[0];
         const match_end = ovec[1];
-        
+
         // 添加匹配前的内容
         if (match_start > subject_offset) {
-            try result.appendSlice(subject_str[subject_offset..match_start]);
+            try result.appendSlice(allocator, subject_str[subject_offset..match_start]);
         }
-        
+
         // 构建匹配数组
         const matches_arr = try PHPArray.init(allocator);
         defer matches_arr.release(allocator);
-        
+
         // 添加所有捕获组
         var i: usize = 0;
         while (i < @as(usize, @intCast(rc))) : (i += 1) {
@@ -21860,36 +25386,36 @@ pub fn php_preg_replace_callback(pattern: Value, callback: Value, subject: Value
             const php_str = try PHPString.init(allocator, try allocator.dupe(u8, match_str));
             try matches_arr.push(allocator, Value.initString(php_str));
         }
-        
+
         // 调用回调函数
         const callback_result = try php_invoke_callable(callback, &[_]Value{Value.initArray(matches_arr)}, allocator);
         defer callback_result.release(allocator);
-        
+
         // 将回调结果添加到输出
         if (callback_result.isString()) {
-            try result.appendSlice(callback_result.asString().data);
+            try result.appendSlice(allocator, callback_result.asString().data);
         } else if (callback_result.isInt()) {
             // 处理整数返回值
             const int_val = callback_result.asInt();
             var buf: [32]u8 = undefined;
             const int_str = try std.fmt.bufPrint(&buf, "{d}", .{int_val});
-            try result.appendSlice(int_str);
+            try result.appendSlice(allocator, int_str);
         } else {
             const str_result = try callback_result.toString(allocator);
             defer str_result.release(allocator);
-            try result.appendSlice(str_result.data);
+            try result.appendSlice(allocator, str_result.data);
         }
-        
+
         subject_offset = match_end;
         replace_count += 1;
     }
-    
+
     // 添加剩余内容
     if (subject_offset < subject_str.len) {
-        try result.appendSlice(subject_str[subject_offset..]);
+        try result.appendSlice(allocator, subject_str[subject_offset..]);
     }
-    
-    const output = try PHPString.init(allocator, try result.toOwnedSlice());
+
+    const output = try PHPString.init(allocator, try result.toOwnedSlice(allocator));
     return Value.initString(output);
 }
 
@@ -21899,38 +25425,124 @@ pub fn php_preg_split(pattern: Value, subject: Value, limit_val: Value, flags_va
 }
 
 /// filter_var - 使用特定的过滤器过滤一个变量
-pub fn php_filter_var(value: Value, filter: Value, allocator: Allocator) !Value {
-    _ = allocator;
-    
+pub fn php_filter_var(value: Value, filter: Value, options: Value, allocator: Allocator) !Value {
     if (!filter.isInt()) return Value.initBool(false);
-    
+
     const filter_type = filter.asInt();
-    
+
     // FILTER_VALIDATE_EMAIL = 274
     if (filter_type == 274) {
         if (!value.isString()) return Value.initBool(false);
-        
+
         const email = value.asString().data;
-        
+
         // 简单的邮箱验证：必须包含 @ 和 .，且格式合理
         if (email.len < 3) return Value.initBool(false);
-        
+
         // 查找 @
         const at_pos = std.mem.indexOf(u8, email, "@") orelse return Value.initBool(false);
         if (at_pos == 0 or at_pos == email.len - 1) return Value.initBool(false);
-        
+
         // @ 后面必须有 .
-        const domain = email[at_pos+1..];
+        const domain = email[at_pos + 1 ..];
         const dot_pos = std.mem.indexOf(u8, domain, ".") orelse return Value.initBool(false);
         if (dot_pos == 0 or dot_pos == domain.len - 1) return Value.initBool(false);
-        
+
         // 检查是否有多个 @
-        if (std.mem.indexOf(u8, email[at_pos+1..], "@") != null) return Value.initBool(false);
-        
+        if (std.mem.indexOf(u8, email[at_pos + 1 ..], "@") != null) return Value.initBool(false);
+
         // 验证通过，返回原值
         return value;
     }
-    
+
+    // FILTER_VALIDATE_URL = 273
+    if (filter_type == 273) {
+        if (!value.isString()) return Value.initBool(false);
+        const url = value.asString().data;
+        if (url.len < 8) return Value.initBool(false);
+        // 必须以 http:// 或 https:// 或 ftp:// 开头
+        if (std.mem.startsWith(u8, url, "http://") or std.mem.startsWith(u8, url, "https://") or std.mem.startsWith(u8, url, "ftp://")) {
+            // 协议后必须有至少一个字符（域名）
+            const scheme_end = std.mem.indexOf(u8, url, "://").? + 3;
+            if (scheme_end >= url.len) return Value.initBool(false);
+            // 域名部分不能包含空格
+            if (std.mem.indexOf(u8, url[scheme_end..], " ") != null) return Value.initBool(false);
+            return value;
+        }
+        return Value.initBool(false);
+    }
+
+    // FILTER_VALIDATE_IP = 275
+    if (filter_type == 275) {
+        if (!value.isString()) return Value.initBool(false);
+        const ip = value.asString().data;
+        // IPv4 验证：4 段数字，每段 0-255
+        var parts = std.mem.splitScalar(u8, ip, '.');
+        var count: usize = 0;
+        while (parts.next()) |part| {
+            count += 1;
+            if (count > 4) return Value.initBool(false);
+            if (part.len == 0 or part.len > 3) return Value.initBool(false);
+            const num = std.fmt.parseInt(u16, part, 10) catch return Value.initBool(false);
+            if (num > 255) return Value.initBool(false);
+        }
+        if (count != 4) return Value.initBool(false);
+        return value;
+    }
+
+    // FILTER_VALIDATE_INT = 257
+    if (filter_type == 257) {
+        if (!value.isString() and !value.isInt()) return Value.initBool(false);
+        if (value.isInt()) return value;
+        const s = value.asString().data;
+        _ = std.fmt.parseInt(i64, s, 10) catch return Value.initBool(false);
+        return value;
+    }
+
+    // FILTER_VALIDATE_FLOAT = 259
+    if (filter_type == 259) {
+        if (!value.isString() and !value.isFloat() and !value.isInt()) return Value.initBool(false);
+        if (value.isFloat() or value.isInt()) return value;
+        const s = value.asString().data;
+        _ = std.fmt.parseFloat(f64, s) catch return Value.initBool(false);
+        return value;
+    }
+
+    // FILTER_VALIDATE_BOOLEAN = 258
+    if (filter_type == 258) {
+        if (value.isBool()) return value;
+        if (value.isInt()) return Value.initBool(value.asInt() != 0);
+        if (!value.isString()) return Value.initBool(false);
+        const s = value.asString().data;
+        if (std.ascii.eqlIgnoreCase(s, "true") or std.ascii.eqlIgnoreCase(s, "yes") or std.mem.eql(u8, s, "1") or std.ascii.eqlIgnoreCase(s, "on")) {
+            return Value.initBool(true);
+        }
+        if (std.ascii.eqlIgnoreCase(s, "false") or std.ascii.eqlIgnoreCase(s, "no") or std.mem.eql(u8, s, "0") or std.ascii.eqlIgnoreCase(s, "off") or std.mem.eql(u8, s, "")) {
+            return Value.initBool(false);
+        }
+        return Value.initNull();
+    }
+
+    // FILTER_VALIDATE_REGEXP = 272
+    if (filter_type == 272) {
+        if (!value.isString()) return Value.initBool(false);
+        // 从 options 中提取 regexp
+        if (options.isNull() or !options.isArray()) return Value.initBool(false);
+        const opts_arr = options.asArray();
+        const opts_entry = opts_arr.getByValue(Value.initString(PHPString.initStatic("options"))) orelse return Value.initBool(false);
+        defer opts_entry.release(runtime_allocator);
+        if (!opts_entry.isArray()) return Value.initBool(false);
+        const inner_arr = opts_entry.asArray();
+        const regexp_entry = inner_arr.getByValue(Value.initString(PHPString.initStatic("regexp"))) orelse return Value.initBool(false);
+        defer regexp_entry.release(runtime_allocator);
+        if (!regexp_entry.isString()) return Value.initBool(false);
+        // 使用 preg_match 进行匹配
+        var dummy_matches: Value = Value.initNull();
+        const match_result = try preg_match(regexp_entry, value, &dummy_matches, Value.initNull(), Value.initInt(0), allocator);
+        if (match_result.isInt() and match_result.asInt() > 0) return value;
+        return Value.initBool(false);
+    }
+
     // 其他过滤器类型暂不支持
     return Value.initBool(false);
 }
@@ -21944,16 +25556,16 @@ pub fn php_htmlspecialchars(str: Value, flags: Value, encoding: Value, double_en
 
     const input = str.asString().data;
     var result = try std.ArrayList(u8).initCapacity(allocator, 0);
-    defer result.deinit();
+    defer result.deinit(allocator);
 
     for (input) |c| {
         switch (c) {
-            '&' => try result.appendSlice("&amp;"),
-            '"' => try result.appendSlice("&quot;"),
-            '\'' => try result.appendSlice("&#039;"),
-            '<' => try result.appendSlice("&lt;"),
-            '>' => try result.appendSlice("&gt;"),
-            else => try result.append(c),
+            '&' => try result.appendSlice(allocator, "&amp;"),
+            '"' => try result.appendSlice(allocator, "&quot;"),
+            '\'' => try result.appendSlice(allocator, "&#039;"),
+            '<' => try result.appendSlice(allocator, "&lt;"),
+            '>' => try result.appendSlice(allocator, "&gt;"),
+            else => try result.append(allocator, c),
         }
     }
 
@@ -21973,32 +25585,32 @@ pub fn php_htmlspecialchars_decode(str: Value, flags: Value, allocator: Allocato
 
     const input = str.asString().data;
     var result = try std.ArrayList(u8).initCapacity(allocator, 0);
-    defer result.deinit();
+    defer result.deinit(allocator);
 
     var i: usize = 0;
     while (i < input.len) {
         if (input[i] == '&') {
             if (i + 4 <= input.len and std.mem.eql(u8, input[i .. i + 4], "&lt;")) {
-                try result.append('<');
+                try result.append(allocator, '<');
                 i += 4;
             } else if (i + 4 <= input.len and std.mem.eql(u8, input[i .. i + 4], "&gt;")) {
-                try result.append('>');
+                try result.append(allocator, '>');
                 i += 4;
             } else if (i + 5 <= input.len and std.mem.eql(u8, input[i .. i + 5], "&amp;")) {
-                try result.append('&');
+                try result.append(allocator, '&');
                 i += 5;
             } else if (i + 6 <= input.len and std.mem.eql(u8, input[i .. i + 6], "&quot;")) {
-                try result.append('"');
+                try result.append(allocator, '"');
                 i += 6;
             } else if (i + 6 <= input.len and std.mem.eql(u8, input[i .. i + 6], "&#039;")) {
-                try result.append('\'');
+                try result.append(allocator, '\'');
                 i += 6;
             } else {
-                try result.append(input[i]);
+                try result.append(allocator, input[i]);
                 i += 1;
             }
         } else {
-            try result.append(input[i]);
+            try result.append(allocator, input[i]);
             i += 1;
         }
     }
@@ -22017,7 +25629,7 @@ pub fn php_wordwrap(str: Value, width: Value, break_str: Value, cut: Value, allo
     const force_cut = cut.toBool();
 
     var result = try std.ArrayList(u8).initCapacity(allocator, 0);
-    defer result.deinit();
+    defer result.deinit(allocator);
 
     var line_len: usize = 0;
     var word_start: usize = 0;
@@ -22028,23 +25640,26 @@ pub fn php_wordwrap(str: Value, width: Value, break_str: Value, cut: Value, allo
             // 输出单词
             if (i > word_start) {
                 const word = input[word_start..i];
-                if (line_len + word.len > wrap_width and line_len > 0) {
-                    try result.appendSlice(break_chars);
+                // 检查是否需要换行（含空格分隔符的长度）
+                if (line_len > 0 and line_len + 1 + word.len > wrap_width) {
+                    try result.appendSlice(allocator, break_chars);
                     line_len = 0;
                 }
-                try result.appendSlice(word);
+                // 行首不加空格
+                if (line_len > 0) {
+                    try result.append(allocator, ' ');
+                    line_len += 1;
+                }
+                try result.appendSlice(allocator, word);
                 line_len += word.len;
             }
             if (input[i] == '\n') {
-                try result.append('\n');
+                try result.appendSlice(allocator, break_chars);
                 line_len = 0;
-            } else {
-                try result.append(' ');
-                line_len += 1;
             }
             word_start = i + 1;
         } else if (force_cut and line_len >= wrap_width) {
-            try result.appendSlice(break_chars);
+            try result.appendSlice(allocator, break_chars);
             line_len = 0;
         }
         i += 1;
@@ -22053,10 +25668,14 @@ pub fn php_wordwrap(str: Value, width: Value, break_str: Value, cut: Value, allo
     // 输出剩余单词
     if (i > word_start) {
         const word = input[word_start..i];
-        if (line_len + word.len > wrap_width and line_len > 0) {
-            try result.appendSlice(break_chars);
+        if (line_len > 0 and line_len + 1 + word.len > wrap_width) {
+            try result.appendSlice(allocator, break_chars);
+            line_len = 0;
         }
-        try result.appendSlice(word);
+        if (line_len > 0) {
+            try result.append(allocator, ' ');
+        }
+        try result.appendSlice(allocator, word);
     }
 
     const php_str = try PHPString.init(allocator, result.items);
@@ -22086,6 +25705,584 @@ pub fn php_bin2hex(str: Value, allocator: Allocator) !Value {
 
     const php_str = try PHPString.init(allocator, hex_str);
     return Value.initString(php_str);
+}
+
+/// 解析十进制字符串为 (负数标记, 整数值, 小数位数)
+/// value * 10^(-scale) 即为原始数值
+fn parseBcNumber(s: []const u8) struct { neg: bool, value: i128, scale: u32 } {
+    var i: usize = 0;
+    var neg = false;
+    if (i < s.len and (s[i] == '+' or s[i] == '-')) {
+        neg = s[i] == '-';
+        i += 1;
+    }
+    var int_part: i128 = 0;
+    while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) {
+        int_part = int_part * 10 + @as(i128, s[i] - '0');
+    }
+    var scale: u32 = 0;
+    var frac_value: i128 = 0;
+    if (i < s.len and s[i] == '.') {
+        i += 1;
+        while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) {
+            frac_value = frac_value * 10 + @as(i128, s[i] - '0');
+            scale += 1;
+        }
+    }
+    // 合并整数和小数部分
+    var total = int_part;
+    var j: u32 = 0;
+    while (j < scale) : (j += 1) {
+        total = total * 10;
+    }
+    total += frac_value;
+    if (neg) total = -total;
+    return .{ .neg = neg, .value = total, .scale = scale };
+}
+
+/// 将 bc 数值格式化为字符串，截断到指定小数位
+fn formatBcNumber(value: i128, orig_scale: u32, target_scale: u32, allocator: Allocator) !Value {
+    // 调整精度：如果 target_scale < orig_scale，需要截断
+    var v = value;
+    var cur_scale = orig_scale;
+    if (target_scale < cur_scale) {
+        const diff = cur_scale - target_scale;
+        var divisor: i128 = 1;
+        var k: u32 = 0;
+        while (k < diff) : (k += 1) divisor *= 10;
+        v = @divTrunc(v, divisor);
+        cur_scale = target_scale;
+    } else if (target_scale > cur_scale) {
+        const diff = target_scale - cur_scale;
+        var multiplier: i128 = 1;
+        var k: u32 = 0;
+        while (k < diff) : (k += 1) multiplier *= 10;
+        v = v * multiplier;
+        cur_scale = target_scale;
+    }
+
+    var neg = false;
+    if (v < 0) {
+        neg = true;
+        v = -v;
+    }
+
+    // 将整数转为字符串
+    var buf: [64]u8 = undefined;
+    const written = std.fmt.bufPrint(&buf, "{d}", .{v}) catch return Value.initNull();
+    const digits = written;
+
+    // 分割整数和小数部分
+    var int_str: []const u8 = digits;
+    var frac_str: []const u8 = "";
+    var frac_buf: [64]u8 = undefined;
+    if (cur_scale > 0) {
+        if (digits.len > cur_scale) {
+            int_str = digits[0 .. digits.len - cur_scale];
+            frac_str = digits[digits.len - cur_scale ..];
+        } else {
+            int_str = "0";
+            const leading_zeros = cur_scale - digits.len;
+            var pos: usize = 0;
+            var z: u32 = 0;
+            while (z < leading_zeros) : (z += 1) {
+                frac_buf[pos] = '0';
+                pos += 1;
+            }
+            @memcpy(frac_buf[pos .. pos + digits.len], digits);
+            pos += digits.len;
+            frac_str = frac_buf[0..pos];
+        }
+    }
+
+    // 组装最终字符串
+    var result_buf: [80]u8 = undefined;
+    var pos: usize = 0;
+    if (neg and v != 0) {
+        result_buf[pos] = '-';
+        pos += 1;
+    }
+    @memcpy(result_buf[pos .. pos + int_str.len], int_str);
+    pos += int_str.len;
+    if (cur_scale > 0) {
+        result_buf[pos] = '.';
+        pos += 1;
+        @memcpy(result_buf[pos .. pos + frac_str.len], frac_str);
+        pos += frac_str.len;
+    }
+
+    return Value.initString(try PHPString.init(allocator, result_buf[0..pos]));
+}
+
+pub fn php_bcadd(args: []const Value, allocator: Allocator) !Value {
+    if (args.len < 2) return Value.initNull();
+    const a = parseBcNumber(args[0].asString().data);
+    const b = parseBcNumber(args[1].asString().data);
+    const s: u32 = if (args.len >= 3 and args[2].isInt()) @intCast(@max(0, args[2].asInt())) else 0;
+    const max_scale = @max(a.scale, b.scale);
+    const av = scaleBcValue(a.value, a.scale, max_scale);
+    const bv = scaleBcValue(b.value, b.scale, max_scale);
+    const result = av + bv;
+    return formatBcNumber(result, max_scale, s, allocator);
+}
+
+pub fn php_bcsub(args: []const Value, allocator: Allocator) !Value {
+    if (args.len < 2) return Value.initNull();
+    const a = parseBcNumber(args[0].asString().data);
+    const b = parseBcNumber(args[1].asString().data);
+    const s: u32 = if (args.len >= 3 and args[2].isInt()) @intCast(@max(0, args[2].asInt())) else 0;
+    const max_scale = @max(a.scale, b.scale);
+    const av = scaleBcValue(a.value, a.scale, max_scale);
+    const bv = scaleBcValue(b.value, b.scale, max_scale);
+    const result = av - bv;
+    return formatBcNumber(result, max_scale, s, allocator);
+}
+
+pub fn php_bcmul(args: []const Value, allocator: Allocator) !Value {
+    if (args.len < 2) return Value.initNull();
+    const a = parseBcNumber(args[0].asString().data);
+    const b = parseBcNumber(args[1].asString().data);
+    const s: u32 = if (args.len >= 3 and args[2].isInt()) @intCast(@max(0, args[2].asInt())) else 0;
+    const result = a.value * b.value;
+    const result_scale = a.scale + b.scale;
+    return formatBcNumber(result, result_scale, s, allocator);
+}
+
+pub fn php_bcdiv(args: []const Value, allocator: Allocator) !Value {
+    if (args.len < 2) return Value.initNull();
+    const a = parseBcNumber(args[0].asString().data);
+    const b = parseBcNumber(args[1].asString().data);
+    const s: u32 = if (args.len >= 3 and args[2].isInt()) @intCast(@max(0, args[2].asInt())) else 0;
+    if (b.value == 0) return Value.initNull();
+    // (a.value / 10^a.scale) / (b.value / 10^b.scale) = (a.value * 10^b.scale) / (b.value * 10^a.scale)
+    // 要得到 s 位小数: result = (a.value * 10^(s + b.scale)) / (b.value * 10^a.scale)
+    const scale_diff: i32 = @as(i32, @intCast(s)) + @as(i32, @intCast(b.scale)) - @as(i32, @intCast(a.scale));
+    var av = a.value;
+    var bv = b.value;
+    if (scale_diff >= 0) {
+        var multiplier: i128 = 1;
+        var k: i32 = 0;
+        while (k < scale_diff) : (k += 1) multiplier *= 10;
+        av = av * multiplier;
+    } else {
+        var divisor: i128 = 1;
+        var k: i32 = 0;
+        while (k < -scale_diff) : (k += 1) divisor *= 10;
+        bv = bv * divisor;
+    }
+    const result = @divTrunc(av, bv);
+    return formatBcNumber(result, s, s, allocator);
+}
+
+pub fn php_bcmod(args: []const Value, allocator: Allocator) !Value {
+    if (args.len < 2) return Value.initNull();
+    const a = parseBcNumber(args[0].asString().data);
+    const b = parseBcNumber(args[1].asString().data);
+    const av = @divTrunc(a.value, bcPow10(a.scale));
+    const bv = @divTrunc(b.value, bcPow10(b.scale));
+    if (bv == 0) return Value.initNull();
+    const result = @rem(av, bv);
+    var buf: [64]u8 = undefined;
+    const written = std.fmt.bufPrint(&buf, "{d}", .{result}) catch return Value.initNull();
+    return Value.initString(try PHPString.init(allocator, written));
+}
+
+pub fn php_bcpow(args: []const Value, allocator: Allocator) !Value {
+    if (args.len < 2) return Value.initNull();
+    const a = parseBcNumber(args[0].asString().data);
+    const e = parseBcNumber(args[1].asString().data);
+    const s: u32 = if (args.len >= 3 and args[2].isInt()) @intCast(@max(0, args[2].asInt())) else 0;
+    const exp_int = @divTrunc(e.value, bcPow10(e.scale));
+    if (exp_int < 0) return Value.initNull();
+    var result: i128 = 1;
+    var i: i128 = 0;
+    while (i < exp_int) : (i += 1) {
+        result = result * a.value;
+    }
+    const result_scale = a.scale * @as(u32, @intCast(exp_int));
+    return formatBcNumber(result, result_scale, s, allocator);
+}
+
+pub fn php_bcsqrt(args: []const Value, allocator: Allocator) !Value {
+    if (args.len < 1) return Value.initNull();
+    const a = parseBcNumber(args[0].asString().data);
+    const s: u32 = if (args.len >= 2 and args[1].isInt()) @intCast(@max(0, args[1].asInt())) else 0;
+    if (a.value < 0) return Value.initNull();
+    const scaled = scaleBcValue(a.value, a.scale, s * 2);
+    if (scaled == 0) return formatBcNumber(0, 0, s, allocator);
+    var x: i128 = scaled;
+    var prev: i128 = 0;
+    var iter: u32 = 0;
+    while (iter < 100) : (iter += 1) {
+        prev = x;
+        x = @divTrunc(x + @divTrunc(scaled, x), 2);
+        if (x == prev) break;
+    }
+    return formatBcNumber(x, s, s, allocator);
+}
+
+pub fn php_bccomp(args: []const Value, _: Allocator) !Value {
+    if (args.len < 2) return Value.initNull();
+    const a = parseBcNumber(args[0].asString().data);
+    const b = parseBcNumber(args[1].asString().data);
+    const s: u32 = if (args.len >= 3 and args[2].isInt()) @intCast(@max(0, args[2].asInt())) else 0;
+    const max_scale = @max(@max(a.scale, b.scale), s);
+    const av = scaleBcValue(a.value, a.scale, max_scale);
+    const bv = scaleBcValue(b.value, b.scale, max_scale);
+    if (av < bv) return Value.initInt(-1);
+    if (av > bv) return Value.initInt(1);
+    return Value.initInt(0);
+}
+
+fn bcPow10(n: u32) i128 {
+    var result: i128 = 1;
+    var i: u32 = 0;
+    while (i < n) : (i += 1) result *= 10;
+    return result;
+}
+
+fn scaleBcValue(value: i128, from_scale: u32, to_scale: u32) i128 {
+    if (to_scale <= from_scale) {
+        const diff = from_scale - to_scale;
+        return @divTrunc(value, bcPow10(diff));
+    }
+    const diff = to_scale - from_scale;
+    return value * bcPow10(diff);
+}
+
+/// pack - 将数据打包为二进制字符串
+pub fn php_pack(format: Value, args: []const Value, allocator: Allocator) !Value {
+    if (!format.isString()) return error.InvalidArgument;
+    const fmt = format.asString().data;
+    var result = try std.ArrayList(u8).initCapacity(allocator, 0);
+    defer result.deinit(allocator);
+    var arg_idx: usize = 0;
+    var i: usize = 0;
+    while (i < fmt.len) {
+        const code = fmt[i];
+        i += 1;
+        // 解析重复次数
+        var repeat: ?usize = null;
+        if (i < fmt.len and fmt[i] == '*') {
+            repeat = null; // 使用所有剩余参数
+            i += 1;
+        } else if (i < fmt.len and fmt[i] >= '0' and fmt[i] <= '9') {
+            var n: usize = 0;
+            while (i < fmt.len and fmt[i] >= '0' and fmt[i] <= '9') {
+                n = n * 10 + (fmt[i] - '0');
+                i += 1;
+            }
+            repeat = n;
+        }
+        switch (code) {
+            'a' => {
+                // NUL 填充字符串
+                const n = repeat orelse 0;
+                if (arg_idx < args.len) {
+                    const str = try args[arg_idx].toString(allocator);
+                    defer str.release(allocator);
+                    const data = str.data;
+                    const write_len = if (n > 0) @min(data.len, n) else data.len;
+                    try result.appendSlice(allocator, data[0..write_len]);
+                    if (n > write_len) {
+                        try result.appendNTimes(allocator, 0, n - write_len);
+                    }
+                    arg_idx += 1;
+                } else if (n > 0) {
+                    try result.appendNTimes(allocator, 0, n);
+                }
+            },
+            'A' => {
+                // 空格填充字符串
+                const n = repeat orelse 0;
+                if (arg_idx < args.len) {
+                    const str = try args[arg_idx].toString(allocator);
+                    defer str.release(allocator);
+                    const data = str.data;
+                    const write_len = if (n > 0) @min(data.len, n) else data.len;
+                    try result.appendSlice(allocator, data[0..write_len]);
+                    if (n > write_len) {
+                        try result.appendNTimes(allocator, ' ', n - write_len);
+                    }
+                    arg_idx += 1;
+                } else if (n > 0) {
+                    try result.appendNTimes(allocator, ' ', n);
+                }
+            },
+            'C', 'c' => {
+                const count = repeat orelse 1;
+                for (0..count) |_| {
+                    if (arg_idx >= args.len) break;
+                    const val: u8 = @intCast(@as(i64, @truncate(args[arg_idx].toInt())) & 0xFF);
+                    try result.append(allocator, val);
+                    arg_idx += 1;
+                }
+            },
+            'n' => {
+                // 16-bit big-endian unsigned
+                const count = repeat orelse 1;
+                for (0..count) |_| {
+                    if (arg_idx >= args.len) break;
+                    const val: u16 = @intCast(@as(i64, @truncate(args[arg_idx].toInt())) & 0xFFFF);
+                    try result.append(allocator, @intCast((val >> 8) & 0xFF));
+                    try result.append(allocator, @intCast(val & 0xFF));
+                    arg_idx += 1;
+                }
+            },
+            'v' => {
+                // 16-bit little-endian unsigned
+                const count = repeat orelse 1;
+                for (0..count) |_| {
+                    if (arg_idx >= args.len) break;
+                    const val: u16 = @intCast(@as(i64, @truncate(args[arg_idx].toInt())) & 0xFFFF);
+                    try result.append(allocator, @intCast(val & 0xFF));
+                    try result.append(allocator, @intCast((val >> 8) & 0xFF));
+                    arg_idx += 1;
+                }
+            },
+            'N' => {
+                // 32-bit big-endian unsigned
+                const count = repeat orelse 1;
+                for (0..count) |_| {
+                    if (arg_idx >= args.len) break;
+                    const val: u32 = @intCast(@as(i64, @truncate(args[arg_idx].toInt())) & 0xFFFFFFFF);
+                    try result.append(allocator, @intCast((val >> 24) & 0xFF));
+                    try result.append(allocator, @intCast((val >> 16) & 0xFF));
+                    try result.append(allocator, @intCast((val >> 8) & 0xFF));
+                    try result.append(allocator, @intCast(val & 0xFF));
+                    arg_idx += 1;
+                }
+            },
+            'V' => {
+                // 32-bit little-endian unsigned
+                const count = repeat orelse 1;
+                for (0..count) |_| {
+                    if (arg_idx >= args.len) break;
+                    const val: u32 = @intCast(@as(i64, @truncate(args[arg_idx].toInt())) & 0xFFFFFFFF);
+                    try result.append(allocator, @intCast(val & 0xFF));
+                    try result.append(allocator, @intCast((val >> 8) & 0xFF));
+                    try result.append(allocator, @intCast((val >> 16) & 0xFF));
+                    try result.append(allocator, @intCast((val >> 24) & 0xFF));
+                    arg_idx += 1;
+                }
+            },
+            'J' => {
+                // 64-bit big-endian unsigned
+                const count = repeat orelse 1;
+                for (0..count) |_| {
+                    if (arg_idx >= args.len) break;
+                    const val: u64 = @bitCast(args[arg_idx].toInt());
+                    var b: i32 = 56;
+                    while (b >= 0) : (b -= 8) {
+                        try result.append(allocator, @intCast((val >> @intCast(b)) & 0xFF));
+                    }
+                    arg_idx += 1;
+                }
+            },
+            'P' => {
+                // 64-bit little-endian unsigned
+                const count = repeat orelse 1;
+                for (0..count) |_| {
+                    if (arg_idx >= args.len) break;
+                    const val: u64 = @bitCast(args[arg_idx].toInt());
+                    var b: i32 = 0;
+                    while (b < 64) : (b += 8) {
+                        try result.append(allocator, @intCast((val >> @intCast(b)) & 0xFF));
+                    }
+                    arg_idx += 1;
+                }
+            },
+            'f' => {
+                // 32-bit float (平台字节序)
+                const count = repeat orelse 1;
+                for (0..count) |_| {
+                    if (arg_idx >= args.len) break;
+                    const val: f32 = @floatCast(args[arg_idx].toFloat());
+                    const bytes: [4]u8 = @bitCast(val);
+                    try result.appendSlice(allocator, &bytes);
+                    arg_idx += 1;
+                }
+            },
+            'd' => {
+                // 64-bit double (平台字节序)
+                const count = repeat orelse 1;
+                for (0..count) |_| {
+                    if (arg_idx >= args.len) break;
+                    const val: f64 = args[arg_idx].toFloat();
+                    const bytes: [8]u8 = @bitCast(val);
+                    try result.appendSlice(allocator, &bytes);
+                    arg_idx += 1;
+                }
+            },
+            'x' => {
+                // NUL 字节
+                const count = repeat orelse 1;
+                try result.appendNTimes(allocator, 0, count);
+            },
+            else => {},
+        }
+    }
+    const php_str = try PHPString.init(allocator, result.items);
+    return Value.initString(php_str);
+}
+
+/// unpack - 从二进制字符串解包数据
+pub fn php_unpack(format: Value, data: Value, allocator: Allocator) !Value {
+    if (!format.isString()) return error.InvalidArgument;
+    if (!data.isString()) return error.InvalidArgument;
+    const fmt = format.asString().data;
+    const input = data.asString().data;
+    const result = try PHPArray.init(allocator);
+    var offset: usize = 0;
+    var out_idx: usize = 1;
+    var i: usize = 0;
+    while (i < fmt.len) {
+        const code = fmt[i];
+        i += 1;
+        var repeat: ?usize = null;
+        if (i < fmt.len and fmt[i] == '*') {
+            repeat = null;
+            i += 1;
+        } else if (i < fmt.len and fmt[i] >= '0' and fmt[i] <= '9') {
+            var n: usize = 0;
+            while (i < fmt.len and fmt[i] >= '0' and fmt[i] <= '9') {
+                n = n * 10 + (fmt[i] - '0');
+                i += 1;
+            }
+            repeat = n;
+        }
+        switch (code) {
+            'A' => {
+                const n = repeat orelse (input.len - offset);
+                if (offset + n <= input.len) {
+                    var slice = input[offset .. offset + n];
+                    // 去除尾部空格/NUL
+                    while (slice.len > 0 and (slice[slice.len - 1] == 0 or slice[slice.len - 1] == ' ')) {
+                        slice = slice[0 .. slice.len - 1];
+                    }
+                    const php_str = try PHPString.init(allocator, slice);
+                    try result.elements.put(.{ .integer = @intCast(out_idx) }, Value.initString(php_str));
+                    out_idx += 1;
+                    offset += n;
+                }
+            },
+            'a' => {
+                const n = repeat orelse (input.len - offset);
+                if (offset + n <= input.len) {
+                    var slice = input[offset .. offset + n];
+                    while (slice.len > 0 and slice[slice.len - 1] == 0) {
+                        slice = slice[0 .. slice.len - 1];
+                    }
+                    const php_str = try PHPString.init(allocator, slice);
+                    try result.elements.put(.{ .integer = @intCast(out_idx) }, Value.initString(php_str));
+                    out_idx += 1;
+                    offset += n;
+                }
+            },
+            'C', 'c' => {
+                const count = repeat orelse (input.len - offset);
+                for (0..count) |_| {
+                    if (offset >= input.len) break;
+                    const b = input[offset];
+                    const val: i64 = if (code == 'c') (if (b & 0x80 != 0) @as(i64, b) - 256 else b) else b;
+                    try result.elements.put(.{ .integer = @intCast(out_idx) }, Value.initInt(val));
+                    out_idx += 1;
+                    offset += 1;
+                }
+            },
+            'n' => {
+                const count = repeat orelse ((input.len - offset) / 2);
+                for (0..count) |_| {
+                    if (offset + 2 > input.len) break;
+                    const val: u16 = (@as(u16, input[offset]) << 8) | input[offset + 1];
+                    try result.elements.put(.{ .integer = @intCast(out_idx) }, Value.initInt(val));
+                    out_idx += 1;
+                    offset += 2;
+                }
+            },
+            'v' => {
+                const count = repeat orelse ((input.len - offset) / 2);
+                for (0..count) |_| {
+                    if (offset + 2 > input.len) break;
+                    const val: u16 = input[offset] | (@as(u16, input[offset + 1]) << 8);
+                    try result.elements.put(.{ .integer = @intCast(out_idx) }, Value.initInt(val));
+                    out_idx += 1;
+                    offset += 2;
+                }
+            },
+            'N' => {
+                const count = repeat orelse ((input.len - offset) / 4);
+                for (0..count) |_| {
+                    if (offset + 4 > input.len) break;
+                    const val: u32 = (@as(u32, input[offset]) << 24) | (@as(u32, input[offset + 1]) << 16) | (@as(u32, input[offset + 2]) << 8) | input[offset + 3];
+                    // PHP 的 N 格式返回有符号 int（如果最高位为 1 则为负数）
+                    const sval: i64 = @intCast(val);
+                    try result.elements.put(.{ .integer = @intCast(out_idx) }, Value.initInt(sval));
+                    out_idx += 1;
+                    offset += 4;
+                }
+            },
+            'V' => {
+                const count = repeat orelse ((input.len - offset) / 4);
+                for (0..count) |_| {
+                    if (offset + 4 > input.len) break;
+                    const val: u32 = input[offset] | (@as(u32, input[offset + 1]) << 8) | (@as(u32, input[offset + 2]) << 16) | (@as(u32, input[offset + 3]) << 24);
+                    const sval: i64 = @intCast(val);
+                    try result.elements.put(.{ .integer = @intCast(out_idx) }, Value.initInt(sval));
+                    out_idx += 1;
+                    offset += 4;
+                }
+            },
+            'J' => {
+                const count = repeat orelse ((input.len - offset) / 8);
+                for (0..count) |_| {
+                    if (offset + 8 > input.len) break;
+                    var val: u64 = 0;
+                    var b: i32 = 56;
+                    while (b >= 0) : (b -= 8) {
+                        val = (val << 8) | input[offset + @as(usize, @intCast(@divTrunc(56 - b, 8)))];
+                    }
+                    offset += 8;
+                    try result.elements.put(.{ .integer = @intCast(out_idx) }, Value.initInt(@bitCast(val)));
+                    out_idx += 1;
+                }
+            },
+            'P' => {
+                const count = repeat orelse ((input.len - offset) / 8);
+                for (0..count) |_| {
+                    if (offset + 8 > input.len) break;
+                    var val: u64 = 0;
+                    var b: i32 = 0;
+                    while (b < 64) : (b += 8) {
+                        val |= @as(u64, input[offset + @as(usize, @intCast(@divTrunc(b, 8)))]) << @intCast(b);
+                    }
+                    offset += 8;
+                    try result.elements.put(.{ .integer = @intCast(out_idx) }, Value.initInt(@bitCast(val)));
+                    out_idx += 1;
+                }
+            },
+            'f' => {
+                if (offset + 4 <= input.len) {
+                    const bytes: [4]u8 = input[offset .. offset + 4][0..4].*;
+                    const val: f32 = @bitCast(bytes);
+                    try result.elements.put(.{ .integer = @intCast(out_idx) }, Value.initFloat(val));
+                    out_idx += 1;
+                    offset += 4;
+                }
+            },
+            'd' => {
+                if (offset + 8 <= input.len) {
+                    const bytes: [8]u8 = input[offset .. offset + 8][0..8].*;
+                    const val: f64 = @bitCast(bytes);
+                    try result.elements.put(.{ .integer = @intCast(out_idx) }, Value.initFloat(val));
+                    out_idx += 1;
+                    offset += 8;
+                }
+            },
+            else => {},
+        }
+    }
+    return Value.initArray(result);
 }
 
 /// decbin - 十进制转二进制
@@ -22195,13 +26392,13 @@ pub fn php_sha1(str: Value, raw_output: Value, allocator: Allocator) !Value {
 /// 签名: password_hash(password, algo, options = []) — options忽略，使用默认cost
 pub fn php_password_hash(password: Value, algo: Value, allocator: Allocator) !Value {
     if (!password.isString()) return error.InvalidArgument;
-    
+
     const pwd = password.asString().data;
     const algo_val = algo.toInt();
-    
+
     // 使用默认cost=12
     const cost: u6 = 12;
-    
+
     // 使用bcrypt (algo=1 是 PASSWORD_BCRYPT)
     if (algo_val == 1 or algo_val == 0) { // 0 = PASSWORD_DEFAULT
         var hash_buf: [128]u8 = undefined;
@@ -22210,7 +26407,7 @@ pub fn php_password_hash(password: Value, algo: Value, allocator: Allocator) !Va
             .params = .{ .rounds_log = cost, .silently_truncate_password = true },
             .encoding = .crypt,
         }, &hash_buf);
-        
+
         // Zig生成$2b$前缀，PHP使用$2y$前缀，替换以保持兼容
         var result_buf: [128]u8 = undefined;
         const result_str = blk: {
@@ -22223,11 +26420,11 @@ pub fn php_password_hash(password: Value, algo: Value, allocator: Allocator) !Va
             }
             break :blk hash_result;
         };
-        
+
         const php_str = try PHPString.init(allocator, result_str);
         return Value.initString(php_str);
     }
-    
+
     return error.InvalidArgument;
 }
 
@@ -22237,10 +26434,10 @@ pub fn php_password_verify(password: Value, hash: Value, allocator: Allocator) !
     if (!password.isString() or !hash.isString()) {
         return Value.initBool(false);
     }
-    
+
     const pwd = password.asString().data;
     const hash_str = hash.asString().data;
-    
+
     // PHP使用$2y$前缀，Zig期望$2b$前缀，需要转换
     var converted_buf: [128]u8 = undefined;
     const verify_str = blk: {
@@ -22255,14 +26452,14 @@ pub fn php_password_verify(password: Value, hash: Value, allocator: Allocator) !
         }
         break :blk hash_str;
     };
-    
+
     // 使用bcrypt验证
     std.crypto.pwhash.bcrypt.strVerify(verify_str, pwd, .{
         .silently_truncate_password = true,
     }) catch {
         return Value.initBool(false);
     };
-    
+
     return Value.initBool(true);
 }
 
@@ -22355,7 +26552,7 @@ pub fn php_uniqid(prefix: Value, more_entropy: Value, allocator: Allocator) !Val
     const formatted = if (ent) blk: {
         // With more_entropy: add .XXXXXXXX (8 random decimal digits)
         var rand_bytes: [4]u8 = undefined;
-        std.crypto.random.bytes(&rand_bytes);
+        getRandomBytes(&rand_bytes);
         const rand_val = @as(u32, rand_bytes[0]) * 16777216 + @as(u32, rand_bytes[1]) * 65536 + @as(u32, rand_bytes[2]) * 256 + rand_bytes[3];
         break :blk try std.fmt.bufPrint(&result_buf, "{s}{x}{x:0>5}.{d:0>8}", .{ prefix_str, seconds, usec_part, rand_val % 100000000 });
     } else try std.fmt.bufPrint(&result_buf, "{s}{x}{x:0>5}", .{ prefix_str, seconds, usec_part });
@@ -22511,19 +26708,124 @@ pub fn php_hash_hmac(algorithm: Value, data: Value, key: Value, allocator: Alloc
 /// hash_equals - 安全比较两个字符串是否相等（防止时序攻击）
 pub fn php_hash_equals(str1: Value, str2: Value) !Value {
     if (!str1.isString() or !str2.isString()) return Value.initBool(false);
-    
+
     const s1 = str1.asString().data;
     const s2 = str2.asString().data;
-    
+
     if (s1.len != s2.len) return Value.initBool(false);
-    
+
     // 使用时序安全比较
     var result: u8 = 0;
     for (s1, s2) |c1, c2| {
         result |= c1 ^ c2;
     }
-    
+
     return Value.initBool(result == 0);
+}
+
+/// hash_pbkdf2 - PBKDF2 密钥派生函数
+pub fn php_hash_pbkdf2(algo: Value, password: Value, salt: Value, iterations: Value, length: Value, raw_output: Value, allocator: Allocator) !Value {
+    if (!algo.isString() or !password.isString() or !salt.isString()) return Value.initBool(false);
+
+    const algo_str = algo.asString().data;
+    const password_str = password.asString().data;
+    const salt_str = salt.asString().data;
+    const iterations_count: u32 = @intCast(@max(1, iterations.toInt()));
+    const dklen: usize = @intCast(@max(0, length.toInt()));
+    const raw = raw_output.toBool();
+
+    // 支持的算法及对应的哈希长度
+    const HmacSha256 = std.crypto.auth.hmac.Hmac(std.crypto.hash.sha2.Sha256);
+    const HmacSha1 = std.crypto.auth.hmac.Hmac(std.crypto.hash.Sha1);
+    const HmacMd5 = std.crypto.auth.hmac.Hmac(std.crypto.hash.Md5);
+
+    const hlen: usize = if (std.mem.eql(u8, algo_str, "sha256")) 32 else if (std.mem.eql(u8, algo_str, "sha1")) 20 else if (std.mem.eql(u8, algo_str, "md5")) 16 else return Value.initBool(false);
+
+    // PHP: length 参数在 binary=false 时是十六进制字符串长度，实际字节数为 length/2
+    // 在 binary=true 时是原始字节长度
+    const raw_dklen: usize = if (dklen == 0) hlen else if (raw) dklen else (dklen + 1) / 2;
+    const actual_dklen = raw_dklen;
+
+    // PBKDF2 算法
+    const num_blocks: usize = (actual_dklen + hlen - 1) / hlen;
+    var dk = try allocator.alloc(u8, num_blocks * hlen);
+    defer allocator.free(dk);
+
+    var block_index: u32 = 1;
+    while (block_index <= num_blocks) : (block_index += 1) {
+        // U1 = HMAC(password, salt || INT_32_BE(block_index))
+        var salt_block = try allocator.alloc(u8, salt_str.len + 4);
+        defer allocator.free(salt_block);
+        @memcpy(salt_block[0..salt_str.len], salt_str);
+        salt_block[salt_str.len] = @intCast((block_index >> 24) & 0xFF);
+        salt_block[salt_str.len + 1] = @intCast((block_index >> 16) & 0xFF);
+        salt_block[salt_str.len + 2] = @intCast((block_index >> 8) & 0xFF);
+        salt_block[salt_str.len + 3] = @intCast(block_index & 0xFF);
+
+        var u_prev: [64]u8 = undefined; // 最大哈希长度
+        var u_curr: [64]u8 = undefined;
+
+        if (std.mem.eql(u8, algo_str, "sha256")) {
+            var hmac = HmacSha256.init(password_str);
+            hmac.update(salt_block);
+            hmac.final(u_prev[0..32]);
+        } else if (std.mem.eql(u8, algo_str, "sha1")) {
+            var hmac = HmacSha1.init(password_str);
+            hmac.update(salt_block);
+            hmac.final(u_prev[0..20]);
+        } else {
+            var hmac = HmacMd5.init(password_str);
+            hmac.update(salt_block);
+            hmac.final(u_prev[0..16]);
+        }
+
+        // T = U1
+        const offset = (block_index - 1) * hlen;
+        @memcpy(dk[offset .. offset + hlen], u_prev[0..hlen]);
+
+        // U2...Uc, XOR into T
+        var iter: u32 = 1;
+        while (iter < iterations_count) : (iter += 1) {
+            if (std.mem.eql(u8, algo_str, "sha256")) {
+                var hmac = HmacSha256.init(password_str);
+                hmac.update(u_prev[0..32]);
+                hmac.final(u_curr[0..32]);
+            } else if (std.mem.eql(u8, algo_str, "sha1")) {
+                var hmac = HmacSha1.init(password_str);
+                hmac.update(u_prev[0..20]);
+                hmac.final(u_curr[0..20]);
+            } else {
+                var hmac = HmacMd5.init(password_str);
+                hmac.update(u_prev[0..16]);
+                hmac.final(u_curr[0..16]);
+            }
+
+            for (0..hlen) |j| {
+                dk[offset + j] ^= u_curr[j];
+            }
+            @memcpy(u_prev[0..hlen], u_curr[0..hlen]);
+        }
+    }
+
+    if (raw) {
+        const result = try allocator.alloc(u8, actual_dklen);
+        @memcpy(result, dk[0..actual_dklen]);
+        const php_str = try PHPString.init(allocator, result);
+        allocator.free(result);
+        return Value.initString(php_str);
+    }
+
+    // 十六进制输出
+    const hex_len = actual_dklen * 2;
+    const hex_str = try allocator.alloc(u8, hex_len);
+    defer allocator.free(hex_str);
+    const hex_chars = "0123456789abcdef";
+    for (dk[0..actual_dklen], 0..) |byte, i| {
+        hex_str[i * 2] = hex_chars[byte >> 4];
+        hex_str[i * 2 + 1] = hex_chars[byte & 0x0f];
+    }
+
+    return Value.initString(try PHPString.init(allocator, hex_str));
 }
 
 /// crc32 - 计算字符串的CRC32校验值
@@ -22540,7 +26842,7 @@ pub fn php_crc32(str: Value) !Value {
 /// hash_algos - 返回支持的哈希算法列表
 pub fn php_hash_algos(allocator: Allocator) !Value {
     const algos = [_][]const u8{
-        "md5", "sha1", "sha224", "sha256", "sha384", "sha512",
+        "md5",        "sha1",  "sha224", "sha256",  "sha384", "sha512",
         "sha512/256", "crc32", "crc32b", "adler32",
     };
     const arr = try PHPArray.init(allocator);
@@ -23828,7 +28130,7 @@ pub fn php_array_rand(arr: Value, num: Value, allocator: Allocator) !Value {
 
     if (n == 1) {
         // 返回单个键
-        const idx = @as(usize, @intCast(std.crypto.random.intRangeAtMost(i64, 0, @as(i64, @intCast(count - 1)))));
+        const idx = @as(usize, @intCast(getRandomIntRange(i64, 0, @as(i64, @intCast(count - 1)))));
         var iter = php_arr.elements.iterator();
         var i: usize = 0;
         while (iter.next()) |entry| : (i += 1) {
@@ -23851,14 +28153,18 @@ pub fn php_shuffle(arr: Value, allocator: Allocator) !Value {
     if (!arr.isArray()) return error.InvalidArgument;
 
     const php_arr = arr.asArray();
-    const count = php_arr.elements.count();
-    if (count <= 1) return Value.initBool(true);
+
+    // 原地排序：直接修改 PHPArray，所有引用均可见排序结果
+    const sort_arr = php_arr;
+
+    const count = sort_arr.elements.count();
+    if (count <= 1) return Value.initArray(sort_arr);
 
     // Fisher-Yates shuffle
     var values = try allocator.alloc(Value, count);
     defer allocator.free(values);
 
-    var iter = php_arr.elements.iterator();
+    var iter = sort_arr.elements.iterator();
     var i: usize = 0;
     while (iter.next()) |entry| : (i += 1) {
         values[i] = entry.value_ptr.*;
@@ -23867,24 +28173,24 @@ pub fn php_shuffle(arr: Value, allocator: Allocator) !Value {
     i = count;
     while (i > 1) {
         i -= 1;
-        const j = @as(usize, @intCast(std.crypto.random.intRangeAtMost(i64, 0, @as(i64, @intCast(i)))));
+        const j = @as(usize, @intCast(getRandomIntRange(i64, 0, @as(i64, @intCast(i)))));
         const temp = values[i];
         values[i] = values[j];
         values[j] = temp;
     }
 
     // 重建数组
-    php_arr.elements.packed_values.clearRetainingCapacity();
-    if (php_arr.elements.mixed) |*mixed| {
+    sort_arr.elements.packed_values.clearRetainingCapacity();
+    if (sort_arr.elements.mixed) |*mixed| {
         mixed.clearRetainingCapacity();
     }
 
     for (values, 0..) |val, idx| {
-        try php_arr.push(allocator, val);
+        try sort_arr.push(allocator, val);
         _ = idx;
     }
 
-    return Value.initBool(true);
+    return Value.initArray(sort_arr);
 }
 
 /// compact() - 创建包含变量及其值的数组
@@ -23900,14 +28206,14 @@ pub fn php_compact(varnames: []const Value, allocator: Allocator) !Value {
 /// 完整实现需要运行时符号表支持
 pub fn php_extract(arr: Value, flags: Value, prefix: Value, allocator: Allocator) !Value {
     if (!arr.isArray()) return Value.initInt(0);
-    
+
     const extract_flags = if (flags.isInt()) flags.asInt() else 0;
     const prefix_str = if (prefix.isString()) prefix.asString().data else "";
-    
+
     _ = extract_flags;
     _ = prefix_str;
     _ = allocator;
-    
+
     // AOT模式限制：
     // extract()需要动态创建变量，但AOT编译时变量名已固定
     // 完整实现需要：
@@ -23949,10 +28255,13 @@ pub fn php_natsort(arr: Value, allocator: Allocator) !Value {
     if (!arr.isArray()) return error.InvalidArgument;
     const php_arr = arr.asArray();
 
+    // 原地排序：直接修改 PHPArray，所有引用均可见排序结果
+    const sort_arr = php_arr;
+
     const Entry = struct { key: ArrayKey, val: Value };
     var entries = std.ArrayListUnmanaged(Entry){ .items = &.{}, .capacity = 0 };
     defer entries.deinit(allocator);
-    var it = php_arr.elements.iterator();
+    var it = sort_arr.elements.iterator();
     while (it.next()) |entry| {
         try entries.append(allocator, .{ .key = entry.key_ptr.*, .val = entry.value_ptr.* });
     }
@@ -23986,23 +28295,109 @@ pub fn php_natsort(arr: Value, allocator: Allocator) !Value {
     };
     std.sort.pdq(Entry, entries.items, {}, Ctx.lessThan);
 
-    // 强制转为mixed map并重排
-    try php_arr.elements.convertToMixed();
-    if (php_arr.elements.mixed) |*m| {
+    try sort_arr.elements.convertToMixed();
+    if (sort_arr.elements.mixed) |*m| {
         m.clearRetainingCapacity();
         for (entries.items) |entry| {
-            try m.put(entry.key, entry.val);
+            try m.put(allocator, entry.key, entry.val);
         }
     }
-    return Value.initBool(true);
+    return Value.initArray(sort_arr);
 }
 
-/// 静态变量访问函数
+/// 大小写不敏感的自然排序
+pub fn php_natcasesort(arr: Value, allocator: Allocator) !Value {
+    if (!arr.isArray()) return error.InvalidArgument;
+    const php_arr = arr.asArray();
+
+    // 原地排序：直接修改 PHPArray，所有引用均可见排序结果
+    const sort_arr = php_arr;
+
+    const Entry = struct { key: ArrayKey, val: Value };
+    var entries = std.ArrayListUnmanaged(Entry){ .items = &.{}, .capacity = 0 };
+    defer entries.deinit(allocator);
+    var it = sort_arr.elements.iterator();
+    while (it.next()) |entry| {
+        try entries.append(allocator, .{ .key = entry.key_ptr.*, .val = entry.value_ptr.* });
+    }
+
+    const Ctx = struct {
+        fn natcasecmp(a: []const u8, b: []const u8) bool {
+            var i: usize = 0;
+            var j: usize = 0;
+            while (i < a.len and j < b.len) {
+                const ac = std.ascii.toLower(a[i]);
+                const bc = std.ascii.toLower(b[j]);
+                if (std.ascii.isDigit(ac) and std.ascii.isDigit(bc)) {
+                    var an: u64 = 0;
+                    var bn: u64 = 0;
+                    while (i < a.len and std.ascii.isDigit(a[i])) : (i += 1) an = an * 10 + (a[i] - '0');
+                    while (j < b.len and std.ascii.isDigit(b[j])) : (j += 1) bn = bn * 10 + (b[j] - '0');
+                    if (an != bn) return an < bn;
+                } else {
+                    if (ac != bc) return ac < bc;
+                    i += 1;
+                    j += 1;
+                }
+            }
+            return a.len < b.len;
+        }
+        fn lessThan(_: void, a: Entry, b: Entry) bool {
+            const as = if (a.val.isString()) a.val.asString().data else "";
+            const bs = if (b.val.isString()) b.val.asString().data else "";
+            return natcasecmp(as, bs);
+        }
+    };
+    std.sort.pdq(Entry, entries.items, {}, Ctx.lessThan);
+
+    try sort_arr.elements.convertToMixed();
+    if (sort_arr.elements.mixed) |*m| {
+        m.clearRetainingCapacity();
+        for (entries.items) |entry| {
+            try m.put(allocator, entry.key, entry.val);
+        }
+    }
+    return Value.initArray(sort_arr);
+}
+
+/// 带键值比较的数组差集
+pub fn php_array_diff_assoc(arrays: []const Value, allocator: Allocator) !Value {
+    if (arrays.len == 0 or !arrays[0].isArray()) return Value.initArray(try PHPArray.init(allocator));
+
+    const first = arrays[0].asArray();
+    const result = try PHPArray.init(allocator);
+    errdefer result.release(allocator);
+
+    var it = first.elements.iterator();
+    while (it.next()) |entry| {
+        const k = entry.key_ptr.*;
+        const v = entry.value_ptr.*;
+        var keep = true;
+        for (arrays[1..]) |other_val| {
+            if (!other_val.isArray()) continue;
+            const other = other_val.asArray();
+            // 检查键是否存在
+            if (other.elements.get(k)) |other_v| {
+                // 键存在且值相等 → 移除
+                const eq = try php_eq(v, other_v);
+                if (eq.asBool()) {
+                    keep = false;
+                    break;
+                }
+            }
+        }
+        if (keep) {
+            try result.set(allocator, k, v);
+        }
+    }
+
+    return Value.initArray(result);
+}
 pub fn getStaticVar(func_name_val: Value, var_name_val: Value) !Value {
     const func_name = if (func_name_val.isString()) func_name_val.asString().data else "global";
     const var_name = if (var_name_val.isString()) var_name_val.asString().data else "";
 
-    static_vars_mutex.lock();
+    spinLock(&static_vars_mutex);
     defer static_vars_mutex.unlock();
 
     if (static_vars == null) return Value.initNull();
@@ -24018,7 +28413,7 @@ pub fn setStaticVar(func_name_val: Value, var_name_val: Value, value: Value) !Va
     const func_name = if (func_name_val.isString()) func_name_val.asString().data else "global";
     const var_name = if (var_name_val.isString()) var_name_val.asString().data else "";
 
-    static_vars_mutex.lock();
+    spinLock(&static_vars_mutex);
     defer static_vars_mutex.unlock();
 
     if (static_vars == null) return Value.initNull();
@@ -24072,7 +28467,7 @@ fn generatorThreadRunner(gen_ctx: *GeneratorContext) void {
         while (!gen_ctx.mutex.tryLock()) std.atomic.spinLoopHint();
         gen_ctx.state = .completed;
         gen_ctx.caller_cond.signal(getIo());
-        gen_ctx.mutex.unlock();
+        gen_ctx.mutex.unlock(getIo());
         return;
     };
     const result = body(
@@ -24084,14 +28479,14 @@ fn generatorThreadRunner(gen_ctx: *GeneratorContext) void {
         gen_ctx.has_error = true;
         gen_ctx.state = .completed;
         gen_ctx.caller_cond.signal(getIo());
-        gen_ctx.mutex.unlock();
+        gen_ctx.mutex.unlock(getIo());
         return;
     };
     while (!gen_ctx.mutex.tryLock()) std.atomic.spinLoopHint();
     gen_ctx.return_value = result;
     gen_ctx.state = .completed;
     gen_ctx.caller_cond.signal(getIo());
-    gen_ctx.mutex.unlock();
+    gen_ctx.mutex.unlock(getIo());
 }
 
 pub fn php_create_generator(
@@ -24133,7 +28528,7 @@ fn generatorEnsureStarted(gen_ctx: *GeneratorContext) void {
     while (!gen_ctx.mutex.tryLock()) std.atomic.spinLoopHint();
     if (gen_ctx.state == .created) {
         gen_ctx.state = .running;
-        gen_ctx.mutex.unlock();
+        gen_ctx.mutex.unlock(getIo());
         gen_ctx.thread = std.Thread.spawn(
             .{},
             generatorThreadRunner,
@@ -24141,23 +28536,23 @@ fn generatorEnsureStarted(gen_ctx: *GeneratorContext) void {
         ) catch {
             while (!gen_ctx.mutex.tryLock()) std.atomic.spinLoopHint();
             gen_ctx.state = .completed;
-            gen_ctx.mutex.unlock();
+            gen_ctx.mutex.unlock(getIo());
             return;
         };
         while (!gen_ctx.mutex.tryLock()) std.atomic.spinLoopHint();
         while (gen_ctx.state == .running) {
             gen_ctx.caller_cond.wait(getIo(), &gen_ctx.mutex) catch {};
         }
-        gen_ctx.mutex.unlock();
+        gen_ctx.mutex.unlock(getIo());
     } else {
-        gen_ctx.mutex.unlock();
+        gen_ctx.mutex.unlock(getIo());
     }
 }
 
 fn generatorAdvance(gen_ctx: *GeneratorContext) void {
     while (!gen_ctx.mutex.tryLock()) std.atomic.spinLoopHint();
     if (gen_ctx.state != .suspended) {
-        gen_ctx.mutex.unlock();
+        gen_ctx.mutex.unlock(getIo());
         return;
     }
     gen_ctx.state = .running;
@@ -24165,7 +28560,7 @@ fn generatorAdvance(gen_ctx: *GeneratorContext) void {
     while (gen_ctx.state == .running) {
         gen_ctx.caller_cond.wait(getIo(), &gen_ctx.mutex) catch {};
     }
-    gen_ctx.mutex.unlock();
+    gen_ctx.mutex.unlock(getIo());
 }
 
 pub fn php_generator_yield(
@@ -24187,20 +28582,20 @@ pub fn php_generator_yield(
         gen_ctx.gen_cond.wait(getIo(), &gen_ctx.mutex);
     }
     if (gen_ctx.state == .completed) {
-        gen_ctx.mutex.unlock();
+        gen_ctx.mutex.unlock(getIo());
         return error.GeneratorClosed;
     }
     if (gen_ctx.has_throw) {
         const throw_val = gen_ctx.throw_value;
         gen_ctx.throw_value = Value.initNull();
         gen_ctx.has_throw = false;
-        gen_ctx.mutex.unlock();
+        gen_ctx.mutex.unlock(getIo());
         setException(throw_val);
         return Value.initNull();
     }
     const sent = gen_ctx.sent_value;
     gen_ctx.sent_value = Value.initNull();
-    gen_ctx.mutex.unlock();
+    gen_ctx.mutex.unlock(getIo());
     return sent;
 }
 
@@ -24326,7 +28721,7 @@ fn registerGeneratorClass(allocator: Allocator) !void {
                     if (args.len > 0) {
                         while (!gc.mutex.tryLock()) std.atomic.spinLoopHint();
                         gc.sent_value = args[0];
-                        gc.mutex.unlock();
+                        gc.mutex.unlock(getIo());
                     }
                     generatorAdvance(gc);
                     if (gc.state == .completed) return Value.initNull();
@@ -24356,7 +28751,7 @@ fn registerGeneratorClass(allocator: Allocator) !void {
                     while (gc.state == .running) {
                         gc.caller_cond.wait(getIo(), &gc.mutex) catch {};
                     }
-                    gc.mutex.unlock();
+                    gc.mutex.unlock(getIo());
                     if (gc.state == .completed) return Value.initNull();
                     _ = gc.current_value.retain();
                     return gc.current_value;
@@ -24398,10 +28793,10 @@ pub fn php_ctype_alnum(text: Value) Value {
         return Value.initBool(std.ascii.isAlphanumeric(c));
     }
     if (!text.isString()) return Value.initBool(false);
-    
+
     const str = text.asString();
     if (str.length == 0) return Value.initBool(false);
-    
+
     for (str.data) |c| {
         if (!std.ascii.isAlphanumeric(c)) return Value.initBool(false);
     }
@@ -24415,10 +28810,10 @@ pub fn php_ctype_alpha(text: Value) Value {
         return Value.initBool(std.ascii.isAlphabetic(c));
     }
     if (!text.isString()) return Value.initBool(false);
-    
+
     const str = text.asString();
     if (str.length == 0) return Value.initBool(false);
-    
+
     for (str.data) |c| {
         if (!std.ascii.isAlphabetic(c)) return Value.initBool(false);
     }
@@ -24432,10 +28827,10 @@ pub fn php_ctype_cntrl(text: Value) Value {
         return Value.initBool(std.ascii.isControl(c));
     }
     if (!text.isString()) return Value.initBool(false);
-    
+
     const str = text.asString();
     if (str.length == 0) return Value.initBool(false);
-    
+
     for (str.data) |c| {
         if (!std.ascii.isControl(c)) return Value.initBool(false);
     }
@@ -24449,10 +28844,10 @@ pub fn php_ctype_digit(text: Value) Value {
         return Value.initBool(std.ascii.isDigit(c));
     }
     if (!text.isString()) return Value.initBool(false);
-    
+
     const str = text.asString();
     if (str.length == 0) return Value.initBool(false);
-    
+
     for (str.data) |c| {
         if (!std.ascii.isDigit(c)) return Value.initBool(false);
     }
@@ -24466,10 +28861,10 @@ pub fn php_ctype_graph(text: Value) Value {
         return Value.initBool(std.ascii.isPrint(c) and c != ' ');
     }
     if (!text.isString()) return Value.initBool(false);
-    
+
     const str = text.asString();
     if (str.length == 0) return Value.initBool(false);
-    
+
     for (str.data) |c| {
         if (!std.ascii.isPrint(c) or c == ' ') return Value.initBool(false);
     }
@@ -24483,10 +28878,10 @@ pub fn php_ctype_lower(text: Value) Value {
         return Value.initBool(std.ascii.isLower(c));
     }
     if (!text.isString()) return Value.initBool(false);
-    
+
     const str = text.asString();
     if (str.length == 0) return Value.initBool(false);
-    
+
     for (str.data) |c| {
         if (!std.ascii.isLower(c)) return Value.initBool(false);
     }
@@ -24500,10 +28895,10 @@ pub fn php_ctype_print(text: Value) Value {
         return Value.initBool(std.ascii.isPrint(c));
     }
     if (!text.isString()) return Value.initBool(false);
-    
+
     const str = text.asString();
     if (str.length == 0) return Value.initBool(false);
-    
+
     for (str.data) |c| {
         if (!std.ascii.isPrint(c)) return Value.initBool(false);
     }
@@ -24517,10 +28912,10 @@ pub fn php_ctype_punct(text: Value) Value {
         return Value.initBool(isPunct(c));
     }
     if (!text.isString()) return Value.initBool(false);
-    
+
     const str = text.asString();
     if (str.length == 0) return Value.initBool(false);
-    
+
     for (str.data) |c| {
         if (!isPunct(c)) return Value.initBool(false);
     }
@@ -24539,10 +28934,10 @@ pub fn php_ctype_space(text: Value) Value {
         return Value.initBool(std.ascii.isWhitespace(c));
     }
     if (!text.isString()) return Value.initBool(false);
-    
+
     const str = text.asString();
     if (str.length == 0) return Value.initBool(false);
-    
+
     for (str.data) |c| {
         if (!std.ascii.isWhitespace(c)) return Value.initBool(false);
     }
@@ -24556,10 +28951,10 @@ pub fn php_ctype_upper(text: Value) Value {
         return Value.initBool(std.ascii.isUpper(c));
     }
     if (!text.isString()) return Value.initBool(false);
-    
+
     const str = text.asString();
     if (str.length == 0) return Value.initBool(false);
-    
+
     for (str.data) |c| {
         if (!std.ascii.isUpper(c)) return Value.initBool(false);
     }
@@ -24573,10 +28968,10 @@ pub fn php_ctype_xdigit(text: Value) Value {
         return Value.initBool(isXDigit(c));
     }
     if (!text.isString()) return Value.initBool(false);
-    
+
     const str = text.asString();
     if (str.length == 0) return Value.initBool(false);
-    
+
     for (str.data) |c| {
         if (!isXDigit(c)) return Value.initBool(false);
     }
@@ -24761,7 +29156,7 @@ pub fn php_mb_substr(str: Value, start: Value, length: Value, encoding: Value, a
 }
 
 /// mb_strtoupper - 转换为大写（支持多字节字符）
-/// 注意：简化实现仅处理ASCII字符，完整实现需要Unicode大小写映射表
+/// 处理 ASCII 及 Latin-1 Supplement (U+00C0-U+00FF) 范围
 pub fn php_mb_strtoupper(str: Value, encoding: Value, allocator: Allocator) !Value {
     _ = encoding;
     if (!str.isString()) return str;
@@ -24774,10 +29169,22 @@ pub fn php_mb_strtoupper(str: Value, encoding: Value, allocator: Allocator) !Val
 
     var i: usize = 0;
     while (i < data.len) {
+        // ß (U+00DF) → SS 特殊处理
         if (i + 1 < data.len and data[i] == 0xC3 and data[i + 1] == 0x9F) {
             try result_data.appendSlice(allocator, "SS");
             i += 2;
             continue;
+        }
+        // UTF-8 2-byte Latin-1 Supplement: 0xC3 0xA0-0xBF → U+00E0-U+00FF
+        if (i + 1 < data.len and data[i] == 0xC3) {
+            const lo = data[i + 1];
+            // 小写 U+00E0-U+00FE (0xA0-0xBE)，跳过 ÷ U+00F7 (0xB7)
+            if (lo >= 0xA0 and lo <= 0xBE and lo != 0xB7) {
+                try result_data.append(allocator, 0xC3);
+                try result_data.append(allocator, lo - 0x20); // 转大写
+                i += 2;
+                continue;
+            }
         }
 
         const byte = data[i];
@@ -24794,7 +29201,7 @@ pub fn php_mb_strtoupper(str: Value, encoding: Value, allocator: Allocator) !Val
 }
 
 /// mb_strtolower - 转换为小写（支持多字节字符）
-/// 注意：简化实现仅处理ASCII字符
+/// 处理 ASCII 及 Latin-1 Supplement (U+00C0-U+00FF) 范围
 pub fn php_mb_strtolower(str: Value, encoding: Value, allocator: Allocator) !Value {
     _ = encoding;
     if (!str.isString()) return str;
@@ -24807,8 +29214,18 @@ pub fn php_mb_strtolower(str: Value, encoding: Value, allocator: Allocator) !Val
 
     var i: usize = 0;
     while (i < data.len) {
+        // UTF-8 2-byte Latin-1 Supplement: 0xC3 0x80-0xBF → U+00C0-U+00FF
+        if (i + 1 < data.len and data[i] == 0xC3) {
+            const lo = data[i + 1];
+            // 大写 U+00C0-U+00DE (0x80-0x9E)，跳过 × U+00D7 (0x97)
+            if (lo >= 0x80 and lo <= 0x9E and lo != 0x97) {
+                result_data[i] = 0xC3;
+                result_data[i + 1] = lo + 0x20; // 转小写
+                i += 2;
+                continue;
+            }
+        }
         const byte = data[i];
-        // 只转换ASCII字母
         if (byte >= 'A' and byte <= 'Z') {
             result_data[i] = byte + 32;
         } else {
@@ -24835,7 +29252,10 @@ pub fn php_mb_detect_encoding(str_val: Value, encodings: Value, strict: Value, a
     // 检查是否全部 ASCII
     var is_ascii = true;
     for (data) |b| {
-        if (b >= 0x80) { is_ascii = false; break; }
+        if (b >= 0x80) {
+            is_ascii = false;
+            break;
+        }
     }
     if (is_ascii) {
         const s = try PHPString.init(allocator, "ASCII");
@@ -24947,12 +29367,12 @@ fn wrapBuiltin_strripos(ctx: Value, args: []const Value, _: Allocator) !Value {
     return php_strripos(args[0], args[1], offset);
 }
 
-fn wrapBuiltin_str_word_count(ctx: Value, args: []const Value, _: Allocator) !Value {
+fn wrapBuiltin_str_word_count(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     _ = ctx;
     if (args.len < 1) return error.InvalidArgumentCount;
     const format = if (args.len >= 2) args[1] else Value.initInt(0);
     const charlist = if (args.len >= 3) args[2] else Value.initNull();
-    return php_str_word_count(args[0], format, charlist);
+    return php_str_word_count(args[0], format, charlist, allocator);
 }
 
 fn wrapBuiltin_substr(ctx: Value, args: []const Value, allocator: Allocator) !Value {
@@ -25047,7 +29467,7 @@ fn wrapBuiltin_stripos(ctx: Value, args: []const Value, _: Allocator) !Value {
 fn wrapBuiltin_strstr(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     _ = ctx;
     if (args.len < 2) return error.InvalidArgumentCount;
-    return php_strstr(args[0], args[1], allocator);
+    return php_strstr(args[0], args[1], if (args.len > 2) args[2] else Value.initBool(false), allocator);
 }
 
 fn wrapBuiltin_str_split(ctx: Value, args: []const Value, allocator: Allocator) !Value {
@@ -25308,6 +29728,44 @@ fn wrapBuiltin_rtrim(ctx: Value, args: []const Value, allocator: Allocator) !Val
     return php_rtrim(args[0], mask, allocator);
 }
 
+/// quotemeta - 转义元字符 (.\+*?[^]($ )
+pub fn php_quotemeta(str: Value, allocator: Allocator) !Value {
+    if (!str.isString()) return str;
+
+    const php_str = str.asString();
+    const data = php_str.data;
+
+    var result_len: usize = 0;
+    for (data) |c| {
+        if (c == '.' or c == '\\' or c == '+' or c == '*' or c == '?' or
+            c == '[' or c == '^' or c == ']' or c == '(' or c == '$' or c == ')')
+        {
+            result_len += 2;
+        } else {
+            result_len += 1;
+        }
+    }
+
+    const result = try allocator.alloc(u8, result_len);
+    var pos: usize = 0;
+    for (data) |c| {
+        if (c == '.' or c == '\\' or c == '+' or c == '*' or c == '?' or
+            c == '[' or c == '^' or c == ']' or c == '(' or c == '$' or c == ')')
+        {
+            result[pos] = '\\';
+            result[pos + 1] = c;
+            pos += 2;
+        } else {
+            result[pos] = c;
+            pos += 1;
+        }
+    }
+
+    const php_result = try PHPString.init(allocator, result);
+    allocator.free(result);
+    return Value.initString(php_result);
+}
+
 /// addslashes - 使用反斜线引用字符串
 pub fn php_addslashes(str: Value, allocator: Allocator) !Value {
     if (!str.isString()) return str;
@@ -25470,4 +29928,3 @@ pub fn php_stream_register_wrapper(protocol: Value, classname: Value, allocator:
     _ = allocator;
     return Value.initBool(true);
 }
-

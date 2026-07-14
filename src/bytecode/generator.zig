@@ -9,6 +9,37 @@ const Instruction = instruction.Instruction;
 const OpCode = instruction.OpCode;
 const CompiledFunction = instruction.CompiledFunction;
 const Value = instruction.Value;
+
+/// 编译时类信息 — 存储属性默认值和方法注册信息
+pub const CompiledClassInfo = struct {
+    name: []const u8,
+    /// 实例属性默认值：属性名 -> 值
+    instance_property_defaults: std.StringHashMapUnmanaged(Value),
+    /// 静态属性默认值：属性名 -> 值
+    static_property_defaults: std.StringHashMapUnmanaged(Value),
+    /// 父类名（如果有）
+    parent_class_name: ?[]const u8,
+
+    pub fn init(allocator: std.mem.Allocator, name: []const u8) !*CompiledClassInfo {
+        const info = try allocator.create(CompiledClassInfo);
+        info.* = .{
+            .name = try allocator.dupe(u8, name),
+            .instance_property_defaults = .{},
+            .static_property_defaults = .{},
+            .parent_class_name = null,
+        };
+        return info;
+    }
+
+    pub fn deinit(self: *CompiledClassInfo, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        if (self.parent_class_name) |pn| allocator.free(pn);
+        self.instance_property_defaults.deinit(allocator);
+        self.static_property_defaults.deinit(allocator);
+        allocator.destroy(self);
+    }
+};
+
 const escape_analysis = compiler.escape_analysis;
 const EscapeAnalyzer = escape_analysis.EscapeAnalyzer;
 const StackAllocationOptimizer = escape_analysis.StackAllocationOptimizer;
@@ -53,6 +84,8 @@ pub const BytecodeGenerator = struct {
     current_line: u32,
     functions: std.StringHashMapUnmanaged(*CompiledFunction),
     anon_fn_counter: u32,
+    /// Whether we are inside a function body (affects variable scoping)
+    is_in_function: bool,
     /// 逃逸分析器
     escape_analyzer: ?*EscapeAnalyzer,
     /// 栈分配优化器
@@ -67,6 +100,8 @@ pub const BytecodeGenerator = struct {
     scalar_field_slots: std.StringHashMapUnmanaged(u16),
     /// 是否在 foreach 循环体中（禁用 visitBlock 的栈清理）
     in_foreach_body: bool,
+    /// 编译时类信息表：类名 -> CompiledClassInfo
+    class_info: std.StringHashMapUnmanaged(*CompiledClassInfo),
 
     const PendingJump = struct {
         instruction_index: u32,
@@ -97,6 +132,7 @@ pub const BytecodeGenerator = struct {
             .current_line = 1,
             .functions = .{},
             .anon_fn_counter = 0,
+            .is_in_function = false,
             .escape_analyzer = null,
             .stack_optimizer = null,
             .scalar_optimizer = null,
@@ -104,6 +140,7 @@ pub const BytecodeGenerator = struct {
             .ast_to_alloc_id = .{},
             .scalar_field_slots = .{},
             .in_foreach_body = false,
+            .class_info = .{},
         };
     }
 
@@ -118,6 +155,12 @@ pub const BytecodeGenerator = struct {
         self.functions.deinit(self.allocator);
         self.ast_to_alloc_id.deinit(self.allocator);
         self.scalar_field_slots.deinit(self.allocator);
+        // 清理类信息
+        var class_iter = self.class_info.iterator();
+        while (class_iter.next()) |entry| {
+            entry.value_ptr.*.deinit(self.allocator);
+        }
+        self.class_info.deinit(self.allocator);
     }
 
     /// 启用逃逸分析优化
@@ -139,6 +182,11 @@ pub const BytecodeGenerator = struct {
     /// 获取编译生成的用户函数表
     pub fn getUserFunctions(self: *BytecodeGenerator) *std.StringHashMapUnmanaged(*CompiledFunction) {
         return &self.functions;
+    }
+
+    /// 获取编译生成的类信息表
+    pub fn getUserClasses(self: *BytecodeGenerator) *std.StringHashMapUnmanaged(*CompiledClassInfo) {
+        return &self.class_info;
     }
 
     /// 检查AST节点是否可以栈分配
@@ -330,6 +378,7 @@ pub const BytecodeGenerator = struct {
             .break_stmt => try self.visitBreak(index),
             .continue_stmt => try self.visitContinue(index),
             .assignment => try self.visitAssignment(index),
+            .list_assignment => try self.visitListAssignment(index),
             .compound_assignment => try self.visitCompoundAssignment(index),
             .binary_expr => try self.visitBinaryExpr(index),
             .unary_expr => try self.visitUnaryExpr(index),
@@ -531,21 +580,21 @@ pub const BytecodeGenerator = struct {
     fn visitBlock(self: *BytecodeGenerator, index: ast.Node.Index) CompileError!void {
         const node = self.getNode(index);
         const stmts = node.data.block.stmts;
-        
+
         // 在 foreach 循环体中，保存初始栈深度
         const initial_stack = if (self.in_foreach_body) self.current_stack else 0;
-        
+
         for (stmts) |stmt_idx| {
             const saved_stack = self.current_stack;
             try self.visitNode(stmt_idx);
-            
+
             // 清理栈上多余的值
             // 但在 foreach 中，不要清理到 initial_stack 以下（保护 iterator）
-            const target_stack = if (self.in_foreach_body) 
+            const target_stack = if (self.in_foreach_body)
                 @max(saved_stack, initial_stack)
-            else 
+            else
                 saved_stack;
-                
+
             while (self.current_stack > target_stack) {
                 try self.emit(.pop, 0, 0);
                 self.popStack();
@@ -558,8 +607,9 @@ pub const BytecodeGenerator = struct {
         const node = self.getNode(index);
         const exprs = node.data.echo_stmt.exprs;
         for (exprs) |expr_idx| {
-            try self.visitNode(expr_idx);
-            try self.emit(.call_builtin, 0, 1); // echo = builtin #0
+            try self.visitNode(expr_idx); // pushStack (+1)
+            try self.emit(.call_builtin, 0, 1); // echo弹出1个参数压入1个null_val，净效果0
+            self.popStack(); // 丢弃echo返回值，栈深度归零
         }
     }
 
@@ -611,14 +661,14 @@ pub const BytecodeGenerator = struct {
         try self.visitNode(switch_data.expression);
 
         const end_label = self.newLabel();
-        
+
         // 添加到 loop_stack 支持 break
         try self.loop_stack.append(self.allocator, .{
             .continue_label = null, // switch 没有 continue
             .break_label = end_label,
         });
         defer _ = self.loop_stack.pop();
-        
+
         const case_labels = try self.allocator.alloc(u32, switch_data.cases.len);
         defer self.allocator.free(case_labels);
 
@@ -660,7 +710,7 @@ pub const BytecodeGenerator = struct {
             for (case_data.body) |stmt| {
                 try self.visitNode(stmt);
             }
-            
+
             // 如果没有 break，fall through 到下一个 case 或 end
             // break 会自动跳到 end_label
         }
@@ -833,7 +883,7 @@ pub const BytecodeGenerator = struct {
         // 获取下一个元素
         // foreach_next 将栈从 [iterator] 变成 [iterator, key, value]
         try self.emitJump(.foreach_next, loop_end);
-        
+
         // 现在栈上有：[iterator, key, value]
         // current_stack 应该反映这个状态
         self.current_stack += 2; // 加上 key 和 value
@@ -866,9 +916,9 @@ pub const BytecodeGenerator = struct {
         // 设置标志并执行循环体
         const was_in_foreach = self.in_foreach_body;
         self.in_foreach_body = true;
-        
+
         try self.visitNode(foreach_data.body);
-        
+
         self.in_foreach_body = was_in_foreach;
 
         // 跳转回循环开始
@@ -877,7 +927,7 @@ pub const BytecodeGenerator = struct {
         // 循环结束标签
         try self.emit(.loop_end, 0, 0);
         try self.placeLabel(loop_end);
-        
+
         // foreach_next 在迭代完成时已经弹出了 iterator
         // 所以我们需要更新 current_stack
         self.popStack();
@@ -931,13 +981,38 @@ pub const BytecodeGenerator = struct {
         switch (target_node.tag) {
             .variable => {
                 const var_name = self.getString(target_node.data.variable.name);
-                const slot = try self.getOrCreateLocal(var_name);
-                try self.emit(.store_local, slot, 0);
+                // $GLOBALS and superglobals should use global storage
+                if (std.mem.eql(u8, var_name, "$GLOBALS") or std.mem.eql(u8, var_name, "GLOBALS") or
+                    (var_name.len > 1 and var_name[0] == '$' and var_name[1] == '_'))
+                {
+                    _ = try self.getOrCreateGlobal(var_name);
+                    const const_idx = try self.addConstant(.{ .string_val = var_name });
+                    try self.emit(.store_global, const_idx, 0);
+                } else if (!self.is_in_function) {
+                    // Top-level scope: use global storage so $GLOBALS can access these variables
+                    _ = try self.getOrCreateGlobal(var_name);
+                    const const_idx = try self.addConstant(.{ .string_val = var_name });
+                    try self.emit(.store_global, const_idx, 0);
+                } else {
+                    const slot = try self.getOrCreateLocal(var_name);
+                    try self.emit(.store_local, slot, 0);
+                }
                 self.popStack();
             },
             .array_access => {
                 // 数组元素赋值
                 const access_data = target_node.data.array_access;
+
+                // Check for $GLOBALS['key'] = value: need to sync to global variable
+                var is_globals_assignment = false;
+                const target_inner = self.getNode(access_data.target);
+                if (target_inner.tag == .variable) {
+                    const target_name = self.getString(target_inner.data.variable.name);
+                    if (std.mem.eql(u8, target_name, "$GLOBALS") or std.mem.eql(u8, target_name, "GLOBALS")) {
+                        is_globals_assignment = true;
+                    }
+                }
+
                 try self.visitNode(access_data.target);
                 if (access_data.index) |idx| {
                     try self.visitNode(idx);
@@ -945,6 +1020,26 @@ pub const BytecodeGenerator = struct {
                 } else {
                     try self.emit(.array_set, 1, 0); // 数组追加 (operand1=1)
                 }
+
+                // For $GLOBALS['key'] = value, also emit store_global to sync to actual variable
+                if (is_globals_assignment and access_data.index != null) {
+                    // The index node should be a string literal for $GLOBALS access
+                    const index_node = self.getNode(access_data.index.?);
+                    if (index_node.tag == .literal_string) {
+                        const key_name = self.getString(index_node.data.literal_string.value);
+                        // Build full variable name with $ prefix
+                        const full_name = if (key_name.len > 0 and key_name[0] == '$')
+                            key_name
+                        else
+                            std.fmt.allocPrint(self.allocator, "${s}", .{key_name}) catch key_name;
+                        _ = try self.getOrCreateGlobal(full_name);
+                        const const_idx = try self.addConstant(.{ .string_val = full_name });
+                        // Re-visit the value expression to push it again for store_global
+                        try self.visitNode(assign_data.value);
+                        try self.emit(.store_global, const_idx, 0);
+                    }
+                }
+
                 self.popStack();
                 self.popStack();
                 if (access_data.index != null) {
@@ -980,6 +1075,97 @@ pub const BytecodeGenerator = struct {
         }
     }
 
+    /// 访问 list/短数组解构赋值: [$a, $b] = $arr 或 ['key' => $var] = $arr
+    fn visitListAssignment(self: *BytecodeGenerator, index: ast.Node.Index) CompileError!void {
+        const node = self.getNode(index);
+        const list_data = node.data.list_assignment;
+
+        // 计算右值（数组表达式），压入栈顶
+        try self.visitNode(list_data.value);
+
+        // 从栈顶数组解构到各目标变量
+        try self.destructureFromStack(list_data.targets);
+
+        // 弹出原始数组
+        try self.emit(.pop, 0, 0);
+        self.popStack();
+    }
+
+    /// 从栈顶的数组开始解构，处理后数组仍在栈顶
+    fn destructureFromStack(self: *BytecodeGenerator, targets: []const ast.Node.Index) CompileError!void {
+        for (targets, 0..) |target_idx, i| {
+            const target_node = self.getNode(target_idx);
+
+            // 跳过空位
+            if (target_node.tag == .list_empty) continue;
+
+            // 判断是带键解构还是索引解构
+            var actual_target_node = target_node;
+            var use_key: bool = false;
+            var key_node_idx: ast.Node.Index = 0;
+
+            if (target_node.tag == .array_pair) {
+                key_node_idx = target_node.data.array_pair.key;
+                use_key = true;
+                actual_target_node = self.getNode(target_node.data.array_pair.value);
+            }
+
+            // 复制数组到栈顶（保留原数组供下一个目标使用）
+            try self.emit(.dup, 0, 0);
+            self.pushStack();
+
+            // 压入键或索引
+            if (use_key) {
+                try self.visitNode(key_node_idx);
+            } else {
+                const idx_val: i64 = @intCast(i);
+                if (idx_val == 0) {
+                    try self.emit(.push_int_0, 0, 0);
+                } else if (idx_val == 1) {
+                    try self.emit(.push_int_1, 0, 0);
+                } else {
+                    const const_idx = try self.addConstant(.{ .int_val = idx_val });
+                    try self.emit(.push_const, const_idx, 0);
+                }
+                self.pushStack();
+            }
+
+            // array_get: 弹出键和数组，压入元素
+            try self.emit(.array_get, 0, 0);
+            self.popStack(); // 弹出键，数组变为结果
+
+            // 存储元素到目标
+            if (actual_target_node.tag == .variable) {
+                const var_name = self.getString(actual_target_node.data.variable.name);
+                if (std.mem.eql(u8, var_name, "$GLOBALS") or std.mem.eql(u8, var_name, "GLOBALS") or
+                    (var_name.len > 1 and var_name[0] == '$' and var_name[1] == '_'))
+                {
+                    _ = try self.getOrCreateGlobal(var_name);
+                    const const_idx = try self.addConstant(.{ .string_val = var_name });
+                    try self.emit(.store_global, const_idx, 0);
+                } else if (!self.is_in_function) {
+                    _ = try self.getOrCreateGlobal(var_name);
+                    const const_idx = try self.addConstant(.{ .string_val = var_name });
+                    try self.emit(.store_global, const_idx, 0);
+                } else {
+                    const slot = try self.getOrCreateLocal(var_name);
+                    try self.emit(.store_local, slot, 0);
+                }
+                self.popStack(); // 弹出元素
+            } else if (actual_target_node.tag == .list_assignment) {
+                // 嵌套解构：元素（子数组）在栈顶，递归解构
+                try self.destructureFromStack(actual_target_node.data.list_assignment.targets);
+                // 递归后子数组仍在栈顶，弹出它
+                try self.emit(.pop, 0, 0);
+                self.popStack();
+            } else {
+                // 未知目标类型，弹出元素
+                try self.emit(.pop, 0, 0);
+                self.popStack();
+            }
+        }
+    }
+
     /// 访问二元表达式
     fn visitBinaryExpr(self: *BytecodeGenerator, index: ast.Node.Index) CompileError!void {
         const node = self.getNode(index);
@@ -989,37 +1175,37 @@ pub const BytecodeGenerator = struct {
         if (binary_data.op == .double_ampersand or binary_data.op == .k_and) {
             // a && b: 如果 a 为 false，直接返回 false，不计算 b
             const end_label = self.newLabel();
-            
+
             try self.visitNode(binary_data.lhs);
             try self.emit(.dup, 0, 0); // 复制左操作数
             self.pushStack();
             try self.emitJump(.jz, end_label); // 如果为 false，跳到结束
-            
+
             self.popStack(); // 弹出复制的值
             try self.emit(.pop, 0, 0);
             self.popStack(); // 弹出原值
-            
+
             try self.visitNode(binary_data.rhs);
-            
+
             try self.placeLabel(end_label);
             return;
         }
-        
+
         if (binary_data.op == .double_pipe or binary_data.op == .k_or) {
             // a || b: 如果 a 为 true，直接返回 true，不计算 b
             const end_label = self.newLabel();
-            
+
             try self.visitNode(binary_data.lhs);
             try self.emit(.dup, 0, 0); // 复制左操作数
             self.pushStack();
             try self.emitJump(.jnz, end_label); // 如果为 true，跳到结束
-            
+
             self.popStack(); // 弹出复制的值
             try self.emit(.pop, 0, 0);
             self.popStack(); // 弹出原值
-            
+
             try self.visitNode(binary_data.rhs);
-            
+
             try self.placeLabel(end_label);
             return;
         }
@@ -1071,6 +1257,50 @@ pub const BytecodeGenerator = struct {
         const node = self.getNode(index);
         const unary_data = node.data.unary_expr;
 
+        // Handle prefix ++/-- specially: increment/decrement first, then push new value
+        if (unary_data.op == .plus_plus or unary_data.op == .minus_minus) {
+            const expr_node = self.getNode(unary_data.expr);
+            if (expr_node.tag == .variable) {
+                const var_name = self.getString(expr_node.data.variable.name);
+
+                // 顶层作用域使用全局变量，函数内使用局部变量
+                if (!self.is_in_function) {
+                    // 全局变量路径
+                    _ = try self.getOrCreateGlobal(var_name);
+                    const const_idx = try self.addConstant(.{ .string_val = var_name });
+
+                    // 执行自增/自减
+                    switch (unary_data.op) {
+                        .plus_plus => try self.emit(.inc_global, const_idx, 0),
+                        .minus_minus => try self.emit(.dec_global, const_idx, 0),
+                        else => {},
+                    }
+
+                    // 压入新值（前缀语义：返回自增/自减后的值）
+                    try self.emit(.push_global, const_idx, 0);
+                    self.pushStack();
+                } else {
+                    // 局部变量路径
+                    const slot = try self.getOrCreateLocal(var_name);
+
+                    // 执行自增/自减
+                    switch (unary_data.op) {
+                        .plus_plus => try self.emit(.inc_int, slot, 0),
+                        .minus_minus => try self.emit(.dec_int, slot, 0),
+                        else => {},
+                    }
+
+                    // 压入新值（前缀语义：返回自增/自减后的值）
+                    try self.emit(.push_local, slot, 0);
+                    self.pushStack();
+                }
+                return;
+            }
+            // For non-variable expressions (property access, array access), fall through
+            // to generic unary handling (which won't handle ++/-- correctly, but that's
+            // a limitation of the current bytecode implementation)
+        }
+
         // 计算操作数
         try self.visitNode(unary_data.expr);
 
@@ -1095,17 +1325,37 @@ pub const BytecodeGenerator = struct {
         const expr_node = self.getNode(postfix_data.expr);
         if (expr_node.tag == .variable) {
             const var_name = self.getString(expr_node.data.variable.name);
-            const slot = try self.getOrCreateLocal(var_name);
 
-            // 先压入原值
-            try self.emit(.push_local, slot, 0);
-            self.pushStack();
+            // 顶层作用域使用全局变量，函数内使用局部变量
+            if (!self.is_in_function) {
+                // 全局变量路径
+                _ = try self.getOrCreateGlobal(var_name);
+                const const_idx = try self.addConstant(.{ .string_val = var_name });
 
-            // 执行自增/自减
-            switch (postfix_data.op) {
-                .plus_plus => try self.emit(.inc_int, slot, 0),
-                .minus_minus => try self.emit(.dec_int, slot, 0),
-                else => {},
+                // 先压入原值（后缀语义：返回自增/自减前的值）
+                try self.emit(.push_global, const_idx, 0);
+                self.pushStack();
+
+                // 执行自增/自减
+                switch (postfix_data.op) {
+                    .plus_plus => try self.emit(.inc_global, const_idx, 0),
+                    .minus_minus => try self.emit(.dec_global, const_idx, 0),
+                    else => {},
+                }
+            } else {
+                // 局部变量路径
+                const slot = try self.getOrCreateLocal(var_name);
+
+                // 先压入原值
+                try self.emit(.push_local, slot, 0);
+                self.pushStack();
+
+                // 执行自增/自减
+                switch (postfix_data.op) {
+                    .plus_plus => try self.emit(.inc_int, slot, 0),
+                    .minus_minus => try self.emit(.dec_int, slot, 0),
+                    else => {},
+                }
             }
         }
     }
@@ -1169,8 +1419,22 @@ pub const BytecodeGenerator = struct {
 
         if (self.locals.get(var_name)) |slot| {
             try self.emit(.push_local, slot, 0);
-        } else if (self.globals.get(var_name)) |slot| {
-            try self.emit(.push_global, slot, 0);
+        } else if (self.globals.get(var_name)) |_| {
+            // Global variable: store name in constant pool, use constant index as operand
+            const const_idx = try self.addConstant(.{ .string_val = var_name });
+            try self.emit(.push_global, const_idx, 0);
+        } else if (std.mem.eql(u8, var_name, "$GLOBALS") or std.mem.eql(u8, var_name, "GLOBALS") or
+            (var_name.len > 1 and var_name[0] == '$' and var_name[1] == '_'))
+        {
+            // $GLOBALS and superglobals are always global variables
+            _ = try self.getOrCreateGlobal(var_name);
+            const const_idx = try self.addConstant(.{ .string_val = var_name });
+            try self.emit(.push_global, const_idx, 0);
+        } else if (!self.is_in_function) {
+            // Top-level scope: use global storage so $GLOBALS can access these variables
+            _ = try self.getOrCreateGlobal(var_name);
+            const const_idx = try self.addConstant(.{ .string_val = var_name });
+            try self.emit(.push_global, const_idx, 0);
         } else {
             // 首次访问，创建局部变量
             const slot = try self.getOrCreateLocal(var_name);
@@ -1338,16 +1602,16 @@ pub const BytecodeGenerator = struct {
                 // key => value
                 // array_set 期望栈顺序（从栈底到栈顶）：[value, array, key]
                 // 当前栈：[array]
-                
+
                 // 1. push value: [array, value]
                 try self.visitNode(elem_node.data.array_pair.value);
-                
+
                 // 2. swap: [value, array]
                 try self.emit(.swap, 0, 0);
-                
+
                 // 3. push key: [value, array, key]
                 try self.visitNode(elem_node.data.array_pair.key);
-                
+
                 // 4. array_set 消耗 3 个元素，推回 array
                 try self.emit(.array_set, 0, 0);
                 self.popStack(); // key
@@ -1444,12 +1708,31 @@ pub const BytecodeGenerator = struct {
 
         // 获取类名
         const class_node = self.getNode(new_data.class_name);
-        var class_name_id: u32 = 0;
-        if (class_node.tag == .variable) {
-            class_name_id = class_node.data.variable.name;
+        var class_name: []const u8 = "";
+
+        // 尝试从不同节点类型获取类名
+        switch (class_node.tag) {
+            .variable => {
+                const name_id = class_node.data.variable.name;
+                if (name_id < self.context.string_pool.keys().len) {
+                    class_name = self.context.string_pool.keys()[name_id];
+                }
+            },
+            .literal_string => {
+                const name_id = class_node.data.literal_string.value;
+                if (name_id < self.context.string_pool.keys().len) {
+                    class_name = self.context.string_pool.keys()[name_id];
+                }
+            },
+            .named_type => {
+                const name_id = class_node.data.named_type.name;
+                if (name_id < self.context.string_pool.keys().len) {
+                    class_name = self.context.string_pool.keys()[name_id];
+                }
+            },
+            else => {},
         }
 
-        const class_name = if (class_name_id != 0) self.getString(class_name_id) else "";
         const class_const = try self.addConstant(.{ .string_val = class_name });
         const arg_count: u16 = @intCast(new_data.args.len);
 
@@ -1505,69 +1788,68 @@ pub const BytecodeGenerator = struct {
     }
 
     /// 访问try语句
-
     /// 访问match表达式
     fn visitMatchExpr(self: *BytecodeGenerator, index: ast.Node.Index) CompileError!void {
         const node = self.getNode(index);
         const match_data = node.data.match_expr;
-        
+
         // 计算match的表达式值
         try self.visitNode(match_data.expression);
-        
+
         const end_label = self.newLabel();
-        
+
         // 生成每个arm的比较和跳转
         for (match_data.arms) |arm_idx| {
             const arm_node = self.getNode(arm_idx);
             const arm_data = arm_node.data.match_arm;
-            
+
             const next_arm_label = self.newLabel();
             const body_label = self.newLabel();
-            
+
             // 对于每个条件值，任一匹配就执行body
             for (arm_data.conditions) |cond_idx| {
                 // 复制match表达式的值
                 try self.emit(.dup, 0, 0);
                 self.pushStack();
-                
+
                 // 计算条件值
                 try self.visitNode(cond_idx);
-                
+
                 // 比较
                 try self.emit(.eq, 0, 0);
                 self.popStack();
-                
+
                 // 如果相等，跳到body
                 try self.emitJump(.jnz, body_label);
                 self.popStack();
             }
-            
+
             // 所有条件都不匹配，跳到下一个arm
             try self.emitJump(.jmp, next_arm_label);
-            
+
             // 执行body
             try self.placeLabel(body_label);
-            self.popStack();  // 弹出比较结果
-            
+            self.popStack(); // 弹出比较结果
+
             // 弹出match表达式的值
             try self.emit(.pop, 0, 0);
             self.popStack();
-            
+
             // 计算body
             try self.visitNode(arm_data.body);
-            
+
             // 跳到结束
             try self.emitJump(.jmp, end_label);
-            
+
             try self.placeLabel(next_arm_label);
         }
-        
+
         // 处理default分支
         if (match_data.default) |default_idx| {
             // 弹出match表达式的值
             try self.emit(.pop, 0, 0);
             self.popStack();
-            
+
             // default是match_arm节点，需要访问它的body
             const default_node = self.getNode(default_idx);
             const default_data = default_node.data.match_arm;
@@ -1579,7 +1861,7 @@ pub const BytecodeGenerator = struct {
             try self.emit(.push_null, 0, 0);
             self.pushStack();
         }
-        
+
         try self.placeLabel(end_label);
     }
     fn visitTry(self: *BytecodeGenerator, index: ast.Node.Index) CompileError!void {
@@ -1914,22 +2196,41 @@ pub const BytecodeGenerator = struct {
     fn visitClassDecl(self: *BytecodeGenerator, index: ast.Node.Index) CompileError!void {
         const node = self.getNode(index);
         const container_data = node.data.container_decl;
-        
+
         // 获取类名
         const class_name = self.getString(container_data.name);
-        
-        // 类定义不生成字节码指令，而是在编译时注册类元数据
-        // 这样在运行时可以通过类名查找类信息
-        
-        // 遍历类成员，编译方法
+
+        // 创建编译时类信息
+        const class_info = CompiledClassInfo.init(self.allocator, class_name) catch return CompileError.OutOfMemory;
+        errdefer class_info.deinit(self.allocator);
+
+        // 处理父类
+        if (container_data.extends) |extends_idx| {
+            const extends_node = self.getNode(extends_idx);
+            switch (extends_node.tag) {
+                .variable => {
+                    const parent_name = self.getString(extends_node.data.variable.name);
+                    class_info.parent_class_name = self.allocator.dupe(u8, parent_name) catch null;
+                },
+                .named_type => {
+                    const parent_name = self.getString(extends_node.data.named_type.name);
+                    class_info.parent_class_name = self.allocator.dupe(u8, parent_name) catch null;
+                },
+                else => {},
+            }
+        }
+
+        try self.class_info.put(self.allocator, class_name, class_info);
+
+        // 遍历类成员，编译方法和属性
         for (container_data.members) |member_idx| {
             const member_node = self.getNode(member_idx);
-            
+
             switch (member_node.tag) {
                 .method_decl => {
                     const method_data = member_node.data.method_decl;
                     const method_name = self.getString(method_data.name);
-                    
+
                     // 保存当前状态
                     const saved_locals = self.locals;
                     const saved_local_count = self.local_count;
@@ -1970,7 +2271,7 @@ pub const BytecodeGenerator = struct {
                     if (method_data.body) |body_idx| {
                         try self.visitNode(body_idx);
                     }
-                    
+
                     try self.emit(.ret_void, 0, 0);
                     try self.resolveJumps();
 
@@ -1992,14 +2293,10 @@ pub const BytecodeGenerator = struct {
                     // 静态方法：ClassName::methodName
                     // 实例方法：ClassName->methodName
                     const separator = if (method_data.modifiers.is_static) "::" else "->";
-                    const full_method_name = try std.fmt.allocPrint(
-                        self.allocator,
-                        "{s}{s}{s}",
-                        .{ class_name, separator, method_name }
-                    );
+                    const full_method_name = try std.fmt.allocPrint(self.allocator, "{s}{s}{s}", .{ class_name, separator, method_name });
                     // 注意：不要释放 full_method_name，它被用作 HashMap 的 key
                     // HashMap 不会复制 key，所以我们需要保持它的生命周期
-                    
+
                     try self.functions.put(self.allocator, full_method_name, compiled);
 
                     // 恢复状态
@@ -2021,8 +2318,21 @@ pub const BytecodeGenerator = struct {
                     self.label_counter = saved_label_counter;
                 },
                 .property_decl => {
-                    // 属性定义暂时跳过，属性在对象实例化时处理
-                    // TODO: 实现属性默认值的编译
+                    // 编译属性默认值到类信息
+                    const prop_data = member_node.data.property_decl;
+                    const prop_name = self.getString(prop_data.name);
+
+                    // 计算默认值
+                    var default_val: Value = .null_val;
+                    if (prop_data.default_value) |val_idx| {
+                        default_val = try self.evalConstExpr(val_idx);
+                    }
+
+                    if (prop_data.modifiers.is_static) {
+                        try class_info.static_property_defaults.put(self.allocator, prop_name, default_val);
+                    } else {
+                        try class_info.instance_property_defaults.put(self.allocator, prop_name, default_val);
+                    }
                 },
                 .const_decl => {
                     // 类常量定义暂时跳过
@@ -2053,6 +2363,7 @@ pub const BytecodeGenerator = struct {
         const saved_loop_stack = self.loop_stack;
 
         // 重置状态 - 使用 Unmanaged 版本
+        const saved_is_in_function = self.is_in_function;
         self.locals = .{};
         self.local_count = 0;
         self.instructions = .empty;
@@ -2063,6 +2374,7 @@ pub const BytecodeGenerator = struct {
         self.labels = .{};
         self.pending_jumps = .empty;
         self.loop_stack = .empty;
+        self.is_in_function = true;
 
         // 处理参数
         for (func_data.params) |param_idx| {
@@ -2110,6 +2422,50 @@ pub const BytecodeGenerator = struct {
         self.loop_stack.deinit(self.allocator);
         self.loop_stack = saved_loop_stack;
         self.label_counter = saved_label_counter;
+        self.is_in_function = saved_is_in_function;
+    }
+
+    /// 计算常量表达式的值（用于属性默认值等编译时已知值）
+    fn evalConstExpr(self: *BytecodeGenerator, index: ast.Node.Index) CompileError!Value {
+        const node = self.getNode(index);
+        switch (node.tag) {
+            .literal_int => return .{ .int_val = node.data.literal_int.value },
+            .literal_float => return .{ .float_val = node.data.literal_float.value },
+            .literal_bool => return .{ .bool_val = node.data.literal_int.value != 0 },
+            .literal_null => return .null_val,
+            .literal_string => {
+                const str = self.getString(node.data.literal_string.value);
+                const copy = self.allocator.dupe(u8, str) catch return CompileError.OutOfMemory;
+                return .{ .string_val = copy };
+            },
+            .variable => {
+                // 常量名引用（如 true, false 等）
+                const name = self.getString(node.data.variable.name);
+                if (std.mem.eql(u8, name, "true") or std.mem.eql(u8, name, "$true")) {
+                    return .{ .bool_val = true };
+                }
+                if (std.mem.eql(u8, name, "false") or std.mem.eql(u8, name, "$false")) {
+                    return .{ .bool_val = false };
+                }
+                if (std.mem.eql(u8, name, "null") or std.mem.eql(u8, name, "$null")) {
+                    return .null_val;
+                }
+                return .null_val;
+            },
+            .unary_expr => {
+                const unary_data = node.data.unary_expr;
+                const inner = try self.evalConstExpr(unary_data.expr);
+                switch (unary_data.op) {
+                    .minus => {
+                        if (inner == .int_val) return .{ .int_val = -inner.int_val };
+                        if (inner == .float_val) return .{ .float_val = -inner.float_val };
+                    },
+                    else => {},
+                }
+                return inner;
+            },
+            else => return .null_val,
+        }
     }
 };
 

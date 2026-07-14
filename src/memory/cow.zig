@@ -11,7 +11,7 @@ pub const CowString = struct {
         const data = try allocator.dupe(u8, str);
         const ref_count = try allocator.create(std.atomic.Value(u32));
         ref_count.* = std.atomic.Value(u32).init(1);
-        
+
         return CowString{
             .data = data,
             .ref_count = ref_count,
@@ -33,13 +33,13 @@ pub const CowString = struct {
             // 创建新副本
             const new_data = try self.allocator.dupe(u8, self.data);
             self.deinit();
-            
+
             const ref_count = try self.allocator.create(std.atomic.Value(u32));
             ref_count.* = std.atomic.Value(u32).init(1);
-            
+
             self.data = new_data;
             self.ref_count = ref_count;
-            
+
             return @constCast(new_data);
         }
         return @constCast(self.data);
@@ -66,7 +66,7 @@ pub const CowArray = struct {
         const elements = try allocator.dupe(i32, arr);
         const ref_count = try allocator.create(std.atomic.Value(u32));
         ref_count.* = std.atomic.Value(u32).init(1);
-        
+
         return CowArray{
             .elements = elements,
             .ref_count = ref_count,
@@ -87,10 +87,10 @@ pub const CowArray = struct {
         if (self.ref_count.load(.monotonic) > 1) {
             const new_elements = try self.allocator.dupe(i32, self.elements);
             self.deinit();
-            
+
             const ref_count = try self.allocator.create(std.atomic.Value(u32));
             ref_count.* = std.atomic.Value(u32).init(1);
-            
+
             self.elements = new_elements;
             self.ref_count = ref_count;
         }

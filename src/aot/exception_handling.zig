@@ -33,27 +33,27 @@ pub const LLVMMetadataRef = ?*anyopaque;
 /// @thread-safety ISOLATED (单线程使用)
 pub const ExceptionHandlingContext = struct {
     allocator: Allocator,
-    
+
     // LLVM 上下文
     context: LLVMContextRef,
     module: LLVMModuleRef,
     builder: LLVMBuilderRef,
-    
+
     // 当前函数
     current_function: LLVMValueRef,
-    
+
     // 类型缓存
     i8_type: LLVMTypeRef,
     i32_type: LLVMTypeRef,
     ptr_type: LLVMTypeRef,
-    
+
     // 异常相关类型
     exception_type: LLVMTypeRef,
     landingpad_type: LLVMTypeRef,
-    
+
     // Personality 函数
     personality_fn: LLVMValueRef,
-    
+
     // 运行时函数
     throw_fn: LLVMValueRef,
     rethrow_fn: LLVMValueRef,
@@ -61,12 +61,12 @@ pub const ExceptionHandlingContext = struct {
     end_catch_fn: LLVMValueRef,
     get_exception_ptr_fn: LLVMValueRef,
     get_type_id_fn: LLVMValueRef,
-    
+
     // LLVM 可用性标志
     llvm_available: bool,
-    
+
     const Self = @This();
-    
+
     /// 初始化异常处理上下文
     /// @pre context, module, builder 必须有效
     /// @post 返回初始化的上下文
@@ -99,30 +99,30 @@ pub const ExceptionHandlingContext = struct {
             .get_type_id_fn = null,
             .llvm_available = llvm_available,
         };
-        
+
         if (llvm_available) {
             try self.initializeTypes();
             try self.declareRuntimeFunctions();
         }
-        
+
         return self;
     }
-    
+
     /// 释放资源
     pub fn deinit(self: *Self) void {
         self.allocator.destroy(self);
     }
-    
+
     /// 初始化异常处理相关类型
     /// @post 所有类型字段已初始化
     fn initializeTypes(self: *Self) !void {
         if (!self.llvm_available) return;
-        
+
         // 在真实 LLVM 模式下：
         // self.i8_type = LLVMInt8TypeInContext(self.context);
         // self.i32_type = LLVMInt32TypeInContext(self.context);
         // self.ptr_type = LLVMPointerType(self.i8_type, 0);
-        
+
         // 异常对象类型：{ i8*, i32 }
         // self.exception_type = LLVMStructTypeInContext(
         //     self.context,
@@ -130,16 +130,16 @@ pub const ExceptionHandlingContext = struct {
         //     2,
         //     0  // not packed
         // );
-        
+
         // Landing pad 类型：{ i8*, i32 }
         // self.landingpad_type = self.exception_type;
     }
-    
+
     /// 声明运行时异常处理函数
     /// @post 所有运行时函数已声明
     fn declareRuntimeFunctions(self: *Self) !void {
         if (!self.llvm_available) return;
-        
+
         // 在真实 LLVM 模式下：
         // 1. Personality 函数
         // const personality_type = LLVMFunctionType(
@@ -153,7 +153,7 @@ pub const ExceptionHandlingContext = struct {
         //     "__gxx_personality_v0",
         //     personality_type
         // );
-        
+
         // 2. __cxa_throw
         // const throw_type = LLVMFunctionType(
         //     LLVMVoidTypeInContext(self.context),
@@ -162,7 +162,7 @@ pub const ExceptionHandlingContext = struct {
         //     0
         // );
         // self.throw_fn = LLVMAddFunction(self.module, "__cxa_throw", throw_type);
-        
+
         // 3. __cxa_rethrow
         // const rethrow_type = LLVMFunctionType(
         //     LLVMVoidTypeInContext(self.context),
@@ -171,7 +171,7 @@ pub const ExceptionHandlingContext = struct {
         //     0
         // );
         // self.rethrow_fn = LLVMAddFunction(self.module, "__cxa_rethrow", rethrow_type);
-        
+
         // 4. __cxa_begin_catch
         // const begin_catch_type = LLVMFunctionType(
         //     self.ptr_type,
@@ -180,7 +180,7 @@ pub const ExceptionHandlingContext = struct {
         //     0
         // );
         // self.begin_catch_fn = LLVMAddFunction(self.module, "__cxa_begin_catch", begin_catch_type);
-        
+
         // 5. __cxa_end_catch
         // const end_catch_type = LLVMFunctionType(
         //     LLVMVoidTypeInContext(self.context),
@@ -189,7 +189,7 @@ pub const ExceptionHandlingContext = struct {
         //     0
         // );
         // self.end_catch_fn = LLVMAddFunction(self.module, "__cxa_end_catch", end_catch_type);
-        
+
         // 6. llvm.eh.typeid.for
         // const typeid_type = LLVMFunctionType(
         //     self.i32_type,
@@ -199,54 +199,54 @@ pub const ExceptionHandlingContext = struct {
         // );
         // self.get_type_id_fn = LLVMAddFunction(self.module, "llvm.eh.typeid.for", typeid_type);
     }
-    
+
     /// 生成完整的异常处理代码
-    /// 
+    ///
     /// 生成的代码结构：
     /// ```
     /// try_block:
     ///   <try 块代码>
     ///   br finally_block
-    /// 
+    ///
     /// landing_pad:
     ///   %exc = landingpad { i8*, i32 } personality @__gxx_personality_v0
     ///     catch <type1>
     ///     catch <type2>
     ///     ...
     ///   br catch_dispatch
-    /// 
+    ///
     /// catch_dispatch:
     ///   %type_id = extractvalue { i8*, i32 } %exc, 1
     ///   %matches_type1 = icmp eq i32 %type_id, <type1_id>
     ///   br i1 %matches_type1, label %catch1, label %check_type2
-    /// 
+    ///
     /// check_type2:
     ///   %matches_type2 = icmp eq i32 %type_id, <type2_id>
     ///   br i1 %matches_type2, label %catch2, label %resume
-    /// 
+    ///
     /// catch1:
     ///   %exc_ptr1 = call i8* @__cxa_begin_catch(i8* %exc_ptr)
     ///   <catch1 块代码>
     ///   call void @__cxa_end_catch()
     ///   br finally_block
-    /// 
+    ///
     /// catch2:
     ///   %exc_ptr2 = call i8* @__cxa_begin_catch(i8* %exc_ptr)
     ///   <catch2 块代码>
     ///   call void @__cxa_end_catch()
     ///   br finally_block
-    /// 
+    ///
     /// finally_block:
     ///   <finally 块代码>
     ///   br exit_block
-    /// 
+    ///
     /// resume:
     ///   resume { i8*, i32 } %exc
-    /// 
+    ///
     /// exit_block:
     ///   <后续代码>
     /// ```
-    /// 
+    ///
     /// @pre try_block, catch_blocks 必须有效
     /// @post 生成完整的异常处理 IR
     /// @ownership NON-OWNING (所有 LLVM 对象由 LLVM 上下文管理)
@@ -257,7 +257,7 @@ pub const ExceptionHandlingContext = struct {
         finally_block: ?*const IR.BasicBlock,
     ) !void {
         if (!self.llvm_available) return;
-        
+
         // 在真实 LLVM 模式下：
         // 1. 创建基本块
         // const landing_pad_bb = LLVMAppendBasicBlockInContext(
@@ -285,13 +285,13 @@ pub const ExceptionHandlingContext = struct {
         //     self.current_function,
         //     "exit"
         // );
-        
+
         // 2. 生成 try 块
         // try self.generateTryBlock(try_block, finally_bb);
-        
+
         // 3. 生成 landing pad
         // try self.generateLandingPad(landing_pad_bb, catch_blocks, catch_dispatch_bb);
-        
+
         // 4. 生成 catch 分发逻辑
         // try self.generateCatchDispatch(
         //     catch_dispatch_bb,
@@ -299,12 +299,12 @@ pub const ExceptionHandlingContext = struct {
         //     finally_bb,
         //     resume_bb
         // );
-        
+
         // 5. 生成所有 catch 块
         // for (catch_blocks, 0..) |catch_block, i| {
         //     try self.generateCatchBlock(catch_block, i, finally_bb);
         // }
-        
+
         // 6. 生成 finally 块
         // if (finally_block) |fb| {
         //     try self.generateFinallyBlock(finally_bb, fb, exit_bb);
@@ -313,18 +313,18 @@ pub const ExceptionHandlingContext = struct {
         //     LLVMPositionBuilderAtEnd(self.builder, finally_bb);
         //     _ = LLVMBuildBr(self.builder, exit_bb);
         // }
-        
+
         // 7. 生成 resume 块
         // try self.generateResumeBlock(resume_bb);
-        
+
         // 8. 定位到 exit 块继续生成后续代码
         // LLVMPositionBuilderAtEnd(self.builder, exit_bb);
-        
+
         _ = try_block;
         _ = catch_blocks;
         _ = finally_block;
     }
-    
+
     /// 生成 try 块代码
     /// @pre try_block 必须有效
     /// @post try 块代码已生成，跳转到 finally_block
@@ -334,29 +334,29 @@ pub const ExceptionHandlingContext = struct {
         finally_block: LLVMBasicBlockRef,
     ) !void {
         if (!self.llvm_available) return;
-        
+
         // 在真实 LLVM 模式下：
         // 1. 生成 try 块的所有指令
         // for (try_block.instructions.items) |inst| {
         //     try self.generateInstruction(inst);
         // }
-        
+
         // 2. 如果块没有终止符，添加跳转到 finally
         // if (try_block.terminator == null) {
         //     _ = LLVMBuildBr(self.builder, finally_block);
         // }
-        
+
         _ = try_block;
         _ = finally_block;
     }
-    
+
     /// 生成 landing pad 指令
-    /// 
+    ///
     /// Landing pad 是异常处理的入口点，负责：
     /// - 捕获异常对象
     /// - 声明可以处理的异常类型
     /// - 提取异常指针和类型 ID
-    /// 
+    ///
     /// @pre landing_pad_bb, catch_blocks 必须有效
     /// @post landing pad 已生成，跳转到 catch_dispatch_bb
     fn generateLandingPad(
@@ -366,11 +366,11 @@ pub const ExceptionHandlingContext = struct {
         catch_dispatch_bb: LLVMBasicBlockRef,
     ) !void {
         if (!self.llvm_available) return;
-        
+
         // 在真实 LLVM 模式下：
         // 1. 定位到 landing pad 块
         // LLVMPositionBuilderAtEnd(self.builder, landing_pad_bb);
-        
+
         // 2. 创建 landing pad 指令
         // const landingpad = LLVMBuildLandingPad(
         //     self.builder,
@@ -379,7 +379,7 @@ pub const ExceptionHandlingContext = struct {
         //     @intCast(c_uint, catch_blocks.len),
         //     "exc"
         // );
-        
+
         // 3. 为每个 catch 块添加 catch 子句
         // for (catch_blocks) |catch_block| {
         //     const exception_type_info = try self.getExceptionTypeInfo(
@@ -387,22 +387,22 @@ pub const ExceptionHandlingContext = struct {
         //     );
         //     LLVMAddClause(landingpad, exception_type_info);
         // }
-        
+
         // 4. 跳转到 catch 分发块
         // _ = LLVMBuildBr(self.builder, catch_dispatch_bb);
-        
+
         _ = landing_pad_bb;
         _ = catch_blocks;
         _ = catch_dispatch_bb;
     }
-    
+
     /// 生成 catch 分发逻辑
-    /// 
+    ///
     /// Catch 分发负责：
     /// - 提取异常类型 ID
     /// - 依次检查每个 catch 块是否匹配
     /// - 跳转到匹配的 catch 块或 resume
-    /// 
+    ///
     /// @pre catch_dispatch_bb, catch_blocks 必须有效
     /// @post catch 分发逻辑已生成
     fn generateCatchDispatch(
@@ -413,14 +413,14 @@ pub const ExceptionHandlingContext = struct {
         resume_block: LLVMBasicBlockRef,
     ) !void {
         if (!self.llvm_available) return;
-        
+
         // 在真实 LLVM 模式下：
         // 1. 定位到 catch 分发块
         // LLVMPositionBuilderAtEnd(self.builder, catch_dispatch_bb);
-        
+
         // 2. 获取 landing pad 的结果（从前一个块）
         // const landingpad_value = ...; // 需要从 landing pad 块获取
-        
+
         // 3. 提取异常指针和类型 ID
         // const exc_ptr = LLVMBuildExtractValue(
         //     self.builder,
@@ -434,7 +434,7 @@ pub const ExceptionHandlingContext = struct {
         //     1,
         //     "type_id"
         // );
-        
+
         // 4. 为每个 catch 块生成类型检查
         // var current_bb = catch_dispatch_bb;
         // for (catch_blocks, 0..) |catch_block, i| {
@@ -442,7 +442,7 @@ pub const ExceptionHandlingContext = struct {
         //     const expected_type_id = try self.getExpectedTypeId(
         //         catch_block.exception_type
         //     );
-        //     
+        //
         //     // 比较类型 ID
         //     const is_match = LLVMBuildICmp(
         //         self.builder,
@@ -451,7 +451,7 @@ pub const ExceptionHandlingContext = struct {
         //         expected_type_id,
         //         "is_match"
         //     );
-        //     
+        //
         //     // 创建 catch 块和下一个检查块
         //     const catch_bb = LLVMAppendBasicBlockInContext(
         //         self.context,
@@ -466,30 +466,30 @@ pub const ExceptionHandlingContext = struct {
         //         )
         //     else
         //         resume_block;
-        //     
+        //
         //     // 条件跳转
         //     _ = LLVMBuildCondBr(self.builder, is_match, catch_bb, next_check_bb);
-        //     
+        //
         //     // 定位到下一个检查块
         //     if (i + 1 < catch_blocks.len) {
         //         LLVMPositionBuilderAtEnd(self.builder, next_check_bb);
         //     }
         // }
-        
+
         _ = catch_dispatch_bb;
         _ = catch_blocks;
         _ = finally_block;
         _ = resume_block;
     }
-    
+
     /// 生成单个 catch 块
-    /// 
+    ///
     /// Catch 块负责：
     /// - 调用 __cxa_begin_catch 开始处理异常
     /// - 执行 catch 块代码
     /// - 调用 __cxa_end_catch 结束处理
     /// - 跳转到 finally 块
-    /// 
+    ///
     /// @pre catch_block 必须有效
     /// @post catch 块代码已生成
     fn generateCatchBlock(
@@ -499,7 +499,7 @@ pub const ExceptionHandlingContext = struct {
         finally_block: LLVMBasicBlockRef,
     ) !void {
         if (!self.llvm_available) return;
-        
+
         // 在真实 LLVM 模式下：
         // 1. 创建 catch 块
         // const catch_bb_name = try std.fmt.allocPrint(
@@ -508,14 +508,14 @@ pub const ExceptionHandlingContext = struct {
         //     .{index}
         // );
         // defer self.allocator.free(catch_bb_name);
-        // 
+        //
         // const catch_bb = LLVMAppendBasicBlockInContext(
         //     self.context,
         //     self.current_function,
         //     catch_bb_name.ptr
         // );
         // LLVMPositionBuilderAtEnd(self.builder, catch_bb);
-        
+
         // 2. 调用 __cxa_begin_catch
         // const exc_ptr = ...; // 从 landing pad 获取
         // const caught_exc = LLVMBuildCall(
@@ -525,7 +525,7 @@ pub const ExceptionHandlingContext = struct {
         //     1,
         //     "caught_exc"
         // );
-        
+
         // 3. 如果有异常变量，存储异常对象
         // if (catch_block.variable) |var_name| {
         //     // 创建局部变量存储异常对象
@@ -536,12 +536,12 @@ pub const ExceptionHandlingContext = struct {
         //     );
         //     _ = LLVMBuildStore(self.builder, caught_exc, var_alloca);
         // }
-        
+
         // 4. 生成 catch 块代码
         // for (catch_block.body.instructions.items) |inst| {
         //     try self.generateInstruction(inst);
         // }
-        
+
         // 5. 调用 __cxa_end_catch
         // _ = LLVMBuildCall(
         //     self.builder,
@@ -550,21 +550,21 @@ pub const ExceptionHandlingContext = struct {
         //     0,
         //     ""
         // );
-        
+
         // 6. 跳转到 finally 块
         // _ = LLVMBuildBr(self.builder, finally_block);
-        
+
         _ = catch_block;
         _ = index;
         _ = finally_block;
     }
-    
+
     /// 生成 finally 块
-    /// 
+    ///
     /// Finally 块无论是否发生异常都会执行，负责：
     /// - 执行清理代码
     /// - 跳转到 exit 块
-    /// 
+    ///
     /// @pre finally_bb, finally_block 必须有效
     /// @post finally 块代码已生成
     fn generateFinallyBlock(
@@ -574,30 +574,30 @@ pub const ExceptionHandlingContext = struct {
         exit_block: LLVMBasicBlockRef,
     ) !void {
         if (!self.llvm_available) return;
-        
+
         // 在真实 LLVM 模式下：
         // 1. 定位到 finally 块
         // LLVMPositionBuilderAtEnd(self.builder, finally_bb);
-        
+
         // 2. 生成 finally 块代码
         // for (finally_block.instructions.items) |inst| {
         //     try self.generateInstruction(inst);
         // }
-        
+
         // 3. 跳转到 exit 块
         // _ = LLVMBuildBr(self.builder, exit_block);
-        
+
         _ = finally_bb;
         _ = finally_block;
         _ = exit_block;
     }
-    
+
     /// 生成 resume 块
-    /// 
+    ///
     /// Resume 块负责：
     /// - 重新抛出未被捕获的异常
     /// - 使用 resume 指令继续异常传播
-    /// 
+    ///
     /// @pre resume_bb 必须有效
     /// @post resume 块代码已生成
     fn generateResumeBlock(
@@ -605,20 +605,20 @@ pub const ExceptionHandlingContext = struct {
         resume_bb: LLVMBasicBlockRef,
     ) !void {
         if (!self.llvm_available) return;
-        
+
         // 在真实 LLVM 模式下：
         // 1. 定位到 resume 块
         // LLVMPositionBuilderAtEnd(self.builder, resume_bb);
-        
+
         // 2. 获取 landing pad 的结果
         // const landingpad_value = ...; // 需要从 landing pad 块获取
-        
+
         // 3. 生成 resume 指令
         // _ = LLVMBuildResume(self.builder, landingpad_value);
-        
+
         _ = resume_bb;
     }
-    
+
     /// 获取异常类型信息
     /// @pre exception_type 必须是有效的类型名
     /// @post 返回异常类型的 RTTI 指针
@@ -627,7 +627,7 @@ pub const ExceptionHandlingContext = struct {
         exception_type: []const u8,
     ) !LLVMValueRef {
         if (!self.llvm_available) return null;
-        
+
         // 在真实 LLVM 模式下：
         // 1. 查找或创建类型信息全局变量
         // const type_info_name = try std.fmt.allocPrint(
@@ -636,7 +636,7 @@ pub const ExceptionHandlingContext = struct {
         //     .{ exception_type.len, exception_type }
         // );
         // defer self.allocator.free(type_info_name);
-        
+
         // 2. 查找现有的类型信息
         // var type_info = LLVMGetNamedGlobal(self.module, type_info_name.ptr);
         // if (type_info == null) {
@@ -648,13 +648,13 @@ pub const ExceptionHandlingContext = struct {
         //     );
         //     LLVMSetLinkage(type_info, LLVMExternalLinkage);
         // }
-        
+
         // return type_info;
-        
+
         _ = exception_type;
         return null;
     }
-    
+
     /// 获取期望的类型 ID
     /// @pre exception_type 必须是有效的类型名
     /// @post 返回类型 ID 值
@@ -663,11 +663,11 @@ pub const ExceptionHandlingContext = struct {
         exception_type: []const u8,
     ) !LLVMValueRef {
         if (!self.llvm_available) return null;
-        
+
         // 在真实 LLVM 模式下：
         // 1. 获取类型信息
         // const type_info = try self.getExceptionTypeInfo(exception_type);
-        
+
         // 2. 调用 llvm.eh.typeid.for 获取类型 ID
         // const type_id = LLVMBuildCall(
         //     self.builder,
@@ -676,9 +676,9 @@ pub const ExceptionHandlingContext = struct {
         //     1,
         //     "type_id"
         // );
-        
+
         // return type_id;
-        
+
         _ = exception_type;
         return null;
     }
@@ -688,10 +688,10 @@ pub const ExceptionHandlingContext = struct {
 pub const CatchBlock = struct {
     /// 异常类型（null 表示 catch 所有异常）
     exception_type: ?[]const u8,
-    
+
     /// 异常变量名（可选）
     variable: ?[]const u8,
-    
+
     /// Catch 块代码
     body: *const IR.BasicBlock,
 };
@@ -699,18 +699,18 @@ pub const CatchBlock = struct {
 /// 异常处理测试辅助函数
 pub fn testExceptionHandling() !void {
     const allocator = std.testing.allocator;
-    
+
     // 创建模拟的 LLVM 上下文
     var ctx = try ExceptionHandlingContext.init(
         allocator,
-        null,  // context
-        null,  // module
-        null,  // builder
-        null,  // current_function
+        null, // context
+        null, // module
+        null, // builder
+        null, // current_function
         false, // llvm_available
     );
     defer ctx.deinit();
-    
+
     // 测试基本功能（在非 LLVM 模式下）
     // 实际测试需要真实的 LLVM 环境
 }

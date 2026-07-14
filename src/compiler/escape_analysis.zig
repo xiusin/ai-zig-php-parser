@@ -838,7 +838,6 @@ pub const DataFlowGraph = struct {
     }
 };
 
-
 /// 逃逸分析器
 /// 分析函数中对象的逃逸状态，用于栈分配和标量替换优化
 pub const EscapeAnalyzer = struct {
@@ -1987,7 +1986,6 @@ pub const OptimizationResult = struct {
         return buffer.toOwnedSlice(allocator);
     }
 };
-
 
 // ============================================================================
 // 单元测试

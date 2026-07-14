@@ -478,7 +478,7 @@ pub const InlineLocal = struct {
     name: []u8, // 拥有字符串的所有权
     value: types.Value,
     allocator: std.mem.Allocator,
-    
+
     pub fn init(allocator: std.mem.Allocator, name: []const u8, value: types.Value) !InlineLocal {
         const owned_name = try allocator.dupe(u8, name);
         return .{
@@ -487,7 +487,7 @@ pub const InlineLocal = struct {
             .allocator = allocator,
         };
     }
-    
+
     pub fn deinit(self: *InlineLocal) void {
         self.allocator.free(self.name);
     }
@@ -498,13 +498,13 @@ pub const InlineLocal = struct {
 /// @memory-layout 使用 StringHashMap 实现动态扩展
 pub const HeapLocals = struct {
     map: std.StringHashMap(types.Value),
-    
+
     pub fn init(allocator: std.mem.Allocator) HeapLocals {
         return .{
             .map = std.StringHashMap(types.Value).init(allocator),
         };
     }
-    
+
     pub fn deinit(self: *HeapLocals, allocator: std.mem.Allocator) void {
         // 释放所有值的引用和键字符串
         var iter = self.map.iterator();
@@ -515,7 +515,7 @@ pub const HeapLocals = struct {
         }
         self.map.deinit();
     }
-    
+
     /// 设置变量
     /// @pre name 和 value 必须有效
     /// @post 变量被存储，旧值被释放
@@ -536,14 +536,14 @@ pub const HeapLocals = struct {
             _ = value.retain();
         }
     }
-    
+
     /// 获取变量
     /// @pre name 必须有效
     /// @post 返回变量值或 null
     pub fn get(self: *const HeapLocals, name: []const u8) ?types.Value {
         return self.map.get(name);
     }
-    
+
     /// 清空所有变量
     /// @post 所有变量被释放，映射被清空
     pub fn clear(self: *HeapLocals, allocator: std.mem.Allocator) void {
@@ -555,7 +555,7 @@ pub const HeapLocals = struct {
         }
         self.map.clearRetainingCapacity();
     }
-    
+
     /// 获取变量数量
     pub fn count(self: *const HeapLocals) usize {
         return self.map.count();
@@ -571,7 +571,7 @@ pub const PooledCallFrame = struct {
     // Task 4.2.4: 内联存储小函数的局部变量（避免堆分配）
     // 对于 ≤8 个局部变量的函数，直接存储在帧中
     pub const INLINE_LOCALS_CAPACITY = 8;
-    
+
     function_name: []const u8,
     file: []const u8,
     line: u32,
@@ -581,7 +581,7 @@ pub const PooledCallFrame = struct {
     imported_globals_ptr: ?*anyopaque,
     imported_count: u16,
     pool_managed: bool,
-    
+
     /// 设置局部变量（自动选择内联或堆存储）
     /// @pre name 和 value 必须有效
     /// @post 变量被存储，无容量限制
@@ -599,7 +599,7 @@ pub const PooledCallFrame = struct {
                 return;
             }
         }
-        
+
         // 如果内联存储未满，添加到内联存储
         if (self.inline_locals_count < INLINE_LOCALS_CAPACITY) {
             self.inline_locals[self.inline_locals_count] = try InlineLocal.init(allocator, name, value);
@@ -607,7 +607,7 @@ pub const PooledCallFrame = struct {
             self.inline_locals_count += 1;
             return;
         }
-        
+
         // Task 25: 内联存储已满，切换到堆存储（无容量限制）
         // 如果堆存储尚未初始化，创建它
         if (self.heap_locals == null) {
@@ -616,11 +616,11 @@ pub const PooledCallFrame = struct {
             heap.* = HeapLocals.init(allocator);
             self.heap_locals = heap;
         }
-        
+
         // 在堆存储中设置变量
         try self.heap_locals.?.set(allocator, name, value);
     }
-    
+
     /// 获取局部变量
     /// @pre name 必须有效
     /// @post 返回变量值或 null
@@ -632,15 +632,15 @@ pub const PooledCallFrame = struct {
                 return self.inline_locals[i].value;
             }
         }
-        
+
         // 如果有堆存储，在堆中查找
         if (self.heap_locals) |heap| {
             return heap.get(name);
         }
-        
+
         return null;
     }
-    
+
     /// 清理所有局部变量
     /// @post 所有变量被释放，内存被回收
     /// @memory-safety 正确释放内联和堆存储
@@ -652,7 +652,7 @@ pub const PooledCallFrame = struct {
             self.inline_locals[i].deinit(); // 释放名称字符串
         }
         self.inline_locals_count = 0;
-        
+
         // 释放堆存储（如果有）
         if (self.heap_locals) |heap| {
             heap.deinit(allocator);
@@ -660,7 +660,7 @@ pub const PooledCallFrame = struct {
             self.heap_locals = null;
         }
     }
-    
+
     /// 获取局部变量总数
     /// @post 返回内联 + 堆存储的变量总数
     pub fn getLocalCount(self: *const PooledCallFrame) usize {
@@ -670,7 +670,7 @@ pub const PooledCallFrame = struct {
         }
         return count;
     }
-    
+
     /// 检查是否使用了堆存储
     /// @post 返回是否已切换到堆存储
     pub fn isUsingHeapStorage(self: *const PooledCallFrame) bool {
@@ -911,21 +911,21 @@ test "CallFramePool" {
     const f1 = try pool.acquire("main", "test.php", 1);
     try std.testing.expectEqualStrings("main", f1.function_name);
     try std.testing.expect(pool.stats.current_depth == 1);
-    
+
     // Task 4.2.4: 测试内联局部变量存储
     try std.testing.expect(f1.inline_locals_count == 0);
     try std.testing.expect(!f1.isUsingHeapStorage());
-    
+
     // 添加局部变量（应该使用内联存储）
     try f1.setLocal(std.testing.allocator, "x", types.Value.initInt(42));
     try std.testing.expect(f1.inline_locals_count == 1);
     try std.testing.expect(!f1.isUsingHeapStorage());
-    
+
     // 获取局部变量
     const x_val = f1.getLocal("x");
     try std.testing.expect(x_val != null);
     try std.testing.expect(x_val.?.asInt() == 42);
-    
+
     // Task 25: 测试堆存储切换（添加超过 8 个变量）
     try f1.setLocal(std.testing.allocator, "a", types.Value.initInt(1));
     try f1.setLocal(std.testing.allocator, "b", types.Value.initInt(2));
@@ -934,26 +934,26 @@ test "CallFramePool" {
     try f1.setLocal(std.testing.allocator, "e", types.Value.initInt(5));
     try f1.setLocal(std.testing.allocator, "f", types.Value.initInt(6));
     try f1.setLocal(std.testing.allocator, "g", types.Value.initInt(7));
-    
+
     // 此时应该有 8 个内联变量
     try std.testing.expect(f1.inline_locals_count == 8);
     try std.testing.expect(!f1.isUsingHeapStorage());
-    
+
     // 添加第 9 个变量，应该触发堆存储
     try f1.setLocal(std.testing.allocator, "h", types.Value.initInt(8));
     try std.testing.expect(f1.isUsingHeapStorage());
     try std.testing.expect(f1.getLocalCount() == 9);
-    
+
     // 验证所有变量都能正确获取
     try std.testing.expect(f1.getLocal("x").?.asInt() == 42);
     try std.testing.expect(f1.getLocal("a").?.asInt() == 1);
     try std.testing.expect(f1.getLocal("h").?.asInt() == 8);
-    
+
     // 添加更多变量到堆存储（无容量限制）
     try f1.setLocal(std.testing.allocator, "i", types.Value.initInt(9));
     try f1.setLocal(std.testing.allocator, "j", types.Value.initInt(10));
     try std.testing.expect(f1.getLocalCount() == 11);
-    
+
     // 更新堆存储中的变量
     try f1.setLocal(std.testing.allocator, "h", types.Value.initInt(88));
     try std.testing.expect(f1.getLocal("h").?.asInt() == 88);

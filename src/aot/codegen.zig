@@ -17,7 +17,7 @@ pub const Target = struct {
     arch: Arch,
     os: OS,
     abi: ABI,
-    
+
     pub const Arch = enum { x86_64, aarch64, arm };
     pub const OS = enum { linux, macos, windows };
     pub const ABI = enum { gnu, musl, msvc, none };
@@ -32,14 +32,8 @@ pub const OptimizeLevel = enum {
 
 pub const CodeGenerator = struct {
     allocator: std.mem.Allocator,
-    
-    pub fn init(
-        allocator: std.mem.Allocator, 
-        target: Target, 
-        optimize: OptimizeLevel, 
-        debug_info: bool, 
-        diagnostics: *Diagnostics.DiagnosticEngine
-    ) !*CodeGenerator {
+
+    pub fn init(allocator: std.mem.Allocator, target: Target, optimize: OptimizeLevel, debug_info: bool, diagnostics: *Diagnostics.DiagnosticEngine) !*CodeGenerator {
         _ = target;
         _ = optimize;
         _ = debug_info;
@@ -62,7 +56,7 @@ pub const CodeGenerator = struct {
         // However, existing compiler.zig might call it.
         return error.LLVMUnavailable;
     }
-    
+
     pub fn getObjectCode(self: *CodeGenerator) ![]const u8 {
         _ = self;
         return error.LLVMUnavailable;

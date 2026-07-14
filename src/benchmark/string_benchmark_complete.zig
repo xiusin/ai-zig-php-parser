@@ -24,7 +24,7 @@ pub fn runTransformTests(benchmark: *StringBenchmark) ![]StringOpResult {
         .generate_php_scripts = benchmark.config.generate_php_scripts,
         .script_output_dir = benchmark.config.script_output_dir,
     };
-    
+
     return try transform_tests.runAll();
 }
 
@@ -35,7 +35,7 @@ pub fn runSplitTests(benchmark: *StringBenchmark) ![]StringOpResult {
         .iterations = benchmark.config.iterations,
         .verbose = benchmark.config.verbose,
     };
-    
+
     return try split_tests.runAll();
 }
 
@@ -46,7 +46,7 @@ pub fn runCompareTests(benchmark: *StringBenchmark) ![]StringOpResult {
         .iterations = benchmark.config.iterations,
         .verbose = benchmark.config.verbose,
     };
-    
+
     return try compare_tests.runAll();
 }
 
@@ -57,7 +57,7 @@ pub fn runTrimTests(benchmark: *StringBenchmark) ![]StringOpResult {
         .iterations = benchmark.config.iterations,
         .verbose = benchmark.config.verbose,
     };
-    
+
     return try trim_tests.runAll();
 }
 
@@ -68,7 +68,7 @@ pub fn runEncodeTests(benchmark: *StringBenchmark) ![]StringOpResult {
         .iterations = benchmark.config.iterations,
         .verbose = benchmark.config.verbose,
     };
-    
+
     return try encode_tests.runAll();
 }
 
@@ -79,7 +79,7 @@ pub fn runFormatTests(benchmark: *StringBenchmark) ![]StringOpResult {
         .iterations = benchmark.config.iterations,
         .verbose = benchmark.config.verbose,
     };
-    
+
     return try format_tests.runAll();
 }
 
@@ -90,7 +90,7 @@ pub fn runParseTests(benchmark: *StringBenchmark) ![]StringOpResult {
         .iterations = benchmark.config.iterations,
         .verbose = benchmark.config.verbose,
     };
-    
+
     return try parse_tests.runAll();
 }
 
@@ -102,9 +102,9 @@ pub fn generatePhpScript(benchmark: *StringBenchmark, test_name: []const u8, scr
         .{ benchmark.config.script_output_dir, test_name },
     );
     defer benchmark.allocator.free(file_path);
-    
+
     const file = try std.fs.cwd.createFile(file_path, .{});
     defer file.close();
-    
+
     try file.writeAll(script_content);
 }

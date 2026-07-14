@@ -10,18 +10,18 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
-    
+
     // 解析命令行参数
     var args = try std.process.argsWithAllocator(allocator);
     defer args.deinit();
-    
+
     _ = args.skip(); // 跳过程序名
-    
+
     var iterations: u32 = 100_000;
     var verbose = false;
     var generate_scripts = true;
     var output_path: []const u8 = "math_benchmark_report.md";
-    
+
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--iterations")) {
             if (args.next()) |iter_str| {
@@ -40,32 +40,32 @@ pub fn main() !void {
             return;
         }
     }
-    
+
     // 创建配置
     const config = MathBenchmarkConfig{
         .iterations = iterations,
         .verbose = verbose,
         .generate_php_scripts = generate_scripts,
     };
-    
+
     // 运行测试
     std.debug.print("初始化数学运算性能测试...\n", .{});
     var benchmark = try MathBenchmark.init(allocator, config);
     defer benchmark.deinit();
-    
+
     std.debug.print("运行测试套件...\n", .{});
     const result = try benchmark.runAllTests();
-    
+
     defer allocator.free(result.integer_results);
     defer allocator.free(result.float_results);
     defer allocator.free(result.math_func_results);
     defer allocator.free(result.complex_results);
     defer allocator.free(result.matrix_results);
-    
+
     // 生成报告
     std.debug.print("生成报告: {s}\n", .{output_path});
     try benchmark.generateReport(result, output_path);
-    
+
     // 打印摘要
     std.debug.print("\n╔════════════════════════════════════════╗\n", .{});
     std.debug.print("║  测试完成                              ║\n", .{});
@@ -76,9 +76,7 @@ pub fn main() !void {
     std.debug.print("  数学函数测试: {d} 项\n", .{result.math_func_results.len});
     std.debug.print("  复数运算测试: {d} 项\n", .{result.complex_results.len});
     std.debug.print("  矩阵运算测试: {d} 项\n", .{result.matrix_results.len});
-    std.debug.print("  总测试时间: {d:.2} 秒\n", .{
-        @as(f64, @floatFromInt(result.total_time_ns)) / 1_000_000_000.0
-    });
+    std.debug.print("  总测试时间: {d:.2} 秒\n", .{@as(f64, @floatFromInt(result.total_time_ns)) / 1_000_000_000.0});
     std.debug.print("\n报告已保存到: {s}\n", .{output_path});
 }
 

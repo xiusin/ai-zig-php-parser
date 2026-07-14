@@ -44,6 +44,7 @@ const PCRE2_SUBSTITUTE_OVERFLOW_LENGTH = 0x00000020;
 const PCRE2_SUBSTITUTE_EXTENDED = 0x00000040;
 const PCRE2_INFO_CAPTURECOUNT = 0x20000000;
 const PCRE2_ERROR_NOMATCH = -1;
+const PCRE2_UNSET: usize = std.math.maxInt(usize);
 const PCRE2_CASELESS = 0x00000008;
 const PCRE2_MULTILINE = 0x00000002;
 const PCRE2_DOTALL = 0x00000004;
@@ -105,13 +106,13 @@ fn parsePHPRegexPattern(pattern: []const u8) ParsedPattern {
     // 提取模式部分（不包括分隔符）
     // 如果没有找到结束分隔符，返回原始模式（PCRE2 会处理错误）
     if (end >= pattern.len) {
-        result.pattern = pattern[start + 1..];
+        result.pattern = pattern[start + 1 ..];
         return result;
     }
-    result.pattern = pattern[start + 1..end];
+    result.pattern = pattern[start + 1 .. end];
 
     // 解析修饰符
-    const modifiers = pattern[end + 1..];
+    const modifiers = pattern[end + 1 ..];
     for (modifiers) |ch| {
         switch (ch) {
             'i' => result.options |= PCRE2_CASELESS,
@@ -196,7 +197,7 @@ const PCRE2Pattern = struct {
     }
 
     /// 获取所有匹配组
-    pub fn getMatches(self: *PCRE2Pattern, allocator: std.mem.Allocator, subject: []const u8, ovector: []c_int) !*PHPArray {
+    pub fn getMatches(self: *PCRE2Pattern, allocator: std.mem.Allocator, subject: []const u8, ovector: []usize) !*PHPArray {
         const result = try allocator.create(PHPArray);
         errdefer {
             result.deinit(allocator);
@@ -206,9 +207,14 @@ const PCRE2Pattern = struct {
 
         const group_count = self.getGroupCount();
         var i: usize = 0;
-        while (i <= group_count and i * 2 < ovector.len) : (i += 1) {
+        while (i <= group_count and i * 2 + 1 < ovector.len) : (i += 1) {
             const start = ovector[i * 2];
             const end = ovector[i * 2 + 1];
+
+            // PCRE2_UNSET: 捕获组未参与匹配时 start/end 均为 maxInt(usize)
+            if (start == PCRE2_UNSET or end == PCRE2_UNSET) continue;
+            // 边界检查
+            if (start > end or end > subject.len) continue;
 
             const matched_str = subject[start..end];
             const match_value = try createStringValue(allocator, matched_str);
@@ -244,7 +250,7 @@ const PCRE2Pattern = struct {
             if (rc < 0) return error.MatchFailed;
 
             const ovec = self.getOvector();
-            const match_array = try self.getMatches(allocator, subject, ovec[0..@as(usize, @intCast(rc * 2))]);
+            const match_array = try self.getMatches(allocator, subject, ovec[0 .. @as(usize, @intCast(rc)) * 2]);
             const box = try allocator.create(types.gc.Box(*PHPArray));
             box.* = .{
                 .ref_count = 1,
@@ -254,7 +260,7 @@ const PCRE2Pattern = struct {
             try result.push(allocator, Value.fromBox(box, Value.TYPE_ARRAY));
 
             const match_end = ovec[1];
-            if (match_end == offset) {
+            if (match_end == PCRE2_UNSET or match_end == offset) {
                 break;
             }
             offset = match_end;
@@ -293,7 +299,7 @@ pub fn pregMatchFn(vm: *VM, args: []const Value) !Value {
 
     const pattern_val = args[0];
     const subject_val = args[1];
-    _ = if (args.len > 2) args[2] else null;
+    const matches_ref = if (args.len > 2) args[2] else null;
     _ = if (args.len > 3) args[3] else null;
     const offset_val = if (args.len > 4) args[4] else null;
 
@@ -343,6 +349,30 @@ pub fn pregMatchFn(vm: *VM, args: []const Value) !Value {
         return Value.initInt(0);
     }
 
+    // 填充matches数组
+    if (matches_ref) |ref| {
+        if (ref.getTag() == .array) {
+            const matches_box = ref.getAsArray();
+            const matches_arr = matches_box.data;
+
+            matches_arr.deinit(vm.allocator);
+            matches_arr.* = PHPArray.init(vm.allocator);
+
+            const ovec = pcre_pattern.getOvector();
+            var i: usize = 0;
+            while (i < @as(usize, @intCast(rc))) : (i += 1) {
+                const start = ovec[i * 2];
+                const end = ovec[i * 2 + 1];
+                if (start == PCRE2_UNSET or end == PCRE2_UNSET) continue;
+                if (start < subject.len and end <= subject.len and start <= end) {
+                    const capture = subject[start..end];
+                    const capture_val = try createStringValue(vm.allocator, capture);
+                    try matches_arr.push(vm.allocator, capture_val);
+                }
+            }
+        }
+    }
+
     vm.preg_last_error = 0; // No error
     return Value.initInt(1);
 }
@@ -380,7 +410,8 @@ pub fn pregMatchAllFn(vm: *VM, args: []const Value) !Value {
     defer pcre_pattern.deinit();
 
     // 临时存储所有匹配
-    var all_matches = std.ArrayListUnmanaged(std.ArrayListUnmanaged([]const u8)).empty;    defer {
+    var all_matches = std.ArrayListUnmanaged(std.ArrayListUnmanaged([]const u8)).empty;
+    defer {
         for (all_matches.items) |*match_groups| {
             match_groups.deinit(vm.allocator);
         }
@@ -411,6 +442,7 @@ pub fn pregMatchAllFn(vm: *VM, args: []const Value) !Value {
         while (i < @as(usize, @intCast(rc))) : (i += 1) {
             const start = ovec[i * 2];
             const end = ovec[i * 2 + 1];
+            if (start == PCRE2_UNSET or end == PCRE2_UNSET) continue;
             if (start < subject.len and end <= subject.len and start <= end) {
                 const capture = subject[start..end];
                 try match_groups.append(vm.allocator, capture);
@@ -419,7 +451,7 @@ pub fn pregMatchAllFn(vm: *VM, args: []const Value) !Value {
         try all_matches.append(vm.allocator, match_groups);
 
         const match_end = ovec[1];
-        if (match_end == offset) {
+        if (match_end == PCRE2_UNSET or match_end == offset) {
             offset += 1;
         } else {
             offset = match_end;
@@ -431,11 +463,11 @@ pub fn pregMatchAllFn(vm: *VM, args: []const Value) !Value {
         if (ref.getTag() == .array) {
             const matches_box = ref.getAsArray();
             const matches_arr = matches_box.data;
-            
+
             // 重新初始化数组
             matches_arr.deinit(vm.allocator);
             matches_arr.* = PHPArray.init(vm.allocator);
-            
+
             if (all_matches.items.len > 0) {
                 const num_groups = all_matches.items[0].items.len;
                 var group_idx: usize = 0;
@@ -449,7 +481,7 @@ pub fn pregMatchAllFn(vm: *VM, args: []const Value) !Value {
                         .gc_info = .{},
                         .data = group_arr,
                     };
-                    
+
                     for (all_matches.items) |match_groups| {
                         if (group_idx < match_groups.items.len) {
                             const capture_val = try createStringValue(vm.allocator, match_groups.items[group_idx]);
@@ -516,6 +548,10 @@ pub fn pregReplaceFn(vm: *VM, args: []const Value) !Value {
             const match_start = ovec[0];
             const match_end = ovec[1];
 
+            // PCRE2_UNSET 检查
+            if (match_start == PCRE2_UNSET or match_end == PCRE2_UNSET) break;
+            if (match_start > subject.len or match_end > subject.len or match_start > match_end) break;
+
             const before_len = match_start;
             if (before_len > subject_offset) {
                 const copy_len = before_len - subject_offset;
@@ -532,7 +568,7 @@ pub fn pregReplaceFn(vm: *VM, args: []const Value) !Value {
             @memcpy(buffer[output_offset..][0..replacement.len], replacement);
             output_offset += replacement.len;
 
-            subject_offset = @as(usize, @intCast(match_end));
+            subject_offset = match_end;
             replace_count += 1;
         }
 
@@ -541,7 +577,7 @@ pub fn pregReplaceFn(vm: *VM, args: []const Value) !Value {
             if (output_offset + remaining > buffer.len) {
                 buffer = try vm.allocator.realloc(buffer, buffer.len + remaining);
             }
-            @memcpy(buffer[output_offset..output_offset + remaining], subject[subject_offset..]);
+            @memcpy(buffer[output_offset .. output_offset + remaining], subject[subject_offset..]);
             output_offset += remaining;
         }
 
@@ -612,6 +648,11 @@ pub fn pregReplaceCallbackFn(vm: *VM, args: []const Value) !Value {
         const match_start = ovec[0];
         const match_end = ovec[1];
 
+        // PCRE2_UNSET 检查：未匹配时跳过
+        if (match_start == PCRE2_UNSET or match_end == PCRE2_UNSET) break;
+        // 边界检查
+        if (match_start > subject.len or match_end > subject.len or match_start > match_end) break;
+
         const before_len = match_start;
         if (before_len > subject_offset) {
             const copy_len = before_len - subject_offset;
@@ -624,7 +665,7 @@ pub fn pregReplaceCallbackFn(vm: *VM, args: []const Value) !Value {
 
         const match_str = subject[match_start..match_end];
 
-        const match_array = try pcre_pattern.getMatches(vm.allocator, match_str, ovec[0..@as(usize, @intCast(rc * 2))]);
+        const match_array = try pcre_pattern.getMatches(vm.allocator, match_str, ovec[0 .. @as(usize, @intCast(rc)) * 2]);
 
         const box = try vm.allocator.create(types.gc.Box(*PHPArray));
         box.* = .{
@@ -662,7 +703,7 @@ pub fn pregReplaceCallbackFn(vm: *VM, args: []const Value) !Value {
 
         vm.releaseValue(callback_result);
 
-        subject_offset = @as(usize, @intCast(match_end));
+        subject_offset = match_end;
         replace_count += 1;
     }
 
@@ -671,7 +712,7 @@ pub fn pregReplaceCallbackFn(vm: *VM, args: []const Value) !Value {
         if (output_offset + remaining > buffer.len) {
             buffer = try vm.allocator.realloc(buffer, buffer.len + remaining);
         }
-        @memcpy(buffer[output_offset..output_offset + remaining], subject[subject_offset..]);
+        @memcpy(buffer[output_offset .. output_offset + remaining], subject[subject_offset..]);
         output_offset += remaining;
     }
 
@@ -742,6 +783,10 @@ pub fn pregSplitFn(vm: *VM, args: []const Value) !Value {
         const match_start = ovec[0];
         const match_end = ovec[1];
 
+        // PCRE2_UNSET 检查
+        if (match_start == PCRE2_UNSET or match_end == PCRE2_UNSET) break;
+        if (match_start > subject.len or match_end > subject.len or match_start > match_end) break;
+
         const before_len = match_start;
         if (before_len > offset) {
             const part = subject[offset..match_start];
@@ -759,7 +804,7 @@ pub fn pregSplitFn(vm: *VM, args: []const Value) !Value {
             split_count += 1;
         }
 
-        offset = @as(usize, @intCast(match_end));
+        offset = match_end;
     }
 
     if (offset < subject.len and split_count < limit) {
@@ -918,7 +963,7 @@ pub fn pregFilterFn(vm: *VM, args: []const Value) !Value {
     if (subject_val.getTag() == .array) {
         const subject_box = subject_val.getAsArray();
         const subject_arr = subject_box.data;
-        
+
         const result_box = try vm.allocator.create(gc.Box(*PHPArray));
         const result_arr = try vm.allocator.create(PHPArray);
         result_arr.* = PHPArray.init(vm.allocator);
@@ -933,7 +978,7 @@ pub fn pregFilterFn(vm: *VM, args: []const Value) !Value {
         while (iter.next()) |entry| {
             if (entry.value.getTag() == .string) {
                 const subject = entry.value.getAsString().data.data;
-                
+
                 if (pattern_val.getTag() == .string and replacement_val.getTag() == .string) {
                     const pattern = pattern_val.getAsString().data.data;
                     const replacement = replacement_val.getAsString().data.data;
@@ -982,6 +1027,11 @@ pub fn pregFilterFn(vm: *VM, args: []const Value) !Value {
                             const match_start = ovec[0];
                             const match_end = ovec[1];
 
+                            // PCRE2_UNSET 检查：未匹配时跳过
+                            if (match_start == PCRE2_UNSET or match_end == PCRE2_UNSET) break;
+                            // 边界检查
+                            if (match_start > subject.len or match_end > subject.len or match_start > match_end) break;
+
                             const before_len = match_start;
                             if (before_len > subject_offset) {
                                 const copy_len = before_len - subject_offset;
@@ -998,7 +1048,7 @@ pub fn pregFilterFn(vm: *VM, args: []const Value) !Value {
                             @memcpy(buffer[output_offset..][0..replacement.len], replacement);
                             output_offset += replacement.len;
 
-                            subject_offset = @as(usize, @intCast(match_end));
+                            subject_offset = match_end;
                             replace_count += 1;
                         }
 
@@ -1007,13 +1057,13 @@ pub fn pregFilterFn(vm: *VM, args: []const Value) !Value {
                             if (output_offset + remaining > buffer.len) {
                                 buffer = try vm.allocator.realloc(buffer, buffer.len + remaining);
                             }
-                            @memcpy(buffer[output_offset..output_offset + remaining], subject[subject_offset..]);
+                            @memcpy(buffer[output_offset .. output_offset + remaining], subject[subject_offset..]);
                             output_offset += remaining;
                         }
 
                         const result = try vm.allocator.realloc(buffer, output_offset);
                         const result_val = try createStringValue(vm.allocator, result);
-                        
+
                         // 保持原始键
                         switch (entry.key) {
                             .integer => try result_arr.set(vm.allocator, entry.key, result_val),
@@ -1080,6 +1130,10 @@ pub fn pregFilterFn(vm: *VM, args: []const Value) !Value {
             const match_start = ovec[0];
             const match_end = ovec[1];
 
+            // PCRE2_UNSET 检查
+            if (match_start == PCRE2_UNSET or match_end == PCRE2_UNSET) break;
+            if (match_start > subject.len or match_end > subject.len or match_start > match_end) break;
+
             const before_len = match_start;
             if (before_len > subject_offset) {
                 const copy_len = before_len - subject_offset;
@@ -1096,7 +1150,7 @@ pub fn pregFilterFn(vm: *VM, args: []const Value) !Value {
             @memcpy(buffer[output_offset..][0..replacement.len], replacement);
             output_offset += replacement.len;
 
-            subject_offset = @as(usize, @intCast(match_end));
+            subject_offset = match_end;
             replace_count += 1;
         }
 
@@ -1105,7 +1159,7 @@ pub fn pregFilterFn(vm: *VM, args: []const Value) !Value {
             if (output_offset + remaining > buffer.len) {
                 buffer = try vm.allocator.realloc(buffer, buffer.len + remaining);
             }
-            @memcpy(buffer[output_offset..output_offset + remaining], subject[subject_offset..]);
+            @memcpy(buffer[output_offset .. output_offset + remaining], subject[subject_offset..]);
             output_offset += remaining;
         }
 

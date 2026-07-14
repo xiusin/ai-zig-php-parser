@@ -12,14 +12,14 @@ pub const StringEncodeExtTests = struct {
     verbose: bool,
     generate_php_scripts: bool,
     script_output_dir: []const u8,
-    
+
     pub fn runAll(self: *@This()) ![]StringOpResult {
         var results = std.array_list.AlignedManaged(StringOpResult, null).init(self.allocator);
-        
+
         if (self.verbose) {
             std.debug.print("\n=== 字符串编码扩展性能测试 ===\n", .{});
         }
-        
+
         try results.append(try self.testHtmlspecialchars());
         try results.append(try self.testHtmlentities());
         try results.append(try self.testHtmlEntityDecode());
@@ -30,15 +30,15 @@ pub const StringEncodeExtTests = struct {
         try results.append(try self.testRawurldecode());
         try results.append(try self.testNl2br());
         try results.append(try self.testWordwrap());
-        
+
         return results.toOwnedSlice();
     }
-    
+
     /// 测试 htmlspecialchars
     fn testHtmlspecialchars(self: *@This()) !StringOpResult {
         const test_name = "htmlspecialchars";
         const test_string = "<script>alert('XSS');</script> & \"quotes\"";
-        
+
         if (self.generate_php_scripts) {
             try self.generatePhpScript(test_name,
                 \\<?php
@@ -52,15 +52,15 @@ pub const StringEncodeExtTests = struct {
                 \\echo "Time: " . (($end - $start) / 1000000) . " ms\n";
             );
         }
-        
+
         const start = std.time.nanoTimestamp();
-        
+
         var total_len: usize = 0;
         var i: u32 = 0;
         while (i < self.iterations) : (i += 1) {
             var result = std.array_list.AlignedManaged(u8, null).init(self.allocator);
             defer result.deinit();
-            
+
             for (test_string) |c| {
                 switch (c) {
                     '&' => try result.appendSlice("&amp;"),
@@ -73,19 +73,19 @@ pub const StringEncodeExtTests = struct {
             }
             total_len += result.items.len;
         }
-        
+
         const end = std.time.nanoTimestamp();
         const total_time = @as(u64, @intCast(end - start));
-        
+
         std.mem.doNotOptimizeAway(&total_len);
-        
-        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) / 
-                           (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
-        
+
+        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) /
+            (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+
         if (self.verbose) {
-            std.debug.print("  {s}: {d:.2} M ops/s\n", .{test_name, ops_per_sec / 1_000_000.0});
+            std.debug.print("  {s}: {d:.2} M ops/s\n", .{ test_name, ops_per_sec / 1_000_000.0 });
         }
-        
+
         return StringOpResult{
             .test_name = test_name,
             .operations_per_second = ops_per_sec,
@@ -94,12 +94,12 @@ pub const StringEncodeExtTests = struct {
             .category = "encode_ext",
         };
     }
-    
+
     /// 测试 htmlentities
     fn testHtmlentities(self: *@This()) !StringOpResult {
         const test_name = "htmlentities";
         const test_string = "Café & Résumé <tag>";
-        
+
         if (self.generate_php_scripts) {
             try self.generatePhpScript(test_name,
                 \\<?php
@@ -113,15 +113,15 @@ pub const StringEncodeExtTests = struct {
                 \\echo "Time: " . (($end - $start) / 1000000) . " ms\n";
             );
         }
-        
+
         const start = std.time.nanoTimestamp();
-        
+
         var total_len: usize = 0;
         var i: u32 = 0;
         while (i < self.iterations) : (i += 1) {
             var result = std.array_list.AlignedManaged(u8, null).init(self.allocator);
             defer result.deinit();
-            
+
             for (test_string) |c| {
                 switch (c) {
                     '&' => try result.appendSlice("&amp;"),
@@ -141,19 +141,19 @@ pub const StringEncodeExtTests = struct {
             }
             total_len += result.items.len;
         }
-        
+
         const end = std.time.nanoTimestamp();
         const total_time = @as(u64, @intCast(end - start));
-        
+
         std.mem.doNotOptimizeAway(&total_len);
-        
-        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) / 
-                           (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
-        
+
+        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) /
+            (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+
         if (self.verbose) {
-            std.debug.print("  {s}: {d:.2} M ops/s\n", .{test_name, ops_per_sec / 1_000_000.0});
+            std.debug.print("  {s}: {d:.2} M ops/s\n", .{ test_name, ops_per_sec / 1_000_000.0 });
         }
-        
+
         return StringOpResult{
             .test_name = test_name,
             .operations_per_second = ops_per_sec,
@@ -162,12 +162,12 @@ pub const StringEncodeExtTests = struct {
             .category = "encode_ext",
         };
     }
-    
+
     /// 测试 html_entity_decode
     fn testHtmlEntityDecode(self: *@This()) !StringOpResult {
         const test_name = "html_entity_decode";
         const test_string = "&lt;script&gt;alert(&quot;XSS&quot;);&lt;/script&gt;";
-        
+
         if (self.generate_php_scripts) {
             try self.generatePhpScript(test_name,
                 \\<?php
@@ -181,9 +181,9 @@ pub const StringEncodeExtTests = struct {
                 \\echo "Time: " . (($end - $start) / 1000000) . " ms\n";
             );
         }
-        
+
         const start = std.time.nanoTimestamp();
-        
+
         var total_len: usize = 0;
         var i: u32 = 0;
         while (i < self.iterations) : (i += 1) {
@@ -197,19 +197,19 @@ pub const StringEncodeExtTests = struct {
             defer self.allocator.free(result4);
             total_len += result4.len;
         }
-        
+
         const end = std.time.nanoTimestamp();
         const total_time = @as(u64, @intCast(end - start));
-        
+
         std.mem.doNotOptimizeAway(&total_len);
-        
-        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) / 
-                           (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
-        
+
+        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) /
+            (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+
         if (self.verbose) {
-            std.debug.print("  {s}: {d:.2} M ops/s\n", .{test_name, ops_per_sec / 1_000_000.0});
+            std.debug.print("  {s}: {d:.2} M ops/s\n", .{ test_name, ops_per_sec / 1_000_000.0 });
         }
-        
+
         return StringOpResult{
             .test_name = test_name,
             .operations_per_second = ops_per_sec,
@@ -218,12 +218,12 @@ pub const StringEncodeExtTests = struct {
             .category = "encode_ext",
         };
     }
-    
+
     /// 测试 htmlspecialchars_decode
     fn testHtmlspecialcharsDecode(self: *@This()) !StringOpResult {
         const test_name = "htmlspecialchars_decode";
         const test_string = "&lt;tag&gt; &amp; &quot;quotes&quot;";
-        
+
         if (self.generate_php_scripts) {
             try self.generatePhpScript(test_name,
                 \\<?php
@@ -237,9 +237,9 @@ pub const StringEncodeExtTests = struct {
                 \\echo "Time: " . (($end - $start) / 1000000) . " ms\n";
             );
         }
-        
+
         const start = std.time.nanoTimestamp();
-        
+
         var total_len: usize = 0;
         var i: u32 = 0;
         while (i < self.iterations) : (i += 1) {
@@ -253,19 +253,19 @@ pub const StringEncodeExtTests = struct {
             defer self.allocator.free(result4);
             total_len += result4.len;
         }
-        
+
         const end = std.time.nanoTimestamp();
         const total_time = @as(u64, @intCast(end - start));
-        
+
         std.mem.doNotOptimizeAway(&total_len);
-        
-        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) / 
-                           (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
-        
+
+        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) /
+            (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+
         if (self.verbose) {
-            std.debug.print("  {s}: {d:.2} M ops/s\n", .{test_name, ops_per_sec / 1_000_000.0});
+            std.debug.print("  {s}: {d:.2} M ops/s\n", .{ test_name, ops_per_sec / 1_000_000.0 });
         }
-        
+
         return StringOpResult{
             .test_name = test_name,
             .operations_per_second = ops_per_sec,
@@ -274,12 +274,12 @@ pub const StringEncodeExtTests = struct {
             .category = "encode_ext",
         };
     }
-    
+
     /// 测试 urlencode
     fn testUrlencode(self: *@This()) !StringOpResult {
         const test_name = "urlencode";
         const test_string = "Hello World! This is a test & demo.";
-        
+
         if (self.generate_php_scripts) {
             try self.generatePhpScript(test_name,
                 \\<?php
@@ -293,15 +293,15 @@ pub const StringEncodeExtTests = struct {
                 \\echo "Time: " . (($end - $start) / 1000000) . " ms\n";
             );
         }
-        
+
         const start = std.time.nanoTimestamp();
-        
+
         var total_len: usize = 0;
         var i: u32 = 0;
         while (i < self.iterations) : (i += 1) {
             var result = std.array_list.AlignedManaged(u8, null).init(self.allocator);
             defer result.deinit();
-            
+
             for (test_string) |c| {
                 if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~') {
                     try result.append(c);
@@ -315,19 +315,19 @@ pub const StringEncodeExtTests = struct {
             }
             total_len += result.items.len;
         }
-        
+
         const end = std.time.nanoTimestamp();
         const total_time = @as(u64, @intCast(end - start));
-        
+
         std.mem.doNotOptimizeAway(&total_len);
-        
-        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) / 
-                           (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
-        
+
+        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) /
+            (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+
         if (self.verbose) {
-            std.debug.print("  {s}: {d:.2} M ops/s\n", .{test_name, ops_per_sec / 1_000_000.0});
+            std.debug.print("  {s}: {d:.2} M ops/s\n", .{ test_name, ops_per_sec / 1_000_000.0 });
         }
-        
+
         return StringOpResult{
             .test_name = test_name,
             .operations_per_second = ops_per_sec,
@@ -336,12 +336,12 @@ pub const StringEncodeExtTests = struct {
             .category = "encode_ext",
         };
     }
-    
+
     /// 测试 urldecode
     fn testUrldecode(self: *@This()) !StringOpResult {
         const test_name = "urldecode";
         const test_string = "Hello+World%21+This+is+a+test+%26+demo.";
-        
+
         if (self.generate_php_scripts) {
             try self.generatePhpScript(test_name,
                 \\<?php
@@ -355,15 +355,15 @@ pub const StringEncodeExtTests = struct {
                 \\echo "Time: " . (($end - $start) / 1000000) . " ms\n";
             );
         }
-        
+
         const start = std.time.nanoTimestamp();
-        
+
         var total_len: usize = 0;
         var i: u32 = 0;
         while (i < self.iterations) : (i += 1) {
             var result = std.array_list.AlignedManaged(u8, null).init(self.allocator);
             defer result.deinit();
-            
+
             var idx: usize = 0;
             while (idx < test_string.len) {
                 if (test_string[idx] == '+') {
@@ -385,19 +385,19 @@ pub const StringEncodeExtTests = struct {
             }
             total_len += result.items.len;
         }
-        
+
         const end = std.time.nanoTimestamp();
         const total_time = @as(u64, @intCast(end - start));
-        
+
         std.mem.doNotOptimizeAway(&total_len);
-        
-        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) / 
-                           (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
-        
+
+        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) /
+            (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+
         if (self.verbose) {
-            std.debug.print("  {s}: {d:.2} M ops/s\n", .{test_name, ops_per_sec / 1_000_000.0});
+            std.debug.print("  {s}: {d:.2} M ops/s\n", .{ test_name, ops_per_sec / 1_000_000.0 });
         }
-        
+
         return StringOpResult{
             .test_name = test_name,
             .operations_per_second = ops_per_sec,
@@ -406,12 +406,12 @@ pub const StringEncodeExtTests = struct {
             .category = "encode_ext",
         };
     }
-    
+
     /// 测试 rawurlencode
     fn testRawurlencode(self: *@This()) !StringOpResult {
         const test_name = "rawurlencode";
         const test_string = "Hello World! Test & Demo";
-        
+
         if (self.generate_php_scripts) {
             try self.generatePhpScript(test_name,
                 \\<?php
@@ -425,15 +425,15 @@ pub const StringEncodeExtTests = struct {
                 \\echo "Time: " . (($end - $start) / 1000000) . " ms\n";
             );
         }
-        
+
         const start = std.time.nanoTimestamp();
-        
+
         var total_len: usize = 0;
         var i: u32 = 0;
         while (i < self.iterations) : (i += 1) {
             var result = std.array_list.AlignedManaged(u8, null).init(self.allocator);
             defer result.deinit();
-            
+
             for (test_string) |c| {
                 if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~') {
                     try result.append(c);
@@ -445,19 +445,19 @@ pub const StringEncodeExtTests = struct {
             }
             total_len += result.items.len;
         }
-        
+
         const end = std.time.nanoTimestamp();
         const total_time = @as(u64, @intCast(end - start));
-        
+
         std.mem.doNotOptimizeAway(&total_len);
-        
-        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) / 
-                           (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
-        
+
+        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) /
+            (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+
         if (self.verbose) {
-            std.debug.print("  {s}: {d:.2} M ops/s\n", .{test_name, ops_per_sec / 1_000_000.0});
+            std.debug.print("  {s}: {d:.2} M ops/s\n", .{ test_name, ops_per_sec / 1_000_000.0 });
         }
-        
+
         return StringOpResult{
             .test_name = test_name,
             .operations_per_second = ops_per_sec,
@@ -466,12 +466,12 @@ pub const StringEncodeExtTests = struct {
             .category = "encode_ext",
         };
     }
-    
+
     /// 测试 rawurldecode
     fn testRawurldecode(self: *@This()) !StringOpResult {
         const test_name = "rawurldecode";
         const test_string = "Hello%20World%21%20Test%20%26%20Demo";
-        
+
         if (self.generate_php_scripts) {
             try self.generatePhpScript(test_name,
                 \\<?php
@@ -485,15 +485,15 @@ pub const StringEncodeExtTests = struct {
                 \\echo "Time: " . (($end - $start) / 1000000) . " ms\n";
             );
         }
-        
+
         const start = std.time.nanoTimestamp();
-        
+
         var total_len: usize = 0;
         var i: u32 = 0;
         while (i < self.iterations) : (i += 1) {
             var result = std.array_list.AlignedManaged(u8, null).init(self.allocator);
             defer result.deinit();
-            
+
             var idx: usize = 0;
             while (idx < test_string.len) {
                 if (test_string[idx] == '%' and idx + 2 < test_string.len) {
@@ -512,19 +512,19 @@ pub const StringEncodeExtTests = struct {
             }
             total_len += result.items.len;
         }
-        
+
         const end = std.time.nanoTimestamp();
         const total_time = @as(u64, @intCast(end - start));
-        
+
         std.mem.doNotOptimizeAway(&total_len);
-        
-        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) / 
-                           (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
-        
+
+        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) /
+            (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+
         if (self.verbose) {
-            std.debug.print("  {s}: {d:.2} M ops/s\n", .{test_name, ops_per_sec / 1_000_000.0});
+            std.debug.print("  {s}: {d:.2} M ops/s\n", .{ test_name, ops_per_sec / 1_000_000.0 });
         }
-        
+
         return StringOpResult{
             .test_name = test_name,
             .operations_per_second = ops_per_sec,
@@ -533,12 +533,12 @@ pub const StringEncodeExtTests = struct {
             .category = "encode_ext",
         };
     }
-    
+
     /// 测试 nl2br (换行转 BR 标签)
     fn testNl2br(self: *@This()) !StringOpResult {
         const test_name = "nl2br";
         const test_string = "Line 1\nLine 2\nLine 3\nLine 4";
-        
+
         if (self.generate_php_scripts) {
             try self.generatePhpScript(test_name,
                 \\<?php
@@ -552,9 +552,9 @@ pub const StringEncodeExtTests = struct {
                 \\echo "Time: " . (($end - $start) / 1000000) . " ms\n";
             );
         }
-        
+
         const start = std.time.nanoTimestamp();
-        
+
         var total_len: usize = 0;
         var i: u32 = 0;
         while (i < self.iterations) : (i += 1) {
@@ -562,19 +562,19 @@ pub const StringEncodeExtTests = struct {
             defer self.allocator.free(result);
             total_len += result.len;
         }
-        
+
         const end = std.time.nanoTimestamp();
         const total_time = @as(u64, @intCast(end - start));
-        
+
         std.mem.doNotOptimizeAway(&total_len);
-        
-        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) / 
-                           (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
-        
+
+        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) /
+            (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+
         if (self.verbose) {
-            std.debug.print("  {s}: {d:.2} M ops/s\n", .{test_name, ops_per_sec / 1_000_000.0});
+            std.debug.print("  {s}: {d:.2} M ops/s\n", .{ test_name, ops_per_sec / 1_000_000.0 });
         }
-        
+
         return StringOpResult{
             .test_name = test_name,
             .operations_per_second = ops_per_sec,
@@ -583,13 +583,13 @@ pub const StringEncodeExtTests = struct {
             .category = "encode_ext",
         };
     }
-    
+
     /// 测试 wordwrap (单词换行)
     fn testWordwrap(self: *@This()) !StringOpResult {
         const test_name = "wordwrap";
         const test_string = "The quick brown fox jumps over the lazy dog and runs away";
         const width: usize = 20;
-        
+
         if (self.generate_php_scripts) {
             try self.generatePhpScript(test_name,
                 \\<?php
@@ -603,48 +603,48 @@ pub const StringEncodeExtTests = struct {
                 \\echo "Time: " . (($end - $start) / 1000000) . " ms\n";
             );
         }
-        
+
         const start = std.time.nanoTimestamp();
-        
+
         var total_len: usize = 0;
         var i: u32 = 0;
         while (i < self.iterations) : (i += 1) {
             var result = std.array_list.AlignedManaged(u8, null).init(self.allocator);
             defer result.deinit();
-            
+
             var line_len: usize = 0;
             var last_space: ?usize = null;
-            
+
             for (test_string, 0..) |c, idx| {
                 if (c == ' ') {
                     last_space = result.items.len;
                 }
-                
+
                 try result.append(c);
                 line_len += 1;
-                
+
                 if (line_len >= width and last_space != null) {
                     result.items[last_space.?] = '\n';
                     line_len = idx - last_space.?;
                     last_space = null;
                 }
             }
-            
+
             total_len += result.items.len;
         }
-        
+
         const end = std.time.nanoTimestamp();
         const total_time = @as(u64, @intCast(end - start));
-        
+
         std.mem.doNotOptimizeAway(&total_len);
-        
-        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) / 
-                           (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
-        
+
+        const ops_per_sec = @as(f64, @floatFromInt(self.iterations)) /
+            (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+
         if (self.verbose) {
-            std.debug.print("  {s}: {d:.2} M ops/s\n", .{test_name, ops_per_sec / 1_000_000.0});
+            std.debug.print("  {s}: {d:.2} M ops/s\n", .{ test_name, ops_per_sec / 1_000_000.0 });
         }
-        
+
         return StringOpResult{
             .test_name = test_name,
             .operations_per_second = ops_per_sec,
@@ -653,7 +653,7 @@ pub const StringEncodeExtTests = struct {
             .category = "encode_ext",
         };
     }
-    
+
     /// 生成 PHP 测试脚本
     fn generatePhpScript(self: *@This(), test_name: []const u8, script_content: []const u8) !void {
         const file_path = try std.fmt.allocPrint(
@@ -662,10 +662,10 @@ pub const StringEncodeExtTests = struct {
             .{ self.script_output_dir, test_name },
         );
         defer self.allocator.free(file_path);
-        
+
         const file = try std.fs.cwd.createFile(file_path, .{});
         defer file.close();
-        
+
         try file.writeAll(script_content);
     }
 };

@@ -179,6 +179,52 @@ fn phpCompare(lhs: Value, rhs: Value) i2 {
         return 0;
     }
 
+    // Rule 6 (PHP 8): number vs string
+    // PHP 8: numeric string → compare as numbers
+    //        non-numeric string → convert number to string, compare as strings
+    if ((lhs.isInt() or lhs.isFloat()) and rhs.isString()) {
+        const rs = rhs.asString();
+        const r_data = rs.data[0..rs.length];
+        if (isNumericString(r_data)) {
+            const l = lhs.toFloat();
+            const r = rhs.toFloat();
+            if (l < r) return -1;
+            if (l > r) return 1;
+            return 0;
+        }
+        var num_buf: [64]u8 = undefined;
+        const num_str = if (lhs.isInt())
+            std.fmt.bufPrint(&num_buf, "{d}", .{lhs.asInt()}) catch "0"
+        else
+            phpFormatFloat(&num_buf, lhs.asFloat());
+        return switch (std.mem.order(u8, num_str, r_data)) {
+            .lt => -1,
+            .gt => 1,
+            .eq => 0,
+        };
+    }
+    if (lhs.isString() and (rhs.isInt() or rhs.isFloat())) {
+        const ls = lhs.asString();
+        const l_data = ls.data[0..ls.length];
+        if (isNumericString(l_data)) {
+            const l = lhs.toFloat();
+            const r = rhs.toFloat();
+            if (l < r) return -1;
+            if (l > r) return 1;
+            return 0;
+        }
+        var num_buf: [64]u8 = undefined;
+        const num_str = if (rhs.isInt())
+            std.fmt.bufPrint(&num_buf, "{d}", .{rhs.asInt()}) catch "0"
+        else
+            phpFormatFloat(&num_buf, rhs.asFloat());
+        return switch (std.mem.order(u8, l_data, num_str)) {
+            .lt => -1,
+            .gt => 1,
+            .eq => 0,
+        };
+    }
+
     // Rule 5: string vs string
     if (lhs.isString() and rhs.isString()) {
         const ls = lhs.asString();
@@ -670,6 +716,20 @@ fn writeExportIndent(writer: anytype, indent: usize) !void {
     }
 }
 
+fn writeExportStrKey(writer: anytype, s: []const u8) !void {
+    try writer.writeAll("'");
+    for (s) |c| {
+        if (c == '\'') {
+            try writer.writeAll("\\'");
+        } else if (c == '\\') {
+            try writer.writeAll("\\\\");
+        } else {
+            try writer.writeByte(c);
+        }
+    }
+    try writer.writeAll("'");
+}
+
 fn printValue(writer: anytype, value: Value, indent: usize, is_nested: bool) !void {
     if (value.isNull()) {
         // null不输出任何内容（PHP行为）
@@ -777,13 +837,42 @@ fn printValue(writer: anytype, value: Value, indent: usize, is_nested: bool) !vo
                 try writer.writeAll("[timezone] => UTC\n");
             }
         } else {
-            // 遍历属性
+            // 按声明顺序遍历属性（property_order），再遍历剩余动态属性
+            var printed = std.StringHashMap(void).init(runtime_allocator);
+            defer printed.deinit();
+
+            if (obj.class_meta) |meta| {
+                var current: ?*const ClassMeta = meta;
+                while (current) |m| {
+                    for (m.property_order.items) |prop_name| {
+                        if (printed.contains(prop_name)) continue;
+                        if (obj.properties.get(prop_name)) |val| {
+                            try printed.put(prop_name, {});
+                            const elem_indent = if (is_nested) indent + 2 else indent + 1;
+                            try writeIndent(writer, elem_indent);
+                            try writer.print("[{s}] => ", .{prop_name});
+
+                            const is_complex = val.isArray() or Value_isObject(val);
+                            if (is_complex) {
+                                try printValue(writer, val, elem_indent, true);
+                                try writer.writeByte('\n');
+                            } else {
+                                try printValue(writer, val, elem_indent, false);
+                                try writer.writeByte('\n');
+                            }
+                        }
+                    }
+                    current = m.parent;
+                }
+            }
+
+            // 遍历剩余动态属性
             var it = obj.properties.iterator();
             while (it.next()) |entry| {
+                if (printed.contains(entry.key_ptr.*)) continue;
                 const elem_indent = if (is_nested) indent + 2 else indent + 1;
                 try writeIndent(writer, elem_indent);
 
-                // 属性名格式化
                 const prop_name = entry.key_ptr.*;
                 try writer.print("[{s}] => ", .{prop_name});
 
@@ -900,20 +989,40 @@ fn exportValue(writer: anytype, value: Value, indent: usize) !void {
         try writer.writeAll("\\");
         try writer.writeAll(class_name);
         try writer.writeAll("::__set_state(array(\n");
+
+        var exported = std.StringHashMap(void).init(runtime_allocator);
+        defer exported.deinit();
+
+        if (obj.class_meta) |meta| {
+            var current: ?*const ClassMeta = meta;
+            while (current) |m| {
+                for (m.property_order.items) |prop_name| {
+                    if (exported.contains(prop_name)) continue;
+                    if (obj.properties.get(prop_name)) |val| {
+                        try exported.put(prop_name, {});
+                        try writeExportIndent(writer, indent + 1);
+                        try writer.writeByte(' ');
+                        try writeExportStrKey(writer, prop_name);
+                        try writer.writeAll(" => ");
+                        if (val.isArray() or Value_isObject(val)) {
+                            try writer.writeAll("\n");
+                            try writeExportIndent(writer, indent + 1);
+                        }
+                        try exportValue(writer, val, indent + 1);
+                        try writer.writeAll(",\n");
+                    }
+                }
+                current = m.parent;
+            }
+        }
+
         var it = obj.properties.iterator();
         while (it.next()) |entry| {
+            if (exported.contains(entry.key_ptr.*)) continue;
             try writeExportIndent(writer, indent + 1);
-            try writer.writeAll("'");
-            for (entry.key_ptr.*) |c| {
-                if (c == '\'') {
-                    try writer.writeAll("\\'");
-                } else if (c == '\\') {
-                    try writer.writeAll("\\\\");
-                } else {
-                    try writer.writeByte(c);
-                }
-            }
-            try writer.writeAll("' => ");
+            try writer.writeByte(' ');
+            try writeExportStrKey(writer, entry.key_ptr.*);
+            try writer.writeAll(" => ");
             if (entry.value_ptr.*.isArray() or Value_isObject(entry.value_ptr.*)) {
                 try writer.writeAll("\n");
                 try writeExportIndent(writer, indent + 1);
@@ -921,6 +1030,7 @@ fn exportValue(writer: anytype, value: Value, indent: usize) !void {
             try exportValue(writer, entry.value_ptr.*, indent + 1);
             try writer.writeAll(",\n");
         }
+
         try writeExportIndent(writer, indent);
         try writer.writeAll("))");
         return;
@@ -1541,20 +1651,20 @@ pub fn php_iterator_to_array(iterator: Value, preserve_keys: Value, allocator: A
     // 处理默认参数：如果preserve_keys是null或missing，默认为true
     const use_keys = if (preserve_keys.isNull() or preserve_keys.isMissing()) true else preserve_keys.toBool();
     const result = try PHPArray.init(allocator);
-    
+
     // 调用rewind()重置迭代器
     _ = try php_object_call(iterator, "rewind", &[_]Value{});
-    
+
     var index: i64 = 0;
     while (true) {
         // 检查valid()
         const valid_result = try php_object_call(iterator, "valid", &[_]Value{});
         defer valid_result.release(allocator);
         if (!valid_result.toBool()) break;
-        
+
         // 获取current()
         const current = try php_object_call(iterator, "current", &[_]Value{});
-        
+
         if (use_keys) {
             // 获取key()并保留键
             const key = try php_object_call(iterator, "key", &[_]Value{});
@@ -1565,13 +1675,13 @@ pub fn php_iterator_to_array(iterator: Value, preserve_keys: Value, allocator: A
             try result.setByValue(allocator, Value.initInt(index), current);
             index += 1;
         }
-        
+
         current.release(allocator);
-        
+
         // 调用next()
         _ = try php_object_call(iterator, "next", &[_]Value{});
     }
-    
+
     return Value.initArray(result);
 }
 
@@ -1740,6 +1850,7 @@ pub fn registerArrayIterator(allocator: Allocator) !void {
         .parent = null,
         .methods = std.StringHashMap(ClassMethod).init(allocator),
         .properties = std.StringHashMap(ClassProperty).init(allocator),
+        .property_order = try std.ArrayList([]const u8).initCapacity(allocator, 0),
         .static_properties = std.StringHashMap(Value).init(allocator),
         .interfaces = &.{},
         .is_abstract = false,
@@ -2008,6 +2119,7 @@ pub fn registerSplFixedArray(allocator: Allocator) !void {
         .parent = null,
         .methods = std.StringHashMap(ClassMethod).init(allocator),
         .properties = std.StringHashMap(ClassProperty).init(allocator),
+        .property_order = try std.ArrayList([]const u8).initCapacity(allocator, 0),
         .static_properties = std.StringHashMap(Value).init(allocator),
         .interfaces = &.{},
         .is_abstract = false,
@@ -2601,6 +2713,7 @@ pub fn registerSplStack(allocator: Allocator) !void {
         .parent = null,
         .methods = std.StringHashMap(ClassMethod).init(allocator),
         .properties = std.StringHashMap(ClassProperty).init(allocator),
+        .property_order = try std.ArrayList([]const u8).initCapacity(allocator, 0),
         .static_properties = std.StringHashMap(Value).init(allocator),
         .interfaces = &.{},
         .is_abstract = false,
@@ -2705,6 +2818,7 @@ pub fn registerSplQueue(allocator: Allocator) !void {
         .parent = null,
         .methods = std.StringHashMap(ClassMethod).init(allocator),
         .properties = std.StringHashMap(ClassProperty).init(allocator),
+        .property_order = try std.ArrayList([]const u8).initCapacity(allocator, 0),
         .static_properties = std.StringHashMap(Value).init(allocator),
         .interfaces = &.{},
         .is_abstract = false,
@@ -3027,7 +3141,10 @@ pub fn php_str_repeat(str: Value, times: Value, allocator: Allocator) !Value {
     const repeat_times = times.toInt();
 
     if (repeat_times <= 0) return Value.initString(try PHPString.init(allocator, ""));
-    if (repeat_times == 1) return str;
+    if (repeat_times == 1) {
+        _ = str.retain();
+        return str;
+    }
 
     const new_len = php_str.length * @as(usize, @intCast(repeat_times));
     const buffer = try allocator.alloc(u8, new_len);
@@ -3158,7 +3275,10 @@ pub fn php_stristr(haystack: Value, needle: Value, allocator: Allocator) !Value 
         while (j < n.length) : (j += 1) {
             const a = std.ascii.toLower(h.data[i + j]);
             const b = std.ascii.toLower(n.data[j]);
-            if (a != b) { matched = false; break; }
+            if (a != b) {
+                matched = false;
+                break;
+            }
         }
         if (matched) {
             const result_len = h.length - i;
@@ -3476,7 +3596,7 @@ pub fn preg_match(pattern_val: Value, subject_val: Value, matches_ref: *Value, f
     _ = flags; // TODO: 实现flags支持
     _ = offset; // TODO: 实现offset支持
     _ = matches_ref; // TODO: 实现matches填充
-    
+
     if (!pattern_val.isString() or !subject_val.isString()) {
         return Value.initInt(0);
     }
@@ -3563,7 +3683,7 @@ pub fn preg_match_with_matches(pattern_val: Value, subject_val: Value, matches_r
 pub fn preg_match_all(pattern_val: Value, subject_val: Value, matches_ref: *Value, flags: Value, offset: Value, allocator: Allocator) !Value {
     _ = flags; // TODO: 实现flags支持
     _ = offset; // TODO: 实现offset支持
-    
+
     if (!pattern_val.isString() or !subject_val.isString()) {
         matches_ref.* = Value.initArray(try PHPArray.init(allocator));
         return Value.initInt(0);
@@ -3713,18 +3833,18 @@ pub fn preg_filter(pattern_val: Value, replacement_val: Value, subject_val: Valu
         while (iter.next()) |entry| {
             if (entry.value_ptr.isString()) {
                 const subject_str = entry.value_ptr.asString();
-                
+
                 if (pattern_val.isString() and replacement_val.isString()) {
                     const pattern_str = pattern_val.asString();
                     const parsed = parsePHPRegexPattern(pattern_str.data);
-                    
+
                     const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch continue;
                     const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse continue;
                     defer pcre2_match_data_free_8(match_data);
 
                     // 检查是否有匹配
                     const rc_check = pcre2_match_8(re, subject_str.data.ptr, subject_str.length, 0, 0, match_data, null);
-                    
+
                     // 只有匹配时才进行替换并添加到结果
                     if (rc_check >= 0) {
                         const replacement_str = replacement_val.asString();
@@ -3744,7 +3864,7 @@ pub fn preg_filter(pattern_val: Value, replacement_val: Value, subject_val: Valu
                                 allocator.free(result);
                                 continue;
                             });
-                            
+
                             // 保持原始键
                             switch (entry.key_ptr.*) {
                                 .integer => result_arr.set(allocator, entry.key_ptr.*, result_val) catch {},
@@ -3778,7 +3898,7 @@ pub fn preg_filter(pattern_val: Value, replacement_val: Value, subject_val: Valu
 
     // 检查是否有匹配
     const rc_check = pcre2_match_8(re, subject_str.data.ptr, subject_str.length, 0, 0, match_data, null);
-    
+
     // 如果没有匹配，返回 null（preg_filter 的特性）
     if (rc_check == PCRE2_ERROR_NOMATCH or rc_check < 0) {
         return Value.initNull();
@@ -4540,18 +4660,17 @@ pub fn php_in_array(needle: Value, haystack: Value, strict: Value) !Value {
 /// array_slice($arr, -2);     // [4, 5]
 /// array_slice($arr, 1, -1);  // [2, 3, 4]
 /// ```
-pub fn php_array_slice(arr: Value, offset: Value, length: Value, allocator: Allocator) !Value {
+pub fn php_array_slice(arr: Value, offset: Value, length: Value, preserve_keys: Value, allocator: Allocator) !Value {
     if (!arr.isArray()) return Value.initNull();
 
     const php_arr = arr.asArray();
     const arr_count = php_arr.count();
+    const preserve = preserve_keys.asBool();
 
     if (arr_count == 0) {
-        // 空数组，返回空数组
         return Value.initArray(try PHPArray.init(allocator));
     }
 
-    // 计算起始位置
     const offset_int = offset.toInt();
     const start_idx: usize = blk: {
         if (offset_int < 0) {
@@ -4562,53 +4681,65 @@ pub fn php_array_slice(arr: Value, offset: Value, length: Value, allocator: Allo
         }
     };
 
-    // 计算结束位置
     const end_idx: usize = blk: {
         if (length.isNull()) {
-            // 没有指定长度，取到数组末尾
             break :blk arr_count;
         }
-
         const length_int = length.toInt();
         if (length_int >= 0) {
-            // 正数长度
             break :blk @min(start_idx + @as(usize, @intCast(length_int)), arr_count);
         } else {
-            // 负数长度：从末尾减去
             const abs_len = @as(usize, @intCast(-length_int));
             if (abs_len >= arr_count) {
-                break :blk start_idx; // 返回空数组
+                break :blk start_idx;
             }
             break :blk if (arr_count - abs_len > start_idx) arr_count - abs_len else start_idx;
         }
     };
 
-    // 创建新数组
     const result = try PHPArray.init(allocator);
     errdefer result.release(allocator);
 
     if (start_idx >= end_idx) {
-        // 空切片
         return Value.initArray(result);
     }
 
-    // 复制元素
-    // 注意：PHP的array_slice会重新索引数组（从0开始）
     var iter = php_arr.elements.iterator();
     var current_idx: usize = 0;
     var new_idx: i64 = 0;
 
     while (iter.next()) |entry| {
-        // 只处理整数键（保持顺序）
-        if (entry.key_ptr.* == .integer) {
-            if (current_idx >= start_idx and current_idx < end_idx) {
-                const new_key = ArrayKey{ .integer = new_idx };
+        if (current_idx >= start_idx and current_idx < end_idx) {
+            if (preserve) {
+                const key_copy = switch (entry.key_ptr.*) {
+                    .integer => |k| ArrayKey{ .integer = k },
+                    .string => |k| blk: {
+                        k.retain();
+                        break :blk ArrayKey{ .string = k };
+                    },
+                };
                 const value_copy = entry.value_ptr.*.retain();
-                try result.elements.put(new_key, value_copy);
-                new_idx += 1;
+                try result.elements.put(key_copy, value_copy);
+                if (key_copy == .integer and key_copy.integer >= new_idx) {
+                    new_idx = key_copy.integer + 1;
+                }
+            } else {
+                switch (entry.key_ptr.*) {
+                    .integer => {
+                        const new_key = ArrayKey{ .integer = new_idx };
+                        const value_copy = entry.value_ptr.*.retain();
+                        try result.elements.put(new_key, value_copy);
+                        new_idx += 1;
+                    },
+                    .string => |k| {
+                        k.retain();
+                        const value_copy = entry.value_ptr.*.retain();
+                        try result.elements.put(.{ .string = k }, value_copy);
+                    },
+                }
             }
-            current_idx += 1;
         }
+        current_idx += 1;
     }
 
     result.next_index = new_idx;
@@ -4861,7 +4992,7 @@ pub fn php_array_is_list(arr: Value) Value {
     if (!arr.isArray()) return Value.initBool(false);
 
     const php_arr = arr.asArray();
-    
+
     // 空数组是列表
     if (php_arr.elements.count() == 0) return Value.initBool(true);
 
@@ -5435,7 +5566,7 @@ pub fn php_is_finite(val: Value) !Value {
 pub fn php_is_countable(val: Value) !Value {
     // 数组总是可计数的
     if (val.isArray()) return Value.initBool(true);
-    
+
     // 对象需要实现Countable接口
     if (Value_isObject(val)) {
         const obj = Value_asObject(val);
@@ -5444,7 +5575,7 @@ pub fn php_is_countable(val: Value) !Value {
             return Value.initBool(meta.findMethod("count") != null);
         }
     }
-    
+
     return Value.initBool(false);
 }
 
@@ -5452,7 +5583,7 @@ pub fn php_is_countable(val: Value) !Value {
 pub fn php_is_iterable(val: Value) !Value {
     // 数组总是可迭代的
     if (val.isArray()) return Value.initBool(true);
-    
+
     // 对象需要实现Traversable接口（Iterator或IteratorAggregate）
     if (Value_isObject(val)) {
         const obj = Value_asObject(val);
@@ -5464,12 +5595,12 @@ pub fn php_is_iterable(val: Value) !Value {
             const has_rewind = meta.findMethod("rewind") != null;
             const has_valid = meta.findMethod("valid") != null;
             const has_getiterator = meta.findMethod("getIterator") != null;
-            
+
             // Iterator接口需要5个方法，IteratorAggregate需要getIterator
             return Value.initBool((has_current and has_key and has_next and has_rewind and has_valid) or has_getiterator);
         }
     }
-    
+
     return Value.initBool(false);
 }
 
@@ -5537,11 +5668,9 @@ pub fn php_array_set_ref(arr_val: Value, key_val: Value, ref_val: Value, _: Valu
 
 /// 从值创建引用（用于全局变量的引用）
 pub fn php_make_ref_from_value(val: Value) !Value {
-    // 这是一个简化实现：创建一个包含该值的临时位置并返回引用
-    // 在完整实现中，这需要更复杂的内存管理
-    _ = val.retain();
-    // 注意：这里返回的是值本身，不是真正的引用
-    // 全局变量的引用需要特殊处理
-    return val;
+    // 创建真正的引用：分配堆单元，将值放入，返回 Ref 指向该单元
+    const cell = try runtime_allocator.create(Value);
+    cell.* = val;
+    _ = cell.retain();
+    return Value.initRef(cell);
 }
-

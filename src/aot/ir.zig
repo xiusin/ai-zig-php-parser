@@ -182,6 +182,10 @@ pub const TypeDef = struct {
     backing_type: ?[]const u8 = null,
     /// Whether the class/enum is readonly
     is_readonly: bool = false,
+    /// Whether the class is abstract
+    is_abstract: bool = false,
+    /// Whether the class is final
+    is_final: bool = false,
     /// PHP attributes (#[...]) on this type
     attributes: []const Attribute = &.{},
     /// Source location
@@ -209,6 +213,8 @@ pub const TypeDef = struct {
         has_default: bool = false,
         /// 是否 readonly
         is_readonly: bool = false,
+        /// PHP attributes (#[...]) on this property
+        attributes: []const Attribute = &.{},
     };
 
     pub const Method = struct {
@@ -228,6 +234,8 @@ pub const TypeDef = struct {
         return_type: ?[]const u8 = null,
         /// 返回类型是否 nullable
         return_nullable: bool = false,
+        /// PHP attributes (#[...]) on this method
+        attributes: []const Attribute = &.{},
     };
 
     pub const Constant = struct {
@@ -316,8 +324,12 @@ pub const Function = struct {
     global_vars: std.ArrayListUnmanaged([]const u8) = .{ .items = &.{}, .capacity = 0 },
     /// Reference parameter indices (0-based)
     ref_params: std.ArrayListUnmanaged(u32) = .{ .items = &.{}, .capacity = 0 },
+    /// 参数索引集合（0-based），这些参数的数组值不会被修改，可跳过 COW 检查
+    cow_skip_params: std.AutoHashMapUnmanaged(u32, void) = .{},
     /// Whether this function is a generator (contains yield)
     is_generator: bool = false,
+    /// Whether this function/method returns by reference (&getRef)
+    returns_reference: bool = false,
     /// PHP variable register ID → variable name (survives optimization)
     var_names: std.AutoHashMapUnmanaged(u32, []const u8) = .{},
 
@@ -355,6 +367,7 @@ pub const Function = struct {
         self.blocks.deinit(self.allocator);
         self.global_vars.deinit(self.allocator);
         self.ref_params.deinit(self.allocator);
+        self.cow_skip_params.deinit(self.allocator);
         self.var_names.deinit(self.allocator);
     }
 
@@ -804,6 +817,8 @@ pub const Instruction = struct {
         const_null: void,
         /// Missing argument sentinel (used for named args holes)
         const_missing: void,
+        /// Constant array with elements (for non-empty array property defaults)
+        const_array: []const TypeDef.ArrayConstElement,
 
         // ============ Function Operations ============
         /// Function call
@@ -1082,6 +1097,7 @@ pub const Instruction = struct {
     pub const ArrayGetOp = struct {
         array: Register,
         key: Register,
+        get_ref: bool = false,
     };
 
     /// Array set operation
@@ -1513,6 +1529,9 @@ pub const IRPrinter = struct {
             .const_string => |id| try self.print("const.string ${d}", .{id}),
             .const_null => try self.write("const.null"),
             .const_missing => try self.write("const.missing"),
+            .const_array => |elements| {
+                try self.print("const.array [{} elements]", .{elements.len});
+            },
 
             // Function calls
             .call => |op| {

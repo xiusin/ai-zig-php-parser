@@ -2,6 +2,10 @@
 //! 内置函数注册表 (Builtin Function Registry)
 //! ============================================================================
 //!
+//! @deprecated 此文件已废弃，请使用 fn_dispatch.zig 替代
+//! 保留 BuiltinRegistry 结构体和 Category 枚举以兼容现有代码
+//! BuiltinError 已迁移到 fn_dispatch.BuiltinError
+//!
 //! 功能：管理所有PHP内置函数的注册、分类和调用
 //!
 //! 主要组件：
@@ -18,6 +22,7 @@ const types = @import("types.zig");
 const Value = types.Value;
 const exceptions = @import("exceptions.zig");
 const ExceptionFactory = exceptions.ExceptionFactory;
+const fn_dispatch_mod = @import("fn_dispatch.zig");
 
 // Forward declaration for VM - will be resolved at compile time
 const VM = anyopaque;
@@ -61,22 +66,8 @@ pub const Category = enum {
 };
 
 /// Error types for builtin function operations
-pub const BuiltinError = error{
-    FunctionNotFound,
-    ArgumentCountMismatch,
-    InvalidArgumentType,
-    DivisionByZero,
-    MathDomainError,
-    RandomSeedError,
-    BigDecimalOverflow,
-    TimeFormatError,
-    ChannelClosed,
-    DeadlockDetected,
-    CoroutineTimeout,
-    StackOverflow,
-    InvalidPriority,
-    SchedulerNotRunning,
-};
+/// 已迁移到 fn_dispatch.BuiltinError，此处重导出以兼容现有代码
+pub const BuiltinError = fn_dispatch_mod.BuiltinError;
 
 /// Builtin function definition with metadata
 pub const BuiltinFunction = struct {
@@ -107,35 +98,10 @@ pub const BuiltinFunction = struct {
         };
     }
 
-    /// Validate argument count and call the function
+    /// 调用内置函数 — 参数校验已由 fn_dispatch.validateArgs 统一处理
+    /// 此方法直接调用 handler，不再重复校验参数数量
+    /// 保留错误转换逻辑（DivisionByZero, MathDomainError, InvalidArgumentType）
     pub fn call(self: *const BuiltinFunction, vm: *anyopaque, args: []const Value) !Value {
-        // Validate argument count
-        if (args.len < self.min_args) {
-            const exception = try ExceptionFactory.createArgumentCountError(
-                vm.allocator,
-                self.min_args,
-                @intCast(args.len),
-                self.name,
-                "builtin",
-                0,
-            );
-            _ = try vm.throwException(exception);
-            return BuiltinError.ArgumentCountMismatch;
-        }
-
-        if (!self.is_variadic and args.len > self.max_args) {
-            const exception = try ExceptionFactory.createArgumentCountError(
-                vm.allocator,
-                self.max_args,
-                @intCast(args.len),
-                self.name,
-                "builtin",
-                0,
-            );
-            _ = try vm.throwException(exception);
-            return BuiltinError.ArgumentCountMismatch;
-        }
-
         // Call the handler with error handling
         return self.handler(vm, args) catch |err| {
             // Convert specific errors to appropriate exceptions
@@ -184,10 +150,10 @@ pub const BuiltinRegistry = struct {
 
     pub fn init(allocator: std.mem.Allocator) BuiltinRegistry {
         var categories = std.EnumMap(Category, std.ArrayList(*const BuiltinFunction)){};
-        
+
         // Initialize category lists
-        inline for (@typeInfo(Category).@"enum".field_names) |field_name| {
-            const category = @field(Category, field_name);
+        inline for (@typeInfo(Category).@"enum".fields) |field| {
+            const category = @field(Category, field.name);
             categories.put(category, std.ArrayList(*const BuiltinFunction).empty);
         }
 
@@ -200,7 +166,7 @@ pub const BuiltinRegistry = struct {
 
     pub fn deinit(self: *BuiltinRegistry) void {
         self.functions.deinit();
-        
+
         // Deinit category lists
         var category_iter = self.categories.iterator();
         while (category_iter.next()) |entry| {
@@ -212,7 +178,7 @@ pub const BuiltinRegistry = struct {
     pub fn register(self: *BuiltinRegistry, func: *const BuiltinFunction) !void {
         // Add to main function map
         try self.functions.put(func.name, func);
-        
+
         // Add to category list
         if (self.categories.getPtr(func.category)) |category_list| {
             try category_list.append(self.allocator, func);
@@ -220,6 +186,7 @@ pub const BuiltinRegistry = struct {
     }
 
     /// Call a builtin function by name
+    /// 参数校验由 fn_dispatch.validateArgs 统一处理
     pub fn call(self: *BuiltinRegistry, vm: *anyopaque, name: []const u8, args: []const Value) !Value {
         const func = self.functions.get(name) orelse {
             const exception = try ExceptionFactory.createRuntimeError(
@@ -231,6 +198,27 @@ pub const BuiltinRegistry = struct {
             _ = try vm.throwException(exception);
             return BuiltinError.FunctionNotFound;
         };
+
+        // 统一参数校验 — 通过 fn_dispatch_mod 的 O(1) 查找获取 id，然后 validateArgs
+        if (fn_dispatch_mod.lookup(name)) |id| {
+            fn_dispatch_mod.validateArgs(id, args.len) catch |err| {
+                const meta = fn_dispatch_mod.getMeta(id).?;
+                const expected = switch (err) {
+                    error.TooFewArguments => meta.min_args,
+                    error.TooManyArguments => meta.max_args,
+                };
+                const exception = try ExceptionFactory.createArgumentCountError(
+                    vm.allocator,
+                    expected,
+                    @intCast(args.len),
+                    name,
+                    "builtin",
+                    0,
+                );
+                _ = try vm.throwException(exception);
+                return BuiltinError.ArgumentCountMismatch;
+            };
+        }
 
         return func.call(vm, args);
     }
@@ -292,12 +280,12 @@ fn testMathFn(vm: *anyopaque, args: []const Value) !Value {
     if (args[0].getTag() != .integer and args[0].getTag() != .float) {
         return BuiltinError.InvalidArgumentType;
     }
-    
-    const val = if (args[0].getTag() == .integer) 
-        @as(f64, @floatFromInt(args[0].asInt())) 
-    else 
+
+    const val = if (args[0].getTag() == .integer)
+        @as(f64, @floatFromInt(args[0].asInt()))
+    else
         args[0].asFloat();
-    
+
     return Value.initFloat(@abs(val));
 }
 
@@ -310,35 +298,35 @@ pub const BUILTIN_FUNCTIONS = [_]BuiltinFunction{
 /// Initialize and populate the builtin registry with core functions
 pub fn initializeRegistry(allocator: std.mem.Allocator) !BuiltinRegistry {
     var registry = BuiltinRegistry.init(allocator);
-    
+
     // Register core builtin functions
     for (BUILTIN_FUNCTIONS) |*func| {
         try registry.register(func);
     }
-    
+
     return registry;
 }
 
 test "BuiltinRegistry basic functionality" {
     const testing = std.testing;
     const allocator = testing.allocator;
-    
+
     var registry = BuiltinRegistry.init(allocator);
     defer registry.deinit();
-    
+
     // Test registration
     const test_func = BuiltinFunction.init("test", .misc, testTimeFn, 0, 0, "Test function");
     try registry.register(&test_func);
-    
+
     // Test existence check
     try testing.expect(registry.exists("test"));
     try testing.expect(!registry.exists("nonexistent"));
-    
+
     // Test function retrieval
     const retrieved = registry.getFunction("test");
     try testing.expect(retrieved != null);
     try testing.expectEqualStrings("test", retrieved.?.name);
-    
+
     // Test category functionality
     try testing.expect(registry.getCategoryCount(.misc) == 1);
     try testing.expect(registry.getTotalCount() == 1);
@@ -346,9 +334,9 @@ test "BuiltinRegistry basic functionality" {
 
 test "BuiltinFunction argument validation" {
     const testing = std.testing;
-    
+
     const test_func = BuiltinFunction.init("test", .misc, testMathFn, 1, 1, "Test function");
-    
+
     // Test argument count validation
     try testing.expect(test_func.min_args == 1);
     try testing.expect(test_func.max_args == 1);

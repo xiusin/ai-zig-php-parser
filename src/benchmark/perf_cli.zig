@@ -20,21 +20,21 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
-    
+
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
-    
+
     if (args.len < 2) {
         try printHelp();
         return;
     }
-    
+
     const command = std.meta.stringToEnum(Command, args[1]) orelse {
         std.debug.print("Unknown command: {s}\n", .{args[1]});
         try printHelp();
         return;
     };
-    
+
     switch (command) {
         .check => try runCheck(allocator, args[2..]),
         .update => try runUpdate(allocator, args[2..]),
@@ -77,7 +77,7 @@ fn printHelp() !void {
 
 fn runCheck(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var config = try CIConfig.fromEnv(allocator);
-    
+
     // 解析命令行参数
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -94,19 +94,19 @@ fn runCheck(allocator: std.mem.Allocator, args: []const []const u8) !void {
             config.fail_on_regression = true;
         }
     }
-    
+
     var runner = try CIRunner.init(allocator, config);
-    
+
     std.debug.print("Running performance regression check...\n", .{});
     std.debug.print("Baseline directory: {s}\n", .{config.baseline_dir});
     std.debug.print("Time threshold: {d:.1}%\n", .{config.threshold_percent});
     std.debug.print("Memory threshold: {d:.1}%\n\n", .{config.mem_threshold_percent});
-    
+
     const results = try microbench_suite.runAll(allocator);
     defer allocator.free(results);
 
     const success = try runner.runAndCheck(results);
-    
+
     if (!success) {
         std.process.exit(1);
     }
@@ -115,7 +115,7 @@ fn runCheck(allocator: std.mem.Allocator, args: []const []const u8) !void {
 fn runUpdate(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var baseline_dir: []const u8 = ".perf_baselines";
     var git_commit: []const u8 = "unknown";
-    
+
     // 解析命令行参数
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -127,24 +127,24 @@ fn runUpdate(allocator: std.mem.Allocator, args: []const []const u8) !void {
             i += 1;
         }
     }
-    
+
     var detector = try RegressionDetector.init(allocator, baseline_dir, 5.0, 1.0);
-    
+
     std.debug.print("Updating performance baselines...\n", .{});
     std.debug.print("Baseline directory: {s}\n", .{baseline_dir});
     std.debug.print("Git commit: {s}\n\n", .{git_commit});
-    
+
     const results = try microbench_suite.runAll(allocator);
     defer allocator.free(results);
 
     try detector.updateBaselines(results, git_commit);
-    
+
     std.debug.print("✅ Baselines updated successfully\n", .{});
 }
 
 fn runList(allocator: std.mem.Allocator, args: []const []const u8) !void {
     var baseline_dir: []const u8 = ".perf_baselines";
-    
+
     // 解析命令行参数
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -153,26 +153,26 @@ fn runList(allocator: std.mem.Allocator, args: []const []const u8) !void {
             i += 1;
         }
     }
-    
+
     std.debug.print("Performance Baselines in {s}:\n\n", .{baseline_dir});
-    
+
     var dir = try std.fs.cwd.openDir(baseline_dir, .{ .iterate = true });
     defer dir.close();
-    
+
     var iter = dir.iterate();
     var count: usize = 0;
-    
+
     while (try iter.next()) |entry| {
         if (entry.kind == .file and std.mem.endsWith(u8, entry.name, ".json")) {
             count += 1;
-            
+
             // 读取基线文件
             const file = try dir.openFile(entry.name, .{});
             defer file.close();
-            
+
             const content = try file.readToEndAlloc(allocator, 1024 * 1024);
             defer allocator.free(content);
-            
+
             const parsed = try std.json.parseFromSlice(
                 @import("regression_detector.zig").PerformanceBaseline,
                 allocator,
@@ -180,9 +180,9 @@ fn runList(allocator: std.mem.Allocator, args: []const []const u8) !void {
                 .{},
             );
             defer parsed.deinit();
-            
+
             const baseline = parsed.value;
-            
+
             std.debug.print("{d}. {s}\n", .{ count, baseline.benchmark_name });
             std.debug.print("   Average: {d} ns\n", .{baseline.avg_time_ns});
             std.debug.print("   Std Dev: {d:.2} ns\n", .{baseline.stddev_ns});
@@ -190,7 +190,7 @@ fn runList(allocator: std.mem.Allocator, args: []const []const u8) !void {
             std.debug.print("   Updated: {d}\n\n", .{baseline.timestamp});
         }
     }
-    
+
     if (count == 0) {
         std.debug.print("No baselines found.\n", .{});
     } else {
@@ -203,27 +203,27 @@ fn runCompare(allocator: std.mem.Allocator, args: []const []const u8) !void {
         std.debug.print("Usage: perf-cli compare <file1> <file2>\n", .{});
         return;
     }
-    
+
     const file1_path = args[0];
     const file2_path = args[1];
-    
+
     std.debug.print("Comparing performance results:\n", .{});
     std.debug.print("  File 1: {s}\n", .{file1_path});
     std.debug.print("  File 2: {s}\n\n", .{file2_path});
-    
+
     // 读取两个文件
     const file1 = try std.fs.cwd.openFile(file1_path, .{});
     defer file1.close();
-    
+
     const file2 = try std.fs.cwd.openFile(file2_path, .{});
     defer file2.close();
-    
+
     const content1 = try file1.readToEndAlloc(allocator, 1024 * 1024);
     defer allocator.free(content1);
-    
+
     const content2 = try file2.readToEndAlloc(allocator, 1024 * 1024);
     defer allocator.free(content2);
-    
+
     const parsed1 = try std.json.parseFromSlice(
         @import("regression_detector.zig").PerformanceBaseline,
         allocator,
@@ -231,7 +231,7 @@ fn runCompare(allocator: std.mem.Allocator, args: []const []const u8) !void {
         .{},
     );
     defer parsed1.deinit();
-    
+
     const parsed2 = try std.json.parseFromSlice(
         @import("regression_detector.zig").PerformanceBaseline,
         allocator,
@@ -239,28 +239,28 @@ fn runCompare(allocator: std.mem.Allocator, args: []const []const u8) !void {
         .{},
     );
     defer parsed2.deinit();
-    
+
     const baseline1 = parsed1.value;
     const baseline2 = parsed2.value;
-    
+
     const avg1 = @as(f64, @floatFromInt(baseline1.avg_time_ns));
     const avg2 = @as(f64, @floatFromInt(baseline2.avg_time_ns));
     const change_percent = ((avg2 - avg1) / avg1) * 100.0;
-    
+
     std.debug.print("Benchmark: {s}\n\n", .{baseline1.benchmark_name});
     std.debug.print("File 1:\n", .{});
     std.debug.print("  Average: {d} ns\n", .{baseline1.avg_time_ns});
     std.debug.print("  Std Dev: {d:.2} ns\n", .{baseline1.stddev_ns});
     std.debug.print("  Commit:  {s}\n\n", .{baseline1.git_commit});
-    
+
     std.debug.print("File 2:\n", .{});
     std.debug.print("  Average: {d} ns\n", .{baseline2.avg_time_ns});
     std.debug.print("  Std Dev: {d:.2} ns\n", .{baseline2.stddev_ns});
     std.debug.print("  Commit:  {s}\n\n", .{baseline2.git_commit});
-    
+
     const sign = if (change_percent >= 0) "+" else "";
     std.debug.print("Change: {s}{d:.2}%\n", .{ sign, change_percent });
-    
+
     if (change_percent > 5.0) {
         std.debug.print("⚠️  Performance regression detected!\n", .{});
     } else if (change_percent < -5.0) {
@@ -272,9 +272,9 @@ fn runCompare(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
 fn runReset(allocator: std.mem.Allocator, args: []const []const u8) !void {
     _ = allocator; // 未使用但保留以保持接口一致性
-    
+
     var baseline_dir: []const u8 = ".perf_baselines";
-    
+
     // 解析命令行参数
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -283,10 +283,10 @@ fn runReset(allocator: std.mem.Allocator, args: []const []const u8) !void {
             i += 1;
         }
     }
-    
+
     std.debug.print("⚠️  This will delete all baselines in {s}\n", .{baseline_dir});
     std.debug.print("Are you sure? (y/N): ", .{});
-    
+
     // 简化版本：直接删除（在 CLI 工具中，用户应该知道自己在做什么）
     // 如果需要交互式确认，可以使用 --force 标志
     std.debug.print("Skipping confirmation (use --force flag in production)\n", .{});

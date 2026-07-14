@@ -55,7 +55,7 @@ pub const RootEntry = struct {
     root_type: RootType,
     /// 元数据（用于调试）
     metadata: RootMetadata,
-    
+
     pub const RootMetadata = struct {
         /// 添加时间戳
         timestamp: i64,
@@ -74,28 +74,28 @@ pub const RootEntry = struct {
 pub const RootSet = struct {
     /// 分配器
     allocator: std.mem.Allocator,
-    
+
     /// 栈根列表
     stack_roots: std.ArrayListUnmanaged(*GCObjectHeader),
-    
+
     /// 全局根列表
     global_roots: std.ArrayListUnmanaged(*GCObjectHeader),
-    
+
     /// 寄存器根列表
     register_roots: std.ArrayListUnmanaged(*GCObjectHeader),
-    
+
     /// 跨代引用列表
     cross_gen_roots: std.ArrayListUnmanaged(*GCObjectHeader),
-    
+
     /// 临时根列表
     temporary_roots: std.ArrayListUnmanaged(*GCObjectHeader),
-    
+
     /// 所有根的统一视图（用于快速查找）
     all_roots: std.AutoHashMapUnmanaged(*GCObjectHeader, RootEntry),
-    
+
     /// 统计信息
     stats: RootSetStats,
-    
+
     pub const RootSetStats = struct {
         /// 栈根数量
         stack_count: usize = 0,
@@ -114,7 +114,7 @@ pub const RootSet = struct {
         /// 移除操作次数
         remove_operations: usize = 0,
     };
-    
+
     /// 初始化根集合
     /// @pre allocator 必须有效
     /// @post 返回已初始化的根集合
@@ -130,7 +130,7 @@ pub const RootSet = struct {
             .stats = .{},
         };
     }
-    
+
     /// 释放所有资源
     /// @pre self 必须已初始化
     /// @post 所有内存被释放
@@ -142,11 +142,11 @@ pub const RootSet = struct {
         self.temporary_roots.deinit(self.allocator);
         self.all_roots.deinit(self.allocator);
     }
-    
+
     // ========================================================================
     // 添加根对象
     // ========================================================================
-    
+
     /// 添加栈根
     /// @pre object 必须是有效的 GC 对象
     /// @post object 被添加到栈根列表
@@ -155,7 +155,7 @@ pub const RootSet = struct {
         try self.stack_roots.append(self.allocator, object);
         self.stats.stack_count += 1;
     }
-    
+
     /// 添加全局根
     /// @pre object 必须是有效的 GC 对象
     /// @post object 被添加到全局根列表
@@ -164,7 +164,7 @@ pub const RootSet = struct {
         try self.global_roots.append(self.allocator, object);
         self.stats.global_count += 1;
     }
-    
+
     /// 添加寄存器根
     /// @pre object 必须是有效的 GC 对象
     /// @post object 被添加到寄存器根列表
@@ -173,7 +173,7 @@ pub const RootSet = struct {
         try self.register_roots.append(self.allocator, object);
         self.stats.register_count += 1;
     }
-    
+
     /// 添加跨代引用
     /// @pre object 必须是有效的 GC 对象
     /// @post object 被添加到跨代引用列表
@@ -182,7 +182,7 @@ pub const RootSet = struct {
         try self.cross_gen_roots.append(self.allocator, object);
         self.stats.cross_gen_count += 1;
     }
-    
+
     /// 添加临时根
     /// @pre object 必须是有效的 GC 对象
     /// @post object 被添加到临时根列表
@@ -191,7 +191,7 @@ pub const RootSet = struct {
         try self.temporary_roots.append(self.allocator, object);
         self.stats.temporary_count += 1;
     }
-    
+
     /// 内部：添加根到统一视图
     fn addRoot(self: *RootSet, object: *GCObjectHeader, root_type: RootType, source: []const u8) !void {
         // 检查是否已存在
@@ -203,7 +203,7 @@ pub const RootSet = struct {
             }
             return;
         }
-        
+
         // 添加新根
         try self.all_roots.put(self.allocator, object, .{
             .object = object,
@@ -213,15 +213,15 @@ pub const RootSet = struct {
                 .source = source,
             },
         });
-        
+
         self.stats.total_count += 1;
         self.stats.add_operations += 1;
     }
-    
+
     // ========================================================================
     // 移除根对象
     // ========================================================================
-    
+
     /// 移除栈根
     /// @pre object 必须存在于栈根列表
     /// @post object 被从栈根列表移除
@@ -232,7 +232,7 @@ pub const RootSet = struct {
             self.stats.stack_count -= 1;
         }
     }
-    
+
     /// 移除全局根
     /// @pre object 必须存在于全局根列表
     /// @post object 被从全局根列表移除
@@ -243,7 +243,7 @@ pub const RootSet = struct {
             self.stats.global_count -= 1;
         }
     }
-    
+
     /// 移除寄存器根
     /// @pre object 必须存在于寄存器根列表
     /// @post object 被从寄存器根列表移除
@@ -254,7 +254,7 @@ pub const RootSet = struct {
             self.stats.register_count -= 1;
         }
     }
-    
+
     /// 清空所有临时根
     /// @post 所有临时根被移除
     pub fn clearTemporaryRoots(self: *RootSet) void {
@@ -265,7 +265,7 @@ pub const RootSet = struct {
         self.stats.total_count -= self.stats.temporary_count;
         self.stats.temporary_count = 0;
     }
-    
+
     /// 内部：从列表中移除对象
     fn removeFromList(_: *RootSet, list: *std.ArrayListUnmanaged(*GCObjectHeader), object: *GCObjectHeader) void {
         var i: usize = 0;
@@ -277,7 +277,7 @@ pub const RootSet = struct {
             i += 1;
         }
     }
-    
+
     /// 内部：从统一视图移除根
     fn removeRoot(self: *RootSet, object: *GCObjectHeader) void {
         if (self.all_roots.remove(object)) {
@@ -287,11 +287,11 @@ pub const RootSet = struct {
             self.stats.remove_operations += 1;
         }
     }
-    
+
     // ========================================================================
     // 遍历根对象
     // ========================================================================
-    
+
     /// 遍历所有根对象
     /// @pre visitor 必须是有效的访问器函数
     /// @post 所有根对象都被访问
@@ -300,28 +300,28 @@ pub const RootSet = struct {
         for (self.stack_roots.items) |obj| {
             try visitor(obj);
         }
-        
+
         // 遍历全局根
         for (self.global_roots.items) |obj| {
             try visitor(obj);
         }
-        
+
         // 遍历寄存器根
         for (self.register_roots.items) |obj| {
             try visitor(obj);
         }
-        
+
         // 遍历跨代引用
         for (self.cross_gen_roots.items) |obj| {
             try visitor(obj);
         }
-        
+
         // 遍历临时根
         for (self.temporary_roots.items) |obj| {
             try visitor(obj);
         }
     }
-    
+
     /// 遍历特定类型的根对象
     /// @pre root_type 必须是有效的根类型
     /// @post 指定类型的所有根对象都被访问
@@ -333,23 +333,23 @@ pub const RootSet = struct {
             .cross_generation => &self.cross_gen_roots,
             .temporary => &self.temporary_roots,
         };
-        
+
         for (list.items) |obj| {
             try visitor(obj);
         }
     }
-    
+
     // ========================================================================
     // 查询和统计
     // ========================================================================
-    
+
     /// 检查对象是否是根
     /// @pre object 必须是有效的指针
     /// @post 返回对象是否在根集合中
     pub fn isRoot(self: *const RootSet, object: *GCObjectHeader) bool {
         return self.all_roots.contains(object);
     }
-    
+
     /// 获取根对象的类型
     /// @pre object 必须在根集合中
     /// @post 返回根对象的类型
@@ -359,19 +359,19 @@ pub const RootSet = struct {
         }
         return null;
     }
-    
+
     /// 获取统计信息
     /// @post 返回当前的统计信息
     pub fn getStats(self: *const RootSet) RootSetStats {
         return self.stats;
     }
-    
+
     /// 获取总根数量
     /// @post 返回所有根对象的数量
     pub fn getTotalCount(self: *const RootSet) usize {
         return self.stats.total_count;
     }
-    
+
     /// 清空所有根（用于测试）
     /// @post 所有根被移除
     pub fn clear(self: *RootSet) void {
@@ -391,10 +391,10 @@ pub const RootSet = struct {
 
 test "RootSet initialization" {
     const allocator = std.testing.allocator;
-    
+
     var root_set = try RootSet.init(allocator);
     defer root_set.deinit();
-    
+
     try std.testing.expectEqual(@as(usize, 0), root_set.getTotalCount());
     try std.testing.expectEqual(@as(usize, 0), root_set.stats.stack_count);
     try std.testing.expectEqual(@as(usize, 0), root_set.stats.global_count);
@@ -402,26 +402,26 @@ test "RootSet initialization" {
 
 test "RootSet add and remove stack roots" {
     const allocator = std.testing.allocator;
-    
+
     var root_set = try RootSet.init(allocator);
     defer root_set.deinit();
-    
+
     // 创建模拟对象
     var obj1 = GCObjectHeader.init(64);
     var obj2 = GCObjectHeader.init(128);
-    
+
     // 添加栈根
     try root_set.addStackRoot(&obj1);
     try root_set.addStackRoot(&obj2);
-    
+
     try std.testing.expectEqual(@as(usize, 2), root_set.getTotalCount());
     try std.testing.expectEqual(@as(usize, 2), root_set.stats.stack_count);
     try std.testing.expect(root_set.isRoot(&obj1));
     try std.testing.expect(root_set.isRoot(&obj2));
-    
+
     // 移除栈根
     root_set.removeStackRoot(&obj1);
-    
+
     try std.testing.expectEqual(@as(usize, 1), root_set.getTotalCount());
     try std.testing.expectEqual(@as(usize, 1), root_set.stats.stack_count);
     try std.testing.expect(!root_set.isRoot(&obj1));
@@ -430,23 +430,23 @@ test "RootSet add and remove stack roots" {
 
 test "RootSet add different root types" {
     const allocator = std.testing.allocator;
-    
+
     var root_set = try RootSet.init(allocator);
     defer root_set.deinit();
-    
+
     var obj1 = GCObjectHeader.init(64);
     var obj2 = GCObjectHeader.init(128);
     var obj3 = GCObjectHeader.init(256);
-    
+
     try root_set.addStackRoot(&obj1);
     try root_set.addGlobalRoot(&obj2);
     try root_set.addRegisterRoot(&obj3);
-    
+
     try std.testing.expectEqual(@as(usize, 3), root_set.getTotalCount());
     try std.testing.expectEqual(@as(usize, 1), root_set.stats.stack_count);
     try std.testing.expectEqual(@as(usize, 1), root_set.stats.global_count);
     try std.testing.expectEqual(@as(usize, 1), root_set.stats.register_count);
-    
+
     try std.testing.expectEqual(RootType.stack, root_set.getRootType(&obj1).?);
     try std.testing.expectEqual(RootType.global, root_set.getRootType(&obj2).?);
     try std.testing.expectEqual(RootType.register, root_set.getRootType(&obj3).?);
@@ -454,18 +454,18 @@ test "RootSet add different root types" {
 
 test "RootSet iterate roots" {
     const allocator = std.testing.allocator;
-    
+
     var root_set = try RootSet.init(allocator);
     defer root_set.deinit();
-    
+
     var obj1 = GCObjectHeader.init(64);
     var obj2 = GCObjectHeader.init(128);
     var obj3 = GCObjectHeader.init(256);
-    
+
     try root_set.addStackRoot(&obj1);
     try root_set.addGlobalRoot(&obj2);
     try root_set.addRegisterRoot(&obj3);
-    
+
     // 遍历所有根 - 使用简单计数
     const total = root_set.getTotalCount();
     try std.testing.expectEqual(@as(usize, 3), total);
@@ -473,22 +473,22 @@ test "RootSet iterate roots" {
 
 test "RootSet temporary roots" {
     const allocator = std.testing.allocator;
-    
+
     var root_set = try RootSet.init(allocator);
     defer root_set.deinit();
-    
+
     var obj1 = GCObjectHeader.init(64);
     var obj2 = GCObjectHeader.init(128);
-    
+
     try root_set.addTemporaryRoot(&obj1);
     try root_set.addTemporaryRoot(&obj2);
-    
+
     try std.testing.expectEqual(@as(usize, 2), root_set.getTotalCount());
     try std.testing.expectEqual(@as(usize, 2), root_set.stats.temporary_count);
-    
+
     // 清空临时根
     root_set.clearTemporaryRoots();
-    
+
     try std.testing.expectEqual(@as(usize, 0), root_set.getTotalCount());
     try std.testing.expectEqual(@as(usize, 0), root_set.stats.temporary_count);
 }

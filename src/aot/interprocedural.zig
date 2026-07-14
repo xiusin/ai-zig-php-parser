@@ -12,7 +12,7 @@ pub const InterproceduralOptimizer = struct {
     constant_values: std.StringHashMap(ConstantValue),
     /// 函数特化映射
     specializations: std.AutoHashMap(*FunctionNode, std.ArrayList(*SpecializedFunction)),
-    
+
     pub fn init(allocator: Allocator, call_graph: *CallGraph) !InterproceduralOptimizer {
         return .{
             .allocator = allocator,
@@ -21,10 +21,10 @@ pub const InterproceduralOptimizer = struct {
             .specializations = std.AutoHashMap(*FunctionNode, std.ArrayList(*SpecializedFunction)).init(allocator),
         };
     }
-    
+
     pub fn deinit(self: *InterproceduralOptimizer) void {
         self.constant_values.deinit();
-        
+
         var it = self.specializations.valueIterator();
         while (it.next()) |list| {
             for (list.items) |spec| {
@@ -35,26 +35,26 @@ pub const InterproceduralOptimizer = struct {
         }
         self.specializations.deinit();
     }
-    
+
     /// 执行跨过程常量传播
     pub fn constantPropagation(self: *InterproceduralOptimizer) !void {
         // 初始化工作列表
         var worklist = try std.ArrayList(*FunctionNode).initCapacity(self.allocator, 0);
         defer worklist.deinit(self.allocator);
-        
+
         // 添加所有函数到工作列表
         var node_it = self.call_graph.nodes.valueIterator();
         while (node_it.next()) |node| {
             try worklist.append(self.allocator, node.*);
         }
-        
+
         // 迭代传播常量
         while (worklist.items.len > 0) {
             const func = worklist.pop() orelse break;
-            
+
             // 分析函数的常量参数
             const changed = try self.analyzeFunction(func);
-            
+
             if (changed) {
                 // 如果有变化，将调用者加入工作列表
                 for (func.callers.items) |caller| {
@@ -63,16 +63,16 @@ pub const InterproceduralOptimizer = struct {
             }
         }
     }
-    
+
     /// 分析单个函数的常量传播
     fn analyzeFunction(self: *InterproceduralOptimizer, func: *FunctionNode) !bool {
         var changed = false;
-        
+
         // 分析每个调用点
         for (func.callees.items) |callee| {
             // 检查参数是否为常量
             const args = try self.getCallArguments(func, callee);
-            
+
             for (args, 0..) |arg, i| {
                 if (arg.isConstant()) {
                     const param_name = try std.fmt.allocPrint(
@@ -81,7 +81,7 @@ pub const InterproceduralOptimizer = struct {
                         .{ callee.name, i },
                     );
                     defer self.allocator.free(param_name);
-                    
+
                     const old_value = self.constant_values.get(param_name);
                     if (old_value == null or !old_value.?.equals(arg)) {
                         try self.constant_values.put(param_name, arg);
@@ -90,10 +90,10 @@ pub const InterproceduralOptimizer = struct {
                 }
             }
         }
-        
+
         return changed;
     }
-    
+
     /// 获取调用参数
     fn getCallArguments(self: *InterproceduralOptimizer, caller: *FunctionNode, callee: *FunctionNode) ![]ConstantValue {
         _ = self;
@@ -102,13 +102,13 @@ pub const InterproceduralOptimizer = struct {
         // 简化实现：返回空数组
         return &[_]ConstantValue{};
     }
-    
+
     /// 执行跨过程死代码消除
     pub fn deadCodeElimination(self: *InterproceduralOptimizer) !void {
         // 标记所有可达函数
         var reachable = std.AutoHashMap(*FunctionNode, void).init(self.allocator);
         defer reachable.deinit();
-        
+
         // 从入口函数开始标记
         var node_it = self.call_graph.nodes.valueIterator();
         while (node_it.next()) |node| {
@@ -116,11 +116,11 @@ pub const InterproceduralOptimizer = struct {
                 try self.markReachable(node.*, &reachable);
             }
         }
-        
+
         // 移除不可达函数
         var to_remove = try std.ArrayList([]const u8).initCapacity(self.allocator, 0);
         defer to_remove.deinit(self.allocator);
-        
+
         var name_it = self.call_graph.nodes.keyIterator();
         while (name_it.next()) |name| {
             const node = self.call_graph.nodes.get(name.*).?;
@@ -128,7 +128,7 @@ pub const InterproceduralOptimizer = struct {
                 try to_remove.append(self.allocator, name.*);
             }
         }
-        
+
         for (to_remove.items) |name| {
             const node = self.call_graph.nodes.get(name).?;
             node.deinit();
@@ -136,23 +136,23 @@ pub const InterproceduralOptimizer = struct {
             _ = self.call_graph.nodes.remove(name);
         }
     }
-    
+
     /// 标记可达函数
     fn markReachable(self: *InterproceduralOptimizer, func: *FunctionNode, reachable: *std.AutoHashMap(*FunctionNode, void)) !void {
         if (reachable.contains(func)) return;
         try reachable.put(func, {});
-        
+
         for (func.callees.items) |callee| {
             try self.markReachable(callee, reachable);
         }
     }
-    
+
     /// 执行函数特化
     pub fn functionSpecialization(self: *InterproceduralOptimizer) !void {
         var node_it = self.call_graph.nodes.valueIterator();
         while (node_it.next()) |node| {
             const func = node.*;
-            
+
             // 收集此函数的所有调用点
             const call_sites = try self.collectCallSites(func);
             defer {
@@ -161,7 +161,7 @@ pub const InterproceduralOptimizer = struct {
                 }
                 self.allocator.free(call_sites);
             }
-            
+
             // 按参数模式分组
             var patterns = std.HashMap(ArgumentPattern, std.ArrayList(*CallSiteInfo), ArgumentPatternContext, std.hash_map.default_max_load_percentage).init(self.allocator);
             defer {
@@ -171,7 +171,7 @@ pub const InterproceduralOptimizer = struct {
                 }
                 patterns.deinit();
             }
-            
+
             for (call_sites) |site| {
                 const pattern = try self.extractPattern(site);
                 const entry = try patterns.getOrPut(pattern);
@@ -180,17 +180,17 @@ pub const InterproceduralOptimizer = struct {
                 }
                 try entry.value_ptr.append(self.allocator, site);
             }
-            
+
             // 为频繁的模式创建特化版本
             var pattern_it = patterns.iterator();
             while (pattern_it.next()) |entry| {
                 const pattern = entry.key_ptr.*;
                 const sites = entry.value_ptr.*;
-                
+
                 // 如果调用次数 >= 10，创建特化版本
                 if (sites.items.len >= 10) {
                     const specialized = try self.createSpecialization(func, pattern);
-                    
+
                     const spec_entry = try self.specializations.getOrPut(func);
                     if (!spec_entry.found_existing) {
                         spec_entry.value_ptr.* = try std.ArrayList(*SpecializedFunction).initCapacity(self.allocator, 0);
@@ -200,11 +200,11 @@ pub const InterproceduralOptimizer = struct {
             }
         }
     }
-    
+
     /// 收集函数的所有调用点
     fn collectCallSites(self: *InterproceduralOptimizer, func: *FunctionNode) ![]const *CallSiteInfo {
         var sites = try std.ArrayList(*CallSiteInfo).initCapacity(self.allocator, 0);
-        
+
         for (func.callers.items) |caller| {
             const site = try self.allocator.create(CallSiteInfo);
             site.* = .{
@@ -214,10 +214,10 @@ pub const InterproceduralOptimizer = struct {
             };
             try sites.append(self.allocator, site);
         }
-        
+
         return sites.toOwnedSlice(self.allocator);
     }
-    
+
     /// 提取参数模式
     fn extractPattern(self: *InterproceduralOptimizer, site: *const CallSiteInfo) !ArgumentPattern {
         _ = self;
@@ -227,7 +227,7 @@ pub const InterproceduralOptimizer = struct {
             .type_args = &[_]TypePattern{},
         };
     }
-    
+
     /// 创建函数特化版本
     fn createSpecialization(self: *InterproceduralOptimizer, func: *FunctionNode, pattern: ArgumentPattern) !*SpecializedFunction {
         const specialized = try self.allocator.create(SpecializedFunction);
@@ -243,17 +243,17 @@ pub const InterproceduralOptimizer = struct {
         };
         return specialized;
     }
-    
+
     /// 消除未使用的参数
     pub fn eliminateUnusedParameters(self: *InterproceduralOptimizer) !void {
         var node_it = self.call_graph.nodes.valueIterator();
         while (node_it.next()) |node| {
             const func = node.*;
-            
+
             // 分析每个参数的使用情况
             const param_usage = try self.analyzeParameterUsage(func);
             defer self.allocator.free(param_usage);
-            
+
             // 标记未使用的参数
             for (param_usage, 0..) |used, i| {
                 if (!used) {
@@ -263,7 +263,7 @@ pub const InterproceduralOptimizer = struct {
             }
         }
     }
-    
+
     /// 分析参数使用情况
     fn analyzeParameterUsage(self: *InterproceduralOptimizer, func: *FunctionNode) ![]bool {
         // 简化实现：假设所有参数都被使用
@@ -281,17 +281,17 @@ pub const ConstantValue = union(enum) {
     string: []const u8,
     bool_val: bool,
     null_val,
-    
+
     pub fn isConstant(self: ConstantValue) bool {
         _ = self;
         return true;
     }
-    
+
     pub fn equals(self: ConstantValue, other: ConstantValue) bool {
         if (@as(std.meta.Tag(ConstantValue), self) != @as(std.meta.Tag(ConstantValue), other)) {
             return false;
         }
-        
+
         return switch (self) {
             .int => |v| v == other.int,
             .float => |v| v == other.float,
@@ -313,7 +313,7 @@ pub const CallSiteInfo = struct {
 pub const ArgumentPattern = struct {
     constant_args: []const bool,
     type_args: []const TypePattern,
-    
+
     pub fn hash(self: ArgumentPattern) u64 {
         var hasher = std.hash.Wyhash.init(0);
         for (self.constant_args) |is_const| {
@@ -324,19 +324,19 @@ pub const ArgumentPattern = struct {
         }
         return hasher.final();
     }
-    
+
     pub fn eql(a: ArgumentPattern, b: ArgumentPattern) bool {
         if (a.constant_args.len != b.constant_args.len) return false;
         if (a.type_args.len != b.type_args.len) return false;
-        
+
         for (a.constant_args, b.constant_args) |a_const, b_const| {
             if (a_const != b_const) return false;
         }
-        
+
         for (a.type_args, b.type_args) |a_type, b_type| {
             if (a_type != b_type) return false;
         }
-        
+
         return true;
     }
 };
@@ -358,7 +358,7 @@ pub const SpecializedFunction = struct {
     original: *FunctionNode,
     pattern: ArgumentPattern,
     name: []const u8,
-    
+
     pub fn deinit(self: *SpecializedFunction) void {
         self.allocator.free(self.name);
     }
@@ -377,7 +377,7 @@ const ArgumentPatternContext = struct {
     pub fn hash(_: ArgumentPatternContext, key: ArgumentPattern) u64 {
         return key.hash();
     }
-    
+
     pub fn eql(_: ArgumentPatternContext, a: ArgumentPattern, b: ArgumentPattern) bool {
         return a.eql(b);
     }

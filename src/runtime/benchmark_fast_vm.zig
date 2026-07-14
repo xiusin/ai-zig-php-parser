@@ -65,10 +65,9 @@ fn benchSimpleAdd(allocator: std.mem.Allocator) !u64 {
     defer vm.deinit();
 
     const code = [_]u8{
-        @intFromEnum(OpCode.push_int), 1, 0, 0, 0,
-        @intFromEnum(OpCode.push_int), 2, 0, 0, 0,
-        @intFromEnum(OpCode.add_i),
-        @intFromEnum(OpCode.halt),
+        @intFromEnum(OpCode.push_int), 1,                         0, 0, 0,
+        @intFromEnum(OpCode.push_int), 2,                         0, 0, 0,
+        @intFromEnum(OpCode.add_i),    @intFromEnum(OpCode.halt),
     };
 
     const func = CompiledFunc{
@@ -81,7 +80,7 @@ fn benchSimpleAdd(allocator: std.mem.Allocator) !u64 {
     };
 
     var timer = time_compat.Timer.start() catch unreachable;
-    
+
     var acc: i64 = 0;
     for (0..ITERATIONS) |_| {
         const result = try vm.execute(&func);
@@ -101,26 +100,39 @@ fn benchLoop(allocator: std.mem.Allocator) !u64 {
     const code = [_]u8{
         // sum = 0
         @intFromEnum(OpCode.push_0),
-        @intFromEnum(OpCode.store_local), 0,
+        @intFromEnum(OpCode.store_local),
+        0,
         // i = 1
         @intFromEnum(OpCode.push_1),
-        @intFromEnum(OpCode.store_local), 1,
+        @intFromEnum(OpCode.store_local),
+        1,
         // loop:
         // sum = sum + i
-        @intFromEnum(OpCode.push_local), 0,
-        @intFromEnum(OpCode.push_local), 1,
+        @intFromEnum(OpCode.push_local),
+        0,
+        @intFromEnum(OpCode.push_local),
+        1,
         @intFromEnum(OpCode.add_i),
-        @intFromEnum(OpCode.store_local), 0,
+        @intFromEnum(OpCode.store_local),
+        0,
         // i++
-        @intFromEnum(OpCode.load_inc_store), 1,
+        @intFromEnum(OpCode.load_inc_store),
+        1,
         // if i <= 100 goto loop
-        @intFromEnum(OpCode.push_local), 1,
-        @intFromEnum(OpCode.push_int), 100, 0, 0, 0,
+        @intFromEnum(OpCode.push_local),
+        1,
+        @intFromEnum(OpCode.push_int),
+        100,
+        0,
+        0,
+        0,
         @intFromEnum(OpCode.le),
         @intFromEnum(OpCode.jnz),
-        @as(u8, @bitCast(@as(i8, -18))), 0xFF,
+        @as(u8, @bitCast(@as(i8, -18))),
+        0xFF,
         // return sum
-        @intFromEnum(OpCode.push_local), 0,
+        @intFromEnum(OpCode.push_local),
+        0,
         @intFromEnum(OpCode.halt),
     };
 
@@ -134,7 +146,7 @@ fn benchLoop(allocator: std.mem.Allocator) !u64 {
     };
 
     var timer = time_compat.Timer.start() catch unreachable;
-    
+
     var acc: i64 = 0;
     for (0..ITERATIONS / 100) |_| { // 每次循环100次，所以减少外层迭代
         const result = try vm.execute(&func);
@@ -180,7 +192,7 @@ fn benchSuperInstruction(allocator: std.mem.Allocator) !u64 {
     };
 
     var timer = time_compat.Timer.start() catch unreachable;
-    
+
     var acc: i64 = 0;
     for (0..ITERATIONS / 1000) |_| {
         const result = try vm.execute(&func);
@@ -214,7 +226,7 @@ fn benchTypeSpecialized(allocator: std.mem.Allocator) !u64 {
     };
 
     var timer = time_compat.Timer.start() catch unreachable;
-    
+
     var acc: i64 = 0;
     for (0..ITERATIONS) |_| {
         const result = try vm.execute(&func);
@@ -248,7 +260,7 @@ fn benchGenericAdd(allocator: std.mem.Allocator) !u64 {
     };
 
     var timer = time_compat.Timer.start() catch unreachable;
-    
+
     var acc: i64 = 0;
     for (0..ITERATIONS) |_| {
         const result = try vm.execute(&func);
@@ -272,11 +284,23 @@ fn benchFloatOps(allocator: std.mem.Allocator) !u64 {
 
     const code = [_]u8{
         @intFromEnum(OpCode.push_float),
-        pi_bytes[0], pi_bytes[1], pi_bytes[2], pi_bytes[3],
-        pi_bytes[4], pi_bytes[5], pi_bytes[6], pi_bytes[7],
+        pi_bytes[0],
+        pi_bytes[1],
+        pi_bytes[2],
+        pi_bytes[3],
+        pi_bytes[4],
+        pi_bytes[5],
+        pi_bytes[6],
+        pi_bytes[7],
         @intFromEnum(OpCode.push_float),
-        e_bytes[0],  e_bytes[1],  e_bytes[2],  e_bytes[3],
-        e_bytes[4],  e_bytes[5],  e_bytes[6],  e_bytes[7],
+        e_bytes[0],
+        e_bytes[1],
+        e_bytes[2],
+        e_bytes[3],
+        e_bytes[4],
+        e_bytes[5],
+        e_bytes[6],
+        e_bytes[7],
         @intFromEnum(OpCode.mul_f),
         @intFromEnum(OpCode.halt),
     };
@@ -345,10 +369,9 @@ fn benchComparison(allocator: std.mem.Allocator) !u64 {
     defer vm.deinit();
 
     const code = [_]u8{
-        @intFromEnum(OpCode.push_int), 42, 0, 0, 0,
-        @intFromEnum(OpCode.push_int), 17, 0, 0, 0,
-        @intFromEnum(OpCode.lt_i),
-        @intFromEnum(OpCode.halt),
+        @intFromEnum(OpCode.push_int), 42,                        0, 0, 0,
+        @intFromEnum(OpCode.push_int), 17,                        0, 0, 0,
+        @intFromEnum(OpCode.lt_i),     @intFromEnum(OpCode.halt),
     };
 
     const func = CompiledFunc{

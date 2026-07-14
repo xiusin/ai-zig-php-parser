@@ -783,7 +783,7 @@ pub const PHPArray = struct {
         // 收集所有整数键元素并排序
         var int_items = std.ArrayList(struct { key: i64, value: Value }).initCapacity(allocator, 0) catch return 0;
         defer int_items.deinit(allocator);
-        
+
         var string_items = std.ArrayList(struct { key: *PHPString, value: Value }).initCapacity(allocator, 0) catch return 0;
         defer string_items.deinit(allocator);
 
@@ -834,7 +834,7 @@ pub const PHPArray = struct {
         // 收集所有整数键元素
         var int_items = std.ArrayList(struct { key: i64, value: Value }).initCapacity(allocator, 0) catch return;
         defer int_items.deinit(allocator);
-        
+
         var string_items = std.ArrayList(struct { key: *PHPString, value: Value }).initCapacity(allocator, 0) catch return;
         defer string_items.deinit(allocator);
 
@@ -2279,6 +2279,25 @@ pub const PHPObject = struct {
             }
         }
 
+        // Constructor Property Promotion (PHP 8.0+):
+        // For promoted parameters in __construct, automatically assign $this->prop = $param
+        if (std.mem.eql(u8, name, "__construct")) {
+            for (method.parameters, 0..) |param, i| {
+                if (param.is_promoted) {
+                    // Get the parameter value that was just injected
+                    const param_val = vm_instance.getVariable(param.name.data) orelse Value.initNull();
+                    // Property names don't have $ prefix (unlike variable names)
+                    var prop_name = param.name.data;
+                    if (prop_name.len > 0 and prop_name[0] == '$') {
+                        prop_name = prop_name[1..];
+                    }
+                    try self.setProperty(vm_instance.allocator, prop_name, param_val);
+
+                    _ = i;
+                }
+            }
+        }
+
         // Set current class for 'self' resolution
         const old_scope_class = vm_instance.current_class;
         const old_called_class = vm_instance.current_called_class;
@@ -2524,7 +2543,7 @@ pub const Value = struct {
     pub const TYPE_RESOURCE: u64 = 0x0003000000000000; // 110
     pub const TYPE_USER_FUNC: u64 = 0x0003800000000000; // 111
     pub const TYPE_NATIVE_FUNC: u64 = 0x0000000000000000; // 000 (default for pointers)
-    
+
     // Reference uses bit 46 (separate from main type tags)
     pub const TYPE_REFERENCE: u64 = 0x0003000000000000; // Use TYPE_MASK range
 
@@ -2583,7 +2602,7 @@ pub const Value = struct {
         const addr = @intFromPtr(ptr);
         return .{ .val = nanbox_abi.encodePtr(addr, type_tag) };
     }
-    
+
     /// 创建引用值（存储 static_key 字符串的哈希值）
     /// 注意：key 必须已经存在于 static_vars 中
     pub fn fromReference(key: []const u8) Value {
@@ -2591,7 +2610,7 @@ pub const Value = struct {
         const hash = std.hash.Wyhash.hash(0, key);
         return .{ .val = nanbox_abi.encodePtr(hash, TYPE_REFERENCE) };
     }
-    
+
     /// 获取引用的哈希值
     pub fn asReferenceHash(self: Value) u64 {
         return nanbox_abi.decodePtr(self.val);
@@ -2607,7 +2626,7 @@ pub const Value = struct {
         };
         return initPtr(box, TYPE_STRING);
     }
-    
+
     // initReference 已废弃，使用 fromReference 代替
 
     pub fn initStringWithManager(mm: anytype, str: []const u8) !Value {
@@ -2846,17 +2865,53 @@ pub const Value = struct {
         };
     }
 
-    pub fn print(self: Value) !void {
+    pub fn print(self: Value) void {
+        const stdout: std.posix.fd_t = std.posix.STDOUT_FILENO;
         switch (self.getTag()) {
-            .null => std.debug.print("NULL", .{}),
-            .boolean => std.debug.print("{}", .{self.asBool()}),
-            .integer => std.debug.print("{}", .{self.asInt()}),
-            .float => std.debug.print("{d}", .{self.asFloat()}),
-            .string => std.debug.print("{s}", .{self.getAsString().data.data}),
-            .array => std.debug.print("Array({d})", .{self.getAsArray().data.count()}),
-            .object => std.debug.print("Object({s})", .{self.getAsObject().data.class.name.data}),
-            .struct_instance => std.debug.print("Struct({s})", .{self.getAsStruct().data.struct_type.name.data}),
-            else => std.debug.print("Unknown", .{}),
+            .null => {
+                const msg = "NULL";
+                _ = std.posix.system.write(stdout, msg.ptr, msg.len);
+            },
+            .boolean => {
+                const msg = if (self.asBool()) "1" else "";
+                if (msg.len > 0) _ = std.posix.system.write(stdout, msg.ptr, msg.len);
+            },
+            .integer => {
+                var buf: [32]u8 = undefined;
+                const slice = std.fmt.bufPrint(&buf, "{d}", .{self.asInt()}) catch return;
+                _ = std.posix.system.write(stdout, slice.ptr, slice.len);
+            },
+            .float => {
+                const f = self.asFloat();
+                var buf: [64]u8 = undefined;
+                const slice = if (@floor(f) == f and !std.math.isInf(f) and !std.math.isNan(f) and @abs(f) < 1e15)
+                    std.fmt.bufPrint(&buf, "{d:.0}", .{f}) catch return
+                else
+                    std.fmt.bufPrint(&buf, "{d}", .{f}) catch return;
+                _ = std.posix.system.write(stdout, slice.ptr, slice.len);
+            },
+            .string => {
+                const s = self.getAsString().data.data;
+                _ = std.posix.system.write(stdout, s.ptr, s.len);
+            },
+            .array => {
+                const msg = "Array";
+                _ = std.posix.system.write(stdout, msg.ptr, msg.len);
+            },
+            .object => {
+                var buf: [128]u8 = undefined;
+                const slice = std.fmt.bufPrint(&buf, "Object({s})", .{self.getAsObject().data.class.name.data}) catch return;
+                _ = std.posix.system.write(stdout, slice.ptr, slice.len);
+            },
+            .struct_instance => {
+                var buf: [128]u8 = undefined;
+                const slice = std.fmt.bufPrint(&buf, "Struct({s})", .{self.getAsStruct().data.struct_type.name.data}) catch return;
+                _ = std.posix.system.write(stdout, slice.ptr, slice.len);
+            },
+            else => {
+                const msg = "Unknown";
+                _ = std.posix.system.write(stdout, msg.ptr, msg.len);
+            },
         }
     }
 
@@ -3465,7 +3520,7 @@ pub const Closure = struct {
         if (has_variadic) {
             // 可变参数处理：将所有参数收集到一个数组中
             const required_params = variadic_param_idx;
-            
+
             // 绑定普通参数
             for (self.function.parameters[0..required_params], 0..) |param, i| {
                 if (i < args.len) {
@@ -3478,7 +3533,7 @@ pub const Closure = struct {
             // 将剩余参数收集到可变参数数组中
             const variadic_param = self.function.parameters[variadic_param_idx];
             const variadic_args = if (args.len > required_params) args[required_params..] else &[_]Value{};
-            
+
             // 创建数组来存储可变参数
             const arr = try vm_instance.memory_manager.allocArray();
             for (variadic_args) |arg| {
@@ -3780,7 +3835,7 @@ pub const ArrowFunction = struct {
         if (has_variadic) {
             // 可变参数处理：将所有参数收集到一个数组中
             const required_params = variadic_param_idx;
-            
+
             // 检查最少参数数量
             if (args.len < required_params) {
                 return error.TooFewArguments;
@@ -3795,7 +3850,7 @@ pub const ArrowFunction = struct {
             // 将剩余参数收集到可变参数数组中
             const variadic_param = self.parameters[variadic_param_idx];
             const variadic_args = args[required_params..];
-            
+
             // 创建数组来存储可变参数
             const arr = try vm_instance.memory_manager.allocArray();
             for (variadic_args) |arg| {

@@ -293,7 +293,7 @@ test "Property 23.3: Error propagation to parent" {
         try testing.expect(received != null);
         try testing.expectEqual(child_id, received.?.coroutine_id);
         try testing.expectEqual(error_type, received.?.error_type);
-        
+
         // Clean up the received error
         received.?.deinit();
 

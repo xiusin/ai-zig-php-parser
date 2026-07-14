@@ -34,7 +34,7 @@ test "date - 基本格式化" {
 
     const result = try dt.date(&vm, &args);
     try testing.expect(result.tag == .string);
-    
+
     const result_str = result.data.string.data.data;
     try testing.expect(std.mem.startsWith(u8, result_str, "2024-01-19"));
 }
@@ -89,7 +89,7 @@ test "date - ISO 8601格式" {
     const format_val = Value.initStringOwned("c");
     const args = [_]Value{ format_val, timestamp_val };
     const result = try dt.date(&vm, &args);
-    
+
     try testing.expect(result.tag == .string);
     try testing.expect(std.mem.indexOf(u8, result.data.string.data.data, "2024-01-19T") != null);
 }
@@ -104,7 +104,7 @@ test "date - RFC 2822格式" {
     const format_val = Value.initStringOwned("r");
     const args = [_]Value{ format_val, timestamp_val };
     const result = try dt.date(&vm, &args);
-    
+
     try testing.expect(result.tag == .string);
     try testing.expect(std.mem.indexOf(u8, result.data.string.data.data, "2024") != null);
 }
@@ -256,9 +256,9 @@ test "mktime - 精确计算" {
     {
         const args = [_]Value{
             Value.initInt(12), // hour
-            Value.initInt(0),  // minute
-            Value.initInt(0),  // second
-            Value.initInt(1),  // month
+            Value.initInt(0), // minute
+            Value.initInt(0), // second
+            Value.initInt(1), // month
             Value.initInt(19), // day
             Value.initInt(2024), // year
         };
@@ -288,7 +288,7 @@ test "mktime - 精确计算" {
             Value.initInt(0),
             Value.initInt(0),
             Value.initInt(0),
-            Value.initInt(2),  // 2月
+            Value.initInt(2), // 2月
             Value.initInt(29), // 29日
             Value.initInt(2024), // 闰年
         };
@@ -316,7 +316,7 @@ test "mktime - 月份规范化" {
         };
         const result = try dt.mktime(&vm, &args);
         try testing.expect(result.tag == .integer);
-        
+
         // 应该等于2025-01-01
         const expected_args = [_]Value{
             Value.initInt(0),
@@ -337,7 +337,7 @@ test "time - 当前时间戳" {
 
     const dt = datetime.DateTimeFunctions.init(testing.allocator);
     const args = [_]Value{};
-    
+
     const result = try dt.time(&vm, &args);
     try testing.expect(result.tag == .integer);
     try testing.expect(result.data.integer > 1700000000); // 应该大于2023年
@@ -398,7 +398,7 @@ test "usleep - 微秒休眠" {
 
 test "辅助函数 - isLeapYear" {
     const isLeapYear = @import("datetime_complete.zig").isLeapYear;
-    
+
     try testing.expect(isLeapYear(2024)); // 闰年
     try testing.expect(!isLeapYear(2023)); // 平年
     try testing.expect(isLeapYear(2000)); // 400的倍数
@@ -407,7 +407,7 @@ test "辅助函数 - isLeapYear" {
 
 test "辅助函数 - getDaysInMonth" {
     const getDaysInMonth = @import("datetime_complete.zig").getDaysInMonth;
-    
+
     try testing.expectEqual(31, getDaysInMonth(2024, .jan));
     try testing.expectEqual(29, getDaysInMonth(2024, .feb)); // 闰年
     try testing.expectEqual(28, getDaysInMonth(2023, .feb)); // 平年
@@ -417,19 +417,19 @@ test "辅助函数 - getDaysInMonth" {
 
 test "辅助函数 - calculateTimestamp" {
     const calculateTimestamp = @import("datetime_complete.zig").calculateTimestamp;
-    
+
     // 测试1970-01-01 00:00:00
     {
         const ts = try calculateTimestamp(1970, 1, 1, 0, 0, 0);
         try testing.expectEqual(0, ts);
     }
-    
+
     // 测试2024-01-19 12:00:00
     {
         const ts = try calculateTimestamp(2024, 1, 19, 12, 0, 0);
         try testing.expectEqual(1705665600, ts);
     }
-    
+
     // 测试月份规范化
     {
         const ts1 = try calculateTimestamp(2024, 13, 1, 0, 0, 0);

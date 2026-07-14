@@ -37,14 +37,14 @@ pub fn RobinHoodHashMap(comptime K: type, comptime V: type) type {
         fn hash(self: *Self, key: K) u64 {
             _ = self;
             var hasher = std.hash.Wyhash.init(0);
-            
+
             // 处理字符串切片
             if (K == []const u8) {
                 hasher.update(key);
             } else {
                 std.hash.autoHash(&hasher, key);
             }
-            
+
             return hasher.final();
         }
 

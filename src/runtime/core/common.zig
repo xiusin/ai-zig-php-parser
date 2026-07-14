@@ -159,7 +159,7 @@ test "StringResult allocated" {
     const allocator = std.testing.allocator;
     const data = try allocator.alloc(u8, 5);
     @memcpy(data, "hello");
-    
+
     var result = StringResult{ .allocated = data };
     try std.testing.expectEqualStrings("hello", result.get());
     result.deinit(allocator);

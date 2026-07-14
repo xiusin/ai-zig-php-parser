@@ -1,10 +1,10 @@
 const std = @import("std");
 
 /// NumberWrapper - 数字方法文档说明
-/// 
+///
 /// 重要：所有数字方法调用通过 VM 的 evaluateMethodCall 自动处理
 /// 使用 PHP 的 -> 语法：(3)->pow(2)
-/// 
+///
 /// 数学方法（返回浮点数）：
 /// - abs()        : 绝对值
 /// - ceil()       : 向上取整
@@ -75,7 +75,7 @@ pub const NumberWrapper = struct {
 
     // 以下方法由 VM 的 evaluateMethodCall 调用
     // 不需要在这里重复实现业务逻辑
-    
+
     pub fn abs(self: NumberWrapper) f64 {
         const val = self.toFloat();
         return @abs(val);

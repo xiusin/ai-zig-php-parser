@@ -26,37 +26,37 @@ pub fn detectSyntaxDirective(source: []const u8) SyntaxDirectiveResult {
     // Skip leading whitespace and find the first non-whitespace content
     var pos: usize = 0;
     var line: usize = 0;
-    
+
     while (pos < source.len) {
         // Skip whitespace
         while (pos < source.len and (source[pos] == ' ' or source[pos] == '\t' or source[pos] == '\r')) {
             pos += 1;
         }
-        
+
         // Check for newline
         if (pos < source.len and source[pos] == '\n') {
             pos += 1;
             line += 1;
             continue;
         }
-        
+
         // We found non-whitespace content
         break;
     }
-    
+
     if (pos >= source.len) {
         return .{ .mode = null, .found = false, .line = 0 };
     }
-    
+
     // Check for PHP-style directive: <?php // @syntax:
     if (std.mem.startsWith(u8, source[pos..], "<?php")) {
         var php_pos = pos + 5; // Skip "<?php"
-        
+
         // Skip whitespace after <?php
         while (php_pos < source.len and (source[php_pos] == ' ' or source[php_pos] == '\t')) {
             php_pos += 1;
         }
-        
+
         // Check for // @syntax:
         if (std.mem.startsWith(u8, source[php_pos..], "// @syntax:")) {
             const mode_start = php_pos + 11; // Skip "// @syntax:"
@@ -65,7 +65,7 @@ pub fn detectSyntaxDirective(source: []const u8) SyntaxDirectiveResult {
             }
         }
     }
-    
+
     // Check for simple directive: // @syntax:
     if (std.mem.startsWith(u8, source[pos..], "// @syntax:")) {
         const mode_start = pos + 11; // Skip "// @syntax:"
@@ -73,7 +73,7 @@ pub fn detectSyntaxDirective(source: []const u8) SyntaxDirectiveResult {
             return .{ .mode = mode, .found = true, .line = line };
         }
     }
-    
+
     return .{ .mode = null, .found = false, .line = 0 };
 }
 
@@ -83,29 +83,30 @@ fn parseSyntaxModeFromDirective(content: []const u8) ?SyntaxMode {
     if (content.len == 0) {
         return null;
     }
-    
+
     // Skip leading whitespace
     var start: usize = 0;
     while (start < content.len and (content[start] == ' ' or content[start] == '\t')) {
         start += 1;
     }
-    
+
     if (start >= content.len) {
         return null;
     }
-    
+
     // Find end of mode name (until whitespace, newline, or end)
     var end = start;
-    while (end < content.len and 
-           content[end] != ' ' and content[end] != '\t' and 
-           content[end] != '\n' and content[end] != '\r') {
+    while (end < content.len and
+        content[end] != ' ' and content[end] != '\t' and
+        content[end] != '\n' and content[end] != '\r')
+    {
         end += 1;
     }
-    
+
     if (end == start) {
         return null;
     }
-    
+
     const mode_str = content[start..end];
     return SyntaxMode.fromString(mode_str);
 }

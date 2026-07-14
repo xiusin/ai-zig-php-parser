@@ -36,7 +36,7 @@ pub const Environment = struct {
     pub fn get(self: *Environment, name: []const u8) ?Value {
         return self.vars.get(name);
     }
-    
+
     pub fn getPtr(self: *Environment, name: []const u8) ?*Value {
         return self.vars.getPtr(name);
     }

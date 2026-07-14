@@ -1,7 +1,6 @@
 const std = @import("std");
 const FlameGraphNode = @import("flamegraph.zig").FlameGraphNode;
 
-
 /// Adapter that wraps ArrayListUnmanaged(u8) to provide a writer-like interface.
 /// Used because ArrayListUnmanaged.writer() was removed in Zig 0.17.
 const BufWriter = struct {
@@ -260,8 +259,10 @@ pub fn writeCpuProfileFromFlameGraph(
         samples.deinit(allocator);
     }
 
-    var func_ids: std.StringHashMapUnmanaged(u64) = .{};defer func_ids.deinit(allocator);
-    var loc_ids: std.StringHashMapUnmanaged(u64) = .{};defer loc_ids.deinit(allocator);
+    var func_ids: std.StringHashMapUnmanaged(u64) = .{};
+    defer func_ids.deinit(allocator);
+    var loc_ids: std.StringHashMapUnmanaged(u64) = .{};
+    defer loc_ids.deinit(allocator);
 
     try collectProfileData(allocator, root, &funcs, &locs, &samples, &func_ids, &loc_ids);
 
@@ -273,10 +274,10 @@ pub fn writeCpuProfileFromFlameGraph(
     var pw = BufWriter{ .buf = &profile_buf, .allocator = allocator };
 
     const now_ns: u64 = blk: {
-    var ts: std.os.linux.timespec = undefined;
-    if (std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &ts) != 0) return error.ClockFailed;
-    break :blk @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
-};
+        var ts: std.os.linux.timespec = undefined;
+        if (std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &ts) != 0) return error.ClockFailed;
+        break :blk @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+    };
     try writeKey(&pw, 1, .varint);
     try writeVarint(&pw, now_ns);
 

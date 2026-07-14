@@ -106,10 +106,10 @@ pub const NestedLoopCodegenV3 = struct {
             regs.contains(reg_id)
         else
             false;
-        
-        return if (is_alloca) 
+
+        return if (is_alloca)
             try std.fmt.bufPrint(buf, "reg_{d}.*", .{reg_id})
-        else 
+        else
             try std.fmt.bufPrint(buf, "reg_{d}", .{reg_id});
     }
 

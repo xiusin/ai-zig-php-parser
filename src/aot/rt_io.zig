@@ -10,15 +10,15 @@ const runtime = @import("runtime_lib.zig");
 pub fn php_file_put_contents(filename: Value, data: Value, allocator: Allocator) !Value {
     if (!filename.isString()) return Value.initBool(false);
     const fname = filename.asString().data;
-    
-    const content_str = if (data.isString()) 
-        data.asString().data 
+
+    const content_str = if (data.isString())
+        data.asString().data
     else blk: {
         const temp = try data.toString(allocator);
         defer temp.release(allocator);
         break :blk temp.data;
     };
-    
+
     const file = std.Io.Dir.cwd().createFile(getIo(), fname, .{}) catch return Value.initBool(false);
     defer file.close(getIo());
     fileWriteAll(file.handle, content_str);
@@ -28,7 +28,7 @@ pub fn php_file_put_contents(filename: Value, data: Value, allocator: Allocator)
 pub fn php_file_get_contents(filename: Value, allocator: Allocator) !Value {
     if (!filename.isString()) return Value.initBool(false);
     const fname = filename.asString().data;
-    
+
     const content = std.Io.Dir.cwd().readFileAlloc(getIo(), fname, allocator, 10 * 1024 * 1024) catch return Value.initBool(false);
     const output = try PHPString.init(allocator, content);
     return Value.initString(output);
@@ -38,12 +38,12 @@ pub fn php_fopen(filename: Value, mode: Value, allocator: Allocator) !Value {
     if (!filename.isString() or !mode.isString()) return Value.initBool(false);
     const fname = filename.asString().data;
     const fmode = mode.asString().data;
-    
+
     // 特殊处理php://流
     if (std.mem.startsWith(u8, fname, "php://")) {
         return Value.initInt(1);
     }
-    
+
     const file = if (std.mem.eql(u8, fmode, "r"))
         std.Io.Dir.cwd().openFile(getIo(), fname, .{}) catch return Value.initBool(false)
     else if (std.mem.eql(u8, fmode, "w"))
@@ -52,7 +52,7 @@ pub fn php_fopen(filename: Value, mode: Value, allocator: Allocator) !Value {
         std.Io.Dir.cwd().createFile(getIo(), fname, .{ .truncate = false }) catch return Value.initBool(false)
     else
         return Value.initBool(false);
-    
+
     const handle = allocator.create(std.Io.File) catch return Value.initBool(false);
     handle.* = file;
     return Value.initInt(@intCast(@intFromPtr(handle)));
@@ -62,14 +62,14 @@ pub fn php_fwrite(handle: Value, data: Value, allocator: Allocator) !Value {
     if (!handle.isInt()) return Value.initBool(false);
     const handle_ptr = handle.asInt();
     if (handle_ptr <= 1) return Value.initInt(0); // 虚拟句柄
-    
+
     const file_handle: *std.Io.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
     const content = if (data.isString()) data.asString().data else blk: {
         const temp = try data.toString(allocator);
         defer temp.release(allocator);
         break :blk temp.data;
     };
-    
+
     fileWriteAll(file_handle.handle, content);
     return Value.initInt(@intCast(content.len));
 }
@@ -78,16 +78,16 @@ pub fn php_fread(handle: Value, length: Value, allocator: Allocator) !Value {
     if (!handle.isInt() or !length.isInt()) return Value.initBool(false);
     const handle_ptr = handle.asInt();
     if (handle_ptr <= 1) return Value.initString(try PHPString.init(allocator, try allocator.dupe(u8, ""))); // 虚拟句柄
-    
+
     const file_handle: *std.Io.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
     const len = length.asInt();
-    
+
     const buffer = allocator.alloc(u8, @intCast(len)) catch return Value.initBool(false);
     const bytes_read = file_handle.read(buffer) catch {
         allocator.free(buffer);
         return Value.initBool(false);
     };
-    
+
     const content = allocator.realloc(buffer, bytes_read) catch {
         allocator.free(buffer);
         return Value.initBool(false);
@@ -100,7 +100,7 @@ pub fn php_fclose(handle: Value) !Value {
     if (!handle.isInt()) return Value.initBool(false);
     const handle_ptr = handle.asInt();
     if (handle_ptr <= 1) return Value.initBool(true); // 虚拟句柄
-    
+
     const file_handle: *std.Io.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
     file_handle.close(getIo());
     return Value.initBool(true);
@@ -118,20 +118,20 @@ pub fn php_fgets(handle: Value) !Value {
     if (!handle.isInt()) return Value.initBool(false);
     const handle_ptr = handle.asInt();
     if (handle_ptr <= 1) return Value.initBool(false);
-    
+
     const file_handle: *std.Io.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
     var buf: [4096]u8 = undefined;
     var pos: usize = 0;
-    
+
     while (pos < buf.len) {
-        const n = file_handle.read(buf[pos..pos+1]) catch break;
+        const n = file_handle.read(buf[pos .. pos + 1]) catch break;
         if (n == 0) break;
         pos += 1;
-        if (buf[pos-1] == '\n') break;
+        if (buf[pos - 1] == '\n') break;
     }
-    
+
     if (pos == 0) return Value.initBool(false);
-    
+
     // 需要allocator但函数签名没有，使用全局allocator
     const global_alloc = std.heap.page_allocator;
     const output = try PHPString.init(global_alloc, try global_alloc.dupe(u8, buf[0..pos]));
@@ -142,7 +142,7 @@ pub fn php_fseek(handle: Value, offset: Value) !Value {
     if (!handle.isInt() or !offset.isInt()) return Value.initInt(-1);
     const handle_ptr = handle.asInt();
     if (handle_ptr <= 1) return Value.initInt(-1);
-    
+
     const file_handle: *std.Io.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
     const off = offset.asInt();
     file_handle.seekTo(@intCast(off)) catch return Value.initInt(-1);
@@ -152,10 +152,10 @@ pub fn php_fseek(handle: Value, offset: Value) !Value {
 pub fn php_scandir(dir: Value, allocator: Allocator) !Value {
     if (!dir.isString()) return Value.initBool(false);
     const dirname = dir.asString().data;
-    
+
     var dir_handle = std.Io.Dir.cwd().openDir(getIo(), dirname, .{ .iterate = true }) catch return Value.initBool(false);
     defer dir_handle.close(getIo());
-    
+
     var arr = try PHPArray.init(allocator);
     var iter = dir_handle.iterate();
     while (iter.next() catch null) |entry| {
@@ -190,7 +190,7 @@ pub fn php_uname(allocator: Allocator) !Value {
         "Windows"
     else
         "Unknown";
-    
+
     const output = try PHPString.init(allocator, try allocator.dupe(u8, uname_info));
     return Value.initString(output);
 }
@@ -305,7 +305,7 @@ pub fn php_set_error_handler(handler: Value, error_types: Value, allocator: Allo
     _ = allocator;
     // 返回之前设置的错误处理器
     const prev_handler = if (global_error_handler) |h| h else Value.initNull();
-    
+
     // 设置新的错误处理器
     if (handler.isNull()) {
         global_error_handler = null;
@@ -313,12 +313,12 @@ pub fn php_set_error_handler(handler: Value, error_types: Value, allocator: Allo
         _ = handler.retain();
         global_error_handler = handler;
     }
-    
+
     // 设置错误类型掩码
     if (!error_types.isNull()) {
         global_error_types = error_types.toInt();
     }
-    
+
     return prev_handler;
 }
 
@@ -352,9 +352,9 @@ pub fn php_restore_exception_handler() !Value {
 /// trigger_error - 触发用户错误
 pub fn php_trigger_error(message: Value, error_type: Value, allocator: Allocator) !Value {
     if (!message.isString()) return Value.initBool(false);
-    
+
     const err_type = if (error_type.isNull()) E_USER_NOTICE else error_type.toInt();
-    
+
     // 如果设置了自定义错误处理器
     if (global_error_handler) |handler| {
         // 检查是否在错误类型掩码内
@@ -382,7 +382,7 @@ pub fn php_trigger_error(message: Value, error_type: Value, allocator: Allocator
         };
         std.debug.print("{s}: {s}\n", .{ err_type_str, message.asString().data });
     }
-    
+
     return Value.initBool(true);
 }
 
@@ -404,10 +404,10 @@ pub fn php_sys_get_temp_dir(allocator: Allocator) !Value {
 pub fn php_file(filename: Value, allocator: Allocator) !Value {
     if (!filename.isString()) return Value.initBool(false);
     const fname = filename.asString().data;
-    
+
     const content = std.Io.Dir.cwd().readFileAlloc(getIo(), fname, allocator, 10 * 1024 * 1024) catch return Value.initBool(false);
     defer allocator.free(content);
-    
+
     const arr = try PHPArray.init(allocator);
     var lines = std.mem.splitScalar(u8, content, '\n');
     var idx: i64 = 0;
@@ -815,7 +815,13 @@ fn valueToArrayKey(val: Value, allocator: Allocator) !ArrayKey {
     return ArrayKey{ .integer = 0 };
 }
 
-pub fn php_array_get(arr_val: Value, key_val: Value, allocator: Allocator) !Value {
+pub fn php_array_get(arr_val_in: Value, key_val: Value, allocator: Allocator) !Value {
+    // Dereference references to access the underlying value
+    var arr_val = arr_val_in;
+    while (arr_val.isRef()) {
+        arr_val = arr_val.asRef().*;
+    }
+
     if (Value_isObject(arr_val)) {
         return php_object_call(arr_val, "offsetGet", &[_]Value{key_val});
     }
@@ -830,7 +836,9 @@ pub fn php_array_get(arr_val: Value, key_val: Value, allocator: Allocator) !Valu
     }
 
     if (arr_val.isArray()) {
-        return arr_val.asArray().getByValue(key_val) orelse Value.initNull();
+        const result = arr_val.asArray().getByValue(key_val) orelse Value.initNull();
+        _ = result.retain();
+        return result;
     }
 
     var buf: [256]u8 = undefined;
@@ -847,7 +855,13 @@ pub fn php_array_get(arr_val: Value, key_val: Value, allocator: Allocator) !Valu
 /// 获取数组元素的引用（用于引用返回）
 /// 参数：array, key
 /// 返回：Value.initRef(指向数组元素的指针)
-pub fn php_array_get_ref(arr_val: Value, key_val: Value, allocator: Allocator) !Value {
+pub fn php_array_get_ref(arr_val_in: Value, key_val: Value, allocator: Allocator) !Value {
+    // Dereference references to access the underlying array
+    var arr_val = arr_val_in;
+    while (arr_val.isRef()) {
+        arr_val = arr_val.asRef().*;
+    }
+
     if (!arr_val.isArray()) return error.InvalidArgument;
     const arr = arr_val.asArray();
 
@@ -1033,12 +1047,12 @@ pub fn getClosureBoundThis() Value {
 pub fn php_invoke_callable(callback: Value, args: []const Value, allocator: Allocator) !Value {
     // 引用透明：闭包自引用场景中 callback 可能是 Ref(cell)
     var actual_cb = if (callback.isRef()) callback.asRef().* else callback;
-    
+
     // 多层Ref解引用：捕获的闭包可能被多次包装
     while (actual_cb.isRef()) {
         actual_cb = actual_cb.asRef().*;
     }
-    
+
     if (actual_cb.isFunction()) {
         const closure = actual_cb.asFunction();
         // Closure::bind/bindTo: 如果有 bound_this，临时设置全局 $this
@@ -1059,6 +1073,15 @@ pub fn php_invoke_callable(callback: Value, args: []const Value, allocator: Allo
     }
     if (actual_cb.isString()) {
         const func_name = actual_cb.asString().data;
+        // AOT hook 优先：支持所有 AOT 注册的函数（包括内置函数分发）
+        if (aot_callable_hook) |hook| {
+            if (hook(func_name, args, allocator)) |result| {
+                return result;
+            } else |err| {
+                // AOT hook 返回错误则尝试其他路径
+                if (err != error.UnknownFunction) return err;
+            }
+        }
         if (lookupBuiltinFunction(func_name)) |func| {
             return func(Value.initNull(), args, allocator);
         }
@@ -1066,10 +1089,6 @@ pub fn php_invoke_callable(callback: Value, args: []const Value, allocator: Allo
             if (registry.get(func_name)) |func| {
                 return func(Value.initNull(), args, allocator);
             }
-        }
-        // AOT hook：尝试调用AOT注册的函数
-        if (aot_callable_hook) |hook| {
-            return hook(func_name, args, allocator);
         }
         // PHP: 对不存在的函数发出 warning 并返回 false
         return Value.initBool(false);
@@ -1257,7 +1276,7 @@ pub fn php_object_call_named_args(obj_val: Value, method_name_val: Value, args_a
     // 获取方法参数名（从函数元数据）
     const full_method_name = try std.fmt.allocPrint(allocator, "{s}::{s}", .{ meta.name, method_name });
     defer allocator.free(full_method_name);
-    
+
     // 尝试获取参数信息
     const param_count: u16 = if (function_meta_registry) |meta_reg|
         (if (meta_reg.get(full_method_name)) |m| m.param_count else 0)
@@ -1717,9 +1736,26 @@ fn emitDeprecatedFloatToInt(f: f64) void {
 }
 
 /// 幂运算（PHP语义）
+/// PHP 的 pow() 在底数和指数都是整数时返回整数，否则返回浮点数
 pub fn php_pow(base: Value, exp: Value) !Value {
+    // PHP 语义：两个整数输入且指数非负 → 返回整数
+    if (base.isInt() and exp.isInt()) {
+        const b = base.asInt();
+        const e = exp.asInt();
+        if (e >= 0) {
+            // 直接整数幂运算，避免浮点误差
+            var result: i64 = 1;
+            var i: i64 = 0;
+            while (i < e) : (i += 1) {
+                result = std.math.mul(i64, result, b) catch {
+                    // 溢出时回退到浮点
+                    return Value.initFloat(std.math.pow(f64, @as(f64, @floatFromInt(b)), @as(f64, @floatFromInt(e))));
+                };
+            }
+            return Value.initInt(result);
+        }
+    }
     const b = base.toFloat();
     const e = exp.toFloat();
     return Value.initFloat(std.math.pow(f64, b, e));
 }
-

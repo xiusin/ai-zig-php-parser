@@ -206,14 +206,14 @@ pub const PHPValue = extern struct {
     pub fn toBool(self: *const Self) bool {
         return self.isTruthy();
     }
-    
+
     /// Retain (increment ref count) - for AOT generated code
     pub fn retain(self: Self) Self {
         var copy = self;
         copy.ref_count += 1;
         return copy;
     }
-    
+
     /// Release (decrement ref count) - for AOT generated code
     pub fn release(self: *Self, allocator: Allocator) void {
         _ = allocator;
@@ -672,7 +672,6 @@ pub const PHPCallable = struct {
     }
 };
 
-
 // ============================================================================
 // Value Creation Functions
 // ============================================================================
@@ -1019,7 +1018,6 @@ var null_sentinel_value: PHPValue = .{
 
 const null_sentinel = &null_sentinel_value;
 
-
 // ============================================================================
 // Reference Counting Garbage Collection
 // ============================================================================
@@ -1109,7 +1107,6 @@ pub fn php_gc_copy_on_write(val: *PHPValue) *PHPValue {
     php_gc_release(val);
     return copy;
 }
-
 
 // ============================================================================
 // Array Runtime Operations
@@ -1349,7 +1346,6 @@ var null_array_storage: PHPArray = .{
     .ref_count = 1,
 };
 var null_array: *PHPArray = &null_array_storage;
-
 
 // ============================================================================
 // String Runtime Operations
@@ -1724,7 +1720,6 @@ pub fn php_string_implode(glue: *PHPValue, pieces: *PHPValue) *PHPValue {
     return php_value_create_string(result.items);
 }
 
-
 // ============================================================================
 // I/O Operations
 // ============================================================================
@@ -1796,7 +1791,7 @@ pub fn php_builtin_var_dump(val: *PHPValue) void {
     const allocator = getGlobalAllocator();
     var buffer = std.ArrayList(u8).initCapacity(allocator, 0) catch return;
     defer buffer.deinit(allocator);
-    
+
     dumpValue(buffer.writer(), val, 0) catch {};
     const stdout = std.io.getStdOut().writer();
     stdout.writeAll(buffer.items) catch {};
@@ -1809,7 +1804,7 @@ pub fn php_builtin_print_r(val: *PHPValue, return_output: bool) *PHPValue {
     defer buffer.deinit(allocator);
 
     printValue(buffer.writer(), val, 0) catch {};
-    
+
     if (return_output) {
         return php_value_create_string(buffer.items);
     } else {
@@ -1826,7 +1821,7 @@ pub fn php_builtin_var_export(val: *PHPValue, return_output: bool) *PHPValue {
     defer buffer.deinit(allocator);
 
     exportValue(buffer.writer(), val) catch {};
-    
+
     if (return_output) {
         return php_value_create_string(buffer.items);
     } else {
@@ -2274,7 +2269,6 @@ fn compareValues(a: *PHPValue, b: *PHPValue) std.math.Order {
     return std.math.order(fa, fb);
 }
 
-
 // ============================================================================
 // Exception Handling Runtime
 // ============================================================================
@@ -2584,7 +2578,6 @@ pub fn php_create_exception(class_name: []const u8, message: []const u8, code: i
     return exception;
 }
 
-
 // ============================================================================
 // Mutex / Concurrency Runtime
 // ============================================================================
@@ -2695,7 +2688,6 @@ pub fn php_mutex_release(mutex: *PHPMutex) void {
         allocator.destroy(mutex);
     }
 }
-
 
 // ============================================================================
 // Unit Tests
@@ -3121,7 +3113,7 @@ pub const PHPArrayIterator = struct {
 /// Initialize array iterator (returns iterator as PHPValue)
 export fn php_array_iter_init(iterable: *PHPValue) *PHPValue {
     const allocator = getGlobalAllocator();
-    
+
     // 如果不是数组，返回空迭代器
     if (iterable.tag != .array or iterable.data.array_ptr == null) {
         const iter_val = allocator.create(PHPValue) catch unreachable;
@@ -3132,11 +3124,11 @@ export fn php_array_iter_init(iterable: *PHPValue) *PHPValue {
         };
         return iter_val;
     }
-    
+
     const array = iterable.data.array_ptr.?;
     const iter = allocator.create(PHPArrayIterator) catch unreachable;
     iter.* = PHPArrayIterator.init(array);
-    
+
     // 将迭代器包装为 PHPValue（使用 resource 类型）
     const iter_val = allocator.create(PHPValue) catch unreachable;
     const iter_ptr: i64 = @bitCast(@intFromPtr(iter));
@@ -3145,7 +3137,7 @@ export fn php_array_iter_init(iterable: *PHPValue) *PHPValue {
         .data = .{ .int_val = iter_ptr },
         .ref_count = 1,
     };
-    
+
     return iter_val;
 }
 
@@ -3154,7 +3146,7 @@ export fn php_array_iter_valid(iter_val: *PHPValue) *PHPValue {
     if (iter_val.tag != .resource) {
         return php_value_create_bool(false);
     }
-    
+
     const iter_ptr: i64 = iter_val.data.int_val;
     const iter: *PHPArrayIterator = @ptrFromInt(@as(usize, @bitCast(iter_ptr)));
     return php_value_create_bool(!iter.is_done);
@@ -3165,17 +3157,17 @@ export fn php_array_iter_key(iter_val: *PHPValue) *PHPValue {
     if (iter_val.tag != .resource) {
         return php_value_create_null();
     }
-    
+
     const iter_ptr: i64 = iter_val.data.int_val;
     const iter: *PHPArrayIterator = @ptrFromInt(@as(usize, @bitCast(iter_ptr)));
-    
+
     if (iter.current) |entry| {
         return switch (entry.key) {
             .int => |i| php_value_create_int(i),
             .string => |s| php_value_create_string(s.getData()),
         };
     }
-    
+
     return php_value_create_null();
 }
 
@@ -3184,15 +3176,15 @@ export fn php_array_iter_value(iter_val: *PHPValue) *PHPValue {
     if (iter_val.tag != .resource) {
         return php_value_create_null();
     }
-    
+
     const iter_ptr: i64 = iter_val.data.int_val;
     const iter: *PHPArrayIterator = @ptrFromInt(@as(usize, @bitCast(iter_ptr)));
-    
+
     if (iter.current) |entry| {
         php_gc_retain(entry.value);
         return entry.value;
     }
-    
+
     return php_value_create_null();
 }
 
@@ -3207,17 +3199,17 @@ export fn php_array_iter_next(iter_val: *PHPValue) *PHPValue {
     if (iter_val.tag != .resource) {
         return iter_val;
     }
-    
+
     const iter_ptr: i64 = iter_val.data.int_val;
     const iter: *PHPArrayIterator = @ptrFromInt(@as(usize, @bitCast(iter_ptr)));
-    
+
     if (iter.current) |entry| {
         iter.current = entry.next_order;
         iter.is_done = iter.current == null;
     } else {
         iter.is_done = true;
     }
-    
+
     return iter_val;
 }
 
@@ -3226,12 +3218,12 @@ export fn php_array_iter_free(iter_val: *PHPValue) void {
     if (iter_val.tag != .resource) {
         return;
     }
-    
+
     const allocator = getGlobalAllocator();
     const iter_ptr: i64 = iter_val.data.int_val;
     const iter: *PHPArrayIterator = @ptrFromInt(@as(usize, @bitCast(iter_ptr)));
     allocator.destroy(iter);
-    
+
     // 释放 iter_val 本身
     php_gc_release(iter_val);
 }
@@ -3255,12 +3247,12 @@ export fn php_round(value: *PHPValue, precision: *PHPValue) *PHPValue {
 export fn php_microtime(get_as_float: *PHPValue) *PHPValue {
     const as_float = php_value_to_bool(get_as_float);
     const now = time_compat.microTimestamp();
-    
+
     if (as_float) {
         const seconds = @as(f64, @floatFromInt(now)) / 1_000_000.0;
         return php_value_create_float(seconds);
     }
-    
+
     const sec = @divFloor(now, 1_000_000);
     const usec = @mod(now, 1_000_000);
     const allocator = getGlobalAllocator();
@@ -3271,19 +3263,19 @@ export fn php_microtime(get_as_float: *PHPValue) *PHPValue {
 export fn php_date(format: *PHPValue, timestamp: *PHPValue) *PHPValue {
     _ = format;
     const ts = if (timestamp.tag == .null) time_compat.timestamp() else php_value_to_int(timestamp);
-    
+
     const allocator = getGlobalAllocator();
     const epoch_seconds: u64 = @intCast(ts);
-    
+
     // 简化实现：只返回 Y-m-d 格式
     // 1970-01-01 00:00:00 UTC 是 epoch 0
     const days_since_epoch = epoch_seconds / 86400;
     const year = 1970 + @divFloor(days_since_epoch, 365);
     const month: u8 = 1;
     const day: u8 = 1;
-    
+
     const result = std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2}", .{ year, month, day }) catch return php_value_create_null();
-    
+
     return php_value_create_string(result);
 }
 
@@ -3301,21 +3293,21 @@ pub var constants_map: ?std.StringHashMap(*PHPValue) = null;
 
 export fn php_define(name: *PHPValue, value: *PHPValue) *PHPValue {
     const allocator = getGlobalAllocator();
-    
+
     if (constants_map == null) {
         constants_map = std.StringHashMap(*PHPValue).init(allocator);
     }
-    
+
     if (name.tag != .string or name.data.string_ptr == null) {
         return php_value_create_bool(false);
     }
-    
+
     const name_str = name.data.string_ptr.?.getData();
     const name_copy = allocator.dupe(u8, name_str) catch return php_value_create_bool(false);
-    
+
     php_gc_retain(value);
     constants_map.?.put(name_copy, value) catch return php_value_create_bool(false);
-    
+
     return php_value_create_bool(true);
 }
 
@@ -3323,17 +3315,17 @@ export fn php_constant(name: *PHPValue) *PHPValue {
     if (constants_map == null) {
         return php_value_create_null();
     }
-    
+
     if (name.tag != .string or name.data.string_ptr == null) {
         return php_value_create_null();
     }
-    
+
     const name_str = name.data.string_ptr.?.getData();
     if (constants_map.?.get(name_str)) |val| {
         php_gc_retain(val);
         return val;
     }
-    
+
     return php_value_create_null();
 }
 
@@ -3342,24 +3334,24 @@ export fn php_constant(name: *PHPValue) *PHPValue {
 /// @param mode 可选，COUNT_RECURSIVE(1)表示递归计数
 pub fn php_count(arr: Value, mode: Value) !Value {
     const mode_int = if (mode.tag == .int) mode.data.int_val else 0;
-    
+
     if (arr.tag != .array or arr.data.array_ptr == null) {
         return Value.initInt(0);
     }
-    
+
     const arr_ptr = arr.data.array_ptr.?;
-    
+
     // COUNT_RECURSIVE = 1
     if (mode_int == 1) {
         return Value.initInt(@intCast(countRecursive(arr_ptr)));
     }
-    
+
     return Value.initInt(@intCast(arr_ptr.count()));
 }
 
 fn countRecursive(arr: *PHPArray) usize {
     var total: usize = arr.count();
-    
+
     var iter = arr.iterator();
     while (iter.next()) |entry| {
         const val = entry.value_ptr.*;
@@ -3367,7 +3359,7 @@ fn countRecursive(arr: *PHPArray) usize {
             total += countRecursive(val.data.array_ptr.?);
         }
     }
-    
+
     return total;
 }
 

@@ -86,7 +86,6 @@ pub const ExtensionRegistry = struct {
         self.initialized_extensions.deinit();
     }
 
-
     /// Register a built-in function name (to prevent extension conflicts)
     pub fn registerBuiltinFunction(self: *ExtensionRegistry, name: []const u8) !void {
         try self.builtin_functions.put(name, {});
@@ -148,7 +147,6 @@ pub const ExtensionRegistry = struct {
     pub fn hasClass(self: *ExtensionRegistry, name: []const u8) bool {
         return self.classes.contains(name);
     }
-
 
     /// Load an extension from a dynamic library
     /// Loads a .so (Linux), .dylib (macOS), or .dll (Windows) file
@@ -331,7 +329,6 @@ pub const ExtensionRegistry = struct {
         return true;
     }
 
-
     /// Get all registered function names
     pub fn getFunctionNames(self: *ExtensionRegistry, allocator: std.mem.Allocator) ![][]const u8 {
         var names = try allocator.alloc([]const u8, self.functions.count());
@@ -480,12 +477,11 @@ pub const ExtensionRegistry = struct {
     }
 };
 
-
 // Unit tests
 test "ExtensionRegistry init and deinit" {
     var registry = ExtensionRegistry.init(std.testing.allocator);
     defer registry.deinit();
-    
+
     try std.testing.expectEqual(@as(usize, 0), registry.functionCount());
     try std.testing.expectEqual(@as(usize, 0), registry.classCount());
     try std.testing.expectEqual(@as(usize, 0), registry.extensionCount());
@@ -494,16 +490,16 @@ test "ExtensionRegistry init and deinit" {
 test "ExtensionRegistry registerFunction" {
     var registry = ExtensionRegistry.init(std.testing.allocator);
     defer registry.deinit();
-    
+
     const callback: api.ExtensionFunctionCallback = struct {
         fn call(_: *anyopaque, _: []const api.ExtensionValue) anyerror!api.ExtensionValue {
             return 0;
         }
     }.call;
-    
+
     const func = api.createFunction("test_func", callback, 0, 1);
     try registry.registerFunction(func);
-    
+
     try std.testing.expectEqual(@as(usize, 1), registry.functionCount());
     try std.testing.expect(registry.hasFunction("test_func"));
     try std.testing.expect(!registry.hasFunction("nonexistent"));
@@ -512,10 +508,10 @@ test "ExtensionRegistry registerFunction" {
 test "ExtensionRegistry registerClass" {
     var registry = ExtensionRegistry.init(std.testing.allocator);
     defer registry.deinit();
-    
+
     const class = api.createClass("TestClass", &[_]api.ExtensionMethod{}, &[_]api.ExtensionProperty{});
     try registry.registerClass(class);
-    
+
     try std.testing.expectEqual(@as(usize, 1), registry.classCount());
     try std.testing.expect(registry.hasClass("TestClass"));
     try std.testing.expect(!registry.hasClass("NonexistentClass"));
@@ -524,22 +520,22 @@ test "ExtensionRegistry registerClass" {
 test "ExtensionRegistry findFunction" {
     var registry = ExtensionRegistry.init(std.testing.allocator);
     defer registry.deinit();
-    
+
     const callback: api.ExtensionFunctionCallback = struct {
         fn call(_: *anyopaque, _: []const api.ExtensionValue) anyerror!api.ExtensionValue {
             return 42;
         }
     }.call;
-    
+
     const func = api.createFunction("my_func", callback, 1, 2);
     try registry.registerFunction(func);
-    
+
     const found = registry.findFunction("my_func");
     try std.testing.expect(found != null);
     try std.testing.expectEqualStrings("my_func", found.?.name);
     try std.testing.expectEqual(@as(u8, 1), found.?.min_args);
     try std.testing.expectEqual(@as(u8, 2), found.?.max_args);
-    
+
     const not_found = registry.findFunction("nonexistent");
     try std.testing.expect(not_found == null);
 }
@@ -547,7 +543,7 @@ test "ExtensionRegistry findFunction" {
 test "ExtensionRegistry findClass" {
     var registry = ExtensionRegistry.init(std.testing.allocator);
     defer registry.deinit();
-    
+
     const class = api.ExtensionClass{
         .name = "MyClass",
         .parent = "BaseClass",
@@ -558,32 +554,31 @@ test "ExtensionRegistry findClass" {
         .destructor = null,
     };
     try registry.registerClass(class);
-    
+
     const found = registry.findClass("MyClass");
     try std.testing.expect(found != null);
     try std.testing.expectEqualStrings("MyClass", found.?.name);
     try std.testing.expectEqualStrings("BaseClass", found.?.parent.?);
-    
+
     const not_found = registry.findClass("NonexistentClass");
     try std.testing.expect(not_found == null);
 }
 
-
 test "ExtensionRegistry function conflict detection" {
     var registry = ExtensionRegistry.init(std.testing.allocator);
     defer registry.deinit();
-    
+
     const callback: api.ExtensionFunctionCallback = struct {
         fn call(_: *anyopaque, _: []const api.ExtensionValue) anyerror!api.ExtensionValue {
             return 0;
         }
     }.call;
-    
+
     const func1 = api.createFunction("duplicate_func", callback, 0, 1);
     const func2 = api.createFunction("duplicate_func", callback, 0, 2);
-    
+
     try registry.registerFunction(func1);
-    
+
     const result = registry.registerFunction(func2);
     try std.testing.expectError(ExtensionError.FunctionAlreadyExists, result);
 }
@@ -591,12 +586,12 @@ test "ExtensionRegistry function conflict detection" {
 test "ExtensionRegistry class conflict detection" {
     var registry = ExtensionRegistry.init(std.testing.allocator);
     defer registry.deinit();
-    
+
     const class1 = api.createClass("DuplicateClass", &[_]api.ExtensionMethod{}, &[_]api.ExtensionProperty{});
     const class2 = api.createClass("DuplicateClass", &[_]api.ExtensionMethod{}, &[_]api.ExtensionProperty{});
-    
+
     try registry.registerClass(class1);
-    
+
     const result = registry.registerClass(class2);
     try std.testing.expectError(ExtensionError.ClassAlreadyExists, result);
 }
@@ -604,15 +599,15 @@ test "ExtensionRegistry class conflict detection" {
 test "ExtensionRegistry builtin function conflict" {
     var registry = ExtensionRegistry.init(std.testing.allocator);
     defer registry.deinit();
-    
+
     try registry.registerBuiltinFunction("echo");
-    
+
     const callback: api.ExtensionFunctionCallback = struct {
         fn call(_: *anyopaque, _: []const api.ExtensionValue) anyerror!api.ExtensionValue {
             return 0;
         }
     }.call;
-    
+
     const func = api.createFunction("echo", callback, 0, 1);
     const result = registry.registerFunction(func);
     try std.testing.expectError(ExtensionError.FunctionAlreadyExists, result);
@@ -621,9 +616,9 @@ test "ExtensionRegistry builtin function conflict" {
 test "ExtensionRegistry builtin class conflict" {
     var registry = ExtensionRegistry.init(std.testing.allocator);
     defer registry.deinit();
-    
+
     try registry.registerBuiltinClass("stdClass");
-    
+
     const class = api.createClass("stdClass", &[_]api.ExtensionMethod{}, &[_]api.ExtensionProperty{});
     const result = registry.registerClass(class);
     try std.testing.expectError(ExtensionError.ClassAlreadyExists, result);
@@ -632,32 +627,32 @@ test "ExtensionRegistry builtin class conflict" {
 test "ExtensionRegistry getFunctionNames" {
     var registry = ExtensionRegistry.init(std.testing.allocator);
     defer registry.deinit();
-    
+
     const callback: api.ExtensionFunctionCallback = struct {
         fn call(_: *anyopaque, _: []const api.ExtensionValue) anyerror!api.ExtensionValue {
             return 0;
         }
     }.call;
-    
+
     try registry.registerFunction(api.createFunction("func_a", callback, 0, 0));
     try registry.registerFunction(api.createFunction("func_b", callback, 0, 0));
-    
+
     const names = try registry.getFunctionNames(std.testing.allocator);
     defer std.testing.allocator.free(names);
-    
+
     try std.testing.expectEqual(@as(usize, 2), names.len);
 }
 
 test "ExtensionRegistry getClassNames" {
     var registry = ExtensionRegistry.init(std.testing.allocator);
     defer registry.deinit();
-    
+
     try registry.registerClass(api.createClass("ClassA", &[_]api.ExtensionMethod{}, &[_]api.ExtensionProperty{}));
     try registry.registerClass(api.createClass("ClassB", &[_]api.ExtensionMethod{}, &[_]api.ExtensionProperty{}));
-    
+
     const names = try registry.getClassNames(std.testing.allocator);
     defer std.testing.allocator.free(names);
-    
+
     try std.testing.expectEqual(@as(usize, 2), names.len);
 }
 
@@ -682,16 +677,16 @@ test {
 test "Feature: multi-syntax-extension-system, Property 11: multiple function conflicts" {
     var registry = ExtensionRegistry.init(std.testing.allocator);
     defer registry.deinit();
-    
+
     const callback: api.ExtensionFunctionCallback = struct {
         fn call(_: *anyopaque, _: []const api.ExtensionValue) anyerror!api.ExtensionValue {
             return 0;
         }
     }.call;
-    
+
     // Test with multiple function names
     const names = [_][]const u8{ "func_a", "func_b", "func_c", "test_func", "helper" };
-    
+
     for (names) |name| {
         const func1 = api.ExtensionFunction{
             .name = name,
@@ -701,7 +696,7 @@ test "Feature: multi-syntax-extension-system, Property 11: multiple function con
             .return_type = null,
             .param_types = &[_][]const u8{},
         };
-        
+
         const func2 = api.ExtensionFunction{
             .name = name,
             .callback = callback,
@@ -710,21 +705,21 @@ test "Feature: multi-syntax-extension-system, Property 11: multiple function con
             .return_type = null,
             .param_types = &[_][]const u8{},
         };
-        
+
         // First registration should succeed
         try registry.registerFunction(func1);
-        
+
         // Second registration with same name MUST fail
         const result = registry.registerFunction(func2);
         try std.testing.expectError(ExtensionError.FunctionAlreadyExists, result);
-        
+
         // Verify original function is unchanged
         const found = registry.findFunction(name);
         try std.testing.expect(found != null);
         try std.testing.expectEqual(@as(u8, 1), found.?.min_args);
         try std.testing.expectEqual(@as(u8, 5), found.?.max_args);
     }
-    
+
     // Verify total count matches unique names
     try std.testing.expectEqual(names.len, registry.functionCount());
 }
@@ -732,19 +727,19 @@ test "Feature: multi-syntax-extension-system, Property 11: multiple function con
 test "Feature: multi-syntax-extension-system, Property 11: multiple builtin function conflicts" {
     var registry = ExtensionRegistry.init(std.testing.allocator);
     defer registry.deinit();
-    
+
     const callback: api.ExtensionFunctionCallback = struct {
         fn call(_: *anyopaque, _: []const api.ExtensionValue) anyerror!api.ExtensionValue {
             return 0;
         }
     }.call;
-    
+
     // Register multiple builtins
     const builtin_names = [_][]const u8{ "echo", "print", "var_dump", "isset", "empty" };
-    
+
     for (builtin_names) |name| {
         try registry.registerBuiltinFunction(name);
-        
+
         const func = api.ExtensionFunction{
             .name = name,
             .callback = callback,
@@ -753,12 +748,12 @@ test "Feature: multi-syntax-extension-system, Property 11: multiple builtin func
             .return_type = null,
             .param_types = &[_][]const u8{},
         };
-        
+
         // Registration MUST fail
         const result = registry.registerFunction(func);
         try std.testing.expectError(ExtensionError.FunctionAlreadyExists, result);
     }
-    
+
     // No extension functions should be registered
     try std.testing.expectEqual(@as(usize, 0), registry.functionCount());
 }
@@ -766,10 +761,10 @@ test "Feature: multi-syntax-extension-system, Property 11: multiple builtin func
 test "Feature: multi-syntax-extension-system, Property 11: multiple class conflicts" {
     var registry = ExtensionRegistry.init(std.testing.allocator);
     defer registry.deinit();
-    
+
     // Test with multiple class names
     const names = [_][]const u8{ "ClassA", "ClassB", "MyClass", "TestClass", "Helper" };
-    
+
     for (names) |name| {
         const class1 = api.ExtensionClass{
             .name = name,
@@ -780,7 +775,7 @@ test "Feature: multi-syntax-extension-system, Property 11: multiple class confli
             .constructor = null,
             .destructor = null,
         };
-        
+
         const class2 = api.ExtensionClass{
             .name = name,
             .parent = "SomeParent",
@@ -790,20 +785,20 @@ test "Feature: multi-syntax-extension-system, Property 11: multiple class confli
             .constructor = null,
             .destructor = null,
         };
-        
+
         // First registration should succeed
         try registry.registerClass(class1);
-        
+
         // Second registration with same name MUST fail
         const result = registry.registerClass(class2);
         try std.testing.expectError(ExtensionError.ClassAlreadyExists, result);
-        
+
         // Verify original class is unchanged
         const found = registry.findClass(name);
         try std.testing.expect(found != null);
         try std.testing.expect(found.?.parent == null);
     }
-    
+
     // Verify total count matches unique names
     try std.testing.expectEqual(names.len, registry.classCount());
 }
@@ -811,13 +806,13 @@ test "Feature: multi-syntax-extension-system, Property 11: multiple class confli
 test "Feature: multi-syntax-extension-system, Property 11: multiple builtin class conflicts" {
     var registry = ExtensionRegistry.init(std.testing.allocator);
     defer registry.deinit();
-    
+
     // Register multiple builtin classes
     const builtin_names = [_][]const u8{ "stdClass", "Exception", "Error", "Iterator", "Countable" };
-    
+
     for (builtin_names) |name| {
         try registry.registerBuiltinClass(name);
-        
+
         const class = api.ExtensionClass{
             .name = name,
             .parent = null,
@@ -827,12 +822,12 @@ test "Feature: multi-syntax-extension-system, Property 11: multiple builtin clas
             .constructor = null,
             .destructor = null,
         };
-        
+
         // Registration MUST fail
         const result = registry.registerClass(class);
         try std.testing.expectError(ExtensionError.ClassAlreadyExists, result);
     }
-    
+
     // No extension classes should be registered
     try std.testing.expectEqual(@as(usize, 0), registry.classCount());
 }
@@ -840,21 +835,21 @@ test "Feature: multi-syntax-extension-system, Property 11: multiple builtin clas
 test "Feature: multi-syntax-extension-system, Property 11: case sensitivity" {
     var registry = ExtensionRegistry.init(std.testing.allocator);
     defer registry.deinit();
-    
+
     const callback: api.ExtensionFunctionCallback = struct {
         fn call(_: *anyopaque, _: []const api.ExtensionValue) anyerror!api.ExtensionValue {
             return 0;
         }
     }.call;
-    
+
     // Register lowercase function
     const func1 = api.createFunction("myfunction", callback, 0, 0);
     try registry.registerFunction(func1);
-    
+
     // Register uppercase function (should succeed - different name)
     const func2 = api.createFunction("MYFUNCTION", callback, 0, 0);
     try registry.registerFunction(func2);
-    
+
     // Both should exist
     try std.testing.expect(registry.hasFunction("myfunction"));
     try std.testing.expect(registry.hasFunction("MYFUNCTION"));
@@ -864,29 +859,29 @@ test "Feature: multi-syntax-extension-system, Property 11: case sensitivity" {
 test "Feature: multi-syntax-extension-system, Property 11: mixed builtin and extension" {
     var registry = ExtensionRegistry.init(std.testing.allocator);
     defer registry.deinit();
-    
+
     const callback: api.ExtensionFunctionCallback = struct {
         fn call(_: *anyopaque, _: []const api.ExtensionValue) anyerror!api.ExtensionValue {
             return 0;
         }
     }.call;
-    
+
     // Register some builtins
     try registry.registerBuiltinFunction("echo");
     try registry.registerBuiltinClass("stdClass");
-    
+
     // Builtin conflicts should fail
     const echo_func = api.createFunction("echo", callback, 1, 1);
     try std.testing.expectError(ExtensionError.FunctionAlreadyExists, registry.registerFunction(echo_func));
-    
+
     const std_class = api.createClass("stdClass", &[_]api.ExtensionMethod{}, &[_]api.ExtensionProperty{});
     try std.testing.expectError(ExtensionError.ClassAlreadyExists, registry.registerClass(std_class));
-    
+
     // Different names should work
     const custom_func = api.createFunction("custom_echo", callback, 1, 1);
     try registry.registerFunction(custom_func);
     try std.testing.expect(registry.hasFunction("custom_echo"));
-    
+
     const custom_class = api.createClass("CustomClass", &[_]api.ExtensionMethod{}, &[_]api.ExtensionProperty{});
     try registry.registerClass(custom_class);
     try std.testing.expect(registry.hasClass("CustomClass"));
@@ -904,23 +899,23 @@ test "Feature: multi-syntax-extension-system, Property 11: mixed builtin and ext
 const LifecycleCounter = struct {
     init_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     shutdown_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
-    
+
     fn incrementInit(self: *LifecycleCounter) void {
         _ = self.init_count.fetchAdd(1, .seq_cst);
     }
-    
+
     fn incrementShutdown(self: *LifecycleCounter) void {
         _ = self.shutdown_count.fetchAdd(1, .seq_cst);
     }
-    
+
     fn getInitCount(self: *LifecycleCounter) u32 {
         return self.init_count.load(.seq_cst);
     }
-    
+
     fn getShutdownCount(self: *LifecycleCounter) u32 {
         return self.shutdown_count.load(.seq_cst);
     }
-    
+
     fn reset(self: *LifecycleCounter) void {
         self.init_count.store(0, .seq_cst);
         self.shutdown_count.store(0, .seq_cst);
@@ -960,157 +955,157 @@ fn createTestExtension(name: []const u8, with_shutdown: bool) api.Extension {
 
 test "Feature: multi-syntax-extension-system, Property 9: init called exactly once" {
     test_lifecycle_counter.reset();
-    
+
     var registry = ExtensionRegistry.init(std.testing.allocator);
     defer registry.deinit();
-    
+
     const ext = createTestExtension("test_ext_init", false);
-    
+
     // Register extension
     try registry.registerExtension(&ext);
-    
+
     // Init should be called exactly once
     try std.testing.expectEqual(@as(u32, 1), test_lifecycle_counter.getInitCount());
-    
+
     // Extension should be marked as initialized
     try std.testing.expect(registry.isExtensionInitialized("test_ext_init"));
 }
 
 test "Feature: multi-syntax-extension-system, Property 9: shutdown called exactly once on deinit" {
     test_lifecycle_counter.reset();
-    
+
     {
         var registry = ExtensionRegistry.init(std.testing.allocator);
-        
+
         const ext = createTestExtension("test_ext_shutdown", true);
         try registry.registerExtension(&ext);
-        
+
         // Init should be called
         try std.testing.expectEqual(@as(u32, 1), test_lifecycle_counter.getInitCount());
         // Shutdown not called yet
         try std.testing.expectEqual(@as(u32, 0), test_lifecycle_counter.getShutdownCount());
-        
+
         // deinit will call shutdown
         registry.deinit();
     }
-    
+
     // Shutdown should be called exactly once
     try std.testing.expectEqual(@as(u32, 1), test_lifecycle_counter.getShutdownCount());
 }
 
 test "Feature: multi-syntax-extension-system, Property 9: shutdown called on unload" {
     test_lifecycle_counter.reset();
-    
+
     var registry = ExtensionRegistry.init(std.testing.allocator);
     defer registry.deinit();
-    
+
     const ext = createTestExtension("test_ext_unload", true);
     try registry.registerExtension(&ext);
-    
+
     // Init called
     try std.testing.expectEqual(@as(u32, 1), test_lifecycle_counter.getInitCount());
     try std.testing.expectEqual(@as(u32, 0), test_lifecycle_counter.getShutdownCount());
-    
+
     // Unload extension
     const unloaded = registry.unloadExtension("test_ext_unload");
     try std.testing.expect(unloaded);
-    
+
     // Shutdown should be called exactly once
     try std.testing.expectEqual(@as(u32, 1), test_lifecycle_counter.getShutdownCount());
-    
+
     // Extension should no longer be initialized
     try std.testing.expect(!registry.isExtensionInitialized("test_ext_unload"));
 }
 
 test "Feature: multi-syntax-extension-system, Property 9: no shutdown if not provided" {
     test_lifecycle_counter.reset();
-    
+
     {
         var registry = ExtensionRegistry.init(std.testing.allocator);
-        
+
         // Extension without shutdown function
         const ext = createTestExtension("test_ext_no_shutdown", false);
         try registry.registerExtension(&ext);
-        
+
         try std.testing.expectEqual(@as(u32, 1), test_lifecycle_counter.getInitCount());
-        
+
         registry.deinit();
     }
-    
+
     // Shutdown should NOT be called (no shutdown_fn provided)
     try std.testing.expectEqual(@as(u32, 0), test_lifecycle_counter.getShutdownCount());
 }
 
 test "Feature: multi-syntax-extension-system, Property 9: multiple extensions lifecycle" {
     test_lifecycle_counter.reset();
-    
+
     {
         var registry = ExtensionRegistry.init(std.testing.allocator);
-        
+
         // Register multiple extensions
         const ext1 = createTestExtension("ext1", true);
         const ext2 = createTestExtension("ext2", true);
         const ext3 = createTestExtension("ext3", false); // No shutdown
-        
+
         try registry.registerExtension(&ext1);
         try registry.registerExtension(&ext2);
         try registry.registerExtension(&ext3);
-        
+
         // All three should have init called
         try std.testing.expectEqual(@as(u32, 3), test_lifecycle_counter.getInitCount());
         try std.testing.expectEqual(@as(u32, 0), test_lifecycle_counter.getShutdownCount());
-        
+
         // All should be initialized
         try std.testing.expectEqual(@as(usize, 3), registry.initializedExtensionCount());
-        
+
         registry.deinit();
     }
-    
+
     // Only ext1 and ext2 have shutdown functions
     try std.testing.expectEqual(@as(u32, 2), test_lifecycle_counter.getShutdownCount());
 }
 
 test "Feature: multi-syntax-extension-system, Property 9: shutdown all extensions" {
     test_lifecycle_counter.reset();
-    
+
     var registry = ExtensionRegistry.init(std.testing.allocator);
     defer registry.deinit();
-    
+
     const ext1 = createTestExtension("ext_shutdown_all_1", true);
     const ext2 = createTestExtension("ext_shutdown_all_2", true);
-    
+
     try registry.registerExtension(&ext1);
     try registry.registerExtension(&ext2);
-    
+
     try std.testing.expectEqual(@as(u32, 2), test_lifecycle_counter.getInitCount());
     try std.testing.expectEqual(@as(usize, 2), registry.initializedExtensionCount());
-    
+
     // Shutdown all extensions
     registry.shutdownAllExtensions();
-    
+
     // Both should have shutdown called
     try std.testing.expectEqual(@as(u32, 2), test_lifecycle_counter.getShutdownCount());
-    
+
     // Extensions should no longer be marked as initialized
     try std.testing.expectEqual(@as(usize, 0), registry.initializedExtensionCount());
 }
 
 test "Feature: multi-syntax-extension-system, Property 9: double registration prevented" {
     test_lifecycle_counter.reset();
-    
+
     var registry = ExtensionRegistry.init(std.testing.allocator);
     defer registry.deinit();
-    
+
     const ext = createTestExtension("test_double_reg", true);
-    
+
     // First registration succeeds
     try registry.registerExtension(&ext);
     try std.testing.expectEqual(@as(u32, 1), test_lifecycle_counter.getInitCount());
-    
+
     // Second registration should fail
     const result = registry.registerExtension(&ext);
     try std.testing.expectError(ExtensionError.ExtensionAlreadyLoaded, result);
-    
+
     // Init should still be called only once
     try std.testing.expectEqual(@as(u32, 1), test_lifecycle_counter.getInitCount());
 }
@@ -1118,12 +1113,11 @@ test "Feature: multi-syntax-extension-system, Property 9: double registration pr
 test "Feature: multi-syntax-extension-system, Property 9: unload non-existent extension" {
     var registry = ExtensionRegistry.init(std.testing.allocator);
     defer registry.deinit();
-    
+
     // Unloading non-existent extension should return false
     const result = registry.unloadExtension("non_existent");
     try std.testing.expect(!result);
 }
-
 
 // ============================================================================
 // Property 17: Extension API version compatibility
@@ -1153,29 +1147,29 @@ fn createTestExtensionWithVersion(name: []const u8, version: u32) api.Extension 
 
 test "Feature: multi-syntax-extension-system, Property 17: compatible API version" {
     test_lifecycle_counter.reset();
-    
+
     var registry = ExtensionRegistry.init(std.testing.allocator);
     defer registry.deinit();
-    
+
     // Extension with current API version should be accepted
     const ext = createTestExtensionWithVersion("ext_current_api", EXTENSION_API_VERSION);
     try registry.registerExtension(&ext);
-    
+
     try std.testing.expect(registry.extensions.contains("ext_current_api"));
     try std.testing.expectEqual(@as(u32, 1), test_lifecycle_counter.getInitCount());
 }
 
 test "Feature: multi-syntax-extension-system, Property 17: older API version compatible" {
     test_lifecycle_counter.reset();
-    
+
     var registry = ExtensionRegistry.init(std.testing.allocator);
     defer registry.deinit();
-    
+
     // Extension with older API version should be accepted (backward compatibility)
     if (EXTENSION_API_VERSION > 0) {
         const ext = createTestExtensionWithVersion("ext_old_api", EXTENSION_API_VERSION - 1);
         try registry.registerExtension(&ext);
-        
+
         try std.testing.expect(registry.extensions.contains("ext_old_api"));
         try std.testing.expectEqual(@as(u32, 1), test_lifecycle_counter.getInitCount());
     }
@@ -1183,14 +1177,14 @@ test "Feature: multi-syntax-extension-system, Property 17: older API version com
 
 test "Feature: multi-syntax-extension-system, Property 17: newer API version rejected" {
     test_lifecycle_counter.reset();
-    
+
     var registry = ExtensionRegistry.init(std.testing.allocator);
     defer registry.deinit();
-    
+
     // Extension with newer API version should be rejected
     const ext = createTestExtensionWithVersion("ext_new_api", EXTENSION_API_VERSION + 1);
     const result = registry.registerExtension(&ext);
-    
+
     try std.testing.expectError(ExtensionError.IncompatibleApiVersion, result);
     try std.testing.expect(!registry.extensions.contains("ext_new_api"));
     // Init should NOT be called for incompatible extensions
@@ -1199,14 +1193,14 @@ test "Feature: multi-syntax-extension-system, Property 17: newer API version rej
 
 test "Feature: multi-syntax-extension-system, Property 17: much newer API version rejected" {
     test_lifecycle_counter.reset();
-    
+
     var registry = ExtensionRegistry.init(std.testing.allocator);
     defer registry.deinit();
-    
+
     // Extension with much newer API version should be rejected
     const ext = createTestExtensionWithVersion("ext_future_api", EXTENSION_API_VERSION + 100);
     const result = registry.registerExtension(&ext);
-    
+
     try std.testing.expectError(ExtensionError.IncompatibleApiVersion, result);
     try std.testing.expect(!registry.extensions.contains("ext_future_api"));
     try std.testing.expectEqual(@as(u32, 0), test_lifecycle_counter.getInitCount());
@@ -1215,16 +1209,16 @@ test "Feature: multi-syntax-extension-system, Property 17: much newer API versio
 test "Feature: multi-syntax-extension-system, Property 17: isApiVersionCompatible helper" {
     var registry = ExtensionRegistry.init(std.testing.allocator);
     defer registry.deinit();
-    
+
     // Current version is compatible
     try std.testing.expect(registry.isApiVersionCompatible(EXTENSION_API_VERSION));
-    
+
     // Older versions are compatible (backward compatibility)
     if (EXTENSION_API_VERSION > 0) {
         try std.testing.expect(registry.isApiVersionCompatible(EXTENSION_API_VERSION - 1));
     }
     try std.testing.expect(registry.isApiVersionCompatible(0));
-    
+
     // Newer versions are NOT compatible
     try std.testing.expect(!registry.isApiVersionCompatible(EXTENSION_API_VERSION + 1));
     try std.testing.expect(!registry.isApiVersionCompatible(EXTENSION_API_VERSION + 100));
@@ -1234,47 +1228,47 @@ test "Feature: multi-syntax-extension-system, Property 17: isApiVersionCompatibl
 test "Feature: multi-syntax-extension-system, Property 17: getApiVersion returns current" {
     var registry = ExtensionRegistry.init(std.testing.allocator);
     defer registry.deinit();
-    
+
     try std.testing.expectEqual(EXTENSION_API_VERSION, registry.getApiVersion());
 }
 
 test "Feature: multi-syntax-extension-system, Property 17: checkExtensionCompatibility" {
     test_lifecycle_counter.reset();
-    
+
     var registry = ExtensionRegistry.init(std.testing.allocator);
     defer registry.deinit();
-    
+
     // Compatible extension should pass check
     const ext_ok = createTestExtensionWithVersion("ext_check_ok", EXTENSION_API_VERSION);
     try registry.checkExtensionCompatibility(&ext_ok);
-    
+
     // Incompatible extension should fail check
     const ext_bad = createTestExtensionWithVersion("ext_check_bad", EXTENSION_API_VERSION + 1);
     const result = registry.checkExtensionCompatibility(&ext_bad);
     try std.testing.expectError(ExtensionError.IncompatibleApiVersion, result);
-    
+
     // Init should NOT be called during compatibility check
     try std.testing.expectEqual(@as(u32, 0), test_lifecycle_counter.getInitCount());
 }
 
 test "Feature: multi-syntax-extension-system, Property 17: multiple versions mixed" {
     test_lifecycle_counter.reset();
-    
+
     var registry = ExtensionRegistry.init(std.testing.allocator);
     defer registry.deinit();
-    
+
     // Try to register extensions with various API versions
     const ext_current = createTestExtensionWithVersion("ext_v_current", EXTENSION_API_VERSION);
     const ext_future = createTestExtensionWithVersion("ext_v_future", EXTENSION_API_VERSION + 1);
-    
+
     // Current version should succeed
     try registry.registerExtension(&ext_current);
     try std.testing.expectEqual(@as(u32, 1), test_lifecycle_counter.getInitCount());
-    
+
     // Future version should fail
     const result = registry.registerExtension(&ext_future);
     try std.testing.expectError(ExtensionError.IncompatibleApiVersion, result);
-    
+
     // Only one extension should be registered
     try std.testing.expectEqual(@as(usize, 1), registry.extensionCount());
     try std.testing.expectEqual(@as(u32, 1), test_lifecycle_counter.getInitCount());

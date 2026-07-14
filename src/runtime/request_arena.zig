@@ -25,7 +25,7 @@ pub const RequestArena = struct {
     stats: RequestArenaStats,
     /// 是否已结束
     is_ended: bool,
-    
+
     /// 逃逸对象条目
     pub const EscapeEntry = struct {
         /// 对象指针
@@ -37,7 +37,7 @@ pub const RequestArena = struct {
         /// 复制函数（用于晋升到全局堆）
         copy_fn: ?*const fn (*anyopaque, std.mem.Allocator) anyerror!*anyopaque,
     };
-    
+
     /// 逃逸原因
     pub const EscapeReason = enum {
         /// 存储到会话
@@ -53,7 +53,7 @@ pub const RequestArena = struct {
         /// 显式标记
         explicit_mark,
     };
-    
+
     /// 请求Arena统计信息
     pub const RequestArenaStats = struct {
         /// 总分配次数
@@ -69,17 +69,17 @@ pub const RequestArena = struct {
         /// 请求处理时间（纳秒）
         request_duration_ns: u64 = 0,
     };
-    
+
     /// 全局请求ID计数器
     var global_request_counter: u64 = 0;
-    
+
     /// 生成唯一请求ID
     fn generateRequestId() u64 {
         const result = global_request_counter;
         global_request_counter += 1;
         return result;
     }
-    
+
     /// 初始化请求Arena
     pub fn init(parent_allocator: std.mem.Allocator, global_allocator: std.mem.Allocator) RequestArena {
         return .{
@@ -94,7 +94,7 @@ pub const RequestArena = struct {
             .is_ended = true,
         };
     }
-    
+
     /// 释放资源
     pub fn deinit(self: *RequestArena) void {
         if (!self.is_ended) {
@@ -103,43 +103,43 @@ pub const RequestArena = struct {
         self.escape_list.deinit(self.parent_allocator);
         self.arena.deinit();
     }
-    
+
     /// 开始新请求
     /// Requirements: 4.1
     pub fn beginRequest(self: *RequestArena) void {
         // 重置Arena（保留已分配的内存块以供复用）
         self.arena.reset();
-        
+
         // 生成新的请求ID
         self.request_id = generateRequestId();
         self.start_time_ns = @intCast(time_compat.nanoTimestamp());
         self.end_time_ns = 0;
         self.is_ended = false;
-        
+
         // 清空逃逸列表
         self.escape_list.clearRetainingCapacity();
-        
+
         // 重置统计
         self.stats = .{};
     }
-    
+
     /// 结束请求并释放内存
     /// Requirements: 4.3, 4.6
     pub fn endRequest(self: *RequestArena) void {
         if (self.is_ended) return;
-        
+
         self.end_time_ns = @intCast(time_compat.nanoTimestamp());
         self.stats.request_duration_ns = @intCast(self.end_time_ns - self.start_time_ns);
-        
+
         // 处理逃逸对象 - 晋升到全局堆
         self.promoteEscapedObjects();
-        
+
         // 一次性释放所有请求内存
         self.arena.freeAll();
-        
+
         self.is_ended = true;
     }
-    
+
     /// 在Arena中分配内存
     /// Requirements: 4.2
     pub fn alloc(self: *RequestArena, comptime T: type, n: usize) ![]T {
@@ -148,26 +148,26 @@ pub const RequestArena = struct {
         self.stats.total_bytes_allocated += @sizeOf(T) * n;
         return result;
     }
-    
+
     /// 分配单个对象
     pub fn create(self: *RequestArena, comptime T: type) !*T {
         const slice = try self.alloc(T, 1);
         return &slice[0];
     }
-    
+
     /// 复制字符串到Arena
     pub fn dupe(self: *RequestArena, comptime T: type, data: []const T) ![]T {
         const result = try self.alloc(T, data.len);
         @memcpy(result, data);
         return result;
     }
-    
+
     /// 标记对象需要跨请求存活（逃逸）
     /// Requirements: 4.5
     pub fn markEscape(
-        self: *RequestArena, 
-        ptr: *anyopaque, 
-        size: usize, 
+        self: *RequestArena,
+        ptr: *anyopaque,
+        size: usize,
         reason: EscapeReason,
         copy_fn: ?*const fn (*anyopaque, std.mem.Allocator) anyerror!*anyopaque,
     ) !void {
@@ -180,7 +180,7 @@ pub const RequestArena = struct {
         self.stats.escaped_objects += 1;
         self.stats.escaped_bytes += size;
     }
-    
+
     /// 晋升逃逸对象到全局堆
     fn promoteEscapedObjects(self: *RequestArena) void {
         for (self.escape_list.items) |entry| {
@@ -195,32 +195,32 @@ pub const RequestArena = struct {
             // 调用者需要确保在标记逃逸时提供正确的复制函数
         }
     }
-    
+
     /// 获取当前请求ID
     pub fn getRequestId(self: *const RequestArena) u64 {
         return self.request_id;
     }
-    
+
     /// 获取请求开始时间
     pub fn getStartTime(self: *const RequestArena) i64 {
         return self.start_time_ns;
     }
-    
+
     /// 获取统计信息
     pub fn getStats(self: *const RequestArena) RequestArenaStats {
         return self.stats;
     }
-    
+
     /// 获取Arena内存使用统计
     pub fn getMemoryStats(self: *RequestArena) memory.MemoryStats {
         return self.arena.getStats();
     }
-    
+
     /// 检查请求是否已结束
     pub fn isEnded(self: *const RequestArena) bool {
         return self.is_ended;
     }
-    
+
     /// 获取请求持续时间（毫秒）
     pub fn getDurationMs(self: *const RequestArena) f64 {
         if (self.is_ended) {
@@ -239,16 +239,16 @@ pub const RequestArenaPool = struct {
     global_allocator: std.mem.Allocator,
     max_pool_size: usize,
     stats: PoolStats,
-    
+
     pub const PoolStats = struct {
         total_acquired: u64 = 0,
         total_released: u64 = 0,
         pool_hits: u64 = 0,
         pool_misses: u64 = 0,
     };
-    
+
     pub fn init(
-        parent_allocator: std.mem.Allocator, 
+        parent_allocator: std.mem.Allocator,
         global_allocator: std.mem.Allocator,
         max_pool_size: usize,
     ) RequestArenaPool {
@@ -260,7 +260,7 @@ pub const RequestArenaPool = struct {
             .stats = .{},
         };
     }
-    
+
     pub fn deinit(self: *RequestArenaPool) void {
         for (self.pool.items) |arena| {
             arena.deinit();
@@ -268,11 +268,11 @@ pub const RequestArenaPool = struct {
         }
         self.pool.deinit(self.parent_allocator);
     }
-    
+
     /// 获取一个RequestArena（从池中获取或新建）
     pub fn acquire(self: *RequestArenaPool) !*RequestArena {
         self.stats.total_acquired += 1;
-        
+
         if (self.pool.items.len > 0) {
             self.stats.pool_hits += 1;
             const arena = self.pool.pop();
@@ -281,23 +281,23 @@ pub const RequestArenaPool = struct {
                 return a;
             }
         }
-        
+
         self.stats.pool_misses += 1;
         const arena = try self.parent_allocator.create(RequestArena);
         arena.* = RequestArena.init(self.parent_allocator, self.global_allocator);
         arena.beginRequest();
         return arena;
     }
-    
+
     /// 释放RequestArena回池中
     pub fn release(self: *RequestArenaPool, arena: *RequestArena) void {
         self.stats.total_released += 1;
-        
+
         // 确保请求已结束
         if (!arena.is_ended) {
             arena.endRequest();
         }
-        
+
         // 如果池未满，放回池中复用
         if (self.pool.items.len < self.max_pool_size) {
             self.pool.append(self.parent_allocator, arena) catch {
@@ -311,12 +311,12 @@ pub const RequestArenaPool = struct {
             self.parent_allocator.destroy(arena);
         }
     }
-    
+
     /// 获取池统计信息
     pub fn getStats(self: *const RequestArenaPool) PoolStats {
         return self.stats;
     }
-    
+
     /// 获取当前池大小
     pub fn getPoolSize(self: *const RequestArenaPool) usize {
         return self.pool.items.len;
@@ -330,15 +330,15 @@ pub const RequestArenaPool = struct {
 test "request arena basic" {
     var arena = RequestArena.init(std.testing.allocator, std.testing.allocator);
     defer arena.deinit();
-    
+
     arena.beginRequest();
     try std.testing.expect(arena.request_id > 0 or arena.request_id == 0); // First request
     try std.testing.expect(!arena.is_ended);
-    
+
     const data = try arena.alloc(u8, 100);
     try std.testing.expect(data.len == 100);
     try std.testing.expect(arena.stats.total_allocations == 1);
-    
+
     arena.endRequest();
     try std.testing.expect(arena.is_ended);
     try std.testing.expect(arena.stats.request_duration_ns > 0);
@@ -347,32 +347,32 @@ test "request arena basic" {
 test "request arena pool" {
     var pool = RequestArenaPool.init(std.testing.allocator, std.testing.allocator, 4);
     defer pool.deinit();
-    
+
     const arena1 = try pool.acquire();
     try std.testing.expect(pool.stats.pool_misses == 1);
-    
+
     _ = try arena1.alloc(u8, 50);
     pool.release(arena1);
-    
+
     const arena2 = try pool.acquire();
     try std.testing.expect(pool.stats.pool_hits == 1);
     try std.testing.expect(arena2 == arena1); // Should be the same arena
-    
+
     pool.release(arena2);
 }
 
 test "request arena escape" {
     var arena = RequestArena.init(std.testing.allocator, std.testing.allocator);
     defer arena.deinit();
-    
+
     arena.beginRequest();
-    
+
     const data = try arena.create(u64);
     data.* = 42;
-    
+
     try arena.markEscape(data, @sizeOf(u64), .stored_to_session, null);
     try std.testing.expect(arena.stats.escaped_objects == 1);
     try std.testing.expect(arena.stats.escaped_bytes == @sizeOf(u64));
-    
+
     arena.endRequest();
 }

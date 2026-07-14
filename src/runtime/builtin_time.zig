@@ -20,9 +20,10 @@ const Value = types.Value;
 const time_lib = @import("time.zig");
 const Time = time_lib.Time;
 const Duration = time_lib.Duration;
+const fn_dispatch = @import("fn_dispatch.zig");
 const builtin_registry = @import("builtin_registry.zig");
 const BuiltinFunction = builtin_registry.BuiltinFunction;
-const BuiltinError = builtin_registry.BuiltinError;
+const BuiltinError = fn_dispatch.BuiltinError;
 const Category = builtin_registry.Category;
 
 // 核心时间函数模块（DRY 原则）

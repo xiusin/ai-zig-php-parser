@@ -49,20 +49,20 @@ const JumpPatch = struct {
 pub const FastCompiler = struct {
     allocator: std.mem.Allocator,
     context: *PHPContext,
-    
+
     // 字节码输出
     code: std.ArrayListUnmanaged(u8),
     constants: std.ArrayListUnmanaged(FastValue),
-    
+
     // 局部变量
     locals: std.ArrayListUnmanaged(Local),
     scope_depth: u32,
-    
+
     // 跳转补丁
     jump_patches: std.ArrayListUnmanaged(JumpPatch),
     label_positions: std.AutoHashMapUnmanaged(u32, u32),
     next_label: u32,
-    
+
     // 统计
     max_stack: u16,
     current_stack: u16,
@@ -95,21 +95,21 @@ pub const FastCompiler = struct {
     pub fn compile(self: *FastCompiler, root: ast.Node.Index) CompileError!CompiledFunc {
         // 编译根节点
         try self.compileNode(root);
-        
+
         // 确保栈上有返回值（如果栈为空，推入 nil）
         // 这是因为 halt 指令会 pop 栈顶作为返回值
         try self.emitOp(.push_nil);
-        
+
         // 添加 halt 指令
         try self.emitOp(.halt);
-        
+
         // 解析跳转补丁
         try self.resolveJumps();
-        
+
         // 创建编译后的函数
         const code_copy = self.allocator.dupe(u8, self.code.items) catch return CompileError.OutOfMemory;
         const constants_copy = self.allocator.dupe(FastValue, self.constants.items) catch return CompileError.OutOfMemory;
-        
+
         return CompiledFunc{
             .name = "main",
             .code = code_copy,
@@ -132,9 +132,9 @@ pub const FastCompiler = struct {
     /// 编译单个节点
     fn compileNode(self: *FastCompiler, node_idx: ast.Node.Index) CompileError!void {
         if (node_idx >= self.context.nodes.items.len) return;
-        
+
         const node = self.context.nodes.items[node_idx];
-        
+
         switch (node.tag) {
             .root => try self.compileRoot(node),
             .block => try self.compileBlock(node),
@@ -175,8 +175,9 @@ pub const FastCompiler = struct {
         }
         self.scope_depth -= 1;
         // 清理局部变量
-        while (self.locals.items.len > 0 and 
-               self.locals.items[self.locals.items.len - 1].depth > self.scope_depth) {
+        while (self.locals.items.len > 0 and
+            self.locals.items[self.locals.items.len - 1].depth > self.scope_depth)
+        {
             _ = self.locals.pop();
         }
     }
@@ -192,10 +193,10 @@ pub const FastCompiler = struct {
     fn compileAssignment(self: *FastCompiler, node: ast.Node) CompileError!void {
         const target_idx = node.data.assignment.target;
         const value_idx = node.data.assignment.value;
-        
+
         // 编译值
         try self.compileNode(value_idx);
-        
+
         // 获取目标变量
         if (target_idx >= self.context.nodes.items.len) return;
         const target_node = self.context.nodes.items[target_idx];
@@ -214,12 +215,12 @@ pub const FastCompiler = struct {
         const lhs_idx = node.data.binary_expr.lhs;
         const rhs_idx = node.data.binary_expr.rhs;
         const op = node.data.binary_expr.op;
-        
+
         // 编译左操作数
         try self.compileNode(lhs_idx);
         // 编译右操作数
         try self.compileNode(rhs_idx);
-        
+
         // 发出操作指令
         const opcode: OpCode = switch (op) {
             .plus => .add,
@@ -246,9 +247,9 @@ pub const FastCompiler = struct {
     fn compileUnaryExpr(self: *FastCompiler, node: ast.Node) CompileError!void {
         const expr_idx = node.data.unary_expr.expr;
         const op = node.data.unary_expr.op;
-        
+
         try self.compileNode(expr_idx);
-        
+
         const opcode: OpCode = switch (op) {
             .minus => .neg,
             .bang => .lnot,
@@ -261,7 +262,7 @@ pub const FastCompiler = struct {
 
     fn compileLiteralInt(self: *FastCompiler, node: ast.Node) CompileError!void {
         const value = node.data.literal_int.value;
-        
+
         // 优化：使用超级指令处理常见值
         if (value == 0) {
             try self.emitOp(.push_0);
@@ -309,22 +310,22 @@ pub const FastCompiler = struct {
         const condition_idx = node.data.if_stmt.condition;
         const then_idx = node.data.if_stmt.then_branch;
         const else_idx = node.data.if_stmt.else_branch;
-        
+
         // 编译条件
         try self.compileNode(condition_idx);
-        
+
         // 条件为假时跳转到 else 或结束
         const else_label = self.newLabel();
         try self.emitJump(.jz, else_label);
-        
+
         // 编译 then 分支
         try self.compileNode(then_idx);
-        
+
         if (else_idx) |else_branch| {
             // 有 else 分支
             const end_label = self.newLabel();
             try self.emitJump(.jmp, end_label);
-            
+
             self.markLabel(else_label);
             try self.compileNode(else_branch);
             self.markLabel(end_label);
@@ -336,22 +337,22 @@ pub const FastCompiler = struct {
     fn compileWhile(self: *FastCompiler, node: ast.Node) CompileError!void {
         const condition_idx = node.data.while_stmt.condition;
         const body_idx = node.data.while_stmt.body;
-        
+
         const loop_start = self.newLabel();
         const loop_end = self.newLabel();
-        
+
         self.markLabel(loop_start);
-        
+
         // 编译条件
         try self.compileNode(condition_idx);
         try self.emitJump(.jz, loop_end);
-        
+
         // 编译循环体
         try self.compileNode(body_idx);
-        
+
         // 跳回循环开始
         try self.emitJump(.jmp, loop_start);
-        
+
         self.markLabel(loop_end);
     }
 
@@ -360,33 +361,33 @@ pub const FastCompiler = struct {
         const cond_idx = node.data.for_stmt.condition;
         const loop_idx = node.data.for_stmt.loop;
         const body_idx = node.data.for_stmt.body;
-        
+
         // 编译初始化表达式
         if (init_idx) |init_expr| {
             try self.compileNode(init_expr);
             try self.emitOp(.pop);
         }
-        
+
         const loop_start = self.newLabel();
         const loop_end = self.newLabel();
-        
+
         self.markLabel(loop_start);
-        
+
         // 编译条件
         if (cond_idx) |cond| {
             try self.compileNode(cond);
             try self.emitJump(.jz, loop_end);
         }
-        
+
         // 编译循环体
         try self.compileNode(body_idx);
-        
+
         // 编译循环表达式
         if (loop_idx) |loop_expr| {
             try self.compileNode(loop_expr);
             try self.emitOp(.pop);
         }
-        
+
         try self.emitJump(.jmp, loop_start);
         self.markLabel(loop_end);
     }
@@ -452,7 +453,7 @@ pub const FastCompiler = struct {
             const target_pos = self.label_positions.get(patch.target_label) orelse continue;
             const current_pos = patch.offset + 2; // 跳过 offset 本身
             const relative: i16 = @intCast(@as(i32, @intCast(target_pos)) - @as(i32, @intCast(current_pos)));
-            
+
             // 写入相对偏移
             const bytes = std.mem.asBytes(&relative);
             self.code.items[patch.offset] = bytes[0];
@@ -511,43 +512,43 @@ pub const FastCompiler = struct {
 
 test "FastCompiler simple arithmetic" {
     const allocator = std.testing.allocator;
-    
+
     // 创建简单的 AST 上下文
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    
+
     var context = PHPContext.init(arena.allocator());
     defer context.deinit();
-    
+
     var fast_compiler = FastCompiler.init(allocator, &context);
     defer fast_compiler.deinit();
-    
+
     // 手动构建简单测试
     try fast_compiler.emitOp(.push_1);
     try fast_compiler.emitOp(.push_int);
     try fast_compiler.emitInt32(2);
     try fast_compiler.emitOp(.add_i);
     try fast_compiler.emitOp(.halt);
-    
+
     try std.testing.expect(fast_compiler.code.items.len > 0);
 }
 
 test "FastCompiler loop compilation" {
     const allocator = std.testing.allocator;
-    
+
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    
+
     var context = PHPContext.init(arena.allocator());
     defer context.deinit();
-    
+
     var fast_compiler = FastCompiler.init(allocator, &context);
     defer fast_compiler.deinit();
-    
+
     // 模拟循环: while (i < 10) { i++ }
     const loop_start = fast_compiler.newLabel();
     const loop_end = fast_compiler.newLabel();
-    
+
     fast_compiler.markLabel(loop_start);
     try fast_compiler.emitOp(.push_local);
     try fast_compiler.emitByte(0);
@@ -560,8 +561,8 @@ test "FastCompiler loop compilation" {
     try fast_compiler.emitJump(.jmp, loop_start);
     fast_compiler.markLabel(loop_end);
     try fast_compiler.emitOp(.halt);
-    
+
     try fast_compiler.resolveJumps();
-    
+
     try std.testing.expect(fast_compiler.code.items.len > 0);
 }

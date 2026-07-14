@@ -125,7 +125,7 @@ pub const YoungGeneration = struct {
             .heap_layout = null,
         };
     }
-    
+
     /// 设置父 HeapLayout 引用
     /// 必须在使用 collect() 之前调用
     pub fn setHeapLayout(self: *YoungGeneration, layout: *HeapLayout) void {
@@ -190,7 +190,7 @@ pub const YoungGeneration = struct {
             const obj_ptr = entry.value_ptr;
             if (obj_ptr.marked) {
                 obj_ptr.age += 1;
-                
+
                 // 检查是否需要提升
                 if (obj_ptr.age >= self.age_threshold) {
                     if (self.heap_layout) |layout| {
@@ -265,58 +265,58 @@ pub const OldGeneration = struct {
         for (self.objects.items) |*obj| {
             obj.marked = false;
         }
-        
+
         // 2. 创建工作列表用于深度优先遍历
         var worklist = std.ArrayList(*GCObject).init(self.allocator);
         defer worklist.deinit();
-        
+
         // 3. 精确根识别（非启发式）
         // 在真实实现中，这些根来自：
         // - VM 栈扫描
         // - 全局变量表
         // - 静态变量表
         // - 当前执行帧
-        
+
         // 当前实现：使用保守策略标记所有可能的根
         // 根对象特征：
         // a) 年龄 > 0（已存活过至少一次 GC）
         // b) 最近分配（列表末尾 100 个对象）
         // c) 大对象（> 1KB，可能是全局数据结构）
-        
-        const recent_threshold = if (self.objects.items.len > 100) 
-            self.objects.items.len - 100 
-        else 
+
+        const recent_threshold = if (self.objects.items.len > 100)
+            self.objects.items.len - 100
+        else
             0;
         const large_object_threshold: usize = 1024;
-        
+
         for (self.objects.items, 0..) |*obj, idx| {
             const is_aged = obj.age > 0;
             const is_recent = idx >= recent_threshold;
             const is_large = obj.size > large_object_threshold;
-            
+
             if (is_aged or is_recent or is_large) {
                 obj.marked = true;
                 worklist.append(obj) catch continue;
             }
         }
-        
+
         // 4. 深度优先遍历标记可达对象
         const ptr_size = @sizeOf(usize);
         const ptr_alignment = @alignOf(usize);
-        
+
         while (worklist.popOrNull()) |obj| {
             if (obj.data.len < ptr_size) continue;
-            
+
             // 保守扫描：按指针对齐扫描对象数据
             var offset: usize = 0;
             while (offset + ptr_size <= obj.data.len) : (offset += ptr_alignment) {
                 const potential_ptr = std.mem.readInt(usize, obj.data[offset..][0..ptr_size], .little);
-                
+
                 // 检查是否指向某个对象
                 for (self.objects.items) |*target_obj| {
                     const target_addr = @intFromPtr(target_obj.data.ptr);
                     const target_end = target_addr + target_obj.data.len;
-                    
+
                     if (potential_ptr >= target_addr and potential_ptr < target_end) {
                         if (!target_obj.marked) {
                             target_obj.marked = true;
@@ -327,13 +327,13 @@ pub const OldGeneration = struct {
                 }
             }
         }
-        
+
         // 5. 保守策略：如果标记的对象太少，标记所有年龄 > 0 的对象
         var marked_count: usize = 0;
         for (self.objects.items) |obj| {
             if (obj.marked) marked_count += 1;
         }
-        
+
         if (marked_count < self.objects.items.len / 10) {
             for (self.objects.items) |*obj| {
                 if (obj.age > 0) {
@@ -678,15 +678,15 @@ pub const CycleDetector = struct {
     pub fn detectAndBreakCycles(self: *CycleDetector) !void {
         // 1. 清空访问标记
         self.visited.clearRetainingCapacity();
-        
+
         // 2. 对每个节点进行 DFS 检测循环
         for (self.worklist.items) |node| {
             if (self.visited.contains(node.ptr)) continue;
-            
+
             // 使用 DFS 检测循环
             var path = std.ArrayList(usize).init(self.allocator);
             defer path.deinit();
-            
+
             if (try self.dfsDetectCycle(node, &path)) {
                 // 发现循环，打破最弱的引用
                 try self.breakCycle(&path);
@@ -694,7 +694,7 @@ pub const CycleDetector = struct {
             }
         }
     }
-    
+
     /// 深度优先搜索检测循环
     /// @pre node 必须是有效的节点指针
     /// @post 如果检测到循环返回 true，否则返回 false
@@ -703,11 +703,11 @@ pub const CycleDetector = struct {
         for (path.items) |ptr| {
             if (ptr == node.ptr) return true;
         }
-        
+
         // 标记为已访问
         try self.visited.put(self.allocator, node.ptr, {});
         try path.append(self.allocator, node.ptr);
-        
+
         // 递归访问所有边
         for (node.edges.items) |edge_ptr| {
             // 查找边指向的节点
@@ -719,21 +719,21 @@ pub const CycleDetector = struct {
                 }
             }
         }
-        
+
         _ = path.pop();
         return false;
     }
-    
+
     /// 打破循环引用
     /// 选择引用计数最低的边进行打破
     /// @pre path 必须包含至少一个循环
     fn breakCycle(self: *CycleDetector, path: *std.ArrayList(usize)) !void {
         if (path.items.len == 0) return;
-        
+
         // 找到引用计数最低的边并打破
         var min_ref_count: u32 = std.math.maxInt(u32);
         var break_index: usize = 0;
-        
+
         for (path.items, 0..) |ptr, i| {
             for (self.worklist.items) |node| {
                 if (node.ptr == ptr and node.ref_count < min_ref_count) {
@@ -742,7 +742,7 @@ pub const CycleDetector = struct {
                 }
             }
         }
-        
+
         // 打破循环（将引用计数减 1）
         const ptr_to_break = path.items[break_index];
         for (self.worklist.items) |node| {
@@ -778,7 +778,7 @@ pub const Compactor = struct {
                 .objects = .{},
             };
         }
-        
+
         pub fn deinit(self: *MemoryRegion, allocator: std.mem.Allocator) void {
             self.objects.deinit(allocator);
             allocator.free(self.start[0..self.size]);
@@ -943,7 +943,7 @@ pub const Compactor = struct {
     /// @post 所有可达对象被标记
     fn markPhase(self: *Compactor) !void {
         const gc_object_types = @import("gc_object_types.zig");
-        
+
         // 1. 重置所有标记
         for (self.memory_regions.items) |*region| {
             for (region.objects.items) |*obj| {
@@ -951,93 +951,89 @@ pub const Compactor = struct {
                 obj.forwarding_address = null;
             }
         }
-        
+
         // 2. 创建工作列表用于深度优先遍历
         var worklist = std.ArrayList(*CompactableObject).init(self.allocator);
         defer worklist.deinit();
-        
+
         // 3. 创建对象遍历器
         const traverser = gc_object_types.ObjectTraverser{
             .allocator = self.allocator,
         };
-        
+
         // 4. 识别根对象（保守 GC 策略）
         // 由于无法直接访问 VM 状态，我们使用多种启发式方法：
         // a) 最近分配的对象（可能在栈上被引用）
         // b) 大对象（可能是全局数据结构）
         // c) 高引用计数对象（被多处引用）
-        
+
         var total_objects: usize = 0;
         for (self.memory_regions.items) |*region| {
             total_objects += region.objects.items.len;
         }
-        
+
         // 计算阈值
         const recent_threshold = if (total_objects > 100) total_objects - 100 else 0;
         const large_object_threshold: usize = 1024; // 1KB
-        
+
         var current_index: usize = 0;
-        
+
         for (self.memory_regions.items) |*region| {
             for (region.objects.items) |*obj| {
                 // 多重启发式根对象识别
                 const is_large = obj.size > large_object_threshold;
                 const is_recent = current_index >= recent_threshold;
-                
+
                 // 检查对象是否在内存区域的开始部分（可能是全局变量）
                 const is_at_region_start = obj.offset < 4096; // 前 4KB
-                
+
                 // 综合判断
                 const is_potential_root = is_large or is_recent or is_at_region_start;
-                
+
                 if (is_potential_root) {
                     obj.marked = true;
                     try worklist.append(obj);
                 }
-                
+
                 current_index += 1;
             }
         }
-        
+
         // 5. 深度优先遍历对象图
         // 使用保守扫描：将内存中所有看起来像指针的值都当作指针处理
         while (worklist.popOrNull()) |obj| {
             // 扫描对象数据，查找所有可能的指针
             const ptr_size = @sizeOf(usize);
             const ptr_alignment = @alignOf(usize);
-            
+
             // 确保对象大小足够容纳至少一个指针
             if (obj.size < ptr_size) continue;
-            
+
             // 获取对象数据的起始地址
             const obj_data_start = @intFromPtr(self.memory_regions.items[0].start) + obj.offset;
             const obj_data: [*]u8 = @ptrFromInt(obj_data_start);
-            
+
             // 按指针对齐扫描
             var offset: usize = 0;
             while (offset + ptr_size <= obj.size) : (offset += ptr_alignment) {
                 // 读取可能的指针值
-                const potential_ptr = std.mem.readInt(
-                    usize,
-                    obj_data[offset..][0..ptr_size],
-                    .little
-                );
-                
+                const potential_ptr = std.mem.readInt(usize, obj_data[offset..][0..ptr_size], .little);
+
                 // 检查这个值是否指向我们管理的某个对象
                 for (self.memory_regions.items) |*region| {
                     const region_start = @intFromPtr(region.start);
                     const region_end = region_start + region.size;
-                    
+
                     // 指针必须在区域范围内
                     if (potential_ptr < region_start or potential_ptr >= region_end) {
                         continue;
                     }
-                    
+
                     // 查找指针指向的对象
                     for (region.objects.items) |*target_obj| {
                         const target_start = region_start + target_obj.offset;
                         const target_end = target_start + target_obj.size;
-                        
+
                         // 检查指针是否指向这个对象
                         if (potential_ptr >= target_start and potential_ptr < target_end) {
                             // 找到引用，标记目标对象
@@ -1051,11 +1047,11 @@ pub const Compactor = struct {
                 }
             }
         }
-        
+
         // 6. 统计标记结果
         var marked_count: usize = 0;
         var unmarked_large_objects: usize = 0;
-        
+
         for (self.memory_regions.items) |*region| {
             for (region.objects.items) |obj| {
                 if (obj.marked) {
@@ -1065,7 +1061,7 @@ pub const Compactor = struct {
                 }
             }
         }
-        
+
         // 7. 保守策略：如果标记的对象太少，可能是根集合不完整
         // 在这种情况下，保守地标记所有大对象以避免误回收
         if (marked_count < total_objects / 10 and unmarked_large_objects > 0) {
@@ -1077,7 +1073,7 @@ pub const Compactor = struct {
                 }
             }
         }
-        
+
         _ = traverser;
     }
 
@@ -1106,20 +1102,20 @@ pub const Compactor = struct {
         // 映射：旧地址 -> 新地址
         var forwarding_map = std.AutoHashMap(usize, usize).init(self.allocator);
         defer forwarding_map.deinit();
-        
+
         // 2. 填充转发地址映射
         for (self.memory_regions.items) |*region| {
             const region_start = @intFromPtr(region.start);
-            
+
             for (region.objects.items) |*obj| {
                 if (obj.marked and obj.forwarding_address != null) {
                     // 旧地址：对象当前的位置
                     const old_addr = region_start + obj.offset;
                     // 新地址：压缩后的位置
                     const new_addr = region_start + obj.forwarding_address.?;
-                    
+
                     try forwarding_map.put(old_addr, new_addr);
-                    
+
                     // 同时为对象内部的每个字节建立映射
                     // 这样可以处理指向对象内部的指针
                     var byte_offset: usize = 0;
@@ -1129,88 +1125,74 @@ pub const Compactor = struct {
                 }
             }
         }
-        
+
         // 3. 更新所有存活对象内部的引用
         const ptr_size = @sizeOf(usize);
         const ptr_alignment = @alignOf(usize);
-        
+
         for (self.memory_regions.items) |*region| {
             const region_start = @intFromPtr(region.start);
-            
+
             for (region.objects.items) |*obj| {
                 if (!obj.marked) continue;
                 if (obj.size < ptr_size) continue;
-                
+
                 // 获取对象数据
                 const obj_data_start = region_start + obj.offset;
                 const obj_data: [*]u8 = @ptrFromInt(obj_data_start);
-                
+
                 // 按指针对齐扫描对象数据
                 var offset: usize = 0;
                 while (offset + ptr_size <= obj.size) : (offset += ptr_alignment) {
                     // 读取可能的指针值
-                    const old_ptr = std.mem.readInt(
-                        usize,
-                        obj_data[offset..][0..ptr_size],
-                        .little
-                    );
-                    
+                    const old_ptr = std.mem.readInt(usize, obj_data[offset..][0..ptr_size], .little);
+
                     // 检查是否需要更新这个指针
                     if (forwarding_map.get(old_ptr)) |new_ptr| {
                         // 更新指针值
-                        std.mem.writeInt(
-                            usize,
-                            obj_data[offset..][0..ptr_size],
-                            new_ptr,
-                            .little
-                        );
+                        std.mem.writeInt(usize, obj_data[offset..][0..ptr_size], new_ptr, .little);
                     } else {
                         // 保守策略：检查指针是否指向任何区域
                         // 如果指向已回收的对象，将其置为 null (0)
                         var points_to_valid_region = false;
-                        
+
                         for (self.memory_regions.items) |*check_region| {
                             const check_region_start = @intFromPtr(check_region.start);
                             const check_region_end = check_region_start + check_region.size;
-                            
+
                             if (old_ptr >= check_region_start and old_ptr < check_region_end) {
                                 // 指针指向某个区域，检查是否指向存活对象
                                 var points_to_live_object = false;
-                                
+
                                 for (check_region.objects.items) |*check_obj| {
                                     if (!check_obj.marked) continue;
-                                    
+
                                     const check_obj_start = check_region_start + check_obj.offset;
                                     const check_obj_end = check_obj_start + check_obj.size;
-                                    
+
                                     if (old_ptr >= check_obj_start and old_ptr < check_obj_end) {
                                         points_to_live_object = true;
                                         break;
                                     }
                                 }
-                                
+
                                 if (points_to_live_object) {
                                     points_to_valid_region = true;
                                 }
                                 break;
                             }
                         }
-                        
+
                         // 如果指针不指向任何存活对象，将其置为 null
                         if (!points_to_valid_region and old_ptr != 0) {
                             // 这是一个悬垂指针，将其置为 null
-                            std.mem.writeInt(
-                                usize,
-                                obj_data[offset..][0..ptr_size],
-                                0,
-                                .little
-                            );
+                            std.mem.writeInt(usize, obj_data[offset..][0..ptr_size], 0, .little);
                         }
                     }
                 }
             }
         }
-        
+
         // 4. 统计更新的引用数量（已在上面的循环中完成）
         // 统计逻辑已集成到引用更新循环中，避免重复遍历
     }

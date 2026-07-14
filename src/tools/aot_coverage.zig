@@ -22,11 +22,11 @@ fn readFile(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
 fn extractIrOps(allocator: std.mem.Allocator) !std.StringHashMap(void) {
     var ops = std.StringHashMap(void).init(allocator);
     const content = try readFile(allocator, "src/aot/ir.zig");
-    
+
     // Find Op union definition
     const start_marker = "pub const Op = union(enum) {";
     const start_idx = std.mem.indexOf(u8, content, start_marker) orelse return error.OpDefinitionNotFound;
-    
+
     var iter = std.mem.tokenizeAny(u8, content[start_idx + start_marker.len ..], "\n");
     var brace_count: usize = 1;
 
@@ -45,7 +45,7 @@ fn extractIrOps(allocator: std.mem.Allocator) !std.StringHashMap(void) {
         if (std.mem.indexOf(u8, trimmed, ":")) |colon_idx| {
             try ops.put(try allocator.dupe(u8, trimmed[0..colon_idx]), {});
         } else if (std.mem.endsWith(u8, trimmed, ",")) {
-             try ops.put(try allocator.dupe(u8, trimmed[0..trimmed.len-1]), {});
+            try ops.put(try allocator.dupe(u8, trimmed[0 .. trimmed.len - 1]), {});
         }
     }
     return ops;
@@ -58,7 +58,7 @@ fn extractSupportedOps(allocator: std.mem.Allocator) !std.StringHashMap(void) {
     // Find generateInstructionSimple function
     const func_marker = "fn generateInstructionSimple";
     const func_idx = std.mem.indexOf(u8, content, func_marker) orelse return error.FuncNotFound;
-    
+
     // Find switch statement inside
     const switch_marker = "switch (inst.op) {";
     const switch_idx = std.mem.indexOf(u8, content[func_idx..], switch_marker) orelse return error.SwitchNotFound;
@@ -97,7 +97,7 @@ fn extractInterpreterBuiltins(allocator: std.mem.Allocator) !std.StringHashMap(v
     const start_idx = std.mem.indexOf(u8, content, start_marker) orelse return error.BuiltinEnumNotFound;
 
     var iter = std.mem.tokenizeAny(u8, content[start_idx + start_marker.len ..], "\n");
-    
+
     while (iter.next()) |line| {
         const trimmed = std.mem.trim(u8, line, " \t\r");
         if (trimmed.len == 0) continue;
@@ -138,7 +138,7 @@ fn extractAotBuiltins(allocator: std.mem.Allocator) !std.StringHashMap(void) {
             }
         }
     }
-    
+
     // Add builtins from runtime_lib_template.zig manually or by reading the file
     // For now, let's hardcode the ones we saw in lookupBuiltinFunction as a fallback
     // But better to read the file.
@@ -146,17 +146,17 @@ fn extractAotBuiltins(allocator: std.mem.Allocator) !std.StringHashMap(void) {
     const lookup_marker = "BuiltinFunctionEntry{";
     if (std.mem.indexOf(u8, template_content, lookup_marker)) |lookup_idx| {
         var t_iter = std.mem.tokenizeAny(u8, template_content[lookup_idx + lookup_marker.len ..], "\n");
-         while (t_iter.next()) |line| {
+        while (t_iter.next()) |line| {
             const trimmed = std.mem.trim(u8, line, " \t\r");
-             if (std.mem.startsWith(u8, trimmed, "};")) break;
-             // .{ .name = "strlen", .func = wrapBuiltin_strlen },
-             if (std.mem.indexOf(u8, trimmed, ".name = \"")) |name_start| {
-                 const rest = trimmed[name_start + 9 ..];
-                 if (std.mem.indexOf(u8, rest, "\"")) |quote_end| {
-                     try builtins.put(try allocator.dupe(u8, rest[0..quote_end]), {});
-                 }
-             }
-         }
+            if (std.mem.startsWith(u8, trimmed, "};")) break;
+            // .{ .name = "strlen", .func = wrapBuiltin_strlen },
+            if (std.mem.indexOf(u8, trimmed, ".name = \"")) |name_start| {
+                const rest = trimmed[name_start + 9 ..];
+                if (std.mem.indexOf(u8, rest, "\"")) |quote_end| {
+                    try builtins.put(try allocator.dupe(u8, rest[0..quote_end]), {});
+                }
+            }
+        }
     }
 
     return builtins;
@@ -188,7 +188,7 @@ fn generateReport(
     while (ir_iter.next()) |key| {
         try ir_keys.append(allocator, key.*);
     }
-    std.mem.sort([]const u8, ir_keys.items, {}, struct{
+    std.mem.sort([]const u8, ir_keys.items, {}, struct {
         fn less(_: void, lhs: []const u8, rhs: []const u8) bool {
             return std.mem.lessThan(u8, lhs, rhs);
         }
@@ -204,9 +204,9 @@ fn generateReport(
             if (is_supported) "Implemented" else "Missing",
         });
     }
-    
+
     const ir_coverage = if (ir_keys.items.len > 0) @as(f64, @floatFromInt(supported_count)) / @as(f64, @floatFromInt(ir_keys.items.len)) * 100.0 else 0.0;
-    try writer.print("\n**Coverage: {d:.2}% ({d}/{d})**\n\n", .{ir_coverage, supported_count, ir_keys.items.len});
+    try writer.print("\n**Coverage: {d:.2}% ({d}/{d})**\n\n", .{ ir_coverage, supported_count, ir_keys.items.len });
 
     // 2. Builtin Coverage
     try writer.print("## 2. Builtin Coverage\n\n", .{});
@@ -219,7 +219,7 @@ fn generateReport(
     while (b_iter.next()) |key| {
         try builtin_keys.append(allocator, key.*);
     }
-    std.mem.sort([]const u8, builtin_keys.items, {}, struct{
+    std.mem.sort([]const u8, builtin_keys.items, {}, struct {
         fn less(_: void, lhs: []const u8, rhs: []const u8) bool {
             return std.mem.lessThan(u8, lhs, rhs);
         }
@@ -237,17 +237,14 @@ fn generateReport(
     }
 
     const builtin_coverage = if (builtin_keys.items.len > 0) @as(f64, @floatFromInt(builtin_supported_count)) / @as(f64, @floatFromInt(builtin_keys.items.len)) * 100.0 else 0.0;
-    try writer.print("\n**Coverage: {d:.2}% ({d}/{d})**\n\n", .{builtin_coverage, builtin_supported_count, builtin_keys.items.len});
+    try writer.print("\n**Coverage: {d:.2}% ({d}/{d})**\n\n", .{ builtin_coverage, builtin_supported_count, builtin_keys.items.len });
 
     // 3. Summary
     try writer.print("## 3. Action Items\n\n", .{});
     try writer.print("### Missing High Priority Builtins (P0)\n\n", .{});
-    
+
     // Define P0 builtins manually for checking
-    const p0_builtins = [_][]const u8{
-        "echo", "print", "strlen", "count", "array_map", "array_filter", 
-        "file_get_contents", "json_encode", "json_decode", "date", "time"
-    };
+    const p0_builtins = [_][]const u8{ "echo", "print", "strlen", "count", "array_map", "array_filter", "file_get_contents", "json_encode", "json_decode", "date", "time" };
 
     for (p0_builtins) |p0| {
         if (!aot_builtins.contains(p0) and interpreter_builtins.contains(p0)) {

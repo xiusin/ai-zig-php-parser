@@ -275,4 +275,3 @@ pub const PHPString = struct {
         return self.length;
     }
 };
-

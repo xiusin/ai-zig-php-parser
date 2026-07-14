@@ -157,7 +157,7 @@ pub const Node = struct {
     pub const Data = union {
         attribute: struct { name: StringId, args: []const Index },
         container_decl: struct { attributes: []const Index, name: StringId, modifiers: Modifier, extends: ?Index, implements: []const Index, members: []const Index },
-        method_decl: struct { attributes: []const Index, name: StringId, modifiers: Modifier, params: []const Index, return_type: ?Index, body: ?Index },
+        method_decl: struct { attributes: []const Index, name: StringId, modifiers: Modifier, params: []const Index, return_type: ?Index, body: ?Index, returns_reference: bool = false },
         property_decl: struct { attributes: []const Index, name: StringId, modifiers: Modifier, type: ?Index, default_value: ?Index, hooks: []const Index },
         property_hook: struct {
             name: StringId, // get or set
@@ -200,7 +200,7 @@ pub const Node = struct {
         static_property_access: struct { class_name: StringId, property_name: StringId },
         class_constant_access: struct { class_name: StringId, constant_name: StringId },
         use_stmt: struct { namespace: StringId, alias: ?StringId, use_type: u8 }, // use_type: 0=class, 1=function, 2=const
-        namespace_stmt: struct { name: StringId },
+        namespace_stmt: struct { name: StringId, body: ?Index = null },
         include_stmt: struct { path: Index, is_once: bool, is_require: bool },
         function_call: struct { name: Index, args: []const Index },
         array_init: struct { elements: []const Index },

@@ -34,11 +34,11 @@ pub const registry = [_]BuiltinFunc{
     .{ .name = "str_split", .type = .string, .is_method = false },
     .{ .name = "strcmp", .type = .string, .is_method = false },
     .{ .name = "strcasecmp", .type = .string, .is_method = false },
-    
+
     // 字符串方法
     .{ .name = "length", .type = .string, .is_method = true },
     .{ .name = "contains", .type = .string, .is_method = true },
-    
+
     // 数组函数
     .{ .name = "count", .type = .array, .is_method = true },
     .{ .name = "array_merge", .type = .array, .is_method = false },
@@ -48,7 +48,7 @@ pub const registry = [_]BuiltinFunc{
     .{ .name = "array_keys", .type = .array, .is_method = false },
     .{ .name = "array_values", .type = .array, .is_method = false },
     .{ .name = "array_slice", .type = .array, .is_method = false },
-    
+
     // 数学函数
     .{ .name = "abs", .type = .global, .is_method = false },
     .{ .name = "sqrt", .type = .global, .is_method = false },
@@ -75,18 +75,18 @@ pub const registry = [_]BuiltinFunc{
     .{ .name = "pi", .type = .global, .is_method = false },
     .{ .name = "rand", .type = .global, .is_method = false },
     .{ .name = "mt_rand", .type = .global, .is_method = false },
-    
+
     // 时间函数
     .{ .name = "time", .type = .global, .is_method = false },
     .{ .name = "microtime", .type = .global, .is_method = false },
     .{ .name = "date", .type = .global, .is_method = false },
-    
+
     // 随机数函数
     .{ .name = "srand", .type = .global, .is_method = false },
     .{ .name = "mt_srand", .type = .global, .is_method = false },
     .{ .name = "random_int", .type = .global, .is_method = false },
     .{ .name = "random_bytes", .type = .global, .is_method = false },
-    
+
     // 类型转换函数
     .{ .name = "intval", .type = .global, .is_method = false },
     .{ .name = "floatval", .type = .global, .is_method = false },

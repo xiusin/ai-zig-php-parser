@@ -64,45 +64,45 @@ pub const StringBenchmark = struct {
     allocator: Allocator,
     config: StringBenchmarkConfig,
     framework_instance: *framework.BenchmarkFramework,
-    
+
     const Self = @This();
-    
+
     /// 初始化测试
     pub fn init(allocator: Allocator, config: StringBenchmarkConfig) !*Self {
         const self = try allocator.create(Self);
-        
+
         const framework_config = framework.BenchmarkConfig{
             .warmup_iterations = 100,
             .test_iterations = config.iterations,
             .verbose = config.verbose,
         };
-        
+
         self.* = .{
             .allocator = allocator,
             .config = config,
             .framework_instance = try framework.BenchmarkFramework.init(allocator, framework_config),
         };
-        
+
         // 创建测试脚本目录
         if (config.generate_php_scripts) {
             std.fs.cwd.makePath(config.script_output_dir) catch |err| {
                 if (err != error.PathAlreadyExists) return err;
             };
         }
-        
+
         return self;
     }
-    
+
     /// 清理资源
     pub fn deinit(self: *Self) void {
         self.framework_instance.deinit();
         self.allocator.destroy(self);
     }
-    
+
     /// 运行所有测试
     pub fn runAllTests(self: *Self) !StringBenchmarkResult {
         const start_time = std.time.nanoTimestamp();
-        
+
         const search_results = try self.runSearchTests();
         const search_ext_results = try self.runSearchExtTests();
         const transform_results = try self.runTransformTests();
@@ -117,40 +117,40 @@ pub const StringBenchmark = struct {
         const parse_results = try self.runParseTests();
         const parse_ext_results = try self.runParseExtTests();
         const misc_ext_results = try self.runMiscExtTests();
-        
+
         // 合并搜索结果
         var all_search = std.array_list.AlignedManaged(StringOpResult, null).init(self.allocator);
         try all_search.appendSlice(self.allocator, search_results);
         try all_search.appendSlice(self.allocator, search_ext_results);
         const merged_search = try all_search.toOwnedSlice(self.allocator);
-        
+
         // 合并转换结果
         var all_transform = std.array_list.AlignedManaged(StringOpResult, null).init(self.allocator);
         try all_transform.appendSlice(self.allocator, transform_results);
         try all_transform.appendSlice(self.allocator, transform_ext_results);
         const merged_transform = try all_transform.toOwnedSlice(self.allocator);
-        
+
         // 合并编码结果
         var all_encode = std.array_list.AlignedManaged(StringOpResult, null).init(self.allocator);
         try all_encode.appendSlice(self.allocator, encode_results);
         try all_encode.appendSlice(self.allocator, encode_ext_results);
         try all_encode.appendSlice(self.allocator, misc_ext_results);
         const merged_encode = try all_encode.toOwnedSlice(self.allocator);
-        
+
         // 合并格式化结果
         var all_format = std.array_list.AlignedManaged(StringOpResult, null).init(self.allocator);
         try all_format.appendSlice(self.allocator, format_results);
         try all_format.appendSlice(self.allocator, format_ext_results);
         const merged_format = try all_format.toOwnedSlice(self.allocator);
-        
+
         // 合并解析结果
         var all_parse = std.array_list.AlignedManaged(StringOpResult, null).init(self.allocator);
         try all_parse.appendSlice(self.allocator, parse_results);
         try all_parse.appendSlice(self.allocator, parse_ext_results);
         const merged_parse = try all_parse.toOwnedSlice(self.allocator);
-        
+
         const end_time = std.time.nanoTimestamp();
-        
+
         return StringBenchmarkResult{
             .search_results = merged_search,
             .transform_results = merged_transform,
@@ -164,19 +164,19 @@ pub const StringBenchmark = struct {
             .timestamp = std.time.timestamp(),
         };
     }
-    
+
     // ========================================================================
     // 字符串查找与替换测试
     // ========================================================================
-    
+
     /// 运行字符串查找测试
     pub fn runSearchTests(self: *Self) ![]StringOpResult {
         if (self.config.verbose) {
             std.debug.print("\n=== 字符串查找与替换性能测试 ===\n", .{});
         }
-        
+
         var results = std.array_list.AlignedManaged(StringOpResult, null).init(self.allocator);
-        
+
         try results.append(self.allocator, try self.testStrlen());
         try results.append(self.allocator, try self.testStrpos());
         try results.append(try self.testStrrpos());
@@ -187,17 +187,17 @@ pub const StringBenchmark = struct {
         try results.append(try self.testSubstr());
         try results.append(try self.testSubstrCount());
         try results.append(try self.testStrPad());
-        
+
         return results.toOwnedSlice();
     }
-    
+
     /// 测试 strlen
     fn testStrlen(self: *Self) !StringOpResult {
         const test_name = "strlen";
         const test_string = "Hello, World! This is a test string for performance benchmarking.";
-        
+
         if (self.config.generate_php_scripts) {
-            try self.generatePhpScript(test_name, 
+            try self.generatePhpScript(test_name,
                 \\<?php
                 \\$iterations = 10000;
                 \\$str = "Hello, World! This is a test string for performance benchmarking.";
@@ -209,27 +209,27 @@ pub const StringBenchmark = struct {
                 \\echo "Time: " . (($end - $start) / 1000000) . " ms\n";
             );
         }
-        
+
         const start = std.time.nanoTimestamp();
-        
+
         var total_len: usize = 0;
         var i: u32 = 0;
         while (i < self.config.iterations) : (i += 1) {
             total_len += test_string.len;
         }
-        
+
         const end = std.time.nanoTimestamp();
         const total_time = @as(u64, @intCast(end - start));
-        
+
         std.mem.doNotOptimizeAway(&total_len);
-        
-        const ops_per_sec = @as(f64, @floatFromInt(self.config.iterations)) / 
-                           (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
-        
+
+        const ops_per_sec = @as(f64, @floatFromInt(self.config.iterations)) /
+            (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+
         if (self.config.verbose) {
-            std.debug.print("  {s}: {d:.2} M ops/s\n", .{test_name, ops_per_sec / 1_000_000.0});
+            std.debug.print("  {s}: {d:.2} M ops/s\n", .{ test_name, ops_per_sec / 1_000_000.0 });
         }
-        
+
         return StringOpResult{
             .test_name = test_name,
             .operations_per_second = ops_per_sec,
@@ -238,13 +238,13 @@ pub const StringBenchmark = struct {
             .category = "search",
         };
     }
-    
+
     /// 测试 strpos
     fn testStrpos(self: *Self) !StringOpResult {
         const test_name = "strpos";
         const haystack = "The quick brown fox jumps over the lazy dog";
         const needle = "fox";
-        
+
         if (self.config.generate_php_scripts) {
             try self.generatePhpScript(test_name,
                 \\<?php
@@ -259,9 +259,9 @@ pub const StringBenchmark = struct {
                 \\echo "Time: " . (($end - $start) / 1000000) . " ms\n";
             );
         }
-        
+
         const start = std.time.nanoTimestamp();
-        
+
         var total_pos: usize = 0;
         var i: u32 = 0;
         while (i < self.config.iterations) : (i += 1) {
@@ -269,19 +269,19 @@ pub const StringBenchmark = struct {
                 total_pos += pos;
             }
         }
-        
+
         const end = std.time.nanoTimestamp();
         const total_time = @as(u64, @intCast(end - start));
-        
+
         std.mem.doNotOptimizeAway(&total_pos);
-        
-        const ops_per_sec = @as(f64, @floatFromInt(self.config.iterations)) / 
-                           (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
-        
+
+        const ops_per_sec = @as(f64, @floatFromInt(self.config.iterations)) /
+            (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+
         if (self.config.verbose) {
-            std.debug.print("  {s}: {d:.2} M ops/s\n", .{test_name, ops_per_sec / 1_000_000.0});
+            std.debug.print("  {s}: {d:.2} M ops/s\n", .{ test_name, ops_per_sec / 1_000_000.0 });
         }
-        
+
         return StringOpResult{
             .test_name = test_name,
             .operations_per_second = ops_per_sec,
@@ -290,13 +290,13 @@ pub const StringBenchmark = struct {
             .category = "search",
         };
     }
-    
+
     /// 测试 strrpos
     fn testStrrpos(self: *Self) !StringOpResult {
         const test_name = "strrpos";
         const haystack = "The quick brown fox jumps over the lazy fox";
         const needle = "fox";
-        
+
         if (self.config.generate_php_scripts) {
             try self.generatePhpScript(test_name,
                 \\<?php
@@ -311,9 +311,9 @@ pub const StringBenchmark = struct {
                 \\echo "Time: " . (($end - $start) / 1000000) . " ms\n";
             );
         }
-        
+
         const start = std.time.nanoTimestamp();
-        
+
         var total_pos: usize = 0;
         var i: u32 = 0;
         while (i < self.config.iterations) : (i += 1) {
@@ -321,19 +321,19 @@ pub const StringBenchmark = struct {
                 total_pos += pos;
             }
         }
-        
+
         const end = std.time.nanoTimestamp();
         const total_time = @as(u64, @intCast(end - start));
-        
+
         std.mem.doNotOptimizeAway(&total_pos);
-        
-        const ops_per_sec = @as(f64, @floatFromInt(self.config.iterations)) / 
-                           (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
-        
+
+        const ops_per_sec = @as(f64, @floatFromInt(self.config.iterations)) /
+            (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+
         if (self.config.verbose) {
-            std.debug.print("  {s}: {d:.2} M ops/s\n", .{test_name, ops_per_sec / 1_000_000.0});
+            std.debug.print("  {s}: {d:.2} M ops/s\n", .{ test_name, ops_per_sec / 1_000_000.0 });
         }
-        
+
         return StringOpResult{
             .test_name = test_name,
             .operations_per_second = ops_per_sec,
@@ -342,13 +342,13 @@ pub const StringBenchmark = struct {
             .category = "search",
         };
     }
-    
+
     /// 测试 stripos（不区分大小写查找）
     fn testStripos(self: *Self) !StringOpResult {
         const test_name = "stripos";
         const haystack = "The Quick Brown FOX Jumps Over The Lazy Dog";
         const needle = "fox";
-        
+
         if (self.config.generate_php_scripts) {
             try self.generatePhpScript(test_name,
                 \\<?php
@@ -363,9 +363,9 @@ pub const StringBenchmark = struct {
                 \\echo "Time: " . (($end - $start) / 1000000) . " ms\n";
             );
         }
-        
+
         const start = std.time.nanoTimestamp();
-        
+
         var total_pos: usize = 0;
         var i: u32 = 0;
         while (i < self.config.iterations) : (i += 1) {
@@ -373,24 +373,24 @@ pub const StringBenchmark = struct {
             const haystack_lower = try self.allocator.alloc(u8, haystack.len);
             defer self.allocator.free(haystack_lower);
             _ = std.ascii.lowerString(haystack_lower, haystack);
-            
+
             if (std.mem.indexOf(u8, haystack_lower, needle)) |pos| {
                 total_pos += pos;
             }
         }
-        
+
         const end = std.time.nanoTimestamp();
         const total_time = @as(u64, @intCast(end - start));
-        
+
         std.mem.doNotOptimizeAway(&total_pos);
-        
-        const ops_per_sec = @as(f64, @floatFromInt(self.config.iterations)) / 
-                           (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
-        
+
+        const ops_per_sec = @as(f64, @floatFromInt(self.config.iterations)) /
+            (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+
         if (self.config.verbose) {
-            std.debug.print("  {s}: {d:.2} M ops/s\n", .{test_name, ops_per_sec / 1_000_000.0});
+            std.debug.print("  {s}: {d:.2} M ops/s\n", .{ test_name, ops_per_sec / 1_000_000.0 });
         }
-        
+
         return StringOpResult{
             .test_name = test_name,
             .operations_per_second = ops_per_sec,
@@ -399,13 +399,13 @@ pub const StringBenchmark = struct {
             .category = "search",
         };
     }
-    
+
     /// 测试 strstr（查找子串）
     fn testStrstr(self: *Self) !StringOpResult {
         const test_name = "strstr";
         const haystack = "The quick brown fox jumps over the lazy dog";
         const needle = "fox";
-        
+
         if (self.config.generate_php_scripts) {
             try self.generatePhpScript(test_name,
                 \\<?php
@@ -420,9 +420,9 @@ pub const StringBenchmark = struct {
                 \\echo "Time: " . (($end - $start) / 1000000) . " ms\n";
             );
         }
-        
+
         const start = std.time.nanoTimestamp();
-        
+
         var total_len: usize = 0;
         var i: u32 = 0;
         while (i < self.config.iterations) : (i += 1) {
@@ -430,19 +430,19 @@ pub const StringBenchmark = struct {
                 total_len += haystack.len - pos;
             }
         }
-        
+
         const end = std.time.nanoTimestamp();
         const total_time = @as(u64, @intCast(end - start));
-        
+
         std.mem.doNotOptimizeAway(&total_len);
-        
-        const ops_per_sec = @as(f64, @floatFromInt(self.config.iterations)) / 
-                           (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
-        
+
+        const ops_per_sec = @as(f64, @floatFromInt(self.config.iterations)) /
+            (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+
         if (self.config.verbose) {
-            std.debug.print("  {s}: {d:.2} M ops/s\n", .{test_name, ops_per_sec / 1_000_000.0});
+            std.debug.print("  {s}: {d:.2} M ops/s\n", .{ test_name, ops_per_sec / 1_000_000.0 });
         }
-        
+
         return StringOpResult{
             .test_name = test_name,
             .operations_per_second = ops_per_sec,
@@ -451,14 +451,14 @@ pub const StringBenchmark = struct {
             .category = "search",
         };
     }
-    
+
     /// 测试 str_replace（字符串替换）
     fn testStrReplace(self: *Self) !StringOpResult {
         const test_name = "str_replace";
         const haystack = "The quick brown fox jumps over the lazy dog";
         const search = "fox";
         const replace = "cat";
-        
+
         if (self.config.generate_php_scripts) {
             try self.generatePhpScript(test_name,
                 \\<?php
@@ -474,9 +474,9 @@ pub const StringBenchmark = struct {
                 \\echo "Time: " . (($end - $start) / 1000000) . " ms\n";
             );
         }
-        
+
         const start = std.time.nanoTimestamp();
-        
+
         var total_len: usize = 0;
         var i: u32 = 0;
         while (i < self.config.iterations) : (i += 1) {
@@ -484,19 +484,19 @@ pub const StringBenchmark = struct {
             defer self.allocator.free(result);
             total_len += result.len;
         }
-        
+
         const end = std.time.nanoTimestamp();
         const total_time = @as(u64, @intCast(end - start));
-        
+
         std.mem.doNotOptimizeAway(&total_len);
-        
-        const ops_per_sec = @as(f64, @floatFromInt(self.config.iterations)) / 
-                           (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
-        
+
+        const ops_per_sec = @as(f64, @floatFromInt(self.config.iterations)) /
+            (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+
         if (self.config.verbose) {
-            std.debug.print("  {s}: {d:.2} M ops/s\n", .{test_name, ops_per_sec / 1_000_000.0});
+            std.debug.print("  {s}: {d:.2} M ops/s\n", .{ test_name, ops_per_sec / 1_000_000.0 });
         }
-        
+
         return StringOpResult{
             .test_name = test_name,
             .operations_per_second = ops_per_sec,
@@ -505,14 +505,14 @@ pub const StringBenchmark = struct {
             .category = "search",
         };
     }
-    
+
     /// 测试 str_ireplace（不区分大小写替换）
     fn testStrIreplace(self: *Self) !StringOpResult {
         const test_name = "str_ireplace";
         const haystack = "The quick brown FOX jumps over the lazy dog";
         const search = "fox";
         const replace = "cat";
-        
+
         if (self.config.generate_php_scripts) {
             try self.generatePhpScript(test_name,
                 \\<?php
@@ -528,9 +528,9 @@ pub const StringBenchmark = struct {
                 \\echo "Time: " . (($end - $start) / 1000000) . " ms\n";
             );
         }
-        
+
         const start = std.time.nanoTimestamp();
-        
+
         var total_len: usize = 0;
         var i: u32 = 0;
         while (i < self.config.iterations) : (i += 1) {
@@ -538,24 +538,24 @@ pub const StringBenchmark = struct {
             const haystack_lower = try self.allocator.alloc(u8, haystack.len);
             defer self.allocator.free(haystack_lower);
             _ = std.ascii.lowerString(haystack_lower, haystack);
-            
+
             const result = try std.mem.replaceOwned(u8, self.allocator, haystack_lower, search, replace);
             defer self.allocator.free(result);
             total_len += result.len;
         }
-        
+
         const end = std.time.nanoTimestamp();
         const total_time = @as(u64, @intCast(end - start));
-        
+
         std.mem.doNotOptimizeAway(&total_len);
-        
-        const ops_per_sec = @as(f64, @floatFromInt(self.config.iterations)) / 
-                           (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
-        
+
+        const ops_per_sec = @as(f64, @floatFromInt(self.config.iterations)) /
+            (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+
         if (self.config.verbose) {
-            std.debug.print("  {s}: {d:.2} M ops/s\n", .{test_name, ops_per_sec / 1_000_000.0});
+            std.debug.print("  {s}: {d:.2} M ops/s\n", .{ test_name, ops_per_sec / 1_000_000.0 });
         }
-        
+
         return StringOpResult{
             .test_name = test_name,
             .operations_per_second = ops_per_sec,
@@ -564,14 +564,14 @@ pub const StringBenchmark = struct {
             .category = "search",
         };
     }
-    
+
     /// 测试 substr（子串提取）
     fn testSubstr(self: *Self) !StringOpResult {
         const test_name = "substr";
         const str = "The quick brown fox jumps over the lazy dog";
         const start_pos: usize = 10;
         const length: usize = 15;
-        
+
         if (self.config.generate_php_scripts) {
             try self.generatePhpScript(test_name,
                 \\<?php
@@ -585,9 +585,9 @@ pub const StringBenchmark = struct {
                 \\echo "Time: " . (($end - $start) / 1000000) . " ms\n";
             );
         }
-        
+
         const start = std.time.nanoTimestamp();
-        
+
         var total_len: usize = 0;
         var i: u32 = 0;
         while (i < self.config.iterations) : (i += 1) {
@@ -595,19 +595,19 @@ pub const StringBenchmark = struct {
             const substr = str[start_pos..end_pos];
             total_len += substr.len;
         }
-        
+
         const end = std.time.nanoTimestamp();
         const total_time = @as(u64, @intCast(end - start));
-        
+
         std.mem.doNotOptimizeAway(&total_len);
-        
-        const ops_per_sec = @as(f64, @floatFromInt(self.config.iterations)) / 
-                           (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
-        
+
+        const ops_per_sec = @as(f64, @floatFromInt(self.config.iterations)) /
+            (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+
         if (self.config.verbose) {
-            std.debug.print("  {s}: {d:.2} M ops/s\n", .{test_name, ops_per_sec / 1_000_000.0});
+            std.debug.print("  {s}: {d:.2} M ops/s\n", .{ test_name, ops_per_sec / 1_000_000.0 });
         }
-        
+
         return StringOpResult{
             .test_name = test_name,
             .operations_per_second = ops_per_sec,
@@ -616,13 +616,13 @@ pub const StringBenchmark = struct {
             .category = "search",
         };
     }
-    
+
     /// 测试 substr_count（子串计数）
     fn testSubstrCount(self: *Self) !StringOpResult {
         const test_name = "substr_count";
         const haystack = "The quick brown fox jumps over the lazy fox and another fox";
         const needle = "fox";
-        
+
         if (self.config.generate_php_scripts) {
             try self.generatePhpScript(test_name,
                 \\<?php
@@ -637,9 +637,9 @@ pub const StringBenchmark = struct {
                 \\echo "Time: " . (($end - $start) / 1000000) . " ms\n";
             );
         }
-        
+
         const start = std.time.nanoTimestamp();
-        
+
         var total_count: usize = 0;
         var i: u32 = 0;
         while (i < self.config.iterations) : (i += 1) {
@@ -651,19 +651,19 @@ pub const StringBenchmark = struct {
             }
             total_count += count;
         }
-        
+
         const end = std.time.nanoTimestamp();
         const total_time = @as(u64, @intCast(end - start));
-        
+
         std.mem.doNotOptimizeAway(&total_count);
-        
-        const ops_per_sec = @as(f64, @floatFromInt(self.config.iterations)) / 
-                           (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
-        
+
+        const ops_per_sec = @as(f64, @floatFromInt(self.config.iterations)) /
+            (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+
         if (self.config.verbose) {
-            std.debug.print("  {s}: {d:.2} M ops/s\n", .{test_name, ops_per_sec / 1_000_000.0});
+            std.debug.print("  {s}: {d:.2} M ops/s\n", .{ test_name, ops_per_sec / 1_000_000.0 });
         }
-        
+
         return StringOpResult{
             .test_name = test_name,
             .operations_per_second = ops_per_sec,
@@ -672,14 +672,14 @@ pub const StringBenchmark = struct {
             .category = "search",
         };
     }
-    
+
     /// 测试 str_pad（字符串填充）
     fn testStrPad(self: *Self) !StringOpResult {
         const test_name = "str_pad";
         const str = "Hello";
         const pad_length: usize = 20;
         const pad_char = ' ';
-        
+
         if (self.config.generate_php_scripts) {
             try self.generatePhpScript(test_name,
                 \\<?php
@@ -693,32 +693,32 @@ pub const StringBenchmark = struct {
                 \\echo "Time: " . (($end - $start) / 1000000) . " ms\n";
             );
         }
-        
+
         const start = std.time.nanoTimestamp();
-        
+
         var total_len: usize = 0;
         var i: u32 = 0;
         while (i < self.config.iterations) : (i += 1) {
             var result = try self.allocator.alloc(u8, pad_length);
             defer self.allocator.free(result);
-            
+
             @memcpy(result[0..str.len], str);
             @memset(result[str.len..], pad_char);
             total_len += result.len;
         }
-        
+
         const end = std.time.nanoTimestamp();
         const total_time = @as(u64, @intCast(end - start));
-        
+
         std.mem.doNotOptimizeAway(&total_len);
-        
-        const ops_per_sec = @as(f64, @floatFromInt(self.config.iterations)) / 
-                           (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
-        
+
+        const ops_per_sec = @as(f64, @floatFromInt(self.config.iterations)) /
+            (@as(f64, @floatFromInt(total_time)) / 1_000_000_000.0);
+
         if (self.config.verbose) {
-            std.debug.print("  {s}: {d:.2} M ops/s\n", .{test_name, ops_per_sec / 1_000_000.0});
+            std.debug.print("  {s}: {d:.2} M ops/s\n", .{ test_name, ops_per_sec / 1_000_000.0 });
         }
-        
+
         return StringOpResult{
             .test_name = test_name,
             .operations_per_second = ops_per_sec,
@@ -727,11 +727,11 @@ pub const StringBenchmark = struct {
             .category = "search",
         };
     }
-    
+
     // ========================================================================
     // 字符串查找扩展测试
     // ========================================================================
-    
+
     /// 运行字符串查找扩展测试
     pub fn runSearchExtTests(self: *Self) ![]StringOpResult {
         const search_ext = @import("string_benchmark_search_ext.zig");
@@ -744,11 +744,11 @@ pub const StringBenchmark = struct {
         };
         return try search_ext_tests.runAll();
     }
-    
+
     // ========================================================================
     // 字符串转换测试
     // ========================================================================
-    
+
     /// 运行字符串转换测试
     pub fn runTransformTests(self: *Self) ![]StringOpResult {
         const transforms = @import("string_benchmark_transforms.zig");
@@ -761,11 +761,11 @@ pub const StringBenchmark = struct {
         };
         return try transform_tests.runAll();
     }
-    
+
     // ========================================================================
     // 字符串转换扩展测试
     // ========================================================================
-    
+
     /// 运行字符串转换扩展测试
     pub fn runTransformExtTests(self: *Self) ![]StringOpResult {
         const transform_ext = @import("string_benchmark_transform_ext.zig");
@@ -778,11 +778,11 @@ pub const StringBenchmark = struct {
         };
         return try transform_ext_tests.runAll();
     }
-    
+
     // ========================================================================
     // 字符串分割与连接测试
     // ========================================================================
-    
+
     /// 运行字符串分割测试
     pub fn runSplitTests(self: *Self) ![]StringOpResult {
         const splits = @import("string_benchmark_split.zig");
@@ -793,11 +793,11 @@ pub const StringBenchmark = struct {
         };
         return try split_tests.runAll();
     }
-    
+
     // ========================================================================
     // 字符串比较测试
     // ========================================================================
-    
+
     /// 运行字符串比较测试
     pub fn runCompareTests(self: *Self) ![]StringOpResult {
         const misc = @import("string_benchmark_misc.zig");
@@ -808,11 +808,11 @@ pub const StringBenchmark = struct {
         };
         return try compare_tests.runAll();
     }
-    
+
     // ========================================================================
     // 字符串修剪测试
     // ========================================================================
-    
+
     /// 运行字符串修剪测试
     pub fn runTrimTests(self: *Self) ![]StringOpResult {
         const misc = @import("string_benchmark_misc.zig");
@@ -823,11 +823,11 @@ pub const StringBenchmark = struct {
         };
         return try trim_tests.runAll();
     }
-    
+
     // ========================================================================
     // 字符串编码测试
     // ========================================================================
-    
+
     /// 运行字符串编码测试
     pub fn runEncodeTests(self: *Self) ![]StringOpResult {
         const misc = @import("string_benchmark_misc.zig");
@@ -838,11 +838,11 @@ pub const StringBenchmark = struct {
         };
         return try encode_tests.runAll();
     }
-    
+
     // ========================================================================
     // 字符串编码扩展测试
     // ========================================================================
-    
+
     /// 运行字符串编码扩展测试
     pub fn runEncodeExtTests(self: *Self) ![]StringOpResult {
         const encode_ext = @import("string_benchmark_encode_ext.zig");
@@ -855,11 +855,11 @@ pub const StringBenchmark = struct {
         };
         return try encode_ext_tests.runAll();
     }
-    
+
     // ========================================================================
     // 字符串格式化测试
     // ========================================================================
-    
+
     /// 运行字符串格式化测试
     pub fn runFormatTests(self: *Self) ![]StringOpResult {
         const misc = @import("string_benchmark_misc.zig");
@@ -870,11 +870,11 @@ pub const StringBenchmark = struct {
         };
         return try format_tests.runAll();
     }
-    
+
     // ========================================================================
     // 字符串格式化扩展测试
     // ========================================================================
-    
+
     /// 运行字符串格式化扩展测试
     pub fn runFormatExtTests(self: *Self) ![]StringOpResult {
         const format_ext = @import("string_benchmark_format_ext.zig");
@@ -887,11 +887,11 @@ pub const StringBenchmark = struct {
         };
         return try format_ext_tests.runAll();
     }
-    
+
     // ========================================================================
     // 字符串解析测试
     // ========================================================================
-    
+
     /// 运行字符串解析测试
     pub fn runParseTests(self: *Self) ![]StringOpResult {
         const misc = @import("string_benchmark_misc.zig");
@@ -902,11 +902,11 @@ pub const StringBenchmark = struct {
         };
         return try parse_tests.runAll();
     }
-    
+
     // ========================================================================
     // 字符串解析扩展测试
     // ========================================================================
-    
+
     /// 运行字符串解析扩展测试
     pub fn runParseExtTests(self: *Self) ![]StringOpResult {
         const parse_ext = @import("string_benchmark_parse_ext.zig");
@@ -919,11 +919,11 @@ pub const StringBenchmark = struct {
         };
         return try parse_ext_tests.runAll();
     }
-    
+
     // ========================================================================
     // 字符串其他扩展测试
     // ========================================================================
-    
+
     /// 运行字符串其他扩展测试
     pub fn runMiscExtTests(self: *Self) ![]StringOpResult {
         const misc_ext = @import("string_benchmark_misc_ext.zig");
@@ -936,11 +936,11 @@ pub const StringBenchmark = struct {
         };
         return try misc_ext_tests.runAll();
     }
-    
+
     // ========================================================================
     // 辅助函数
     // ========================================================================
-    
+
     /// 生成 PHP 测试脚本
     fn generatePhpScript(self: *Self, test_name: []const u8, script_content: []const u8) !void {
         const file_path = try std.fmt.allocPrint(
@@ -949,10 +949,10 @@ pub const StringBenchmark = struct {
             .{ self.config.script_output_dir, test_name },
         );
         defer self.allocator.free(file_path);
-        
+
         const file = try std.fs.cwd.createFile(file_path, .{});
         defer file.close();
-        
+
         try file.writeAll(script_content);
     }
 };

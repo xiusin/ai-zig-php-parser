@@ -60,10 +60,10 @@ pub const BigDecimal = struct {
 
     /// Maximum number of digits supported
     pub const MAX_DIGITS = 1000;
-    
+
     /// Default scale for operations
     pub const DEFAULT_SCALE = 10;
-    
+
     /// Small number cache for frequently used values (0-9)
     var small_number_cache: [10]?*BigDecimal = [_]?*BigDecimal{null} ** 10;
     var cache_mutex = std.Thread.Mutex{};
@@ -71,15 +71,15 @@ pub const BigDecimal = struct {
     /// Get cached small number or create new one
     pub fn getSmallNumber(allocator: std.mem.Allocator, digit: u8) !*BigDecimal {
         if (digit > 9) return error.InvalidDigit;
-        
+
         cache_mutex.lock();
         defer cache_mutex.unlock();
-        
+
         if (small_number_cache[digit]) |cached| {
             _ = cached.ref_count.fetchAdd(1, .acq_rel);
             return cached;
         }
-        
+
         // Create and cache the small number
         const bd = try allocator.create(BigDecimal);
         bd.* = BigDecimal{
@@ -89,7 +89,7 @@ pub const BigDecimal = struct {
             .allocator = allocator,
             .ref_count = std.atomic.Value(usize).init(2), // One for cache, one for caller
         };
-        
+
         small_number_cache[digit] = bd;
         return bd;
     }
@@ -103,7 +103,7 @@ pub const BigDecimal = struct {
         const bd = try allocator.create(BigDecimal);
         bd.allocator = allocator;
         bd.ref_count = std.atomic.Value(usize).init(1);
-        
+
         // Parse sign
         var start_idx: usize = 0;
         bd.sign = true;
@@ -160,29 +160,29 @@ pub const BigDecimal = struct {
 
         // Remove leading zeros
         bd.removeLeadingZeros();
-        
+
         return bd;
     }
 
     /// Initialize BigDecimal from integer
     pub fn fromInt(allocator: std.mem.Allocator, value: i64) !*BigDecimal {
         const abs_value = if (value < 0) @as(u64, @intCast(-value)) else @as(u64, @intCast(value));
-        
+
         // Convert to string first
         var buffer: [32]u8 = undefined;
         const str = try std.fmt.bufPrint(&buffer, "{d}", .{abs_value});
-        
+
         const bd = try allocator.create(BigDecimal);
         bd.allocator = allocator;
         bd.ref_count = std.atomic.Value(usize).init(1);
         bd.sign = value >= 0;
         bd.scale = 0;
-        
+
         bd.digits = try allocator.alloc(u8, str.len);
         for (str, 0..) |char, i| {
             bd.digits[i] = char - '0';
         }
-        
+
         return bd;
     }
 
@@ -195,7 +195,7 @@ pub const BigDecimal = struct {
         // Convert float to string with sufficient precision
         var buffer: [64]u8 = undefined;
         const str = try std.fmt.bufPrint(&buffer, "{d:.15}", .{value});
-        
+
         return try init(allocator, str);
     }
 
@@ -235,7 +235,7 @@ pub const BigDecimal = struct {
         while (start < self.digits.len - 1 and self.digits[start] == 0) {
             start += 1;
         }
-        
+
         if (start > 0) {
             const new_len = self.digits.len - start;
             std.mem.copyForwards(u8, self.digits[0..new_len], self.digits[start..]);
@@ -269,7 +269,7 @@ pub const BigDecimal = struct {
         if (self.sign) {
             return self.clone();
         }
-        
+
         const result = try self.clone();
         result.sign = true;
         return result;
@@ -282,10 +282,10 @@ pub const BigDecimal = struct {
         new_bd.ref_count = std.atomic.Value(usize).init(1);
         new_bd.sign = self.sign;
         new_bd.scale = self.scale;
-        
+
         new_bd.digits = try self.allocator.alloc(u8, self.digits.len);
         @memcpy(new_bd.digits, self.digits);
-        
+
         return new_bd;
     }
 
@@ -313,7 +313,7 @@ pub const BigDecimal = struct {
 
         // Add integer part
         const integer_digits = if (self.digits.len > self.scale) self.digits.len - self.scale else 0;
-        
+
         if (integer_digits == 0) {
             try result.append(self.allocator, '0');
         } else {
@@ -325,14 +325,14 @@ pub const BigDecimal = struct {
         // Add decimal part
         if (self.scale > 0) {
             try result.append(self.allocator, '.');
-            
+
             // Add leading zeros if needed
             if (integer_digits == 0 and self.digits.len < self.scale) {
                 for (0..self.scale - self.digits.len) |_| {
                     try result.append(self.allocator, '0');
                 }
             }
-            
+
             // Add fractional digits
             const fractional_start = if (integer_digits > 0) integer_digits else 0;
             for (self.digits[fractional_start..]) |digit| {
@@ -346,12 +346,12 @@ pub const BigDecimal = struct {
     /// Set the scale (number of decimal places)
     pub fn setScale(self: *BigDecimal, scale: u32) void {
         if (scale == self.scale) return;
-        
+
         if (scale > self.scale) {
             // Increase scale - add trailing zeros
             const new_digits = self.allocator.realloc(self.digits, self.digits.len + (scale - self.scale)) catch return;
             self.digits = new_digits;
-            
+
             // Add zeros at the end
             for (self.digits.len - (scale - self.scale)..self.digits.len) |i| {
                 self.digits[i] = 0;
@@ -368,7 +368,7 @@ pub const BigDecimal = struct {
                 self.digits = self.allocator.realloc(self.digits, new_len) catch self.digits[0..new_len];
             }
         }
-        
+
         self.scale = scale;
         self.removeLeadingZeros();
     }
@@ -376,13 +376,13 @@ pub const BigDecimal = struct {
     /// Normalize two BigDecimals to have the same scale
     fn normalize(self: *const BigDecimal, other: *const BigDecimal) !struct { a: *BigDecimal, b: *BigDecimal } {
         const max_scale = @max(self.scale, other.scale);
-        
+
         var a = try self.clone();
         var b = try other.clone();
-        
+
         a.setScale(max_scale);
         b.setScale(max_scale);
-        
+
         return .{ .a = a, .b = b };
     }
 
@@ -401,7 +401,7 @@ pub const BigDecimal = struct {
         if (self.sign == other.sign) {
             return try addMagnitudes(normalized.a, normalized.b, self.sign);
         }
-        
+
         // Different signs: subtract magnitudes
         const cmp = compareMagnitudes(normalized.a, normalized.b);
         if (cmp == 0) {
@@ -432,7 +432,7 @@ pub const BigDecimal = struct {
         if (self.sign != other.sign) {
             return try addMagnitudes(normalized.a, normalized.b, self.sign);
         }
-        
+
         // Same sign: subtract magnitudes
         const cmp = compareMagnitudes(normalized.a, normalized.b);
         if (cmp == 0) {
@@ -508,7 +508,7 @@ pub const BigDecimal = struct {
 
         // For simplicity, we'll implement long division with a fixed precision
         const precision = @max(self.scale, other.scale) + DEFAULT_SCALE;
-        
+
         // Scale up dividend to get desired precision
         var dividend = try self.clone();
         defer dividend.release();
@@ -575,7 +575,7 @@ pub const BigDecimal = struct {
 
         // Both have same sign
         const magnitude_cmp = compareMagnitudes(self, other);
-        
+
         if (self.sign) {
             return magnitude_cmp;
         } else {
@@ -614,17 +614,17 @@ pub const BigDecimal = struct {
 
         var carry: u8 = 0;
         var i: usize = 0;
-        
+
         while (i < max_len or carry > 0) {
             var sum: u8 = carry;
-            
+
             if (i < a.digits.len) {
                 sum += a.digits[a.digits.len - 1 - i];
             }
             if (i < b.digits.len) {
                 sum += b.digits[b.digits.len - 1 - i];
             }
-            
+
             result_digits[result_digits.len - 1 - i] = sum % 10;
             carry = sum / 10;
             i += 1;
@@ -648,21 +648,21 @@ pub const BigDecimal = struct {
 
         var borrow: u8 = 0;
         var i: usize = 0;
-        
+
         while (i < b.digits.len or borrow > 0) {
             var diff: i16 = @as(i16, result_digits[result_digits.len - 1 - i]) - borrow;
-            
+
             if (i < b.digits.len) {
                 diff -= b.digits[b.digits.len - 1 - i];
             }
-            
+
             if (diff < 0) {
                 diff += 10;
                 borrow = 1;
             } else {
                 borrow = 0;
             }
-            
+
             result_digits[result_digits.len - 1 - i] = @intCast(diff);
             i += 1;
         }
@@ -711,7 +711,7 @@ pub const BigDecimal = struct {
 
         const result = try self.clone();
         const digits_to_remove = self.scale - scale;
-        
+
         if (digits_to_remove >= result.digits.len) {
             // All digits would be removed, result is zero
             result.allocator.free(result.digits);
@@ -725,7 +725,7 @@ pub const BigDecimal = struct {
         // Check if we need to round up
         const round_digit_idx = result.digits.len - digits_to_remove;
         var should_round_up = false;
-        
+
         if (round_digit_idx < result.digits.len) {
             should_round_up = result.digits[round_digit_idx] >= 5;
         }
@@ -739,14 +739,14 @@ pub const BigDecimal = struct {
         if (should_round_up) {
             var carry: u8 = 1;
             var i: usize = result.digits.len;
-            
+
             while (i > 0 and carry > 0) {
                 i -= 1;
                 const sum = result.digits[i] + carry;
                 result.digits[i] = sum % 10;
                 carry = sum / 10;
             }
-            
+
             // If we still have carry, we need to add a digit
             if (carry > 0) {
                 const new_digits = try result.allocator.alloc(u8, result.digits.len + 1);

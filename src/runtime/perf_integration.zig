@@ -1,15 +1,14 @@
 /// Linux Perf 集成
-/// 
+///
 /// 提供与 Linux perf 工具的集成，支持：
 /// - perf_event_open 系统调用
 /// - 硬件性能计数器
 /// - 软件性能计数器
 /// - perf.data 文件生成
-/// 
+///
 /// @platform Linux
 /// @concurrency-model THREAD_SAFE
 /// @ownership NON-OWNING (allocator)
-
 const std = @import("std");
 const builtin = @import("builtin");
 const Profiler = @import("profiler.zig").Profiler;
@@ -97,7 +96,7 @@ pub const PerfEventAttr = extern struct {
     aux_watermark: u32,
     sample_max_stack: u16,
     reserved2: u16,
-    
+
     pub fn init(event_type: PerfEventType, config: u64) PerfEventAttr {
         return .{
             .type = @intFromEnum(event_type),
@@ -129,7 +128,7 @@ pub const PerfEventCounter = struct {
     event_type: PerfEventType,
     config: u64,
     enabled: bool,
-    
+
     /// 初始化计数器
     pub fn init(event_type: PerfEventType, config: u64) !PerfEventCounter {
         return PerfEventCounter{
@@ -139,7 +138,7 @@ pub const PerfEventCounter = struct {
             .enabled = false,
         };
     }
-    
+
     /// 清理资源
     pub fn deinit(self: *PerfEventCounter) void {
         if (self.fd >= 0) {
@@ -147,31 +146,31 @@ pub const PerfEventCounter = struct {
             self.fd = -1;
         }
     }
-    
+
     /// 启用计数器
     pub fn enable(self: *PerfEventCounter) !void {
         if (builtin.os.tag != .linux) {
             return error.UnsupportedPlatform;
         }
-        
+
         // 在 Linux 上，这里应该调用 perf_event_open
         // 简化实现：仅标记为启用
         self.enabled = true;
     }
-    
+
     /// 禁用计数器
     pub fn disable(self: *PerfEventCounter) !void {
         self.enabled = false;
     }
-    
+
     /// 读取计数器值
     pub fn read(self: *const PerfEventCounter) !u64 {
         if (!self.enabled) return 0;
-        
+
         // 简化实现：返回模拟值
         return @intCast(std.time.nanoTimestamp());
     }
-    
+
     /// 重置计数器
     pub fn reset(self: *PerfEventCounter) !void {
         // 简化实现
@@ -183,27 +182,27 @@ pub const PerfEventCounter = struct {
 pub const PerfIntegration = struct {
     allocator: std.mem.Allocator,
     profiler: *Profiler,
-    
+
     // 硬件计数器
     cycles_counter: PerfEventCounter,
     instructions_counter: PerfEventCounter,
     cache_misses_counter: PerfEventCounter,
     branch_misses_counter: PerfEventCounter,
-    
+
     // 软件计数器
     page_faults_counter: PerfEventCounter,
     context_switches_counter: PerfEventCounter,
-    
+
     // 采样配置
     sampling_enabled: bool,
     sampling_frequency: u64,
-    
+
     /// 初始化 Perf 集成
     pub fn init(allocator: std.mem.Allocator, profiler: *Profiler) !PerfIntegration {
         if (builtin.os.tag != .linux) {
             return error.UnsupportedPlatform;
         }
-        
+
         return PerfIntegration{
             .allocator = allocator,
             .profiler = profiler,
@@ -217,7 +216,7 @@ pub const PerfIntegration = struct {
             .sampling_frequency = 1000, // 1000 Hz
         };
     }
-    
+
     /// 清理资源
     pub fn deinit(self: *PerfIntegration) void {
         self.cycles_counter.deinit();
@@ -227,7 +226,7 @@ pub const PerfIntegration = struct {
         self.page_faults_counter.deinit();
         self.context_switches_counter.deinit();
     }
-    
+
     /// 启动性能监控
     pub fn start(self: *PerfIntegration) !void {
         try self.cycles_counter.enable();
@@ -237,7 +236,7 @@ pub const PerfIntegration = struct {
         try self.page_faults_counter.enable();
         try self.context_switches_counter.enable();
     }
-    
+
     /// 停止性能监控
     pub fn stop(self: *PerfIntegration) !void {
         try self.cycles_counter.disable();
@@ -247,7 +246,7 @@ pub const PerfIntegration = struct {
         try self.page_faults_counter.disable();
         try self.context_switches_counter.disable();
     }
-    
+
     /// 读取所有计数器
     pub fn readCounters(self: *const PerfIntegration) !PerfCounters {
         return PerfCounters{
@@ -259,33 +258,33 @@ pub const PerfIntegration = struct {
             .context_switches = try self.context_switches_counter.read(),
         };
     }
-    
+
     /// 启用采样
     pub fn enableSampling(self: *PerfIntegration, frequency: u64) void {
         self.sampling_enabled = true;
         self.sampling_frequency = frequency;
     }
-    
+
     /// 禁用采样
     pub fn disableSampling(self: *PerfIntegration) void {
         self.sampling_enabled = false;
     }
-    
+
     /// 生成 perf.data 文件
     pub fn generatePerfData(self: *const PerfIntegration, output_path: []const u8) !void {
         const file = try std.fs.cwd.createFile(output_path, .{});
         defer file.close();
-        
+
         var writer = file.writer();
-        
+
         // 写入头部
         try writer.writeAll("PERFILE2\n");
-        
+
         // 写入元数据
         try writer.print("# sampling_frequency: {d}\n", .{self.sampling_frequency});
         try writer.print("# platform: {s}\n", .{@tagName(builtin.os.tag)});
         try writer.print("# arch: {s}\n", .{@tagName(builtin.cpu.arch)});
-        
+
         // 写入性能数据
         const counters = try self.readCounters();
         try writer.print("# cpu_cycles: {d}\n", .{counters.cpu_cycles});
@@ -294,12 +293,12 @@ pub const PerfIntegration = struct {
         try writer.print("# branch_misses: {d}\n", .{counters.branch_misses});
         try writer.print("# page_faults: {d}\n", .{counters.page_faults});
         try writer.print("# context_switches: {d}\n", .{counters.context_switches});
-        
+
         // 写入函数统计
         try writer.writeAll("\n# Function Statistics\n");
         const all_stats = try self.profiler.getAllStats(self.allocator);
         defer self.allocator.free(all_stats);
-        
+
         for (all_stats) |stats| {
             try writer.print("{s} {d} {d} {d}\n", .{
                 stats.name,
@@ -309,11 +308,11 @@ pub const PerfIntegration = struct {
             });
         }
     }
-    
+
     /// 打印性能报告
     pub fn printReport(self: *const PerfIntegration) !void {
         std.debug.print("\n=== Perf 性能报告 ===\n", .{});
-        
+
         const counters = try self.readCounters();
         std.debug.print("CPU 周期: {d}\n", .{counters.cpu_cycles});
         std.debug.print("指令数: {d}\n", .{counters.instructions});
@@ -333,13 +332,13 @@ pub const PerfCounters = struct {
     branch_misses: u64,
     page_faults: u64,
     context_switches: u64,
-    
+
     /// 计算 IPC (Instructions Per Cycle)
     pub fn ipc(self: *const PerfCounters) f64 {
         if (self.cpu_cycles == 0) return 0.0;
         return @as(f64, @floatFromInt(self.instructions)) / @as(f64, @floatFromInt(self.cpu_cycles));
     }
-    
+
     /// 计算缓存命中率
     pub fn cacheHitRate(self: *const PerfCounters) f64 {
         const total_accesses = self.instructions; // 简化假设
@@ -347,7 +346,7 @@ pub const PerfCounters = struct {
         const hits = total_accesses - self.cache_misses;
         return @as(f64, @floatFromInt(hits)) / @as(f64, @floatFromInt(total_accesses));
     }
-    
+
     /// 计算分支预测准确率
     pub fn branchPredictionAccuracy(self: *const PerfCounters) f64 {
         const total_branches = self.instructions / 5; // 简化假设：20% 是分支指令
@@ -363,62 +362,62 @@ pub const PerfCounters = struct {
 
 test "PerfEventCounter 基本功能" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
-    
+
     var counter = try PerfEventCounter.init(.hardware, @intFromEnum(HardwareEvent.cpu_cycles));
     defer counter.deinit();
-    
+
     try counter.enable();
-    
+
     // 模拟一些工作
     var sum: u64 = 0;
     var i: u64 = 0;
     while (i < 1000) : (i += 1) {
         sum += i;
     }
-    
+
     const value = try counter.read();
     try std.testing.expect(value > 0);
-    
+
     try counter.disable();
 }
 
 test "PerfIntegration 初始化" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
-    
+
     const allocator = std.testing.allocator;
-    
+
     var profiler = try Profiler.init(allocator, .perf);
     defer profiler.deinit();
-    
+
     var perf = try PerfIntegration.init(allocator, &profiler);
     defer perf.deinit();
-    
+
     try std.testing.expect(!perf.sampling_enabled);
     try std.testing.expectEqual(@as(u64, 1000), perf.sampling_frequency);
 }
 
 test "PerfIntegration 启动和停止" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
-    
+
     const allocator = std.testing.allocator;
-    
+
     var profiler = try Profiler.init(allocator, .perf);
     defer profiler.deinit();
-    
+
     var perf = try PerfIntegration.init(allocator, &profiler);
     defer perf.deinit();
-    
+
     try perf.start();
-    
+
     // 模拟工作
     var sum: u64 = 0;
     var i: u64 = 0;
     while (i < 1000) : (i += 1) {
         sum += i;
     }
-    
+
     try perf.stop();
-    
+
     const counters = try perf.readCounters();
     try std.testing.expect(counters.cpu_cycles > 0);
 }
@@ -432,7 +431,7 @@ test "PerfCounters IPC 计算" {
         .page_faults = 5,
         .context_switches = 2,
     };
-    
+
     const ipc_value = counters.ipc();
     try std.testing.expectEqual(@as(f64, 2.0), ipc_value);
 }
@@ -446,27 +445,27 @@ test "PerfCounters 缓存命中率" {
         .page_faults = 5,
         .context_switches = 2,
     };
-    
+
     const hit_rate = counters.cacheHitRate();
     try std.testing.expectEqual(@as(f64, 0.9), hit_rate);
 }
 
 test "PerfIntegration 采样控制" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
-    
+
     const allocator = std.testing.allocator;
-    
+
     var profiler = try Profiler.init(allocator, .perf);
     defer profiler.deinit();
-    
+
     var perf = try PerfIntegration.init(allocator, &profiler);
     defer perf.deinit();
-    
+
     // 启用采样
     perf.enableSampling(5000);
     try std.testing.expect(perf.sampling_enabled);
     try std.testing.expectEqual(@as(u64, 5000), perf.sampling_frequency);
-    
+
     // 禁用采样
     perf.disableSampling();
     try std.testing.expect(!perf.sampling_enabled);

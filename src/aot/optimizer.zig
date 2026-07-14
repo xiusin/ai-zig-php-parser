@@ -38,6 +38,7 @@ const BackEdge = struct {
 };
 const DiagnosticEngine = Diagnostics.DiagnosticEngine;
 const Analysis = @import("analysis.zig");
+const ConstantFolder = @import("constant_folder.zig");
 // const EscapeAnalysis = @import("escape_analysis.zig").EscapeAnalysis;
 
 // ============================================================================
@@ -100,6 +101,12 @@ pub const PassConfig = struct {
     unroll_factor: u32 = 4,
     /// Maximum optimization iterations
     max_iterations: u32 = 3,
+    /// Maximum instructions per function before skipping optimization
+    /// (prevents optimizer from hanging on very large functions)
+    max_instructions_per_function: u32 = 50000,
+    /// Maximum instruction growth ratio before early termination
+    /// (if instructions grow by this factor, stop iterating)
+    max_growth_ratio: u32 = 3,
 
     // ========== 高级优化（现代编译器技术）==========
     /// Scalar Replacement (Java HotSpot)
@@ -209,7 +216,9 @@ pub const PassConfig = struct {
             .loop_unroll = false, // Unrolling increases size
             .cfg_cleanup = true,
             .rc_elision = true,
-            .max_iterations = 2,
+            .max_iterations = 1, // 减少迭代避免挂起；release-small 目标是代码大小，单轮迭代足够
+            .copy_propagation = false, // 禁用 copy_propagation 避免与其他 pass 振荡
+            .max_instructions_per_function = 30000, // 更严格的指令数限制
         };
     }
 };
@@ -330,14 +339,7 @@ pub const IROptimizer = struct {
     const Self = @This();
 
     /// Constant value representation
-    pub const ConstantValue = union(enum) {
-        int: i64,
-        float: f64,
-        bool_val: bool,
-        null_val: void,
-        missing_val: void,
-        string_id: u32,
-    };
+    pub const ConstantValue = ConstantFolder.ConstantValue;
 
     /// Function information for inlining
     pub const FunctionInfo = struct {
@@ -404,19 +406,42 @@ pub const IROptimizer = struct {
         self.stats.reset();
     }
 
+    /// 跨平台纳秒时间戳（替代 std.os.linux.clock_gettime，macOS 兼容）
+    inline fn nanoTimestamp(self: *const Self) i128 {
+        _ = self;
+        var ts: std.posix.timespec = undefined;
+        _ = std.posix.system.clock_gettime(.MONOTONIC, &ts);
+        return @as(i128, @intCast(ts.sec)) * std.time.ns_per_s + @as(i128, @intCast(ts.nsec));
+    }
+
     // ========================================================================
     // Main Optimization Entry Point
     // ========================================================================
 
     /// Optimize an IR module
     pub fn optimize(self: *Self, module: *Module) !void {
-        // std.debug.print("Optimizer: Starting optimization (mem2reg={}, max_iter={})\n", .{ self.config.mem2reg, self.config.max_iterations });
-
         self.current_module = module;
         defer self.current_module = null;
 
         // Build call graph for inlining decisions
         try self.buildCallGraph(module);
+
+        // 跳过指令数过多的函数，避免优化器挂起
+        for (module.functions.items) |func| {
+            const inst_count = self.countFunctionInstructions(func);
+            if (inst_count > self.config.max_instructions_per_function) {
+                // 对超大函数只运行 DCE + cfg_cleanup，跳过昂贵 pass
+                _ = try self.eliminateDeadCodeInFunction(func);
+                _ = try self.cleanupCFGInFunction(func);
+            }
+        }
+
+        // 记录初始指令数，用于增长检测
+        const initial_inst_count = self.countModuleInstructions(module);
+
+        // P2-2: 在优化循环前分析参数 COW 需求
+        // 标记只读数组参数为 cow_skip，在代码生成时跳过 COW 检查
+        try self.analyzeParamCOWForModule(module);
 
         // Run optimization passes iteratively
         var iteration: u32 = 0;
@@ -427,7 +452,8 @@ pub const IROptimizer = struct {
             iteration += 1;
             self.stats.passes_run += 1;
 
-            // Run each enabled pass
+            // ===== 第一阶段：基础优化 =====
+
             if (self.config.mem2reg) {
                 if (try self.runMem2Reg(module)) {
                     changed = true;
@@ -436,7 +462,6 @@ pub const IROptimizer = struct {
             }
 
             // 类型推断和特化（在 mem2reg 后运行）
-            // std.debug.print("Optimizer: Running type inference and specialization...\n", .{});
             if (try self.runTypeInferenceAndSpecialization(module)) {
                 changed = true;
             }
@@ -484,6 +509,8 @@ pub const IROptimizer = struct {
                 if (self.verify_ir) try self.verifyModule(module);
             }
 
+            // ===== 第二阶段：结构优化 =====
+
             if (self.config.function_inlining) {
                 if (try self.runFunctionInlining(module)) {
                     changed = true;
@@ -526,7 +553,7 @@ pub const IROptimizer = struct {
                 if (self.verify_ir) try self.verifyModule(module);
             }
 
-            // ========== 高级优化 Passes ==========
+            // ===== 第三阶段：高级优化 Passes =====
 
             if (self.config.scalar_replacement) {
                 if (try self.runScalarReplacement(module)) {
@@ -570,6 +597,7 @@ pub const IROptimizer = struct {
                 if (self.verify_ir) try self.verifyModule(module);
             }
 
+            // LICM/loop_unroll 后再跑一次 DCE 清理
             if (changed and self.config.dead_code_elimination and (self.config.licm or self.config.loop_unroll)) {
                 if (try self.runDeadCodeElimination(module)) {
                     changed = true;
@@ -583,6 +611,19 @@ pub const IROptimizer = struct {
                 }
                 if (self.verify_ir) try self.verifyModule(module);
             }
+
+            // 增长检测：如果指令数增长超过阈值，提前终止迭代
+            const current_inst_count = self.countModuleInstructions(module);
+            if (current_inst_count > initial_inst_count * self.config.max_growth_ratio) {
+                break;
+            }
+        }
+
+        // PHI 悬空指针修复：优化 pass 可能释放了 block 但未更新 PHI incoming.block
+        // 用 predecessors 列表（rebuildCFG 维护，指针有效）重建 PHI incoming
+        for (module.functions.items) |func| {
+            try Analysis.rebuildCFG(func);
+            try self.fixupDanglingPhiReferences(func);
         }
 
         // 优化完成后，最后一次运行类型推断并保存结果
@@ -615,12 +656,27 @@ pub const IROptimizer = struct {
 
     /// Optimize a single function
     pub fn optimizeFunction(self: *Self, func: *Function) !void {
+        // 跳过指令数过多的函数，避免优化器挂起
+        const initial_inst_count = self.countFunctionInstructions(func);
+        if (initial_inst_count > self.config.max_instructions_per_function) {
+            // 对超大函数只运行 DCE + cfg_cleanup
+            _ = try self.eliminateDeadCodeInFunction(func);
+            _ = try self.cleanupCFGInFunction(func);
+            return;
+        }
+
         var changed = true;
         var iteration: u32 = 0;
 
         while (changed and iteration < self.config.max_iterations) {
             changed = false;
             iteration += 1;
+
+            // 增长检测：如果指令数增长超过阈值，提前终止
+            const current_inst_count = self.countFunctionInstructions(func);
+            if (current_inst_count > initial_inst_count * self.config.max_growth_ratio) {
+                break;
+            }
 
             if (self.config.mem2reg) {
                 if (try self.promoteMemoryToRegisters(func)) {
@@ -692,6 +748,31 @@ pub const IROptimizer = struct {
                 if (self.verify_ir) try self.verifyFunction(func);
             }
         }
+    }
+
+    /// 统计模块中所有函数的指令总数
+    fn countModuleInstructions(self: *Self, module: *Module) u64 {
+        _ = self;
+        var total: u64 = 0;
+        for (module.functions.items) |func| {
+            total += countFunctionInstructionsImpl(func);
+        }
+        return total;
+    }
+
+    /// 统计单个函数的指令数
+    fn countFunctionInstructions(self: *Self, func: *Function) u64 {
+        _ = self;
+        return countFunctionInstructionsImpl(func);
+    }
+
+    /// 指令计数实现（无 allocator 依赖）
+    fn countFunctionInstructionsImpl(func: *Function) u64 {
+        var count: u64 = 0;
+        for (func.blocks.items) |block| {
+            count += block.instructions.items.len;
+        }
+        return count;
     }
 
     fn verifyModule(self: *Self, module: *Module) !void {
@@ -874,7 +955,7 @@ pub const IROptimizer = struct {
     fn isLoopInvariant(self: *Self, inst: *Instruction, loop: *Analysis.Loop) bool {
         // 纯常量指令始终可提升
         switch (inst.op) {
-            .const_int, .const_float, .const_bool, .const_string, .const_null, .const_missing => return true,
+            .const_int, .const_float, .const_bool, .const_string, .const_null, .const_missing, .const_array => return true,
             else => {},
         }
 
@@ -942,7 +1023,7 @@ pub const IROptimizer = struct {
             .box => |op| return self.isInvariant(op.value, loop),
             .unbox => |op| return self.isInvariant(op.value, loop),
             // Constants are always invariant
-            .const_int, .const_float, .const_bool, .const_string, .const_null, .const_missing, .arg_count, .has_arg => return true,
+            .const_int, .const_float, .const_bool, .const_string, .const_null, .const_missing, .const_array, .arg_count, .has_arg => return true,
             // Allocas are invariant (address is constant)
             .alloca => return true,
             else => return false, // Conservative
@@ -1518,6 +1599,189 @@ pub const IROptimizer = struct {
     }
 
     // ========================================================================
+    // Param COW Analysis (P2-2: mem2reg needs_cow 属性感知)
+    // ========================================================================
+
+    /// 对模块中所有函数分析参数 COW 需求
+    /// 标记只读数组参数为 cow_skip，在代码生成时跳过 COW 检查
+    fn analyzeParamCOWForModule(self: *Self, module: *Module) !void {
+        for (module.functions.items) |func| {
+            try self.analyzeParamCOW(func);
+        }
+    }
+
+    /// 分析单个函数的参数 COW 需求
+    /// 如果参数数组值在函数体内从未被 array_set/array_push/array_unset 修改，则标记为 cow_skip
+    fn analyzeParamCOW(self: *Self, func: *Function) !void {
+        func.cow_skip_params.clearRetainingCapacity();
+
+        // 无参数函数无需分析
+        if (func.params.items.len == 0) return;
+
+        // 引用参数始终需要 COW（它们是引用语义）
+        var ref_param_set = std.AutoHashMap(u32, void).init(self.allocator);
+        defer ref_param_set.deinit();
+        for (func.ref_params.items) |ref_idx| {
+            try ref_param_set.put(ref_idx, {});
+        }
+
+        // ---- 第 1 阶段：收集所有 param 结果寄存器 ----
+        // param_value_regs: reg_id -> param_index
+        var param_value_regs = std.AutoHashMap(u32, u32).init(self.allocator);
+        defer param_value_regs.deinit();
+
+        // param_allocas: alloca_reg_id -> param_index
+        var param_allocas = std.AutoHashMap(u32, u32).init(self.allocator);
+        defer param_allocas.deinit();
+
+        // 找到所有 param 指令的结果寄存器
+        for (func.blocks.items) |block| {
+            for (block.instructions.items) |inst| {
+                switch (inst.op) {
+                    .param => |op| {
+                        if (inst.result) |reg| {
+                            try param_value_regs.put(reg.id, op.index);
+                        }
+                    },
+                    else => {},
+                }
+            }
+        }
+
+        // ---- 第 2 阶段：传播 param 派生值（工作列表算法）----
+        // 跟踪 select/move/cast 链和 store->load 链
+        var worklist = std.ArrayListUnmanaged(u32){ .items = &.{}, .capacity = 0 };
+        defer worklist.deinit(self.allocator);
+        {
+            var it = param_value_regs.iterator();
+            while (it.next()) |entry| {
+                try worklist.append(self.allocator, entry.key_ptr.*);
+            }
+        }
+
+        while (worklist.items.len > 0) {
+            const reg_id = worklist.pop() orelse break;
+
+            for (func.blocks.items) |block| {
+                for (block.instructions.items) |inst| {
+                    switch (inst.op) {
+                        // select: 如果操作数是 param 派生值，结果也是
+                        .select => |op| {
+                            if ((op.then_value.id == reg_id or op.else_value.id == reg_id) and inst.result != null) {
+                                const result_id = inst.result.?.id;
+                                if (param_value_regs.get(reg_id)) |param_idx| {
+                                    if (!param_value_regs.contains(result_id)) {
+                                        try param_value_regs.put(result_id, param_idx);
+                                        try worklist.append(self.allocator, result_id);
+                                    }
+                                }
+                            }
+                        },
+                        // move/cast: 如果操作数是 param 派生值，结果也是
+                        .move => |op| {
+                            if (op.operand.id == reg_id and inst.result != null) {
+                                const result_id = inst.result.?.id;
+                                if (param_value_regs.get(reg_id)) |param_idx| {
+                                    if (!param_value_regs.contains(result_id)) {
+                                        try param_value_regs.put(result_id, param_idx);
+                                        try worklist.append(self.allocator, result_id);
+                                    }
+                                }
+                            }
+                        },
+                        .cast => |op| {
+                            if (op.value.id == reg_id and inst.result != null) {
+                                const result_id = inst.result.?.id;
+                                if (param_value_regs.get(reg_id)) |param_idx| {
+                                    if (!param_value_regs.contains(result_id)) {
+                                        try param_value_regs.put(result_id, param_idx);
+                                        try worklist.append(self.allocator, result_id);
+                                    }
+                                }
+                            }
+                        },
+                        // store: 如果 value 是 param 派生值，目标 alloca 是 param 的
+                        .store => |op| {
+                            if (op.value.id == reg_id) {
+                                if (param_value_regs.get(reg_id)) |param_idx| {
+                                    if (!param_allocas.contains(op.ptr.id)) {
+                                        try param_allocas.put(op.ptr.id, param_idx);
+                                    }
+                                }
+                            }
+                        },
+                        // load: 如果从 param alloca 加载，结果寄存器是 param 派生值
+                        .load => |op| {
+                            if (param_allocas.get(op.ptr.id)) |param_idx| {
+                                if (inst.result) |result| {
+                                    if (!param_value_regs.contains(result.id)) {
+                                        try param_value_regs.put(result.id, param_idx);
+                                        try worklist.append(self.allocator, result.id);
+                                    }
+                                }
+                            }
+                        },
+                        else => {},
+                    }
+                }
+            }
+        }
+
+        // ---- 第 3 阶段：检查哪些参数被修改 ----
+        var modified_params = std.AutoHashMap(u32, void).init(self.allocator);
+        defer modified_params.deinit();
+
+        for (func.blocks.items) |block| {
+            for (block.instructions.items) |inst| {
+                switch (inst.op) {
+                    .array_set => |op| {
+                        if (param_value_regs.get(op.array.id)) |param_idx| {
+                            try modified_params.put(param_idx, {});
+                        }
+                    },
+                    .array_push => |op| {
+                        if (param_value_regs.get(op.array.id)) |param_idx| {
+                            try modified_params.put(param_idx, {});
+                        }
+                    },
+                    .array_set_nested => |op| {
+                        if (param_value_regs.get(op.outer_array.id)) |param_idx| {
+                            try modified_params.put(param_idx, {});
+                        }
+                    },
+                    .array_unset => |op| {
+                        if (param_value_regs.get(op.array.id)) |param_idx| {
+                            try modified_params.put(param_idx, {});
+                        }
+                    },
+                    else => {},
+                }
+            }
+        }
+
+        // ---- 第 4 阶段：标记未修改且非引用的参数为 COW-skip ----
+        for (func.params.items, 0..) |_, idx| {
+            const param_idx: u32 = @intCast(idx);
+            // 引用参数不跳过
+            if (ref_param_set.contains(param_idx)) continue;
+            // 被修改的参数不跳过
+            if (modified_params.contains(param_idx)) continue;
+            // 无法确定 alloca 的参数保守不跳过
+            // (param_value_regs 包含了所有 param 结果，如果 param 在列表中说明已追踪到)
+            var found = false;
+            var pv_it = param_value_regs.iterator();
+            while (pv_it.next()) |entry| {
+                if (entry.value_ptr.* == param_idx) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) continue;
+            try func.cow_skip_params.put(self.allocator, param_idx, {});
+        }
+    }
+
+    // ========================================================================
     // Mem2Reg (Promote Memory to Register)
     // ========================================================================
 
@@ -1537,19 +1801,15 @@ pub const IROptimizer = struct {
     /// Promote memory to registers in a single function
     fn promoteMemoryToRegisters(self: *Self, func: *Function) !bool {
 
-    // 超时保护：最多 5 秒
-    var start_ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &start_ts);
-    const timeout_ns = 5 * std.time.ns_per_s;
+        // 超时保护：最多 5 秒（使用跨平台时钟 API）
+        const start_ns = self.nanoTimestamp();
+        const timeout_ns: i128 = 5 * std.time.ns_per_s;
 
-    // 0. Rebuild CFG (ensure predecessors/successors are up to date)
-    try Analysis.rebuildCFG(func);
+        // 0. Rebuild CFG (ensure predecessors/successors are up to date)
+        try Analysis.rebuildCFG(func);
 
-    // Check timeout using clock_gettime
-    var now_ts: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &now_ts);
-    const elapsed_ns: u64 = @as(u64, @intCast(now_ts.sec - start_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(now_ts.nsec - start_ts.nsec));
-    if (elapsed_ns > timeout_ns) {
+        // Check timeout
+        if (self.nanoTimestamp() - start_ns > timeout_ns) {
             return false;
         }
 
@@ -1592,11 +1852,32 @@ pub const IROptimizer = struct {
 
         if (promotable_allocas.items.len == 0) return false;
 
+        // 3. Scan all blocks for stores to populate def_blocks
+        //    Each store to a promotable alloca defines a new value in that block.
+        for (func.blocks.items) |block| {
+            for (block.instructions.items) |inst| {
+                if (inst.*.op == .store) {
+                    if (reg_to_alloca.get(inst.op.store.ptr.id)) |alloca| {
+                        if (def_blocks.getPtr(alloca)) |defs| {
+                            // Avoid duplicates
+                            var already = false;
+                            for (defs.items) |d| {
+                                if (d == block) {
+                                    already = true;
+                                    break;
+                                }
+                            }
+                            if (!already) {
+                                try defs.append(self.allocator, block);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Check timeout
-    var nt1: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &nt1);
-    const el1: u64 = @as(u64, @intCast(nt1.sec - start_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(nt1.nsec - start_ts.nsec));
-    if (el1 > timeout_ns) {
+        if (self.nanoTimestamp() - start_ns > timeout_ns) {
             return false;
         }
 
@@ -1624,10 +1905,7 @@ pub const IROptimizer = struct {
         }
 
         // Check timeout
-    var nt2: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &nt2);
-    const el2: u64 = @as(u64, @intCast(nt2.sec - start_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(nt2.nsec - start_ts.nsec));
-    if (el2 > timeout_ns) {
+        if (self.nanoTimestamp() - start_ns > timeout_ns) {
             return false;
         }
 
@@ -1674,10 +1952,7 @@ pub const IROptimizer = struct {
         }
 
         // Check timeout
-    var nt3: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &nt3);
-    const el3: u64 = @as(u64, @intCast(nt3.sec - start_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(nt3.nsec - start_ts.nsec));
-    if (el3 > timeout_ns) {
+        if (self.nanoTimestamp() - start_ns > timeout_ns) {
             return false;
         }
 
@@ -1705,29 +1980,7 @@ pub const IROptimizer = struct {
         // We'll assume valid code or handle it.
 
         if (func.getEntryBlock()) |entry| {
-            // 记录回边的 phi incoming
-            var back_edges = try std.ArrayList(BackEdge).initCapacity(self.allocator, 0);
-            defer back_edges.deinit(self.allocator);
-
-            try self.renameVariables(entry, &dt, &current_values, &new_phis, &reg_to_alloca, &reg_rename_map, &back_edges);
-
-            // 填充回边
-            for (back_edges.items) |edge| {
-                if (new_phis.getPtr(edge.to)) |succ_phis| {
-                    if (succ_phis.getPtr(edge.alloca)) |phi_inst_ptr| {
-                        const phi_inst = phi_inst_ptr.*;
-                        // std.debug.print("  Adding phi incoming (back-edge): block_{d} -> block_{d}, reg_{d}\n", .{ edge.from.index, edge.to.index, edge.value.id });
-
-                        const old_incoming = phi_inst.op.phi.incoming;
-                        const new_incoming = try self.allocator.alloc(IR.Instruction.PhiIncoming, old_incoming.len + 1);
-                        @memcpy(new_incoming[0..old_incoming.len], old_incoming);
-                        new_incoming[old_incoming.len] = .{ .value = edge.value, .block = edge.from };
-
-                        if (old_incoming.len > 0) self.allocator.free(old_incoming);
-                        phi_inst.op.phi.incoming = new_incoming;
-                    }
-                }
-            }
+            try self.renameVariables(entry, &dt, &current_values, &new_phis, &reg_to_alloca, &reg_rename_map, func);
         }
 
         // 6. 应用寄存器重命名：更新所有指令的操作数
@@ -1735,11 +1988,22 @@ pub const IROptimizer = struct {
             try self.applyRegisterRenaming(func, &reg_rename_map);
         }
 
+        // VERIFY: Check phi incoming counts after register renaming
+        {
+            for (func.blocks.items) |blk| {
+                for (blk.instructions.items) |inst| {
+                    if (inst.*.op == .phi and inst.result != null) {
+                        const inc_count = inst.op.phi.incoming.len;
+                        if (inc_count < 2) {
+                            // std.debug.print("  WARNING after rename: phi reg_{d} has only {d} incoming\n", .{ inst.result.?.id, inc_count });
+                        }
+                    }
+                }
+            }
+        }
+
         // Check timeout
-    var nt4: std.os.linux.timespec = undefined;
-    _ = std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &nt4);
-    const el4: u64 = @as(u64, @intCast(nt4.sec - start_ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(nt4.nsec - start_ts.nsec));
-    if (el4 > timeout_ns) {
+        if (self.nanoTimestamp() - start_ns > timeout_ns) {
             return false;
         }
 
@@ -1809,7 +2073,7 @@ pub const IROptimizer = struct {
                         // std.debug.print("  Specialized phi reg_{d} to f64\n", .{phi_inst.result.?.id});
                     } else if (has_bool and !has_i64 and !has_f64) {
                         phi_inst.result.?.type_ = .{ .bool = {} };
-                        std.debug.print("  Specialized phi reg_{d} to bool\n", .{phi_inst.result.?.id});
+                        // std.debug.print("  Specialized phi reg_{d} to bool\n", .{phi_inst.result.?.id});
                     }
                 }
             }
@@ -1825,7 +2089,7 @@ pub const IROptimizer = struct {
             var phi_it = entry.value_ptr.iterator();
             while (phi_it.next()) |phi_entry| {
                 try all_phi_insts.put(phi_entry.value_ptr.*, {});
-                std.debug.print("  Found phi: {any}\n", .{phi_entry.value_ptr.*.result});
+                // std.debug.print("  Found phi: {any}\n", .{phi_entry.value_ptr.*.result});
             }
         }
 
@@ -1858,7 +2122,7 @@ pub const IROptimizer = struct {
                 // 只传播原生类型（i64/f64/bool）
                 if (result_tag == .i64 or result_tag == .f64 or result_tag == .bool) {
                     try worklist.append(self.allocator, result.id);
-                    std.debug.print("  Starting propagation from phi reg_{d} ({any})\n", .{ result.id, result_tag });
+                    // std.debug.print("  Starting propagation from phi reg_{d} ({any})\n", .{ result.id, result_tag });
                 }
             }
         }
@@ -1897,8 +2161,8 @@ pub const IROptimizer = struct {
             for (func.blocks.items) |block| {
                 for (block.instructions.items) |*inst| {
                     const propagated = try self.propagateTypeToInstruction(inst, reg_id, def_type, &worklist);
-                    if (propagated) |new_reg| {
-                        std.debug.print("  Propagated {any} from reg_{d} to reg_{d}\n", .{ def_tag, reg_id, new_reg });
+                    if (propagated) |_| {
+                        // std.debug.print("  Propagated {any} from reg_{d} to reg_{d}\n", .{ def_tag, reg_id, new_reg });
                     }
                 }
             }
@@ -2007,7 +2271,7 @@ pub const IROptimizer = struct {
                         if (op.ptr.id == result_id) {
                             // Valid use
                             if (!op.type_.eql(alloca.op.alloca.type_)) {
-                                std.debug.print("  reg_{d} NOT promotable: load type mismatch\n", .{result_id});
+                                // std.debug.print("  reg_{d} NOT promotable: load type mismatch\n", .{result_id});
                                 return false;
                             }
                         }
@@ -2016,19 +2280,40 @@ pub const IROptimizer = struct {
                         if (op.ptr.id == result_id) {
                             // Valid use
                             if (op.value.id == result_id) {
-                                std.debug.print("  reg_{d} NOT promotable: storing pointer to itself\n", .{result_id});
+                                // std.debug.print("  reg_{d} NOT promotable: storing pointer to itself\n", .{result_id});
                                 return false;
+                            }
+                            // 数组变量需要 COW 语义，不能被 mem2reg 提升
+                            // 否则链式赋值 $a = $b = [] 会导致两个变量共享同一寄存器
+                            // 但参数 alloca 例外：参数的 COW 由 val_assign 处理，提升不影响正确性
+                            if (@as(std.meta.Tag(IR.Type), op.value.type_) == .php_array) {
+                                // 检查是否是参数 alloca
+                                var is_param = false;
+                                if (alloca.op == .alloca) {
+                                    const var_name = alloca.op.alloca.var_name;
+                                    if (var_name.len > 0) {
+                                        for (func.params.items) |param| {
+                                            if (std.mem.eql(u8, param.name, var_name)) {
+                                                is_param = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                if (!is_param) {
+                                    return false;
+                                }
                             }
                         } else if (op.value.id == result_id) {
                             // Escaping pointer!
-                            std.debug.print("  reg_{d} NOT promotable: escaping pointer\n", .{result_id});
+                            // std.debug.print("  reg_{d} NOT promotable: escaping pointer\n", .{result_id});
                             return false;
                         }
                     },
                     else => {
                         // Check if register is used in other operands
                         if (self.usesRegister(inst, result_id)) {
-                            std.debug.print("  reg_{d} NOT promotable: used in {s}\n", .{ result_id, @tagName(inst.op) });
+                            // std.debug.print("  reg_{d} NOT promotable: used in {s}\n", .{ result_id, @tagName(inst.op) });
                             return false;
                         }
                     },
@@ -2049,6 +2334,7 @@ pub const IROptimizer = struct {
             .eq, .ne, .lt, .le, .gt, .ge, .identical, .not_identical, .spaceship => |op| return op.lhs.id == reg_id or op.rhs.id == reg_id,
             .and_, .or_, .xor_, .concat => |op| return op.lhs.id == reg_id or op.rhs.id == reg_id,
             .neg, .bit_not, .not, .strlen, .array_count, .clone, .retain, .release, .debug_print, .get_type => |op| return op.operand.id == reg_id,
+            .make_ref => |op| return op.ptr.id == reg_id,
             .call => |op| {
                 for (op.args) |arg| if (arg.id == reg_id) return true;
                 return false;
@@ -2068,7 +2354,7 @@ pub const IROptimizer = struct {
         new_phis: *std.AutoHashMap(*BasicBlock, std.AutoHashMap(*Instruction, *Instruction)),
         reg_to_alloca: *std.AutoHashMap(u32, *Instruction),
         reg_rename_map: *std.AutoHashMap(u32, u32),
-        back_edges: *std.ArrayList(BackEdge),
+        func: *Function,
     ) !void {
         // 防止无限递归
         const max_depth = 1000;
@@ -2149,61 +2435,53 @@ pub const IROptimizer = struct {
             }
         }
 
-        // 3. Recurse to dominated blocks FIRST
-        for (dt.children[block.index].items) |child| {
-            try self.renameVariables(child, dt, current_values, new_phis, reg_to_alloca, reg_rename_map, back_edges);
-        }
-
-        // 4. Update Successors' Phis AFTER recursion
-        // 只更新非回边的 phi（回边会在第二遍处理）
+        // 3. Update Successors' Phis BEFORE recursion (standard mem2reg order)
+        // 统一处理所有后继的 phi incoming（不区分 forward/back-edge）
         for (block.successors.items) |succ| {
-            // 检测回边：如果后继的索引 <= 当前块的索引，可能是回边
-            const is_back_edge = succ.index <= block.index;
+            if (new_phis.getPtr(succ)) |succ_phis| {
+                var it = succ_phis.iterator();
+                while (it.next()) |entry| {
+                    const alloca = entry.key_ptr.*;
+                    const phi_inst = entry.value_ptr.*;
 
-            if (is_back_edge) {
-                // 记录回边，稍后填充
-                if (new_phis.getPtr(succ)) |succ_phis| {
-                    var it = succ_phis.iterator();
-                    while (it.next()) |entry| {
-                        const alloca = entry.key_ptr.*;
-
+                    // Get current value for this alloca (top of stack)
+                    // If stack is empty, create an undef register (null value)
+                    const val = blk: {
                         if (current_values.getPtr(alloca)) |stack| {
                             if (stack.items.len > 0) {
-                                const val = stack.items[stack.items.len - 1];
-                                try back_edges.append(self.allocator, .{
-                                    .from = block,
-                                    .to = succ,
-                                    .alloca = alloca,
-                                    .value = val,
-                                });
+                                break :blk stack.items[stack.items.len - 1];
                             }
                         }
-                    }
-                }
-            } else {
-                if (new_phis.getPtr(succ)) |succ_phis| {
-                    var it = succ_phis.iterator();
-                    while (it.next()) |entry| {
-                        const alloca = entry.key_ptr.*;
-                        const phi_inst = entry.value_ptr.*;
-
-                        if (current_values.getPtr(alloca)) |stack| {
-                            if (stack.items.len > 0) {
-                                const val = stack.items[stack.items.len - 1];
-                                std.debug.print("  Adding phi incoming (forward): block_{d} -> block_{d}, reg_{d}\n", .{ block.index, succ.index, val.id });
-
-                                const old_incoming = phi_inst.op.phi.incoming;
-                                const new_incoming = try self.allocator.alloc(IR.Instruction.PhiIncoming, old_incoming.len + 1);
-                                @memcpy(new_incoming[0..old_incoming.len], old_incoming);
-                                new_incoming[old_incoming.len] = .{ .value = val, .block = block };
-
-                                if (old_incoming.len > 0) self.allocator.free(old_incoming);
-                                phi_inst.op.phi.incoming = new_incoming;
-                            }
+                        // No value on stack — create undef (null) register
+                        const undef_reg = func.newRegister(alloca.op.alloca.type_);
+                        // Push it onto the stack so it persists for children
+                        var stack = current_values.getPtr(alloca);
+                        if (stack == null) {
+                            try current_values.put(alloca, .{ .items = &.{}, .capacity = 0 });
+                            stack = current_values.getPtr(alloca);
                         }
-                    }
+                        try stack.?.append(self.allocator, undef_reg);
+                        // Record stack height for popping
+                        if (!stack_heights.contains(alloca)) {
+                            try stack_heights.put(alloca, stack.?.items.len - 1);
+                        }
+                        break :blk undef_reg;
+                    };
+
+                    const old_incoming = phi_inst.op.phi.incoming;
+                    const new_incoming = try self.allocator.alloc(IR.Instruction.PhiIncoming, old_incoming.len + 1);
+                    @memcpy(new_incoming[0..old_incoming.len], old_incoming);
+                    new_incoming[old_incoming.len] = .{ .value = val, .block = block };
+
+                    if (old_incoming.len > 0) self.allocator.free(old_incoming);
+                    phi_inst.op.phi.incoming = new_incoming;
                 }
             }
+        }
+
+        // 4. Recurse to dominated blocks AFTER updating successors
+        for (dt.children[block.index].items) |child| {
+            try self.renameVariables(child, dt, current_values, new_phis, reg_to_alloca, reg_rename_map, func);
         }
 
         // 5. Pop Stacks
@@ -2797,6 +3075,7 @@ pub const IROptimizer = struct {
             },
             .instanceof => |op| {
                 try self.used_registers.put(op.object.id, {});
+                try self.used_registers.put(op.class_name.id, {});
             },
             .implements_interface => |op| {
                 try self.used_registers.put(op.object.id, {});
@@ -2848,7 +3127,7 @@ pub const IROptimizer = struct {
                 }
             },
             // Instructions with no register operands
-            .alloca, .array_new, .const_int, .const_float, .const_bool, .const_string, .const_null, .const_missing, .param, .capture_get, .arg_count, .has_arg => {},
+            .alloca, .array_new, .const_int, .const_float, .const_bool, .const_string, .const_null, .const_missing, .const_array, .param, .capture_get, .arg_count, .has_arg => {},
             .try_begin, .try_end, .get_exception, .peek_exception, .clear_exception => {},
             .mutex_lock, .mutex_unlock, .mutex_new => {},
             .catch_ => {},
@@ -2939,7 +3218,7 @@ pub const IROptimizer = struct {
             .eq, .ne, .lt, .le, .gt, .ge, .identical, .not_identical, .spaceship => false,
             .and_, .or_, .xor_, .not => false,
             .neg => false,
-            .const_int, .const_float, .const_bool, .const_string, .const_null, .const_missing => false,
+            .const_int, .const_float, .const_bool, .const_string, .const_null, .const_missing, .const_array => false,
             .param, .capture_get, .arg_count, .has_arg => false,
             .cast, .move, .type_check, .get_type => false,
             .box, .unbox => false,
@@ -3023,6 +3302,13 @@ pub const IROptimizer = struct {
                 }
                 if (keep_count == old_incoming.len) continue;
 
+                // std.debug.print("  DCE phi cleanup: phi reg_{d} removing {d} unreachable incoming\n", .{ inst.result.?.id, old_incoming.len - keep_count });
+                for (old_incoming) |inc| {
+                    _ = inc;
+                    // const is_reachable = reachable.contains(inc.block);
+                    // std.debug.print("    incoming from block_{d} (reachable={})\n", .{ inc.block.index, is_reachable });
+                }
+
                 const new_incoming = try self.allocator.alloc(IR.Instruction.PhiIncoming, keep_count);
                 var j: usize = 0;
                 for (old_incoming) |inc| {
@@ -3044,6 +3330,7 @@ pub const IROptimizer = struct {
             const block = func.blocks.items[i];
             if (!reachable.contains(block)) {
                 // Remove block
+                // std.debug.print("  Removing unreachable block_{d} ({s})\n", .{ block.index, block.label });
                 _ = func.blocks.orderedRemove(i);
                 block.deinit();
                 self.allocator.destroy(block);
@@ -3065,6 +3352,11 @@ pub const IROptimizer = struct {
     fn markReachableBlocks(self: *Self, block: *BasicBlock, reachable: *std.AutoHashMap(*BasicBlock, void)) !void {
         if (reachable.contains(block)) return;
         try reachable.put(block, {});
+
+        // Follow exception_handler (catch blocks are reachable via exception flow)
+        if (block.exception_handler) |handler| {
+            try self.markReachableBlocks(handler, reachable);
+        }
 
         // Follow terminator to successors
         if (block.terminator) |term| {
@@ -3230,6 +3522,18 @@ pub const IROptimizer = struct {
                         else => {},
                     }
                 }
+
+                // Follow exception_handler edges: if this block is executable,
+                // its catch block is also executable (exception can be thrown
+                // by any instruction that may raise an exception).
+                if (block.exception_handler) |handler| {
+                    if (block_ids.get(handler)) |hid| {
+                        if (!executable[hid]) {
+                            executable[hid] = true;
+                            changed_analysis = true;
+                        }
+                    }
+                }
             }
         }
 
@@ -3372,106 +3676,49 @@ pub const IROptimizer = struct {
                 if (t == .unknown and e == .unknown) break :blk .unknown;
                 break :blk .overdefined;
             },
-            .add => |op| blk: {
+            // P2-4: 二元运算统一通过 ConstantFolder.foldBinary 折叠
+            .add,
+            .sub,
+            .mul,
+            .div,
+            .mod,
+            .bit_and,
+            .bit_or,
+            .bit_xor,
+            .shl,
+            .shr,
+            .eq,
+            .ne,
+            .lt,
+            .le,
+            .gt,
+            .ge,
+            .and_,
+            .or_,
+            => |op| blk: {
                 const a = get(lattice, op.lhs);
                 const b = get(lattice, op.rhs);
-                if (a == .constant and b == .constant and a.constant == .int and b.constant == .int) {
-                    break :blk .{ .constant = .{ .int = a.constant.int + b.constant.int } };
-                }
-                if (a == .constant and b == .constant and a.constant == .float and b.constant == .float) {
-                    break :blk .{ .constant = .{ .float = a.constant.float + b.constant.float } };
+                if (a == .constant and b == .constant) {
+                    const result = ConstantFolder.foldBinary(std.meta.activeTag(inst.op), a.constant, b.constant);
+                    switch (result) {
+                        .folded => |val| break :blk .{ .constant = val },
+                        .cannot_fold => break :blk .overdefined,
+                        .unknown => break :blk .unknown,
+                    }
                 }
                 if (a == .unknown or b == .unknown) break :blk .unknown;
                 break :blk .overdefined;
             },
-            .sub => |op| blk: {
-                const a = get(lattice, op.lhs);
-                const b = get(lattice, op.rhs);
-                if (a == .constant and b == .constant and a.constant == .int and b.constant == .int) {
-                    break :blk .{ .constant = .{ .int = a.constant.int - b.constant.int } };
-                }
-                if (a == .constant and b == .constant and a.constant == .float and b.constant == .float) {
-                    break :blk .{ .constant = .{ .float = a.constant.float - b.constant.float } };
-                }
-                if (a == .unknown or b == .unknown) break :blk .unknown;
-                break :blk .overdefined;
-            },
-            .mul => |op| blk: {
-                const a = get(lattice, op.lhs);
-                const b = get(lattice, op.rhs);
-                if (a == .constant and b == .constant and a.constant == .int and b.constant == .int) {
-                    break :blk .{ .constant = .{ .int = a.constant.int * b.constant.int } };
-                }
-                if (a == .constant and b == .constant and a.constant == .float and b.constant == .float) {
-                    break :blk .{ .constant = .{ .float = a.constant.float * b.constant.float } };
-                }
-                if (a == .unknown or b == .unknown) break :blk .unknown;
-                break :blk .overdefined;
-            },
-            .eq => |op| blk: {
-                const a = get(lattice, op.lhs);
-                const b = get(lattice, op.rhs);
-                if (a == .constant and b == .constant and a.constant == .int and b.constant == .int) {
-                    break :blk .{ .constant = .{ .bool_val = a.constant.int == b.constant.int } };
-                }
-                if (a == .constant and b == .constant and a.constant == .bool_val and b.constant == .bool_val) {
-                    break :blk .{ .constant = .{ .bool_val = a.constant.bool_val == b.constant.bool_val } };
-                }
-                if (a == .unknown or b == .unknown) break :blk .unknown;
-                break :blk .overdefined;
-            },
-            .ne => |op| blk: {
-                const a = get(lattice, op.lhs);
-                const b = get(lattice, op.rhs);
-                if (a == .constant and b == .constant and a.constant == .int and b.constant == .int) {
-                    break :blk .{ .constant = .{ .bool_val = a.constant.int != b.constant.int } };
-                }
-                if (a == .constant and b == .constant and a.constant == .bool_val and b.constant == .bool_val) {
-                    break :blk .{ .constant = .{ .bool_val = a.constant.bool_val != b.constant.bool_val } };
-                }
-                if (a == .unknown or b == .unknown) break :blk .unknown;
-                break :blk .overdefined;
-            },
-            .lt => |op| blk: {
-                const a = get(lattice, op.lhs);
-                const b = get(lattice, op.rhs);
-                if (a == .constant and b == .constant and a.constant == .int and b.constant == .int) {
-                    break :blk .{ .constant = .{ .bool_val = a.constant.int < b.constant.int } };
-                }
-                if (a == .unknown or b == .unknown) break :blk .unknown;
-                break :blk .overdefined;
-            },
-            .le => |op| blk: {
-                const a = get(lattice, op.lhs);
-                const b = get(lattice, op.rhs);
-                if (a == .constant and b == .constant and a.constant == .int and b.constant == .int) {
-                    break :blk .{ .constant = .{ .bool_val = a.constant.int <= b.constant.int } };
-                }
-                if (a == .unknown or b == .unknown) break :blk .unknown;
-                break :blk .overdefined;
-            },
-            .gt => |op| blk: {
-                const a = get(lattice, op.lhs);
-                const b = get(lattice, op.rhs);
-                if (a == .constant and b == .constant and a.constant == .int and b.constant == .int) {
-                    break :blk .{ .constant = .{ .bool_val = a.constant.int > b.constant.int } };
-                }
-                if (a == .unknown or b == .unknown) break :blk .unknown;
-                break :blk .overdefined;
-            },
-            .ge => |op| blk: {
-                const a = get(lattice, op.lhs);
-                const b = get(lattice, op.rhs);
-                if (a == .constant and b == .constant and a.constant == .int and b.constant == .int) {
-                    break :blk .{ .constant = .{ .bool_val = a.constant.int >= b.constant.int } };
-                }
-                if (a == .unknown or b == .unknown) break :blk .unknown;
-                break :blk .overdefined;
-            },
-            .not => |op| blk: {
+            // P2-4: 一元运算统一通过 ConstantFolder.foldUnary 折叠
+            .neg, .not, .bit_not => |op| blk: {
                 const v = get(lattice, op.operand);
-                if (v == .constant and v.constant == .bool_val) {
-                    break :blk .{ .constant = .{ .bool_val = !v.constant.bool_val } };
+                if (v == .constant) {
+                    const result = ConstantFolder.foldUnary(std.meta.activeTag(inst.op), v.constant);
+                    switch (result) {
+                        .folded => |val| break :blk .{ .constant = val },
+                        .cannot_fold => break :blk .overdefined,
+                        .unknown => break :blk .unknown,
+                    }
                 }
                 if (v == .unknown) break :blk .unknown;
                 break :blk .overdefined;
@@ -3499,7 +3746,9 @@ pub const IROptimizer = struct {
                 if (a == .unknown or b == .unknown) break :blk .unknown;
                 break :blk .overdefined;
             },
-            else => null,
+            // 未覆盖的指令类型（如load/call/getGlobalVar等）返回overdefined
+            // 而非null(unknown)，否则phi节点会因incoming值保持unknown而被错误折叠为常量
+            else => .overdefined,
         };
     }
 
@@ -3675,177 +3924,65 @@ pub const IROptimizer = struct {
         };
     }
 
+    /// P2-4: 将 ConstantValue 转换为 IR 指令的 Op
+    fn constValueToOp(val: ConstantValue) Instruction.Op {
+        return switch (val) {
+            .int => |v| .{ .const_int = v },
+            .float => |v| .{ .const_float = v },
+            .bool_val => |v| .{ .const_bool = v },
+            .null_val => .const_null,
+            .missing_val => .const_missing,
+            .string_id => |id| .{ .const_string = id },
+        };
+    }
+
     /// Try to fold a constant expression
+    /// P2-4: 二元/一元运算折叠逻辑已统一到 ConstantFolder 模块
     fn foldConstantExpression(self: *Self, inst: *Instruction) !bool {
+        const op_tag = std.meta.activeTag(inst.op);
+
+        // 二元运算：通过 ConstantFolder.foldBinary 统一折叠
         switch (inst.op) {
-            .add => |op| {
-                if (self.constant_values.get(op.lhs.id)) |lhs| {
-                    if (self.constant_values.get(op.rhs.id)) |rhs| {
-                        if (lhs == .int and rhs == .int) {
-                            inst.op = .{ .const_int = lhs.int + rhs.int };
-                            return true;
-                        }
-                        if (lhs == .float and rhs == .float) {
-                            inst.op = .{ .const_float = lhs.float + rhs.float };
-                            return true;
-                        }
-                    }
-                }
-            },
-            .sub => |op| {
-                if (self.constant_values.get(op.lhs.id)) |lhs| {
-                    if (self.constant_values.get(op.rhs.id)) |rhs| {
-                        if (lhs == .int and rhs == .int) {
-                            inst.op = .{ .const_int = lhs.int - rhs.int };
-                            return true;
-                        }
-                        if (lhs == .float and rhs == .float) {
-                            inst.op = .{ .const_float = lhs.float - rhs.float };
-                            return true;
-                        }
-                    }
-                }
-            },
-            .mul => |op| {
-                if (self.constant_values.get(op.lhs.id)) |lhs| {
-                    if (self.constant_values.get(op.rhs.id)) |rhs| {
-                        if (lhs == .int and rhs == .int) {
-                            inst.op = .{ .const_int = lhs.int * rhs.int };
-                            return true;
-                        }
-                        if (lhs == .float and rhs == .float) {
-                            inst.op = .{ .const_float = lhs.float * rhs.float };
-                            return true;
-                        }
-                    }
-                }
-            },
-            .div => |op| {
-                if (self.constant_values.get(op.lhs.id)) |lhs| {
-                    if (self.constant_values.get(op.rhs.id)) |rhs| {
-                        if (lhs == .int and rhs == .int and rhs.int != 0) {
-                            inst.op = .{ .const_int = @divTrunc(lhs.int, rhs.int) };
-                            return true;
-                        }
-                        if (lhs == .float and rhs == .float and rhs.float != 0.0) {
-                            inst.op = .{ .const_float = lhs.float / rhs.float };
-                            return true;
-                        }
-                    }
-                }
-            },
-            .mod => |op| {
-                if (self.constant_values.get(op.lhs.id)) |lhs| {
-                    if (self.constant_values.get(op.rhs.id)) |rhs| {
-                        if (lhs == .int and rhs == .int and rhs.int != 0) {
-                            inst.op = .{ .const_int = @mod(lhs.int, rhs.int) };
-                            return true;
-                        }
-                    }
-                }
-            },
-            .neg => |op| {
-                if (self.constant_values.get(op.operand.id)) |val| {
-                    if (val == .int) {
-                        inst.op = .{ .const_int = -val.int };
+            .add,
+            .sub,
+            .mul,
+            .div,
+            .mod,
+            .bit_and,
+            .bit_or,
+            .bit_xor,
+            .shl,
+            .shr,
+            .eq,
+            .ne,
+            .lt,
+            .le,
+            .gt,
+            .ge,
+            .and_,
+            .or_,
+            => |op| {
+                const lhs_cv = self.constant_values.get(op.lhs.id) orelse return false;
+                const rhs_cv = self.constant_values.get(op.rhs.id) orelse return false;
+                const result = ConstantFolder.foldBinary(op_tag, lhs_cv, rhs_cv);
+                switch (result) {
+                    .folded => |val| {
+                        inst.op = constValueToOp(val);
                         return true;
-                    }
-                    if (val == .float) {
-                        inst.op = .{ .const_float = -val.float };
+                    },
+                    .cannot_fold, .unknown => return false,
+                }
+            },
+            // 一元运算：通过 ConstantFolder.foldUnary 统一折叠
+            .neg, .not, .bit_not => |op| {
+                const val = self.constant_values.get(op.operand.id) orelse return false;
+                const result = ConstantFolder.foldUnary(op_tag, val);
+                switch (result) {
+                    .folded => |v| {
+                        inst.op = constValueToOp(v);
                         return true;
-                    }
-                }
-            },
-            .not => |op| {
-                if (self.constant_values.get(op.operand.id)) |val| {
-                    if (val == .bool_val) {
-                        inst.op = .{ .const_bool = !val.bool_val };
-                        return true;
-                    }
-                }
-            },
-            .eq => |op| {
-                if (self.constant_values.get(op.lhs.id)) |lhs| {
-                    if (self.constant_values.get(op.rhs.id)) |rhs| {
-                        if (lhs == .int and rhs == .int) {
-                            inst.op = .{ .const_bool = lhs.int == rhs.int };
-                            return true;
-                        }
-                        if (lhs == .bool_val and rhs == .bool_val) {
-                            inst.op = .{ .const_bool = lhs.bool_val == rhs.bool_val };
-                            return true;
-                        }
-                    }
-                }
-            },
-            .ne => |op| {
-                if (self.constant_values.get(op.lhs.id)) |lhs| {
-                    if (self.constant_values.get(op.rhs.id)) |rhs| {
-                        if (lhs == .int and rhs == .int) {
-                            inst.op = .{ .const_bool = lhs.int != rhs.int };
-                            return true;
-                        }
-                    }
-                }
-            },
-            .lt => |op| {
-                if (self.constant_values.get(op.lhs.id)) |lhs| {
-                    if (self.constant_values.get(op.rhs.id)) |rhs| {
-                        if (lhs == .int and rhs == .int) {
-                            inst.op = .{ .const_bool = lhs.int < rhs.int };
-                            return true;
-                        }
-                    }
-                }
-            },
-            .le => |op| {
-                if (self.constant_values.get(op.lhs.id)) |lhs| {
-                    if (self.constant_values.get(op.rhs.id)) |rhs| {
-                        if (lhs == .int and rhs == .int) {
-                            inst.op = .{ .const_bool = lhs.int <= rhs.int };
-                            return true;
-                        }
-                    }
-                }
-            },
-            .gt => |op| {
-                if (self.constant_values.get(op.lhs.id)) |lhs| {
-                    if (self.constant_values.get(op.rhs.id)) |rhs| {
-                        if (lhs == .int and rhs == .int) {
-                            inst.op = .{ .const_bool = lhs.int > rhs.int };
-                            return true;
-                        }
-                    }
-                }
-            },
-            .ge => |op| {
-                if (self.constant_values.get(op.lhs.id)) |lhs| {
-                    if (self.constant_values.get(op.rhs.id)) |rhs| {
-                        if (lhs == .int and rhs == .int) {
-                            inst.op = .{ .const_bool = lhs.int >= rhs.int };
-                            return true;
-                        }
-                    }
-                }
-            },
-            .and_ => |op| {
-                if (self.constant_values.get(op.lhs.id)) |lhs| {
-                    if (self.constant_values.get(op.rhs.id)) |rhs| {
-                        if (lhs == .bool_val and rhs == .bool_val) {
-                            inst.op = .{ .const_bool = lhs.bool_val and rhs.bool_val };
-                            return true;
-                        }
-                    }
-                }
-            },
-            .or_ => |op| {
-                if (self.constant_values.get(op.lhs.id)) |lhs| {
-                    if (self.constant_values.get(op.rhs.id)) |rhs| {
-                        if (lhs == .bool_val and rhs == .bool_val) {
-                            inst.op = .{ .const_bool = lhs.bool_val or rhs.bool_val };
-                            return true;
-                        }
-                    }
+                    },
+                    .cannot_fold, .unknown => return false,
                 }
             },
             .concat => |op| {
@@ -3974,6 +4111,101 @@ pub const IROptimizer = struct {
         return changed;
     }
 
+    /// 修复 PHI 节点中的悬空 block 指针
+    /// 优化 pass（如 cfg_cleanup、DCE）可能释放 block 但未更新所有 PHI incoming.block
+    /// 此函数用 block.predecessors 列表（由 rebuildCFG 维护，指针有效）重建 PHI incoming
+    fn fixupDanglingPhiReferences(self: *Self, func: *IR.Function) !void {
+        // 构建 block 指针 -> index 映射（仅包含当前有效的 block）
+        var valid_blocks = std.AutoHashMap(*IR.BasicBlock, u32).init(self.allocator);
+        defer valid_blocks.deinit();
+        for (func.blocks.items, 0..) |block, idx| {
+            try valid_blocks.put(block, @intCast(idx));
+        }
+
+        for (func.blocks.items) |block| {
+            var inst_idx: usize = 0;
+            while (inst_idx < block.instructions.items.len) {
+                const inst = block.instructions.items[inst_idx];
+                if (inst.op != .phi) {
+                    inst_idx += 1;
+                    continue;
+                }
+
+                const old_incoming = inst.op.phi.incoming;
+                if (old_incoming.len == 0) {
+                    inst_idx += 1;
+                    continue;
+                }
+
+                // 检查是否有悬空指针
+                var has_dangling = false;
+                for (old_incoming) |inc| {
+                    if (!valid_blocks.contains(inc.block)) {
+                        has_dangling = true;
+                        break;
+                    }
+                }
+
+                if (!has_dangling) {
+                    inst_idx += 1;
+                    continue;
+                }
+
+                // 用 predecessors 列表重建 incoming
+                // predecessors 由 rebuildCFG 维护，指针有效
+                const preds = block.predecessors.items;
+                var new_incoming = try self.allocator.alloc(IR.Instruction.PhiIncoming, preds.len);
+                var j: usize = 0;
+
+                for (preds) |pred| {
+                    // 在 old_incoming 中查找匹配的 pred
+                    var found_val: ?IR.Register = null;
+
+                    // 优先用指针比较
+                    for (old_incoming) |inc| {
+                        if (inc.block == pred) {
+                            found_val = inc.value;
+                            break;
+                        }
+                    }
+
+                    // 指针比较失败时，用 label 比较
+                    if (found_val == null) {
+                        for (old_incoming) |inc| {
+                            if (valid_blocks.contains(inc.block)) continue; // 跳过有效指针（已处理）
+                            // inc.block 是悬空指针，无法安全访问其 label
+                            // 尝试用 pred 的 label 匹配 old_incoming 中有效块的同名块
+                            // 但这不会匹配悬空指针的 incoming
+                        }
+                    }
+
+                    // 如果仍未找到，用 old_incoming 中第一个未匹配的值
+                    if (found_val == null) {
+                        for (old_incoming) |inc| {
+                            if (!valid_blocks.contains(inc.block)) {
+                                // 这是悬空指针的 incoming，用其 value
+                                found_val = inc.value;
+                                break;
+                            }
+                        }
+                    }
+
+                    // 最终回退：用第一个 incoming 的值
+                    if (found_val == null) {
+                        found_val = old_incoming[0].value;
+                    }
+
+                    new_incoming[j] = .{ .value = found_val.?, .block = pred };
+                    j += 1;
+                }
+
+                if (old_incoming.len > 0) self.allocator.free(@constCast(old_incoming));
+                inst.op.phi.incoming = new_incoming;
+                inst_idx += 1;
+            }
+        }
+    }
+
     fn cleanupCFGInFunction(self: *Self, func: *Function) !bool {
         if (func.blocks.items.len == 0) return false;
         try Analysis.rebuildCFG(func);
@@ -3986,6 +4218,10 @@ pub const IROptimizer = struct {
             if (!is_entry) {
                 if (try self.tryRemoveTrampolineBlock(func, block, &i)) {
                     changed = true;
+                    // Rebuild CFG after each removal to keep predecessor lists fresh.
+                    // Without this, subsequent trampoline removals may miss redirected
+                    // predecessors, leaving dangling block references.
+                    try Analysis.rebuildCFG(func);
                     continue;
                 }
             }
@@ -4060,6 +4296,7 @@ pub const IROptimizer = struct {
         if (term != .br) return false;
 
         const target = term.br;
+        // std.debug.print("  Removing trampoline block_{d} ({s}) -> block_{d} ({s})\n", .{ block.index, block.label, target.index, target.label });
 
         for (block.predecessors.items) |pred| {
             if (pred.terminator) |*pt| {
@@ -4084,6 +4321,17 @@ pub const IROptimizer = struct {
 
         if (succ.predecessors.items.len != 1 or succ.predecessors.items[0] != block) return false;
 
+        // 禁止合并 exception_handler 不同的块：
+        // 嵌套 try/catch 场景中，外层 catch 块（handler=outer_catch）尾跳到内层 try_body 块（handler=inner_catch），
+        // 若合并，内层 try body 的 throw 会错误路由到 outer_catch 而非 inner_catch
+        if (block.exception_handler != null and succ.exception_handler != null and
+            block.exception_handler.? != succ.exception_handler.?)
+        {
+            return false;
+        }
+
+        // std.debug.print("  Merging block_{d} ({s}) with single successor block_{d} ({s})\n", .{ block.index, block.label, succ.index, succ.label });
+
         if (try self.simplifySinglePredecessorPhiNodes(func, succ)) {}
 
         for (succ.instructions.items) |inst| {
@@ -4091,10 +4339,18 @@ pub const IROptimizer = struct {
         }
         succ.instructions.shrinkRetainingCapacity(0);
 
+        // Transfer exception_handler from successor to merged block
+        // This is critical for try/catch: if try_block is merged into entry,
+        // entry must inherit try_block's exception_handler (catch block)
+        if (block.exception_handler == null and succ.exception_handler != null) {
+            block.exception_handler = succ.exception_handler;
+        }
+
+        // Update phi references BEFORE clearing terminator
+        self.rewritePhiBlockRefInSuccessors(succ, block);
+
         block.terminator = succ.terminator;
         succ.terminator = null;
-
-        self.rewritePhiBlockRefInSuccessors(succ, block);
 
         for (func.blocks.items, 0..) |b, idx| {
             if (b == succ) {
@@ -4148,7 +4404,23 @@ pub const IROptimizer = struct {
                         }
                     }
 
-                    if (new_len == old.len) continue;
+                    if (new_len == old.len) {
+                        // 数量不变但仍需更新 block 指针（trampoline 块只有 1 个前驱时）
+                        // 原地更新 incoming 的 block 指针
+                        const mutable_old = @constCast(old);
+                        var j2: usize = 0;
+                        for (old) |inc| {
+                            if (inc.block == removed_block) {
+                                for (preds) |p| {
+                                    mutable_old[j2].block = p;
+                                    j2 += 1;
+                                }
+                            } else {
+                                j2 += 1;
+                            }
+                        }
+                        continue;
+                    }
 
                     const new_incoming = try self.allocator.alloc(Instruction.PhiIncoming, new_len);
                     var j: usize = 0;
@@ -4405,7 +4677,8 @@ pub const IROptimizer = struct {
         var next_reg_id = caller.getNextRegisterId();
 
         // Collect instructions to inline (excluding terminators)
-        var inlined_instructions: std.ArrayListUnmanaged(*Instruction) = .{ .items = &.{}, .capacity = 0 };defer inlined_instructions.deinit(self.allocator);
+        var inlined_instructions: std.ArrayListUnmanaged(*Instruction) = .{ .items = &.{}, .capacity = 0 };
+        defer inlined_instructions.deinit(self.allocator);
 
         // Process callee's entry block instructions
         for (callee_entry.instructions.items) |callee_inst| {
@@ -5045,11 +5318,146 @@ pub const IROptimizer = struct {
                     if (args_ptr[i].id == old_reg.id) args_ptr[i] = new_reg;
                 }
             },
+            .call_indirect => |*op| {
+                if (op.func_ptr.id == old_reg.id) op.func_ptr = new_reg;
+                const args_ptr = @constCast(op.args.ptr);
+                for (0..op.args.len) |i| {
+                    if (args_ptr[i].id == old_reg.id) args_ptr[i] = new_reg;
+                }
+            },
             .phi => |*op| {
                 const inc_ptr = @constCast(op.incoming.ptr);
                 for (0..op.incoming.len) |i| {
                     if (inc_ptr[i].value.id == old_reg.id) inc_ptr[i].value = new_reg;
                 }
+            },
+            .array_get, .array_ensure => |*op| {
+                if (op.array.id == old_reg.id) op.array = new_reg;
+                if (op.key.id == old_reg.id) op.key = new_reg;
+            },
+            .array_set => |*op| {
+                if (op.array.id == old_reg.id) op.array = new_reg;
+                if (op.key.id == old_reg.id) op.key = new_reg;
+                if (op.value.id == old_reg.id) op.value = new_reg;
+            },
+            .array_set_nested => |*op| {
+                if (op.outer_array.id == old_reg.id) op.outer_array = new_reg;
+                if (op.outer_key.id == old_reg.id) op.outer_key = new_reg;
+                if (op.inner_key.id == old_reg.id) op.inner_key = new_reg;
+                if (op.value.id == old_reg.id) op.value = new_reg;
+            },
+            .array_push => |*op| {
+                if (op.array.id == old_reg.id) op.array = new_reg;
+                if (op.value.id == old_reg.id) op.value = new_reg;
+            },
+            .array_key_exists => |*op| {
+                if (op.array.id == old_reg.id) op.array = new_reg;
+                if (op.key.id == old_reg.id) op.key = new_reg;
+            },
+            .array_unset => |*op| {
+                if (op.array.id == old_reg.id) op.array = new_reg;
+                if (op.key.id == old_reg.id) op.key = new_reg;
+            },
+            .property_get => |*op| {
+                if (op.object.id == old_reg.id) op.object = new_reg;
+            },
+            .property_set => |*op| {
+                if (op.object.id == old_reg.id) op.object = new_reg;
+                if (op.value.id == old_reg.id) op.value = new_reg;
+            },
+            .static_property_set => |*op| {
+                if (op.value.id == old_reg.id) op.value = new_reg;
+            },
+            .global_set => |*op| {
+                if (op.value) |*v| {
+                    if (v.id == old_reg.id) v.* = new_reg;
+                }
+            },
+            .global_get_dynamic => |*op| {
+                if (op.name_reg.id == old_reg.id) op.name_reg = new_reg;
+            },
+            .global_set_dynamic => |*op| {
+                if (op.name_reg.id == old_reg.id) op.name_reg = new_reg;
+                if (op.value.id == old_reg.id) op.value = new_reg;
+            },
+            .new_object => |*op| {
+                const args_ptr = @constCast(op.args.ptr);
+                for (0..op.args.len) |i| {
+                    if (args_ptr[i].id == old_reg.id) args_ptr[i] = new_reg;
+                }
+            },
+            .method_call => |*op| {
+                if (op.object.id == old_reg.id) op.object = new_reg;
+                const args_ptr = @constCast(op.args.ptr);
+                for (0..op.args.len) |i| {
+                    if (args_ptr[i].id == old_reg.id) args_ptr[i] = new_reg;
+                }
+            },
+            .static_method_call => |*op| {
+                const args_ptr = @constCast(op.args.ptr);
+                for (0..op.args.len) |i| {
+                    if (args_ptr[i].id == old_reg.id) args_ptr[i] = new_reg;
+                }
+            },
+            .interpolate => |*op| {
+                const parts_ptr = @constCast(op.parts.ptr);
+                for (0..op.parts.len) |i| {
+                    if (parts_ptr[i].id == old_reg.id) parts_ptr[i] = new_reg;
+                }
+            },
+            .instanceof => |*op| {
+                if (op.object.id == old_reg.id) op.object = new_reg;
+                if (op.class_name.id == old_reg.id) op.class_name = new_reg;
+            },
+            .select => |*op| {
+                if (op.cond.id == old_reg.id) op.cond = new_reg;
+                if (op.then_value.id == old_reg.id) op.then_value = new_reg;
+                if (op.else_value.id == old_reg.id) op.else_value = new_reg;
+            },
+            .move => |*op| {
+                if (op.operand.id == old_reg.id) op.operand = new_reg;
+            },
+            .closure_new => |*op| {
+                if (op.func_ptr.id == old_reg.id) op.func_ptr = new_reg;
+                const caps_ptr = @constCast(op.captures.ptr);
+                for (0..op.captures.len) |i| {
+                    if (caps_ptr[i].id == old_reg.id) caps_ptr[i] = new_reg;
+                }
+            },
+            .closure_bind => |*op| {
+                if (op.closure.id == old_reg.id) op.closure = new_reg;
+                if (op.object.id == old_reg.id) op.object = new_reg;
+            },
+            .parent_call => |*op| {
+                if (op.object.id == old_reg.id) op.object = new_reg;
+                const args_ptr = @constCast(op.args.ptr);
+                for (0..op.args.len) |i| {
+                    if (args_ptr[i].id == old_reg.id) args_ptr[i] = new_reg;
+                }
+            },
+            .go_spawn => |*op| {
+                const args_ptr = @constCast(op.args.ptr);
+                for (0..op.args.len) |i| {
+                    if (args_ptr[i].id == old_reg.id) args_ptr[i] = new_reg;
+                }
+            },
+            .channel_new => |*op| {
+                _ = op;
+            },
+            .channel_send => |*op| {
+                if (op.channel.id == old_reg.id) op.channel = new_reg;
+                if (op.value.id == old_reg.id) op.value = new_reg;
+            },
+            .yield_val => |*op| {
+                if (op.key) |*k| {
+                    if (k.id == old_reg.id) k.* = new_reg;
+                }
+                if (op.value) |*v| {
+                    if (v.id == old_reg.id) v.* = new_reg;
+                }
+            },
+            .yield_from => |*op| {
+                if (op.operand.id == old_reg.id) op.operand = new_reg;
             },
             // Handle other ops...
             else => {},
@@ -5298,6 +5706,19 @@ pub const IROptimizer = struct {
 
     /// Apply strength reduction in a function
     pub fn reduceStrengthInFunction(self: *Self, func: *Function) !bool {
+        // Rebuild constant_values for THIS function so strength reduction
+        // doesn't use stale data from a different function processed earlier.
+        self.constant_values.clearRetainingCapacity();
+        for (func.blocks.items) |block| {
+            for (block.instructions.items) |inst| {
+                if (inst.result) |result| {
+                    if (self.getConstantValue(inst)) |const_val| {
+                        try self.constant_values.put(result.id, const_val);
+                    }
+                }
+            }
+        }
+
         var changed = false;
 
         for (func.blocks.items) |block| {
@@ -5322,51 +5743,63 @@ pub const IROptimizer = struct {
         switch (inst.op) {
             .mul => |op| {
                 // Multiply by power of 2 -> shift left
+                // 仅当 LHS 也是常量整数时才优化，避免字符串/浮点数被 toInt() 截断
                 if (self.constant_values.get(op.rhs.id)) |rhs| {
                     if (rhs == .int) {
                         if (self.isPowerOfTwo(rhs.int)) |shift| {
-                            // Create constant for shift amount
-                            const shift_reg = func.newRegister(.i64);
-                            const shift_inst = try self.allocator.create(Instruction);
-                            shift_inst.* = .{
-                                .result = shift_reg,
-                                .op = .{ .const_int = shift },
-                                .location = inst.location,
-                            };
+                            // 检查 LHS 是否也是常量整数
+                            if (self.constant_values.get(op.lhs.id)) |lhs| {
+                                if (lhs == .int) {
+                                    // 两操作数均为常量整数，shift 安全
+                                    const shift_reg = func.newRegister(.i64);
+                                    const shift_inst = try self.allocator.create(Instruction);
+                                    shift_inst.* = .{
+                                        .result = shift_reg,
+                                        .op = .{ .const_int = shift },
+                                        .location = inst.location,
+                                    };
 
-                            try block.instructions.insert(self.allocator, index, shift_inst);
+                                    try block.instructions.insert(self.allocator, index, shift_inst);
 
-                            inst.op = .{ .shl = .{
-                                .lhs = op.lhs,
-                                .rhs = shift_reg,
-                            } };
+                                    inst.op = .{ .shl = .{
+                                        .lhs = op.lhs,
+                                        .rhs = shift_reg,
+                                    } };
 
-                            return 1;
+                                    return 1;
+                                }
+                            }
                         }
                     }
                 }
             },
             .div => |op| {
-                // Divide by power of 2 -> shift right
+                // 条件性强度削减：仅当两操作数均为常量且整除时，将 x/2^n 替换为 x>>n
+                // PHP / 可能返回浮点数（如 3/2=1.5），不能无条件右移
+                // 但当 @rem(lhs, rhs) == 0 时结果必为整数，右移等价于除法（对负数也成立）
+                // 注意：intdiv() 使用 php_intdiv 运行时函数而非 .div 指令，不受此优化影响
                 if (self.constant_values.get(op.rhs.id)) |rhs| {
                     if (rhs == .int and rhs.int > 0) {
                         if (self.isPowerOfTwo(rhs.int)) |shift| {
-                            const shift_reg = func.newRegister(.i64);
-                            const shift_inst = try self.allocator.create(Instruction);
-                            shift_inst.* = .{
-                                .result = shift_reg,
-                                .op = .{ .const_int = shift },
-                                .location = inst.location,
-                            };
-
-                            try block.instructions.insert(self.allocator, index, shift_inst);
-
-                            inst.op = .{ .shr = .{
-                                .lhs = op.lhs,
-                                .rhs = shift_reg,
-                            } };
-
-                            return 1;
+                            // 检查被除数是否也是常量
+                            if (self.constant_values.get(op.lhs.id)) |lhs| {
+                                if (lhs == .int and @rem(lhs.int, rhs.int) == 0) {
+                                    // 整除：结果为整数，右移安全
+                                    const shift_reg = func.newRegister(.i64);
+                                    const shift_inst = try self.allocator.create(Instruction);
+                                    shift_inst.* = .{
+                                        .result = shift_reg,
+                                        .op = .{ .const_int = shift },
+                                        .location = inst.location,
+                                    };
+                                    try block.instructions.insert(self.allocator, index, shift_inst);
+                                    inst.op = .{ .shr = .{
+                                        .lhs = op.lhs,
+                                        .rhs = shift_reg,
+                                    } };
+                                    return 1;
+                                }
+                            }
                         }
                     }
                 }

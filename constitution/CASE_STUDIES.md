@@ -454,6 +454,61 @@ loop:
 
 ---
 
+## 案例5：AOT 语法增强 — array_walk 字面量参数
+
+### 背景
+PHP 解释器要求 `array_walk` / `array_walk_recursive` 的第一个参数必须是变量（by-reference 语义），传递数组字面量 `[]` 会触发 Fatal Error。这在函数式编程风格中造成了不便——开发者必须先声明临时变量再传入。
+
+### PHP 解释器限制
+```php
+<?php
+// ❌ PHP Fatal error: Cannot pass parameter 1 by reference
+array_walk([1, 2, 3], function($v) { echo $v; });
+```
+
+### AOT 解决方案：编译期字面量物化
+
+AOT 编译器在 IR 生成阶段，将数组字面量自动物化（materialize）为栈/堆上的临时存储位置，使其具备可取地址性。然后将对临时变量的引用传递给 `php_array_walk`，绕过 PHP 解释器的运行时 by-reference 检查。
+
+```php
+<?php
+// ✅ AOT 编译器：合法，正常执行
+array_walk([1, 2, 3], function($v) { echo $v; });
+
+// ✅ 带键字面量
+array_walk(['a'=>1, 'b'=>2], function($v, $k) { echo "$k=$v"; });
+
+// ✅ array_walk_recursive 同样支持
+array_walk_recursive([1, [2, 3]], function($v) { echo $v; });
+```
+
+**编译期物化过程**：
+```
+PHP: array_walk([1, 2, 3], $callback)
+  ↓ IR 生成
+  %1 = alloc PHPArray                    ; 物化字面量
+  store %1, [1, 2, 3]                    ; 初始化
+  %2 = load %1                           ; 取值
+  call php_array_walk(%2, $callback, null)
+```
+
+### 行为对比
+
+|| 场景 | PHP 解释器 | AOT 编译器 |
+|------|------|-----------|-----------|
+|| `array_walk($var, ...)` | ✅ 变量传引用 | ✅ 变量传引用 |
+|| `array_walk([1,2,3], ...)` | ❌ Fatal Error | ✅ 字面量物化后传引用 |
+|| 回调修改 `$value` (变量参数) | ✅ 写回原变量 | ✅ 写回原变量 |
+|| 回调修改 `$value` (字面量参数) | N/A (不可达) | ⚠️ 写回临时副本，不传播 |
+
+### 关键学习点
+
+1. **编译期 vs 运行时**：PHP 解释器在运行时检查参数来源，AOT 在编译期完成物化，根本不存在"非变量"的运行时表示
+2. **语法放宽而非语义违背**：AOT 并未改变 by-reference 语义，只是放宽了"必须为变量"的语法约束
+3. **临时对象生命周期**：字面量物化后的临时变量在语句结束时释放，回调的引用写回不影响调用者——这与 PHP 解释器对临时变量的处理一致
+
+---
+
 ## 总结：优化原则
 
 ### 1. 理解硬件

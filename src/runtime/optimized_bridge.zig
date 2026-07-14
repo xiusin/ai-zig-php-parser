@@ -125,18 +125,18 @@ pub const OptimizedExecutor = struct {
         _ = self;
         // 简单解析: "10 + 20"
         var it = std.mem.tokenizeAny(u8, expr, " \t\n");
-        
+
         const left_str = it.next() orelse return OptimizedValue.initNull();
         const left_val = std.fmt.parseInt(i64, left_str, 10) catch return OptimizedValue.initNull();
-        
+
         const op = it.next() orelse return OptimizedValue.initInt(left_val);
-        
+
         const right_str = it.next() orelse return OptimizedValue.initNull();
         const right_val = std.fmt.parseInt(i64, right_str, 10) catch return OptimizedValue.initNull();
-        
+
         const left = OptimizedValue.initInt(left_val);
         const right = OptimizedValue.initInt(right_val);
-        
+
         if (std.mem.eql(u8, op, "+")) {
             return left.add(right);
         } else if (std.mem.eql(u8, op, "-")) {
@@ -146,7 +146,7 @@ pub const OptimizedExecutor = struct {
         } else if (std.mem.eql(u8, op, "/")) {
             return left.div(right);
         }
-        
+
         return OptimizedValue.initNull();
     }
 
@@ -182,7 +182,7 @@ test "OptimizedValue basic" {
     const v1 = OptimizedValue.initInt(10);
     const v2 = OptimizedValue.initInt(20);
     const sum = v1.add(v2);
-    
+
     try std.testing.expect(sum.isInt());
     try std.testing.expect(sum.asInt() == 30);
 }
@@ -190,10 +190,10 @@ test "OptimizedValue basic" {
 test "OptimizedExecutor" {
     var exec = try OptimizedExecutor.init(std.testing.allocator);
     defer exec.deinit();
-    
+
     const result = try exec.evalExpression("10 + 20");
     try std.testing.expect(result.asInt() == 30);
-    
+
     try exec.echo(result);
     try std.testing.expectEqualStrings("30", exec.getOutput());
 }

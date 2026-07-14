@@ -11,18 +11,18 @@ pub fn build(b: *std.Build) void {
 
     // ========== 定义共享模块 ==========
     // 这些模块用于解决 Zig 0.15.2 不推荐使用 `../` 跨目录导入的问题
-    
+
     // 编译器模块
     const compiler_mod = b.createModule(.{
         .root_source_file = b.path("src/compiler/mod.zig"),
     });
-    
+
     // Shared 模块（导出 compiler 的 Parser 等类型）
     const shared_mod = b.createModule(.{
         .root_source_file = b.path("src/shared/mod.zig"),
     });
     shared_mod.addImport("compiler", compiler_mod);
-    
+
     // 运行时模块
     const runtime_mod = b.createModule(.{
         .root_source_file = b.path("src/runtime/mod.zig"),
@@ -31,41 +31,41 @@ pub fn build(b: *std.Build) void {
     const nanbox_abi_mod = b.createModule(.{
         .root_source_file = b.path("src/shared/nanbox_abi.zig"),
     });
-    
+
     // 模块相互依赖
     runtime_mod.addImport("compiler", compiler_mod);
     runtime_mod.addImport("nanbox_abi", nanbox_abi_mod);
     runtime_mod.addImport("shared", shared_mod);
     compiler_mod.addImport("runtime", runtime_mod);
-    
+
     // 字节码模块
     const bytecode_mod = b.createModule(.{
         .root_source_file = b.path("src/bytecode/mod.zig"),
     });
-    
+
     // bytecode 需要访问 runtime 和 compiler
     bytecode_mod.addImport("runtime", runtime_mod);
     bytecode_mod.addImport("compiler", compiler_mod);
-    
+
     // JIT 模块
     const jit_mod = b.createModule(.{
         .root_source_file = b.path("src/jit/mod.zig"),
     });
-    
+
     // jit 需要访问 runtime 和 compiler
     jit_mod.addImport("runtime", runtime_mod);
     jit_mod.addImport("compiler", compiler_mod);
-    
+
     // 扩展模块
     const extension_mod = b.createModule(.{
         .root_source_file = b.path("src/extension/mod.zig"),
     });
-    
+
     // runtime 需要访问其他模块
     runtime_mod.addImport("bytecode", bytecode_mod);
     runtime_mod.addImport("jit", jit_mod);
     runtime_mod.addImport("extension", extension_mod);
-    
+
     // 添加 extension 模块到 compiler
     compiler_mod.addImport("extension", extension_mod);
 
@@ -78,7 +78,7 @@ pub fn build(b: *std.Build) void {
             .optimize = exe_optimize,
         }),
     });
-    
+
     // 添加模块导入到主可执行文件
     exe.root_module.addImport("compiler", compiler_mod);
     exe.root_module.addImport("runtime", runtime_mod);
@@ -137,6 +137,7 @@ pub fn build(b: *std.Build) void {
         // "src/runtime/coroutine_error_handling.zig",
         // "src/runtime/coroutine_debugging.zig",
         // "src/runtime/test_error_handling_property.zig",
+        // fn_dispatch.zig tests are run via "test-fn-dispatch" step
     };
 
     // Add all test files
@@ -166,6 +167,46 @@ pub fn build(b: *std.Build) void {
     const compat_test_cmd = b.addSystemCommand(&[_][]const u8{ "bash", "run_compatibility_tests.sh" });
     compat_test_cmd.step.dependOn(b.getInstallStep());
     compat_test_step.dependOn(&compat_test_cmd.step);
+
+    // fn_dispatch test — uses a wrapper test file to avoid file-in-two-modules conflict
+    const fn_dispatch_test_step = b.step("test-fn-dispatch", "Run fn_dispatch tests");
+    const fn_dispatch_test = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/runtime/test_fn_dispatch.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    fn_dispatch_test.root_module.link_libc = true;
+    fn_dispatch_test.root_module.linkSystemLibrary("pcre2-8", .{});
+    fn_dispatch_test.root_module.addImport("compiler", compiler_mod);
+    fn_dispatch_test.root_module.addImport("runtime", runtime_mod);
+    fn_dispatch_test.root_module.addImport("bytecode", bytecode_mod);
+    fn_dispatch_test.root_module.addImport("jit", jit_mod);
+    fn_dispatch_test.root_module.addImport("extension", extension_mod);
+    fn_dispatch_test.root_module.addImport("shared", shared_mod);
+    const run_fn_dispatch_test = b.addRunArtifact(fn_dispatch_test);
+    fn_dispatch_test_step.dependOn(&run_fn_dispatch_test.step);
+
+    // stdlib module tests — uses a wrapper test file to trigger inline tests
+    const stdlib_test_step = b.step("test-stdlib", "Run stdlib module unit tests");
+    const stdlib_test = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/runtime/test_stdlib.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    stdlib_test.root_module.link_libc = true;
+    stdlib_test.root_module.linkSystemLibrary("pcre2-8", .{});
+    stdlib_test.root_module.addImport("compiler", compiler_mod);
+    stdlib_test.root_module.addImport("runtime", runtime_mod);
+    stdlib_test.root_module.addImport("bytecode", bytecode_mod);
+    stdlib_test.root_module.addImport("jit", jit_mod);
+    stdlib_test.root_module.addImport("extension", extension_mod);
+    stdlib_test.root_module.addImport("shared", shared_mod);
+    const run_stdlib_test = b.addRunArtifact(stdlib_test);
+    stdlib_test_step.dependOn(&run_stdlib_test.step);
 
     // All tests (unit + compatibility)
     const test_all_step = b.step("test-all", "Run all tests (unit + compatibility)");
@@ -230,14 +271,14 @@ pub fn build(b: *std.Build) void {
 
     // String benchmark tests
     const string_bench_step = b.step("bench-string", "Run string benchmark tests");
-    
+
     // 创建基准测试模块
     const benchmark_module = b.createModule(.{
         .root_source_file = b.path("src/benchmark/string_benchmark.zig"),
         .target = target,
         .optimize = .ReleaseFast,
     });
-    
+
     const string_bench_exe = b.addExecutable(.{
         .name = "string-benchmark",
         .root_module = b.createModule(.{
@@ -254,7 +295,7 @@ pub fn build(b: *std.Build) void {
     string_bench_exe.root_module.addImport("bytecode", bytecode_mod);
     string_bench_exe.root_module.addImport("jit", jit_mod);
     string_bench_exe.root_module.addImport("extension", extension_mod);
-    
+
     const string_bench_cmd = b.addRunArtifact(string_bench_exe);
     string_bench_step.dependOn(&string_bench_cmd.step);
 
@@ -282,13 +323,13 @@ pub fn build(b: *std.Build) void {
 
     // Array benchmark tests
     const array_bench_step = b.step("bench-array", "Run array benchmark tests");
-    
+
     const array_benchmark_module = b.createModule(.{
         .root_source_file = b.path("src/benchmark/array_benchmark.zig"),
         .target = target,
         .optimize = .ReleaseFast,
     });
-    
+
     const array_bench_exe = b.addExecutable(.{
         .name = "array-benchmark",
         .root_module = b.createModule(.{
@@ -305,13 +346,13 @@ pub fn build(b: *std.Build) void {
     array_bench_exe.root_module.addImport("bytecode", bytecode_mod);
     array_bench_exe.root_module.addImport("jit", jit_mod);
     array_bench_exe.root_module.addImport("extension", extension_mod);
-    
+
     const array_bench_cmd = b.addRunArtifact(array_bench_exe);
     array_bench_step.dependOn(&array_bench_cmd.step);
 
     // JIT benchmark tests
     const jit_bench_step = b.step("bench-jit", "Run JIT benchmark tests");
-    
+
     const jit_bench_exe = b.addExecutable(.{
         .name = "jit-benchmark",
         .root_module = b.createModule(.{
@@ -327,13 +368,13 @@ pub fn build(b: *std.Build) void {
     jit_bench_exe.root_module.addImport("bytecode", bytecode_mod);
     jit_bench_exe.root_module.addImport("jit", jit_mod);
     jit_bench_exe.root_module.addImport("extension", extension_mod);
-    
+
     const jit_bench_cmd = b.addRunArtifact(jit_bench_exe);
     jit_bench_step.dependOn(&jit_bench_cmd.step);
 
     // AOT benchmark tests
     const aot_bench_step = b.step("bench-aot", "Run AOT benchmark tests");
-    
+
     const aot_bench_exe = b.addExecutable(.{
         .name = "aot-benchmark",
         .root_module = b.createModule(.{
@@ -349,7 +390,7 @@ pub fn build(b: *std.Build) void {
     aot_bench_exe.root_module.addImport("bytecode", bytecode_mod);
     aot_bench_exe.root_module.addImport("jit", jit_mod);
     aot_bench_exe.root_module.addImport("extension", extension_mod);
-    
+
     const aot_bench_cmd = b.addRunArtifact(aot_bench_exe);
     aot_bench_step.dependOn(&aot_bench_cmd.step);
 
@@ -389,7 +430,7 @@ pub fn build(b: *std.Build) void {
     //     }),
     // });
     // b.installArtifact(terminator_debug);
-    
+
     // const terminator_debug_step = b.step("test-terminator", "Run terminator debug test");
     // const run_terminator_debug = b.addRunArtifact(terminator_debug);
     // terminator_debug_step.dependOn(&run_terminator_debug.step);
@@ -420,7 +461,7 @@ pub fn build(b: *std.Build) void {
     const install_profile_cli = b.addInstallArtifact(profile_cli_exe, .{});
     const profile_cli_step = b.step("profile-cli", "Build profile-cli");
     profile_cli_step.dependOn(&install_profile_cli.step);
-    
+
     // TEMPORARILY DISABLED: perf-cli related commands
     // const perf_check_cmd = b.addRunArtifact(perf_cli_exe);
     // const perf_update_cmd = b.addRunArtifact(perf_cli_exe);
@@ -428,7 +469,7 @@ pub fn build(b: *std.Build) void {
 
     // Regression detector tests
     const regression_test_step = b.step("test-regression", "Test regression detector");
-    
+
     const regression_test = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/benchmark/regression_detector.zig"),
@@ -436,14 +477,14 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    
+
     const run_regression_test = b.addRunArtifact(regression_test);
     regression_test_step.dependOn(&run_regression_test.step);
     test_step.dependOn(&run_regression_test.step);
 
     // CI integration tests
     const ci_test_step = b.step("test-ci", "Test CI integration");
-    
+
     const ci_test = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/benchmark/ci_integration.zig"),
@@ -451,14 +492,14 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    
+
     const run_ci_test = b.addRunArtifact(ci_test);
     ci_test_step.dependOn(&run_ci_test.step);
     test_step.dependOn(&run_ci_test.step);
 
     // AOT Differential Tests
     const aot_diff_step = b.step("test-aot-diff", "Run AOT differential tests (Interpreter vs AOT)");
-    
+
     const aot_diff_exe = b.addExecutable(.{
         .name = "aot-diff-runner",
         .root_module = b.createModule(.{
@@ -467,7 +508,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    
+
     const run_aot_diff = b.addRunArtifact(aot_diff_exe);
     // Ensure the interpreter is built and installed first
     run_aot_diff.step.dependOn(b.getInstallStep());

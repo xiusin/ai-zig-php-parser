@@ -98,8 +98,9 @@ inline fn tryFileWriteAll(fd: std.posix.fd_t, data: []const u8) WriteError!void 
 /// Zig 0.17 兼容：替代 std.process.getEnvVarOwned()（已移除）
 /// 简化实现：AOT 模式下直接返回 null（不支持运行时环境变量查询）
 pub inline fn getEnvVar(name: [*:0]const u8) ?[]const u8 {
-    _ = name;
-    return null;
+    const c_val = std.c.getenv(name);
+    if (c_val == null) return null;
+    return std.mem.sliceTo(c_val.?, 0);
 }
 
 var array_internal_pointers: ?std.AutoHashMap(*PHPArray, usize) = null;
@@ -477,7 +478,7 @@ fn initPredefinedConstants() !void {
         const maxpath_key = try runtime_allocator.dupe(u8, "PHP_MAXPATHLEN");
         try constants.put(maxpath_key, Value.initInt(4096));
     }
-    
+
     // 排序常量
     const sort_keys = [_][]const u8{ "SORT_ASC", "SORT_DESC", "SORT_REGULAR", "SORT_NUMERIC", "SORT_STRING", "SORT_NATURAL", "SORT_FLAG_CASE" };
     const sort_vals = [_]i64{ 1, 2, 0, 1, 2, 6, 8 };
@@ -485,7 +486,7 @@ fn initPredefinedConstants() !void {
         const key_copy = try runtime_allocator.dupe(u8, key);
         try constants.put(key_copy, Value.initInt(val));
     }
-    
+
     // 数组常量
     const array_keys = [_][]const u8{ "CASE_LOWER", "CASE_UPPER", "COUNT_NORMAL", "COUNT_RECURSIVE", "EXTR_OVERWRITE", "EXTR_SKIP", "EXTR_PREFIX_SAME", "EXTR_PREFIX_ALL" };
     const array_vals = [_]i64{ 0, 1, 0, 1, 0, 1, 3, 4 };
@@ -493,7 +494,7 @@ fn initPredefinedConstants() !void {
         const key_copy = try runtime_allocator.dupe(u8, key);
         try constants.put(key_copy, Value.initInt(val));
     }
-    
+
     const keys = [_][]const u8{ "STR_PAD_LEFT", "STR_PAD_RIGHT", "STR_PAD_BOTH" };
     const values = [_]i64{ 0, 1, 2 };
     for (keys, values) |key, val| {
@@ -540,7 +541,7 @@ fn initPredefinedConstants() !void {
         const k = try runtime_allocator.dupe(u8, sk2);
         try constants.put(k, Value.initInt(sv2));
     }
-    
+
     // Filter 常量
     const filter_keys = [_][]const u8{
         "FILTER_VALIDATE_EMAIL",
@@ -1345,4 +1346,3 @@ fn gcDestroyClosure(c: *PHPClosure) void {
     c.allocator.free(c.captures);
     c.allocator.destroy(c);
 }
-

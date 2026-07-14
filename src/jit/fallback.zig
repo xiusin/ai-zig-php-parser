@@ -1,11 +1,10 @@
 /// JIT 编译失败回退机制
-/// 
+///
 /// 本模块实现了 JIT 编译失败时的错误捕获、日志记录和回退到解释执行的机制。
-/// 
+///
 /// @ownership NON-OWNING (allocator)
 /// @thread-safety ISOLATED (单线程)
 /// @memory-protection 所有错误路径都使用 errdefer 确保资源释放
-
 const std = @import("std");
 const builtin = @import("builtin");
 const time_compat = @import("runtime").time_compat;
@@ -14,31 +13,31 @@ const time_compat = @import("runtime").time_compat;
 pub const JITCompilationError = error{
     /// 编译失败 - 通用编译错误
     CompilationFailed,
-    
+
     /// 不支持的指令
     UnsupportedInstruction,
-    
+
     /// 寄存器分配失败
     RegisterAllocationFailed,
-    
+
     /// 代码生成失败
     CodeGenerationFailed,
-    
+
     /// 无效的目标架构
     InvalidTargetArchitecture,
-    
+
     /// 代码缓存已满
     CodeCacheFull,
-    
+
     /// 无效的缓存条目
     InvalidCacheEntry,
-    
+
     /// 内存不足
     OutOfMemory,
-    
+
     /// 类型推断失败
     TypeInferenceFailed,
-    
+
     /// 优化失败
     OptimizationFailed,
 };
@@ -54,7 +53,7 @@ pub const CompilationFailureReason = enum {
     type_inference_failed,
     optimization_failed,
     unknown,
-    
+
     /// 从错误类型转换
     pub fn fromError(err: anyerror) CompilationFailureReason {
         return switch (err) {
@@ -69,7 +68,7 @@ pub const CompilationFailureReason = enum {
             else => .unknown,
         };
     }
-    
+
     /// 获取错误描述
     pub fn description(self: CompilationFailureReason) []const u8 {
         return switch (self) {
@@ -90,22 +89,22 @@ pub const CompilationFailureReason = enum {
 pub const CompilationFailureRecord = struct {
     /// 函数名称
     function_name: []const u8,
-    
+
     /// 失败原因
     reason: CompilationFailureReason,
-    
+
     /// 错误消息
     error_message: []const u8,
-    
+
     /// 失败时间戳（纳秒）
     timestamp_ns: i64,
-    
+
     /// 失败的指令偏移（如果适用）
     instruction_offset: ?usize,
-    
+
     /// 堆栈跟踪（如果可用）
     stack_trace: ?[]const u8,
-    
+
     /// 创建失败记录
     pub fn create(
         allocator: std.mem.Allocator,
@@ -116,10 +115,10 @@ pub const CompilationFailureRecord = struct {
     ) !CompilationFailureRecord {
         const name_copy = try allocator.dupe(u8, function_name);
         errdefer allocator.free(name_copy);
-        
+
         const msg_copy = try allocator.dupe(u8, error_message);
         errdefer allocator.free(msg_copy);
-        
+
         return CompilationFailureRecord{
             .function_name = name_copy,
             .reason = reason,
@@ -129,7 +128,7 @@ pub const CompilationFailureRecord = struct {
             .stack_trace = null,
         };
     }
-    
+
     /// 释放资源
     pub fn deinit(self: *CompilationFailureRecord, allocator: std.mem.Allocator) void {
         allocator.free(self.function_name);
@@ -144,19 +143,19 @@ pub const CompilationFailureRecord = struct {
 /// @concurrency-model ISOLATED
 pub const CompilationLogger = struct {
     allocator: std.mem.Allocator,
-    
+
     /// 失败记录列表
     failure_records: std.ArrayListUnmanaged(CompilationFailureRecord),
-    
+
     /// 日志文件路径（可选）
     log_file_path: ?[]const u8,
-    
+
     /// 日志文件句柄
     log_file: ?std.Io.File,
-    
+
     /// 是否启用详细日志
     verbose: bool,
-    
+
     /// 初始化日志记录器
     /// @pre allocator 必须有效
     /// @post 返回初始化的日志记录器
@@ -169,7 +168,7 @@ pub const CompilationLogger = struct {
             .verbose = false,
         };
     }
-    
+
     /// 初始化日志记录器并指定日志文件
     pub fn initWithFile(
         allocator: std.mem.Allocator,
@@ -177,7 +176,7 @@ pub const CompilationLogger = struct {
     ) !CompilationLogger {
         const path_copy = try allocator.dupe(u8, log_file_path);
         errdefer allocator.free(path_copy);
-        
+
         const io = std.Io.Threaded.global_single_threaded.io();
         const file = try std.Io.Dir.cwd().createFile(io, log_file_path, .{
             .truncate = false,
@@ -187,7 +186,7 @@ pub const CompilationLogger = struct {
 
         // 移动到文件末尾以追加
         _ = std.os.linux.lseek(file.handle, 0, std.posix.SEEK.END);
-        
+
         return .{
             .allocator = allocator,
             .failure_records = .{},
@@ -196,12 +195,12 @@ pub const CompilationLogger = struct {
             .verbose = false,
         };
     }
-    
+
     /// 设置详细日志模式
     pub fn setVerbose(self: *CompilationLogger, verbose: bool) void {
         self.verbose = verbose;
     }
-    
+
     /// 释放资源
     /// @pre self 必须已初始化
     /// @post 释放所有资源
@@ -210,16 +209,16 @@ pub const CompilationLogger = struct {
             record.deinit(self.allocator);
         }
         self.failure_records.deinit(self.allocator);
-        
+
         if (self.log_file_path) |path| {
             self.allocator.free(path);
         }
-        
+
         if (self.log_file) |file| {
             file.close(std.Io.Threaded.global_single_threaded.io());
         }
     }
-    
+
     /// 记录编译失败
     /// @pre function_name 和 error_message 必须有效
     /// @post 失败记录被添加到列表并写入日志文件（如果有）
@@ -231,7 +230,7 @@ pub const CompilationLogger = struct {
         instruction_offset: ?usize,
     ) !void {
         const reason = CompilationFailureReason.fromError(err);
-        
+
         // 创建失败记录
         var record = try CompilationFailureRecord.create(
             self.allocator,
@@ -241,23 +240,23 @@ pub const CompilationLogger = struct {
             instruction_offset,
         );
         errdefer record.deinit(self.allocator);
-        
+
         // 添加到列表
         try self.failure_records.append(self.allocator, record);
-        
+
         // 写入日志文件
         if (self.log_file) |file| {
             const last_record = &self.failure_records.items[self.failure_records.items.len - 1];
             try self.writeToFile(file, last_record);
         }
-        
+
         // 如果启用详细模式，打印到标准错误
         if (self.verbose) {
             const last_record = &self.failure_records.items[self.failure_records.items.len - 1];
             try self.printToStderr(last_record);
         }
     }
-    
+
     /// 写入日志文件
     fn writeToFile(self: *CompilationLogger, file: std.Io.File, record: *const CompilationFailureRecord) !void {
         _ = self;
@@ -267,15 +266,12 @@ pub const CompilationLogger = struct {
         var fba = std.heap.FixedBufferAllocator.init(&buf);
         const allocator = fba.allocator();
 
-        const msg = try std.fmt.allocPrint(allocator,
-            "[{d}] JIT 编译失败\n  函数: {s}\n  原因: {s}\n  错误: {s}\n",
-            .{
-                record.timestamp_ns,
-                record.function_name,
-                record.reason.description(),
-                record.error_message,
-            }
-        );
+        const msg = try std.fmt.allocPrint(allocator, "[{d}] JIT 编译失败\n  函数: {s}\n  原因: {s}\n  错误: {s}\n", .{
+            record.timestamp_ns,
+            record.function_name,
+            record.reason.description(),
+            record.error_message,
+        });
 
         try file.writeStreamingAll(io, msg);
 
@@ -286,28 +282,28 @@ pub const CompilationLogger = struct {
 
         try file.writeStreamingAll(io, "\n");
     }
-    
+
     /// 打印到标准错误
     fn printToStderr(self: *CompilationLogger, record: *const CompilationFailureRecord) !void {
         _ = self;
-        
+
         std.debug.print("[JIT 编译失败] 函数: {s}, 原因: {s}\n", .{
             record.function_name,
             record.reason.description(),
         });
-        
+
         if (record.instruction_offset) |offset| {
             std.debug.print("  指令偏移: {d}\n", .{offset});
         }
     }
-    
+
     /// 获取失败统计
     pub fn getStatistics(self: *const CompilationLogger) CompilationStatistics {
         var stats = CompilationStatistics{};
-        
+
         for (self.failure_records.items) |record| {
             stats.total_failures += 1;
-            
+
             switch (record.reason) {
                 .unsupported_instruction => stats.unsupported_instruction_count += 1,
                 .register_allocation_failed => stats.register_allocation_failures += 1,
@@ -320,10 +316,10 @@ pub const CompilationLogger = struct {
                 .unknown => stats.unknown_failures += 1,
             }
         }
-        
+
         return stats;
     }
-    
+
     /// 清除所有失败记录
     pub fn clear(self: *CompilationLogger) void {
         for (self.failure_records.items) |*record| {
@@ -345,7 +341,7 @@ pub const CompilationStatistics = struct {
     type_inference_failures: usize = 0,
     optimization_failures: usize = 0,
     unknown_failures: usize = 0,
-    
+
     /// 打印统计信息
     pub fn print(self: *const CompilationStatistics, writer: anytype) !void {
         try writer.print("=== JIT 编译失败统计 ===\n", .{});
@@ -366,16 +362,16 @@ pub const CompilationStatistics = struct {
 /// @concurrency-model ISOLATED
 pub const FallbackManager = struct {
     allocator: std.mem.Allocator,
-    
+
     /// 日志记录器
     logger: CompilationLogger,
-    
+
     /// 是否启用回退
     fallback_enabled: bool,
-    
+
     /// 回退计数器
     fallback_count: usize,
-    
+
     /// 初始化回退管理器
     pub fn init(allocator: std.mem.Allocator) FallbackManager {
         return .{
@@ -385,7 +381,7 @@ pub const FallbackManager = struct {
             .fallback_count = 0,
         };
     }
-    
+
     /// 初始化回退管理器并指定日志文件
     pub fn initWithLogger(
         allocator: std.mem.Allocator,
@@ -398,22 +394,22 @@ pub const FallbackManager = struct {
             .fallback_count = 0,
         };
     }
-    
+
     /// 释放资源
     pub fn deinit(self: *FallbackManager) void {
         self.logger.deinit();
     }
-    
+
     /// 启用/禁用回退
     pub fn setFallbackEnabled(self: *FallbackManager, enabled: bool) void {
         self.fallback_enabled = enabled;
     }
-    
+
     /// 设置详细日志模式
     pub fn setVerbose(self: *FallbackManager, verbose: bool) void {
         self.logger.setVerbose(verbose);
     }
-    
+
     /// 处理编译失败并回退
     /// @pre function_name 必须有效
     /// @post 记录失败并返回是否应该回退到解释执行
@@ -431,24 +427,24 @@ pub const FallbackManager = struct {
             error_message,
             instruction_offset,
         );
-        
+
         // 增加回退计数
         self.fallback_count += 1;
-        
+
         // 返回是否应该回退
         return self.fallback_enabled;
     }
-    
+
     /// 获取回退计数
     pub fn getFallbackCount(self: *const FallbackManager) usize {
         return self.fallback_count;
     }
-    
+
     /// 获取编译统计
     pub fn getStatistics(self: *const FallbackManager) CompilationStatistics {
         return self.logger.getStatistics();
     }
-    
+
     /// 重置统计
     pub fn resetStatistics(self: *FallbackManager) void {
         self.logger.clear();

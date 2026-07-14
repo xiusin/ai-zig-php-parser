@@ -1,13 +1,12 @@
 const std = @import("std");
 
 /// Copy-on-Write (COW) 实现
-/// 
+///
 /// 设计目标：
 /// 1. 引用计数管理 - 追踪共享状态
 /// 2. 延迟复制 - 只在写入时复制
 /// 3. 线程安全 - 原子操作保证并发安全
 /// 4. 内存效率 - 减少不必要的复制
-
 /// COW状态
 pub const COWState = enum(u8) {
     /// 独占所有权 - 可以直接修改
@@ -47,7 +46,6 @@ pub fn COWWrapper(comptime T: type) type {
                 .allocator = allocator,
             };
         }
-
 
         /// 从现有数据创建（共享）
         pub fn share(self: *Self) Self {
@@ -137,7 +135,7 @@ pub fn COWWrapper(comptime T: type) type {
 }
 
 /// COW字符串 - PHP字符串的COW实现
-/// 
+///
 /// 特性：
 /// 1. 短字符串优化 (SSO) - 小于等于23字节的字符串内联存储
 /// 2. 引用计数共享 - 多个引用共享同一数据
@@ -399,7 +397,7 @@ pub const COWString = struct {
 };
 
 /// COW数组 - PHP数组的COW实现
-/// 
+///
 /// 特性：
 /// 1. 引用计数共享 - 多个引用共享同一数据
 /// 2. 写时复制 - 修改时才复制数据

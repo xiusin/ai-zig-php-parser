@@ -4,12 +4,12 @@ const Allocator = std.mem.Allocator;
 /// 动态代码分析器
 pub const DynamicCodeAnalyzer = struct {
     allocator: Allocator,
-    
+
     /// 动态特性列表
     dynamic_features: std.ArrayList(DynamicFeature),
     /// 静态化统计
     stats: StaticizationStats,
-    
+
     pub fn init(allocator: Allocator) !DynamicCodeAnalyzer {
         return .{
             .allocator = allocator,
@@ -17,11 +17,11 @@ pub const DynamicCodeAnalyzer = struct {
             .stats = .{},
         };
     }
-    
+
     pub fn deinit(self: *DynamicCodeAnalyzer) void {
         self.dynamic_features.deinit(self.allocator);
     }
-    
+
     /// 分析动态特性
     pub fn analyze(self: *DynamicCodeAnalyzer) !void {
         // 简化：假设找到一些动态特性
@@ -32,7 +32,7 @@ pub const DynamicCodeAnalyzer = struct {
                 .is_constant = true,
             },
         });
-        
+
         try self.dynamic_features.append(self.allocator, .{
             .variable_variable = .{
                 .location = .{ .file = "test.php", .line = 2, .column = 1 },
@@ -40,10 +40,10 @@ pub const DynamicCodeAnalyzer = struct {
                 .is_constant = true,
             },
         });
-        
+
         self.stats.total_dynamic_features = self.dynamic_features.items.len;
     }
-    
+
     /// 静态化动态代码
     pub fn staticize(self: *DynamicCodeAnalyzer) !void {
         for (self.dynamic_features.items) |feature| {
@@ -79,7 +79,7 @@ pub const DynamicCodeAnalyzer = struct {
             }
         }
     }
-    
+
     /// 获取静态化率
     pub fn getStaticizationRate(self: *const DynamicCodeAnalyzer) f64 {
         return self.stats.staticizationRate();
@@ -134,11 +134,11 @@ pub const StaticizationStats = struct {
     total_dynamic_features: usize = 0,
     staticized_features: usize = 0,
     remaining_dynamic: usize = 0,
-    
+
     pub fn staticizationRate(self: StaticizationStats) f64 {
         if (self.total_dynamic_features == 0) return 1.0;
         return @as(f64, @floatFromInt(self.staticized_features)) /
-               @as(f64, @floatFromInt(self.total_dynamic_features));
+            @as(f64, @floatFromInt(self.total_dynamic_features));
     }
 };
 
@@ -146,36 +146,32 @@ pub const StaticizationStats = struct {
 pub const DynamicCodeStaticizer = struct {
     allocator: Allocator,
     analyzer: *DynamicCodeAnalyzer,
-    
+
     pub fn init(allocator: Allocator, analyzer: *DynamicCodeAnalyzer) DynamicCodeStaticizer {
         return .{
             .allocator = allocator,
             .analyzer = analyzer,
         };
     }
-    
+
     /// 静态化动态代码
     pub fn staticize(self: *DynamicCodeStaticizer) !void {
         try self.analyzer.staticize();
     }
-    
+
     /// 生成静态化报告
     pub fn generateReport(self: *const DynamicCodeStaticizer) ![]const u8 {
         const stats = self.analyzer.stats;
-        
-        return try std.fmt.allocPrint(
-            self.allocator,
-            "=== Dynamic Code Staticization Report ===\n\n" ++
+
+        return try std.fmt.allocPrint(self.allocator, "=== Dynamic Code Staticization Report ===\n\n" ++
             "Total dynamic features: {d}\n" ++
             "Staticized features: {d}\n" ++
             "Remaining dynamic: {d}\n" ++
-            "Staticization rate: {d:.2}%\n",
-            .{
-                stats.total_dynamic_features,
-                stats.staticized_features,
-                stats.remaining_dynamic,
-                stats.staticizationRate() * 100,
-            }
-        );
+            "Staticization rate: {d:.2}%\n", .{
+            stats.total_dynamic_features,
+            stats.staticized_features,
+            stats.remaining_dynamic,
+            stats.staticizationRate() * 100,
+        });
     }
 };

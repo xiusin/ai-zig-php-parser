@@ -430,12 +430,12 @@ pub const DependencyResolver = struct {
             } else if (self.matchKeyword(source[i..], "__DIR__")) {
                 // Handle __DIR__ constant
                 i += 7; // length of "__DIR__"
-                
+
                 // Skip whitespace
                 while (i < source.len and (source[i] == ' ' or source[i] == '\t')) {
                     i += 1;
                 }
-                
+
                 // Check for concatenation operator
                 if (i < source.len and source[i] == '.') {
                     i += 1;
@@ -443,7 +443,7 @@ pub const DependencyResolver = struct {
                     while (i < source.len and (source[i] == ' ' or source[i] == '\t')) {
                         i += 1;
                     }
-                    
+
                     // Extract the concatenated string
                     if (i < source.len and (source[i] == '\'' or source[i] == '"')) {
                         const quote = source[i];
@@ -460,7 +460,7 @@ pub const DependencyResolver = struct {
                             // Resolve __DIR__ to current file's directory
                             const dir = std.fs.path.dirname(current_file) orelse ".";
                             const relative_path = source[path_start..i];
-                            
+
                             // Combine directory with relative path
                             const full_path = try std.fs.path.join(self.allocator, &[_][]const u8{ dir, relative_path });
                             path = full_path;

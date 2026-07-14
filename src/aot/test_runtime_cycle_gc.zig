@@ -43,4 +43,3 @@ test "AOT runtime - cycle GC collects cyclic objects" {
         }
     }.run);
 }
-

@@ -1093,16 +1093,11 @@ pub const AOTCompiler = struct {
             const linker_message = switch (err) {
                 //error.TraitMethodConflict =>
                 //    "trait method conflict: colliding methods require insteadof/as resolution",
-                error.TraitPropertyConflict =>
-                    "trait property conflict: imported properties are not definition-compatible",
-                error.TraitConstantConflict =>
-                    "trait constant conflict: imported constants are not definition-compatible",
-                error.UnknownTraitMethodReference =>
-                    "trait adaptation error: referenced method was not found in imported traits",
-                error.AmbiguousTraitMethodReference =>
-                    "trait adaptation error: referenced method is ambiguous across imported traits",
-                error.TraitNotFound =>
-                    "trait adaptation error: referenced trait was not found",
+                error.TraitPropertyConflict => "trait property conflict: imported properties are not definition-compatible",
+                error.TraitConstantConflict => "trait constant conflict: imported constants are not definition-compatible",
+                error.UnknownTraitMethodReference => "trait adaptation error: referenced method was not found in imported traits",
+                error.AmbiguousTraitMethodReference => "trait adaptation error: referenced method is ambiguous across imported traits",
+                error.TraitNotFound => "trait adaptation error: referenced trait was not found",
                 else => @errorName(err),
             };
             self.diagnostics.reportError(

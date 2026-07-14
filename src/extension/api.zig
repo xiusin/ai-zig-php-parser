@@ -249,7 +249,7 @@ test "ExtensionFunction creation" {
             return 0;
         }
     }.call;
-    
+
     const func = createFunction("test_func", callback, 1, 3);
     try std.testing.expectEqualStrings("test_func", func.name);
     try std.testing.expectEqual(@as(u8, 1), func.min_args);

@@ -13,12 +13,12 @@ pub const RegisterAllocator = struct {
     live_intervals: std.AutoHashMapUnmanaged(u32, Interval),
     /// 寄存器分配结果
     allocation: std.AutoHashMapUnmanaged(u32, u8),
-    
+
     const Interval = struct {
         start: u32,
         end: u32,
     };
-    
+
     pub fn init(allocator: std.mem.Allocator) RegisterAllocator {
         return .{
             .allocator = allocator,
@@ -26,26 +26,26 @@ pub const RegisterAllocator = struct {
             .allocation = .{},
         };
     }
-    
+
     pub fn deinit(self: *RegisterAllocator) void {
         self.live_intervals.deinit(self.allocator);
         self.allocation.deinit(self.allocator);
     }
-    
+
     /// 线性扫描寄存器分配
     pub fn allocate(self: *RegisterAllocator, func: *Function) !void {
         // 1. 计算活跃区间
         try self.computeLiveIntervals(func);
-        
+
         // 2. 按起始点排序
         var intervals = std.ArrayList(struct { reg: u32, interval: Interval }).init(self.allocator);
         defer intervals.deinit();
-        
+
         var it = self.live_intervals.iterator();
         while (it.next()) |entry| {
             try intervals.append(.{ .reg = entry.key_ptr.*, .interval = entry.value_ptr.* });
         }
-        
+
         std.sort.pdq(
             @TypeOf(intervals.items[0]),
             intervals.items,
@@ -56,14 +56,14 @@ pub const RegisterAllocator = struct {
                 }
             }.lessThan,
         );
-        
+
         // 3. 线性扫描分配
         var active = std.ArrayList(struct { reg: u32, end: u32, phys: u8 }).init(self.allocator);
         defer active.deinit();
-        
+
         var next_reg: u8 = 0;
         const max_regs: u8 = 16; // 假设有16个物理寄存器
-        
+
         for (intervals.items) |item| {
             // 移除已结束的区间
             var i: usize = 0;
@@ -74,7 +74,7 @@ pub const RegisterAllocator = struct {
                     i += 1;
                 }
             }
-            
+
             // 分配寄存器
             if (active.items.len < max_regs) {
                 const phys_reg = next_reg;
@@ -87,10 +87,10 @@ pub const RegisterAllocator = struct {
             }
         }
     }
-    
+
     fn computeLiveIntervals(self: *RegisterAllocator, func: *Function) !void {
         self.live_intervals.clearRetainingCapacity();
-        
+
         var pos: u32 = 0;
         for (func.blocks.items) |block| {
             for (block.instructions.items) |inst| {

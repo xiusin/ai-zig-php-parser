@@ -23,24 +23,24 @@ pub const GenerationalGC = struct {
     /// 执行 Minor GC（年轻代）
     pub fn minorGC(self: *GenerationalGC) !GCStats {
         const start = std.time.nanoTimestamp();
-        
+
         // 标记存活对象
         var survived: usize = 0;
         for (self.young_gen.objects.items) |*obj| {
             if (obj.marked) {
                 survived += 1;
                 obj.age += 1;
-                
+
                 // 晋升到老年代
                 if (obj.age >= self.young_gen.age_threshold) {
                     try self.old_gen.objects.append(self.allocator, obj.*);
                 }
             }
         }
-        
+
         const end = std.time.nanoTimestamp();
         const pause_time_ns = @as(u64, @intCast(end - start));
-        
+
         return GCStats{
             .pause_time_ns = pause_time_ns,
             .collected = self.young_gen.objects.items.len - survived,
@@ -51,17 +51,17 @@ pub const GenerationalGC = struct {
     /// 执行 Major GC（老年代）
     pub fn majorGC(self: *GenerationalGC) !GCStats {
         const start = std.time.nanoTimestamp();
-        
+
         var survived: usize = 0;
         for (self.old_gen.objects.items) |obj| {
             if (obj.marked) {
                 survived += 1;
             }
         }
-        
+
         const end = std.time.nanoTimestamp();
         const pause_time_ns = @as(u64, @intCast(end - start));
-        
+
         return GCStats{
             .pause_time_ns = pause_time_ns,
             .collected = self.old_gen.objects.items.len - survived,

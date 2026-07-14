@@ -209,7 +209,7 @@ pub const MixedValueArray = struct {
     next_int_key: i64,
     allocator: std.mem.Allocator,
     ref_count: u32,
-    
+
     // 已删除元素的数量，用于决定是否重建
     deleted_count: u32,
 
@@ -272,13 +272,13 @@ pub const MixedValueArray = struct {
 
         // 重新插入所有有效条目
         // 如果 deleted_count 过高，我们应该同时压缩 entries
-        
+
         if (self.deleted_count > 0) {
             // 实现压缩逻辑：移除已删除的条目
             // 创建新的 entries 数组，只包含有效条目
             var new_entries = std.ArrayList(Entry).init(self.allocator);
             errdefer new_entries.deinit();
-            
+
             // 复制所有有效条目（跳过已删除的）
             for (self.entries.items) |entry| {
                 // 检查条目是否有效（非删除标记）
@@ -287,12 +287,12 @@ pub const MixedValueArray = struct {
                     try new_entries.append(entry);
                 }
             }
-            
+
             // 替换旧的 entries 数组
             self.entries.deinit();
             self.entries = new_entries;
             self.deleted_count = 0;
-            
+
             // 重建哈希表索引
             for (self.entries.items, 0..) |*entry, i| {
                 const idx = entry.hash & self.mask;
@@ -363,17 +363,17 @@ pub const MixedValueArray = struct {
         };
 
         _ = value.retain();
-        
+
         const new_idx = @as(u32, @intCast(self.entries.items.len));
         const hash_idx = h & self.mask;
-        
+
         try self.entries.append(Entry{
             .key = owned_key,
             .value = value,
             .hash = h,
             .next = self.hash_table[hash_idx],
         });
-        
+
         self.hash_table[hash_idx] = new_idx;
     }
 

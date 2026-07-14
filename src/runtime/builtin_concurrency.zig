@@ -260,7 +260,7 @@ pub fn callSharedDataMethod(vm: anytype, obj: *types.PHPObject, method_name: []c
         else
             try std.fmt.allocPrint(vm.allocator, "{any}", .{args[1]});
         defer if (args[1].getTag() != .string) vm.allocator.free(value_str);
-        
+
         try shared.set(key, value_str);
         return Value.initNull();
     } else if (std.mem.eql(u8, method_name, "get")) {

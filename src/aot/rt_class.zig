@@ -131,12 +131,13 @@ pub const ClassMeta = struct {
     interfaces: []const []const u8 = &.{},
     methods: std.StringHashMap(ClassMethod),
     properties: std.StringHashMap(ClassProperty),
+    property_order: std.ArrayList([]const u8),
     static_properties: std.StringHashMap(Value),
     is_abstract: bool = false,
     is_final: bool = false,
-    is_interface: bool = false,  // 是否为接口
-    is_trait: bool = false,      // 是否为trait
-    is_enum: bool = false,       // 是否为enum
+    is_interface: bool = false, // 是否为接口
+    is_trait: bool = false, // 是否为trait
+    is_enum: bool = false, // 是否为enum
     allocator: Allocator,
 
     /// 魔法函数指针
@@ -155,6 +156,7 @@ pub const ClassMeta = struct {
     magic_wakeup: ?MethodFn = null,
     magic_serialize: ?MethodFn = null,
     magic_unserialize: ?MethodFn = null,
+    magic_debugInfo: ?MethodFn = null,
 
     pub fn init(allocator: Allocator, name: []const u8) !*ClassMeta {
         const meta = try allocator.create(ClassMeta);
@@ -164,6 +166,7 @@ pub const ClassMeta = struct {
             .name = try allocator.dupe(u8, name),
             .methods = std.StringHashMap(ClassMethod).init(allocator),
             .properties = std.StringHashMap(ClassProperty).init(allocator),
+            .property_order = try std.ArrayList([]const u8).initCapacity(allocator, 0),
             .static_properties = std.StringHashMap(Value).init(allocator),
             .allocator = allocator,
         };
@@ -181,6 +184,7 @@ pub const ClassMeta = struct {
         // 再释放其他资源
         self.methods.deinit();
         self.properties.deinit();
+        self.property_order.deinit(self.allocator);
         self.allocator.free(self.name);
         self.allocator.destroy(self);
     }
@@ -203,6 +207,7 @@ pub const ClassMeta = struct {
         if (std.mem.eql(u8, method.name, "__wakeup")) self.magic_wakeup = method.func;
         if (std.mem.eql(u8, method.name, "__serialize")) self.magic_serialize = method.func;
         if (std.mem.eql(u8, method.name, "__unserialize")) self.magic_unserialize = method.func;
+        if (std.mem.eql(u8, method.name, "__debugInfo")) self.magic_debugInfo = method.func;
     }
 
     pub const MethodLookup = struct {
@@ -274,8 +279,7 @@ pub const ClassMeta = struct {
             const wday = getDayOfWeek(year, month, day);
             const iso_wday = if (wday == 0) @as(i64, 7) else @as(i64, wday);
             var week = @divFloor(@as(i64, doy) - iso_wday + 10, 7);
-            if (week < 1) week = if (isLeapYear(year - 1)) 53 else 52
-            else if (week > 52 and doy - iso_wday > 365 - (if (isLeapYear(year)) @as(i64, 1) else @as(i64, 0))) week = 1;
+            if (week < 1) week = if (isLeapYear(year - 1)) 53 else 52 else if (week > 52 and doy - iso_wday > 365 - (if (isLeapYear(year)) @as(i64, 1) else @as(i64, 0))) week = 1;
             return @intCast(week);
         }
 
@@ -305,22 +309,82 @@ pub const ClassMeta = struct {
                     'L' => try aw.writer.print("{d}", .{if (isLeapYear(year)) @as(u32, 1) else @as(u32, 0)}),
                     'm' => try aw.writer.print("{d:0>2}", .{month}),
                     'n' => try aw.writer.print("{d}", .{month}),
-                    'F' => try aw.writer.writeAll(switch (month) { 1=>"January", 2=>"February", 3=>"March", 4=>"April", 5=>"May", 6=>"June", 7=>"July", 8=>"August", 9=>"September", 10=>"October", 11=>"November", 12=>"December", else=>"Unknown" }),
-                    'M' => try aw.writer.writeAll(switch (month) { 1=>"Jan", 2=>"Feb", 3=>"Mar", 4=>"Apr", 5=>"May", 6=>"Jun", 7=>"Jul", 8=>"Aug", 9=>"Sep", 10=>"Oct", 11=>"Nov", 12=>"Dec", else=>"???" }),
+                    'F' => try aw.writer.writeAll(switch (month) {
+                        1 => "January",
+                        2 => "February",
+                        3 => "March",
+                        4 => "April",
+                        5 => "May",
+                        6 => "June",
+                        7 => "July",
+                        8 => "August",
+                        9 => "September",
+                        10 => "October",
+                        11 => "November",
+                        12 => "December",
+                        else => "Unknown",
+                    }),
+                    'M' => try aw.writer.writeAll(switch (month) {
+                        1 => "Jan",
+                        2 => "Feb",
+                        3 => "Mar",
+                        4 => "Apr",
+                        5 => "May",
+                        6 => "Jun",
+                        7 => "Jul",
+                        8 => "Aug",
+                        9 => "Sep",
+                        10 => "Oct",
+                        11 => "Nov",
+                        12 => "Dec",
+                        else => "???",
+                    }),
                     't' => try aw.writer.print("{d}", .{getDaysInMonth(year, month)}),
                     'd' => try aw.writer.print("{d:0>2}", .{day}),
                     'j' => try aw.writer.print("{d}", .{day}),
-                    'S' => try aw.writer.writeAll(if (day >= 11 and day <= 13) "th" else switch (day % 10) { 1=>"st", 2=>"nd", 3=>"rd", else=>"th" }),
+                    'S' => try aw.writer.writeAll(if (day >= 11 and day <= 13) "th" else switch (day % 10) {
+                        1 => "st",
+                        2 => "nd",
+                        3 => "rd",
+                        else => "th",
+                    }),
                     'z' => try aw.writer.print("{d}", .{getDayOfYear(year, month, day) - 1}),
-                    'l' => try aw.writer.writeAll(switch (getDayOfWeek(year, month, day)) { 0=>"Sunday", 1=>"Monday", 2=>"Tuesday", 3=>"Wednesday", 4=>"Thursday", 5=>"Friday", 6=>"Saturday", else=>"Unknown" }),
-                    'D' => try aw.writer.writeAll(switch (getDayOfWeek(year, month, day)) { 0=>"Sun", 1=>"Mon", 2=>"Tue", 3=>"Wed", 4=>"Thu", 5=>"Fri", 6=>"Sat", else=>"???" }),
+                    'l' => try aw.writer.writeAll(switch (getDayOfWeek(year, month, day)) {
+                        0 => "Sunday",
+                        1 => "Monday",
+                        2 => "Tuesday",
+                        3 => "Wednesday",
+                        4 => "Thursday",
+                        5 => "Friday",
+                        6 => "Saturday",
+                        else => "Unknown",
+                    }),
+                    'D' => try aw.writer.writeAll(switch (getDayOfWeek(year, month, day)) {
+                        0 => "Sun",
+                        1 => "Mon",
+                        2 => "Tue",
+                        3 => "Wed",
+                        4 => "Thu",
+                        5 => "Fri",
+                        6 => "Sat",
+                        else => "???",
+                    }),
                     'w' => try aw.writer.print("{d}", .{getDayOfWeek(year, month, day)}),
-                    'N' => { const n = getDayOfWeek(year, month, day); try aw.writer.print("{d}", .{if (n == 0) @as(u32, 7) else n}); },
+                    'N' => {
+                        const n = getDayOfWeek(year, month, day);
+                        try aw.writer.print("{d}", .{if (n == 0) @as(u32, 7) else n});
+                    },
                     'W' => try aw.writer.print("{d:0>2}", .{getIsoWeek(year, month, day)}),
                     'H' => try aw.writer.print("{d:0>2}", .{hour}),
                     'G' => try aw.writer.print("{d}", .{hour}),
-                    'h' => { const h12 = if (hour == 0) @as(u32, 12) else if (hour > 12) hour - 12 else hour; try aw.writer.print("{d:0>2}", .{h12}); },
-                    'g' => { const h12 = if (hour == 0) @as(u32, 12) else if (hour > 12) hour - 12 else hour; try aw.writer.print("{d}", .{h12}); },
+                    'h' => {
+                        const h12 = if (hour == 0) @as(u32, 12) else if (hour > 12) hour - 12 else hour;
+                        try aw.writer.print("{d:0>2}", .{h12});
+                    },
+                    'g' => {
+                        const h12 = if (hour == 0) @as(u32, 12) else if (hour > 12) hour - 12 else hour;
+                        try aw.writer.print("{d}", .{h12});
+                    },
                     'a' => try aw.writer.writeAll(if (hour < 12) "am" else "pm"),
                     'A' => try aw.writer.writeAll(if (hour < 12) "AM" else "PM"),
                     'i' => try aw.writer.print("{d:0>2}", .{minute}),
@@ -328,13 +392,58 @@ pub const ClassMeta = struct {
                     'u' => try aw.writer.print("{d:0>6}", .{self.microseconds}),
                     'v' => try aw.writer.print("{d:0>3}", .{@divFloor(self.microseconds, 1000)}),
                     'T' => try aw.writer.writeAll(self.timezone_name),
-                    'O' => { const oh = @divFloor(self.timezone_offset, 3600); const om = @divFloor(@rem(self.timezone_offset, 3600), 60); if (oh >= 0) try aw.writer.print("+{d:0>2}{d:0>2}", .{oh, @abs(om)}) else try aw.writer.print("{d:0>3}{d:0>2}", .{oh, @abs(om)}); },
-                    'P' => { const oh = @divFloor(self.timezone_offset, 3600); const om = @divFloor(@rem(self.timezone_offset, 3600), 60); if (oh >= 0) try aw.writer.print("+{d:0>2}:{d:0>2}", .{oh, @abs(om)}) else try aw.writer.print("{d:0>3}:{d:0>2}", .{oh, @abs(om)}); },
+                    'O' => {
+                        const oh = @divFloor(self.timezone_offset, 3600);
+                        const om = @divFloor(@rem(self.timezone_offset, 3600), 60);
+                        if (oh >= 0) try aw.writer.print("+{d:0>2}{d:0>2}", .{ oh, @abs(om) }) else try aw.writer.print("{d:0>3}{d:0>2}", .{ oh, @abs(om) });
+                    },
+                    'P' => {
+                        const oh = @divFloor(self.timezone_offset, 3600);
+                        const om = @divFloor(@rem(self.timezone_offset, 3600), 60);
+                        if (oh >= 0) try aw.writer.print("+{d:0>2}:{d:0>2}", .{ oh, @abs(om) }) else try aw.writer.print("{d:0>3}:{d:0>2}", .{ oh, @abs(om) });
+                    },
                     'Z' => try aw.writer.print("{d}", .{self.timezone_offset}),
                     'U' => try aw.writer.print("{d}", .{self.timestamp}),
-                    'c' => { try aw.writer.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}", .{year, month, day, hour, minute, second}); const oh = @divFloor(self.timezone_offset, 3600); const om = @divFloor(@rem(self.timezone_offset, 3600), 60); if (oh >= 0) try aw.writer.print("+{d:0>2}:{d:0>2}", .{oh, @abs(om)}) else try aw.writer.print("{d:0>3}:{d:0>2}", .{oh, @abs(om)}); },
-                    'r' => { const wd = switch (getDayOfWeek(year, month, day)) { 0=>"Sun", 1=>"Mon", 2=>"Tue", 3=>"Wed", 4=>"Thu", 5=>"Fri", 6=>"Sat", else=>"???" }; const mon = switch (month) { 1=>"Jan", 2=>"Feb", 3=>"Mar", 4=>"Apr", 5=>"May", 6=>"Jun", 7=>"Jul", 8=>"Aug", 9=>"Sep", 10=>"Oct", 11=>"Nov", 12=>"Dec", else=>"???" }; const oh = @divFloor(self.timezone_offset, 3600); const om = @divFloor(@rem(self.timezone_offset, 3600), 60); if (oh >= 0) try aw.writer.print("{s}, {d} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} +{d:0>2}{d:0>2}", .{wd, day, mon, year, hour, minute, second, oh, @abs(om)}) else try aw.writer.print("{s}, {d} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} -{d:0>2}{d:0>2}", .{wd, day, mon, year, hour, minute, second, @abs(oh), @abs(om)}); },
-                    '\\' => { i += 1; if (i < format_str.len) try aw.writer.writeAll(format_str[i .. i + 1]); },
+                    'c' => {
+                        try aw.writer.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}", .{ year, month, day, hour, minute, second });
+                        const oh = @divFloor(self.timezone_offset, 3600);
+                        const om = @divFloor(@rem(self.timezone_offset, 3600), 60);
+                        if (oh >= 0) try aw.writer.print("+{d:0>2}:{d:0>2}", .{ oh, @abs(om) }) else try aw.writer.print("{d:0>3}:{d:0>2}", .{ oh, @abs(om) });
+                    },
+                    'r' => {
+                        const wd = switch (getDayOfWeek(year, month, day)) {
+                            0 => "Sun",
+                            1 => "Mon",
+                            2 => "Tue",
+                            3 => "Wed",
+                            4 => "Thu",
+                            5 => "Fri",
+                            6 => "Sat",
+                            else => "???",
+                        };
+                        const mon = switch (month) {
+                            1 => "Jan",
+                            2 => "Feb",
+                            3 => "Mar",
+                            4 => "Apr",
+                            5 => "May",
+                            6 => "Jun",
+                            7 => "Jul",
+                            8 => "Aug",
+                            9 => "Sep",
+                            10 => "Oct",
+                            11 => "Nov",
+                            12 => "Dec",
+                            else => "???",
+                        };
+                        const oh = @divFloor(self.timezone_offset, 3600);
+                        const om = @divFloor(@rem(self.timezone_offset, 3600), 60);
+                        if (oh >= 0) try aw.writer.print("{s}, {d} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} +{d:0>2}{d:0>2}", .{ wd, day, mon, year, hour, minute, second, oh, @abs(om) }) else try aw.writer.print("{s}, {d} {s} {d} {d:0>2}:{d:0>2}:{d:0>2} -{d:0>2}{d:0>2}", .{ wd, day, mon, year, hour, minute, second, @abs(oh), @abs(om) });
+                    },
+                    '\\' => {
+                        i += 1;
+                        if (i < format_str.len) try aw.writer.writeAll(format_str[i .. i + 1]);
+                    },
                     else => try aw.writer.writeAll(&[_]u8{c}),
                 }
             }
@@ -360,7 +469,7 @@ pub const ClassMeta = struct {
     // ========================================================================
     // 时区数据库 (简化版)
     // ========================================================================
-    
+
     const TimezoneInfo = struct { name: []const u8, offset_seconds: i32, abbreviation: []const u8 };
     const TIMEZONE_DATABASE: []const TimezoneInfo = &[_]TimezoneInfo{
         .{ .name = "UTC", .offset_seconds = 0, .abbreviation = "UTC" },
@@ -392,10 +501,15 @@ pub const ClassMeta = struct {
         if (tz_str.len >= 3 and (tz_str[0] == '+' or tz_str[0] == '-')) {
             const sign: i32 = if (tz_str[0] == '+') 1 else -1;
             const rest = tz_str[1..];
-            var hours: i32 = 0; var minutes: i32 = 0;
-            if (rest.len == 2) hours = std.fmt.parseInt(i32, rest, 10) catch return null
-            else if (rest.len == 4) { hours = std.fmt.parseInt(i32, rest[0..2], 10) catch return null; minutes = std.fmt.parseInt(i32, rest[2..4], 10) catch return null; }
-            else if (rest.len == 5 and rest[2] == ':') { hours = std.fmt.parseInt(i32, rest[0..2], 10) catch return null; minutes = std.fmt.parseInt(i32, rest[3..5], 10) catch return null; }
+            var hours: i32 = 0;
+            var minutes: i32 = 0;
+            if (rest.len == 2) hours = std.fmt.parseInt(i32, rest, 10) catch return null else if (rest.len == 4) {
+                hours = std.fmt.parseInt(i32, rest[0..2], 10) catch return null;
+                minutes = std.fmt.parseInt(i32, rest[2..4], 10) catch return null;
+            } else if (rest.len == 5 and rest[2] == ':') {
+                hours = std.fmt.parseInt(i32, rest[0..2], 10) catch return null;
+                minutes = std.fmt.parseInt(i32, rest[3..5], 10) catch return null;
+            }
             return sign * (hours * 3600 + minutes * 60);
         }
         return null;
@@ -427,7 +541,10 @@ pub const ClassMeta = struct {
         try meta.addMethod(.{ .name = "getName", .func = struct {
             fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
                 const this = Value_asObject(ctx);
-                if (this.getProperty("timezone")) |tz| { _ = tz.retain(); return tz; }
+                if (this.getProperty("timezone")) |tz| {
+                    _ = tz.retain();
+                    return tz;
+                }
                 return Value.initString(try PHPString.init(runtime_allocator, "UTC"));
             }
         }.call, .is_static = false });
@@ -468,27 +585,52 @@ pub const ClassMeta = struct {
                 const spec = args[0].asString().data;
                 if (spec.len < 1 or spec[0] != 'P') return error.InvalidDateIntervalSpecification;
 
-                var y: i64 = 0; var m: i64 = 0; var d: i64 = 0;
-                var h: i64 = 0; var i: i64 = 0; var s: i64 = 0;
-                var in_time = false; var pos: usize = 1;
-                var num_buf: [32]u8 = undefined; var num_len: usize = 0;
+                var y: i64 = 0;
+                var m: i64 = 0;
+                var d: i64 = 0;
+                var h: i64 = 0;
+                var i: i64 = 0;
+                var s: i64 = 0;
+                var in_time = false;
+                var pos: usize = 1;
+                var num_buf: [32]u8 = undefined;
+                var num_len: usize = 0;
 
                 while (pos < spec.len) {
                     const c = spec[pos];
-                    if (c >= '0' and c <= '9' or c == '.') { if (num_len < 32) { num_buf[num_len] = c; num_len += 1; } pos += 1; }
-                    else if (c == 'T') { in_time = true; pos += 1; num_len = 0; }
-                    else {
+                    if (c >= '0' and c <= '9' or c == '.') {
+                        if (num_len < 32) {
+                            num_buf[num_len] = c;
+                            num_len += 1;
+                        }
+                        pos += 1;
+                    } else if (c == 'T') {
+                        in_time = true;
+                        pos += 1;
+                        num_len = 0;
+                    } else {
                         const num_str = num_buf[0..num_len];
                         const num_val = std.fmt.parseFloat(f64, num_str) catch 0;
                         switch (c) {
-                            'Y' => { y = @intFromFloat(num_val); },
-                            'M' => { if (in_time) i = @intFromFloat(num_val) else m = @intFromFloat(num_val); },
-                            'D' => { d = @intFromFloat(num_val); },
-                            'H' => { h = @intFromFloat(num_val); },
-                            'S' => { s = @intFromFloat(@floor(num_val)); },
+                            'Y' => {
+                                y = @intFromFloat(num_val);
+                            },
+                            'M' => {
+                                if (in_time) i = @intFromFloat(num_val) else m = @intFromFloat(num_val);
+                            },
+                            'D' => {
+                                d = @intFromFloat(num_val);
+                            },
+                            'H' => {
+                                h = @intFromFloat(num_val);
+                            },
+                            'S' => {
+                                s = @intFromFloat(@floor(num_val));
+                            },
                             else => {},
                         }
-                        pos += 1; num_len = 0;
+                        pos += 1;
+                        num_len = 0;
                     }
                 }
                 try this.setProperty("y", Value.initInt(y));
@@ -561,27 +703,28 @@ pub const ClassMeta = struct {
             fn call(_: Value, args: []const Value, alloc: Allocator) anyerror!Value {
                 if (args.len == 0 or !args[0].isString()) return Value.initNull();
                 const spec = args[0].asString().data;
-                var y: i64 = 0; var m: i64 = 0; var d: i64 = 0;
-                var h: i64 = 0; var i: i64 = 0; var s: i64 = 0;
+                var y: i64 = 0;
+                var m: i64 = 0;
+                var d: i64 = 0;
+                var h: i64 = 0;
+                var i: i64 = 0;
+                var s: i64 = 0;
                 var pos: usize = 0;
 
                 while (pos < spec.len) {
                     while (pos < spec.len and spec[pos] == ' ') pos += 1;
                     if (pos >= spec.len) break;
                     var num: i64 = 0;
-                    while (pos < spec.len and spec[pos] >= '0' and spec[pos] <= '9') { num = num * 10 + (spec[pos] - '0'); pos += 1; }
+                    while (pos < spec.len and spec[pos] >= '0' and spec[pos] <= '9') {
+                        num = num * 10 + (spec[pos] - '0');
+                        pos += 1;
+                    }
                     while (pos < spec.len and spec[pos] == ' ') pos += 1;
                     const start = pos;
                     while (pos < spec.len and spec[pos] >= 'a' and spec[pos] <= 'z') pos += 1;
                     const unit = spec[start..pos];
 
-                    if (std.mem.startsWith(u8, unit, "year")) y += num
-                    else if (std.mem.startsWith(u8, unit, "month")) m += num
-                    else if (std.mem.startsWith(u8, unit, "day")) d += num
-                    else if (std.mem.startsWith(u8, unit, "hour")) h += num
-                    else if (std.mem.startsWith(u8, unit, "minute")) i += num
-                    else if (std.mem.startsWith(u8, unit, "second")) s += num
-                    else if (std.mem.startsWith(u8, unit, "week")) d += num * 7;
+                    if (std.mem.startsWith(u8, unit, "year")) y += num else if (std.mem.startsWith(u8, unit, "month")) m += num else if (std.mem.startsWith(u8, unit, "day")) d += num else if (std.mem.startsWith(u8, unit, "hour")) h += num else if (std.mem.startsWith(u8, unit, "minute")) i += num else if (std.mem.startsWith(u8, unit, "second")) s += num else if (std.mem.startsWith(u8, unit, "week")) d += num * 7;
                 }
 
                 const meta_ptr = findClass("DateInterval") orelse return Value.initNull();
@@ -630,7 +773,10 @@ pub const ClassMeta = struct {
         try meta.addMethod(.{ .name = "current", .func = struct {
             fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
                 const this = Value_asObject(ctx);
-                if (this.getProperty("_current")) |current| { _ = current.retain(); return current; }
+                if (this.getProperty("_current")) |current| {
+                    _ = current.retain();
+                    return current;
+                }
                 return Value.initNull();
             }
         }.call, .is_static = false });
@@ -689,7 +835,8 @@ pub const ClassMeta = struct {
                 const this = Value_asObject(ctx);
                 if (this.getProperty("end")) |end| {
                     if (!end.isNull()) {
-                        var current_ts: i64 = 0; var end_ts: i64 = 0;
+                        var current_ts: i64 = 0;
+                        var end_ts: i64 = 0;
                         if (this.getProperty("_current")) |current| {
                             if (Value_isObject(current)) {
                                 if (Value_asObject(current).getProperty("timestamp")) |ts| current_ts = ts.toInt();
@@ -711,7 +858,10 @@ pub const ClassMeta = struct {
         try meta.addMethod(.{ .name = "getStartDate", .func = struct {
             fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
                 const this = Value_asObject(ctx);
-                if (this.getProperty("start")) |start| { _ = start.retain(); return start; }
+                if (this.getProperty("start")) |start| {
+                    _ = start.retain();
+                    return start;
+                }
                 return Value.initNull();
             }
         }.call, .is_static = false });
@@ -719,7 +869,10 @@ pub const ClassMeta = struct {
         try meta.addMethod(.{ .name = "getEndDate", .func = struct {
             fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
                 const this = Value_asObject(ctx);
-                if (this.getProperty("end")) |end| { _ = end.retain(); return end; }
+                if (this.getProperty("end")) |end| {
+                    _ = end.retain();
+                    return end;
+                }
                 return Value.initNull();
             }
         }.call, .is_static = false });
@@ -727,7 +880,10 @@ pub const ClassMeta = struct {
         try meta.addMethod(.{ .name = "getDateInterval", .func = struct {
             fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
                 const this = Value_asObject(ctx);
-                if (this.getProperty("interval")) |interval| { _ = interval.retain(); return interval; }
+                if (this.getProperty("interval")) |interval| {
+                    _ = interval.retain();
+                    return interval;
+                }
                 return Value.initNull();
             }
         }.call, .is_static = false });
@@ -781,12 +937,19 @@ pub const ClassMeta = struct {
         try meta.addMethod(.{ .name = "__construct", .func = struct {
             fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
                 const this = Value_asObject(ctx);
-                var tz_offset: i32 = 0; var tz_name: []const u8 = "UTC";
+                var tz_offset: i32 = 0;
+                var tz_name: []const u8 = "UTC";
 
                 if (args.len > 1 and Value_isObject(args[1])) {
                     const tz_obj = Value_asObject(args[1]);
-                    if (tz_obj.getProperty("__offset")) |offset| { tz_offset = @intCast(offset.toInt()); }
-                    if (tz_obj.getProperty("timezone")) |tz| { if (tz.isString()) { tz_name = tz.asString().data; } }
+                    if (tz_obj.getProperty("__offset")) |offset| {
+                        tz_offset = @intCast(offset.toInt());
+                    }
+                    if (tz_obj.getProperty("timezone")) |tz| {
+                        if (tz.isString()) {
+                            tz_name = tz.asString().data;
+                        }
+                    }
                     try this.setProperty("timezone", args[1]);
                 } else try this.setProperty("timezone", Value.initString(try PHPString.init(runtime_alloc, "UTC")));
                 try this.setProperty("__offset", Value.initInt(tz_offset));
@@ -832,9 +995,14 @@ pub const ClassMeta = struct {
 
                 var tz_name: []const u8 = "UTC";
                 if (this.getProperty("timezone")) |tz| {
-                    if (tz.isString()) { tz_name = tz.asString().data; }
-                    else if (Value_isObject(tz)) {
-                        if (Value_asObject(tz).getProperty("timezone")) |tz_str| { if (tz_str.isString()) { tz_name = tz_str.asString().data; } }
+                    if (tz.isString()) {
+                        tz_name = tz.asString().data;
+                    } else if (Value_isObject(tz)) {
+                        if (Value_asObject(tz).getProperty("timezone")) |tz_str| {
+                            if (tz_str.isString()) {
+                                tz_name = tz_str.asString().data;
+                            }
+                        }
                     }
                 }
 
@@ -858,7 +1026,8 @@ pub const ClassMeta = struct {
             fn call(ctx: Value, args: []const Value, _: Allocator) anyerror!Value {
                 const this = Value_asObject(ctx);
                 if (args.len > 0) try this.setProperty("timestamp", Value.initInt(args[0].toInt()));
-                _ = ctx.retain(); return ctx;
+                _ = ctx.retain();
+                return ctx;
             }
         }.call, .is_static = false });
 
@@ -870,7 +1039,8 @@ pub const ClassMeta = struct {
                     try this.setProperty("timezone", args[0]);
                     if (Value_asObject(args[0]).getProperty("__offset")) |offset| try this.setProperty("__offset", offset);
                 }
-                _ = ctx.retain(); return ctx;
+                _ = ctx.retain();
+                return ctx;
             }
         }.call, .is_static = false });
 
@@ -878,7 +1048,10 @@ pub const ClassMeta = struct {
         try meta.addMethod(.{ .name = "getTimezone", .func = struct {
             fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
                 const this = Value_asObject(ctx);
-                if (this.getProperty("timezone")) |tz| { _ = tz.retain(); return tz; }
+                if (this.getProperty("timezone")) |tz| {
+                    _ = tz.retain();
+                    return tz;
+                }
                 return Value.initBool(false);
             }
         }.call, .is_static = false });
@@ -887,7 +1060,10 @@ pub const ClassMeta = struct {
         try meta.addMethod(.{ .name = "add", .func = struct {
             fn call(ctx: Value, args: []const Value, _: Allocator) anyerror!Value {
                 const this = Value_asObject(ctx);
-                if (args.len == 0 or !Value_isObject(args[0])) { _ = ctx.retain(); return ctx; }
+                if (args.len == 0 or !Value_isObject(args[0])) {
+                    _ = ctx.retain();
+                    return ctx;
+                }
                 const interval = Value_asObject(args[0]);
                 var ts = if (this.getProperty("timestamp")) |t| t.toInt() else 0;
                 const y = if (interval.getProperty("y")) |v| v.toInt() else 0;
@@ -898,7 +1074,8 @@ pub const ClassMeta = struct {
                 const s = if (interval.getProperty("s")) |v| v.toInt() else 0;
                 ts += y * 31536000 + m * 2592000 + d * 86400 + h * 3600 + i * 60 + s;
                 try this.setProperty("timestamp", Value.initInt(ts));
-                _ = ctx.retain(); return ctx;
+                _ = ctx.retain();
+                return ctx;
             }
         }.call, .is_static = false });
 
@@ -906,7 +1083,10 @@ pub const ClassMeta = struct {
         try meta.addMethod(.{ .name = "sub", .func = struct {
             fn call(ctx: Value, args: []const Value, _: Allocator) anyerror!Value {
                 const this = Value_asObject(ctx);
-                if (args.len == 0 or !Value_isObject(args[0])) { _ = ctx.retain(); return ctx; }
+                if (args.len == 0 or !Value_isObject(args[0])) {
+                    _ = ctx.retain();
+                    return ctx;
+                }
                 const interval = Value_asObject(args[0]);
                 var ts = if (this.getProperty("timestamp")) |t| t.toInt() else 0;
                 const y = if (interval.getProperty("y")) |v| v.toInt() else 0;
@@ -917,7 +1097,8 @@ pub const ClassMeta = struct {
                 const s = if (interval.getProperty("s")) |v| v.toInt() else 0;
                 ts -= y * 31536000 + m * 2592000 + d * 86400 + h * 3600 + i * 60 + s;
                 try this.setProperty("timestamp", Value.initInt(ts));
-                _ = ctx.retain(); return ctx;
+                _ = ctx.retain();
+                return ctx;
             }
         }.call, .is_static = false });
 
@@ -952,7 +1133,8 @@ pub const ClassMeta = struct {
                 const new_ts = try php_strtotime(args[0], Value.initInt(ts), alloc);
                 if (new_ts.isInt()) {
                     try this.setProperty("timestamp", new_ts);
-                    _ = ctx.retain(); return ctx;
+                    _ = ctx.retain();
+                    return ctx;
                 }
                 return Value.initBool(false);
             }
@@ -962,13 +1144,19 @@ pub const ClassMeta = struct {
         try meta.addMethod(.{ .name = "setDate", .func = struct {
             fn call(ctx: Value, args: []const Value, _: Allocator) anyerror!Value {
                 const this = Value_asObject(ctx);
-                if (args.len < 3) { _ = ctx.retain(); return ctx; }
-                const year = args[0].toInt(); const month = args[1].toInt(); const day = args[2].toInt();
+                if (args.len < 3) {
+                    _ = ctx.retain();
+                    return ctx;
+                }
+                const year = args[0].toInt();
+                const month = args[1].toInt();
+                const day = args[2].toInt();
                 const y = if (month <= 2) year - 1 else year;
                 const m = if (month <= 2) month + 12 else month;
                 const jd = 365 * y + @divFloor(y, 4) - @divFloor(y, 100) + @divFloor(y, 400) + @divFloor(306 * (m + 1), 10) + day - 719591;
                 try this.setProperty("timestamp", Value.initInt(jd * 86400));
-                _ = ctx.retain(); return ctx;
+                _ = ctx.retain();
+                return ctx;
             }
         }.call, .is_static = false });
 
@@ -976,66 +1164,122 @@ pub const ClassMeta = struct {
         try meta.addMethod(.{ .name = "setTime", .func = struct {
             fn call(ctx: Value, args: []const Value, _: Allocator) anyerror!Value {
                 const this = Value_asObject(ctx);
-                if (args.len < 2) { _ = ctx.retain(); return ctx; }
-                const hour = args[0].toInt(); const minute = args[1].toInt();
+                if (args.len < 2) {
+                    _ = ctx.retain();
+                    return ctx;
+                }
+                const hour = args[0].toInt();
+                const minute = args[1].toInt();
                 const second = if (args.len > 2) args[2].toInt() else 0;
                 var ts = if (this.getProperty("timestamp")) |t| t.toInt() else 0;
                 const day_ts = @divFloor(ts, 86400) * 86400;
                 ts = day_ts + hour * 3600 + minute * 60 + second;
                 try this.setProperty("timestamp", Value.initInt(ts));
-                _ = ctx.retain(); return ctx;
+                _ = ctx.retain();
+                return ctx;
             }
         }.call, .is_static = false });
 
         // createFromFormat(string $format, string $datetime, ?DateTimeZone $timezone = null): DateTime|false
-        try meta.addMethod(.{ .name = "createFromFormat", .func = struct {
-            fn call(_: Value, args: []const Value, alloc: Allocator) anyerror!Value {
-                if (args.len < 2) return Value.initBool(false);
-                if (!args[0].isString() or !args[1].isString()) return Value.initBool(false);
+        try meta.addMethod(.{
+            .name = "createFromFormat",
+            .func = struct {
+                fn call(_: Value, args: []const Value, alloc: Allocator) anyerror!Value {
+                    if (args.len < 2) return Value.initBool(false);
+                    if (!args[0].isString() or !args[1].isString()) return Value.initBool(false);
 
-                const format_str = args[0].asString().data;
-                const datetime_str = args[1].asString().data;
+                    const format_str = args[0].asString().data;
+                    const datetime_str = args[1].asString().data;
 
-                // 简单解析: Y-m-d H:i:s
-                var year: i64 = 1970; var month: i64 = 1; var day: i64 = 1;
-                var hour: i64 = 0; var minute: i64 = 0; var second: i64 = 0;
-                var fmt_pos: usize = 0; var dt_pos: usize = 0;
+                    // 简单解析: Y-m-d H:i:s
+                    var year: i64 = 1970;
+                    var month: i64 = 1;
+                    var day: i64 = 1;
+                    var hour: i64 = 0;
+                    var minute: i64 = 0;
+                    var second: i64 = 0;
+                    var fmt_pos: usize = 0;
+                    var dt_pos: usize = 0;
 
-                while (fmt_pos < format_str.len and dt_pos < datetime_str.len) {
-                    const fc = format_str[fmt_pos];
-                    switch (fc) {
-                        'Y' => { if (dt_pos + 4 <= datetime_str.len) { year = std.fmt.parseInt(i64, datetime_str[dt_pos..dt_pos+4], 10) catch 1970; dt_pos += 4; } fmt_pos += 1; },
-                        'm' => { if (dt_pos + 2 <= datetime_str.len) { month = std.fmt.parseInt(i64, datetime_str[dt_pos..dt_pos+2], 10) catch 1; dt_pos += 2; } fmt_pos += 1; },
-                        'd' => { if (dt_pos + 2 <= datetime_str.len) { day = std.fmt.parseInt(i64, datetime_str[dt_pos..dt_pos+2], 10) catch 1; dt_pos += 2; } fmt_pos += 1; },
-                        'H' => { if (dt_pos + 2 <= datetime_str.len) { hour = std.fmt.parseInt(i64, datetime_str[dt_pos..dt_pos+2], 10) catch 0; dt_pos += 2; } fmt_pos += 1; },
-                        'i' => { if (dt_pos + 2 <= datetime_str.len) { minute = std.fmt.parseInt(i64, datetime_str[dt_pos..dt_pos+2], 10) catch 0; dt_pos += 2; } fmt_pos += 1; },
-                        's' => { if (dt_pos + 2 <= datetime_str.len) { second = std.fmt.parseInt(i64, datetime_str[dt_pos..dt_pos+2], 10) catch 0; dt_pos += 2; } fmt_pos += 1; },
-                        else => { if (dt_pos < datetime_str.len and datetime_str[dt_pos] == fc) dt_pos += 1; fmt_pos += 1; },
+                    while (fmt_pos < format_str.len and dt_pos < datetime_str.len) {
+                        const fc = format_str[fmt_pos];
+                        switch (fc) {
+                            'Y' => {
+                                if (dt_pos + 4 <= datetime_str.len) {
+                                    year = std.fmt.parseInt(i64, datetime_str[dt_pos .. dt_pos + 4], 10) catch 1970;
+                                    dt_pos += 4;
+                                }
+                                fmt_pos += 1;
+                            },
+                            'm' => {
+                                if (dt_pos + 2 <= datetime_str.len) {
+                                    month = std.fmt.parseInt(i64, datetime_str[dt_pos .. dt_pos + 2], 10) catch 1;
+                                    dt_pos += 2;
+                                }
+                                fmt_pos += 1;
+                            },
+                            'd' => {
+                                if (dt_pos + 2 <= datetime_str.len) {
+                                    day = std.fmt.parseInt(i64, datetime_str[dt_pos .. dt_pos + 2], 10) catch 1;
+                                    dt_pos += 2;
+                                }
+                                fmt_pos += 1;
+                            },
+                            'H' => {
+                                if (dt_pos + 2 <= datetime_str.len) {
+                                    hour = std.fmt.parseInt(i64, datetime_str[dt_pos .. dt_pos + 2], 10) catch 0;
+                                    dt_pos += 2;
+                                }
+                                fmt_pos += 1;
+                            },
+                            'i' => {
+                                if (dt_pos + 2 <= datetime_str.len) {
+                                    minute = std.fmt.parseInt(i64, datetime_str[dt_pos .. dt_pos + 2], 10) catch 0;
+                                    dt_pos += 2;
+                                }
+                                fmt_pos += 1;
+                            },
+                            's' => {
+                                if (dt_pos + 2 <= datetime_str.len) {
+                                    second = std.fmt.parseInt(i64, datetime_str[dt_pos .. dt_pos + 2], 10) catch 0;
+                                    dt_pos += 2;
+                                }
+                                fmt_pos += 1;
+                            },
+                            else => {
+                                if (dt_pos < datetime_str.len and datetime_str[dt_pos] == fc) dt_pos += 1;
+                                fmt_pos += 1;
+                            },
+                        }
                     }
+
+                    const y = if (month <= 2) year - 1 else year;
+                    const m = if (month <= 2) month + 12 else month;
+                    const jd = 365 * y + @divFloor(y, 4) - @divFloor(y, 100) + @divFloor(y, 400) + @divFloor(306 * (m + 1), 10) + day - 719591;
+                    const ts: i64 = jd * 86400 + hour * 3600 + minute * 60 + second;
+
+                    const meta_ptr = findClass("DateTime") orelse return Value.initBool(false);
+                    const obj = try PHPObject.initWithMeta(alloc, meta_ptr);
+                    try obj.setProperty("timestamp", Value.initInt(ts));
+                    try obj.setProperty("microseconds", Value.initInt(0));
+                    if (args.len > 2) try obj.setProperty("timezone", args[2]) else try obj.setProperty("timezone", Value.initString(try PHPString.init(alloc, "UTC")));
+                    return Value_initObject(obj);
                 }
-
-                const y = if (month <= 2) year - 1 else year;
-                const m = if (month <= 2) month + 12 else month;
-                const jd = 365 * y + @divFloor(y, 4) - @divFloor(y, 100) + @divFloor(y, 400) + @divFloor(306 * (m + 1), 10) + day - 719591;
-                const ts: i64 = jd * 86400 + hour * 3600 + minute * 60 + second;
-
-                const meta_ptr = findClass("DateTime") orelse return Value.initBool(false);
-                const obj = try PHPObject.initWithMeta(alloc, meta_ptr);
-                try obj.setProperty("timestamp", Value.initInt(ts));
-                try obj.setProperty("microseconds", Value.initInt(0));
-                if (args.len > 2) try obj.setProperty("timezone", args[2])
-                else try obj.setProperty("timezone", Value.initString(try PHPString.init(alloc, "UTC")));
-                return Value_initObject(obj);
-            }
-        }.call, .is_static = true });
+            }.call,
+            .is_static = true,
+        });
 
         // __clone()
-        try meta.addMethod(.{ .name = "__clone", .func = struct {
-            fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
-                _ = ctx; // 克隆已由运行时处理
-                return Value.initNull();
-            }
-        }.call, .is_static = false });
+        try meta.addMethod(.{
+            .name = "__clone",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    _ = ctx; // 克隆已由运行时处理
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
 
         meta.magic_construct = meta.methods.get("__construct").?.func;
         try registerClass(meta);
@@ -1294,7 +1538,6 @@ pub const ClassMeta = struct {
     /// Closure Class Implementation
     /// ============================================================================
     /// PHP Closure class: Closure::bind(), Closure::fromCallable(), bindTo()
-
     fn registerClosureClass(allocator: Allocator) !void {
         const meta = try ClassMeta.init(allocator, "Closure");
 
@@ -1330,6 +1573,18 @@ pub const ClassMeta = struct {
                         _ = new_this.retain();
                         break :brk new_this;
                     };
+                    // 解析 newScope 参数，绑定作用域类
+                    const bound_scope = blk: {
+                        if (args.len > 2 and !args[2].isNull() and args[2].isString()) {
+                            const scope_name = args[2].asString().data;
+                            break :blk findClass(scope_name);
+                        }
+                        if (Value_isObject(new_this)) {
+                            const obj = Value_asObject(new_this);
+                            break :blk obj.class_meta;
+                        }
+                        break :blk null;
+                    };
                     new_closure.* = .{
                         .func = orig_closure.func,
                         .captures = new_captures,
@@ -1339,6 +1594,7 @@ pub const ClassMeta = struct {
                         .param_count = orig_closure.param_count,
                         .required_params = orig_closure.required_params,
                         .bound_this = bound_this,
+                        .bound_scope = bound_scope,
                         .is_static = orig_closure.is_static,
                     };
 
@@ -1407,6 +1663,20 @@ pub const ClassMeta = struct {
                     const prev_this = closure_bound_this_stack;
                     closure_bound_this_stack = new_this;
                     defer closure_bound_this_stack = prev_this;
+                    // 设置 scope class：优先使用闭包已有的 bound_scope，否则从 new_this 推断
+                    const scope_meta = closure.bound_scope orelse blk: {
+                        if (Value_isObject(new_this)) {
+                            const obj = Value_asObject(new_this);
+                            break :blk obj.class_meta;
+                        }
+                        break :blk null;
+                    };
+                    if (scope_meta) |sm| {
+                        const prev_scope = getCurrentScopeClass();
+                        setCurrentScopeClass(sm);
+                        defer setCurrentScopeClass(prev_scope);
+                        return closure.func(ctx, args[1..], alloc);
+                    }
                     return closure.func(ctx, args[1..], alloc);
                 }
             }.call,
@@ -1425,7 +1695,6 @@ pub const ClassMeta = struct {
     /// PHP API:
     ///   WeakReference::create(object $object): WeakReference
     ///   WeakReference->get(): ?object
-
     fn registerWeakReferenceClass(allocator: Allocator) !void {
         const meta = try ClassMeta.init(allocator, "WeakReference");
 
@@ -1558,7 +1827,6 @@ pub const ClassMeta = struct {
     ///   - offsetExists(object $object): bool
     ///   - offsetUnset(object $object): void
     ///   - getIterator(): Iterator
-
     fn registerWeakMapClass(allocator: Allocator) !void {
         const meta = try ClassMeta.init(allocator, "WeakMap");
 
@@ -2121,8 +2389,8 @@ pub const ClassMeta = struct {
     /// 注意：self/static/parent 在 PHP 中不是 builtin type，isBuiltin() 返回 false
     fn isBuiltinType(type_name: []const u8) bool {
         const builtins = [_][]const u8{
-            "int", "float", "string", "bool", "array", "object", "callable",
-            "iterable", "void", "never", "null", "mixed", "true", "false",
+            "int",      "float", "string", "bool", "array", "object", "callable",
+            "iterable", "void",  "never",  "null", "mixed", "true",   "false",
         };
         for (builtins) |b| {
             if (std.mem.eql(u8, type_name, b)) return true;
@@ -2922,7 +3190,10 @@ pub const ClassMeta = struct {
                 fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
                     if (!Value_isObject(ctx)) return Value.initString(try PHPString.init(alloc, ""));
                     const this = Value_asObject(ctx);
-                    if (this.getPropertyDirect("__type_name")) |v| { _ = v.retain(); return v; }
+                    if (this.getPropertyDirect("__type_name")) |v| {
+                        _ = v.retain();
+                        return v;
+                    }
                     return Value.initString(try PHPString.init(alloc, ""));
                 }
             }.call,
@@ -2961,7 +3232,10 @@ pub const ClassMeta = struct {
                 fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
                     if (!Value_isObject(ctx)) return Value.initString(try PHPString.init(alloc, ""));
                     const this = Value_asObject(ctx);
-                    if (this.getPropertyDirect("__type_name")) |v| { _ = v.retain(); return v; }
+                    if (this.getPropertyDirect("__type_name")) |v| {
+                        _ = v.retain();
+                        return v;
+                    }
                     return Value.initString(try PHPString.init(alloc, ""));
                 }
             }.call,
@@ -3026,7 +3300,7 @@ pub const ClassMeta = struct {
                                         pos += 1;
                                     }
                                     const end = @min(pos + tname.len, buf.len);
-                                    @memcpy(buf[pos..end], tname[0..end - pos]);
+                                    @memcpy(buf[pos..end], tname[0 .. end - pos]);
                                     pos = end;
                                 }
                             }
@@ -3093,7 +3367,7 @@ pub const ClassMeta = struct {
                                         pos += 1;
                                     }
                                     const end = @min(pos + tname.len, buf.len);
-                                    @memcpy(buf[pos..end], tname[0..end - pos]);
+                                    @memcpy(buf[pos..end], tname[0 .. end - pos]);
                                     pos = end;
                                 }
                             }
@@ -3129,7 +3403,10 @@ pub const ClassMeta = struct {
                 fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
                     if (!Value_isObject(ctx)) return Value.initNull();
                     const this = Value_asObject(ctx);
-                    if (this.getPropertyDirect("__method_name")) |v| { _ = v.retain(); return v; }
+                    if (this.getPropertyDirect("__method_name")) |v| {
+                        _ = v.retain();
+                        return v;
+                    }
                     return Value.initNull();
                 }
             }.call,
@@ -3541,7 +3818,10 @@ pub const ClassMeta = struct {
                 fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
                     if (!Value_isObject(ctx)) return Value.initNull();
                     const this = Value_asObject(ctx);
-                    if (this.getPropertyDirect("__name")) |v| { _ = v.retain(); return v; }
+                    if (this.getPropertyDirect("__name")) |v| {
+                        _ = v.retain();
+                        return v;
+                    }
                     // Fallback: generate name from position
                     const pos_val = this.getPropertyDirect("__position") orelse return Value.initString(try PHPString.init(alloc, "param0"));
                     const pos = pos_val.toInt();
@@ -3678,7 +3958,10 @@ pub const ClassMeta = struct {
                 fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
                     if (!Value_isObject(ctx)) return Value.initString(try PHPString.init(alloc, ""));
                     const this = Value_asObject(ctx);
-                    if (this.getPropertyDirect("__prop_name")) |v| { _ = v.retain(); return v; }
+                    if (this.getPropertyDirect("__prop_name")) |v| {
+                        _ = v.retain();
+                        return v;
+                    }
                     return Value.initString(try PHPString.init(alloc, ""));
                 }
             }.call,
@@ -3807,6 +4090,16 @@ pub const ClassMeta = struct {
                 .is_static = false,
             });
         }
+        // setAccessible($bool) — PHP 8.1+ 已默认可访问，此方法为兼容性 no-op
+        try rprop_meta.addMethod(.{
+            .name = "setAccessible",
+            .func = struct {
+                fn call(_: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
         // hasType()
         try rprop_meta.addMethod(.{
             .name = "hasType",
@@ -4260,7 +4553,7 @@ pub const ClassMeta = struct {
         while (fctx.state != .running) {
             fctx.fiber_cond.wait(getIo(), &fctx.mutex) catch {};
         }
-        fctx.mutex.unlock();
+        fctx.mutex.unlock(getIo());
 
         // 通过闭包函数指针调用 fiber 回调
         const cb = fctx.callback;
@@ -4278,7 +4571,7 @@ pub const ClassMeta = struct {
         fctx.return_value = result;
         fctx.state = .terminated;
         fctx.caller_cond.signal(getIo());
-        fctx.mutex.unlock();
+        fctx.mutex.unlock(getIo());
     }
 
     /// Register built-in Fiber class
@@ -4333,7 +4626,7 @@ pub const ClassMeta = struct {
                         return Value.initNull();
                     while (!fctx.mutex.tryLock()) std.atomic.spinLoopHint();
                     if (fctx.state != .created) {
-                        fctx.mutex.unlock();
+                        fctx.mutex.unlock(getIo());
                         return Value.initNull();
                     }
                     if (args.len > 0) {
@@ -4348,7 +4641,7 @@ pub const ClassMeta = struct {
                         fiberThreadMain,
                         .{fctx},
                     ) catch {
-                        fctx.mutex.unlock();
+                        fctx.mutex.unlock(getIo());
                         return Value.initNull();
                     };
                     // 信号唤醒 fiber 线程
@@ -4360,7 +4653,7 @@ pub const ClassMeta = struct {
                     const result = fctx.suspend_value;
                     fctx.suspend_value = Value.initNull();
                     setFiberState(this, fctx.state);
-                    fctx.mutex.unlock();
+                    fctx.mutex.unlock(getIo());
                     if (fctx.state == .terminated) {
                         if (fctx.thread) |t| t.join();
                         fctx.thread = null;
@@ -4385,7 +4678,7 @@ pub const ClassMeta = struct {
                         return Value.initNull();
                     while (!fctx.mutex.tryLock()) std.atomic.spinLoopHint();
                     if (fctx.state != .suspended) {
-                        fctx.mutex.unlock();
+                        fctx.mutex.unlock(getIo());
                         return Value.initNull();
                     }
                     if (args.len > 0) {
@@ -4401,7 +4694,7 @@ pub const ClassMeta = struct {
                     const result = fctx.suspend_value;
                     fctx.suspend_value = Value.initNull();
                     setFiberState(this, fctx.state);
-                    fctx.mutex.unlock();
+                    fctx.mutex.unlock(getIo());
                     if (fctx.state == .terminated) {
                         if (fctx.thread) |t| t.join();
                         fctx.thread = null;
@@ -4444,7 +4737,7 @@ pub const ClassMeta = struct {
                     // 检查是否有 throw 传入的异常
                     const thrown = fctx.throw_exception;
                     fctx.throw_exception = Value.initNull();
-                    fctx.mutex.unlock();
+                    fctx.mutex.unlock(getIo());
                     // 在 fiber 线程设置异常（不返回 Zig 错误，
                     // 由生成代码的 hasException() 路由到 catch）
                     if (!thrown.isNull()) {
@@ -4574,7 +4867,7 @@ pub const ClassMeta = struct {
                         return Value.initNull();
                     while (!fctx.mutex.tryLock()) std.atomic.spinLoopHint();
                     if (fctx.state != .suspended) {
-                        fctx.mutex.unlock();
+                        fctx.mutex.unlock(getIo());
                         return Value.initNull();
                     }
                     if (args.len > 0) {
@@ -4590,7 +4883,7 @@ pub const ClassMeta = struct {
                     const result = fctx.suspend_value;
                     fctx.suspend_value = Value.initNull();
                     setFiberState(this, fctx.state);
-                    fctx.mutex.unlock();
+                    fctx.mutex.unlock(getIo());
                     if (fctx.state == .terminated) {
                         if (fctx.thread) |t| t.join();
                         fctx.thread = null;
@@ -4629,7 +4922,53 @@ pub const ClassMeta = struct {
     }
 
     /// 添加属性定义
+    /// 查找属性的声明类及其可见性
+    fn findPropertyDeclaringClass(meta: *const ClassMeta, name: []const u8) ?struct {
+        class: *const ClassMeta,
+        prop: *const ClassProperty,
+    } {
+        if (meta.properties.getPtr(name)) |prop| {
+            return .{ .class = meta, .prop = prop };
+        }
+        if (meta.parent) |parent| {
+            return findPropertyDeclaringClass(parent, name);
+        }
+        return null;
+    }
+
+    /// 检查当前作用域是否可以访问属性
+    /// PHP 可见性规则：
+    /// - public: 任何地方都可访问
+    /// - protected: 同一继承层级中的类可访问（声明类、子类、父类）
+    /// - private: 仅声明类本身可访问
+    fn checkPropertyAccess(declaring_class: *const ClassMeta, prop: *const ClassProperty) bool {
+        if (prop.is_public) return true;
+
+        const scope = getCurrentScopeClass() orelse return false;
+
+        // trait 方法上下文：trait 方法被复制到使用类中，trait 方法内访问使用类的 protected/private 属性应允许
+        if (scope.is_trait) {
+            return true;
+        }
+
+        if (prop.is_protected) {
+            // 同一继承层级：scope 是声明类的子类，或声明类是 scope 的子类，或相等
+            return scope.isSubclassOf(declaring_class.name) or
+                declaring_class.isSubclassOf(scope.name);
+        }
+
+        if (prop.is_private) {
+            // 仅声明类本身可访问
+            return std.mem.eql(u8, scope.name, declaring_class.name);
+        }
+
+        return true;
+    }
+
     pub fn addProperty(self: *ClassMeta, prop: ClassProperty) !void {
+        if (!self.properties.contains(prop.name)) {
+            try self.property_order.append(self.allocator, prop.name);
+        }
         try self.properties.put(prop.name, prop);
     }
 
@@ -4764,7 +5103,6 @@ fn php_weak_is_alive(addr: usize) bool {
 /// ============================================================================
 /// 用于存储弱引用的目标对象。当创建 WeakReference 时，目标对象会被注册到这里。
 /// 注意：这是一个简化实现，真正的弱引用应该在 GC 层面实现。
-
 /// 弱引用表：地址 -> Value（目标对象的引用）
 var weakref_table: ?std.AutoHashMap(usize, Value) = null;
 
@@ -4910,6 +5248,103 @@ pub fn registerClass(meta: *ClassMeta) !void {
     }
 }
 
+/// 检查 final class 继承：如果 child 类继承自 final 类，输出 fatal error 并退出
+pub fn php_check_final_inheritance(child_class_name: []const u8, parent_meta: *const ClassMeta, file: []const u8, line: u32) void {
+    if (parent_meta.is_final) {
+        var ebuf: [512]u8 = undefined;
+        const stderr_msg = std.fmt.bufPrint(
+            &ebuf,
+            "PHP Fatal error:  Class {s} cannot extend final class {s} in {s} on line {d}\n",
+            .{ child_class_name, parent_meta.name, file, line },
+        ) catch {
+            std.process.exit(255);
+        };
+        fileWriteAll(2, stderr_msg);
+        var buf: [512]u8 = undefined;
+        const stdout_msg = std.fmt.bufPrint(
+            &buf,
+            "\nFatal error: Class {s} cannot extend final class {s} in {s} on line {d}\n",
+            .{ child_class_name, parent_meta.name, file, line },
+        ) catch {
+            fileWriteAll(1, "\nFatal error: Class cannot extend final class\n");
+            std.process.exit(255);
+        };
+        fileWriteAll(1, stdout_msg);
+        std.process.exit(255);
+    }
+}
+
+/// 检查非抽象类是否实现了所有抽象方法
+pub fn php_check_abstract_methods(child_class_name: []const u8, file: []const u8, line: u32) void {
+    const meta = findClass(child_class_name) orelse return;
+    if (meta.is_abstract) return;
+
+    var unimplemented: [64][]const u8 = undefined;
+    var unimplemented_owners: [64][]const u8 = undefined;
+    var count: usize = 0;
+
+    var current: ?*const ClassMeta = meta;
+    while (current) |c| {
+        var iter = c.methods.iterator();
+        while (iter.next()) |entry| {
+            const method = entry.value_ptr.*;
+            if (method.is_abstract) {
+                // 使用 findMethod 遍历整个继承链检查是否已实现（非抽象版本）
+                const found = if (meta.findMethod(entry.key_ptr.*)) |impl| !impl.is_abstract else false;
+                if (!found and count < 64) {
+                    var dup = false;
+                    for (unimplemented[0..count]) |u| {
+                        if (std.mem.eql(u8, u, entry.key_ptr.*)) {
+                            dup = true;
+                            break;
+                        }
+                    }
+                    if (!dup) {
+                        unimplemented[count] = entry.key_ptr.*;
+                        unimplemented_owners[count] = c.name;
+                        count += 1;
+                    }
+                }
+            }
+        }
+        current = c.parent;
+    }
+
+    if (count == 0) return;
+
+    var msg_buf: [1024]u8 = undefined;
+    var pos: usize = 0;
+    const prefix = std.fmt.bufPrint(msg_buf[pos..], "Class {s} contains {d} abstract method{s} and must therefore be declared abstract or implement the remaining methods (", .{ child_class_name, count, if (count == 1) @as([]const u8, "") else @as([]const u8, "s") }) catch return;
+    pos += prefix.len;
+    for (unimplemented[0..count], 0..) |m, i| {
+        if (i > 0 and pos < msg_buf.len) {
+            msg_buf[pos] = ',';
+            msg_buf[pos + 1] = ' ';
+            pos += 2;
+        }
+        const part = std.fmt.bufPrint(msg_buf[pos..], "{s}::{s}", .{ unimplemented_owners[i], m }) catch break;
+        pos += part.len;
+    }
+    if (pos < msg_buf.len) {
+        msg_buf[pos] = ')';
+        pos += 1;
+    }
+    const full_msg = msg_buf[0..pos];
+
+    var ebuf: [1024]u8 = undefined;
+    const stderr_msg = std.fmt.bufPrint(&ebuf, "PHP Fatal error:  {s} in {s} on line {d}\n", .{ full_msg, file, line }) catch {
+        std.process.exit(255);
+    };
+    fileWriteAll(2, stderr_msg);
+    var buf: [1024]u8 = undefined;
+    const stdout_msg = std.fmt.bufPrint(&buf, "\nFatal error: {s} in {s} on line {d}\n", .{ full_msg, file, line }) catch {
+        fileWriteAll(1, "\nFatal error: Abstract method not implemented\n");
+        std.process.exit(255);
+    };
+    fileWriteAll(1, stdout_msg);
+    std.process.exit(255);
+}
+
 /// 查找类
 pub fn findClass(name: []const u8) ?*ClassMeta {
     if (class_registry) |registry| {
@@ -4990,27 +5425,26 @@ pub const PHPObject = struct {
             alloc_counters.php_object_peak_live_objects = alloc_counters.php_object_live_objects;
         }
 
-        // 初始化默认属性值（包括父类）
+        // 初始化默认属性值（包括父类），按声明顺序遍历
         var current_meta: ?*const ClassMeta = meta;
         while (current_meta) |m| {
-            var prop_iter = m.properties.iterator();
-            while (prop_iter.next()) |entry| {
-                if (!entry.value_ptr.is_static) {
-                    // 只初始化还不存在的属性（避免覆盖子类的属性）
-                    if (obj.properties.get(entry.key_ptr.*) == null) {
-                        if (entry.value_ptr.default_value) |default| {
-                            // 检查是否是数组标记（initInt(-1)）
-                            if (default.isInt() and default.asInt() == -1) {
-                                const new_array = try PHPArray.init(allocator);
-                                try obj.properties.put(entry.key_ptr.*, Value.initArray(new_array));
-                            } else if (default.isArray()) {
-                                // 旧代码路径：如果是数组，创建新实例
-                                const new_array = try PHPArray.init(allocator);
-                                try obj.properties.put(entry.key_ptr.*, Value.initArray(new_array));
-                            } else {
-                                // 其他类型可以共享（int/float/bool/string是不可变的）
-                                _ = default.retain();
-                                try obj.properties.put(entry.key_ptr.*, default);
+            for (m.property_order.items) |prop_name| {
+                if (m.properties.get(prop_name)) |prop_def| {
+                    if (!prop_def.is_static) {
+                        // readonly 属性跳过默认值初始化：由构造函数显式赋值
+                        if (prop_def.is_readonly) continue;
+                        if (obj.properties.get(prop_name) == null) {
+                            if (prop_def.default_value) |default| {
+                                if (default.isInt() and default.asInt() == -1) {
+                                    const new_array = try PHPArray.init(allocator);
+                                    try obj.properties.put(prop_name, Value.initArray(new_array));
+                                } else if (default.isArray()) {
+                                    const cloned_array = try default.asArray().cloneDeep(allocator);
+                                    try obj.properties.put(prop_name, Value.initArray(cloned_array));
+                                } else {
+                                    _ = default.retain();
+                                    try obj.properties.put(prop_name, default);
+                                }
                             }
                         }
                     }
@@ -5324,12 +5758,463 @@ pub fn php_object_new(class_name: []const u8, allocator: Allocator) !Value {
 /// @param obj_val 对象Value
 /// @param property_name 属性名
 /// @return 属性值，如果不存在返回null
+/// 尝试调用 __get 魔术方法，返回 ?Value
+/// 调用方负责检查返回值是否为 null
+fn tryMagicGet(obj_val: Value, meta: *const ClassMeta, property_name: []const u8) !?Value {
+    if (meta.findMethodLookup("__get")) |lookup| {
+        const name_str = try PHPString.init(runtime_allocator, property_name);
+        const name_val = Value.initString(name_str);
+        defer name_val.release(runtime_allocator);
+        const args = [_]Value{name_val};
+        const guard = ClassContext.init(meta, lookup.owner);
+        defer guard.deinit();
+        return try lookup.method.func(obj_val, &args, runtime_allocator);
+    }
+    return null;
+}
+
+/// 尝试调用 __set 魔术方法，返回 true 表示已处理
+fn tryMagicSet(obj_val: Value, meta: *const ClassMeta, property_name: []const u8, value: Value) !bool {
+    if (meta.findMethodLookup("__set")) |lookup| {
+        const name_str = try PHPString.init(runtime_allocator, property_name);
+        const name_val = Value.initString(name_str);
+        defer name_val.release(runtime_allocator);
+        const args = [_]Value{ name_val, value };
+        const guard = ClassContext.init(meta, lookup.owner);
+        defer guard.deinit();
+        _ = try lookup.method.func(obj_val, &args, runtime_allocator);
+        return true;
+    }
+    return false;
+}
+
+/// 属性类型 coercion：根据声明的类型将值强制转换
+/// 不兼容类型抛出 TypeError
+fn isNumericString(data: []const u8) bool {
+    if (data.len == 0) return false;
+    var i: usize = 0;
+    while (i < data.len and std.ascii.isWhitespace(data[i])) : (i += 1) {}
+    if (i < data.len and (data[i] == '+' or data[i] == '-')) i += 1;
+    if (i >= data.len) return false;
+    var has_digits = false;
+    while (i < data.len and std.ascii.isDigit(data[i])) : (i += 1) {
+        has_digits = true;
+    }
+    if (i < data.len and data[i] == '.') {
+        i += 1;
+        while (i < data.len and std.ascii.isDigit(data[i])) : (i += 1) {
+            has_digits = true;
+        }
+    }
+    if (!has_digits) return false;
+    if (i < data.len and (data[i] == 'e' or data[i] == 'E')) {
+        i += 1;
+        if (i < data.len and (data[i] == '+' or data[i] == '-')) i += 1;
+        if (i >= data.len or !std.ascii.isDigit(data[i])) return false;
+        while (i < data.len and std.ascii.isDigit(data[i])) : (i += 1) {}
+    }
+    while (i < data.len and std.ascii.isWhitespace(data[i])) : (i += 1) {}
+    return i >= data.len;
+}
+
+/// 将 union 类型名按 PHP 语义排序（字母序）生成规范化消息
+fn sortUnionTypeName(buf: []u8, type_name: []const u8) []const u8 {
+    var parts: [16][]const u8 = undefined;
+    var count: usize = 0;
+    var it = std.mem.splitScalar(u8, type_name, '|');
+    while (it.next()) |part| {
+        if (count < 16) {
+            parts[count] = part;
+            count += 1;
+        }
+    }
+    var i: usize = 1;
+    while (i < count) : (i += 1) {
+        var j = i;
+        while (j > 0 and std.mem.lessThan(u8, parts[j], parts[j - 1])) {
+            const tmp = parts[j];
+            parts[j] = parts[j - 1];
+            parts[j - 1] = tmp;
+            j -= 1;
+        }
+    }
+    var pos: usize = 0;
+    for (parts[0..count], 0..) |part, idx| {
+        if (idx > 0) {
+            if (pos < buf.len) {
+                buf[pos] = '|';
+                pos += 1;
+            }
+        }
+        const len = @min(part.len, buf.len - pos);
+        @memcpy(buf[pos .. pos + len], part[0..len]);
+        pos += len;
+    }
+    return buf[0..pos];
+}
+
+/// 检查值是否精确匹配某个类型（不进行 coercion）
+fn coercePriority(type_name: []const u8) u8 {
+    if (std.mem.eql(u8, type_name, "int") or std.mem.eql(u8, type_name, "integer")) return 1;
+    if (std.mem.eql(u8, type_name, "float") or std.mem.eql(u8, type_name, "double")) return 2;
+    if (std.mem.eql(u8, type_name, "string")) return 3;
+    if (std.mem.eql(u8, type_name, "bool") or std.mem.eql(u8, type_name, "boolean")) return 4;
+    if (std.mem.eql(u8, type_name, "false") or std.mem.eql(u8, type_name, "true")) return 4;
+    if (std.mem.eql(u8, type_name, "array")) return 5;
+    if (std.mem.eql(u8, type_name, "object")) return 6;
+    if (std.mem.eql(u8, type_name, "callable") or std.mem.eql(u8, type_name, "iterable")) return 7;
+    if (std.mem.eql(u8, type_name, "mixed")) return 8;
+    return 9;
+}
+
+fn typeExactMatch(type_name: []const u8, value: Value) bool {
+    if (std.mem.eql(u8, type_name, "int") or std.mem.eql(u8, type_name, "integer")) return value.isInt();
+    if (std.mem.eql(u8, type_name, "float") or std.mem.eql(u8, type_name, "double")) return value.isFloat();
+    if (std.mem.eql(u8, type_name, "string")) return value.isString();
+    if (std.mem.eql(u8, type_name, "bool") or std.mem.eql(u8, type_name, "boolean")) return value.isBool();
+    if (std.mem.eql(u8, type_name, "array")) return value.isArray();
+    if (std.mem.eql(u8, type_name, "object")) return Value_isObject(value);
+    if (std.mem.eql(u8, type_name, "null")) return value.isNull();
+    if (std.mem.eql(u8, type_name, "false")) return value.isBool() and !value.asBool();
+    if (std.mem.eql(u8, type_name, "true")) return value.isBool() and value.asBool();
+    if (std.mem.eql(u8, type_name, "mixed")) return true;
+    if (std.mem.eql(u8, type_name, "callable") or std.mem.eql(u8, type_name, "iterable")) return true;
+    if (findClass(type_name)) |_| {
+        if (Value_isObject(value)) {
+            const obj = Value_asObject(value);
+            if (obj.class_meta) |meta| {
+                var current: ?*const ClassMeta = meta;
+                while (current) |m| {
+                    if (std.mem.eql(u8, m.name, type_name)) return true;
+                    current = m.parent;
+                }
+                if (meta.implementsInterface(type_name)) return true;
+            }
+        }
+        return false;
+    }
+    return false;
+}
+
+fn tryCoerceSingleType(type_name: []const u8, value: Value) ?Value {
+    if (std.mem.eql(u8, type_name, "int") or std.mem.eql(u8, type_name, "integer")) {
+        if (value.isInt()) return value;
+        if (value.isFloat()) return Value.initInt(@intFromFloat(value.toFloat()));
+        if (value.isBool()) return Value.initInt(if (value.asBool()) 1 else 0);
+        if (value.isString()) {
+            if (!isNumericString(value.asString().data)) return null;
+            return Value.initInt(value.toInt());
+        }
+        return null;
+    }
+    if (std.mem.eql(u8, type_name, "float") or std.mem.eql(u8, type_name, "double")) {
+        if (value.isFloat()) return value;
+        if (value.isInt()) return Value.initFloat(@floatFromInt(value.toInt()));
+        if (value.isBool()) return Value.initFloat(if (value.asBool()) 1.0 else 0.0);
+        if (value.isString()) {
+            if (!isNumericString(value.asString().data)) return null;
+            return Value.initFloat(value.toFloat());
+        }
+        return null;
+    }
+    if (std.mem.eql(u8, type_name, "string")) {
+        if (value.isString()) return value;
+        if (value.isInt() or value.isFloat() or value.isBool()) {
+            const str = value.toString(runtime_allocator) catch return null;
+            return Value.initString(str);
+        }
+        return null;
+    }
+    if (std.mem.eql(u8, type_name, "bool") or std.mem.eql(u8, type_name, "boolean")) {
+        if (value.isBool()) return value;
+        if (value.isInt() or value.isFloat() or value.isString()) return Value.initBool(value.toBool());
+        return null;
+    }
+    if (std.mem.eql(u8, type_name, "array")) {
+        if (value.isArray()) return value;
+        return null;
+    }
+    if (std.mem.eql(u8, type_name, "mixed")) return value;
+    if (std.mem.eql(u8, type_name, "object")) {
+        if (Value_isObject(value)) return value;
+        return null;
+    }
+    if (std.mem.eql(u8, type_name, "callable") or std.mem.eql(u8, type_name, "iterable")) return value;
+    // DNF 中的 intersection 子类型（如 Iterator&Countable）：值必须是对象且 instanceof 所有声明类型
+    if (std.mem.indexOfScalar(u8, type_name, '&') != null) {
+        if (!Value_isObject(value)) return null;
+        const obj = Value_asObject(value);
+        if (obj.class_meta) |meta| {
+            var it = std.mem.splitScalar(u8, type_name, '&');
+            while (it.next()) |sub_type| {
+                const trimmed = std.mem.trim(u8, sub_type, " \t()");
+                var current: ?*const ClassMeta = meta;
+                var found = false;
+                while (current) |m| {
+                    if (std.mem.eql(u8, m.name, trimmed)) {
+                        found = true;
+                        break;
+                    }
+                    current = m.parent;
+                }
+                if (!found) {
+                    if (meta.implementsInterface(trimmed)) found = true;
+                }
+                if (!found) return null;
+            }
+            return value;
+        }
+        return null;
+    }
+    if (findClass(type_name)) |_| {
+        if (Value_isObject(value)) {
+            const obj = Value_asObject(value);
+            if (obj.class_meta) |meta| {
+                var current: ?*const ClassMeta = meta;
+                while (current) |m| {
+                    if (std.mem.eql(u8, m.name, type_name)) return value;
+                    current = m.parent;
+                }
+                if (meta.implementsInterface(type_name)) return value;
+            }
+        }
+        return null;
+    }
+    return value;
+}
+
+fn coercePropertyType(prop: *const ClassProperty, value: Value, class_name: []const u8) !Value {
+    if (prop.type_name == null) return value;
+
+    const type_name = prop.type_name.?;
+
+    // mixed 类型：接受任何值（包括 null），无 coercion
+    if (std.mem.eql(u8, type_name, "mixed")) return value;
+
+    // never 类型：PHP 不允许作为属性类型，任何赋值即 TypeError
+    if (std.mem.eql(u8, type_name, "never")) {
+        var buf: [256]u8 = undefined;
+        const val_type = if (value.isNull()) "null" else if (value.isArray()) "array" else if (Value_isObject(value)) Value_asObject(value).class_name else if (value.isString()) "string" else if (value.isInt()) "int" else if (value.isFloat()) "float" else if (value.isBool()) "bool" else "unknown";
+        const msg = std.fmt.bufPrint(&buf, "Cannot assign {s} to property {s}::${s} of type never", .{ val_type, class_name, prop.name }) catch "Cannot assign to never property";
+        return throwThrowable("TypeError", msg, runtime_allocator);
+    }
+
+    if (prop.type_nullable and value.isNull()) return value;
+
+    if (value.isNull()) {
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Cannot assign null to property {s}::${s} of type {s}", .{ class_name, prop.name, type_name }) catch "Cannot assign null to property";
+        return throwThrowable("TypeError", msg, runtime_allocator);
+    }
+
+    // Intersection 类型（Iterator&Countable 等，不含 |）：值必须是对象且 instanceof 所有声明类型
+    if (std.mem.indexOfScalar(u8, type_name, '&') != null and std.mem.indexOfScalar(u8, type_name, '|') == null) {
+        if (!Value_isObject(value)) {
+            var buf: [256]u8 = undefined;
+            const val_type = if (value.isArray()) "array" else if (value.isString()) "string" else if (value.isInt()) "int" else if (value.isFloat()) "float" else if (value.isBool()) "bool" else "unknown";
+            const msg = std.fmt.bufPrint(&buf, "Cannot assign {s} to property {s}::${s} of type {s}", .{ val_type, class_name, prop.name, type_name }) catch "Cannot assign: type mismatch";
+            return throwThrowable("TypeError", msg, runtime_allocator);
+        }
+        const obj = Value_asObject(value);
+        if (obj.class_meta) |meta| {
+            var it = std.mem.splitScalar(u8, type_name, '&');
+            while (it.next()) |sub_type| {
+                const trimmed = std.mem.trim(u8, sub_type, " \t");
+                var current: ?*const ClassMeta = meta;
+                var found = false;
+                while (current) |m| {
+                    if (std.mem.eql(u8, m.name, trimmed)) {
+                        found = true;
+                        break;
+                    }
+                    current = m.parent;
+                }
+                if (!found) {
+                    if (meta.implementsInterface(trimmed)) {
+                        found = true;
+                    }
+                }
+                if (!found) {
+                    var buf: [256]u8 = undefined;
+                    const msg = std.fmt.bufPrint(&buf, "Cannot assign {s} to property {s}::${s} of type {s}", .{ obj.class_name, class_name, prop.name, type_name }) catch "Cannot assign: type mismatch";
+                    return throwThrowable("TypeError", msg, runtime_allocator);
+                }
+            }
+            return value;
+        }
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Cannot assign {s} to property {s}::${s} of type {s}", .{ obj.class_name, class_name, prop.name, type_name }) catch "Cannot assign: type mismatch";
+        return throwThrowable("TypeError", msg, runtime_allocator);
+    }
+
+    // Union 类型（int|string, int|float|null 等）：两阶段匹配
+    if (std.mem.indexOfScalar(u8, type_name, '|') != null) {
+        var it = std.mem.splitScalar(u8, type_name, '|');
+        while (it.next()) |sub_type| {
+            if (std.mem.eql(u8, sub_type, "null")) continue;
+            if (typeExactMatch(sub_type, value)) return value;
+        }
+        var sub_types: [16][]const u8 = undefined;
+        var sub_count: usize = 0;
+        it = std.mem.splitScalar(u8, type_name, '|');
+        while (it.next()) |sub_type| {
+            if (std.mem.eql(u8, sub_type, "null")) continue;
+            if (sub_count < 16) {
+                sub_types[sub_count] = sub_type;
+                sub_count += 1;
+            }
+        }
+        var i: usize = 1;
+        while (i < sub_count) : (i += 1) {
+            var j = i;
+            while (j > 0 and coercePriority(sub_types[j]) < coercePriority(sub_types[j - 1])) {
+                const tmp = sub_types[j];
+                sub_types[j] = sub_types[j - 1];
+                sub_types[j - 1] = tmp;
+                j -= 1;
+            }
+        }
+        for (sub_types[0..sub_count]) |sub_type| {
+            if (tryCoerceSingleType(sub_type, value)) |coerced| {
+                return coerced;
+            }
+        }
+        var buf: [256]u8 = undefined;
+        var sort_buf: [256]u8 = undefined;
+        const sorted_type = sortUnionTypeName(&sort_buf, type_name);
+        const val_type = if (value.isArray()) "array" else if (Value_isObject(value)) Value_asObject(value).class_name else if (value.isString()) "string" else if (value.isInt()) "int" else if (value.isFloat()) "float" else if (value.isBool()) "bool" else "unknown";
+        const msg = std.fmt.bufPrint(&buf, "Cannot assign {s} to property {s}::${s} of type {s}", .{ val_type, class_name, prop.name, sorted_type }) catch "Cannot assign: type mismatch";
+        return throwThrowable("TypeError", msg, runtime_allocator);
+    }
+
+    if (std.mem.eql(u8, type_name, "int") or std.mem.eql(u8, type_name, "integer")) {
+        if (value.isInt()) return value;
+        if (value.isFloat()) return Value.initInt(@intFromFloat(value.toFloat()));
+        if (value.isBool()) return Value.initInt(if (value.asBool()) 1 else 0);
+        if (value.isString()) {
+            const str_data = value.asString().data;
+            if (!isNumericString(str_data)) {
+                var buf: [256]u8 = undefined;
+                const msg = std.fmt.bufPrint(&buf, "Cannot assign string to property {s}::${s} of type int", .{ class_name, prop.name }) catch "Cannot assign to int property";
+                return throwThrowable("TypeError", msg, runtime_allocator);
+            }
+            return Value.initInt(value.toInt());
+        }
+        var buf: [256]u8 = undefined;
+        const val_type = if (value.isArray()) "array" else if (Value_isObject(value)) Value_asObject(value).class_name else "unknown";
+        const msg = std.fmt.bufPrint(&buf, "Cannot assign {s} to property {s}::${s} of type int", .{ val_type, class_name, prop.name }) catch "Cannot assign to int property";
+        return throwThrowable("TypeError", msg, runtime_allocator);
+    }
+    if (std.mem.eql(u8, type_name, "float") or std.mem.eql(u8, type_name, "double")) {
+        if (value.isFloat()) return value;
+        if (value.isInt()) return Value.initFloat(@floatFromInt(value.toInt()));
+        if (value.isBool()) return Value.initFloat(if (value.asBool()) 1.0 else 0.0);
+        if (value.isString()) {
+            const str_data = value.asString().data;
+            if (!isNumericString(str_data)) {
+                var buf: [256]u8 = undefined;
+                const msg = std.fmt.bufPrint(&buf, "Cannot assign string to property {s}::${s} of type float", .{ class_name, prop.name }) catch "Cannot assign to float property";
+                return throwThrowable("TypeError", msg, runtime_allocator);
+            }
+            return Value.initFloat(value.toFloat());
+        }
+        var buf: [256]u8 = undefined;
+        const val_type = if (value.isArray()) "array" else if (Value_isObject(value)) Value_asObject(value).class_name else "unknown";
+        const msg = std.fmt.bufPrint(&buf, "Cannot assign {s} to property {s}::${s} of type float", .{ val_type, class_name, prop.name }) catch "Cannot assign to float property";
+        return throwThrowable("TypeError", msg, runtime_allocator);
+    }
+    if (std.mem.eql(u8, type_name, "string")) {
+        if (value.isString()) return value;
+        if (value.isInt() or value.isFloat() or value.isBool()) {
+            const str = try value.toString(runtime_allocator);
+            return Value.initString(str);
+        }
+        var buf: [256]u8 = undefined;
+        const val_type = if (value.isArray()) "array" else if (Value_isObject(value)) Value_asObject(value).class_name else "unknown";
+        const msg = std.fmt.bufPrint(&buf, "Cannot assign {s} to property {s}::${s} of type string", .{ val_type, class_name, prop.name }) catch "Cannot assign to string property";
+        return throwThrowable("TypeError", msg, runtime_allocator);
+    }
+    if (std.mem.eql(u8, type_name, "bool") or std.mem.eql(u8, type_name, "boolean")) {
+        if (value.isBool()) return value;
+        if (value.isInt() or value.isFloat() or value.isString()) return Value.initBool(value.toBool());
+        var buf: [256]u8 = undefined;
+        const val_type = if (value.isArray()) "array" else if (Value_isObject(value)) Value_asObject(value).class_name else "unknown";
+        const msg = std.fmt.bufPrint(&buf, "Cannot assign {s} to property {s}::${s} of type bool", .{ val_type, class_name, prop.name }) catch "Cannot assign to bool property";
+        return throwThrowable("TypeError", msg, runtime_allocator);
+    }
+    if (std.mem.eql(u8, type_name, "array")) {
+        if (value.isArray()) return value;
+        var buf: [256]u8 = undefined;
+        const val_type = if (Value_isObject(value)) Value_asObject(value).class_name else if (value.isString()) "string" else if (value.isInt()) "int" else if (value.isFloat()) "float" else if (value.isBool()) "bool" else "unknown";
+        const msg = std.fmt.bufPrint(&buf, "Cannot assign {s} to property {s}::${s} of type array", .{ val_type, class_name, prop.name }) catch "Cannot assign to array property";
+        return throwThrowable("TypeError", msg, runtime_allocator);
+    }
+    if (std.mem.eql(u8, type_name, "mixed")) return value;
+    if (std.mem.eql(u8, type_name, "object")) {
+        if (Value_isObject(value)) return value;
+        var buf: [256]u8 = undefined;
+        const val_type = if (value.isArray()) "array" else if (value.isString()) "string" else if (value.isInt()) "int" else if (value.isFloat()) "float" else if (value.isBool()) "bool" else "unknown";
+        const msg = std.fmt.bufPrint(&buf, "Cannot assign {s} to property {s}::${s} of type object", .{ val_type, class_name, prop.name }) catch "Cannot assign to object property";
+        return throwThrowable("TypeError", msg, runtime_allocator);
+    }
+
+    if (findClass(type_name)) |_| {
+        if (Value_isObject(value)) {
+            const obj = Value_asObject(value);
+            if (obj.class_meta) |meta| {
+                var current: ?*const ClassMeta = meta;
+                while (current) |m| {
+                    if (std.mem.eql(u8, m.name, type_name)) return value;
+                    current = m.parent;
+                }
+                if (meta.implementsInterface(type_name)) return value;
+            }
+            var buf: [256]u8 = undefined;
+            const actual_class = if (obj.class_meta) |m| m.name else obj.class_name;
+            const msg = std.fmt.bufPrint(&buf, "Cannot assign {s} to property {s}::${s} of type {s}", .{ actual_class, class_name, prop.name, type_name }) catch "Cannot assign: type mismatch";
+            return throwThrowable("TypeError", msg, runtime_allocator);
+        }
+        var buf: [256]u8 = undefined;
+        const val_type = if (value.isArray()) "array" else if (value.isString()) "string" else if (value.isInt()) "int" else if (value.isFloat()) "float" else if (value.isBool()) "bool" else "unknown";
+        const msg = std.fmt.bufPrint(&buf, "Cannot assign {s} to property {s}::${s} of type {s}", .{ val_type, class_name, prop.name, type_name }) catch "Cannot assign: type mismatch";
+        return throwThrowable("TypeError", msg, runtime_allocator);
+    }
+
+    return value;
+}
+
 pub fn php_object_get(obj_val: Value, property_name: []const u8) !Value {
     if (!Value_isObject(obj_val)) {
         return Value.initNull();
     }
 
     const obj = Value_asObject(obj_val);
+
+    // 属性可见性检查
+    if (obj.class_meta) |meta| {
+        if (findPropertyDeclaringClass(meta, property_name)) |decl| {
+            if (!checkPropertyAccess(decl.class, decl.prop)) {
+                // 属性声明但不可访问：尝试 __get 魔术方法
+                if (try tryMagicGet(obj_val, meta, property_name)) |result| {
+                    return result;
+                }
+                var buf: [256]u8 = undefined;
+                const vis = if (decl.prop.is_private) "private" else "protected";
+                const msg = std.fmt.bufPrint(&buf, "Cannot access {s} property {s}::${s}", .{ vis, meta.name, property_name }) catch "Cannot access property";
+                return throwThrowable("Error", msg, runtime_allocator);
+            }
+        } else {
+            // 属性未声明：检查动态属性，若无则尝试 __get
+            if (obj.getProperty(property_name)) |val| {
+                return val;
+            }
+            if (try tryMagicGet(obj_val, meta, property_name)) |result| {
+                return result;
+            }
+            return Value.initNull();
+        }
+    }
+
     return obj.getProperty(property_name) orelse Value.initNull();
 }
 
@@ -5350,7 +6235,34 @@ pub fn php_object_get_safe_value(obj_val: Value, prop_name_val: Value) !Value {
         return Value.initNull();
     }
     const obj = Value_asObject(obj_val);
-    return obj.getProperty(prop_name_val.asString().data) orelse Value.initNull();
+    const name = prop_name_val.asString().data;
+
+    // 属性可见性检查
+    if (obj.class_meta) |meta| {
+        if (findPropertyDeclaringClass(meta, name)) |decl| {
+            if (!checkPropertyAccess(decl.class, decl.prop)) {
+                // 属性声明但不可访问：尝试 __get 魔术方法
+                if (try tryMagicGet(obj_val, meta, name)) |result| {
+                    return result;
+                }
+                var buf: [256]u8 = undefined;
+                const vis = if (decl.prop.is_private) "private" else "protected";
+                const msg = std.fmt.bufPrint(&buf, "Cannot access {s} property {s}::${s}", .{ vis, meta.name, name }) catch "Cannot access property";
+                return throwThrowable("Error", msg, runtime_allocator);
+            }
+        } else {
+            // 属性未声明：检查动态属性，若无则尝试 __get
+            if (obj.getProperty(name)) |val| {
+                return val;
+            }
+            if (try tryMagicGet(obj_val, meta, name)) |result| {
+                return result;
+            }
+            return Value.initNull();
+        }
+    }
+
+    return obj.getProperty(name) orelse Value.initNull();
 }
 
 pub fn php_object_get_dynamic(obj_val: Value, prop_name_val: Value) !Value {
@@ -5362,7 +6274,49 @@ pub fn php_object_get_dynamic(obj_val: Value, prop_name_val: Value) !Value {
     }
     const obj = Value_asObject(obj_val);
     const prop_str = prop_name_val.asString();
-    return obj.getProperty(prop_str.data) orelse Value.initNull();
+    const name = prop_str.data;
+
+    // 属性可见性检查
+    if (obj.class_meta) |meta| {
+        if (findPropertyDeclaringClass(meta, name)) |decl| {
+            if (!checkPropertyAccess(decl.class, decl.prop)) {
+                // 属性声明但不可访问：尝试 __get 魔术方法
+                if (try tryMagicGet(obj_val, meta, name)) |result| {
+                    return result;
+                }
+                var buf: [256]u8 = undefined;
+                const vis = if (decl.prop.is_private) "private" else "protected";
+                const msg = std.fmt.bufPrint(&buf, "Cannot access {s} property {s}::${s}", .{ vis, meta.name, name }) catch "Cannot access property";
+                return throwThrowable("Error", msg, runtime_allocator);
+            }
+        } else {
+            // 属性未声明：先检查动态属性
+            if (obj.getProperty(name)) |prop_val| {
+                return prop_val;
+            }
+            // 尝试 __get 魔术方法
+            if (try tryMagicGet(obj_val, meta, name)) |result| {
+                return result;
+            }
+            // 无 __get：返回 [obj, method_name] 数组供 php_invoke_callable 调用
+            const arr = try PHPArray.init(runtime_allocator);
+            errdefer arr.release(runtime_allocator);
+            try arr.push(runtime_allocator, obj_val);
+            try arr.push(runtime_allocator, prop_name_val);
+            return Value.initArray(arr);
+        }
+    }
+
+    // 先查找属性
+    if (obj.getProperty(name)) |prop_val| {
+        return prop_val;
+    }
+    // 属性不存在时，返回 [obj, method_name] 数组供 php_invoke_callable 调用
+    const arr = try PHPArray.init(runtime_allocator);
+    errdefer arr.release(runtime_allocator);
+    try arr.push(runtime_allocator, obj_val);
+    try arr.push(runtime_allocator, prop_name_val);
+    return Value.initArray(arr);
 }
 
 pub fn php_object_set_dynamic(obj_val: Value, prop_name_val: Value, value: Value) !Value {
@@ -5374,7 +6328,40 @@ pub fn php_object_set_dynamic(obj_val: Value, prop_name_val: Value, value: Value
     }
     const obj = Value_asObject(obj_val);
     const prop_str = prop_name_val.asString();
-    try obj.setProperty(prop_str.data, value);
+    const name = prop_str.data;
+
+    // 属性可见性检查
+    if (obj.class_meta) |meta| {
+        if (findPropertyDeclaringClass(meta, name)) |decl| {
+            if (!checkPropertyAccess(decl.class, decl.prop)) {
+                // 属性声明但不可访问：尝试 __set 魔术方法
+                if (try tryMagicSet(obj_val, meta, name, value)) {
+                    return Value.initNull();
+                }
+                var buf: [256]u8 = undefined;
+                const vis = if (decl.prop.is_private) "private" else "protected";
+                const msg = std.fmt.bufPrint(&buf, "Cannot access {s} property {s}::${s}", .{ vis, meta.name, name }) catch "Cannot access property";
+                return throwThrowable("Error", msg, runtime_allocator);
+            }
+            // readonly 属性 enforcement
+            if (decl.prop.is_readonly and obj.hasProperty(name)) {
+                var buf: [256]u8 = undefined;
+                const msg = std.fmt.bufPrint(&buf, "Cannot modify readonly property {s}::${s}", .{ meta.name, name }) catch "Cannot modify readonly property";
+                return throwThrowable("Error", msg, runtime_allocator);
+            }
+            // 属性类型 coercion：将值转换为声明类型
+            const coerced = try coercePropertyType(decl.prop, value, meta.name);
+            try obj.setProperty(name, coerced);
+            return Value.initNull();
+        } else {
+            // 属性未声明：尝试 __set 魔术方法
+            if (try tryMagicSet(obj_val, meta, name, value)) {
+                return Value.initNull();
+            }
+        }
+    }
+
+    try obj.setProperty(name, value);
     return Value.initNull();
 }
 
@@ -5413,7 +6400,7 @@ pub fn php_cast_object(val: Value) !Value {
     if (Value_isObject(val)) {
         return val;
     }
-    
+
     // 数组转对象：将数组元素作为对象属性
     if (val.isArray()) {
         const obj_val = try php_object_new("stdClass", runtime_allocator);
@@ -5435,7 +6422,7 @@ pub fn php_cast_object(val: Value) !Value {
         }
         return obj_val;
     }
-    
+
     // 标量类型转对象：创建 stdClass 对象，值存储在 "scalar" 属性中
     // PHP 行为：(object)"test" 创建 stdClass { scalar: "test" }
     const obj_val = try php_object_new("stdClass", runtime_allocator);
@@ -5456,6 +6443,38 @@ pub fn php_object_set(obj_val: Value, property_name: []const u8, value: Value) !
     }
 
     const obj = Value_asObject(obj_val);
+
+    // 属性可见性检查
+    if (obj.class_meta) |meta| {
+        if (findPropertyDeclaringClass(meta, property_name)) |decl| {
+            if (!checkPropertyAccess(decl.class, decl.prop)) {
+                // 属性声明但不可访问：尝试 __set 魔术方法
+                if (try tryMagicSet(obj_val, meta, property_name, value)) {
+                    return Value.initNull();
+                }
+                var buf: [256]u8 = undefined;
+                const vis = if (decl.prop.is_private) "private" else "protected";
+                const msg = std.fmt.bufPrint(&buf, "Cannot access {s} property {s}::${s}", .{ vis, meta.name, property_name }) catch "Cannot access property";
+                return throwThrowable("Error", msg, runtime_allocator);
+            }
+            // readonly 属性 enforcement：已初始化的 readonly 属性不可修改
+            if (decl.prop.is_readonly and obj.hasProperty(property_name)) {
+                var buf: [256]u8 = undefined;
+                const msg = std.fmt.bufPrint(&buf, "Cannot modify readonly property {s}::${s}", .{ meta.name, property_name }) catch "Cannot modify readonly property";
+                return throwThrowable("Error", msg, runtime_allocator);
+            }
+            // 属性类型 coercion：将值转换为声明类型
+            const coerced = try coercePropertyType(decl.prop, value, meta.name);
+            try obj.setProperty(property_name, coerced);
+            return Value.initNull();
+        } else {
+            // 属性未声明：尝试 __set 魔术方法
+            if (try tryMagicSet(obj_val, meta, property_name, value)) {
+                return Value.initNull();
+            }
+        }
+    }
+
     try obj.setProperty(property_name, value);
     return Value.initNull();
 }
@@ -5646,6 +6665,13 @@ pub fn php_object_new_with_constructor(class_name: []const u8, args: []const Val
         std.process.exit(255);
     }
 
+    // abstract class 实例化检查：new AbstractClass() 抛出 Error
+    if (meta.?.is_abstract) {
+        var msg_buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "Cannot instantiate abstract class {s}", .{resolved}) catch "Cannot instantiate abstract class";
+        return throwThrowable("Error", msg, allocator);
+    }
+
     const obj = try PHPObject.initWithMeta(allocator, meta.?);
 
     const obj_val = Value_initObject(obj);
@@ -5730,7 +6756,7 @@ pub fn php_is_subclass_of(child: Value, parent: Value) !Value {
     // 第一个参数可以是对象或类名字符串
     var child_class_name: []const u8 = undefined;
     var child_meta: ?*const ClassMeta = null;
-    
+
     if (Value_isObject(child)) {
         const obj = Value_asObject(child);
         child_class_name = obj.class_name;
@@ -5741,31 +6767,31 @@ pub fn php_is_subclass_of(child: Value, parent: Value) !Value {
     } else {
         return Value.initBool(false);
     }
-    
+
     // 第二个参数必须是类名字符串
     if (!parent.isString()) return Value.initBool(false);
     const parent_class_name = parent.asString().data;
-    
+
     // 如果子类元数据不存在，返回 false
     if (child_meta == null) return Value.initBool(false);
-    
+
     // 检查是否相同（PHP 的 is_subclass_of 不包括自身）
     if (std.mem.eql(u8, child_class_name, parent_class_name)) {
         return Value.initBool(false);
     }
-    
+
     // 检查继承链
     if (child_meta.?.parent) |parent_meta| {
         if (parent_meta.isSubclassOf(parent_class_name)) {
             return Value.initBool(true);
         }
     }
-    
+
     // 检查接口实现
     if (child_meta.?.implementsInterface(parent_class_name)) {
         return Value.initBool(true);
     }
-    
+
     return Value.initBool(false);
 }
 
@@ -6050,11 +7076,27 @@ pub fn php_get_static_property(class_name: []const u8, property_name: []const u8
         }
         break :blk findClass(class_name) orelse return error.ClassNotFound;
     };
+
+    // 静态属性可见性检查
+    if (findPropertyDeclaringClass(meta, property_name)) |decl| {
+        if (decl.prop.is_static and !checkPropertyAccess(decl.class, decl.prop)) {
+            var buf: [256]u8 = undefined;
+            const vis = if (decl.prop.is_private) "private" else "protected";
+            const msg = std.fmt.bufPrint(&buf, "Cannot access {s} property {s}::${s}", .{ vis, decl.class.name, property_name }) catch "Cannot access property";
+            return throwThrowable("Error", msg, runtime_allocator);
+        }
+    }
+
     const val = meta.getStaticProperty(property_name);
     if (val == null) {
         std.debug.print("ERROR: Property {s}.{s} not found\n", .{ meta.name, property_name });
     }
-    return val orelse Value.initNull();
+    // retain：调用方（代码生成器）会在寄存器释放时 release
+    if (val) |v| {
+        _ = v.retain();
+        return v;
+    }
+    return Value.initNull();
 }
 
 /// 设置静态属性
@@ -6072,6 +7114,17 @@ pub fn php_set_static_property(class_name: []const u8, property_name: []const u8
         }
         break :blk findClass(class_name) orelse return error.ClassNotFound;
     };
+
+    // 静态属性可见性检查
+    if (findPropertyDeclaringClass(meta, property_name)) |decl| {
+        if (decl.prop.is_static and !checkPropertyAccess(decl.class, decl.prop)) {
+            var buf: [256]u8 = undefined;
+            const vis = if (decl.prop.is_private) "private" else "protected";
+            const msg = std.fmt.bufPrint(&buf, "Cannot access {s} property {s}::${s}", .{ vis, decl.class.name, property_name }) catch "Cannot access property";
+            return throwThrowable("Error", msg, runtime_allocator);
+        }
+    }
+
     try meta.setStaticProperty(property_name, value);
     return Value.initNull();
 }
@@ -6478,4 +7531,3 @@ pub fn throwThrowable(class_name: []const u8, message: []const u8, allocator: Al
 pub fn hasException() bool {
     return has_exception;
 }
-

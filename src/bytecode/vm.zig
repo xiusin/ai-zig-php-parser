@@ -90,10 +90,10 @@ pub const Value = union(enum) {
     };
 
     pub const Iterator = struct {
-        iterable: Value,           // 被遍历的数组/对象
-        current_index: i64,        // 当前索引
-        keys: ?[][]const u8,       // 键数组（关联数组）
-        is_done: bool,             // 是否完成
+        iterable: Value, // 被遍历的数组/对象
+        current_index: i64, // 当前索引
+        keys: ?[][]const u8, // 键数组（关联数组）
+        is_done: bool, // 是否完成
         ref_count: u32,
         marked: bool,
     };
@@ -146,20 +146,20 @@ pub const Value = union(enum) {
                 while (i < s.data.len and std.ascii.isDigit(s.data[i])) : (i += 1) {
                     has_digits = true;
                     const digit: i64 = s.data[i] - '0';
-                    
+
                     // 使用saturating算术避免溢出panic
                     const mul_result = @mulWithOverflow(result, 10);
                     if (mul_result[1] != 0) {
                         // 溢出：返回最大/最小值
                         break :blk if (negative) std.math.minInt(i64) else std.math.maxInt(i64);
                     }
-                    
+
                     const add_result = @addWithOverflow(mul_result[0], digit);
                     if (add_result[1] != 0) {
                         // 溢出：返回最大/最小值
                         break :blk if (negative) std.math.minInt(i64) else std.math.maxInt(i64);
                     }
-                    
+
                     result = add_result[0];
                 }
 
@@ -264,7 +264,7 @@ pub const ClassMetadata = struct {
     class_id: u16,
     /// 引用计数
     ref_count: u32,
-    
+
     pub fn init(allocator: std.mem.Allocator, name: []const u8, class_id: u16) !*ClassMetadata {
         const meta = try allocator.create(ClassMetadata);
         meta.* = .{
@@ -280,12 +280,12 @@ pub const ClassMetadata = struct {
         };
         return meta;
     }
-    
+
     pub fn deinit(self: *ClassMetadata, allocator: std.mem.Allocator) void {
         allocator.free(self.name);
         self.static_methods.deinit(allocator);
         self.instance_methods.deinit(allocator);
-        
+
         // 释放静态属性值
         var static_iter = self.static_properties.iterator();
         while (static_iter.next()) |entry| {
@@ -293,21 +293,21 @@ pub const ClassMetadata = struct {
             _ = entry;
         }
         self.static_properties.deinit(allocator);
-        
+
         // 释放实例属性默认值
         var inst_iter = self.instance_property_defaults.iterator();
         while (inst_iter.next()) |entry| {
             _ = entry;
         }
         self.instance_property_defaults.deinit(allocator);
-        
+
         // 释放常量值
         var const_iter = self.constants.iterator();
         while (const_iter.next()) |entry| {
             _ = entry;
         }
         self.constants.deinit(allocator);
-        
+
         allocator.destroy(self);
     }
 };
@@ -318,6 +318,8 @@ pub const CallFrame = struct {
     ip: u32,
     base_pointer: u32,
     return_address: u32,
+    /// 构造函数调用时保存 this 对象，返回时需要压回栈上
+    construct_this: ?Value = null,
 };
 
 /// 指令分发结果 - 用于计算跳转表优化
@@ -364,6 +366,8 @@ pub const BytecodeVM = struct {
     function_table: std.ArrayListUnmanaged(*CompiledFunction),
     /// 类元数据表 - 类名 -> ClassMetadata
     classes: std.StringHashMapUnmanaged(*ClassMetadata),
+    /// 类ID -> ClassMetadata 快速查找表（用于方法调用时通过 obj.class_id 查找类定义）
+    class_id_map: std.AutoHashMapUnmanaged(u16, *ClassMetadata),
     /// 类ID计数器
     next_class_id: u16,
     builtins: std.StringHashMapUnmanaged(BuiltinFn),
@@ -444,6 +448,7 @@ pub const BytecodeVM = struct {
             .functions = .{},
             .function_table = .empty,
             .classes = .{},
+            .class_id_map = .{},
             .next_class_id = 0,
             .builtins = .{},
             .builtin_array = .empty,
@@ -488,6 +493,8 @@ pub const BytecodeVM = struct {
             .{ .name = "echo", .func = builtinEcho },
             .{ .name = "print", .func = builtinPrint },
             .{ .name = "var_dump", .func = builtinVarDump },
+            .{ .name = "var_export", .func = builtinVarExport },
+            .{ .name = "print_r", .func = builtinPrintR },
             .{ .name = "sprintf", .func = builtinSprintf },
             .{ .name = "microtime", .func = builtinMicrotime },
             .{ .name = "strlen", .func = builtinStrlen },
@@ -549,6 +556,80 @@ pub const BytecodeVM = struct {
             .{ .name = "pow", .func = builtinPow },
             .{ .name = "sin", .func = builtinSin },
             .{ .name = "cos", .func = builtinCos },
+            .{ .name = "tan", .func = builtinTan },
+            .{ .name = "exp", .func = builtinExp },
+            .{ .name = "log", .func = builtinLog },
+            .{ .name = "log10", .func = builtinLog10 },
+            .{ .name = "asin", .func = builtinAsin },
+            .{ .name = "acos", .func = builtinAcos },
+            .{ .name = "atan", .func = builtinAtan },
+            .{ .name = "sinh", .func = builtinSinh },
+            .{ .name = "cosh", .func = builtinCosh },
+            .{ .name = "tanh", .func = builtinTanh },
+            .{ .name = "deg2rad", .func = builtinDeg2rad },
+            .{ .name = "rad2deg", .func = builtinRad2deg },
+            .{ .name = "fmod", .func = builtinFmod },
+            .{ .name = "intdiv", .func = builtinIntdiv },
+            .{ .name = "is_nan", .func = builtinIsNan },
+            .{ .name = "is_finite", .func = builtinIsFinite },
+            .{ .name = "is_infinite", .func = builtinIsInfinite },
+            .{ .name = "decbin", .func = builtinDecbin },
+            .{ .name = "dechex", .func = builtinDechex },
+            .{ .name = "decoct", .func = builtinDecoct },
+            .{ .name = "bindec", .func = builtinBindec },
+            .{ .name = "hexdec", .func = builtinHexdec },
+            .{ .name = "octdec", .func = builtinOctdec },
+            .{ .name = "base_convert", .func = builtinBaseConvert },
+            .{ .name = "number_format", .func = builtinNumberFormat },
+            .{ .name = "sprintf", .func = builtinSprintf },
+            .{ .name = "printf", .func = builtinPrintf },
+            .{ .name = "str_replace", .func = builtinStrReplace },
+            .{ .name = "str_ireplace", .func = builtinStrIReplace },
+            .{ .name = "substr_replace", .func = builtinSubstrReplace },
+            .{ .name = "strpos", .func = builtinStrpos },
+            .{ .name = "strrpos", .func = builtinStrrpos },
+            .{ .name = "stripos", .func = builtinStrpos },
+            .{ .name = "strripos", .func = builtinStrrpos },
+            .{ .name = "strstr", .func = builtinStrstr },
+            .{ .name = "stristr", .func = builtinStrstr },
+            .{ .name = "strrchr", .func = builtinStrrchr },
+            .{ .name = "substr_count", .func = builtinSubstrCount },
+            .{ .name = "str_pad", .func = builtinStrPad },
+            .{ .name = "str_repeat", .func = builtinStrRepeat },
+            .{ .name = "strrev", .func = builtinStrrev },
+            .{ .name = "str_shuffle", .func = builtinStrShuffle },
+            .{ .name = "str_split", .func = builtinStrSplit },
+            .{ .name = "chunk_split", .func = builtinChunkSplit },
+            .{ .name = "strcmp", .func = builtinStrcmp },
+            .{ .name = "strcasecmp", .func = builtinStrcasecmp },
+            .{ .name = "strnatcmp", .func = builtinStrnatcmp },
+            .{ .name = "strncasecmp", .func = builtinStrcasecmp },
+            .{ .name = "str_word_count", .func = builtinStrWordCount },
+            .{ .name = "ucfirst", .func = builtinUcfirst },
+            .{ .name = "lcfirst", .func = builtinLcfirst },
+            .{ .name = "ucwords", .func = builtinUcwords },
+            .{ .name = "array_key_exists", .func = builtinArrayKeyExists },
+            .{ .name = "array_fill", .func = builtinArrayFill },
+            .{ .name = "array_flip", .func = builtinArrayFlip },
+            .{ .name = "array_reverse", .func = builtinArrayReverse },
+            .{ .name = "array_unique", .func = builtinArrayUnique },
+            .{ .name = "array_rand", .func = builtinArrayRand },
+            .{ .name = "array_slice", .func = builtinArraySlice },
+            .{ .name = "array_merge", .func = builtinArrayMerge },
+            .{ .name = "array_chunk", .func = builtinArrayChunk },
+            .{ .name = "array_combine", .func = builtinArrayCombine },
+            .{ .name = "array_walk", .func = builtinArrayWalk },
+            .{ .name = "array_walk_recursive", .func = builtinArrayWalkRecursive },
+            .{ .name = "mb_strlen", .func = builtinMbStrlen },
+            .{ .name = "mb_substr", .func = builtinMbSubstr },
+            .{ .name = "mb_strtolower", .func = builtinMbStrtolower },
+            .{ .name = "mb_strtoupper", .func = builtinMbStrtoupper },
+            .{ .name = "mb_detect_encoding", .func = builtinMbDetectEncoding },
+            .{ .name = "call_user_func", .func = builtinCallUserFunc },
+            .{ .name = "call_user_func_array", .func = builtinCallUserFuncArray },
+            .{ .name = "is_callable", .func = builtinIsCallable },
+            .{ .name = "usort", .func = builtinUsort },
+            .{ .name = "array_column", .func = builtinArrayColumn },
         };
 
         for (builtins_list) |b| {
@@ -602,6 +683,7 @@ pub const BytecodeVM = struct {
             entry.value_ptr.*.deinit(self.allocator);
         }
         self.classes.deinit(self.allocator);
+        self.class_id_map.deinit(self.allocator);
 
         // 释放类型反馈收集器
         self.type_feedback_collector.deinit();
@@ -639,9 +721,10 @@ pub const BytecodeVM = struct {
     pub fn registerClass(self: *BytecodeVM, name: []const u8) !*ClassMetadata {
         const class_id = self.next_class_id;
         self.next_class_id += 1;
-        
+
         const meta = try ClassMetadata.init(self.allocator, name, class_id);
         try self.classes.put(self.allocator, name, meta);
+        try self.class_id_map.put(self.allocator, class_id, meta);
         return meta;
     }
 
@@ -652,13 +735,18 @@ pub const BytecodeVM = struct {
         return self.classes.get(name);
     }
 
+    /// 通过类ID获取类元数据（用于方法调用时从 obj.class_id 查找类定义）
+    pub fn getClassById(self: *BytecodeVM, class_id: u16) ?*ClassMetadata {
+        return self.class_id_map.get(class_id);
+    }
+
     /// 注册静态方法到类
     /// @pre class_meta 必须是有效的类元数据指针
     /// @pre method_name 必须是有效的方法名
     /// @pre func 必须是有效的编译后函数指针
     pub fn registerStaticMethod(self: *BytecodeVM, class_meta: *ClassMetadata, method_name: []const u8, func: *CompiledFunction) !void {
         try class_meta.static_methods.put(self.allocator, method_name, func);
-        
+
         // 同时注册到全局函数表，使用 ClassName::methodName 格式
         const full_name = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_meta.name, method_name });
         defer self.allocator.free(full_name);
@@ -700,147 +788,202 @@ pub const BytecodeVM = struct {
     /// @ownership NON-OWNING (args)
     /// @thread-safety ISOLATED
     pub fn call(self: *BytecodeVM, name: []const u8, args: []const Value) VMError!Value {
-        // 1. 查找函数
-        const func = self.functions.get(name) orelse return VMError.UndefinedFunction;
-        
-        // 2. 验证参数数量
-        if (args.len < func.min_args or args.len > func.max_args) {
-            return VMError.InvalidArgumentCount;
-        }
-        
-        // 3. 检查内联缓存
-        const cache_key = self.computeCacheKey(name, args);
-        if (self.enable_inline_cache) {
-            if (self.method_cache.lookupFunction(cache_key)) |cached_func| {
-                // 缓存命中 - 直接使用缓存的函数
-                if (cached_func == func) {
-                    self.stats.cache_hits += 1;
-                }
-            } else {
-                self.stats.cache_misses += 1;
+        // 1. 查找函数 — 先查用户函数，再查内置函数
+        if (self.functions.get(name)) |func| {
+            // 2. 验证参数数量
+            if (args.len < func.min_args or args.len > func.max_args) {
+                return VMError.InvalidArgumentCount;
             }
-        }
-        
-        // 4. 创建新的调用帧
-        if (self.frame_count >= BytecodeVM.FRAMES_MAX) {
-            return VMError.StackOverflow;
-        }
-        
-        const frame_idx = self.frame_count;
-        self.frame_count += 1;
-        
-        self.frames[frame_idx] = CallFrame{
-            .function = func,
-            .ip = 0,
-            .base_pointer = self.stack_top,
-            .return_address = 0, // 顶层调用
-        };
-        
-        // 5. 处理参数传递
-        // 5.1 值传递参数
-        for (args, 0..) |arg, i| {
-            if (i < func.param_count) {
-                const param_info = func.param_info[i];
-                
-                switch (param_info.pass_mode) {
-                    .by_value => {
-                        // 值传递：复制值
-                        try self.push(arg);
-                    },
-                    .by_reference => {
-                        // 引用传递：传递引用
-                        // 对于引用类型，直接传递指针
-                        // 对于值类型，需要创建引用包装
-                        switch (arg) {
-                            .string_val, .array_val, .object_val, .closure_val => {
-                                // 引用类型：直接传递
-                                try self.push(arg);
-                            },
-                            else => {
-                                // 值类型：创建引用包装
-                                // 在实际实现中，这里需要创建一个引用对象
-                                try self.push(arg);
-                            },
-                        }
-                    },
-                }
-            }
-        }
-        
-        // 5.2 处理默认参数
-        if (args.len < func.param_count) {
-            var i = args.len;
-            while (i < func.param_count) : (i += 1) {
-                const param_info = func.param_info[i];
-                if (param_info.default_value) |default| {
-                    try self.push(default);
+
+            // 3. 检查内联缓存
+            const cache_key = self.computeCacheKey(name, args);
+            if (self.enable_inline_cache) {
+                if (self.method_cache.lookupFunction(cache_key)) |cached_func| {
+                    // 缓存命中 - 直接使用缓存的函数
+                    if (cached_func == func) {
+                        self.stats.cache_hits += 1;
+                    }
                 } else {
-                    // 没有默认值，参数不足
+                    self.stats.cache_misses += 1;
+                }
+            }
+
+            // 4. 创建新的调用帧
+            if (self.frame_count >= BytecodeVM.FRAMES_MAX) {
+                return VMError.StackOverflow;
+            }
+
+            const frame_idx = self.frame_count;
+            self.frame_count += 1;
+
+            self.frames[frame_idx] = CallFrame{
+                .function = func,
+                .ip = 0,
+                .base_pointer = self.stack_top,
+                .return_address = 0, // 顶层调用
+            };
+
+            // 5. 处理参数传递
+            // 5.1 值传递参数
+            for (args, 0..) |arg, i| {
+                if (i < func.param_count) {
+                    const param_info = func.param_info[i];
+
+                    switch (param_info.pass_mode) {
+                        .by_value => {
+                            // 值传递：复制值
+                            try self.push(arg);
+                        },
+                        .by_reference => {
+                            // 引用传递：传递引用
+                            // 对于引用类型，直接传递指针
+                            // 对于值类型，需要创建引用包装
+                            switch (arg) {
+                                .string_val, .array_val, .object_val, .closure_val => {
+                                    // 引用类型：直接传递
+                                    try self.push(arg);
+                                },
+                                else => {
+                                    // 值类型：创建引用包装
+                                    // 在实际实现中，这里需要创建一个引用对象
+                                    try self.push(arg);
+                                },
+                            }
+                        },
+                    }
+                }
+            }
+
+            // 5.2 处理默认参数
+            if (args.len < func.param_count) {
+                var i = args.len;
+                while (i < func.param_count) : (i += 1) {
+                    const param_info = func.param_info[i];
+                    if (param_info.default_value) |default| {
+                        try self.push(default);
+                    } else {
+                        // 没有默认值，参数不足
+                        return VMError.InvalidArgumentCount;
+                    }
+                }
+            }
+
+            // 5.3 处理可变参数
+            if (func.is_variadic) {
+                // 收集额外的参数到数组中
+                const extra_count = if (args.len > func.param_count)
+                    args.len - func.param_count
+                else
+                    0;
+
+                const variadic_array = try self.createArray();
+
+                if (extra_count > 0) {
+                    var i: usize = 0;
+                    while (i < extra_count) : (i += 1) {
+                        const arg_idx = func.param_count + i;
+                        try self.arrayPush(variadic_array, args[arg_idx]);
+                    }
+                }
+
+                try self.push(Value{ .array_val = variadic_array });
+            }
+
+            // 6. 分配局部变量空间
+            var i: u32 = 0;
+            while (i < func.local_count) : (i += 1) {
+                try self.push(.null_val);
+            }
+
+            // 7. 执行函数体
+            const result = try self.executeFrame(&self.frames[frame_idx]);
+
+            // 8. 清理调用帧
+            self.frame_count -= 1;
+
+            // 9. 更新内联缓存
+            if (self.enable_inline_cache) {
+                try self.method_cache.cacheFunction(cache_key, func);
+            }
+
+            // 10. 更新统计信息
+            self.stats.function_calls += 1;
+
+            return result;
+        }
+
+        // 2. 用户函数未找到，尝试内置函数
+        if (self.builtins.get(name)) |builtin_fn| {
+            const result = builtin_fn(self, args) catch return .null_val;
+            self.stats.function_calls += 1;
+            return result;
+        }
+
+        // 3. 名称归一化：兼容 "\\func" 形式
+        if (name.len > 0 and name[0] == '\\') {
+            const short = name[1..];
+            if (self.functions.get(short)) |func| {
+                if (args.len < func.min_args or args.len > func.max_args) {
                     return VMError.InvalidArgumentCount;
                 }
-            }
-        }
-        
-        // 5.3 处理可变参数
-        if (func.is_variadic) {
-            // 收集额外的参数到数组中
-            const extra_count = if (args.len > func.param_count) 
-                args.len - func.param_count 
-            else 
-                0;
-            
-            const variadic_array = try self.createArray();
-            
-            if (extra_count > 0) {
-                var i: usize = 0;
-                while (i < extra_count) : (i += 1) {
-                    const arg_idx = func.param_count + i;
-                    try self.arrayPush(variadic_array, args[arg_idx]);
+                const frame_idx = self.frame_count;
+                self.frame_count += 1;
+                self.frames[frame_idx] = CallFrame{
+                    .function = func,
+                    .ip = 0,
+                    .base_pointer = self.stack_top,
+                    .return_address = 0,
+                };
+                for (args) |arg| {
+                    try self.push(arg);
                 }
+                var i: u32 = 0;
+                while (i < func.local_count) : (i += 1) {
+                    try self.push(.null_val);
+                }
+                const result = try self.executeFrame(&self.frames[frame_idx]);
+                self.frame_count -= 1;
+                self.stats.function_calls += 1;
+                return result;
             }
-            
-            try self.push(Value{ .array_val = variadic_array });
+            if (self.builtins.get(short)) |builtin_fn| {
+                const result = builtin_fn(self, args) catch return .null_val;
+                self.stats.function_calls += 1;
+                return result;
+            }
         }
-        
-        // 6. 分配局部变量空间
-        var i: u32 = 0;
-        while (i < func.local_count) : (i += 1) {
-            try self.push(.null_val);
+
+        // 4. 最终回退：通过 fn_dispatch 检查是否是已知但未实现的内置函数
+        const fn_dispatch_mod = @import("runtime").fn_dispatch;
+        if (fn_dispatch_mod.lookup(name) != null) {
+            // 内置函数存在于 fn_dispatch 但 BytecodeVM 未实现，返回 null
+            return .null_val;
         }
-        
-        // 7. 执行函数体
-        const result = try self.executeFrame(&self.frames[frame_idx]);
-        
-        // 8. 清理调用帧
-        self.frame_count -= 1;
-        
-        // 9. 更新内联缓存
-        if (self.enable_inline_cache) {
-            try self.method_cache.cacheFunction(cache_key, func);
+        if (name.len > 0 and name[0] == '\\') {
+            if (fn_dispatch_mod.lookup(name[1..]) != null) {
+                return .null_val;
+            }
         }
-        
-        // 10. 更新统计信息
-        self.stats.function_calls += 1;
-        
-        return result;
+
+        return VMError.UndefinedFunction;
     }
-    
+
     /// 计算缓存键
     /// @pre name 和 args 必须有效
     /// @post 返回唯一的缓存键
     fn computeCacheKey(self: *BytecodeVM, name: []const u8, args: []const Value) u64 {
         _ = self;
         var hasher = std.hash.Wyhash.init(0);
-        
+
         // 哈希函数名
         hasher.update(name);
-        
+
         // 哈希参数类型
         for (args) |arg| {
             const type_tag = @intFromEnum(arg.getTypeTag());
             hasher.update(std.mem.asBytes(&type_tag));
         }
-        
+
         return hasher.final();
     }
 
@@ -950,14 +1093,14 @@ pub const BytecodeVM = struct {
         self.bytes_allocated += @sizeOf(Value.Object);
         return obj;
     }
-    
+
     /// 向数组添加元素
     /// @pre arr 必须是有效的数组指针
     /// @post 元素被添加到数组末尾
     pub fn arrayPush(self: *BytecodeVM, arr: *Value.Array, value: Value) !void {
         try arr.elements.append(self.allocator, value);
     }
-    
+
     /// 执行单个调用帧
     /// @pre frame 必须是有效的调用帧指针
     /// @post 返回函数执行结果
@@ -966,11 +1109,11 @@ pub const BytecodeVM = struct {
         while (frame.ip < frame.function.bytecode.len) {
             const inst = frame.function.bytecode[frame.ip];
             frame.ip += 1;
-            
+
             // 使用计算跳转表分发指令
             const handler = dispatch_table[@intFromEnum(inst.opcode)];
             const result = try handler(self, frame, inst);
-            
+
             switch (result) {
                 .continue_execution => {},
                 .return_value => |val| return val,
@@ -983,7 +1126,7 @@ pub const BytecodeVM = struct {
                 },
             }
         }
-        
+
         // 函数执行完毕，返回 null
         return .null_val;
     }
@@ -1040,11 +1183,11 @@ pub const BytecodeVM = struct {
         var instruction_count: usize = 0;
         while (true) {
             instruction_count += 1;
-            
+
             if (frame.ip >= frame.function.bytecode.len) {
                 return .null_val;
             }
-            
+
             const inst = frame.function.bytecode[frame.ip];
             frame.ip += 1;
 
@@ -1097,9 +1240,35 @@ pub const BytecodeVM = struct {
                         const name_val = frame.function.constants[name_idx];
                         if (name_val == .string_val) {
                             const var_name = name_val.string_val.data;
-                            
-                            // O(1) 哈希表查找全局变量
-                            if (self.globals.get(var_name)) |global_val| {
+
+                            // $GLOBALS superglobal: build snapshot of all global variables
+                            if (std.mem.eql(u8, var_name, "$GLOBALS") or std.mem.eql(u8, var_name, "GLOBALS")) {
+                                const arr = try self.allocator.create(Value.Array);
+                                arr.* = Value.Array{
+                                    .elements = .{},
+                                    .keys = .{},
+                                    .ref_count = 1,
+                                    .marked = false,
+                                };
+                                var giter = self.globals.iterator();
+                                while (giter.next()) |entry| {
+                                    // Skip $GLOBALS itself
+                                    if (std.mem.eql(u8, entry.key_ptr.*, "$GLOBALS") or std.mem.eql(u8, entry.key_ptr.*, "GLOBALS")) {
+                                        continue;
+                                    }
+                                    // PHP: $GLOBALS keys are variable names WITHOUT $ prefix
+                                    const key_name = if (entry.key_ptr.*.len > 0 and entry.key_ptr.*[0] == '$')
+                                        entry.key_ptr.*[1..]
+                                    else
+                                        entry.key_ptr.*;
+                                    const key_str = try self.allocator.create(Value.String);
+                                    key_str.* = Value.String{ .data = try self.allocator.dupe(u8, key_name), .ref_count = 1, .marked = false };
+                                    const idx = arr.elements.items.len;
+                                    try arr.elements.append(self.allocator, entry.value_ptr.*);
+                                    try arr.keys.put(self.allocator, key_str.data, idx);
+                                }
+                                try self.push(.{ .array_val = arr });
+                            } else if (self.globals.get(var_name)) |global_val| {
                                 try self.push(global_val);
                             } else {
                                 // 未定义的全局变量，返回 null
@@ -1151,7 +1320,7 @@ pub const BytecodeVM = struct {
                         const name_val = frame.function.constants[name_idx];
                         if (name_val == .string_val) {
                             // 根据字符串名称存储全局变量
-                            _ = value;
+                            try self.globals.put(self.allocator, name_val.string_val.data, value);
                         }
                     }
                 },
@@ -1206,11 +1375,93 @@ pub const BytecodeVM = struct {
                     self.stack[idx] = .{ .int_val = val - 1 };
                 },
 
+                .inc_global => {
+                    // 全局变量自增（operand1 = 常量池索引）
+                    const name_idx = inst.operand1;
+                    if (name_idx < frame.function.constants.len) {
+                        const name_val = frame.function.constants[name_idx];
+                        if (name_val == .string_val) {
+                            const var_name = name_val.string_val.data;
+                            if (self.globals.getPtr(var_name)) |ptr| {
+                                const val = ptr.*.toInt();
+                                ptr.* = .{ .int_val = val + 1 };
+                            } else {
+                                // Variable not found, initialize to 1 (0 + 1)
+                                try self.globals.put(self.allocator, var_name, .{ .int_val = 1 });
+                            }
+                        }
+                    }
+                },
+
+                .dec_global => {
+                    // 全局变量自减（operand1 = 常量池索引）
+                    const name_idx = inst.operand1;
+                    if (name_idx < frame.function.constants.len) {
+                        const name_val = frame.function.constants[name_idx];
+                        if (name_val == .string_val) {
+                            const var_name = name_val.string_val.data;
+                            if (self.globals.getPtr(var_name)) |ptr| {
+                                const val = ptr.*.toInt();
+                                ptr.* = .{ .int_val = val - 1 };
+                            } else {
+                                // Variable not found, initialize to -1 (0 - 1)
+                                try self.globals.put(self.allocator, var_name, .{ .int_val = -1 });
+                            }
+                        }
+                    }
+                },
+
                 .pow_int => {
                     const b = (try self.pop()).toInt();
                     const a = (try self.pop()).toInt();
-                    const result = std.math.pow(i64, a, @intCast(b));
-                    try self.push(.{ .int_val = result });
+                    // 负指数 → 浮点结果
+                    if (b < 0) {
+                        const base_f = @as(f64, @floatFromInt(a));
+                        const abs_exp: u64 = @intCast(-b);
+                        const abs_result = std.math.pow(f64, base_f, @as(f64, @floatFromInt(abs_exp)));
+                        try self.push(.{ .float_val = 1.0 / abs_result });
+                    } else if (b == 0) {
+                        try self.push(.{ .int_val = 1 });
+                    } else {
+                        // 非负整数指数：使用快速幂避免溢出 panic
+                        const exp: u64 = @intCast(b);
+                        var result: i64 = 1;
+                        var base = a;
+                        var e = exp;
+                        var overflow = false;
+                        while (e > 0) {
+                            if (e & 1 == 1) {
+                                if (base > 0 and result > @divTrunc(std.math.maxInt(i64), base)) {
+                                    overflow = true;
+                                    break;
+                                }
+                                if (base < 0 and result < @divTrunc(std.math.minInt(i64), base)) {
+                                    overflow = true;
+                                    break;
+                                }
+                                result *= base;
+                            }
+                            e >>= 1;
+                            if (e > 0) {
+                                if (base > 0 and base > @divTrunc(std.math.maxInt(i64), base)) {
+                                    overflow = true;
+                                    break;
+                                }
+                                if (base < 0 and base < @divTrunc(std.math.minInt(i64), base)) {
+                                    overflow = true;
+                                    break;
+                                }
+                                base *= base;
+                            }
+                        }
+                        if (overflow) {
+                            // 溢出 → 浮点结果
+                            const base_f = @as(f64, @floatFromInt(a));
+                            try self.push(.{ .float_val = std.math.pow(f64, base_f, @as(f64, @floatFromInt(exp))) });
+                        } else {
+                            try self.push(.{ .int_val = result });
+                        }
+                    }
                 },
 
                 .bit_and => {
@@ -1363,8 +1614,10 @@ pub const BytecodeVM = struct {
                 .call => {
                     const arg_count = inst.operand2;
                     const func_id = inst.operand1;
-                    try self.callFunction(func_id, arg_count);
-                    frame = &self.frames[self.frame_count - 1];
+                    const frame_changed = try self.callFunction(func_id, arg_count);
+                    if (frame_changed) {
+                        frame = &self.frames[self.frame_count - 1];
+                    }
                 },
 
                 .call_builtin => {
@@ -1628,9 +1881,23 @@ pub const BytecodeVM = struct {
 
                 // ========== 对象操作 ==========
                 .new_object => {
-                    // operand1 = class_id
-                    const class_id = inst.operand1;
-                    const obj = self.createObject(class_id) catch return BytecodeVM.VMError.OutOfMemory;
+                    // operand1 = 类名在常量池中的索引
+                    // 通过 handleNewObject 处理（dispatch table 已路由）
+                    // 此处为 fallback，实际执行走 dispatch_table
+                    const class_name_idx = inst.operand1;
+                    var cid: u16 = 0;
+                    if (class_name_idx < frame.function.constants.len) {
+                        const cc = frame.function.constants[class_name_idx];
+                        if (cc == .string_val) {
+                            if (self.getClass(cc.string_val)) |cm| {
+                                cid = cm.class_id;
+                            } else {
+                                const cm = self.registerClass(cc.string_val) catch return BytecodeVM.VMError.OutOfMemory;
+                                cid = cm.class_id;
+                            }
+                        }
+                    }
+                    const obj = self.createObject(cid) catch return BytecodeVM.VMError.OutOfMemory;
                     try self.push(.{ .object_val = obj });
                 },
 
@@ -1879,7 +2146,7 @@ pub const BytecodeVM = struct {
                 .foreach_init => {
                     // 栈: [iterable] -> [iterator]
                     const iterable = try self.pop();
-                    
+
                     // 创建迭代器
                     const iterator = self.allocator.create(Value.Iterator) catch return BytecodeVM.VMError.OutOfMemory;
                     iterator.* = .{
@@ -1890,7 +2157,7 @@ pub const BytecodeVM = struct {
                         .ref_count = 1,
                         .marked = false,
                     };
-                    
+
                     // 如果是关联数组，提取键
                     switch (iterable) {
                         .array_val => |arr| {
@@ -1912,7 +2179,7 @@ pub const BytecodeVM = struct {
                             iterator.is_done = true;
                         },
                     }
-                    
+
                     try self.push(.{ .iterator_val = iterator });
                 },
 
@@ -1921,7 +2188,7 @@ pub const BytecodeVM = struct {
                     // operand1 = 循环结束跳转目标
                     const jump_target = inst.operand1;
                     const iterator_val = self.peek(0);
-                    
+
                     switch (iterator_val) {
                         .iterator_val => |iterator| {
                             if (iterator.is_done) {
@@ -1933,7 +2200,7 @@ pub const BytecodeVM = struct {
                                 switch (iterator.iterable) {
                                     .array_val => |arr| {
                                         const idx: usize = @intCast(iterator.current_index);
-                                        
+
                                         if (idx < arr.elements.items.len) {
                                             // 获取键
                                             const key: Value = if (iterator.keys) |keys| blk: {
@@ -1951,14 +2218,14 @@ pub const BytecodeVM = struct {
                                                 // 索引数组：使用整数键
                                                 break :blk .{ .int_val = iterator.current_index };
                                             };
-                                            
+
                                             // 获取值
                                             const value = arr.elements.items[idx];
-                                            
+
                                             // 压入键和值
                                             try self.push(key);
                                             try self.push(value);
-                                            
+
                                             // 更新迭代器
                                             iterator.current_index += 1;
                                             if (idx + 1 >= arr.elements.items.len) {
@@ -2133,7 +2400,6 @@ pub const BytecodeVM = struct {
     }
 
     fn valuesIdentical(self: *BytecodeVM, a: Value, b: Value) bool {
-        _ = self;
         // === 严格比较：类型和值都必须相同
         return switch (a) {
             .null_val => b == .null_val,
@@ -2153,11 +2419,43 @@ pub const BytecodeVM = struct {
                 .string_val => |bv| std.mem.eql(u8, av.data, bv.data),
                 else => false,
             },
+            .array_val => |av| switch (b) {
+                .array_val => |bv| self.arraysIdentical(av, bv),
+                else => false,
+            },
             else => false,
         };
     }
 
-    fn callFunction(self: *BytecodeVM, func_id: u16, arg_count: u16) VMError!void {
+    /// PHP 语义：=== 对数组进行深度值比较
+    fn arraysIdentical(self: *BytecodeVM, a: *Value.Array, b: *Value.Array) bool {
+        // 快速路径：同一指针
+        if (@intFromPtr(a) == @intFromPtr(b)) return true;
+
+        const a_count = a.elements.items.len;
+        const b_count = b.elements.items.len;
+        if (a_count != b_count) return false;
+
+        // 逐个比较元素值（顺序也必须相同）
+        for (a.elements.items, b.elements.items) |a_val, b_val| {
+            if (!self.valuesIdentical(a_val, b_val)) return false;
+        }
+
+        // 比较键（keys map 中的键名和索引）
+        if (a.keys.count() != b.keys.count()) return false;
+        var a_key_iter = a.keys.iterator();
+        while (a_key_iter.next()) |entry| {
+            if (b.keys.get(entry.key_ptr.*)) |b_idx| {
+                if (entry.value_ptr.* != b_idx) return false;
+            } else {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    fn callFunction(self: *BytecodeVM, func_id: u16, arg_count: u16) VMError!bool {
         if (self.frame_count >= FRAMES_MAX) {
             return BytecodeVM.VMError.StackOverflow;
         }
@@ -2190,7 +2488,7 @@ pub const BytecodeVM = struct {
                             self.stack[i] = .null_val;
                         }
                         self.stack_top = required_top;
-                        return;
+                        return true; // 用户函数：帧已改变
                     }
                 },
                 .string_val => |name| {
@@ -2215,7 +2513,7 @@ pub const BytecodeVM = struct {
                             self.stack[i] = .null_val;
                         }
                         self.stack_top = required_top;
-                        return;
+                        return true; // 用户函数：帧已改变
                     }
                     // 然后检查内置函数
                     if (self.builtins.get(name)) |builtin_fn| {
@@ -2223,7 +2521,7 @@ pub const BytecodeVM = struct {
                         self.stack_top -= arg_count;
                         const result = builtin_fn(self, args_slice) catch .null_val;
                         self.push(result) catch return BytecodeVM.VMError.StackOverflow;
-                        return;
+                        return false; // 内置函数：帧未改变
                     }
 
                     // 名称归一化：兼容 "\\func" 形式
@@ -2238,14 +2536,32 @@ pub const BytecodeVM = struct {
                                 .return_address = current_frame.ip,
                             };
                             self.frame_count += 1;
-                            return;
+                            return true; // 用户函数：帧已改变
                         }
                         if (self.builtins.get(short)) |builtin_fn| {
                             const args_slice = self.stack[self.stack_top - arg_count .. self.stack_top];
                             self.stack_top -= arg_count;
                             const result = builtin_fn(self, args_slice) catch .null_val;
                             self.push(result) catch return BytecodeVM.VMError.StackOverflow;
-                            return;
+                            return false; // 内置函数：帧未改变
+                        }
+                    }
+
+                    // 最终回退：通过 fn_dispatch 检查是否是已知但未实现的内置函数
+                    // 如果是，返回 null 而非 UndefinedFunction，避免降级到 tree-walking
+                    const fn_dispatch_mod = @import("runtime").fn_dispatch;
+                    if (fn_dispatch_mod.lookup(name) != null) {
+                        // 内置函数存在于 fn_dispatch 但 BytecodeVM 未实现
+                        // 弹出参数，压入 null 作为降级结果
+                        self.stack_top -= arg_count;
+                        self.push(.null_val) catch return BytecodeVM.VMError.StackOverflow;
+                        return false; // 内置函数降级：帧未改变
+                    }
+                    if (name.len > 0 and name[0] == '\\') {
+                        if (fn_dispatch_mod.lookup(name[1..]) != null) {
+                            self.stack_top -= arg_count;
+                            self.push(.null_val) catch return BytecodeVM.VMError.StackOverflow;
+                            return false; // 内置函数降级：帧未改变
                         }
                     }
                 },
@@ -2262,7 +2578,7 @@ pub const BytecodeVM = struct {
                     .return_address = current_frame.ip,
                 };
                 self.frame_count += 1;
-                return;
+                return true; // 用户函数：帧已改变
             }
         }
 
@@ -2298,56 +2614,56 @@ pub const BytecodeVM = struct {
     /// @post 内存碎片率 < 10%
     fn collectGarbage(self: *BytecodeVM) void {
         const start_time = time_compat.nanoTimestamp();
-        
+
         // 1. 标记阶段：完整的对象图遍历
         self.markPhase() catch |err| {
             std.debug.print("GC 标记阶段失败: {}\n", .{err});
             return;
         };
-        
+
         // 2. 清除阶段：回收未标记的对象
         self.sweepPhase();
-        
+
         // 3. 压缩阶段：每 10 次 GC 进行一次压缩
         if (self.gc_count % 10 == 0) {
             self.compactPhase() catch |err| {
                 std.debug.print("GC 压缩阶段失败: {}\n", .{err});
             };
         }
-        
+
         self.gc_count += 1;
-        
+
         const end_time = time_compat.nanoTimestamp();
         const pause_time_ns = @as(u64, @intCast(end_time - start_time));
         const pause_time_ms = pause_time_ns / 1_000_000;
-        
+
         // 检查暂停时间是否超出 10ms 预算
         if (pause_time_ms > 10) {
             std.debug.print("警告: GC 暂停时间 {d}ms 超出 10ms 预算\n", .{pause_time_ms});
         }
-        
+
         // 重置分配计数
         self.bytes_allocated = 0;
     }
-    
+
     /// 标记阶段：完整的对象图遍历（非简化实现）
     /// @post 所有可达对象被标记
     fn markPhase(self: *BytecodeVM) !void {
         // 工作列表：待处理的值
         var worklist = std.ArrayListUnmanaged(Value){ .items = &.{}, .capacity = 0 };
         defer worklist.deinit(self.allocator);
-        
+
         // 1. 标记栈上的根对象
         for (self.stack[0..self.stack_top]) |value| {
             try self.markValueComplete(value, &worklist);
         }
-        
+
         // 2. 标记全局变量
         var iter = self.globals.iterator();
         while (iter.next()) |entry| {
             try self.markValueComplete(entry.value_ptr.*, &worklist);
         }
-        
+
         // 3. 标记调用帧中的局部变量
         for (self.frames[0..self.frame_count]) |frame| {
             const base = frame.base_pointer;
@@ -2359,14 +2675,14 @@ pub const BytecodeVM = struct {
                 }
             }
         }
-        
+
         // 4. 处理工作列表：遍历对象图
         while (worklist.items.len > 0) {
             const value = worklist.pop() orelse break;
             try self.scanValueReferences(value, &worklist);
         }
     }
-    
+
     /// 标记单个值（完整实现）
     /// @pre value 必须有效
     /// @post value 引用的对象被标记并添加到 worklist
@@ -2407,7 +2723,7 @@ pub const BytecodeVM = struct {
             },
         }
     }
-    
+
     /// 扫描值的所有引用（完整实现，处理所有引用类型）
     /// @pre value 必须已标记
     /// @post value 引用的所有对象被添加到 worklist
@@ -2424,7 +2740,7 @@ pub const BytecodeVM = struct {
                     }
                 }
             },
-            
+
             .object_val => |obj| {
                 // 扫描对象属性
                 var iter = obj.properties.iterator();
@@ -2438,7 +2754,7 @@ pub const BytecodeVM = struct {
                     }
                 }
             },
-            
+
             .struct_val => |s| {
                 // 扫描结构体字段
                 for (s.fields) |field_value| {
@@ -2450,7 +2766,7 @@ pub const BytecodeVM = struct {
                     }
                 }
             },
-            
+
             .closure_val => |closure| {
                 // 扫描闭包捕获的变量
                 for (closure.captured) |captured_value| {
@@ -2462,32 +2778,32 @@ pub const BytecodeVM = struct {
                     }
                 }
             },
-            
+
             .string_val, .resource_val => {
                 // 字符串和资源没有引用字段
             },
-            
+
             else => {
                 // 基本类型，无引用
             },
         }
     }
-    
+
     /// 清除阶段：回收未标记的对象
     /// @post 所有未标记对象被释放
     fn sweepPhase(self: *BytecodeVM) void {
         // 清理临时字符串
         clearTempStrings(self);
-        
+
         // 注意：这里的实现依赖于具体的内存管理策略
         // 在实际系统中，应该遍历堆上的所有对象，释放未标记的对象
         // 由于当前使用引用计数，这里主要是重置标记位
-        
+
         // 重置所有对象的标记位（为下次 GC 做准备）
         // 这需要遍历所有已分配的对象
         // 简化实现：假设对象会在下次访问时重置标记
     }
-    
+
     /// 压缩阶段：整理内存碎片
     /// @post 内存碎片率 < 10%
     fn compactPhase(self: *BytecodeVM) !void {
@@ -2497,17 +2813,17 @@ pub const BytecodeVM = struct {
         // 2. 更新所有引用
         // 3. 移动对象到新地址
         // 4. 重建空闲列表
-        
+
         // 注意：完整的压缩实现需要：
         // - 遍历所有存活对象
         // - 计算它们的新地址（紧密排列）
         // - 更新所有指向这些对象的引用
         // - 实际移动对象数据
-        
+
         // 这是一个复杂的操作，需要仔细处理指针更新
         // 简化实现：标记需要压缩，但不实际执行
     }
-    
+
     /// 旧的简化标记方法（保留用于向后兼容）
     fn markValue(self: *BytecodeVM, value: Value) void {
         _ = self;
@@ -2682,6 +2998,132 @@ fn builtinVarDump(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
     return .null_val;
 }
 
+fn builtinVarExport(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .null_val;
+    const return_output = args.len > 1 and args[1].toBool();
+    const exported = valueExport(vm, args[0], 0) catch return BytecodeVM.VMError.OutOfMemory;
+    if (return_output) {
+        const str = vm.createString(exported) catch return BytecodeVM.VMError.OutOfMemory;
+        return .{ .string_val = str };
+    }
+    vm.output_buffer.appendSlice(vm.allocator, exported) catch return BytecodeVM.VMError.OutOfMemory;
+    return .null_val;
+}
+
+fn builtinPrintR(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .null_val;
+    const return_output = args.len > 1 and args[1].toBool();
+    const printed = valuePrintR(vm, args[0], 0) catch return BytecodeVM.VMError.OutOfMemory;
+    if (return_output) {
+        const str = vm.createString(printed) catch return BytecodeVM.VMError.OutOfMemory;
+        return .{ .string_val = str };
+    }
+    vm.output_buffer.appendSlice(vm.allocator, printed) catch return BytecodeVM.VMError.OutOfMemory;
+    return .null_val;
+}
+
+fn valueExport(vm: *BytecodeVM, value: Value, indent: usize) ![]const u8 {
+    const ind: [40]u8 = @splat(' ');
+    return switch (value) {
+        .null_val => try vm.allocator.dupe(u8, "NULL"),
+        .bool_val => |b| try vm.allocator.dupe(u8, if (b) "true" else "false"),
+        .int_val => |i| blk: {
+            var buf: [32]u8 = undefined;
+            const slice = std.fmt.bufPrint(&buf, "{d}", .{i}) catch "0";
+            break :blk try vm.allocator.dupe(u8, slice);
+        },
+        .float_val => |f| blk: {
+            var buf: [64]u8 = undefined;
+            const slice = std.fmt.bufPrint(&buf, "{d}", .{f}) catch "0";
+            break :blk try vm.allocator.dupe(u8, slice);
+        },
+        .string_val => |s| blk: {
+            const result = try std.fmt.allocPrint(vm.allocator, "'{s}'", .{s.data});
+            break :blk result;
+        },
+        .array_val => |arr| blk: {
+            var buf: std.ArrayList(u8) = .empty;
+            defer buf.deinit(vm.allocator);
+            buf.appendSlice(vm.allocator, "array (\n") catch {};
+            for (arr.elements.items, 0..) |elem, idx| {
+                buf.appendSlice(vm.allocator, ind[0..@min((indent + 1) * 2, ind.len)]) catch {};
+                var key_buf: [64]u8 = undefined;
+                var found_str_key = false;
+                var key_iter = arr.keys.iterator();
+                while (key_iter.next()) |entry| {
+                    if (entry.value_ptr.* == idx) {
+                        const skey = std.fmt.bufPrint(&key_buf, "'{s}'", .{entry.key_ptr.*}) catch "''";
+                        buf.appendSlice(vm.allocator, skey) catch {};
+                        found_str_key = true;
+                        break;
+                    }
+                }
+                if (!found_str_key) {
+                    const ikey = std.fmt.bufPrint(&key_buf, "{d}", .{idx}) catch "0";
+                    buf.appendSlice(vm.allocator, ikey) catch {};
+                }
+                buf.appendSlice(vm.allocator, " => ") catch {};
+                const elem_str = try valueExport(vm, elem, indent + 1);
+                defer vm.allocator.free(elem_str);
+                buf.appendSlice(vm.allocator, elem_str) catch {};
+                buf.appendSlice(vm.allocator, ",\n") catch {};
+            }
+            buf.appendSlice(vm.allocator, ind[0..@min(indent * 2, ind.len)]) catch {};
+            buf.appendSlice(vm.allocator, ")") catch {};
+            break :blk buf.toOwnedSlice(vm.allocator) catch "array()";
+        },
+        else => try vm.allocator.dupe(u8, "NULL"),
+    };
+}
+
+fn valuePrintR(vm: *BytecodeVM, value: Value, indent: usize) ![]const u8 {
+    return switch (value) {
+        .null_val => try vm.allocator.dupe(u8, ""),
+        .bool_val => |b| try vm.allocator.dupe(u8, if (b) "1" else ""),
+        .int_val => |i| blk: {
+            var buf: [32]u8 = undefined;
+            const slice = std.fmt.bufPrint(&buf, "{d}", .{i}) catch "0";
+            break :blk try vm.allocator.dupe(u8, slice);
+        },
+        .float_val => |f| blk: {
+            var buf: [64]u8 = undefined;
+            const slice = std.fmt.bufPrint(&buf, "{d}", .{f}) catch "0";
+            break :blk try vm.allocator.dupe(u8, slice);
+        },
+        .string_val => |s| try vm.allocator.dupe(u8, s.data),
+        .array_val => |arr| blk: {
+            var buf: std.ArrayList(u8) = .empty;
+            defer buf.deinit(vm.allocator);
+            buf.appendSlice(vm.allocator, "Array\n") catch {};
+            buf.appendSlice(vm.allocator, "(\n") catch {};
+            for (arr.elements.items, 0..) |elem, idx| {
+                var tmp: [64]u8 = undefined;
+                var found_str_key = false;
+                var key_iter = arr.keys.iterator();
+                while (key_iter.next()) |entry| {
+                    if (entry.value_ptr.* == idx) {
+                        const prefix = std.fmt.bufPrint(&tmp, "    [{s}] => ", .{entry.key_ptr.*}) catch "    [] => ";
+                        buf.appendSlice(vm.allocator, prefix) catch {};
+                        found_str_key = true;
+                        break;
+                    }
+                }
+                if (!found_str_key) {
+                    const prefix = std.fmt.bufPrint(&tmp, "    [{d}] => ", .{idx}) catch "    [0] => ";
+                    buf.appendSlice(vm.allocator, prefix) catch {};
+                }
+                const elem_str = try valuePrintR(vm, elem, indent + 1);
+                defer vm.allocator.free(elem_str);
+                buf.appendSlice(vm.allocator, elem_str) catch {};
+                buf.appendSlice(vm.allocator, "\n") catch {};
+            }
+            buf.appendSlice(vm.allocator, ")\n") catch {};
+            break :blk buf.toOwnedSlice(vm.allocator) catch "Array";
+        },
+        else => try vm.allocator.dupe(u8, ""),
+    };
+}
+
 /// microtime - 返回当前时间（支持 microtime(true) 返回 float）
 fn builtinMicrotime(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
     // microtime(true)
@@ -2795,7 +3237,7 @@ fn builtinGettype(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
         .resource_val => "resource",
         else => "unknown type",
     };
-    
+
     const str = vm.allocator.create(Value.String) catch return BytecodeVM.VMError.OutOfMemory;
     const data = vm.allocator.dupe(u8, type_name) catch return BytecodeVM.VMError.OutOfMemory;
     str.* = .{
@@ -3008,9 +3450,20 @@ fn builtinArrayFilter(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
         else => return .null_val,
     };
     const out = vm.createArray() catch return BytecodeVM.VMError.OutOfMemory;
-    for (arr.elements.items) |v| {
-        if (v.toBool()) {
-            out.elements.append(vm.allocator, v) catch return BytecodeVM.VMError.OutOfMemory;
+    if (args.len >= 2) {
+        const callback = args[1];
+        for (arr.elements.items) |v| {
+            var cb_args: [1]Value = .{v};
+            const result = callCallback(vm, callback, &cb_args) catch continue;
+            if (result.toBool()) {
+                out.elements.append(vm.allocator, v) catch return BytecodeVM.VMError.OutOfMemory;
+            }
+        }
+    } else {
+        for (arr.elements.items) |v| {
+            if (v.toBool()) {
+                out.elements.append(vm.allocator, v) catch return BytecodeVM.VMError.OutOfMemory;
+            }
         }
     }
     return .{ .array_val = out };
@@ -3018,77 +3471,34 @@ fn builtinArrayFilter(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
 
 fn builtinArrayMap(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
     if (args.len < 2) return .null_val;
+    const callback = args[0];
     const arr = switch (args[1]) {
         .array_val => |a| a,
         else => return .null_val,
     };
     const out = vm.createArray() catch return BytecodeVM.VMError.OutOfMemory;
     for (arr.elements.items) |v| {
-        out.elements.append(vm.allocator, v) catch return BytecodeVM.VMError.OutOfMemory;
+        var cb_args: [1]Value = .{v};
+        const result = callCallback(vm, callback, &cb_args) catch v;
+        out.elements.append(vm.allocator, result) catch return BytecodeVM.VMError.OutOfMemory;
     }
     return .{ .array_val = out };
 }
 
-fn builtinArrayReduce(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+fn builtinArrayReduce(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
     if (args.len < 2) return .null_val;
     const arr = switch (args[0]) {
         .array_val => |a| a,
         else => return .null_val,
     };
+    const callback = args[1];
     var acc: Value = if (args.len >= 3) args[2] else .{ .int_val = 0 };
 
-    const items = arr.elements.items;
-    if (items.len == 0) return acc;
-
-    var has_float = (acc == .float_val);
-    if (!has_float) {
-        for (items) |v| {
-            if (v == .float_val) {
-                has_float = true;
-                break;
-            }
-        }
+    for (arr.elements.items) |v| {
+        var cb_args: [2]Value = .{ acc, v };
+        acc = callCallback(vm, callback, &cb_args) catch acc;
     }
-
-    if (has_float) {
-        const VecLen = 4;
-        const Vec = @Vector(VecLen, f64);
-        var vec_sum: Vec = @splat(0.0);
-        var i: usize = 0;
-        while (i + VecLen <= items.len) : (i += VecLen) {
-            const v: Vec = .{
-                items[i].toFloat(),
-                items[i + 1].toFloat(),
-                items[i + 2].toFloat(),
-                items[i + 3].toFloat(),
-            };
-            vec_sum += v;
-        }
-        var sum: f64 = acc.toFloat() + @reduce(.Add, vec_sum);
-        while (i < items.len) : (i += 1) {
-            sum += items[i].toFloat();
-        }
-        return .{ .float_val = sum };
-    }
-
-    const VecLen = 4;
-    const Vec = @Vector(VecLen, i64);
-    var vec_sum: Vec = @splat(@as(i64, 0));
-    var i: usize = 0;
-    while (i + VecLen <= items.len) : (i += VecLen) {
-        const v: Vec = .{
-            items[i].toInt(),
-            items[i + 1].toInt(),
-            items[i + 2].toInt(),
-            items[i + 3].toInt(),
-        };
-        vec_sum += v;
-    }
-    var sum_i: i64 = acc.toInt() + @reduce(.Add, vec_sum);
-    while (i < items.len) : (i += 1) {
-        sum_i += items[i].toInt();
-    }
-    return .{ .int_val = sum_i };
+    return acc;
 }
 
 /// OPT-007: SIMD优化的数组求和 - 利用向量指令加速批量数学运算
@@ -3317,24 +3727,22 @@ fn builtinPregMatch(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
 
     const rc = pcre2_match_8(re, subject.ptr, subject.len, 0, 0, match_data, null);
     if (rc == PCRE2_ERROR_NOMATCH) {
-        // 如果有matches参数，设置为空数组
-        if (args.len >= 3) {
+        if (args.len >= 3 and args[2] == .array_val) {
             args[2].array_val.elements.clearRetainingCapacity();
         }
         return .{ .int_val = 0 };
     }
     if (rc < 0) {
-        if (args.len >= 3) {
+        if (args.len >= 3 and args[2] == .array_val) {
             args[2].array_val.elements.clearRetainingCapacity();
         }
         return .{ .int_val = 0 };
     }
-    
-    // 填充matches数组
-    if (args.len >= 3) {
+
+    if (args.len >= 3 and args[2] == .array_val) {
         args[2].array_val.elements.clearRetainingCapacity();
         const ovec = pcre2_get_ovector_pointer_8(match_data);
-        
+
         var i: usize = 0;
         while (i < @as(usize, @intCast(rc))) : (i += 1) {
             const start = ovec[i * 2];
@@ -3346,7 +3754,7 @@ fn builtinPregMatch(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
             }
         }
     }
-    
+
     return .{ .int_val = 1 };
 }
 
@@ -3480,14 +3888,14 @@ fn builtinPregMatchAll(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value 
 
 fn builtinPregGrep(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
     if (args.len < 2) return .{ .array_val = vm.createArray() catch return BytecodeVM.VMError.OutOfMemory };
-    
+
     const pattern = valueToString(vm, args[0]) catch return BytecodeVM.VMError.OutOfMemory;
     if (args[1] != .array_val) return .{ .array_val = vm.createArray() catch return BytecodeVM.VMError.OutOfMemory };
-    
+
     const input_arr = args[1].array_val;
     const flags: i64 = if (args.len >= 3 and args[2] == .int_val) args[2].int_val else 0;
     const invert = (flags & 1) != 0;
-    
+
     const parsed = parsePHPRegexPattern(pattern);
     var errcode: c_int = 0;
     var erroffset: usize = 0;
@@ -3564,9 +3972,39 @@ fn builtinRound(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
     return .{ .float_val = @round(val / scale) * scale };
 }
 
+/// 比较字节码 VM 的两个值，返回 -1/0/1
+fn compareBytecodeValues(a: Value, b: Value) i32 {
+    const a_f: f64 = switch (a) {
+        .int_val => |v| @as(f64, @floatFromInt(v)),
+        .float_val => |v| v,
+        .bool_val => |v| if (v) @as(f64, 1.0) else @as(f64, 0.0),
+        else => @as(f64, 0.0),
+    };
+    const b_f: f64 = switch (b) {
+        .int_val => |v| @as(f64, @floatFromInt(v)),
+        .float_val => |v| v,
+        .bool_val => |v| if (v) @as(f64, 1.0) else @as(f64, 0.0),
+        else => @as(f64, 0.0),
+    };
+    if (a_f < b_f) return -1;
+    if (a_f > b_f) return 1;
+    return 0;
+}
+
 fn builtinMax(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
     if (args.len == 0) return .null_val;
-    if (args.len == 1) return args[0];
+    // PHP 语义：如果只有一个参数且是数组，在数组元素中找最大值
+    if (args.len == 1 and args[0] == .array_val) {
+        const arr = args[0].array_val;
+        if (arr.elements.items.len == 0) return .null_val;
+        var best = arr.elements.items[0];
+        for (arr.elements.items[1..]) |elem| {
+            if (compareBytecodeValues(elem, best) > 0) {
+                best = elem;
+            }
+        }
+        return best;
+    }
 
     var has_float = false;
     for (args) |a| {
@@ -3624,7 +4062,18 @@ fn builtinMax(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
 
 fn builtinMin(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
     if (args.len == 0) return .null_val;
-    if (args.len == 1) return args[0];
+    // PHP 语义：如果只有一个参数且是数组，在数组元素中找最小值
+    if (args.len == 1 and args[0] == .array_val) {
+        const arr = args[0].array_val;
+        if (arr.elements.items.len == 0) return .null_val;
+        var best = arr.elements.items[0];
+        for (arr.elements.items[1..]) |elem| {
+            if (compareBytecodeValues(elem, best) < 0) {
+                best = elem;
+            }
+        }
+        return best;
+    }
 
     var has_float = false;
     for (args) |a| {
@@ -3702,6 +4151,1259 @@ fn builtinSin(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
 fn builtinCos(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
     if (args.len == 0) return .{ .float_val = 0.0 };
     return .{ .float_val = std.math.cos(args[0].toFloat()) };
+}
+
+fn builtinTan(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .float_val = 0.0 };
+    return .{ .float_val = @tan(args[0].toFloat()) };
+}
+
+fn builtinExp(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .float_val = 0.0 };
+    return .{ .float_val = @exp(args[0].toFloat()) };
+}
+
+fn builtinLog(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .float_val = 0.0 };
+    if (args.len > 1) {
+        const base = args[1].toFloat();
+        if (base > 0.0 and base != 1.0) {
+            return .{ .float_val = @log(args[0].toFloat()) / @log(base) };
+        }
+    }
+    return .{ .float_val = @log(args[0].toFloat()) };
+}
+
+fn builtinLog10(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .float_val = 0.0 };
+    return .{ .float_val = @log10(args[0].toFloat()) };
+}
+
+fn builtinAsin(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .float_val = 0.0 };
+    return .{ .float_val = std.math.asin(args[0].toFloat()) };
+}
+
+fn builtinAcos(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .float_val = 0.0 };
+    return .{ .float_val = std.math.acos(args[0].toFloat()) };
+}
+
+fn builtinAtan(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .float_val = 0.0 };
+    return .{ .float_val = std.math.atan(args[0].toFloat()) };
+}
+
+fn builtinSinh(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .float_val = 0.0 };
+    return .{ .float_val = std.math.sinh(args[0].toFloat()) };
+}
+
+fn builtinCosh(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .float_val = 0.0 };
+    return .{ .float_val = std.math.cosh(args[0].toFloat()) };
+}
+
+fn builtinTanh(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .float_val = 0.0 };
+    return .{ .float_val = std.math.tanh(args[0].toFloat()) };
+}
+
+fn builtinDeg2rad(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .float_val = 0.0 };
+    return .{ .float_val = args[0].toFloat() * std.math.pi / 180.0 };
+}
+
+fn builtinRad2deg(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .float_val = 0.0 };
+    return .{ .float_val = args[0].toFloat() * 180.0 / std.math.pi };
+}
+
+fn builtinFmod(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .{ .float_val = 0.0 };
+    const x = args[0].toFloat();
+    const y = args[1].toFloat();
+    if (y == 0.0) return .{ .float_val = std.math.nan(f64) };
+    return .{ .float_val = @mod(x, y) };
+}
+
+fn builtinIntdiv(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .{ .int_val = 0 };
+    const a = args[0].toInt();
+    const b = args[1].toInt();
+    if (b == 0) return .{ .int_val = 0 };
+    return .{ .int_val = @divTrunc(a, b) };
+}
+
+fn builtinIsNan(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .bool_val = false };
+    return .{ .bool_val = std.math.isNan(args[0].toFloat()) };
+}
+
+fn builtinIsFinite(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .bool_val = true };
+    return .{ .bool_val = std.math.isFinite(args[0].toFloat()) };
+}
+
+fn builtinIsInfinite(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .bool_val = false };
+    return .{ .bool_val = std.math.isInf(args[0].toFloat()) };
+}
+
+fn builtinDecbin(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .null_val;
+    const n = args[0].toInt();
+    if (n < 0) return .null_val;
+    var buf: [64]u8 = undefined;
+    const digits = std.fmt.bufPrint(&buf, "{b}", .{@as(u64, @intCast(n))}) catch "0";
+    const str = vm.createString(digits) catch return BytecodeVM.VMError.OutOfMemory;
+    return .{ .string_val = str };
+}
+
+fn builtinDechex(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .null_val;
+    const n = args[0].toInt();
+    if (n < 0) return .null_val;
+    var buf: [64]u8 = undefined;
+    const digits = std.fmt.bufPrint(&buf, "{x}", .{@as(u64, @intCast(n))}) catch "0";
+    const str = vm.createString(digits) catch return BytecodeVM.VMError.OutOfMemory;
+    return .{ .string_val = str };
+}
+
+fn builtinDecoct(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .null_val;
+    const n = args[0].toInt();
+    if (n < 0) return .null_val;
+    var buf: [64]u8 = undefined;
+    const digits = std.fmt.bufPrint(&buf, "{o}", .{@as(u64, @intCast(n))}) catch "0";
+    const str = vm.createString(digits) catch return BytecodeVM.VMError.OutOfMemory;
+    return .{ .string_val = str };
+}
+
+fn builtinBindec(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .int_val = 0 };
+    const s = switch (args[0]) {
+        .string_val => |sv| sv.data,
+        else => valueToString(vm, args[0]) catch "0",
+    };
+    var result: i64 = 0;
+    for (s) |c| {
+        if (c == '0' or c == '1') {
+            result = result * 2 + (c - '0');
+        }
+    }
+    return .{ .int_val = result };
+}
+
+fn builtinHexdec(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .int_val = 0 };
+    const s = switch (args[0]) {
+        .string_val => |sv| sv.data,
+        else => valueToString(vm, args[0]) catch "0",
+    };
+    var result: i64 = 0;
+    for (s) |c| {
+        const digit: i64 = switch (c) {
+            '0'...'9' => c - '0',
+            'a'...'f' => c - 'a' + 10,
+            'A'...'F' => c - 'A' + 10,
+            else => continue,
+        };
+        result = result * 16 + digit;
+    }
+    return .{ .int_val = result };
+}
+
+fn builtinOctdec(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .int_val = 0 };
+    const s = switch (args[0]) {
+        .string_val => |sv| sv.data,
+        else => valueToString(vm, args[0]) catch "0",
+    };
+    var result: i64 = 0;
+    for (s) |c| {
+        if (c >= '0' and c <= '7') {
+            result = result * 8 + (c - '0');
+        }
+    }
+    return .{ .int_val = result };
+}
+
+fn formatIntBase(buf: []u8, value: u64, base: u8) []const u8 {
+    if (value == 0) {
+        buf[0] = '0';
+        return buf[0..1];
+    }
+    const digits_str = "0123456789abcdefghijklmnopqrstuvwxyz";
+    var i: usize = buf.len;
+    var v = value;
+    while (v > 0) {
+        i -= 1;
+        buf[i] = digits_str[v % @as(u64, base)];
+        v /= @as(u64, base);
+    }
+    return buf[i..];
+}
+
+fn builtinBaseConvert(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 3) return .null_val;
+    const s = switch (args[0]) {
+        .string_val => |sv| sv.data,
+        else => valueToString(vm, args[0]) catch "0",
+    };
+    const from_base = args[1].toInt();
+    const to_base = args[2].toInt();
+    if (from_base < 2 or from_base > 36 or to_base < 2 or to_base > 36) return .null_val;
+    var value: u64 = 0;
+    for (s) |c| {
+        const digit: u64 = switch (c) {
+            '0'...'9' => c - '0',
+            'a'...'z' => c - 'a' + 10,
+            'A'...'Z' => c - 'A' + 10,
+            else => continue,
+        };
+        if (digit >= @as(u64, @intCast(from_base))) continue;
+        value = value * @as(u64, @intCast(from_base)) + digit;
+    }
+    var buf: [64]u8 = undefined;
+    const digits = formatIntBase(&buf, value, @as(u8, @intCast(to_base)));
+    const str = vm.createString(digits) catch return BytecodeVM.VMError.OutOfMemory;
+    return .{ .string_val = str };
+}
+
+fn builtinNumberFormat(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .null_val;
+    const num = args[0].toFloat();
+    const decimals: usize = if (args.len > 1) @intCast(@max(args[1].toInt(), 0)) else 0;
+    _ = if (args.len > 2) switch (args[2]) {
+        .string_val => |s| s.data,
+        else => ".",
+    } else ".";
+    _ = if (args.len > 3) switch (args[3]) {
+        .string_val => |s| s.data,
+        else => "",
+    } else "";
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(vm.allocator);
+    if (decimals == 0) {
+        var int_buf: [64]u8 = undefined;
+        const int_str = std.fmt.bufPrint(&int_buf, "{d:.0}", .{num}) catch "0";
+        out.appendSlice(vm.allocator, int_str) catch {};
+    } else {
+        var int_buf: [64]u8 = undefined;
+        const int_str = std.fmt.bufPrint(&int_buf, "{d}", .{@floor(@abs(num))}) catch "0";
+        if (num < 0) out.append(vm.allocator, '-') catch {};
+        out.appendSlice(vm.allocator, int_str) catch {};
+        out.append(vm.allocator, '.') catch {};
+        var frac: f64 = @abs(num) - @floor(@abs(num));
+        var i: usize = 0;
+        while (i < decimals) : (i += 1) {
+            frac *= 10.0;
+            const digit: u8 = @intFromFloat(frac);
+            out.append(vm.allocator, '0' + digit) catch {};
+            frac -= @floor(frac);
+        }
+    }
+    const result = out.toOwnedSlice(vm.allocator) catch return BytecodeVM.VMError.OutOfMemory;
+    const str = vm.createString(result) catch return BytecodeVM.VMError.OutOfMemory;
+    return .{ .string_val = str };
+}
+
+fn builtinPrintf(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .int_val = 0 };
+    const result = builtinSprintf(vm, args);
+    const formatted = result catch return .{ .int_val = 0 };
+    const output = switch (formatted) {
+        .string_val => |s| s.data,
+        else => "",
+    };
+    vm.output_buffer.appendSlice(vm.allocator, output) catch return BytecodeVM.VMError.OutOfMemory;
+    return .{ .int_val = @intCast(output.len) };
+}
+
+fn builtinSubstrReplace(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 3) return .null_val;
+    const str = switch (args[0]) {
+        .string_val => |s| s.data,
+        else => "",
+    };
+    const replacement = switch (args[1]) {
+        .string_val => |s| s.data,
+        else => "",
+    };
+    const offset = args[2].toInt();
+    const len = if (args.len > 3) args[3].toInt() else @as(i64, @intCast(str.len));
+    var start: usize = if (offset >= 0) @intCast(offset) else if (@as(i64, @intCast(str.len)) + offset >= 0) @intCast(@as(i64, @intCast(str.len)) + offset) else 0;
+    if (start > str.len) start = str.len;
+    var end: usize = start + @as(usize, @intCast(@max(len, 0)));
+    if (end > str.len) end = str.len;
+    var buf: std.ArrayList(u8) = .empty;
+    buf.appendSlice(vm.allocator, str[0..start]) catch {};
+    buf.appendSlice(vm.allocator, replacement) catch {};
+    buf.appendSlice(vm.allocator, str[end..]) catch {};
+    const result = buf.toOwnedSlice(vm.allocator) catch return BytecodeVM.VMError.OutOfMemory;
+    const str_val = vm.createString(result) catch return BytecodeVM.VMError.OutOfMemory;
+    return .{ .string_val = str_val };
+}
+
+fn builtinStrstr(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .{ .bool_val = false };
+    const hay = switch (args[0]) {
+        .string_val => |s| s.data,
+        else => "",
+    };
+    const needle = switch (args[1]) {
+        .string_val => |s| s.data,
+        else => "",
+    };
+    if (std.mem.indexOf(u8, hay, needle)) |idx| {
+        const result = vm.createString(hay[idx..]) catch return BytecodeVM.VMError.OutOfMemory;
+        return .{ .string_val = result };
+    }
+    return .{ .bool_val = false };
+}
+
+fn builtinStrrchr(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .{ .bool_val = false };
+    const hay = switch (args[0]) {
+        .string_val => |s| s.data,
+        else => "",
+    };
+    const needle = switch (args[1]) {
+        .string_val => |s| s.data,
+        else => "",
+    };
+    const ch = if (needle.len > 0) needle[0] else return .{ .bool_val = false };
+    if (std.mem.lastIndexOfScalar(u8, hay, ch)) |idx| {
+        const result = vm.createString(hay[idx..]) catch return BytecodeVM.VMError.OutOfMemory;
+        return .{ .string_val = result };
+    }
+    return .{ .bool_val = false };
+}
+
+fn builtinSubstrCount(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .{ .int_val = 0 };
+    const hay = switch (args[0]) {
+        .string_val => |s| s.data,
+        else => "",
+    };
+    const needle = switch (args[1]) {
+        .string_val => |s| s.data,
+        else => "",
+    };
+    if (needle.len == 0) return .{ .int_val = 0 };
+    var count: i64 = 0;
+    var start: usize = 0;
+    while (std.mem.indexOfPos(u8, hay, start, needle)) |idx| {
+        count += 1;
+        start = idx + needle.len;
+    }
+    return .{ .int_val = count };
+}
+
+fn builtinStrPad(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return args[0];
+    const input = switch (args[0]) {
+        .string_val => |s| s.data,
+        else => valueToString(vm, args[0]) catch "",
+    };
+    const pad_len = @as(usize, @intCast(@max(args[1].toInt(), 0)));
+    const pad_str = if (args.len > 2) switch (args[2]) {
+        .string_val => |s| s.data,
+        else => " ",
+    } else " ";
+    const pad_type = if (args.len > 3) args[3].toInt() else 1;
+    if (input.len >= pad_len) {
+        const result = vm.createString(input) catch return BytecodeVM.VMError.OutOfMemory;
+        return .{ .string_val = result };
+    }
+    var buf: std.ArrayList(u8) = .empty;
+    const diff = pad_len - input.len;
+    if (pad_type == 1) {
+        buf.appendSlice(vm.allocator, input) catch {};
+        var i: usize = 0;
+        while (i < diff) : (i += 1) buf.append(vm.allocator, pad_str[i % pad_str.len]) catch {};
+    } else if (pad_type == 0) {
+        var i: usize = 0;
+        while (i < diff) : (i += 1) buf.append(vm.allocator, pad_str[i % pad_str.len]) catch {};
+        buf.appendSlice(vm.allocator, input) catch {};
+    } else {
+        const left = diff / 2;
+        const right = diff - left;
+        var i: usize = 0;
+        while (i < left) : (i += 1) buf.append(vm.allocator, pad_str[i % pad_str.len]) catch {};
+        buf.appendSlice(vm.allocator, input) catch {};
+        i = 0;
+        while (i < right) : (i += 1) buf.append(vm.allocator, pad_str[i % pad_str.len]) catch {};
+    }
+    const result = buf.toOwnedSlice(vm.allocator) catch return BytecodeVM.VMError.OutOfMemory;
+    const str_val = vm.createString(result) catch return BytecodeVM.VMError.OutOfMemory;
+    return .{ .string_val = str_val };
+}
+
+fn builtinStrRepeat(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .null_val;
+    const input = switch (args[0]) {
+        .string_val => |s| s.data,
+        else => "",
+    };
+    const times = @as(usize, @intCast(@max(args[1].toInt(), 0)));
+    var buf: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < times) : (i += 1) buf.appendSlice(vm.allocator, input) catch {};
+    const result = buf.toOwnedSlice(vm.allocator) catch return BytecodeVM.VMError.OutOfMemory;
+    const str_val = vm.createString(result) catch return BytecodeVM.VMError.OutOfMemory;
+    return .{ .string_val = str_val };
+}
+
+fn builtinStrrev(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .null_val;
+    const input = switch (args[0]) {
+        .string_val => |s| s.data,
+        else => "",
+    };
+    var buf: std.ArrayList(u8) = .empty;
+    var i: usize = input.len;
+    while (i > 0) {
+        i -= 1;
+        buf.append(vm.allocator, input[i]) catch {};
+    }
+    const result = buf.toOwnedSlice(vm.allocator) catch return BytecodeVM.VMError.OutOfMemory;
+    const str_val = vm.createString(result) catch return BytecodeVM.VMError.OutOfMemory;
+    return .{ .string_val = str_val };
+}
+
+fn builtinStrShuffle(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .null_val;
+    const input = switch (args[0]) {
+        .string_val => |s| s.data,
+        else => "",
+    };
+    var buf: std.ArrayList(u8) = .empty;
+    buf.appendSlice(vm.allocator, input) catch {};
+    var prng = std.Random.DefaultPrng.init(@intCast(time_compat.nanoTimestamp()));
+    const random = prng.random();
+    var i: usize = buf.items.len;
+    while (i > 1) {
+        i -= 1;
+        const j = random.uintLessThan(usize, i + 1);
+        const tmp = buf.items[i];
+        buf.items[i] = buf.items[j];
+        buf.items[j] = tmp;
+    }
+    const result = buf.toOwnedSlice(vm.allocator) catch return BytecodeVM.VMError.OutOfMemory;
+    const str_val = vm.createString(result) catch return BytecodeVM.VMError.OutOfMemory;
+    return .{ .string_val = str_val };
+}
+
+fn builtinStrSplit(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 1) return .null_val;
+    const input = switch (args[0]) {
+        .string_val => |s| s.data,
+        else => "",
+    };
+    const chunk_size = if (args.len > 1) @as(usize, @intCast(@max(args[1].toInt(), 1))) else 1;
+    const arr = vm.createArray() catch return BytecodeVM.VMError.OutOfMemory;
+    var i: usize = 0;
+    while (i < input.len) {
+        const end = @min(i + chunk_size, input.len);
+        const chunk = vm.createString(input[i..end]) catch return BytecodeVM.VMError.OutOfMemory;
+        arr.elements.append(vm.allocator, .{ .string_val = chunk }) catch return BytecodeVM.VMError.OutOfMemory;
+        i = end;
+    }
+    return .{ .array_val = arr };
+}
+
+fn builtinChunkSplit(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .null_val;
+    const input = switch (args[0]) {
+        .string_val => |s| s.data,
+        else => "",
+    };
+    const chunklen = if (args.len > 1) @as(usize, @intCast(@max(args[1].toInt(), 1))) else 76;
+    const end_str = if (args.len > 2) switch (args[2]) {
+        .string_val => |s| s.data,
+        else => "\r\n",
+    } else "\r\n";
+    var buf: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < input.len) {
+        const end = @min(i + chunklen, input.len);
+        buf.appendSlice(vm.allocator, input[i..end]) catch {};
+        buf.appendSlice(vm.allocator, end_str) catch {};
+        i = end;
+    }
+    const result = buf.toOwnedSlice(vm.allocator) catch return BytecodeVM.VMError.OutOfMemory;
+    const str_val = vm.createString(result) catch return BytecodeVM.VMError.OutOfMemory;
+    return .{ .string_val = str_val };
+}
+
+fn builtinStrcmp(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .{ .int_val = 0 };
+    const a = switch (args[0]) {
+        .string_val => |s| s.data,
+        else => "",
+    };
+    const b = switch (args[1]) {
+        .string_val => |s| s.data,
+        else => "",
+    };
+    return .{ .int_val = @intCast(switch (std.mem.order(u8, a, b)) {
+        .lt => @as(i64, -1),
+        .eq => @as(i64, 0),
+        .gt => @as(i64, 1),
+    }) };
+}
+
+fn builtinStrcasecmp(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .{ .int_val = 0 };
+    const a = switch (args[0]) {
+        .string_val => |s| s.data,
+        else => "",
+    };
+    const b = switch (args[1]) {
+        .string_val => |s| s.data,
+        else => "",
+    };
+    var i: usize = 0;
+    while (i < a.len and i < b.len) {
+        const ca = std.ascii.toLower(a[i]);
+        const cb = std.ascii.toLower(b[i]);
+        if (ca != cb) return .{ .int_val = if (ca < cb) @as(i64, -1) else @as(i64, 1) };
+        i += 1;
+    }
+    if (a.len < b.len) return .{ .int_val = -1 };
+    if (a.len > b.len) return .{ .int_val = 1 };
+    return .{ .int_val = 0 };
+}
+
+fn builtinStrnatcmp(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .{ .int_val = 0 };
+    const a = switch (args[0]) {
+        .string_val => |s| s.data,
+        else => "",
+    };
+    const b = switch (args[1]) {
+        .string_val => |s| s.data,
+        else => "",
+    };
+    return .{ .int_val = @intCast(switch (std.mem.order(u8, a, b)) {
+        .lt => @as(i64, -1),
+        .eq => @as(i64, 0),
+        .gt => @as(i64, 1),
+    }) };
+}
+
+fn builtinStrWordCount(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .int_val = 0 };
+    const input = switch (args[0]) {
+        .string_val => |s| s.data,
+        else => "",
+    };
+    var count: i64 = 0;
+    var in_word = false;
+    for (input) |c| {
+        if (std.ascii.isWhitespace(c)) {
+            in_word = false;
+        } else if (!in_word) {
+            count += 1;
+            in_word = true;
+        }
+    }
+    return .{ .int_val = count };
+}
+
+fn builtinLcfirst(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .null_val;
+    const input = switch (args[0]) {
+        .string_val => |s| s.data,
+        else => "",
+    };
+    if (input.len == 0) return args[0];
+    var buf: std.ArrayList(u8) = .empty;
+    buf.append(vm.allocator, std.ascii.toLower(input[0])) catch {};
+    if (input.len > 1) buf.appendSlice(vm.allocator, input[1..]) catch {};
+    const result = buf.toOwnedSlice(vm.allocator) catch return BytecodeVM.VMError.OutOfMemory;
+    const str_val = vm.createString(result) catch return BytecodeVM.VMError.OutOfMemory;
+    return .{ .string_val = str_val };
+}
+
+fn builtinArrayKeyExists(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .{ .bool_val = false };
+    const key = switch (args[0]) {
+        .string_val => |s| s.data,
+        .int_val => blk: {
+            var buf: [20]u8 = undefined;
+            break :blk std.fmt.bufPrint(&buf, "{d}", .{args[0].int_val}) catch "";
+        },
+        else => "",
+    };
+    return switch (args[1]) {
+        .array_val => |arr| .{ .bool_val = arr.keys.contains(key) },
+        else => .{ .bool_val = false },
+    };
+}
+
+fn builtinArrayFill(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 3) return .null_val;
+    const start_idx = args[0].toInt();
+    const num = @as(usize, @intCast(@max(args[1].toInt(), 0)));
+    const val = args[2];
+    const arr = vm.createArray() catch return BytecodeVM.VMError.OutOfMemory;
+    var i: usize = 0;
+    while (i < num) : (i += 1) {
+        arr.elements.append(vm.allocator, val) catch return BytecodeVM.VMError.OutOfMemory;
+        var key_buf: [20]u8 = undefined;
+        const key = std.fmt.bufPrint(&key_buf, "{d}", .{start_idx + @as(i64, @intCast(i))}) catch "";
+        arr.keys.put(vm.allocator, key, i) catch {};
+    }
+    return .{ .array_val = arr };
+}
+
+fn builtinArrayFlip(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .null_val;
+    return switch (args[0]) {
+        .array_val => |arr| blk: {
+            const result = vm.createArray() catch return BytecodeVM.VMError.OutOfMemory;
+            for (arr.elements.items, 0..) |elem, idx| {
+                const key = switch (elem) {
+                    .string_val => |s| s.data,
+                    .int_val => blk2: {
+                        var buf: [20]u8 = undefined;
+                        break :blk2 std.fmt.bufPrint(&buf, "{d}", .{elem.int_val}) catch "";
+                    },
+                    else => continue,
+                };
+                result.keys.put(vm.allocator, key, idx) catch {};
+                result.elements.append(vm.allocator, elem) catch return BytecodeVM.VMError.OutOfMemory;
+            }
+            break :blk .{ .array_val = result };
+        },
+        else => .null_val,
+    };
+}
+
+fn builtinArrayReverse(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .null_val;
+    return switch (args[0]) {
+        .array_val => |arr| blk: {
+            const result = vm.createArray() catch return BytecodeVM.VMError.OutOfMemory;
+            var i: usize = arr.elements.items.len;
+            while (i > 0) {
+                i -= 1;
+                result.elements.append(vm.allocator, arr.elements.items[i]) catch return BytecodeVM.VMError.OutOfMemory;
+            }
+            break :blk .{ .array_val = result };
+        },
+        else => .null_val,
+    };
+}
+
+fn builtinArrayUnique(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .null_val;
+    return switch (args[0]) {
+        .array_val => |arr| blk: {
+            const result = vm.createArray() catch return BytecodeVM.VMError.OutOfMemory;
+            var seen = std.StringHashMapUnmanaged(void){};
+            for (arr.elements.items) |elem| {
+                const key = switch (elem) {
+                    .string_val => |s| s.data,
+                    .int_val => blk2: {
+                        var buf: [20]u8 = undefined;
+                        break :blk2 std.fmt.bufPrint(&buf, "{d}", .{elem.int_val}) catch "";
+                    },
+                    else => continue,
+                };
+                if (seen.contains(key)) continue;
+                seen.put(vm.allocator, key, {}) catch {};
+                result.elements.append(vm.allocator, elem) catch return BytecodeVM.VMError.OutOfMemory;
+            }
+            seen.deinit(vm.allocator);
+            break :blk .{ .array_val = result };
+        },
+        else => .null_val,
+    };
+}
+
+fn builtinArrayRand(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .null_val;
+    return switch (args[0]) {
+        .array_val => |arr| blk: {
+            if (arr.elements.items.len == 0) break :blk .null_val;
+            var prng = std.Random.DefaultPrng.init(@intCast(time_compat.nanoTimestamp()));
+            const idx = prng.random().uintLessThan(usize, arr.elements.items.len);
+            break :blk .{ .int_val = @intCast(idx) };
+        },
+        else => .null_val,
+    };
+}
+
+fn builtinArrayCombine(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .null_val;
+    return switch (args[0]) {
+        .array_val => |keys_arr| switch (args[1]) {
+            .array_val => |vals_arr| blk: {
+                if (keys_arr.elements.items.len != vals_arr.elements.items.len) break :blk .{ .bool_val = false };
+                const result = vm.createArray() catch return BytecodeVM.VMError.OutOfMemory;
+                for (keys_arr.elements.items, 0..) |key_elem, idx| {
+                    const key = switch (key_elem) {
+                        .string_val => |s| s.data,
+                        .int_val => blk2: {
+                            var buf: [20]u8 = undefined;
+                            break :blk2 std.fmt.bufPrint(&buf, "{d}", .{key_elem.int_val}) catch "";
+                        },
+                        else => continue,
+                    };
+                    result.keys.put(vm.allocator, key, idx) catch {};
+                    result.elements.append(vm.allocator, vals_arr.elements.items[idx]) catch return BytecodeVM.VMError.OutOfMemory;
+                }
+                break :blk .{ .array_val = result };
+            },
+            else => .null_val,
+        },
+        else => .null_val,
+    };
+}
+
+fn builtinArrayWalk(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .null_val;
+    const arr = switch (args[0]) {
+        .array_val => |a| a,
+        else => return .{ .bool_val = false },
+    };
+    const callback = args[1];
+    const elem_count = arr.elements.items.len;
+    for (0..elem_count) |idx| {
+        var cuf_args: [5]Value = undefined;
+        cuf_args[0] = callback;
+        cuf_args[1] = arr.elements.items[idx];
+        cuf_args[2] = .{ .int_val = @intCast(idx) };
+        const cuf_len: usize = if (args.len >= 3) 4 else 3;
+        if (args.len >= 3) cuf_args[3] = args[2];
+        _ = builtinCallUserFunc(vm, cuf_args[0..cuf_len]) catch continue;
+    }
+    return .{ .bool_val = true };
+}
+
+fn builtinArrayWalkRecursive(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .null_val;
+    const arr = switch (args[0]) {
+        .array_val => |a| a,
+        else => return .{ .bool_val = false },
+    };
+    const callback = args[1];
+    for (arr.elements.items, 0..) |*elem, idx| {
+        if (elem.* == .array_val) {
+            var sub_args: [2]Value = .{ elem.*, callback };
+            _ = builtinArrayWalkRecursive(vm, sub_args[0..2]) catch {};
+        }
+        var call_args: [3]Value = .{ elem.*, .{ .int_val = @intCast(idx) }, args[0] };
+        const call_args_slice = call_args[0..if (args.len >= 3) 3 else 2];
+        const result = callCallback(vm, callback, call_args_slice) catch continue;
+        elem.* = result;
+    }
+    return .{ .bool_val = true };
+}
+
+fn callCallback(vm: *BytecodeVM, callback: Value, call_args: []Value) BytecodeVM.VMError!Value {
+    switch (callback) {
+        .string_val => |s| {
+            if (vm.builtins.get(s.data)) |builtin_fn| {
+                return builtin_fn(vm, call_args) catch .null_val;
+            }
+            if (vm.functions.get(s.data)) |func| {
+                return executeFunctionWithArgs(vm, func, call_args);
+            }
+            if (std.mem.indexOfScalar(u8, s.data, ':')) |colon_pos| {
+                if (colon_pos + 2 < s.data.len and s.data[colon_pos + 1] == ':') {
+                    const class_name = s.data[0..colon_pos];
+                    const method_name = s.data[colon_pos + 2 ..];
+                    return callStaticMethod(vm, class_name, method_name, call_args);
+                }
+            }
+            return .null_val;
+        },
+        .closure_val => |cl| {
+            return executeFunctionWithArgs(vm, cl.function, call_args);
+        },
+        .object_val => |obj| {
+            var class_iter = vm.classes.valueIterator();
+            while (class_iter.next()) |cls_ptr| {
+                const cls = cls_ptr.*;
+                if (cls.class_id == obj.class_id) {
+                    if (cls.instance_methods.get("__invoke")) |method| {
+                        var all_args: [17]Value = undefined;
+                        const total_args = @min(call_args.len, 16);
+                        for (0..total_args) |i| all_args[i] = call_args[i];
+                        return executeFunctionWithArgs(vm, method, all_args[0..total_args]);
+                    }
+                    break;
+                }
+            }
+            return .null_val;
+        },
+        .array_val => |arr| {
+            if (arr.elements.items.len >= 2) {
+                const class_val = arr.elements.items[0];
+                const method_val = arr.elements.items[1];
+                const method_name = switch (method_val) {
+                    .string_val => |s| s.data,
+                    else => return .null_val,
+                };
+                switch (class_val) {
+                    .string_val => |s| {
+                        return callStaticMethod(vm, s.data, method_name, call_args);
+                    },
+                    .object_val => |obj| {
+                        return callInstanceMethod(vm, obj, method_name, call_args);
+                    },
+                    else => return .null_val,
+                }
+            }
+            return .null_val;
+        },
+        else => return .null_val,
+    }
+}
+
+fn utf8CharCount(data: []const u8) usize {
+    var count: usize = 0;
+    for (data) |byte| {
+        if ((byte & 0xC0) != 0x80) count += 1;
+    }
+    return count;
+}
+
+fn utf8CharToBytePos(data: []const u8, char_pos: usize) usize {
+    var chars: usize = 0;
+    for (data, 0..) |byte, byte_idx| {
+        if ((byte & 0xC0) != 0x80) {
+            if (chars == char_pos) return byte_idx;
+            chars += 1;
+        }
+    }
+    return data.len;
+}
+
+fn builtinMbStrlen(_: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .int_val = 0 };
+    const data = switch (args[0]) {
+        .string_val => |s| s.data,
+        else => return .{ .int_val = 0 },
+    };
+    return .{ .int_val = @intCast(utf8CharCount(data)) };
+}
+
+fn builtinMbSubstr(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .null_val;
+    const data = switch (args[0]) {
+        .string_val => |s| s.data,
+        else => return .null_val,
+    };
+    const total_chars = utf8CharCount(data);
+    var start: i64 = switch (args[1]) {
+        .int_val => |i| i,
+        .float_val => |f| @intFromFloat(f),
+        else => 0,
+    };
+    if (start < 0) start = @max(@as(i64, @intCast(total_chars)) + start, 0);
+    if (start >= @as(i64, @intCast(total_chars))) {
+        const empty = vm.createString("") catch return .null_val;
+        return .{ .string_val = empty };
+    }
+    var length: ?i64 = null;
+    if (args.len >= 3 and args[2] != .null_val) {
+        length = switch (args[2]) {
+            .int_val => |i| i,
+            .float_val => |f| @intFromFloat(f),
+            else => null,
+        };
+    }
+    const byte_start = utf8CharToBytePos(data, @intCast(start));
+    var byte_end: usize = data.len;
+    if (length) |len| {
+        if (len < 0) {
+            const end_char: i64 = @as(i64, @intCast(total_chars)) + len;
+            if (end_char <= start) {
+                const empty = vm.createString("") catch return .null_val;
+                return .{ .string_val = empty };
+            }
+            byte_end = utf8CharToBytePos(data, @intCast(end_char));
+        } else {
+            const end_char: usize = @as(usize, @intCast(start)) + @as(usize, @intCast(len));
+            byte_end = utf8CharToBytePos(data, @min(end_char, total_chars));
+        }
+    }
+    if (byte_end <= byte_start) {
+        const empty = vm.createString("") catch return .null_val;
+        return .{ .string_val = empty };
+    }
+    const result = vm.createString(data[byte_start..byte_end]) catch return .null_val;
+    return .{ .string_val = result };
+}
+
+fn builtinMbStrtolower(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .null_val;
+    const data = switch (args[0]) {
+        .string_val => |s| s.data,
+        else => return .null_val,
+    };
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(vm.allocator);
+    buf.ensureTotalCapacity(vm.allocator, data.len) catch return .null_val;
+    for (data) |byte| {
+        if (byte >= 'A' and byte <= 'Z') {
+            buf.append(vm.allocator, byte + 32) catch return .null_val;
+        } else {
+            buf.append(vm.allocator, byte) catch return .null_val;
+        }
+    }
+    const result = vm.createString(buf.items) catch return .null_val;
+    return .{ .string_val = result };
+}
+
+fn builtinMbStrtoupper(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .null_val;
+    const data = switch (args[0]) {
+        .string_val => |s| s.data,
+        else => return .null_val,
+    };
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(vm.allocator);
+    buf.ensureTotalCapacity(vm.allocator, data.len) catch return .null_val;
+    for (data) |byte| {
+        if (byte >= 'a' and byte <= 'z') {
+            buf.append(vm.allocator, byte - 32) catch return .null_val;
+        } else {
+            buf.append(vm.allocator, byte) catch return .null_val;
+        }
+    }
+    const result = vm.createString(buf.items) catch return .null_val;
+    return .{ .string_val = result };
+}
+
+fn builtinMbDetectEncoding(vm: *BytecodeVM, _: []Value) BytecodeVM.VMError!Value {
+    const s = vm.createString("UTF-8") catch return .null_val;
+    return .{ .string_val = s };
+}
+
+fn builtinCallUserFunc(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 1) return .null_val;
+    const callback = args[0];
+    const func_args = if (args.len > 1) args[1..] else args[0..0];
+
+    switch (callback) {
+        .string_val => |s| {
+            if (vm.builtins.get(s.data)) |builtin_fn| {
+                return builtin_fn(vm, func_args) catch .null_val;
+            }
+            if (vm.functions.get(s.data)) |func| {
+                return executeFunctionWithArgs(vm, func, func_args);
+            }
+            if (std.mem.indexOfScalar(u8, s.data, ':')) |colon_pos| {
+                if (colon_pos + 2 < s.data.len and s.data[colon_pos + 1] == ':') {
+                    const class_name = s.data[0..colon_pos];
+                    const method_name = s.data[colon_pos + 2 ..];
+                    return callStaticMethod(vm, class_name, method_name, func_args);
+                }
+            }
+            return .null_val;
+        },
+        .closure_val => |cl| {
+            return executeFunctionWithArgs(vm, cl.function, func_args);
+        },
+        .array_val => |arr| {
+            if (arr.elements.items.len >= 2) {
+                const class_val = arr.elements.items[0];
+                const method_val = arr.elements.items[1];
+                const method_name = switch (method_val) {
+                    .string_val => |s| s.data,
+                    else => return .null_val,
+                };
+                switch (class_val) {
+                    .string_val => |s| {
+                        return callStaticMethod(vm, s.data, method_name, func_args);
+                    },
+                    .object_val => |obj| {
+                        return callInstanceMethod(vm, obj, method_name, func_args);
+                    },
+                    else => return .null_val,
+                }
+            }
+            return .null_val;
+        },
+        else => return .null_val,
+    }
+}
+
+fn builtinCallUserFuncArray(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .null_val;
+    const callback = args[0];
+    const params = switch (args[1]) {
+        .array_val => |a| a,
+        else => return .null_val,
+    };
+    var new_args: [16]Value = undefined;
+    new_args[0] = callback;
+    const elem_count = @min(params.elements.items.len, 15);
+    for (0..elem_count) |i| {
+        new_args[1 + i] = params.elements.items[i];
+    }
+    return builtinCallUserFunc(vm, new_args[0 .. 1 + elem_count]);
+}
+
+fn builtinIsCallable(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len == 0) return .{ .bool_val = false };
+    const callback = args[0];
+    const result = switch (callback) {
+        .string_val => |s| blk: {
+            if (vm.builtins.get(s.data)) |_| break :blk true;
+            if (vm.functions.get(s.data)) |_| break :blk true;
+            if (std.mem.indexOfScalar(u8, s.data, ':')) |colon_pos| {
+                if (colon_pos + 2 < s.data.len and s.data[colon_pos + 1] == ':') {
+                    const class_name = s.data[0..colon_pos];
+                    const method_name = s.data[colon_pos + 2 ..];
+                    if (vm.classes.get(class_name)) |cls| {
+                        if (cls.static_methods.get(method_name)) |_| break :blk true;
+                    }
+                }
+            }
+            break :blk false;
+        },
+        .closure_val => true,
+        .array_val => |arr| blk: {
+            if (arr.elements.items.len >= 2) {
+                const class_val = arr.elements.items[0];
+                const method_val = arr.elements.items[1];
+                switch (method_val) {
+                    .string_val => |ms| {
+                        switch (class_val) {
+                            .string_val => |cs| {
+                                if (vm.classes.get(cs.data)) |cls| {
+                                    if (cls.static_methods.get(ms.data)) |_| break :blk true;
+                                }
+                            },
+                            .object_val => |obj| {
+                                var class_iter = vm.classes.valueIterator();
+                                while (class_iter.next()) |cls_ptr| {
+                                    const cls = cls_ptr.*;
+                                    if (cls.class_id == obj.class_id) {
+                                        if (cls.instance_methods.get(ms.data)) |_| break :blk true;
+                                    }
+                                }
+                            },
+                            else => {},
+                        }
+                    },
+                    else => {},
+                }
+            }
+            break :blk false;
+        },
+        .object_val => |obj| blk: {
+            var class_iter = vm.classes.valueIterator();
+            while (class_iter.next()) |cls_ptr| {
+                const cls = cls_ptr.*;
+                if (cls.class_id == obj.class_id) {
+                    if (cls.instance_methods.get("__invoke")) |_| break :blk true;
+                }
+            }
+            break :blk false;
+        },
+        else => false,
+    };
+    return .{ .bool_val = result };
+}
+
+fn builtinUsort(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .{ .bool_val = false };
+    const arr = switch (args[0]) {
+        .array_val => |a| a,
+        else => return .{ .bool_val = false },
+    };
+    const callback = args[1];
+    const items = arr.elements.items;
+    if (items.len <= 1) return .{ .bool_val = true };
+
+    var indices: std.ArrayListUnmanaged(usize) = .empty;
+    defer indices.deinit(vm.allocator);
+    indices.ensureTotalCapacity(vm.allocator, items.len) catch return .{ .bool_val = false };
+    for (0..items.len) |i| indices.append(vm.allocator, i) catch return .{ .bool_val = false };
+
+    const SortCtx = struct {
+        vm_ptr: *BytecodeVM,
+        cb: Value,
+        items_slice: []Value,
+        idx_slice: []usize,
+        pub fn lessThan(ctx: @This(), a: usize, b: usize) bool {
+            const idx_a = ctx.idx_slice[a];
+            const idx_b = ctx.idx_slice[b];
+            var cb_args: [2]Value = .{ ctx.items_slice[idx_a], ctx.items_slice[idx_b] };
+            const result = callCallback(ctx.vm_ptr, ctx.cb, &cb_args) catch return false;
+            const cmp = switch (result) {
+                .int_val => |i| i,
+                .float_val => |f| @as(i64, @intFromFloat(f)),
+                else => 0,
+            };
+            return cmp < 0;
+        }
+    };
+    const ctx = SortCtx{ .vm_ptr = vm, .cb = callback, .items_slice = items, .idx_slice = indices.items };
+    std.mem.sort(usize, indices.items, ctx, SortCtx.lessThan);
+
+    var sorted: std.ArrayListUnmanaged(Value) = .empty;
+    defer sorted.deinit(vm.allocator);
+    sorted.ensureTotalCapacity(vm.allocator, items.len) catch return .{ .bool_val = false };
+    for (indices.items) |idx| sorted.append(vm.allocator, items[idx]) catch return .{ .bool_val = false };
+
+    arr.elements.clearAndFree(vm.allocator);
+    arr.keys.clearAndFree(vm.allocator);
+    for (sorted.items) |v| {
+        arr.elements.append(vm.allocator, v) catch return .{ .bool_val = false };
+    }
+    return .{ .bool_val = true };
+}
+
+fn builtinArrayColumn(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
+    if (args.len < 2) return .null_val;
+    const arr = switch (args[0]) {
+        .array_val => |a| a,
+        else => return .null_val,
+    };
+    const col_key_str: []const u8 = switch (args[1]) {
+        .string_val => |s| s.data,
+        .int_val => |i| blk: {
+            var buf: [32]u8 = undefined;
+            const s = std.fmt.bufPrint(&buf, "{}", .{i}) catch "0";
+            const duped = vm.allocator.dupe(u8, s) catch return .null_val;
+            break :blk duped;
+        },
+        else => return .null_val,
+    };
+    const out = vm.createArray() catch return BytecodeVM.VMError.OutOfMemory;
+    for (arr.elements.items) |row| {
+        switch (row) {
+            .array_val => |r| {
+                if (r.keys.get(col_key_str)) |idx| {
+                    if (idx < r.elements.items.len) {
+                        out.elements.append(vm.allocator, r.elements.items[idx]) catch return BytecodeVM.VMError.OutOfMemory;
+                    }
+                }
+            },
+            .object_val => |obj| {
+                if (obj.properties.get(col_key_str)) |val| {
+                    out.elements.append(vm.allocator, val) catch return BytecodeVM.VMError.OutOfMemory;
+                }
+            },
+            else => {},
+        }
+    }
+    return .{ .array_val = out };
+}
+
+fn callStaticMethod(vm: *BytecodeVM, class_name: []const u8, method_name: []const u8, func_args: []Value) BytecodeVM.VMError!Value {
+    const cls = vm.classes.get(class_name) orelse return .null_val;
+    const method = cls.static_methods.get(method_name) orelse return .null_val;
+    return executeFunctionWithArgs(vm, method, func_args);
+}
+
+fn callInstanceMethod(vm: *BytecodeVM, obj: *Value.Object, method_name: []const u8, func_args: []Value) BytecodeVM.VMError!Value {
+    var class_iter = vm.classes.valueIterator();
+    var found_method: ?*CompiledFunction = null;
+    while (class_iter.next()) |cls_ptr| {
+        const cls = cls_ptr.*;
+        if (cls.class_id == obj.class_id) {
+            found_method = cls.instance_methods.get(method_name);
+            if (found_method == null) {
+                var parent = cls.parent;
+                while (parent) |p| {
+                    found_method = p.instance_methods.get(method_name);
+                    if (found_method != null) break;
+                    parent = p.parent;
+                }
+            }
+            break;
+        }
+    }
+    const method = found_method orelse return .null_val;
+    const total_args = func_args.len + 1;
+    var all_args: [17]Value = undefined;
+    all_args[0] = .{ .object_val = obj };
+    for (func_args, 0..) |a, i| {
+        if (i + 1 < 17) all_args[i + 1] = a;
+    }
+    return executeFunctionWithArgs(vm, method, all_args[0..total_args]);
+}
+
+fn executeFunctionWithArgs(vm: *BytecodeVM, func: *CompiledFunction, call_args: []Value) BytecodeVM.VMError!Value {
+    const saved_stack_top = vm.stack_top;
+    const saved_frame_count = vm.frame_count;
+
+    const new_frame_idx = vm.frame_count;
+    if (new_frame_idx >= BytecodeVM.FRAMES_MAX) return .null_val;
+
+    const bp = vm.stack_top;
+    for (call_args, 0..) |arg, i| {
+        if (bp + i < BytecodeVM.STACK_MAX) vm.stack[bp + i] = arg;
+    }
+    vm.stack_top = bp + @as(u32, @intCast(call_args.len));
+    vm.frames[new_frame_idx] = CallFrame{
+        .function = func,
+        .ip = 0,
+        .base_pointer = bp,
+        .return_address = 0,
+    };
+    vm.frame_count = new_frame_idx + 1;
+    const required_top: u32 = bp + @as(u32, @intCast(call_args.len)) + func.local_count;
+    if (required_top > BytecodeVM.STACK_MAX) {
+        vm.stack_top = saved_stack_top;
+        vm.frame_count = saved_frame_count;
+        return .null_val;
+    }
+    var j: u32 = vm.stack_top;
+    while (j < required_top) : (j += 1) {
+        vm.stack[j] = .null_val;
+    }
+    vm.stack_top = required_top;
+
+    const target_frame = saved_frame_count;
+    var result: Value = .null_val;
+    var frame = &vm.frames[vm.frame_count - 1];
+    while (true) {
+        if (frame.ip >= frame.function.bytecode.len) {
+            break;
+        }
+        const inst = frame.function.bytecode[frame.ip];
+        frame.ip += 1;
+        const handler = BytecodeVM.dispatch_table[@intFromEnum(inst.opcode)];
+        const dispatch_result = handler(vm, frame, inst) catch {
+            vm.stack_top = saved_stack_top;
+            vm.frame_count = saved_frame_count;
+            return .null_val;
+        };
+        switch (dispatch_result) {
+            .continue_execution => {},
+            .return_value => |val| {
+                result = val;
+                break;
+            },
+            .frame_changed => {
+                if (vm.frame_count <= target_frame) {
+                    if (vm.stack_top > saved_stack_top) {
+                        result = vm.stack[vm.stack_top - 1];
+                    }
+                    break;
+                }
+                frame = &vm.frames[vm.frame_count - 1];
+            },
+            .jump_to => |addr| {
+                frame.ip = addr;
+            },
+        }
+    }
+    vm.stack_top = saved_stack_top;
+    vm.frame_count = saved_frame_count;
+    return result;
 }
 
 fn builtinStrpos(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
@@ -4226,7 +5928,7 @@ fn valueToString(vm: *BytecodeVM, value: Value) ![]const u8 {
             if (i >= 0 and i <= 9) {
                 const static_digits = "0123456789";
                 const idx: usize = @intCast(i);
-                break :blk static_digits[idx..idx + 1];
+                break :blk static_digits[idx .. idx + 1];
             }
 
             const arena_alloc = vm.temp_arena.allocator();
@@ -4319,6 +6021,8 @@ fn initDispatchTable() [256]DispatchFn {
     table[@intFromEnum(OpCode.neg_int)] = handleNegInt;
     table[@intFromEnum(OpCode.inc_int)] = handleIncInt;
     table[@intFromEnum(OpCode.dec_int)] = handleDecInt;
+    table[@intFromEnum(OpCode.inc_global)] = handleIncGlobal;
+    table[@intFromEnum(OpCode.dec_global)] = handleDecGlobal;
     table[@intFromEnum(OpCode.pow_int)] = handlePowInt;
     table[@intFromEnum(OpCode.bit_and)] = handleBitAnd;
     table[@intFromEnum(OpCode.bit_or)] = handleBitOr;
@@ -4422,6 +6126,8 @@ fn initDispatchTable() [256]DispatchFn {
     table[@intFromEnum(OpCode.to_float)] = handleToFloat;
     table[@intFromEnum(OpCode.to_bool)] = handleToBool;
     table[@intFromEnum(OpCode.to_string)] = handleToString;
+    table[@intFromEnum(OpCode.to_array)] = handleToArray;
+    table[@intFromEnum(OpCode.to_object)] = handleToObject;
 
     // 闭包操作
     table[@intFromEnum(OpCode.make_closure)] = handleMakeClosure;
@@ -4641,11 +6347,13 @@ fn callRuntimeName(vm: *BytecodeVM, current_frame: *CallFrame, name: []const u8,
 
 fn handleClosureCall(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) BytecodeVM.VMError!DispatchResult {
     const arg_count: u16 = inst.operand2;
-    if (vm.stack_top < arg_count + 1) {
+    // 安全检查：避免 u16 溢出，使用 u32 计算
+    const required_elements: u32 = @as(u32, arg_count) + 1;
+    if (vm.stack_top < required_elements) {
         return BytecodeVM.VMError.StackUnderflow;
     }
 
-    const callable_index: u32 = vm.stack_top - arg_count - 1;
+    const callable_index: u32 = vm.stack_top - required_elements;
     const callable = vm.stack[callable_index];
 
     var i: u32 = 0;
@@ -4672,6 +6380,54 @@ fn handleClosureCall(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) Byte
         .string_val => |s| {
             try callRuntimeName(vm, frame, s.data, arg_count);
             return .frame_changed;
+        },
+        .array_val => |arr| {
+            if (arr.elements.items.len >= 2) {
+                const class_val = arr.elements.items[0];
+                const method_val = arr.elements.items[1];
+                const method_name = switch (method_val) {
+                    .string_val => |s| s.data,
+                    else => return BytecodeVM.VMError.TypeMismatch,
+                };
+                switch (class_val) {
+                    .string_val => |s| {
+                        const cls = vm.classes.get(s.data) orelse return BytecodeVM.VMError.TypeMismatch;
+                        const method = cls.static_methods.get(method_name) orelse return BytecodeVM.VMError.TypeMismatch;
+                        const args_start: u32 = vm.stack_top - arg_count;
+                        const func_args = vm.stack[args_start..vm.stack_top];
+                        const result = executeFunctionWithArgs(vm, method, func_args) catch .null_val;
+                        vm.stack_top = args_start;
+                        try vm.push(result);
+                        return .continue_execution;
+                    },
+                    .object_val => |obj| {
+                        var class_iter = vm.classes.valueIterator();
+                        var found_method: ?*CompiledFunction = null;
+                        while (class_iter.next()) |cls_ptr| {
+                            const cls = cls_ptr.*;
+                            if (cls.class_id == obj.class_id) {
+                                found_method = cls.instance_methods.get(method_name);
+                                break;
+                            }
+                        }
+                        const method = found_method orelse return BytecodeVM.VMError.TypeMismatch;
+                        const args_start: u32 = vm.stack_top - arg_count;
+                        const func_args = vm.stack[args_start..vm.stack_top];
+                        var all_args: [17]Value = undefined;
+                        all_args[0] = .{ .object_val = obj };
+                        for (func_args, 0..) |a, idx| {
+                            if (idx + 1 < 17) all_args[idx + 1] = a;
+                        }
+                        const total_args = func_args.len + 1;
+                        const result = executeFunctionWithArgs(vm, method, all_args[0..total_args]) catch .null_val;
+                        vm.stack_top = args_start;
+                        try vm.push(result);
+                        return .continue_execution;
+                    },
+                    else => return BytecodeVM.VMError.TypeMismatch,
+                }
+            }
+            return BytecodeVM.VMError.TypeMismatch;
         },
         else => return BytecodeVM.VMError.TypeMismatch,
     }
@@ -4702,7 +6458,37 @@ fn handlePushGlobal(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) Bytec
     if (name_idx < frame.function.constants.len) {
         const name_val = frame.function.constants[name_idx];
         if (name_val == .string_val) {
-            if (vm.globals.get(name_val.string_val)) |val| {
+            const var_name = name_val.string_val;
+            // $GLOBALS superglobal: build snapshot of all global variables
+            if (std.mem.eql(u8, var_name, "$GLOBALS") or std.mem.eql(u8, var_name, "GLOBALS")) {
+                const arr = vm.allocator.create(Value.Array) catch return BytecodeVM.VMError.OutOfMemory;
+                arr.* = Value.Array{
+                    .elements = .empty,
+                    .keys = .{},
+                    .ref_count = 1,
+                    .marked = false,
+                };
+                var giter = vm.globals.iterator();
+                while (giter.next()) |entry| {
+                    // Skip $GLOBALS itself
+                    if (std.mem.eql(u8, entry.key_ptr.*, "$GLOBALS") or std.mem.eql(u8, entry.key_ptr.*, "GLOBALS")) {
+                        continue;
+                    }
+                    // PHP: $GLOBALS keys are variable names WITHOUT $ prefix
+                    const key_name = if (entry.key_ptr.*.len > 0 and entry.key_ptr.*[0] == '$')
+                        entry.key_ptr.*[1..]
+                    else
+                        entry.key_ptr.*;
+                    const key_str = vm.allocator.create(Value.String) catch continue;
+                    key_str.* = Value.String{ .data = vm.allocator.dupe(u8, key_name) catch continue, .ref_count = 1, .marked = false };
+                    const idx = arr.elements.items.len;
+                    arr.elements.append(vm.allocator, entry.value_ptr.*) catch continue;
+                    arr.keys.put(vm.allocator, key_str.data, idx) catch continue;
+                }
+                try vm.push(.{ .array_val = arr });
+                return .continue_execution;
+            }
+            if (vm.globals.get(var_name)) |val| {
                 try vm.push(val);
                 return .continue_execution;
             }
@@ -4765,16 +6551,54 @@ fn handlePushInt1(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VME
 }
 
 /// STORE_LOCAL - 存储到局部变量
+/// PHP 值语义：数组赋值时进行深拷贝
+/// 赋值表达式返回所赋的值，所以值也会被压回栈顶
 fn handleStoreLocal(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) BytecodeVM.VMError!DispatchResult {
-    const value = try vm.pop();
+    var value = try vm.pop();
+    // PHP 值语义：数组赋值时深拷贝，确保变量独立
+    if (value == .array_val) {
+        value = deepCopyArray(vm, value) catch value;
+    }
     const idx = frame.base_pointer + inst.operand1;
     vm.stack[idx] = value;
+    // 赋值表达式返回所赋的值，压回栈顶供链式赋值使用
+    try vm.push(value);
     return .continue_execution;
 }
 
+/// 深拷贝字节码 VM 的数组值
+fn deepCopyArray(vm: *BytecodeVM, value: Value) !Value {
+    if (value != .array_val) return value;
+    const src = value.array_val;
+    const new_arr = try vm.allocator.create(Value.Array);
+    new_arr.* = .{
+        .elements = .{ .items = &.{}, .capacity = 0 },
+        .keys = .{},
+        .ref_count = 1,
+        .marked = false,
+    };
+    // 复制元素
+    try new_arr.elements.ensureTotalCapacity(vm.allocator, src.elements.items.len);
+    for (src.elements.items) |elem| {
+        const copied = if (elem == .array_val) try deepCopyArray(vm, elem) else elem;
+        try new_arr.elements.append(vm.allocator, copied);
+    }
+    // 复制键映射
+    var key_iter = src.keys.iterator();
+    while (key_iter.next()) |entry| {
+        try new_arr.keys.put(vm.allocator, entry.key_ptr.*, entry.value_ptr.*);
+    }
+    return .{ .array_val = new_arr };
+}
+
 /// STORE_GLOBAL - 存储到全局变量
+/// PHP 值语义：数组赋值时进行深拷贝
 fn handleStoreGlobal(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) BytecodeVM.VMError!DispatchResult {
-    const value = try vm.pop();
+    var value = try vm.pop();
+    // PHP 值语义：数组赋值时深拷贝
+    if (value == .array_val) {
+        value = deepCopyArray(vm, value) catch value;
+    }
     const name_idx = inst.operand1;
     if (name_idx < frame.function.constants.len) {
         const name_val = frame.function.constants[name_idx];
@@ -4861,11 +6685,89 @@ fn handleDecInt(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) BytecodeV
     return .continue_execution;
 }
 
+fn handleIncGlobal(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) BytecodeVM.VMError!DispatchResult {
+    const name_idx = inst.operand1;
+    if (name_idx < frame.function.constants.len) {
+        const name_val = frame.function.constants[name_idx];
+        if (name_val == .string_val) {
+            const var_name = name_val.string_val;
+            if (vm.globals.getPtr(var_name)) |ptr| {
+                const val = ptr.*.toInt();
+                ptr.* = .{ .int_val = val + 1 };
+            } else {
+                vm.globals.put(vm.allocator, var_name, .{ .int_val = 1 }) catch {};
+            }
+        }
+    }
+    return .continue_execution;
+}
+
+fn handleDecGlobal(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) BytecodeVM.VMError!DispatchResult {
+    const name_idx = inst.operand1;
+    if (name_idx < frame.function.constants.len) {
+        const name_val = frame.function.constants[name_idx];
+        if (name_val == .string_val) {
+            const var_name = name_val.string_val;
+            if (vm.globals.getPtr(var_name)) |ptr| {
+                const val = ptr.*.toInt();
+                ptr.* = .{ .int_val = val - 1 };
+            } else {
+                vm.globals.put(vm.allocator, var_name, .{ .int_val = -1 }) catch {};
+            }
+        }
+    }
+    return .continue_execution;
+}
+
 fn handlePowInt(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
     const b = (try vm.pop()).toInt();
     const a = (try vm.pop()).toInt();
-    const result = std.math.pow(i64, a, @intCast(b));
-    try vm.push(.{ .int_val = result });
+    // 负指数 → 浮点结果
+    if (b < 0) {
+        const base_f = @as(f64, @floatFromInt(a));
+        const abs_exp: u64 = @intCast(-b);
+        const abs_result = std.math.pow(f64, base_f, @as(f64, @floatFromInt(abs_exp)));
+        try vm.push(.{ .float_val = 1.0 / abs_result });
+    } else if (b == 0) {
+        try vm.push(.{ .int_val = 1 });
+    } else {
+        const exp: u64 = @intCast(b);
+        // 使用快速幂避免 std.math.pow(i64) 的溢出 panic
+        var result: i64 = 1;
+        var base = a;
+        var e = exp;
+        var overflow = false;
+        while (e > 0) {
+            if (e & 1 == 1) {
+                if (base > 0 and result > @divTrunc(std.math.maxInt(i64), base)) {
+                    overflow = true;
+                    break;
+                }
+                if (base < 0 and result < @divTrunc(std.math.minInt(i64), base)) {
+                    overflow = true;
+                    break;
+                }
+                result *= base;
+            }
+            e >>= 1;
+            if (e > 0) {
+                if (base > 0 and base > @divTrunc(std.math.maxInt(i64), base)) {
+                    overflow = true;
+                    break;
+                }
+                if (base < 0 and base < @divTrunc(std.math.minInt(i64), base)) {
+                    overflow = true;
+                    break;
+                }
+                base *= base;
+            }
+        }
+        if (overflow) {
+            try vm.push(.{ .float_val = std.math.pow(f64, @as(f64, @floatFromInt(a)), @as(f64, @floatFromInt(exp))) });
+        } else {
+            try vm.push(.{ .int_val = result });
+        }
+    }
     return .continue_execution;
 }
 
@@ -5211,8 +7113,11 @@ fn handleCall(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) BytecodeVM.
         }
     }
 
-    try vm.callFunction(func_id, arg_count);
-    return .frame_changed;
+    const frame_changed = try vm.callFunction(func_id, arg_count);
+    if (frame_changed) {
+        return .frame_changed;
+    }
+    return .continue_execution;
 }
 
 fn handleCallBuiltin(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) BytecodeVM.VMError!DispatchResult {
@@ -5244,13 +7149,14 @@ fn handleCallStatic(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) Bytec
 
     // 栈布局验证：至少需要 class_name + method_name + args
     // stack_top 指向下一个可用位置，所以需要 >= arg_count + 2 个元素
-    const required_elements = arg_count + 2;
+    // 安全检查：避免 u16 溢出，使用 u32 计算
+    const required_elements: u32 = @as(u32, arg_count) + 2;
     if (vm.stack_top < required_elements) {
         return BytecodeVM.VMError.StackUnderflow;
     }
 
     // 获取类名（在栈底）
-    const class_name_idx = vm.stack_top - arg_count - 2;
+    const class_name_idx: u32 = vm.stack_top - required_elements;
     const class_name_val = vm.stack[class_name_idx];
     if (class_name_val != .string_val) {
         return BytecodeVM.VMError.TypeMismatch;
@@ -5258,7 +7164,7 @@ fn handleCallStatic(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) Bytec
     const class_name = class_name_val.string_val.data;
 
     // 获取方法名（在类名之上）
-    const method_name_idx = vm.stack_top - arg_count - 1;
+    const method_name_idx: u32 = class_name_idx + 1;
     const method_name_val = vm.stack[method_name_idx];
     if (method_name_val != .string_val) {
         return BytecodeVM.VMError.TypeMismatch;
@@ -5291,11 +7197,7 @@ fn handleCallStatic(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) Bytec
     var method_func: ?*CompiledFunction = cached_method;
     if (method_func == null) {
         // 构造完整方法名：ClassName::methodName
-        const full_method_name = std.fmt.allocPrint(
-            vm.allocator,
-            "{s}::{s}",
-            .{ class_name, method_name }
-        ) catch {
+        const full_method_name = std.fmt.allocPrint(vm.allocator, "{s}::{s}", .{ class_name, method_name }) catch {
             return BytecodeVM.VMError.OutOfMemory;
         };
         defer vm.allocator.free(full_method_name);
@@ -5306,11 +7208,7 @@ fn handleCallStatic(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) Bytec
         // 如果未找到，尝试不带命名空间前缀的查找
         if (method_func == null and class_name.len > 0 and class_name[0] == '\\') {
             const short_class_name = class_name[1..];
-            const short_full_name = std.fmt.allocPrint(
-                vm.allocator,
-                "{s}::{s}",
-                .{ short_class_name, method_name }
-            ) catch {
+            const short_full_name = std.fmt.allocPrint(vm.allocator, "{s}::{s}", .{ short_class_name, method_name }) catch {
                 return BytecodeVM.VMError.OutOfMemory;
             };
             defer vm.allocator.free(short_full_name);
@@ -5319,11 +7217,7 @@ fn handleCallStatic(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) Bytec
 
         // 3. 缓存找到的方法
         if (vm.enable_inline_cache and method_func != null) {
-            vm.method_cache.cacheMethod(
-                method_name,
-                cache_key,
-                @ptrCast(method_func.?)
-            ) catch {};
+            vm.method_cache.cacheMethod(method_name, cache_key, @ptrCast(method_func.?)) catch {};
         }
     }
 
@@ -5417,10 +7311,12 @@ fn handleCallMethod(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) Bytec
     const method_name = method_name_const.string_val;
 
     // 获取对象（在参数之下）
-    const obj_idx = vm.stack_top - arg_count - 1;
-    if (obj_idx >= vm.stack_top) {
+    // 安全检查：避免 u32 下溢，先验证栈上有足够的元素（对象 + 参数）
+    const required_elements: u32 = @as(u32, arg_count) + 1;
+    if (vm.stack_top < required_elements) {
         return BytecodeVM.VMError.StackUnderflow;
     }
+    const obj_idx = vm.stack_top - required_elements;
     const obj_val = vm.stack[obj_idx];
 
     // 类型反馈：记录方法调用的对象类型
@@ -5448,80 +7344,148 @@ fn handleCallMethod(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) Bytec
             // 2. 如果缓存未命中，从类定义中查找方法
             var method_func: ?*CompiledFunction = cached_method;
             if (method_func == null) {
-                // 从对象的属性中查找方法
-                // 注意：在完整的实现中，这里应该从类的方法表中查找
-                if (obj.properties.get(method_name)) |method_val| {
-                    switch (method_val) {
-                        .closure_val => |closure| {
-                            method_func = closure.function;
-                        },
-                        else => {
-                            // 方法不是闭包类型
-                            return BytecodeVM.VMError.TypeMismatch;
-                        },
+                // 2a. 优先从类的 instance_methods 中查找（PHP 方法存储在类定义中）
+                if (vm.getClassById(obj.class_id)) |class_meta| {
+                    // 沿继承链查找方法
+                    var current_class: ?*ClassMetadata = class_meta;
+                    while (current_class) |cls| {
+                        if (cls.instance_methods.get(method_name)) |method| {
+                            method_func = method;
+                            break;
+                        }
+                        // 检查静态方法（兼容静态调用场景）
+                        if (cls.static_methods.get(method_name)) |method| {
+                            method_func = method;
+                            break;
+                        }
+                        current_class = cls.parent;
                     }
-                } else {
+                }
+
+                // 2b. 回退到 obj.properties 查找（__invoke 闭包等场景）
+                if (method_func == null) {
+                    if (obj.properties.get(method_name)) |method_val| {
+                        switch (method_val) {
+                            .closure_val => |closure| {
+                                method_func = closure.function;
+                            },
+                            else => {
+                                // 属性存在但不是可调用类型，继续查找其他路径
+                            },
+                        }
+                    }
+                }
+
+                // 2c. 回退到全局函数表查找（BytecodeGenerator 将方法注册为 ClassName->methodName）
+                if (method_func == null) {
+                    if (vm.getClassById(obj.class_id)) |class_meta| {
+                        const full_name = std.fmt.allocPrint(vm.allocator, "{s}->{s}", .{ class_meta.name, method_name }) catch null;
+                        if (full_name) |name| {
+                            defer vm.allocator.free(name);
+                            if (vm.functions.get(name)) |func| {
+                                method_func = func;
+                            }
+                        }
+                        // 也尝试静态方法格式 ClassName::methodName
+                        if (method_func == null) {
+                            const static_name = std.fmt.allocPrint(vm.allocator, "{s}::{s}", .{ class_meta.name, method_name }) catch null;
+                            if (static_name) |name| {
+                                defer vm.allocator.free(name);
+                                if (vm.functions.get(name)) |func| {
+                                    method_func = func;
+                                }
+                            }
+                        }
+                        // 沿继承链查找父类方法
+                        if (method_func == null) {
+                            var parent_class = class_meta.parent;
+                            while (parent_class) |pcls| {
+                                const parent_name = std.fmt.allocPrint(vm.allocator, "{s}->{s}", .{ pcls.name, method_name }) catch null;
+                                if (parent_name) |pname| {
+                                    defer vm.allocator.free(pname);
+                                    if (vm.functions.get(pname)) |func| {
+                                        method_func = func;
+                                        break;
+                                    }
+                                }
+                                parent_class = pcls.parent;
+                            }
+                        }
+                    }
+                }
+
+                if (method_func == null) {
+                    // 构造函数是可选的：如果类没有定义 __construct，不报错
+                    if (std.mem.eql(u8, method_name, "__construct")) {
+                        // 弹出参数，保留对象在栈上（new 的结果就是对象本身）
+                        var i: u16 = 0;
+                        while (i < arg_count) : (i += 1) {
+                            _ = try vm.pop();
+                        }
+                        // 不弹出对象，它留在栈上作为 new 表达式的结果
+                        return .continue_execution;
+                    }
                     // 方法未找到
                     return BytecodeVM.VMError.UndefinedFunction;
                 }
-                
+
                 // 3. 缓存找到的方法
-                if (vm.enable_inline_cache and method_func != null) {
-                    vm.method_cache.cacheMethod(
-                        method_name, 
-                        class_id, 
-                        @ptrCast(method_func.?)
-                    ) catch {};
+                if (vm.enable_inline_cache) {
+                    vm.method_cache.cacheMethod(method_name, class_id, @ptrCast(method_func.?)) catch {};
                 }
             }
 
             // 4. 准备方法调用
             if (method_func) |func| {
+                // 判断是否是构造函数调用
+                const is_construct = std.mem.eql(u8, method_name, "__construct");
+
                 // 收集参数
                 var args = std.ArrayList(Value).initCapacity(vm.allocator, arg_count) catch {
                     return BytecodeVM.VMError.OutOfMemory;
                 };
                 defer args.deinit(vm.allocator);
-                
+
                 // 弹出参数（逆序）
                 var i: u16 = 0;
                 while (i < arg_count) : (i += 1) {
                     const arg = try vm.pop();
                     try args.insert(vm.allocator, 0, arg); // 插入到开头以保持正确顺序
                 }
-                
+
                 // 弹出对象（this）
                 _ = try vm.pop();
-                
+
                 // 5. 创建新的调用帧
                 if (vm.frame_count >= BytecodeVM.FRAMES_MAX) {
                     return BytecodeVM.VMError.StackOverflow;
                 }
-                
+
                 const new_frame_idx = vm.frame_count;
                 vm.frame_count += 1;
-                
+
                 vm.frames[new_frame_idx] = CallFrame{
                     .function = func,
                     .ip = 0,
                     .base_pointer = vm.stack_top,
                     .return_address = frame.ip,
+                    .construct_this = if (is_construct) obj_val else null,
                 };
-                
+
                 // 6. 压入 this 对象作为第一个参数
                 try vm.push(obj_val);
-                
+
                 // 7. 压入其他参数
                 for (args.items) |arg| {
                     try vm.push(arg);
                 }
-                
+
                 // 8. 分配局部变量空间
                 var j: u32 = 0;
                 while (j < func.local_count) : (j += 1) {
                     try vm.push(.null_val);
                 }
-                
+
                 return .frame_changed;
             } else {
                 // 方法未找到
@@ -5546,7 +7510,7 @@ fn handleCallMethod(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) Bytec
             // 如果缓存未命中，查找结构体方法
             // 注意：结构体方法通常是静态的，需要从结构体定义中查找
             // 这里简化为返回错误，实际实现需要结构体方法表
-            
+
             // 弹出参数和结构体
             var i: u16 = 0;
             while (i < arg_count + 1) : (i += 1) {
@@ -5576,23 +7540,34 @@ fn computeMethodCacheKey(method_name: []const u8, class_id: u64) u64 {
 
 fn handleRet(vm: *BytecodeVM, frame: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
     const result = try vm.pop();
+    const construct_this = frame.construct_this;
     vm.frame_count -= 1;
     if (vm.frame_count == 0) {
         return .{ .return_value = result };
     }
     vm.stack_top = frame.base_pointer;
-    try vm.push(result);
+    // 构造函数返回时，压入 this 对象（new 表达式的结果）
+    if (construct_this) |this_val| {
+        try vm.push(this_val);
+    } else {
+        try vm.push(result);
+    }
     return .frame_changed;
 }
 
 fn handleRetVoid(vm: *BytecodeVM, frame: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
+    const construct_this = frame.construct_this;
     vm.frame_count -= 1;
     if (vm.frame_count == 0) {
         return .{ .return_value = .null_val };
     }
     vm.stack_top = frame.base_pointer;
-    // void 函数也需要压入返回值（null），这样调用者可以正确 pop
-    try vm.push(.null_val);
+    // 构造函数返回时，压入 this 对象（new 表达式的结果）
+    if (construct_this) |this_val| {
+        try vm.push(this_val);
+    } else {
+        try vm.push(.null_val);
+    }
     return .frame_changed;
 }
 
@@ -5835,12 +7810,12 @@ fn handleArrayGet(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VME
 fn handleArraySet(vm: *BytecodeVM, _: *CallFrame, inst: Instruction) BytecodeVM.VMError!DispatchResult {
     // 检查是否是数组追加操作（operand1 = 1 表示追加）
     const is_append = inst.operand1 == 1;
-    
+
     if (is_append) {
         // 数组追加：栈顺序 [值, 数组]
         const arr_val = vm.popFast();
         const value = vm.popFast();
-        
+
         if (arr_val == .array_val) {
             const arr = arr_val.array_val;
             arr.elements.append(vm.allocator, value) catch
@@ -5851,7 +7826,7 @@ fn handleArraySet(vm: *BytecodeVM, _: *CallFrame, inst: Instruction) BytecodeVM.
         }
         return .continue_execution;
     }
-    
+
     // 数组索引设置：栈顺序 [值, 数组, 索引]
     const index = vm.popFast();
     const arr_val = vm.popFast();
@@ -6000,7 +7975,7 @@ fn handleArrayUnset(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.V
 
 fn handleForeachInit(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
     const iterable = try vm.pop();
-    
+
     // 创建迭代器
     const iterator = vm.allocator.create(Value.Iterator) catch return BytecodeVM.VMError.OutOfMemory;
     iterator.* = .{
@@ -6011,7 +7986,7 @@ fn handleForeachInit(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.
         .ref_count = 1,
         .marked = false,
     };
-    
+
     // 如果是关联数组，提取键
     switch (iterable) {
         .array_val => |arr| {
@@ -6033,7 +8008,7 @@ fn handleForeachInit(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.
             iterator.is_done = true;
         },
     }
-    
+
     try vm.push(.{ .iterator_val = iterator });
     return .continue_execution;
 }
@@ -6041,7 +8016,7 @@ fn handleForeachInit(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.
 fn handleForeachNext(vm: *BytecodeVM, _: *CallFrame, inst: Instruction) BytecodeVM.VMError!DispatchResult {
     const jump_target = inst.operand1;
     const iterator_val = vm.peek(0);
-    
+
     switch (iterator_val) {
         .iterator_val => |iterator| {
             if (iterator.is_done) {
@@ -6053,7 +8028,7 @@ fn handleForeachNext(vm: *BytecodeVM, _: *CallFrame, inst: Instruction) Bytecode
                 switch (iterator.iterable) {
                     .array_val => |arr| {
                         const idx: usize = @intCast(iterator.current_index);
-                        
+
                         if (idx < arr.elements.items.len) {
                             // 获取键
                             const key: Value = if (iterator.keys) |keys| blk: {
@@ -6071,15 +8046,15 @@ fn handleForeachNext(vm: *BytecodeVM, _: *CallFrame, inst: Instruction) Bytecode
                                 // 索引数组：使用整数键
                                 break :blk .{ .int_val = iterator.current_index };
                             };
-                            
+
                             // 获取值
                             const value = arr.elements.items[idx];
-                            
+
                             // 压入 key 和 value，保持 iterator 在栈底
                             // 栈布局：[iterator] -> [iterator, key, value]
                             try vm.push(key);
                             try vm.push(value);
-                            
+
                             // 更新迭代器
                             iterator.current_index += 1;
                             if (idx + 1 >= arr.elements.items.len) {
@@ -6111,10 +8086,105 @@ fn handleForeachNext(vm: *BytecodeVM, _: *CallFrame, inst: Instruction) Bytecode
 
 // ========== 对象操作处理函数 ==========
 
-fn handleNewObject(vm: *BytecodeVM, _: *CallFrame, inst: Instruction) BytecodeVM.VMError!DispatchResult {
-    const class_id = inst.operand1;
+fn handleNewObject(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) BytecodeVM.VMError!DispatchResult {
+    // operand1 = 类名在常量池中的索引
+    // operand2 = 构造参数数量
+    // 栈布局（进入时）: [arg1, arg2, ..., argN]
+    // 栈布局（退出时）: [object, arg1, arg2, ..., argN]（为 call_method 准备）
+    const class_name_idx = inst.operand1;
+    const arg_count = inst.operand2;
+    var class_id: u16 = 0;
+    var found_class_meta: ?*ClassMetadata = null;
+
+    // 从常量池获取类名，然后查找或创建类
+    if (class_name_idx < frame.function.constants.len) {
+        const class_const = frame.function.constants[class_name_idx];
+        if (class_const == .string_val) {
+            const class_name = class_const.string_val;
+            // 查找已注册的类，或自动注册新类
+            if (vm.getClass(class_name)) |class_meta| {
+                class_id = class_meta.class_id;
+                found_class_meta = class_meta;
+            } else {
+                // 类未注册，自动注册
+                const class_meta = vm.registerClass(class_name) catch return BytecodeVM.VMError.OutOfMemory;
+                class_id = class_meta.class_id;
+                found_class_meta = class_meta;
+            }
+        }
+    }
+
     const obj = vm.createObject(class_id) catch return BytecodeVM.VMError.OutOfMemory;
-    try vm.push(.{ .object_val = obj });
+
+    // 从 ClassMetadata.instance_property_defaults 复制默认属性到新对象
+    if (found_class_meta) |class_meta| {
+        var prop_iter = class_meta.instance_property_defaults.iterator();
+        while (prop_iter.next()) |entry| {
+            obj.properties.put(vm.allocator, entry.key_ptr.*, entry.value_ptr.*) catch
+                return BytecodeVM.VMError.OutOfMemory;
+        }
+    }
+
+    // 调整栈布局：将对象插入到参数之下
+    // 当前栈: [arg1, arg2, ..., argN]（arg_count 个参数在栈顶）
+    // 目标栈: [object, arg1, arg2, ..., argN]
+    if (arg_count > 0) {
+        // 保存参数到临时缓冲区
+        var args_buf: [16]Value = undefined;
+        const actual_count = @min(arg_count, 16);
+        var i: u16 = 0;
+        while (i < actual_count) : (i += 1) {
+            args_buf[i] = try vm.pop();
+        }
+        // 如果参数超过16个，使用动态分配
+        var dyn_args: ?std.ArrayListUnmanaged(Value) = null;
+        defer if (dyn_args) |*da| da.deinit(vm.allocator);
+        if (arg_count > 16) {
+            var da = std.ArrayListUnmanaged(Value){ .items = &.{}, .capacity = 0 };
+            // 先把已弹出的16个参数保存
+            var j: u16 = 0;
+            while (j < actual_count) : (j += 1) {
+                // 注意：弹出顺序是逆序的，需要反转
+                try da.append(vm.allocator, args_buf[actual_count - 1 - j]);
+            }
+            // 继续弹出剩余参数
+            var k: u16 = 16;
+            while (k < arg_count) : (k += 1) {
+                try da.append(vm.allocator, try vm.pop());
+            }
+            // 反转整个列表
+            var left: usize = 0;
+            var right: usize = da.items.len - 1;
+            while (left < right) {
+                const tmp = da.items[left];
+                da.items[left] = da.items[right];
+                da.items[right] = tmp;
+                left += 1;
+                right -= 1;
+            }
+            dyn_args = da;
+        }
+
+        // 压入对象
+        try vm.push(.{ .object_val = obj });
+
+        // 压回参数（正序）
+        if (dyn_args) |da| {
+            for (da.items) |arg| {
+                try vm.push(arg);
+            }
+        } else {
+            // args_buf 中的参数是逆序弹出的，需要正序压回
+            var j: u16 = 0;
+            while (j < actual_count) : (j += 1) {
+                try vm.push(args_buf[actual_count - 1 - j]);
+            }
+        }
+    } else {
+        // 没有参数，直接压入对象
+        try vm.push(.{ .object_val = obj });
+    }
+
     return .continue_execution;
 }
 
@@ -6152,8 +8222,9 @@ fn handleGetProp(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) Bytecode
 }
 
 fn handleSetProp(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) BytecodeVM.VMError!DispatchResult {
-    const value = try vm.pop();
-    const obj_val = try vm.pop();
+    // 栈布局: [value, obj]（visitAssignment 先压值再压对象）
+    const obj_val = try vm.pop(); // 先弹出对象（栈顶）
+    const value = try vm.pop(); // 再弹出值（次栈顶）
     const prop_idx = inst.operand1;
 
     // 类型反馈：记录属性设置的对象类型和值类型
@@ -6299,6 +8370,66 @@ fn handleToString(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VME
     return .continue_execution;
 }
 
+fn handleToArray(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
+    const val = try vm.pop();
+    switch (val) {
+        .array_val => |a| {
+            a.ref_count += 1;
+            try vm.push(.{ .array_val = a });
+        },
+        .null_val => {
+            const arr = vm.createArray() catch return BytecodeVM.VMError.OutOfMemory;
+            try vm.push(.{ .array_val = arr });
+        },
+        else => {
+            const arr = vm.createArray() catch return BytecodeVM.VMError.OutOfMemory;
+            arr.elements.append(vm.allocator, val) catch return BytecodeVM.VMError.OutOfMemory;
+            try vm.push(.{ .array_val = arr });
+        },
+    }
+    return .continue_execution;
+}
+
+fn handleToObject(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
+    const val = try vm.pop();
+    switch (val) {
+        .object_val => |o| {
+            o.ref_count += 1;
+            try vm.push(.{ .object_val = o });
+        },
+        .array_val => |arr| {
+            const obj = vm.createObject(0) catch return BytecodeVM.VMError.OutOfMemory;
+            var iter = arr.keys.iterator();
+            while (iter.next()) |entry| {
+                const key = entry.key_ptr.*;
+                const idx = entry.value_ptr.*;
+                if (idx < arr.elements.items.len) {
+                    obj.properties.put(vm.allocator, key, arr.elements.items[idx]) catch {};
+                }
+            }
+            if (arr.elements.items.len > 0 and arr.keys.count() == 0) {
+                var i: usize = 0;
+                while (i < arr.elements.items.len) : (i += 1) {
+                    const key = std.fmt.allocPrint(vm.allocator, "{d}", .{i}) catch continue;
+                    defer vm.allocator.free(key);
+                    obj.properties.put(vm.allocator, key, arr.elements.items[i]) catch {};
+                }
+            }
+            try vm.push(.{ .object_val = obj });
+        },
+        .null_val => {
+            const obj = vm.createObject(0) catch return BytecodeVM.VMError.OutOfMemory;
+            try vm.push(.{ .object_val = obj });
+        },
+        else => {
+            const obj = vm.createObject(0) catch return BytecodeVM.VMError.OutOfMemory;
+            obj.properties.put(vm.allocator, "scalar", val) catch {};
+            try vm.push(.{ .object_val = obj });
+        },
+    }
+    return .continue_execution;
+}
+
 fn handleIsNull(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMError!DispatchResult {
     const val = try vm.pop();
     try vm.push(.{ .bool_val = val == .null_val });
@@ -6349,7 +8480,7 @@ fn handleConcat(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMErr
     if (a == .string_val and b == .string_val) {
         const str_a = a.string_val.data;
         const str_b = b.string_val.data;
-        
+
         // 检查长度相加是否溢出
         const add_result = @addWithOverflow(str_a.len, str_b.len);
         if (add_result[1] != 0) {
@@ -6362,7 +8493,7 @@ fn handleConcat(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMErr
             vm.pushFast(.{ .string_val = empty_str });
             return .continue_execution;
         }
-        
+
         const result_len = add_result[0];
 
         // OPT-009: 小字符串使用栈上缓冲区避免堆分配
@@ -6405,7 +8536,7 @@ fn handleConcat(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMErr
     // 慢路径：需要类型转换
     const str_a = valueToString(vm, a) catch return BytecodeVM.VMError.OutOfMemory;
     const str_b = valueToString(vm, b) catch return BytecodeVM.VMError.OutOfMemory;
-    
+
     // 检查长度相加是否溢出
     const add_result = @addWithOverflow(str_a.len, str_b.len);
     if (add_result[1] != 0) {
@@ -6418,7 +8549,7 @@ fn handleConcat(vm: *BytecodeVM, _: *CallFrame, _: Instruction) BytecodeVM.VMErr
         vm.pushFast(.{ .string_val = empty_str });
         return .continue_execution;
     }
-    
+
     const result_len = add_result[0];
     const result_data = vm.allocator.alloc(u8, result_len) catch
         return BytecodeVM.VMError.OutOfMemory;

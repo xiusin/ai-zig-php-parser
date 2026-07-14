@@ -58,7 +58,7 @@ pub const Profiler = struct {
         while (self.running.load(.seq_cst)) {
             // 采样当前调用栈（简化实现）
             self.recordSample("main") catch {};
-            
+
             // 休眠
             std.Thread.sleep(self.sample_interval_us * 1000);
         }

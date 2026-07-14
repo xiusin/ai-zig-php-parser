@@ -16,15 +16,15 @@ pub const ProgramGenerator = struct {
     /// 生成随机程序
     pub fn generate(self: *ProgramGenerator) !Program {
         const random = self.rng.random();
-        
+
         const num_functions = random.intRangeAtMost(usize, 1, 5);
         var functions = try std.ArrayList(Function).initCapacity(self.allocator, num_functions);
-        
+
         var i: usize = 0;
         while (i < num_functions) : (i += 1) {
             try functions.append(self.allocator, try self.generateFunction());
         }
-        
+
         return Program{
             .functions = functions,
             .allocator = self.allocator,
@@ -33,15 +33,15 @@ pub const ProgramGenerator = struct {
 
     fn generateFunction(self: *ProgramGenerator) !Function {
         const random = self.rng.random();
-        
+
         const num_statements = random.intRangeAtMost(usize, 1, 10);
         var statements = try std.ArrayList(Statement).initCapacity(self.allocator, num_statements);
-        
+
         var i: usize = 0;
         while (i < num_statements) : (i += 1) {
             try statements.append(self.allocator, try self.generateStatement());
         }
-        
+
         return Function{
             .name = try self.generateName(),
             .statements = statements,
@@ -52,7 +52,7 @@ pub const ProgramGenerator = struct {
     fn generateStatement(self: *ProgramGenerator) !Statement {
         const random = self.rng.random();
         const kind = random.intRangeAtMost(u8, 0, 2);
-        
+
         return switch (kind) {
             0 => Statement{ .assignment = .{
                 .var_name = try self.generateName(),
@@ -134,11 +134,11 @@ pub const ExecutionResult = struct {
     pub fn equals(self: *ExecutionResult, other: *ExecutionResult) bool {
         if (self.return_value != other.return_value) return false;
         if (self.side_effects.items.len != other.side_effects.items.len) return false;
-        
+
         for (self.side_effects.items, 0..) |effect, i| {
             if (!effect.equals(other.side_effects.items[i])) return false;
         }
-        
+
         return true;
     }
 };

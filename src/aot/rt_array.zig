@@ -445,4 +445,3 @@ pub const PHPArray = struct {
         try self.set(allocator, .{ .integer = @intCast(index) }, value);
     }
 };
-

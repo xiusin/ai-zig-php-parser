@@ -1,3 +1,11 @@
+//! @deprecated 此文件已废弃，请使用 fn_dispatch.zig 替代
+//! 所有功能已迁移到 fn_dispatch.zig：
+//! - BuiltinId → fn_dispatch.BuiltinId (u16)
+//! - lookup() → fn_dispatch.lookup() (StaticStringMap O(1))
+//! - FastBuiltins → fn_dispatch.FastBuiltins
+//! - 新增: HANDLER_TABLE, dispatch(), validateArgs(), getMeta()
+//!
+//! 原始说明：
 //! Builtin Function Direct Dispatch
 //! 目标：实现内置函数的零开销直接调用
 //!
@@ -395,7 +403,7 @@ pub fn initDispatchTable(stdlib: anytype) void {
     // 这个函数将在 VM.init() 中被调用
 
     // 这里我们只是预留接口，实际的函数指针映射
-    // 将通过 VM 的 stdlib.getFunction() 动态查找
+    // 已通过 fn_dispatch 的 O(1) StaticStringMap 查找，无需 stdlib.getFunction()
     _ = stdlib;
 }
 

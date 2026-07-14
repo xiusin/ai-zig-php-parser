@@ -456,11 +456,11 @@ pub const CompactingGC = struct {
     /// 更新所有引用
     fn updateReferences(self: *CompactingGC) !void {
         const gc_scanner = @import("gc_scanner.zig");
-        
+
         // 创建对象扫描器
         var scanner = gc_scanner.ObjectScanner.init(self.allocator);
         defer scanner.deinit();
-        
+
         // 遍历所有存活对象，更新其中的引用
         for (self.region.objects.items) |obj| {
             if (obj.alive) {
@@ -468,12 +468,12 @@ pub const CompactingGC = struct {
                 // 1. 将 obj 转换为 GCObjectHeader
                 // 2. 使用 scanner 扫描并更新引用
                 // 3. 使用 forwarding_table 查找新地址
-                
+
                 // 示例实现框架：
                 // const obj_header = getObjectHeaderFromMemoryObject(&obj);
                 // try scanner.updateReferences(obj_header, struct {
                 //     forwarding_table: *ForwardingTable,
-                //     
+                //
                 //     fn update(self: @This(), ref: **GCObjectHeader) !void {
                 //         const old_addr = @intFromPtr(ref.*);
                 //         const old_ptr: [*]u8 = @ptrFromInt(old_addr);
@@ -482,17 +482,17 @@ pub const CompactingGC = struct {
                 //         }
                 //     }
                 // }{ .forwarding_table = &self.forwarding_table }.update);
-                
+
                 _ = obj;
                 _ = scanner;
-                
+
                 // 注意：要完全修复此函数，需要：
                 // 1. 定义 MemoryObject 到 GCObjectHeader 的转换
                 // 2. 实现引用地址的读取和更新
                 // 3. 集成 forwarding_table 查找
             }
         }
-        
+
         self.stats.updated_references += 1; // 简化统计
     }
 

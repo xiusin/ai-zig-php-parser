@@ -41,7 +41,7 @@ pub const BoyerMoore = struct {
 
     fn buildGoodSuffixTable(self: *BoyerMoore) !void {
         const m = self.pattern.len;
-        
+
         // 简化实现：所有位置都使用模式长度
         for (self.good_suffix_table) |*entry| {
             entry.* = m;

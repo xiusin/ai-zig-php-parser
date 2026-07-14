@@ -39,11 +39,36 @@ pub const Value = struct {
     pub const TYPE_FUNCTION: u64 = nanbox_abi.TYPE_FUNCTION;
     pub const TYPE_REF: u64 = nanbox_abi.TYPE_REF;
     pub const TYPE_BIGINT: u64 = nanbox_abi.TYPE_BIGINT;
+    pub const TYPE_RESOURCE: u64 = nanbox_abi.TYPE_RESOURCE;
 
     // 堆装箱大整数（超出48位范围）
     pub const BoxedInt = struct {
         ref_count: u32,
         value: i64,
+    };
+
+    // PHP 资源类型（文件句柄等）
+    pub const PHPResource = struct {
+        ref_count: u32,
+        file_handle: ?*std.Io.File, // 堆分配的文件句柄（null 表示虚拟句柄或已关闭）
+        type_name: []const u8, // 资源类型名（如 "stream"）
+        closed: bool = false, // 是否已关闭（fclose 后设为 true）
+
+        pub fn retain(self: *PHPResource) void {
+            self.ref_count += 1;
+        }
+
+        pub fn release(self: *PHPResource, allocator: Allocator) void {
+            if (self.ref_count > 0) {
+                self.ref_count -= 1;
+                if (self.ref_count == 0) {
+                    if (self.file_handle) |fh| {
+                        allocator.destroy(fh);
+                    }
+                    allocator.destroy(self);
+                }
+            }
+        }
     };
 
     // 48位整数常量
@@ -122,6 +147,12 @@ pub const Value = struct {
         return .{ .val = nanbox_abi.encodePtr(addr, TYPE_REF) };
     }
 
+    /// 创建资源值
+    pub fn initResource(res: *PHPResource) Value {
+        const addr = @intFromPtr(res);
+        return .{ .val = nanbox_abi.encodePtr(addr, TYPE_RESOURCE) };
+    }
+
     // ========================================================================
     // 类型检查
     // ========================================================================
@@ -182,6 +213,13 @@ pub const Value = struct {
         if ((self.val & (SIGN_BIT | QNAN)) != QNAN) return false;
         // 然后检查类型标签
         return (self.val & TYPE_MASK) == TYPE_REF;
+    }
+
+    pub fn isResource(self: Value) bool {
+        if ((self.val & (SIGN_BIT | QNAN)) != QNAN) return false;
+        if ((self.val & TYPE_MASK) != TYPE_RESOURCE) return false;
+        // 已关闭的 resource 不再是有效 resource
+        return !self.asResource().closed;
     }
 
     // ========================================================================
@@ -251,6 +289,11 @@ pub const Value = struct {
         return @ptrFromInt(ptr_val);
     }
 
+    pub fn asResource(self: Value) *PHPResource {
+        const ptr_val = nanbox_abi.decodePtr(self.val);
+        return @ptrFromInt(ptr_val);
+    }
+
     pub fn asRef(self: Value) *Value {
         const ptr_val = nanbox_abi.decodePtr(self.val);
         return @ptrFromInt(ptr_val);
@@ -287,6 +330,8 @@ pub const Value = struct {
         } else if (self.isBigInt()) {
             const boxed: *BoxedInt = @ptrFromInt(nanbox_abi.decodePtr(self.val));
             boxed.ref_count += 1;
+        } else if (self.isResource()) {
+            self.asResource().retain();
         }
         return self;
     }
@@ -318,6 +363,8 @@ pub const Value = struct {
                     allocator.destroy(boxed);
                 }
             }
+        } else if (self.isResource()) {
+            self.asResource().release(allocator);
         }
     }
 
@@ -331,8 +378,12 @@ pub const Value = struct {
         if (self.isBool()) return self.asBool();
         if (self.isInt()) return self.asInt() != 0;
         if (self.isFloat()) return self.asFloat() != 0.0;
-        if (self.isString()) return self.asString().length > 0;
+        if (self.isString()) {
+            const s = self.asString();
+            return s.length > 0 and !std.mem.eql(u8, s.data, "0");
+        }
         if (self.isArray()) return self.asArray().count() > 0;
+        if (self.isResource()) return true;
         return true;
     }
 
@@ -501,6 +552,7 @@ pub const PHPClosure = struct {
     param_count: u16 = 0,
     required_params: u16 = 0,
     bound_this: Value = Value.initNull(), // Closure::bind/bindTo 绑定的 $this
+    bound_scope: ?*const ClassMeta = null, // Closure::bind/bindTo 绑定的作用域类
     is_static: bool = false, // static closure 不能绑定 $this
 
     pub fn init(
@@ -527,7 +579,7 @@ pub const PHPClosure = struct {
             alloc_counters.php_closure_live_objects,
         );
 
-        f.* = .{ .func = func, .captures = caps, .ref_count = 1, .gc_info = .{}, .allocator = allocator, .param_count = 0, .required_params = 0, .bound_this = Value.initNull(), .is_static = false };
+        f.* = .{ .func = func, .captures = caps, .ref_count = 1, .gc_info = .{}, .allocator = allocator, .param_count = 0, .required_params = 0, .bound_this = Value.initNull(), .bound_scope = null, .is_static = false };
         return f;
     }
 
@@ -564,7 +616,7 @@ pub fn val_assign(target: *Value, value: Value) void {
         // 调用者已经执行一次 retain，因此当 ref_count > 1 时，除本次引用外仍有其他持有者，
         // 需要分离（COW）以维持值语义。
         if (arr.ref_count > 1) {
-            const cloned = arr.cloneDeep(runtime_allocator) catch {
+            const cloned = arr.cloneShallow(runtime_allocator) catch {
                 target.* = value;
                 return;
             };
@@ -587,14 +639,13 @@ pub fn ref_aware_store(target: *Value, new_val: Value) void {
     dest.* = new_val;
 }
 
-/// 变量解引用
+/// 变量解引用（跟随完整引用链）
 pub fn val_deref(val: *Value) *Value {
-    if (val.isRef()) {
-        // 直接返回指针指向的Value
-        const ptr = val.asRef();
-        return ptr;
+    var current = val;
+    while (current.isRef()) {
+        current = current.asRef();
     }
-    return val;
+    return current;
 }
 
 pub fn make_ref(ptr: *Value, allocator: Allocator) !Value {
@@ -973,24 +1024,24 @@ pub fn php_memory_get_peak_usage(args: []const Value, allocator: Allocator) !Val
 /// shell_exec - 执行shell命令并返回完整输出
 pub fn php_shell_exec(args: []const Value, allocator: Allocator) !Value {
     if (args.len < 1) return Value.initNull();
-    
+
     const cmd_val = args[0];
     if (!cmd_val.isString()) return Value.initNull();
-    
+
     const cmd_str = cmd_val.asString().data;
-    
+
     // 执行命令
     const result = std.process.Child.run(.{
         .allocator = allocator,
         .argv = &[_][]const u8{ "/bin/sh", "-c", cmd_str },
         .max_output_bytes = 1024 * 1024,
     }) catch return Value.initNull();
-    
+
     defer {
         allocator.free(result.stdout);
         allocator.free(result.stderr);
     }
-    
+
     const output = try PHPString.init(allocator, result.stdout);
     return Value.initString(output);
 }
@@ -999,24 +1050,24 @@ pub fn php_shell_exec(args: []const Value, allocator: Allocator) !Value {
 /// PHP签名: exec(string $command, array &$output = null, int &$result_code = null): string|false
 pub fn php_exec(args: []const Value, allocator: Allocator) !Value {
     if (args.len < 1) return Value.initNull();
-    
+
     const cmd_val = args[0];
     if (!cmd_val.isString()) return Value.initNull();
-    
+
     const cmd_str = cmd_val.asString().data;
-    
+
     // 执行命令
     const result = std.process.Child.run(.{
         .allocator = allocator,
         .argv = &[_][]const u8{ "/bin/sh", "-c", cmd_str },
         .max_output_bytes = 1024 * 1024,
     }) catch return Value.initBool(false);
-    
+
     defer {
         allocator.free(result.stdout);
         allocator.free(result.stderr);
     }
-    
+
     // 将输出按行分割成数组
     const arr = try PHPArray.init(allocator);
     var lines = std.mem.splitScalar(u8, result.stdout, '\n');
@@ -1029,7 +1080,7 @@ pub fn php_exec(args: []const Value, allocator: Allocator) !Value {
         try arr.set(allocator, ArrayKey{ .integer = idx }, Value.initString(line_str));
         idx += 1;
     }
-    
+
     // 如果有第二个参数（&$output引用），写回输出数组
     if (args.len >= 2) {
         const output_ref = args[1];
@@ -1053,7 +1104,7 @@ pub fn php_exec(args: []const Value, allocator: Allocator) !Value {
             }
         }
     }
-    
+
     // 如果有第三个参数（&$return_code引用），写回返回码
     if (args.len >= 3) {
         const return_code_ref = args[2];
@@ -1064,7 +1115,7 @@ pub fn php_exec(args: []const Value, allocator: Allocator) !Value {
             ptr.* = Value.initInt(exit_code);
         }
     }
-    
+
     // 返回最后一行输出
     if (last_line.len > 0) {
         const last_str = try PHPString.init(allocator, last_line);
@@ -1077,29 +1128,29 @@ pub fn php_exec(args: []const Value, allocator: Allocator) !Value {
 /// PHP签名: system(string $command, int &$result_code = null): string|false
 pub fn php_system(args: []const Value, allocator: Allocator) !Value {
     if (args.len < 1) return Value.initNull();
-    
+
     const cmd_val = args[0];
     if (!cmd_val.isString()) return Value.initNull();
-    
+
     const cmd_str = cmd_val.asString().data;
-    
+
     // 执行命令
     const result = std.process.Child.run(.{
         .allocator = allocator,
         .argv = &[_][]const u8{ "/bin/sh", "-c", cmd_str },
         .max_output_bytes = 1024 * 1024,
     }) catch return Value.initBool(false);
-    
+
     defer {
         allocator.free(result.stdout);
         allocator.free(result.stderr);
     }
-    
+
     // 输出到stdout（模拟PHP的system行为）
     if (result.stdout.len > 0) {
         fileWriteAll(1, result.stdout);
     }
-    
+
     // 如果有第二个参数（&$return_var引用），写回返回码
     if (args.len >= 2) {
         const return_var_ref = args[1];
@@ -1110,16 +1161,16 @@ pub fn php_system(args: []const Value, allocator: Allocator) !Value {
             ptr.* = Value.initInt(exit_code);
         }
     }
-    
+
     // 返回最后一行
     if (result.stdout.len == 0) return Value.initBool(false);
-    
+
     var lines = std.mem.splitScalar(u8, result.stdout, '\n');
     var last_line: []const u8 = "";
     while (lines.next()) |line| {
         if (line.len > 0) last_line = line;
     }
-    
+
     const last_str = try PHPString.init(allocator, last_line);
     return Value.initString(last_str);
 }
@@ -1132,9 +1183,9 @@ pub fn php_escapeshellarg(arg_val: Value, allocator: Allocator) !Value {
         defer str.release(allocator);
         return php_escapeshellarg(Value.initString(str), allocator);
     }
-    
+
     const arg = arg_val.asString().data;
-    
+
     // 计算结果长度：每个单引号需要转义为 '\''，加上首尾的单引号
     var result_len: usize = 2; // 首尾单引号
     for (arg) |c| {
@@ -1144,12 +1195,12 @@ pub fn php_escapeshellarg(arg_val: Value, allocator: Allocator) !Value {
             result_len += 1;
         }
     }
-    
+
     const result = try allocator.alloc(u8, result_len);
     var pos: usize = 0;
     result[pos] = '\'';
     pos += 1;
-    
+
     for (arg) |c| {
         if (c == '\'') {
             // 替换 ' 为 '\''
@@ -1163,9 +1214,9 @@ pub fn php_escapeshellarg(arg_val: Value, allocator: Allocator) !Value {
             pos += 1;
         }
     }
-    
+
     result[pos] = '\'';
-    
+
     const php_str = try PHPString.init(allocator, result);
     allocator.free(result);
     return Value.initString(php_str);
@@ -1179,21 +1230,21 @@ pub fn php_escapeshellcmd(cmd_val: Value, allocator: Allocator) !Value {
         defer str.release(allocator);
         return php_escapeshellcmd(Value.initString(str), allocator);
     }
-    
+
     const cmd = cmd_val.asString().data;
-    
+
     // 需要转义的字符: &#;`|*?~<>^()[]{}$\, \x0A, \xFF, 以及未配对的引号
     const special_chars = "&#;`|*?~<>^()[]{}$\\";
-    
+
     // 计算结果长度
     var result_len: usize = 0;
     var single_quote_count: usize = 0;
     var double_quote_count: usize = 0;
-    
+
     for (cmd) |c| {
         if (c == '\'') single_quote_count += 1;
         if (c == '"') double_quote_count += 1;
-        
+
         var is_special = false;
         for (special_chars) |sc| {
             if (c == sc) {
@@ -1207,16 +1258,16 @@ pub fn php_escapeshellcmd(cmd_val: Value, allocator: Allocator) !Value {
             result_len += 1;
         }
     }
-    
+
     // 处理未配对的引号
     const escape_single = (single_quote_count % 2) == 1;
     const escape_double = (double_quote_count % 2) == 1;
     if (escape_single) result_len += single_quote_count;
     if (escape_double) result_len += double_quote_count;
-    
+
     const result = try allocator.alloc(u8, result_len);
     var pos: usize = 0;
-    
+
     for (cmd) |c| {
         // 检查是否是特殊字符
         var is_special = false;
@@ -1226,7 +1277,7 @@ pub fn php_escapeshellcmd(cmd_val: Value, allocator: Allocator) !Value {
                 break;
             }
         }
-        
+
         if (c == '\'' and escape_single) {
             result[pos] = '\\';
             result[pos + 1] = '\'';
@@ -1244,7 +1295,7 @@ pub fn php_escapeshellcmd(cmd_val: Value, allocator: Allocator) !Value {
             pos += 1;
         }
     }
-    
+
     const php_str = try PHPString.init(allocator, result[0..pos]);
     allocator.free(result);
     return Value.initString(php_str);
@@ -1253,43 +1304,42 @@ pub fn php_escapeshellcmd(cmd_val: Value, allocator: Allocator) !Value {
 /// substr_replace - 替换字符串的子串
 pub fn php_substr_replace(args: []const Value, allocator: Allocator) !Value {
     if (args.len < 2) return Value.initNull();
-    
+
     const str_val = args[0];
     if (!str_val.isString()) return Value.initNull();
     const str = str_val.asString().data;
-    
+
     const replacement_val = args[1];
     if (!replacement_val.isString()) return Value.initNull();
     const replacement = replacement_val.asString().data;
-    
+
     const start = if (args.len >= 3) args[2].toInt() else 0;
     const length = if (args.len >= 4) args[3].toInt() else @as(i64, @intCast(str.len));
-    
+
     // 处理负数索引
-    const actual_start = if (start < 0) 
-        @max(0, @as(i64, @intCast(str.len)) + start) 
-    else 
+    const actual_start = if (start < 0)
+        @max(0, @as(i64, @intCast(str.len)) + start)
+    else
         @min(start, @as(i64, @intCast(str.len)));
-    
+
     const actual_length = if (length < 0)
         @max(0, @as(i64, @intCast(str.len)) - actual_start + length)
     else
         @min(length, @as(i64, @intCast(str.len)) - actual_start);
-    
+
     const start_idx = @as(usize, @intCast(actual_start));
     const end_idx = @as(usize, @intCast(actual_start + actual_length));
-    
+
     // 构建结果字符串
     var result = try std.ArrayList(u8).initCapacity(allocator, str.len + replacement.len);
     errdefer result.deinit();
-    
+
     try result.appendSlice(str[0..start_idx]);
     try result.appendSlice(replacement);
     if (end_idx < str.len) {
         try result.appendSlice(str[end_idx..]);
     }
-    
+
     const output = try PHPString.init(allocator, try result.toOwnedSlice());
     return Value.initString(output);
 }
-

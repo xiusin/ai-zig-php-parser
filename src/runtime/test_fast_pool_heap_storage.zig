@@ -1,7 +1,7 @@
 //! Fast Pool 堆存储属性测试
-//! 
+//!
 //! 验证需求 4.5：Fast Pool 堆存储正确性
-//! 
+//!
 //! 属性 25：Fast Pool 堆存储正确性
 //! - 内联存储满时自动切换到堆存储
 //! - 堆存储无容量限制
@@ -132,8 +132,8 @@ test "Property 25.3: Variables in both inline and heap storage are accessible" {
 }
 
 // 属性 25.4：变量更新正确处理引用计数
-// @property ∀ frame, var, old_val, new_val: 
-//   frame.setLocal(var, old_val) ∧ frame.setLocal(var, new_val) ⇒ 
+// @property ∀ frame, var, old_val, new_val:
+//   frame.setLocal(var, old_val) ∧ frame.setLocal(var, new_val) ⇒
 //   old_val.released ∧ new_val.retained
 test "Property 25.4: Variable updates handle reference counting correctly" {
     var pool = fast_pool.CallFramePool.init(testing.allocator);
@@ -175,7 +175,7 @@ test "Property 25.4: Variable updates handle reference counting correctly" {
 }
 
 // 属性 25.5：清理时正确释放所有资源
-// @property ∀ frame: frame.clearLocals() ⇒ 
+// @property ∀ frame: frame.clearLocals() ⇒
 //   frame.getLocalCount() = 0 ∧ !frame.isUsingHeapStorage()
 test "Property 25.5: Cleanup releases all resources correctly" {
     var pool = fast_pool.CallFramePool.init(testing.allocator);
@@ -208,7 +208,7 @@ test "Property 25.5: Cleanup releases all resources correctly" {
 }
 
 // 属性 25.6：帧重用时堆存储被正确清理
-// @property ∀ frame1, frame2: 
+// @property ∀ frame1, frame2:
 //   pool.release(frame1) ∧ frame2 = pool.acquire() ∧ frame1 = frame2 ⇒
 //   !frame2.isUsingHeapStorage() ∧ frame2.getLocalCount() = 0
 test "Property 25.6: Heap storage is cleaned on frame reuse" {
@@ -217,7 +217,7 @@ test "Property 25.6: Heap storage is cleaned on frame reuse" {
 
     // 第一次使用帧
     const frame1 = try pool.acquire("func1", "test.php", 1);
-    
+
     // 添加大量变量触发堆存储
     var i: usize = 0;
     while (i < 20) : (i += 1) {
@@ -225,20 +225,20 @@ test "Property 25.6: Heap storage is cleaned on frame reuse" {
         defer testing.allocator.free(name);
         try frame1.setLocal(testing.allocator, name, types.Value.initInt(@intCast(i)));
     }
-    
+
     try testing.expect(frame1.isUsingHeapStorage());
     const frame1_ptr = frame1;
-    
+
     // 释放帧
     pool.release(frame1, testing.allocator);
-    
+
     // 重新获取帧（应该重用同一个帧）
     const frame2 = try pool.acquire("func2", "test.php", 2);
     defer pool.release(frame2, testing.allocator);
-    
+
     // 验证是同一个帧
     try testing.expect(frame2 == frame1_ptr);
-    
+
     // 验证堆存储已清理
     try testing.expect(!frame2.isUsingHeapStorage());
     try testing.expect(frame2.getLocalCount() == 0);
@@ -249,7 +249,7 @@ test "Property 25.6: Heap storage is cleaned on frame reuse" {
 test "Property 25.7: Memory safety in concurrent scenarios" {
     // 注意：这个测试验证单个帧的内存安全，不涉及真正的并发
     // 因为 PooledCallFrame 被标记为 ISOLATED (单线程)
-    
+
     var pool = fast_pool.CallFramePool.init(testing.allocator);
     defer pool.deinit();
 
@@ -282,7 +282,7 @@ test "Property 25.7: Memory safety in concurrent scenarios" {
     while (i < frames.len) : (i += 1) {
         const count = (i + 1) * 10;
         try testing.expect(frames[i].getLocalCount() == count);
-        
+
         var j: usize = 0;
         while (j < count) : (j += 1) {
             const name = try std.fmt.allocPrint(testing.allocator, "frame{d}_var{d}", .{ i, j });

@@ -40,7 +40,7 @@ pub const OpCode = opcode_mod.OpCode;
 //     pop = 0x09,
 //     dup = 0x0A,
 //     swap = 0x0B,
-// 
+//
 //     // 整数算术 (0x10-0x1F) - 类型特化
 //     add_i = 0x10,
 //     sub_i = 0x11,
@@ -50,14 +50,14 @@ pub const OpCode = opcode_mod.OpCode;
 //     neg_i = 0x15,
 //     inc_i = 0x16,
 //     dec_i = 0x17,
-// 
+//
 //     // 浮点算术 (0x20-0x2F)
 //     add_f = 0x20,
 //     sub_f = 0x21,
 //     mul_f = 0x22,
 //     div_f = 0x23,
 //     neg_f = 0x25,
-// 
+//
 //     // 通用算术 (0x30-0x3F) - 带类型检查
 //     add = 0x30,
 //     sub = 0x31,
@@ -65,7 +65,7 @@ pub const OpCode = opcode_mod.OpCode;
 //     div = 0x33,
 //     mod = 0x34,
 //     neg = 0x35,
-// 
+//
 //     // 比较 (0x40-0x4F)
 //     eq = 0x40,
 //     ne = 0x41,
@@ -76,7 +76,7 @@ pub const OpCode = opcode_mod.OpCode;
 //     eq_i = 0x46,
 //     lt_i = 0x47,
 //     gt_i = 0x48,
-// 
+//
 //     // 位操作 (0x50-0x5F)
 //     band = 0x50,
 //     bor = 0x51,
@@ -84,12 +84,12 @@ pub const OpCode = opcode_mod.OpCode;
 //     bnot = 0x53,
 //     shl = 0x54,
 //     shr = 0x55,
-// 
+//
 //     // 逻辑 (0x60-0x6F)
 //     land = 0x60,
 //     lor = 0x61,
 //     lnot = 0x62,
-// 
+//
 //     // 控制流 (0x70-0x7F)
 //     jmp = 0x70, // 无条件跳转
 //     jz = 0x71, // 为假跳转
@@ -98,7 +98,7 @@ pub const OpCode = opcode_mod.OpCode;
 //     ret = 0x74, // 返回
 //     ret_nil = 0x75, // 返回 nil
 //     halt = 0x7F,
-// 
+//
 //     // 超级指令 (0x80-0x8F) - 合并常见序列
 //     load_add_i = 0x80, // push_local + add_i
 //     load_sub_i = 0x81,
@@ -108,7 +108,7 @@ pub const OpCode = opcode_mod.OpCode;
 //     push_1 = 0x85, // push_int 1
 //     push_m1 = 0x86, // push_int -1
 //     dup_add_i = 0x87, // dup + add_i
-// 
+//
 //     // 数组/对象 (0x90-0x9F)
 //     new_array = 0x90,
 //     array_get = 0x91,
@@ -117,15 +117,15 @@ pub const OpCode = opcode_mod.OpCode;
 //     obj_get = 0x94,
 //     obj_set = 0x95,
 //     obj_call = 0x96,
-// 
+//
 //     // 字符串 (0xA0-0xAF)
 //     concat = 0xA0,
 //     strlen = 0xA1,
-// 
+//
 //     // 内置函数 (0xB0-0xBF)
 //     echo = 0xB0,
 //     print = 0xB1,
-// 
+//
 //     // 调试 (0xF0-0xFF)
 //     debug = 0xF0,
 //     line = 0xF1, // 行号信息
@@ -252,20 +252,20 @@ pub const FastVM = struct {
     }
 
     fn jitCompile(self: *FastVM, func: *const CompiledFunc, osr_ip: ?usize) void {
-       const mutable_func = @constCast(func);
-       if (mutable_func.jit_code != null) return;
-       
-       std.debug.print("Attempting JIT compile for {s} osr_ip={?}\n", .{func.name, osr_ip});
-       
-       if (self.jit_compiler.compile(&self.code_cache, func, &self.tf, osr_ip)) |res| {
+        const mutable_func = @constCast(func);
+        if (mutable_func.jit_code != null) return;
+
+        std.debug.print("Attempting JIT compile for {s} osr_ip={?}\n", .{ func.name, osr_ip });
+
+        if (self.jit_compiler.compile(&self.code_cache, func, &self.tf, osr_ip)) |res| {
             if (res) |r| {
                 mutable_func.jit_code = r.code;
                 mutable_func.osr_entry_offset = r.osr_entry_offset;
-                std.debug.print("JIT compiled {s} osr_off={d}\n", .{func.name, r.osr_entry_offset});
+                std.debug.print("JIT compiled {s} osr_off={d}\n", .{ func.name, r.osr_entry_offset });
             }
-       } else |err| {
+        } else |err| {
             std.debug.print("JIT compilation failed: {s}\n", .{@errorName(err)});
-       }
+        }
     }
 
     pub fn deinit(self: *FastVM) void {
@@ -277,7 +277,7 @@ pub const FastVM = struct {
     /// 执行函数
     pub fn execute(self: *FastVM, func: *const CompiledFunc) !FastValue {
         // std.debug.print("FastVM executing {s} (len={d})\n", .{func.name, func.code.len});
-        
+
         // Force JIT for test
         // if (std.mem.eql(u8, func.name, "main") and func.jit_code == null) {
         //      self.jitCompile(func, null);
@@ -285,16 +285,16 @@ pub const FastVM = struct {
 
         // JIT Fast Path
         if (func.jit_code) |jit_ptr| {
-             // Check signature for "sum" or "main"
-             if (std.mem.eql(u8, func.name, "sum") or std.mem.eql(u8, func.name, "main")) {
-                 // const stack_ptr = self.stack.data.ptr;
-                 // const bp = self.stack.top; // Wait, bp should be 0 for main? No, execute sets bp to stack.top
-                 // For main, frame is set up below.
-                 // If we JIT, we need to setup frame or pass stack pointer correctly.
-                 // For now, let's skip JIT Fast Path for main on entry, rely on OSR.
-                 // return FastValue.initInt(42);
-                 _ = jit_ptr;
-             }
+            // Check signature for "sum" or "main"
+            if (std.mem.eql(u8, func.name, "sum") or std.mem.eql(u8, func.name, "main")) {
+                // const stack_ptr = self.stack.data.ptr;
+                // const bp = self.stack.top; // Wait, bp should be 0 for main? No, execute sets bp to stack.top
+                // For main, frame is set up below.
+                // If we JIT, we need to setup frame or pass stack pointer correctly.
+                // For now, let's skip JIT Fast Path for main on entry, rely on OSR.
+                // return FastValue.initInt(42);
+                _ = jit_ptr;
+            }
         }
 
         // 设置初始帧
@@ -339,7 +339,7 @@ pub const FastVM = struct {
             const op: OpCode = @enumFromInt(op_byte);
             frame.ip += 1;
             // std.debug.print("Op: {s} stack: {d}\n", .{@tagName(op), self.stack.top});
-            std.debug.print("Op: {s} stack: {d}\n", .{@tagName(op), self.stack.top});
+            std.debug.print("Op: {s} stack: {d}\n", .{ @tagName(op), self.stack.top });
 
             switch (op) {
                 // --- 栈操作 ---
@@ -615,27 +615,27 @@ pub const FastVM = struct {
                     const offset = std.mem.readInt(i16, code[frame.ip..][0..2], .little);
                     frame.ip += 2;
                     frame.ip = @intCast(@as(i32, @intCast(frame.ip)) + offset);
-                    
-                    std.debug.print("JMP offset: {d} counter: {d}\n", .{offset, frame.hot_counter});
+
+                    std.debug.print("JMP offset: {d} counter: {d}\n", .{ offset, frame.hot_counter });
                     if (offset < 0) {
                         // std.debug.print("Backward jump: {d}\n", .{offset});
                         frame.hot_counter +|= 1;
                         if (frame.hot_counter > 100) {
-                             self.jitCompile(frame.func, frame.ip);
-                             if (frame.func.jit_code) |jit_ptr| {
-                                 if (frame.func.osr_entry_offset != 0) {
-                                     const stack_ptr = self.stack.data.ptr;
-                                     const bp = frame.bp;
-                                     // Pass stack.top as 3rd argument (x2)
-                                     const stack_top = self.stack.top;
-                                     const code_ptr = @intFromPtr(jit_ptr);
-                                     const f: *const fn([*]FastValue, usize, usize, usize) callconv(.c) i64 = @ptrCast(@alignCast(@as(*anyopaque, @ptrFromInt(code_ptr))));
-                                     std.debug.print("JIT Call: stack_ptr={*} bp={d} stack_top={d} osr_off={d}\n", .{stack_ptr, bp, stack_top, frame.func.osr_entry_offset});
-                                     const ret = f(stack_ptr, bp, stack_top, frame.func.osr_entry_offset);
-                                     std.debug.print("OSR execution result: {d}\n", .{ret});
-                                     return FastValue.initInt(ret);
-                                 }
-                             }
+                            self.jitCompile(frame.func, frame.ip);
+                            if (frame.func.jit_code) |jit_ptr| {
+                                if (frame.func.osr_entry_offset != 0) {
+                                    const stack_ptr = self.stack.data.ptr;
+                                    const bp = frame.bp;
+                                    // Pass stack.top as 3rd argument (x2)
+                                    const stack_top = self.stack.top;
+                                    const code_ptr = @intFromPtr(jit_ptr);
+                                    const f: *const fn ([*]FastValue, usize, usize, usize) callconv(.c) i64 = @ptrCast(@alignCast(@as(*anyopaque, @ptrFromInt(code_ptr))));
+                                    std.debug.print("JIT Call: stack_ptr={*} bp={d} stack_top={d} osr_off={d}\n", .{ stack_ptr, bp, stack_top, frame.func.osr_entry_offset });
+                                    const ret = f(stack_ptr, bp, stack_top, frame.func.osr_entry_offset);
+                                    std.debug.print("OSR execution result: {d}\n", .{ret});
+                                    return FastValue.initInt(ret);
+                                }
+                            }
                         }
                     }
                 },
@@ -648,21 +648,21 @@ pub const FastVM = struct {
                             // std.debug.print("Backward jump (jz): {d}\n", .{offset});
                             frame.hot_counter +|= 1;
                             if (frame.hot_counter > 100) {
-                                 self.jitCompile(frame.func, frame.ip);
-                                 if (frame.func.jit_code) |jit_ptr| {
-                                     if (frame.func.osr_entry_offset != 0) {
-                                         const stack_ptr = self.stack.data.ptr;
-                                         const bp = frame.bp;
-                                         const stack_top = self.stack.top;
-                                         const code_ptr = @intFromPtr(jit_ptr);
-                                         const f: *const fn([*]FastValue, usize, usize, usize) callconv(.c) i64 = @ptrCast(@alignCast(@as(*anyopaque, @ptrFromInt(code_ptr))));
-                                         std.debug.print("JIT Call: stack_ptr={*} bp={d} stack_top={d} osr_off={d}\n", .{stack_ptr, bp, stack_top, frame.func.osr_entry_offset});
-                                         const ret = f(stack_ptr, bp, stack_top, frame.func.osr_entry_offset);
-                                         std.debug.print("OSR execution result: {d}\n", .{ret});
-                                         // return FastValue.initInt(ret);
-                                         // _ = ret;
-                                     }
-                                 }
+                                self.jitCompile(frame.func, frame.ip);
+                                if (frame.func.jit_code) |jit_ptr| {
+                                    if (frame.func.osr_entry_offset != 0) {
+                                        const stack_ptr = self.stack.data.ptr;
+                                        const bp = frame.bp;
+                                        const stack_top = self.stack.top;
+                                        const code_ptr = @intFromPtr(jit_ptr);
+                                        const f: *const fn ([*]FastValue, usize, usize, usize) callconv(.c) i64 = @ptrCast(@alignCast(@as(*anyopaque, @ptrFromInt(code_ptr))));
+                                        std.debug.print("JIT Call: stack_ptr={*} bp={d} stack_top={d} osr_off={d}\n", .{ stack_ptr, bp, stack_top, frame.func.osr_entry_offset });
+                                        const ret = f(stack_ptr, bp, stack_top, frame.func.osr_entry_offset);
+                                        std.debug.print("OSR execution result: {d}\n", .{ret});
+                                        // return FastValue.initInt(ret);
+                                        // _ = ret;
+                                    }
+                                }
                             }
                         }
                     }
@@ -676,19 +676,19 @@ pub const FastVM = struct {
                             // std.debug.print("Backward jump (jnz): {d}\n", .{offset});
                             frame.hot_counter +|= 1;
                             if (frame.hot_counter > 100) {
-                                 self.jitCompile(frame.func, frame.ip);
-                                 if (frame.func.jit_code) |jit_ptr| {
-                                     if (frame.func.osr_entry_offset != 0) {
-                                         const stack_ptr = self.stack.data.ptr;
-                                         const bp = frame.bp;
-                                         const stack_top = self.stack.top;
-                                         const code_ptr = @intFromPtr(jit_ptr) + frame.func.osr_entry_offset;
-                                         const f: *const fn([*]FastValue, usize, usize) callconv(.c) i64 = @ptrCast(@alignCast(@as(*anyopaque, @ptrFromInt(code_ptr))));
-                                         const ret = f(stack_ptr, bp, stack_top);
-                                         // return FastValue.initInt(ret);
-                                         _ = ret;
-                                     }
-                                 }
+                                self.jitCompile(frame.func, frame.ip);
+                                if (frame.func.jit_code) |jit_ptr| {
+                                    if (frame.func.osr_entry_offset != 0) {
+                                        const stack_ptr = self.stack.data.ptr;
+                                        const bp = frame.bp;
+                                        const stack_top = self.stack.top;
+                                        const code_ptr = @intFromPtr(jit_ptr) + frame.func.osr_entry_offset;
+                                        const f: *const fn ([*]FastValue, usize, usize) callconv(.c) i64 = @ptrCast(@alignCast(@as(*anyopaque, @ptrFromInt(code_ptr))));
+                                        const ret = f(stack_ptr, bp, stack_top);
+                                        // return FastValue.initInt(ret);
+                                        _ = ret;
+                                    }
+                                }
                             }
                         }
                     }
@@ -810,10 +810,9 @@ test "FastVM simple" {
 
     // 测试: 10 + 20 = 30
     const code = [_]u8{
-        @intFromEnum(OpCode.push_int), 10, 0, 0, 0,
-        @intFromEnum(OpCode.push_int), 20, 0, 0, 0,
-        @intFromEnum(OpCode.add_i),
-        @intFromEnum(OpCode.halt),
+        @intFromEnum(OpCode.push_int), 10,                        0, 0, 0,
+        @intFromEnum(OpCode.push_int), 20,                        0, 0, 0,
+        @intFromEnum(OpCode.add_i),    @intFromEnum(OpCode.halt),
     };
 
     const func = CompiledFunc{

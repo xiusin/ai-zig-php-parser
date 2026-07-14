@@ -1023,7 +1023,7 @@ test "DiagnosticEngine getLocation" {
     var engine = DiagnosticEngine.init(allocator);
     defer engine.deinit();
 
-    const source = 
+    const source =
         \\line 1
         \\line 2
         \\line 3

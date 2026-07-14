@@ -55,7 +55,7 @@ pub export fn aot_strtoupper(
 ) ?[*]u8 {
     const str = str_ptr[0..str_len];
     var ctx = createContext();
-    
+
     const result = core.string.strtoupper(&ctx, str) catch return null;
     out_len.* = result.len;
     return result.ptr;
@@ -69,7 +69,7 @@ pub export fn aot_strtolower(
 ) ?[*]u8 {
     const str = str_ptr[0..str_len];
     var ctx = createContext();
-    
+
     const result = core.string.strtolower(&ctx, str) catch return null;
     out_len.* = result.len;
     return result.ptr;
@@ -111,7 +111,7 @@ pub export fn aot_substr(
 ) ?[*]u8 {
     const str = str_ptr[0..str_len];
     var ctx = createContext();
-    
+
     const len_param: ?i64 = if (has_length) length else null;
     const result = core.string.substr(&ctx, str, start, len_param) catch return null;
     out_len.* = result.len;
@@ -127,7 +127,7 @@ pub export fn aot_trim(
 ) void {
     const str = str_ptr[0..str_len];
     const trimmed = core.string.trim(str);
-    
+
     out_start.* = @intFromPtr(trimmed.ptr) - @intFromPtr(str_ptr);
     out_len.* = trimmed.len;
 }
@@ -232,7 +232,7 @@ pub export fn aot_date(
 ) ?[*]u8 {
     const format = format_ptr[0..format_len];
     var ctx = createContext();
-    
+
     const ts: ?i64 = if (has_timestamp) timestamp else null;
     const result = core.time.date(&ctx, format, ts) catch return null;
     out_len.* = result.len;

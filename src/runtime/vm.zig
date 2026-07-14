@@ -20,8 +20,8 @@ const stdlib = @import("stdlib.zig");
 const StandardLibrary = stdlib.StandardLibrary;
 const reflection = @import("reflection.zig");
 const builtin_classes = @import("builtin_classes.zig");
-const builtin_registry = @import("builtin_registry.zig");
-const BuiltinRegistry = builtin_registry.BuiltinRegistry;
+// Deprecated: builtin_registry 已废弃，使用 fn_dispatch 替代
+// BuiltinError 已迁移到 fn_dispatch.BuiltinError
 const builtin_vars = @import("builtin_vars.zig");
 const database = @import("database.zig");
 const ReflectionSystem = reflection.ReflectionSystem;
@@ -52,7 +52,9 @@ const fast_string = @import("fast_string.zig");
 const fast_value = @import("fast_value.zig");
 const loop_optimizer = @import("loop_optimizer.zig");
 const inline_cache = @import("inline_cache.zig");
-const builtin_dispatch = @import("builtin_dispatch.zig");
+
+const fn_dispatch = @import("fn_dispatch.zig");
+const fn_table = @import("fn_table.zig");
 
 // FastVM for high-performance execution
 const fast_vm = @import("fast_vm.zig");
@@ -701,13 +703,8 @@ fn functionExistsFn(vm: *VM, args: []const Value) !Value {
 
     const function_name = function_name_val.getAsString().data.data;
 
-    // Check builtin functions (stdlib)
-    if (vm.stdlib.getFunction(function_name) != null) {
-        return Value.initBool(true);
-    }
-
-    // Check builtin registry functions
-    if (vm.builtin_registry.exists(function_name)) {
+    // Check builtin functions (via fn_dispatch, replaces legacy stdlib.getFunction)
+    if (fn_dispatch.lookup(function_name) != null) {
         return Value.initBool(true);
     }
 
@@ -2192,8 +2189,8 @@ pub const VM = struct {
     // Anonymous class counter for generating unique names
     anonymous_class_counter: u64 = 0,
 
-    // Builtin function registry with category-based organization
-    builtin_registry: BuiltinRegistry,
+    // Deprecated: builtin_registry field removed — use fn_dispatch instead
+    // Builtin function dispatch is now handled by fn_dispatch.zig (O(1) lookup + dispatch)
 
     // Shutdown function registry for register_shutdown_function()
     shutdown_functions: std.ArrayList(ShutdownFunction),
@@ -2259,8 +2256,7 @@ pub const VM = struct {
             .syntax_config = config,
             // Extension registry - initialized lazily or via setExtensionRegistry
             .extension_registry = null,
-            // Initialize builtin function registry
-            .builtin_registry = BuiltinRegistry.init(allocator),
+            // Builtin function registry is now handled by fn_dispatch (no field needed)
             .recursion_depth = 0,
             // Shutdown function registry
             .shutdown_functions = std.ArrayList(ShutdownFunction).empty,
@@ -2406,8 +2402,7 @@ pub const VM = struct {
         // 5. Clean up standard library
         self.stdlib.deinit();
 
-        // 5.5. Clean up builtin function registry
-        self.builtin_registry.deinit();
+        // 5.5. Builtin function registry is now handled by fn_dispatch (no deinit needed)
 
         // 5.6. Clean up shutdown functions
         for (self.shutdown_functions.items) |*func| {
@@ -2504,6 +2499,11 @@ pub const VM = struct {
     }
 
     pub fn getVariable(self: *VM, name: []const u8) ?Value {
+        // $GLOBALS superglobal: return a snapshot of all global variables as PHPArray
+        if (std.mem.eql(u8, name, "$GLOBALS") or std.mem.eql(u8, name, "GLOBALS")) {
+            return self.buildGlobalsArray() catch return null;
+        }
+
         // Check cached current call frame first
         if (self.current_frame) |frame| {
             // If variable is imported from global scope, fetch it from there
@@ -2625,6 +2625,31 @@ pub const VM = struct {
             }
         }
         try self.global.set(name, value);
+    }
+
+    /// Build $GLOBALS superglobal array: a snapshot of all global variables
+    /// PHP behavior: keys are variable names WITHOUT $ prefix (e.g. $GLOBALS["x"] maps to $x)
+    fn buildGlobalsArray(self: *VM) !Value {
+        const arr_val = try Value.initArrayWithManager(&self.memory_manager);
+        const php_array = arr_val.getAsArray().data;
+
+        var iter = self.global.vars.iterator();
+        while (iter.next()) |entry| {
+            // Skip $GLOBALS itself to avoid infinite recursion
+            if (std.mem.eql(u8, entry.key_ptr.*, "$GLOBALS") or std.mem.eql(u8, entry.key_ptr.*, "GLOBALS")) {
+                continue;
+            }
+            // PHP: $GLOBALS keys are variable names WITHOUT $ prefix
+            // e.g. $x is stored as "$x" in global, but key in $GLOBALS is "x"
+            const key_name = if (entry.key_ptr.*.len > 0 and entry.key_ptr.*[0] == '$')
+                entry.key_ptr.*[1..]
+            else
+                entry.key_ptr.*;
+            const key_str = types.PHPString.init(self.allocator, key_name) catch continue;
+            const key = types.ArrayKey{ .string = key_str };
+            try php_array.set(self.allocator, key, entry.value_ptr.*);
+        }
+        return arr_val;
     }
 
     pub fn deleteVariable(self: *VM, name: []const u8) bool {
@@ -2834,13 +2859,12 @@ pub const VM = struct {
     pub fn registerStandardLibraryFunctions(self: *VM) !void {
         const start_time = time_compat.nanoTimestamp();
 
-        var iterator = self.stdlib.functions.iterator();
-        while (iterator.next()) |entry| {
-            const name = entry.key_ptr.*;
-            const builtin_func = entry.value_ptr.*;
-
-            const value = Value.initNativeFunction(@as(*const anyopaque, @ptrCast(builtin_func.handler)));
-            try self.global.set(name, value);
+        // 直接从 fn_dispatch comptime 数据遍历，无需 func_storage
+        for (fn_table.FN_TABLE, 0..) |entry, i| {
+            const handler_opt = fn_dispatch.COMPTIME_HANDLER_TABLE[i];
+            if (handler_opt == null) continue; // 未实现的函数跳过
+            const value = Value.initNativeFunction(handler_opt.?);
+            try self.global.set(entry.name, value);
         }
 
         const end_time = time_compat.nanoTimestamp();
@@ -3270,8 +3294,8 @@ pub const VM = struct {
     /// 判断 PHP 类型名是否是内置类型
     fn isBuiltinTypeName(type_name: []const u8) bool {
         const builtins = [_][]const u8{
-            "int", "float", "string", "bool", "array", "object", "callable",
-            "iterable", "void", "never", "null", "mixed", "true", "false",
+            "int",      "float", "string", "bool", "array", "object", "callable",
+            "iterable", "void",  "never",  "null", "mixed", "true",   "false",
         };
         for (builtins) |b| {
             if (std.mem.eql(u8, type_name, b)) return true;
@@ -3778,6 +3802,10 @@ pub const VM = struct {
         try self.global.set("M_SQRT2", Value.initFloat(std.math.sqrt2));
         try self.global.set("M_SQRT1_2", Value.initFloat(1.0 / std.math.sqrt2));
 
+        // NAN / INF constants
+        try self.global.set("NAN", Value.initFloat(std.math.nan(f64)));
+        try self.global.set("INF", Value.initFloat(std.math.inf(f64)));
+
         // String constants
         try self.global.set("STR_PAD_LEFT", Value.initInt(0));
         try self.global.set("STR_PAD_RIGHT", Value.initInt(1));
@@ -3785,26 +3813,53 @@ pub const VM = struct {
     }
 
     /// Initialize the builtin function registry with core functions
+    /// Deprecated: BUILTIN_FUNCTIONS only had 2 test functions, no longer needed
+    /// fn_dispatch now handles all builtin function dispatch
     pub fn initializeBuiltinRegistry(self: *VM) !void {
-        // Register core builtin functions from the registry module
-        for (&builtin_registry.BUILTIN_FUNCTIONS) |*func| {
-            try self.builtin_registry.register(func);
-        }
+        _ = self;
+        // No-op: fn_dispatch handles builtin function dispatch without runtime registration
     }
 
-    /// Call a builtin function through the registry
+    /// Call a builtin function through fn_dispatch
     pub fn callBuiltinFunction(self: *VM, name: []const u8, args: []const Value) !Value {
-        return self.builtin_registry.call(@as(*anyopaque, @ptrCast(self)), name, args);
+        const id = fn_dispatch.lookup(name) orelse return fn_dispatch.BuiltinError.FunctionNotFound;
+        fn_dispatch.validateArgs(id, args.len) catch return fn_dispatch.BuiltinError.ArgumentCountMismatch;
+        const vm_ptr: *anyopaque = @ptrCast(self);
+        if (try fn_dispatch.dispatch(vm_ptr, id, args)) |v| return v;
+        return fn_dispatch.BuiltinError.FunctionNotFound;
     }
 
-    /// Check if a builtin function exists
+    /// fn_dispatch O(1) 查找 + 参数校验（含异常抛出）+ O(1) 分发
+    /// 返回 null 表示函数未注册于 fn_dispatch，调用方应继续查找其他路径
+    fn callBuiltinDispatched(self: *VM, name: []const u8, args: []const Value) anyerror!?Value {
+        const id = fn_dispatch.lookup(name) orelse return null;
+        fn_dispatch.validateArgs(id, args.len) catch |err| {
+            const meta = fn_dispatch.getMeta(id).?;
+            const expected = switch (err) {
+                error.TooFewArguments => meta.min_args,
+                error.TooManyArguments => meta.max_args,
+            };
+            const exception = try ExceptionFactory.createArgumentCountError(self.allocator, expected, @intCast(args.len), name, "builtin", 0);
+            _ = try self.throwException(exception);
+            return error.ArgumentCountMismatch;
+        };
+        const vm_ptr: *anyopaque = @ptrCast(self);
+        return fn_dispatch.dispatch(vm_ptr, id, args);
+    }
+
+    /// Check if a builtin function exists (via fn_dispatch)
     pub fn hasBuiltinFunction(self: *VM, name: []const u8) bool {
-        return self.builtin_registry.exists(name);
+        _ = self;
+        return fn_dispatch.lookup(name) != null;
     }
 
-    /// Get builtin functions by category
-    pub fn getBuiltinFunctionsByCategory(self: *VM, category: builtin_registry.Category) []const *const builtin_registry.BuiltinFunction {
-        return self.builtin_registry.getFunctionsByCategory(category);
+    /// Get builtin functions by category (via fn_dispatch META_TABLE)
+    /// Deprecated: 返回类型已变更，使用 fn_dispatch.META_TABLE 直接查询
+    pub fn getBuiltinFunctionsByCategory(self: *VM, category: fn_table.FnCategory) []const fn_dispatch.BuiltinMeta {
+        _ = self;
+        _ = category;
+        // TODO: 实现 comptime 或运行时按分类过滤 META_TABLE
+        return &[_]fn_dispatch.BuiltinMeta{};
     }
 
     /// Execute all registered shutdown functions in LIFO order
@@ -4596,24 +4651,24 @@ pub const VM = struct {
     }
 
     fn initializeObjectProperties(self: *VM, object: *types.PHPObject, class: *types.PHPClass) !void {
+        // Initialize ALL declared properties, including those without default values
+        // Properties without default values get null
         var prop_iterator = class.properties.iterator();
         while (prop_iterator.next()) |entry| {
             const property = entry.value_ptr.*;
-            if (property.default_value) |default_val| {
-                try object.setProperty(self.allocator, entry.key_ptr.*, default_val);
-            }
+            const default_val = if (property.default_value) |dv| dv else Value.initNull();
+            try object.setProperty(self.allocator, entry.key_ptr.*, default_val);
         }
     }
 
     fn initializeObjectPropertiesOptimized(self: *VM, object: *types.PHPObject, class: *types.PHPClass) !void {
         // Pre-allocate property_values with expected size (already done in PHPObject.init)
-        // Just set default values for class properties
+        // Initialize ALL declared properties, including those without default values
         var prop_iterator = class.properties.iterator();
         while (prop_iterator.next()) |entry| {
             const property = entry.value_ptr.*;
-            if (property.default_value) |default_val| {
-                try object.setProperty(self.allocator, entry.key_ptr.*, default_val);
-            }
+            const default_val = if (property.default_value) |dv| dv else Value.initNull();
+            try object.setProperty(self.allocator, entry.key_ptr.*, default_val);
         }
     }
 
@@ -5869,27 +5924,27 @@ pub const VM = struct {
         if (std.mem.indexOf(u8, function_name, "::")) |sep_pos| {
             const class_name = function_name[0..sep_pos];
             const method_name = function_name[sep_pos + 2 ..];
-            
+
             // Get the class
             const class = self.getClass(class_name) orelse {
                 const exception = try ExceptionFactory.createUndefinedClassError(self.allocator, class_name, self.current_file, self.current_line);
                 return self.throwException(exception);
             };
-            
+
             // Get the method
             const method_lookup = class.getMethodLookup(method_name) orelse {
                 const exception = try ExceptionFactory.createUndefinedMethodError(self.allocator, class_name, method_name, self.current_file, self.current_line);
                 return self.throwException(exception);
             };
-            
+
             const method = method_lookup.method;
-            
+
             // Call the static method
             const full_method_name = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, method_name });
             defer self.allocator.free(full_method_name);
             try self.pushCallFrame(full_method_name, self.current_file, self.current_line);
             defer self.popCallFrame();
-            
+
             // Bind arguments to parameters
             for (method.parameters, 0..) |param, i| {
                 if (i < args.len) {
@@ -5898,17 +5953,28 @@ pub const VM = struct {
                     try self.setVariable(param.name.data, default);
                 }
             }
-            
+
             // Execute method body
             if (method.body) |body| {
-                const body_node_idx: u32 = @intCast(@intFromPtr(body));
-                return self.eval(body_node_idx);
+                const body_node_idx: u32 = @truncate(@intFromPtr(body));
+                return self.eval(body_node_idx) catch |err| {
+                    if (err == error.Return) {
+                        if (self.return_value) |val| {
+                            const ret = val;
+                            self.return_value = null;
+                            return ret;
+                        }
+                        return Value.initNull();
+                    }
+                    return err;
+                };
             }
-            
+
             return Value.initNull();
         }
-        
-        if (try StandardLibrary.callBuiltinFast(self, function_name, args)) |v| return v;
+
+        // 快速路径：fn_dispatch O(1) 查找 + O(1) 分发
+        if (try self.callBuiltinDispatched(function_name, args)) |v| return v;
 
         // Second, check extension functions (Requirements: 9.2)
         if (self.extension_registry) |ext_reg| {
@@ -6126,8 +6192,7 @@ pub const VM = struct {
     /// 字节码生成器类型问题已修复，现在可以正常使用字节码执行
     fn runBytecode(self: *VM, node: ast.Node.Index) !Value {
         // 初始化字节码VM
-        const bvm = self.ensureBytecodeVM() catch |err| {
-            std.debug.print("Bytecode VM init failed: {s}, falling back to tree-walking\n", .{@errorName(err)});
+        const bvm = self.ensureBytecodeVM() catch {
             return self.runTreeWalking(node);
         };
 
@@ -6135,8 +6200,7 @@ pub const VM = struct {
         var generator = BytecodeGenerator.init(self.allocator, self.context);
         defer generator.deinit();
 
-        const compiled_func = generator.compile(node) catch |err| {
-            std.debug.print("Bytecode compilation failed: {s}, falling back to tree-walking\n", .{@errorName(err)});
+        const compiled_func = generator.compile(node) catch {
             return self.runTreeWalking(node);
         };
         defer compiled_func.deinit(self.allocator);
@@ -6145,21 +6209,55 @@ pub const VM = struct {
         const user_funcs = generator.getUserFunctions();
         var iter = user_funcs.iterator();
         while (iter.next()) |entry| {
-            bvm.registerFunction(entry.key_ptr.*, entry.value_ptr.*) catch |err| {
-                std.debug.print("Function registration failed: {s}\n", .{@errorName(err)});
-            };
+            bvm.registerFunction(entry.key_ptr.*, entry.value_ptr.*) catch {};
+        }
+
+        // 注册用户定义的类信息到BytecodeVM（属性默认值、方法等）
+        const user_classes = generator.getUserClasses();
+        var class_iter = user_classes.iterator();
+        while (class_iter.next()) |entry| {
+            const class_info = entry.value_ptr.*;
+            // 注册类元数据
+            const class_meta = bvm.registerClass(entry.key_ptr.*) catch continue;
+            // 注册实例属性默认值
+            var prop_iter = class_info.instance_property_defaults.iterator();
+            while (prop_iter.next()) |prop_entry| {
+                const prop_name = prop_entry.key_ptr.*;
+                const prop_val = prop_entry.value_ptr.*;
+                // 将 instruction.Value 转换为 vm.Value
+                const vm_val = self.convertInstructionValue(prop_val);
+                class_meta.instance_property_defaults.put(bvm.allocator, prop_name, vm_val) catch continue;
+            }
+            // 注册实例方法（从函数表中查找 ClassName->methodName 格式的方法）
+            var func_iter = user_funcs.iterator();
+            while (func_iter.next()) |func_entry| {
+                const func_name = func_entry.key_ptr.*;
+                const func_ptr = func_entry.value_ptr.*;
+                // 检查是否是实例方法：ClassName->methodName
+                if (std.mem.startsWith(u8, func_name, entry.key_ptr.*)) {
+                    const sep_start = entry.key_ptr.*.len;
+                    if (func_name.len > sep_start + 2 and func_name[sep_start] == '-' and func_name[sep_start + 1] == '>') {
+                        const method_name = func_name[sep_start + 2 ..];
+                        class_meta.instance_methods.put(bvm.allocator, method_name, func_ptr) catch continue;
+                    }
+                    // 检查是否是静态方法：ClassName::methodName
+                    if (func_name.len > sep_start + 2 and func_name[sep_start] == ':' and func_name[sep_start + 1] == ':') {
+                        const method_name = func_name[sep_start + 2 ..];
+                        class_meta.static_methods.put(bvm.allocator, method_name, func_ptr) catch continue;
+                    }
+                }
+            }
         }
 
         // 执行字节码
-        const result = bvm.execute(compiled_func) catch |err| {
-            std.debug.print("Bytecode execution failed: {s}, falling back to tree-walking\n", .{@errorName(err)});
+        const result = bvm.execute(compiled_func) catch {
             return self.runTreeWalking(node);
         };
 
         // 输出 BytecodeVM 的 echo/print 结果
         const output = bvm.getOutput();
         if (output.len > 0) {
-            std.debug.print("{s}", .{output});
+            _ = std.posix.system.write(std.posix.STDOUT_FILENO, output.ptr, output.len);
             bvm.clearOutput();
         }
 
@@ -6196,8 +6294,7 @@ pub const VM = struct {
     /// 但功能有限，不支持复杂的 OOP 特性
     fn runFastVM(self: *VM, node: ast.Node.Index) !Value {
         // 初始化 FastVM
-        const fvm = self.ensureFastVM() catch |err| {
-            std.debug.print("FastVM init failed: {s}, falling back to tree-walking\n", .{@errorName(err)});
+        const fvm = self.ensureFastVM() catch {
             return self.runTreeWalking(node);
         };
 
@@ -6205,8 +6302,7 @@ pub const VM = struct {
         var fc = FastCompiler.init(self.allocator, self.context);
         defer fc.deinit();
 
-        const compiled_func = fc.compile(node) catch |err| {
-            std.debug.print("FastVM compilation failed: {s}, falling back to tree-walking\n", .{@errorName(err)});
+        const compiled_func = fc.compile(node) catch {
             return self.runTreeWalking(node);
         };
         defer {
@@ -6216,16 +6312,14 @@ pub const VM = struct {
         }
 
         // 执行字节码
-        const result = fvm.execute(&compiled_func) catch |err| {
-            std.debug.print("FastVM execution failed: {s}, falling back to tree-walking\n", .{@errorName(err)});
+        const result = fvm.execute(&compiled_func) catch {
             return self.runTreeWalking(node);
         };
 
         // 输出 FastVM 的 echo/print 结果
         const output = fvm.getOutput();
         if (output.len > 0) {
-            std.debug.print("{s}", .{output});
-            // 清空输出缓冲区以便下次使用
+            _ = std.posix.system.write(std.posix.STDOUT_FILENO, output.ptr, output.len);
             fvm.output.clearRetainingCapacity();
         }
 
@@ -6259,6 +6353,26 @@ pub const VM = struct {
             .string_val => |s| try Value.initStringWithManager(&self.memory_manager, s.data),
             // 复杂类型暂时返回null，后续可以扩展
             .array_val, .object_val, .struct_val, .closure_val, .resource_val, .iterator_val => Value.initNull(),
+        };
+    }
+
+    /// 将 instruction.Value（常量池值）转换为 bytecode.vm.Value（运行时值）
+    fn convertInstructionValue(self: *VM, iv: bytecode.instruction.Value) bytecode.vm.Value {
+        return switch (iv) {
+            .null_val => .null_val,
+            .bool_val => |b| .{ .bool_val = b },
+            .int_val => |i| .{ .int_val = i },
+            .float_val => |f| .{ .float_val = f },
+            .string_val => |s| blk: {
+                const str = self.allocator.create(bytecode.vm.Value.String) catch break :blk .null_val;
+                str.* = .{
+                    .data = self.allocator.dupe(u8, s) catch &.{},
+                    .ref_count = 1,
+                    .marked = false,
+                };
+                break :blk .{ .string_val = str };
+            },
+            .array_val, .class_ref, .func_ref => .null_val,
         };
     }
 
@@ -6401,6 +6515,9 @@ pub const VM = struct {
             Token.Tag.percent => {
                 return self.evaluateModulo(left, right) catch Value.initNull();
             },
+            Token.Tag.star_star => {
+                return self.evaluateExponentiation(left, right) catch Value.initNull();
+            },
             Token.Tag.dot => {
                 return self.concatenateStrings(left, right) catch Value.initNull();
             },
@@ -6500,6 +6617,11 @@ pub const VM = struct {
                 const target_class = self.getClass(class_name) orelse return Value.initBool(false);
                 return Value.initBool(object.isInstanceOf(target_class));
             },
+            .double_question => {
+                // ?? 运算符：左操作数非 null 时返回左，否则返回右
+                if (!left.isNull()) return left.retain();
+                return right.retain();
+            },
             else => return Value.initNull(),
         }
     }
@@ -6528,6 +6650,7 @@ pub const VM = struct {
     inline fn evaluateVariableFast(self: *VM, ast_node: *const ast.Node) Value {
         const name_id = ast_node.data.variable.name;
         const name = self.context.string_pool.keys()[name_id];
+
         if (self.getVariable(name)) |value| {
             return value.retain();
         }
@@ -6681,6 +6804,7 @@ pub const VM = struct {
             Token.Tag.asterisk_equal => self.evaluateMultiplication(left, right),
             Token.Tag.slash_equal => self.evaluateDivision(left, right),
             Token.Tag.percent_equal => self.evaluateModulo(left, right),
+            Token.Tag.star_star_equal => self.evaluateExponentiation(left, right),
             Token.Tag.dot_equal => self.concatenateStrings(left, right),
             else => Value.initNull(),
         };
@@ -6828,6 +6952,54 @@ pub const VM = struct {
         }
     }
 
+    /// 深拷贝数组值 — PHP 值语义：$a = $b 时数组独立
+    fn deepCopyArrayValue(self: *VM, value: Value) !Value {
+        if (!value.isArray()) return value;
+
+        const src_box = value.getAsArray();
+        const src_arr = src_box.data;
+
+        const new_arr = try self.allocator.create(types.PHPArray);
+        new_arr.* = types.PHPArray.init(self.allocator);
+
+        var iter = src_arr.iterator();
+        while (iter.next()) |entry| {
+            const val = entry.value.retain();
+            // 递归深拷贝嵌套数组
+            const copied_val = if (val.isArray()) try self.deepCopyArrayValue(val) else val;
+            try new_arr.set(self.allocator, entry.key, copied_val);
+        }
+
+        const new_box = try self.allocator.create(types.gc.Box(*types.PHPArray));
+        new_box.* = .{ .ref_count = 1, .gc_info = .{}, .data = new_arr };
+        return Value.fromBox(new_box, Value.TYPE_ARRAY);
+    }
+
+    /// Copy-on-Write 检查：当数组被多个变量引用时，修改前需要深拷贝
+    /// 返回可安全修改的数组值（如果 ref_count > 1 则创建副本）
+    /// 注意：调用者负责释放返回值；如果创建了副本，旧引用的引用计数已减 1
+    fn ensureArrayCOW(self: *VM, arr_val: Value) !Value {
+        if (!arr_val.isArray()) return arr_val.retain();
+        const box = arr_val.getAsArray();
+        if (box.ref_count <= 1) return arr_val.retain(); // 唯一引用，安全修改
+
+        // 需要深拷贝：创建新数组并复制所有元素
+        const src_arr = box.data;
+        const new_arr = try self.allocator.create(types.PHPArray);
+        new_arr.* = types.PHPArray.init(self.allocator);
+
+        var iter = src_arr.iterator();
+        while (iter.next()) |entry| {
+            const val = entry.value.retain();
+            try new_arr.set(self.allocator, entry.key, val);
+        }
+
+        // 创建新 box（引用计数为 1）
+        const new_box = try self.allocator.create(types.gc.Box(*types.PHPArray));
+        new_box.* = .{ .ref_count = 1, .gc_info = .{}, .data = new_arr };
+        return Value.fromBox(new_box, Value.TYPE_ARRAY);
+    }
+
     fn handleInvalidOperands(self: *VM, operation: []const u8) !Value {
         const message = try std.fmt.allocPrint(self.allocator, "Invalid operands for {s}", .{operation});
         defer self.allocator.free(message);
@@ -6850,8 +7022,11 @@ pub const VM = struct {
     }
 
     pub fn eval(self: *VM, node: ast.Node.Index) !Value {
-        if (self.recursion_depth >= 1000) {
-            const exception = try ExceptionFactory.createError(self.allocator, "Maximum function nesting level of '1000' reached, aborting!", self.current_file, self.current_line);
+        // 注意：recursion_depth 计算的是 AST 节点遍历深度，不是函数调用深度
+        // 函数调用深度由 pushCallFrame 的 1000 限制保证
+        // 一个函数内部可能有数百个 AST 节点，因此节点级限制需要足够大
+        if (self.recursion_depth >= 50000) {
+            const exception = try ExceptionFactory.createError(self.allocator, "Maximum execution depth reached, aborting!", self.current_file, self.current_line);
             _ = try self.throwException(exception);
             return error.StackOverflow;
         }
@@ -6859,9 +7034,6 @@ pub const VM = struct {
         defer self.recursion_depth -= 1;
 
         const ast_node = &self.context.nodes.items[node];
-
-        // 每次调用都打印
-        std.debug.print("eval: depth={} tag={s}\n", .{ self.recursion_depth, @tagName(ast_node.tag) });
 
         // Update current line for error reporting - 安全检查
         // main_token is a Token struct, not an index
@@ -6939,12 +7111,21 @@ pub const VM = struct {
                 const inner_value = try self.eval(ast_node.data.variable_variable.expr);
                 defer self.releaseValue(inner_value);
 
-                if (!inner_value.isString()) {
-                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Variable variable name must be a string", self.current_file, self.current_line);
-                    return self.throwException(exception);
+                // PHP 行为：非字符串值自动转为字符串作为变量名
+                var var_name_str: []const u8 = undefined;
+                var converted_phpstr: ?*types.PHPString = null;
+                defer {
+                    if (converted_phpstr) |ps| ps.release(self.allocator);
                 }
 
-                const var_name_str = inner_value.getAsString().data.data;
+                if (inner_value.isString()) {
+                    var_name_str = inner_value.getAsString().data.data;
+                } else {
+                    const phpstr = try inner_value.toString(self.allocator);
+                    converted_phpstr = phpstr;
+                    var_name_str = phpstr.data;
+                }
+
                 // 添加 $ 前缀（如果没有）
                 const var_name = if (var_name_str.len > 0 and var_name_str[0] == '$')
                     var_name_str
@@ -7009,19 +7190,30 @@ pub const VM = struct {
                             try self.setVariable(name, value);
                         }
                     } else {
-                        try self.setVariable(name, value);
+                        // PHP 值语义：数组赋值时深拷贝，确保 $a = $b 后独立
+                        const stored = if (value.isArray()) try self.deepCopyArrayValue(value) else value;
+                        try self.setVariable(name, stored);
                     }
                 } else if (target_node.tag == .variable_variable) {
                     // $$var = value: 先求值内层变量得到变量名，再设置该变量
                     const inner_value = try self.eval(target_node.data.variable_variable.expr);
                     defer self.releaseValue(inner_value);
 
-                    if (!inner_value.isString()) {
-                        const exception = try ExceptionFactory.createTypeError(self.allocator, "Variable variable name must be a string", self.current_file, self.current_line);
-                        return self.throwException(exception);
+                    // PHP 行为：非字符串值自动转为字符串作为变量名
+                    var var_name_str: []const u8 = undefined;
+                    var converted_phpstr: ?*types.PHPString = null;
+                    defer {
+                        if (converted_phpstr) |ps| ps.release(self.allocator);
                     }
 
-                    const var_name_str = inner_value.getAsString().data.data;
+                    if (inner_value.isString()) {
+                        var_name_str = inner_value.getAsString().data.data;
+                    } else {
+                        const phpstr = try inner_value.toString(self.allocator);
+                        converted_phpstr = phpstr;
+                        var_name_str = phpstr.data;
+                    }
+
                     // 添加 $ 前缀（如果没有），并复制字符串
                     const var_name = if (var_name_str.len > 0 and var_name_str[0] == '$')
                         try self.allocator.dupe(u8, var_name_str)
@@ -7075,31 +7267,92 @@ pub const VM = struct {
                         return self.throwException(exception);
                     }
                 } else if (target_node.tag == .array_access) {
-                    const arr_val = try self.eval(target_node.data.array_access.target);
-                    defer self.releaseValue(arr_val);
-
-                    if (!arr_val.isArray()) {
-                        const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot use value as array", self.current_file, self.current_line);
-                        return self.throwException(exception);
+                    // $GLOBALS special handling: $GLOBALS['x'] = val should sync to global variable
+                    const target_inner = self.context.nodes.items[target_node.data.array_access.target];
+                    var is_globals_assignment = false;
+                    if (target_inner.tag == .variable) {
+                        const target_name_id = target_inner.data.variable.name;
+                        const target_name = self.context.string_pool.keys()[target_name_id];
+                        if (std.mem.eql(u8, target_name, "$GLOBALS") or std.mem.eql(u8, target_name, "GLOBALS")) {
+                            is_globals_assignment = true;
+                        }
                     }
 
-                    const php_array = arr_val.getAsArray().data;
-                    if (target_node.data.array_access.index) |index_idx| {
-                        const index_val = try self.eval(index_idx);
-                        defer self.releaseValue(index_val);
+                    if (is_globals_assignment) {
+                        // $GLOBALS['key'] = value => set global variable
+                        // $GLOBALS is lazily rebuilt on each access, so we only need to
+                        // sync the value to the actual global variable
+                        if (target_node.data.array_access.index) |index_idx| {
+                            const index_val = try self.eval(index_idx);
+                            defer self.releaseValue(index_val);
 
-                        const key = switch (index_val.getTag()) {
-                            .integer => types.ArrayKey{ .integer = index_val.asInt() },
-                            .string => types.ArrayKey{ .string = index_val.getAsString().data },
-                            else => {
-                                const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid array key type", self.current_file, self.current_line);
-                                return self.throwException(exception);
-                            },
-                        };
-                        try php_array.set(self.allocator, key, value);
+                            if (index_val.isString()) {
+                                const var_name = index_val.getAsString().data.data;
+                                // Ensure $ prefix for variable name (PHP: $GLOBALS["x"] => $x)
+                                const full_name = if (var_name.len > 0 and var_name[0] == '$')
+                                    var_name
+                                else
+                                    try std.fmt.allocPrint(self.allocator, "${s}", .{var_name});
+                                defer {
+                                    if (full_name.ptr != var_name.ptr) self.allocator.free(full_name);
+                                }
+                                const stored = if (value.isArray()) try self.deepCopyArrayValue(value) else value;
+                                try self.setVariable(full_name, stored);
+                            }
+                        }
                     } else {
-                        // Push operation: $a[] = $val
-                        try php_array.push(self.allocator, value);
+                        const arr_val_raw = try self.eval(target_node.data.array_access.target);
+                        defer self.releaseValue(arr_val_raw);
+
+                        if (!arr_val_raw.isArray()) {
+                            const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot use value as array", self.current_file, self.current_line);
+                            return self.throwException(exception);
+                        }
+
+                        // Copy-on-Write: 如果数组被多个变量引用，先深拷贝
+                        const arr_val = try self.ensureArrayCOW(arr_val_raw);
+                        defer self.releaseValue(arr_val);
+
+                        // 如果创建了副本，需要将新数组写回变量
+                        const box_raw = arr_val_raw.getAsArray();
+                        const box_cow = arr_val.getAsArray();
+                        if (box_raw != box_cow) {
+                            // COW 触发了深拷贝，将新数组直接写入变量（不再深拷贝）
+                            const cow_target_inner = self.context.nodes.items[target_node.data.array_access.target];
+                            if (cow_target_inner.tag == .variable) {
+                                const cow_var_name_id = cow_target_inner.data.variable.name;
+                                const cow_var_name = self.context.string_pool.keys()[cow_var_name_id];
+                                // 直接写入局部/全局变量，绕过 setVariable 的深拷贝
+                                if (self.current_frame) |frame| {
+                                    if (frame.locals.get(cow_var_name)) |old_value| {
+                                        self.releaseValue(old_value);
+                                    }
+                                    self.retainValue(arr_val);
+                                    try frame.locals.put(cow_var_name, arr_val);
+                                } else {
+                                    try self.global.set(cow_var_name, arr_val);
+                                }
+                            }
+                        }
+
+                        const php_array = arr_val.getAsArray().data;
+                        if (target_node.data.array_access.index) |index_idx| {
+                            const index_val = try self.eval(index_idx);
+                            defer self.releaseValue(index_val);
+
+                            const key = switch (index_val.getTag()) {
+                                .integer => types.ArrayKey{ .integer = index_val.asInt() },
+                                .string => types.ArrayKey{ .string = index_val.getAsString().data },
+                                else => {
+                                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Invalid array key type", self.current_file, self.current_line);
+                                    return self.throwException(exception);
+                                },
+                            };
+                            try php_array.set(self.allocator, key, value);
+                        } else {
+                            // Push operation: $a[] = $val
+                            try php_array.push(self.allocator, value);
+                        }
                     }
                 } else if (target_node.tag == .static_property_access) {
                     // ... (keep existing implementation)
@@ -7225,21 +7478,43 @@ pub const VM = struct {
                         continue;
                     }
 
-                    // Get value from array at position i (always use array position)
-                    const elem_val = php_array.get(types.ArrayKey{ .integer = @as(i64, @intCast(i)) });
+                    // 判断是带键解构还是索引解构
+                    var actual_target_node = &self.context.nodes.items[target_idx];
+                    var elem_val: ?Value = null;
+
+                    if (target_node.tag == .array_pair) {
+                        // 带键解构: ['key' => $var]
+                        // 直接从 AST 节点读取键值
+                        const key_node = self.context.nodes.items[target_node.data.array_pair.key];
+                        var key: types.ArrayKey = types.ArrayKey{ .integer = @as(i64, @intCast(i)) };
+                        if (key_node.tag == .literal_string) {
+                            const str_id = key_node.data.literal_string.value;
+                            const str_val = self.context.string_pool.keys()[str_id];
+                            var temp_str: types.PHPString = .{ .data = @constCast(str_val), .length = str_val.len, .encoding = .utf8, .ref_count = 1 };
+                            key = types.ArrayKey{ .string = &temp_str };
+                        } else if (key_node.tag == .literal_int) {
+                            key = types.ArrayKey{ .integer = key_node.data.literal_int.value };
+                        }
+                        elem_val = php_array.get(key);
+                        actual_target_node = &self.context.nodes.items[target_node.data.array_pair.value];
+                    } else {
+                        // 索引解构: [$var1, $var2]
+                        elem_val = php_array.get(types.ArrayKey{ .integer = @as(i64, @intCast(i)) });
+                    }
+
                     if (elem_val) |val| {
                         // Set to variable if target is a variable node
-                        if (target_node.tag == .variable) {
-                            const name_id = target_node.data.variable.name;
+                        if (actual_target_node.tag == .variable) {
+                            const name_id = actual_target_node.data.variable.name;
                             const name = self.context.string_pool.keys()[name_id];
                             // Retain the value before assigning
                             self.retainValue(val);
                             try self.setVariable(name, val);
-                        } else if (target_node.tag == .list_assignment) {
+                        } else if (actual_target_node.tag == .list_assignment) {
                             // Handle nested list assignment recursively
                             // For nested list, val is the nested array element
                             if (val.isArray()) {
-                                try self.assignListRecursive(val.getAsArray().data, target_node.data.list_assignment.targets);
+                                try self.assignListRecursive(val.getAsArray().data, actual_target_node.data.list_assignment.targets);
                             }
                             self.releaseValue(val);
                         } else {
@@ -7268,7 +7543,7 @@ pub const VM = struct {
                         }
                     }
 
-                    try value.print();
+                    value.print();
                 }
                 return Value.initNull();
             },
@@ -7522,6 +7797,45 @@ pub const VM = struct {
                 // Namespace and use statements don't produce values
                 return Value.initNull();
             },
+            .enum_decl => {
+                return self.evaluateClassDeclaration(ast_node.data.container_decl);
+            },
+            .enum_case => {
+                return Value.initNull();
+            },
+            .property_hook => {
+                return Value.initNull();
+            },
+            .attribute => {
+                return Value.initNull();
+            },
+            .named_arg => {
+                return self.eval(ast_node.data.named_arg.value);
+            },
+            .unpacking_expr => {
+                const val = try self.eval(ast_node.data.unpacking_expr.expr);
+                return val;
+            },
+            .expr_list => {
+                var last: Value = Value.initNull();
+                for (ast_node.data.expr_list.exprs) |expr_idx| {
+                    last = try self.eval(expr_idx);
+                }
+                return last;
+            },
+            .goto_stmt => {
+                return Value.initNull();
+            },
+            .goto_label => {
+                return Value.initNull();
+            },
+            .named_type => {
+                const name = self.context.string_pool.keys()[ast_node.data.named_type.name];
+                return Value.initStringWithManager(&self.memory_manager, name) catch Value.initNull();
+            },
+            .nullable_type, .union_type, .intersection_type => {
+                return Value.initNull();
+            },
             else => {
                 const exception = try ExceptionFactory.createTypeError(self.allocator, "Unsupported AST node type", self.current_file, self.current_line);
                 return self.throwException(exception);
@@ -7622,6 +7936,14 @@ pub const VM = struct {
                             const func_name = val.getAsString().data.data;
                             return self.callFunctionByName(func_name, args.items);
                         },
+                        .object => {
+                            const obj = val.getAsObject().data;
+                            if (obj.class.getMethod("__invoke")) |_| {
+                                return self.callObjectMethod(val, "__invoke", args.items);
+                            }
+                            const exception = try ExceptionFactory.createTypeError(self.allocator, "Value is not callable", self.current_file, self.current_line);
+                            return self.throwException(exception);
+                        },
                         else => {
                             const exception = try ExceptionFactory.createTypeError(self.allocator, "Value is not callable", self.current_file, self.current_line);
                             return self.throwException(exception);
@@ -7678,6 +8000,14 @@ pub const VM = struct {
                 .closure => return self.callClosure(result.getAsClosure().data, args.items),
                 .arrow_function => return self.callArrowFunction(result.getAsArrowFunc().data, args.items),
                 .user_function => return self.callUserFunction(result.getAsUserFunc().data, args.items),
+                .object => {
+                    const obj = result.getAsObject().data;
+                    if (obj.class.getMethod("__invoke")) |_| {
+                        return self.callObjectMethod(result, "__invoke", args.items);
+                    }
+                    const exception = try ExceptionFactory.createTypeError(self.allocator, "Value is not callable", self.current_file, self.current_line);
+                    return self.throwException(exception);
+                },
                 else => {
                     const exception = try ExceptionFactory.createTypeError(self.allocator, "Value is not callable", self.current_file, self.current_line);
                     return self.throwException(exception);
@@ -7695,35 +8025,36 @@ pub const VM = struct {
     }
 
     pub fn callFunctionByNameWithRefs(self: *VM, name: []const u8, args: []const Value, named_args: ?*const std.StringHashMap(Value), ref_var_names: ?[]const []const u8) !Value {
-        if (try StandardLibrary.callBuiltinFast(self, name, args)) |v| return v;
+        // 快速路径：fn_dispatch O(1) 查找 + O(1) 分发
+        if (try self.callBuiltinDispatched(name, args)) |v| return v;
 
         // Check if it's a static method call: "ClassName::methodName"
         if (std.mem.indexOf(u8, name, "::")) |sep_pos| {
             const class_name = name[0..sep_pos];
             const method_name = name[sep_pos + 2 ..];
-            
+
             // Get the class
             const class = self.getClass(class_name) orelse {
                 const exception = try ExceptionFactory.createUndefinedClassError(self.allocator, class_name, self.current_file, self.current_line);
                 return self.throwException(exception);
             };
-            
+
             // Get the method
             const method_lookup = class.getMethodLookup(method_name) orelse {
                 const exception = try ExceptionFactory.createUndefinedMethodError(self.allocator, class_name, method_name, self.current_file, self.current_line);
                 return self.throwException(exception);
             };
-            
+
             const method = method_lookup.method;
-            
+
             // Build full method name for call stack
             var full_method_name_buf: [256]u8 = undefined;
             const full_method_name = std.fmt.bufPrint(&full_method_name_buf, "{s}::{s}", .{ class_name, method_name }) catch name;
-            
+
             // Push call frame
             try self.pushCallFrame(full_method_name, self.current_file, self.current_line);
             defer self.popCallFrame();
-            
+
             // Bind parameters
             for (method.parameters, 0..) |param, i| {
                 if (i < args.len) {
@@ -7735,7 +8066,7 @@ pub const VM = struct {
                     return self.throwException(exception);
                 }
             }
-            
+
             // Execute method body
             if (method.body) |body| {
                 const body_node_idx: u32 = @truncate(@intFromPtr(body));
@@ -7751,7 +8082,7 @@ pub const VM = struct {
                     return err;
                 };
             }
-            
+
             return Value.initNull();
         }
 
@@ -8248,12 +8579,12 @@ pub const VM = struct {
 
         for (method_data.args) |arg_node_idx| {
             const arg_node = self.context.nodes.items[arg_node_idx];
-            
+
             // 处理 unpacking_expr: ...$array
             if (arg_node.tag == .unpacking_expr) {
                 const array_val = try self.eval(arg_node.data.unpacking_expr.expr);
                 defer self.releaseValue(array_val);
-                
+
                 if (array_val.isArray()) {
                     const arr = array_val.getAsArray().data;
                     var i: usize = 0;
@@ -8643,8 +8974,161 @@ pub const VM = struct {
                 // For prefix, return new value.
                 _ = self.retainValue(new_val);
                 return new_val;
+            } else if (expr_node.tag == .property_access) {
+                // Handle ++$this->property or ++$obj->property
+                const obj_val = try self.eval(expr_node.data.property_access.target);
+                defer self.releaseValue(obj_val);
+
+                const prop_name = self.context.string_pool.keys()[expr_node.data.property_access.property_name];
+
+                // Get current property value
+                var current_val: Value = Value.initInt(0);
+                if (obj_val.isObject()) {
+                    const obj = obj_val.getAsObject().data;
+                    current_val = obj.getProperty(prop_name) catch Value.initInt(0);
+                } else if (obj_val.isStruct()) {
+                    const struct_inst = obj_val.getAsStruct().data;
+                    current_val = struct_inst.getField(prop_name) catch Value.initInt(0);
+                }
+
+                // Calculate new value
+                var new_val: Value = undefined;
+                if (unary_expr.op == .plus_plus) {
+                    new_val = try self.incrementValue(current_val);
+                } else {
+                    new_val = try self.decrementValue(current_val);
+                }
+
+                // Update property
+                if (obj_val.isObject()) {
+                    const obj = obj_val.getAsObject().data;
+                    try obj.setProperty(self.allocator, prop_name, new_val);
+                } else if (obj_val.isStruct()) {
+                    const struct_inst = obj_val.getAsStruct().data;
+                    try struct_inst.setField(self.allocator, prop_name, new_val);
+                }
+
+                // For prefix, return new value
+                _ = self.retainValue(new_val);
+                return new_val;
+            } else if (expr_node.tag == .array_access) {
+                // Handle ++$arr[0]
+                const array_val = try self.eval(expr_node.data.array_access.target);
+                defer self.releaseValue(array_val);
+
+                const index_node = expr_node.data.array_access.index orelse return Value.initNull();
+                const index_val = try self.eval(index_node);
+                defer self.releaseValue(index_val);
+
+                if (array_val.isArray()) {
+                    const php_array = array_val.getAsArray().data;
+                    const key = switch (index_val.getTag()) {
+                        .integer => types.ArrayKey{ .integer = index_val.asInt() },
+                        .string => types.ArrayKey{ .string = index_val.getAsString().data },
+                        else => return Value.initNull(),
+                    };
+
+                    const current_val = php_array.get(key) orelse Value.initInt(0);
+
+                    var new_val: Value = undefined;
+                    if (unary_expr.op == .plus_plus) {
+                        new_val = try self.incrementValue(current_val);
+                    } else {
+                        new_val = try self.decrementValue(current_val);
+                    }
+
+                    try php_array.set(self.allocator, key, new_val);
+
+                    // For prefix, return new value
+                    _ = self.retainValue(new_val);
+                    return new_val;
+                }
+                return Value.initNull();
+            } else if (expr_node.tag == .static_property_access) {
+                // Handle ++Class::$property
+                const class_name = self.context.string_pool.keys()[expr_node.data.static_property_access.class_name];
+                const prop_name = self.context.string_pool.keys()[expr_node.data.static_property_access.property_name];
+
+                // Resolve class
+                const class = if (std.mem.eql(u8, class_name, "self")) blk: {
+                    break :blk self.current_class orelse {
+                        const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access self:: outside of class scope", self.current_file, self.current_line);
+                        return self.throwException(exception);
+                    };
+                } else if (std.mem.eql(u8, class_name, "static")) blk: {
+                    break :blk self.current_called_class orelse {
+                        const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access static:: outside of class scope", self.current_file, self.current_line);
+                        return self.throwException(exception);
+                    };
+                } else if (std.mem.eql(u8, class_name, "parent")) blk: {
+                    const curr_class = self.current_class orelse {
+                        const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access parent:: outside of class scope", self.current_file, self.current_line);
+                        return self.throwException(exception);
+                    };
+                    break :blk curr_class.parent orelse {
+                        const exception = try ExceptionFactory.createTypeError(self.allocator, "Cannot access parent:: when class has no parent", self.current_file, self.current_line);
+                        return self.throwException(exception);
+                    };
+                } else blk: {
+                    break :blk self.getClass(class_name) orelse {
+                        const exception = try ExceptionFactory.createUndefinedClassError(self.allocator, class_name, self.current_file, self.current_line);
+                        return self.throwException(exception);
+                    };
+                };
+
+                // Get current static property value
+                var current_val: Value = Value.initInt(0);
+                var found = false;
+
+                // Search in current class and parents
+                var search_class: ?*types.PHPClass = class;
+                while (search_class) |sc| {
+                    if (sc.properties.getPtr(prop_name)) |prop| {
+                        if (prop.modifiers.is_static) {
+                            if (prop.default_value) |val| {
+                                current_val = val;
+                                found = true;
+                            }
+                            break;
+                        }
+                    }
+                    search_class = sc.parent;
+                }
+
+                if (!found) {
+                    const exception = try ExceptionFactory.createUndefinedPropertyError(self.allocator, class.name.data, prop_name, self.current_file, self.current_line);
+                    return self.throwException(exception);
+                }
+
+                // Calculate new value
+                var new_val: Value = undefined;
+                if (unary_expr.op == .plus_plus) {
+                    new_val = try self.incrementValue(current_val);
+                } else {
+                    new_val = try self.decrementValue(current_val);
+                }
+
+                // Update static property
+                search_class = class;
+                while (search_class) |sc| {
+                    if (sc.properties.getPtr(prop_name)) |prop| {
+                        if (prop.modifiers.is_static) {
+                            if (prop.default_value) |old_val| {
+                                self.releaseValue(old_val);
+                            }
+                            self.retainValue(new_val);
+                            prop.default_value = new_val;
+                            break;
+                        }
+                    }
+                    search_class = sc.parent;
+                }
+
+                // For prefix, return new value
+                _ = self.retainValue(new_val);
+                return new_val;
             } else {
-                const exception = try ExceptionFactory.createTypeError(self.allocator, "Increment/decrement only supports variables", self.current_file, self.current_line);
+                const exception = try ExceptionFactory.createTypeError(self.allocator, "Increment/decrement only supports variables and properties", self.current_file, self.current_line);
                 return self.throwException(exception);
             }
         }
@@ -10083,6 +10567,7 @@ pub const VM = struct {
             .asterisk => return self.evaluateMultiplication(left, right),
             .slash => return self.evaluateDivision(left, right),
             .percent => return self.evaluateModulo(left, right),
+            .star_star => return self.evaluateExponentiation(left, right),
             .equal_equal => return Value.initBool(self.valuesEqual(left, right)),
             .bang_equal => return Value.initBool(!self.valuesEqual(left, right)),
             .equal_equal_equal => return Value.initBool(self.valuesStrictEqual(left, right)),
@@ -10158,6 +10643,84 @@ pub const VM = struct {
         return Value.initInt(@mod(left.asInt(), r));
     }
 
+    /// 幂运算符 ** — PHP 语义：两个整数且指数非负时返回整数，否则返回浮点数
+    fn evaluateExponentiation(_: *VM, left: Value, right: Value) !Value {
+        const left_tag = left.getTag();
+        const right_tag = right.getTag();
+
+        // 两个操作数都是整数且指数非负 → 整数结果
+        if (left_tag == .integer and right_tag == .integer) {
+            const base = left.asInt();
+            const exp = right.asInt();
+            if (exp < 0) {
+                // 负指数 → 浮点结果：base^(-exp) = 1 / base^exp
+                const abs_exp: u64 = @intCast(-exp);
+                const abs_result = std.math.pow(f64, @as(f64, @floatFromInt(base)), @as(f64, @floatFromInt(abs_exp)));
+                return Value.initFloat(1.0 / abs_result);
+            }
+            if (exp == 0) return Value.initInt(1);
+            if (base == 0) return Value.initInt(0);
+            if (base == 1) return Value.initInt(1);
+            if (base == -1) return Value.initInt(if (@mod(exp, 2) == 0) 1 else -1);
+
+            // 快速幂算法（整数），检测溢出
+            var result: i64 = 1;
+            var b = base;
+            var e: u64 = @intCast(exp);
+            var overflow = false;
+            while (e > 0) {
+                if (e & 1 == 1) {
+                    // result * b 溢出检查
+                    if (b > 0 and result > @divTrunc(std.math.maxInt(i64), b)) {
+                        overflow = true;
+                        break;
+                    }
+                    if (b < 0 and result < @divTrunc(std.math.minInt(i64), b)) {
+                        overflow = true;
+                        break;
+                    }
+                    result *= b;
+                }
+                e >>= 1;
+                if (e > 0) {
+                    // b * b 溢出检查
+                    if (b > 0 and b > @divTrunc(std.math.maxInt(i64), b)) {
+                        overflow = true;
+                        break;
+                    }
+                    if (b < 0 and b < @divTrunc(std.math.minInt(i64), b)) {
+                        overflow = true;
+                        break;
+                    }
+                    b *= b;
+                }
+            }
+            if (!overflow) return Value.initInt(result);
+            // 溢出 → 回退到浮点
+        }
+
+        // 浮点路径
+        const base_f: f64 = if (left_tag == .float) left.asFloat() else @as(f64, @floatFromInt(left.asInt()));
+        const exp_f: f64 = if (right_tag == .float) right.asFloat() else @as(f64, @floatFromInt(right.asInt()));
+        // std.math.pow 只支持非负整数指数，用 exp/log 实现通用幂运算
+        if (base_f == 0) {
+            if (exp_f > 0) return Value.initFloat(0.0);
+            if (exp_f == 0) return Value.initFloat(1.0);
+            return Value.initFloat(std.math.inf(f64)); // 0 ** negative = INF
+        }
+        if (base_f > 0) {
+            return Value.initFloat(@exp(exp_f * @log(base_f)));
+        }
+        // 负底数 + 整数指数
+        if (base_f < 0 and exp_f == @trunc(exp_f)) {
+            const abs_result = @exp(@abs(exp_f) * @log(@abs(base_f)));
+            const is_even = @mod(@abs(exp_f), 2.0) == 0;
+            return Value.initFloat(if (is_even) abs_result else -abs_result);
+        }
+        // 负底数 + 非整数指数 = NAN
+        return Value.initFloat(std.math.nan(f64));
+    }
+
     fn valuesEqual(self: *VM, left: Value, right: Value) bool {
         _ = self;
         const left_tag = left.getTag();
@@ -10204,7 +10767,6 @@ pub const VM = struct {
     }
 
     fn valuesStrictEqual(self: *VM, left: Value, right: Value) bool {
-        _ = self;
         const left_tag = left.getTag();
         const right_tag = right.getTag();
 
@@ -10216,10 +10778,40 @@ pub const VM = struct {
             .integer => left.asInt() == right.asInt(),
             .float => left.asFloat() == right.asFloat(),
             .string => std.mem.eql(u8, left.getAsString().data.data, right.getAsString().data.data),
-            .array => @intFromPtr(left.getAsArray()) == @intFromPtr(right.getAsArray()),
+            .array => self.arraysStrictEqual(left.getAsArray().data, right.getAsArray().data),
             .object => @intFromPtr(left.getAsObject()) == @intFromPtr(right.getAsObject()),
             else => false,
         };
+    }
+
+    /// PHP 语义：=== 对数组进行深度值比较
+    /// 两个数组 === 当且仅当：元素数量相同、键名相同（顺序也相同）、值 === 相同
+    fn arraysStrictEqual(self: *VM, left: *types.PHPArray, right: *types.PHPArray) bool {
+        // 快速路径：同一指针
+        if (@intFromPtr(left) == @intFromPtr(right)) return true;
+
+        // 元素数量不同
+        if (left.count() != right.count()) return false;
+
+        // 逐个比较键值对（顺序也必须相同）
+        var left_iter = left.iterator();
+        var right_iter = right.iterator();
+        while (true) {
+            const left_entry = left_iter.next();
+            const right_entry = right_iter.next();
+            if (left_entry == null and right_entry == null) return true;
+            if (left_entry == null or right_entry == null) return false;
+
+            const le = left_entry.?;
+            const re = right_entry.?;
+
+            // 比较键
+            if (!le.key.eql(re.key)) return false;
+
+            // 比较值（递归使用 === 语义）
+            if (!self.valuesStrictEqual(le.value, re.value)) return false;
+        }
+        return true;
     }
 
     fn compareValues(self: *VM, left: Value, right: Value, op: Token.Tag) !i64 {
@@ -11165,6 +11757,34 @@ pub const VM = struct {
         // Process parameters with type info
         method.parameters = try self.processMethodParameters(method_data.params);
 
+        // Constructor Property Promotion (PHP 8.0+):
+        // When __construct has parameters with visibility modifiers (public/protected/private/readonly),
+        // they automatically become class properties and are assigned in the constructor body.
+        if (std.mem.eql(u8, method_name, "__construct")) {
+            for (method.parameters) |param| {
+                if (param.is_promoted) {
+                    // Create property for promoted parameter
+                    // Property names don't have $ prefix (unlike variable names)
+                    var prop_name = param.name.data;
+                    if (prop_name.len > 0 and prop_name[0] == '$') {
+                        prop_name = prop_name[1..];
+                    }
+                    const prop_name_str = try types.PHPString.init(self.allocator, prop_name);
+                    defer prop_name_str.release(self.allocator);
+                    var property = types.Property.init(prop_name_str);
+                    property.modifiers = param.modifiers;
+                    property.type = param.type;
+                    // Set default value from parameter default if present
+                    if (param.default_value) |dv| {
+                        property.default_value = dv;
+                    }
+                    try class.properties.put(prop_name, property);
+                    // Sync shape
+                    _ = try class.shape.addProperty(prop_name);
+                }
+            }
+        }
+
         // Process return type
         if (method_data.return_type) |type_idx| {
             method.return_type = self.extractTypeInfo(type_idx);
@@ -11249,16 +11869,24 @@ pub const VM = struct {
             const param_node = self.context.nodes.items[param_idx];
             if (param_node.tag == .parameter) {
                 const param_data = param_node.data.parameter;
-                var param_name = self.context.string_pool.keys()[param_data.name];
-                // Remove $ prefix if present
-                if (param_name.len > 0 and param_name[0] == '$') {
-                    param_name = param_name[1..];
-                }
+                const param_name = self.context.string_pool.keys()[param_data.name];
+                // Keep $ prefix in parameter name so setVariable can find it
+                // (PHP variables are stored with $ prefix in the VM)
                 const php_param_name = try types.PHPString.init(self.allocator, param_name);
                 params[i] = types.Method.Parameter.init(php_param_name);
                 // Set parameter type
                 if (param_data.type) |type_idx| {
                     params[i].type = self.extractTypeInfo(type_idx);
+                }
+                // Set promoted flag and modifiers for constructor property promotion (PHP 8.0+)
+                params[i].is_promoted = param_data.is_promoted;
+                if (param_data.is_promoted) {
+                    params[i].modifiers = .{
+                        .visibility = if (param_data.modifiers.is_public) .public else if (param_data.modifiers.is_protected) .protected else .private,
+                        .is_static = false,
+                        .is_readonly = param_data.modifiers.is_readonly,
+                        .is_final = false,
+                    };
                 }
             }
         }
@@ -11325,8 +11953,12 @@ pub const VM = struct {
             property.hooks = try self.allocator.dupe(types.PropertyHook, hooks.items);
         }
 
-        // Add property to class (simplified - just store in properties map)
+        // Add property to class
         try class.properties.put(property_name, property);
+
+        // Sync shape: register property in class.shape so PHPObject.init
+        // can pre-allocate the correct number of property_value slots
+        _ = try class.shape.addProperty(property_name);
     }
 
     fn processConstantDeclaration(self: *VM, class: *types.PHPClass, const_data: anytype) !void {
@@ -11523,24 +12155,46 @@ pub const VM = struct {
         for (targets, 0..) |target_idx, i| {
             const target_node = self.context.nodes.items[target_idx];
 
-            // Get value from array at position i (always use array position)
-            const elem_val = array.get(types.ArrayKey{ .integer = @as(i64, @intCast(i)) });
+            // 判断是带键解构还是索引解构
+            var actual_target_node = &self.context.nodes.items[target_idx];
+            var elem_val: ?Value = null;
+
+            if (target_node.tag == .array_pair) {
+                // 带键解构: ['key' => $var]
+                // 直接从 AST 节点读取键值，避免调用 eval 造成依赖循环
+                const key_node = self.context.nodes.items[target_node.data.array_pair.key];
+                var key: types.ArrayKey = types.ArrayKey{ .integer = @as(i64, @intCast(i)) };
+                if (key_node.tag == .literal_string) {
+                    const str_id = key_node.data.literal_string.value;
+                    const str_val = self.context.string_pool.keys()[str_id];
+                    var temp_str: types.PHPString = .{ .data = @constCast(str_val), .length = str_val.len, .encoding = .utf8, .ref_count = 1 };
+                    key = types.ArrayKey{ .string = &temp_str };
+                } else if (key_node.tag == .literal_int) {
+                    key = types.ArrayKey{ .integer = key_node.data.literal_int.value };
+                }
+                elem_val = array.get(key);
+                actual_target_node = &self.context.nodes.items[target_node.data.array_pair.value];
+            } else {
+                // 索引解构: [$var1, $var2]
+                elem_val = array.get(types.ArrayKey{ .integer = @as(i64, @intCast(i)) });
+            }
+
             if (elem_val) |val| {
                 // Skip empty slots
-                if (target_node.tag == .list_empty) {
+                if (actual_target_node.tag == .list_empty) {
                     self.releaseValue(val);
                     continue;
                 }
 
-                if (target_node.tag == .variable) {
-                    const name_id = target_node.data.variable.name;
+                if (actual_target_node.tag == .variable) {
+                    const name_id = actual_target_node.data.variable.name;
                     const name = self.context.string_pool.keys()[name_id];
                     self.retainValue(val);
                     try self.setVariable(name, val);
-                } else if (target_node.tag == .list_assignment) {
+                } else if (actual_target_node.tag == .list_assignment) {
                     // Recursive handling for nested lists
                     if (val.isArray()) {
-                        try self.assignListRecursive(val.getAsArray().data, target_node.data.list_assignment.targets);
+                        try self.assignListRecursive(val.getAsArray().data, actual_target_node.data.list_assignment.targets);
                     }
                     self.releaseValue(val);
                 } else {
@@ -12152,6 +12806,12 @@ pub const VM = struct {
                 return self.throwException(exception);
             };
         };
+
+        // 特殊处理 ClassName::class → 返回类名字符串
+        if (std.mem.eql(u8, constant_name, "class")) {
+            const name_str = class.name.data;
+            return Value.initStringWithManager(&self.memory_manager, name_str) catch Value.initNull();
+        }
 
         // Look up constant in class (包括继承链)
         if (class.constants.get(constant_name)) |value| {

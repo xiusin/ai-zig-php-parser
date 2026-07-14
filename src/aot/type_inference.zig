@@ -528,7 +528,6 @@ pub const TypeInferencer = struct {
     }
 };
 
-
 // ============================================================================
 // Helper Functions
 // ============================================================================
@@ -685,6 +684,8 @@ pub fn getBuiltinReturnType(name: []const u8) ?InferredType {
     if (std.mem.eql(u8, name, "sqrt")) return .{ .concrete = .float };
     if (std.mem.eql(u8, name, "rand")) return .{ .concrete = .int };
     if (std.mem.eql(u8, name, "mt_rand")) return .{ .concrete = .int };
+    if (std.mem.eql(u8, name, "mt_getrandmax")) return .{ .concrete = .int };
+    if (std.mem.eql(u8, name, "fnmatch")) return .{ .concrete = .bool };
 
     // Type functions
     if (std.mem.eql(u8, name, "gettype")) return .{ .concrete = .string };
@@ -946,7 +947,6 @@ test "TypeInferencer inferFromTag" {
     try std.testing.expectEqual(ConcreteType.callable, inferencer.inferFromTag(.closure).concrete);
     try std.testing.expect(inferencer.inferFromTag(.if_stmt).isDynamic());
 }
-
 
 test "TypeInferencer union type inference" {
     const allocator = std.testing.allocator;

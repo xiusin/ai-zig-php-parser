@@ -39,7 +39,7 @@ pub const MultiFileCompileResult = struct {
 /// 单个文件的编译结果
 const FileCompileResult = struct {
     path: []const u8,
-    aot_compiler: *CompilerMod.AOTCompiler,  // 保存编译器实例以保持 module 存活
+    aot_compiler: *CompilerMod.AOTCompiler, // 保存编译器实例以保持 module 存活
     success: bool,
     error_message: ?[]const u8,
 };
@@ -82,13 +82,13 @@ pub const MultiFileCompiler = struct {
         // 1. 清理 dependency_resolver
         self.dependency_resolver.deinit();
         self.allocator.destroy(self.dependency_resolver);
-        
+
         // 2. 清理 merged_module
         if (self.merged_module) |module| {
             module.deinit();
             self.allocator.destroy(module);
         }
-        
+
         // 3. 清理 compiled_files
         var it = self.compiled_files.iterator();
         while (it.next()) |entry| {
@@ -105,10 +105,10 @@ pub const MultiFileCompiler = struct {
         if (self.options.verbose) {
             std.debug.print("Resolving dependencies...\n", .{});
         }
-        
+
         try self.dependency_resolver.resolveFile(entry_file);
         const compile_order = try self.dependency_resolver.getCompilationOrder();
-        
+
         if (self.options.verbose) {
             std.debug.print("  Files to compile: {d}\n", .{compile_order.len});
             for (compile_order) |file| {
@@ -135,14 +135,14 @@ pub const MultiFileCompiler = struct {
         if (self.options.verbose) {
             std.debug.print("Merging IR modules...\n", .{});
         }
-        
+
         try self.mergeModules();
 
         // 4. 生成输出
         if (self.options.verbose) {
             std.debug.print("Generating output...\n", .{});
         }
-        
+
         try self.generateOutput(output_path);
 
         return MultiFileCompileResult{
@@ -184,7 +184,7 @@ pub const MultiFileCompiler = struct {
             );
             return false;
         };
-        
+
         // 确保源码是 null-terminated (dupeZ removed in Zig 0.17)
         const source_z = try self.allocator.allocSentinel(u8, source.len, 0);
         @memcpy(source_z[0..source.len], source);
@@ -193,15 +193,15 @@ pub const MultiFileCompiler = struct {
         // 使用共享的 Parser 解析源码
         var context = PHPContext.init(self.allocator);
         defer context.deinit();
-        
+
         const syntax_mode = switch (self.options.syntax_mode) {
             .php => SyntaxMode.php,
             .go => SyntaxMode.go,
         };
-        
+
         var p = try Parser.initWithMode(self.allocator, &context, source_z, syntax_mode);
         defer p.deinit();
-        
+
         const root_index = p.parse() catch |err| {
             self.diagnostics.reportError(
                 .{ .file = file_path },
@@ -210,26 +210,26 @@ pub const MultiFileCompiler = struct {
             );
             return false;
         };
-        
+
         // 构建字符串表
         var string_table = try std.ArrayList([]const u8).initCapacity(self.allocator, 0);
-        defer string_table.deinit(self.allocator);  // 只释放容器，不释放内容（所有权转移给ir_module）
-        
+        defer string_table.deinit(self.allocator); // 只释放容器，不释放内容（所有权转移给ir_module）
+
         for (context.string_pool.keys()) |str| {
             const str_copy = try self.allocator.dupe(u8, str);
             try string_table.append(self.allocator, str_copy);
         }
-        
+
         // 使用 AOTCompiler 完整编译流程
         // 创建临时 options，设置不链接（只生成 IR）
         var temp_options = self.options;
         temp_options.link_executable = false;
-        
+
         const aot_compiler = try CompilerMod.AOTCompiler.init(self.allocator, self.io, temp_options);
-        
+
         try aot_compiler.setSource(source_z);
         try aot_compiler.setAST(context.nodes.items, string_table.items, root_index);
-        
+
         // 只编译到 IR，不生成可执行文件
         const module_opt = aot_compiler.compileToIR() catch |err| {
             self.diagnostics.reportError(
@@ -241,7 +241,7 @@ pub const MultiFileCompiler = struct {
             self.allocator.destroy(aot_compiler);
             return false;
         };
-        
+
         if (module_opt == null) {
             self.diagnostics.reportError(
                 .{ .file = file_path },
@@ -252,7 +252,7 @@ pub const MultiFileCompiler = struct {
             self.allocator.destroy(aot_compiler);
             return false;
         }
-        
+
         // 保存结果（保存编译器实例以保持 module 存活）
         try self.compiled_files.put(file_path, .{
             .path = file_path,
@@ -276,20 +276,20 @@ pub const MultiFileCompiler = struct {
         while (it.next()) |entry| {
             const file_result = entry.value_ptr;
             if (!file_result.success) continue;
-            
+
             const source_module = file_result.aot_compiler.ir_module orelse continue;
-            
+
             // 创建字符串索引映射
             var string_index_map = std.AutoHashMap(usize, usize).init(self.allocator);
             defer string_index_map.deinit();
-            
+
             // 合并字符串表并记录映射
             for (source_module.string_table.items, 0..) |str, old_idx| {
                 const new_idx = merged.string_table.items.len;
                 try merged.string_table.append(self.allocator, str);
                 try string_index_map.put(old_idx, new_idx);
             }
-            
+
             // 合并函数并更新字符串索引（转移所有权）
             for (source_module.functions.items) |func| {
                 const new_func = func;
@@ -306,17 +306,17 @@ pub const MultiFileCompiler = struct {
                 }
                 try merged.functions.append(self.allocator, new_func);
             }
-            
+
             // 合并类型定义（转移所有权）
             for (source_module.types.items) |type_def| {
                 try merged.types.append(self.allocator, type_def);
             }
-            
+
             // 合并全局变量（转移所有权）
             for (source_module.globals.items) |global| {
                 try merged.globals.append(self.allocator, global);
             }
-            
+
             // 清空原始module的容器（所有权已转移，避免双重释放）
             source_module.functions.clearRetainingCapacity();
             source_module.types.clearRetainingCapacity();
@@ -342,7 +342,7 @@ pub const MultiFileCompiler = struct {
             .os = @enumFromInt(@intFromEnum(self.options.target.os)),
             .abi = @enumFromInt(@intFromEnum(self.options.target.abi)),
         };
-        
+
         // 转换 OptimizeLevel 类型
         const optimize_level = @as(OptimizeLevel, @enumFromInt(@intFromEnum(self.options.optimize_level)));
 
@@ -363,16 +363,11 @@ pub const MultiFileCompiler = struct {
             const linker_message = switch (err) {
                 //error.TraitMethodConflict =>
                 //    "trait method conflict: colliding methods require insteadof/as resolution",
-                error.TraitPropertyConflict =>
-                    "trait property conflict: imported properties are not definition-compatible",
-                error.TraitConstantConflict =>
-                    "trait constant conflict: imported constants are not definition-compatible",
-                error.UnknownTraitMethodReference =>
-                    "trait adaptation error: referenced method was not found in imported traits",
-                error.AmbiguousTraitMethodReference =>
-                    "trait adaptation error: referenced method is ambiguous across imported traits",
-                error.TraitNotFound =>
-                    "trait adaptation error: referenced trait was not found",
+                error.TraitPropertyConflict => "trait property conflict: imported properties are not definition-compatible",
+                error.TraitConstantConflict => "trait constant conflict: imported constants are not definition-compatible",
+                error.UnknownTraitMethodReference => "trait adaptation error: referenced method was not found in imported traits",
+                error.AmbiguousTraitMethodReference => "trait adaptation error: referenced method is ambiguous across imported traits",
+                error.TraitNotFound => "trait adaptation error: referenced trait was not found",
                 else => @errorName(err),
             };
             self.diagnostics.reportError(
@@ -383,7 +378,7 @@ pub const MultiFileCompiler = struct {
             return err;
         };
         defer self.allocator.free(zig_code);
-        
+
         // 编译到可执行文件
         try linker.compileToExecutable(zig_code, output_path);
     }

@@ -845,18 +845,3 @@ pub const JsonFunctions = struct {
         };
     }
 };
-
-
-/// 注册扩展函数到标准库
-pub fn registerExtendedFunctions(stdlib: anytype) !void {
-    // 注册数据库函数
-    // 注册cURL函数
-    // 注册HTTP函数
-    // 注册协程函数
-    // 注册文件函数
-    // 注册日期函数
-
-    // 示例：注册一些基本函数
-    // 这里需要实际实现函数注册
-    _ = stdlib; // 暂时不使用
-}

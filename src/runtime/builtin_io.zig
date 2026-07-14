@@ -814,25 +814,23 @@ pub fn dirnameFn(vm: *VM, args: []const Value) !Value {
 
     var result = path_str;
 
-        var i: usize = 0;
+    var i: usize = 0;
 
-        while (i < levels_int) : (i += 1) {
+    while (i < levels_int) : (i += 1) {
+        const dirname_result = std.fs.path.dirname(result) orelse ".";
 
-            const dirname_result = std.fs.path.dirname(result) orelse ".";
+        // dirname returns []u8, so we need to copy it
 
-            // dirname returns []u8, so we need to copy it
+        const dirname_copy = try vm.allocator.dupe(u8, dirname_result);
 
-            const dirname_copy = try vm.allocator.dupe(u8, dirname_result);
+        if (i > 0) vm.allocator.free(result);
 
-            if (i > 0) vm.allocator.free(result);
+        result = dirname_copy;
 
-            result = dirname_copy;
+        if (std.mem.eql(u8, result, ".")) break;
+    }
 
-            if (std.mem.eql(u8, result, ".")) break;
-
-        }
-
-        defer vm.allocator.free(result);
+    defer vm.allocator.free(result);
 
     return try Value.initString(vm.allocator, result);
 }
@@ -894,12 +892,12 @@ pub fn fopenFn(vm: *VM, args: []const Value) !Value {
     // Parse mode and determine open flags
     const read = std.mem.indexOfScalar(u8, mode_str, 'r') != null;
     const write = std.mem.indexOfScalar(u8, mode_str, 'w') != null or
-                   std.mem.indexOfScalar(u8, mode_str, 'a') != null or
-                   std.mem.indexOfScalar(u8, mode_str, 'c') != null;
+        std.mem.indexOfScalar(u8, mode_str, 'a') != null or
+        std.mem.indexOfScalar(u8, mode_str, 'c') != null;
     const append = std.mem.indexOfScalar(u8, mode_str, 'a') != null;
     const create = std.mem.indexOfScalar(u8, mode_str, 'x') != null or
-                   std.mem.indexOfScalar(u8, mode_str, 'w') != null or
-                   std.mem.indexOfScalar(u8, mode_str, 'c') != null;
+        std.mem.indexOfScalar(u8, mode_str, 'w') != null or
+        std.mem.indexOfScalar(u8, mode_str, 'c') != null;
     const truncate = std.mem.indexOfScalar(u8, mode_str, 'w') != null;
 
     const open_mode: std.Io.Dir.OpenFileOptions.Mode = if (read and write)
@@ -1161,83 +1159,43 @@ pub fn fgetsFn(vm: *VM, args: []const Value) !Value {
 
     const buffer = try vm.allocator.alloc(u8, length_int);
 
-        defer vm.allocator.free(buffer);
+    defer vm.allocator.free(buffer);
 
+    // Read line using positional read byte by byte until newline
 
+    var bytes_read: usize = 0;
 
-        // Read line using positional read byte by byte until newline
+    const io = getIo();
 
+    while (bytes_read < length_int) {
+        var byte_buf: [1]u8 = undefined;
 
+        const n = file_handle.file.readPositionalAll(io, &byte_buf, file_handle.pos) catch {
+            break;
+        };
 
-            var bytes_read: usize = 0;
+        if (n == 0) break;
 
+        file_handle.pos += 1;
 
+        const byte = byte_buf[0];
 
-            const io = getIo();
+        if (byte == '\n') {
+            buffer[bytes_read] = byte;
 
-            while (bytes_read < length_int) {
+            bytes_read += 1;
 
-
-
-                var byte_buf: [1]u8 = undefined;
-
-
-
-                const n = file_handle.file.readPositionalAll(io, &byte_buf, file_handle.pos) catch {
-
-                    break;
-
-                };
-
-
-
-                if (n == 0) break;
-
-
-
-                file_handle.pos += 1;
-
-                const byte = byte_buf[0];
-
-
-
-                if (byte == '\n') {
-
-
-
-                    buffer[bytes_read] = byte;
-
-
-
-                    bytes_read += 1;
-
-
-
-                    break;
-
-
-
-                }
-
-
-
-                buffer[bytes_read] = byte;
-
-
-
-                bytes_read += 1;
-
-
-
-            }
-
-
-
-        if (bytes_read == 0) {
-
-            return Value.initBool(false);
-
+            break;
         }
+
+        buffer[bytes_read] = byte;
+
+        bytes_read += 1;
+    }
+
+    if (bytes_read == 0) {
+        return Value.initBool(false);
+    }
 
     return try Value.initString(vm.allocator, buffer[0..bytes_read]);
 }
@@ -1451,7 +1409,7 @@ pub fn fileFn(vm: *VM, args: []const Value) !Value {
             const effective_line = if (flags & FILE_SKIP_EMPTY_LINES != 0 and line.len == 0)
                 continue
             else if (flags & FILE_IGNORE_NEW_LINES != 0 and line.len > 0 and line[line.len - 1] == '\r')
-                line[0..line.len - 1]
+                line[0 .. line.len - 1]
             else
                 line;
 
@@ -1518,10 +1476,10 @@ const FILE_SKIP_EMPTY_LINES: i64 = 4;
 const FILE_USE_INCLUDE_PATH: i64 = 1;
 
 // Lock constants
-const LOCK_SH: i64 = 1;    // Shared lock
-const LOCK_EX: i64 = 2;    // Exclusive lock
-const LOCK_UN: i64 = 3;    // Unlock
-const LOCK_NB: i64 = 4;    // Non-blocking
+const LOCK_SH: i64 = 1; // Shared lock
+const LOCK_EX: i64 = 2; // Exclusive lock
+const LOCK_UN: i64 = 3; // Unlock
+const LOCK_NB: i64 = 4; // Non-blocking
 
 // ============================================================================
 // File permission functions
@@ -2204,6 +2162,75 @@ pub fn globFn(vm: *VM, args: []const Value) !Value {
     // For now, just return the pattern itself
     const value = try Value.initString(vm.allocator, pattern_str.data);
     try result.push(vm.allocator, value);
+
+    return Value.initArrayWithObject(&vm.memory_manager, result);
+}
+
+/// pathinfo - Returns information about a file path
+/// Parameters:
+///   - path (string): The path to be parsed
+///   - flags (int, optional): Specifies the element to be returned (PATHINFO_DIRNAME, PATHINFO_BASENAME, PATHINFO_EXTENSION, PATHINFO_FILENAME)
+/// Returns: array|string — Associative array or string element
+pub fn pathinfoFn(vm: *VM, args: []const Value) !Value {
+    if (args.len < 1) {
+        const exception = try ExceptionFactory.createArgumentCountError(vm.allocator, 1, 0, "pathinfo", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.ArgumentCountMismatch;
+    }
+
+    const path = args[0];
+    if (path.getTag() != .string) {
+        const exception = try ExceptionFactory.createTypeError(vm.allocator, "pathinfo() expects parameter 1 to be string", "builtin", 0);
+        _ = try vm.throwException(exception);
+        return error.InvalidArgumentType;
+    }
+
+    const path_str = path.getAsString().data.data;
+    const flags = if (args.len > 1) args[1].asInt() else 0;
+
+    // 计算各部分
+    const dirname = std.fs.path.dirname(path_str) orelse "";
+    const basename = std.fs.path.basename(path_str);
+
+    // 扩展名：basename 中最后一个 . 之后的部分
+    var extension: []const u8 = "";
+    if (std.mem.lastIndexOfScalar(u8, basename, '.')) |dot_pos| {
+        if (dot_pos > 0) { // 不能以 . 开头（隐藏文件）
+            extension = basename[dot_pos + 1 ..];
+        }
+    }
+
+    // 文件名（不含扩展名）：basename 去掉最后一个 . 及之后的部分
+    var filename: []const u8 = basename;
+    if (std.mem.lastIndexOfScalar(u8, basename, '.')) |dot_pos| {
+        if (dot_pos > 0) {
+            filename = basename[0..dot_pos];
+        }
+    }
+
+    // PHP 常量值：PATHINFO_DIRNAME=1, PATHINFO_BASENAME=2, PATHINFO_EXTENSION=4, PATHINFO_FILENAME=8
+    if (flags > 0) {
+        // 返回指定元素
+        if (flags == 1) return try Value.initString(vm.allocator, dirname);
+        if (flags == 2) return try Value.initString(vm.allocator, basename);
+        if (flags == 4) return try Value.initString(vm.allocator, extension);
+        if (flags == 8) return try Value.initString(vm.allocator, filename);
+        // 多个标志组合 — 返回数组
+    }
+
+    // 返回关联数组
+    const result = try vm.allocator.create(PHPArray);
+    result.* = PHPArray.init(vm.allocator);
+
+    const dirname_key = try PHPString.init(vm.allocator, "dirname");
+    const basename_key = try PHPString.init(vm.allocator, "basename");
+    const extension_key = try PHPString.init(vm.allocator, "extension");
+    const filename_key = try PHPString.init(vm.allocator, "filename");
+
+    try result.set(vm.allocator, .{ .string = dirname_key }, try Value.initString(vm.allocator, dirname));
+    try result.set(vm.allocator, .{ .string = basename_key }, try Value.initString(vm.allocator, basename));
+    try result.set(vm.allocator, .{ .string = extension_key }, try Value.initString(vm.allocator, extension));
+    try result.set(vm.allocator, .{ .string = filename_key }, try Value.initString(vm.allocator, filename));
 
     return Value.initArrayWithObject(&vm.memory_manager, result);
 }

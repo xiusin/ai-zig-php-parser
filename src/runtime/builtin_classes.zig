@@ -301,10 +301,10 @@ pub const BuiltinClassManager = struct {
         generator_class.* = try PHPClass.init(self.allocator, generator_name);
         generator_name.release(self.allocator);
         generator_class.modifiers.is_final = true;
-        
+
         // 添加 Generator 的属性
         try self.addProperty(generator_class, "__generator_state_ptr", .private, null);
-        
+
         // 注册 Generator 的 Iterator 方法
         try self.addMethod(generator_class, "current", .public, null, true);
         try self.addMethod(generator_class, "key", .public, null, true);
@@ -314,7 +314,7 @@ pub const BuiltinClassManager = struct {
         try self.addMethod(generator_class, "send", .public, null, true);
         try self.addMethod(generator_class, "throw", .public, null, true);
         try self.addMethod(generator_class, "close", .public, null, true);
-        
+
         // Generator实现了Iterator接口
         try self.classes.put("Generator", generator_class);
     }

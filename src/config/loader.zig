@@ -287,7 +287,6 @@ fn testIo() std.Io {
     return threaded.io();
 }
 
-
 // ============================================================================
 // Unit Tests
 // ============================================================================
@@ -454,7 +453,6 @@ test "MergedConfig getExtensions combines file and CLI" {
     try std.testing.expectEqualStrings("./file_ext.so", all_exts[0]);
     try std.testing.expectEqualStrings("./cli_ext.so", all_exts[1]);
 }
-
 
 // ============================================================================
 // Property 14: Configuration precedence

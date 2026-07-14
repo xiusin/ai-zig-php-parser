@@ -408,7 +408,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             var aot_arena = std.heap.ArenaAllocator.init(allocator);
             defer aot_arena.deinit();
             const aot_alloc = aot_arena.allocator();
-            
+
             aot_options.input_file = filename;
             if (aot_zig_flags.items.len > 0) {
                 // 复制到arena分配器
@@ -423,7 +423,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 .php => .php,
                 .go => .go,
             };
-            
+
             try runAOTCompilation(aot_alloc, io, cwd_dir, aot_options);
         } else {
             std.debug.print("Error: No input file specified for compilation.\n", .{});
@@ -517,7 +517,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
     defer vm_instance.deinit();
 
-    std.debug.print("DEBUG: About to run VM...\n", .{});
     const result = vm_instance.run(program) catch |err| {
         if (err == error.Return) {
             const ret = vm_instance.return_value orelse Value.initNull();
@@ -633,7 +632,7 @@ fn runAOTCompilation(allocator: std.mem.Allocator, io: std.Io, cwd_dir: std.Io.D
     if (needs_multi_file) {
         // 使用多文件编译器
         std.debug.print("Detected require/include statements, using multi-file compiler...\n", .{});
-        
+
         // 确定输出路径
         const output_path = options.output_file orelse blk: {
             // 默认输出路径：移除 .php 后缀
@@ -643,19 +642,19 @@ fn runAOTCompilation(allocator: std.mem.Allocator, io: std.Io, cwd_dir: std.Io.D
             }
             break :blk input;
         };
-        
+
         var diagnostics = aot.DiagnosticEngine.init(allocator);
         defer diagnostics.deinit();
-        
+
         var multi_compiler = try aot.MultiFileCompiler.init(allocator, io, cwd_dir, options, &diagnostics);
         defer multi_compiler.deinit();
-        
+
         const result = multi_compiler.compile(options.input_file, output_path) catch |err| {
             std.debug.print("Error: Multi-file compilation failed: {s}\n", .{@errorName(err)});
             diagnostics.printToStderr();
             return;
         };
-        
+
         if (result.success) {
             if (result.output_path) |output| {
                 std.debug.print("Success: Compiled {d} files to {s}\n", .{ result.files_compiled, output });
@@ -780,11 +779,6 @@ fn runAOTCompilation(allocator: std.mem.Allocator, io: std.Io, cwd_dir: std.Io.D
         return error.CompilationFailed;
     }
 }
-
-
-
-
-
 
 /// 生成输出 PHP 格式 Parse error 的最小二进制
 fn generateParseErrorBinary(

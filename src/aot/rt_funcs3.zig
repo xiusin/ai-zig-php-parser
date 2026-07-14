@@ -45,7 +45,7 @@ fn generatorThreadRunner(gen_ctx: *GeneratorContext) void {
         while (!gen_ctx.mutex.tryLock()) std.atomic.spinLoopHint();
         gen_ctx.state = .completed;
         gen_ctx.caller_cond.signal(getIo());
-        gen_ctx.mutex.unlock();
+        gen_ctx.mutex.unlock(getIo());
         return;
     };
     const result = body(
@@ -57,14 +57,14 @@ fn generatorThreadRunner(gen_ctx: *GeneratorContext) void {
         gen_ctx.has_error = true;
         gen_ctx.state = .completed;
         gen_ctx.caller_cond.signal(getIo());
-        gen_ctx.mutex.unlock();
+        gen_ctx.mutex.unlock(getIo());
         return;
     };
     while (!gen_ctx.mutex.tryLock()) std.atomic.spinLoopHint();
     gen_ctx.return_value = result;
     gen_ctx.state = .completed;
     gen_ctx.caller_cond.signal(getIo());
-    gen_ctx.mutex.unlock();
+    gen_ctx.mutex.unlock(getIo());
 }
 
 pub fn php_create_generator(
@@ -106,7 +106,7 @@ fn generatorEnsureStarted(gen_ctx: *GeneratorContext) void {
     while (!gen_ctx.mutex.tryLock()) std.atomic.spinLoopHint();
     if (gen_ctx.state == .created) {
         gen_ctx.state = .running;
-        gen_ctx.mutex.unlock();
+        gen_ctx.mutex.unlock(getIo());
         gen_ctx.thread = std.Thread.spawn(
             .{},
             generatorThreadRunner,
@@ -114,23 +114,23 @@ fn generatorEnsureStarted(gen_ctx: *GeneratorContext) void {
         ) catch {
             while (!gen_ctx.mutex.tryLock()) std.atomic.spinLoopHint();
             gen_ctx.state = .completed;
-            gen_ctx.mutex.unlock();
+            gen_ctx.mutex.unlock(getIo());
             return;
         };
         while (!gen_ctx.mutex.tryLock()) std.atomic.spinLoopHint();
         while (gen_ctx.state == .running) {
             gen_ctx.caller_cond.wait(getIo(), &gen_ctx.mutex) catch {};
         }
-        gen_ctx.mutex.unlock();
+        gen_ctx.mutex.unlock(getIo());
     } else {
-        gen_ctx.mutex.unlock();
+        gen_ctx.mutex.unlock(getIo());
     }
 }
 
 fn generatorAdvance(gen_ctx: *GeneratorContext) void {
     while (!gen_ctx.mutex.tryLock()) std.atomic.spinLoopHint();
     if (gen_ctx.state != .suspended) {
-        gen_ctx.mutex.unlock();
+        gen_ctx.mutex.unlock(getIo());
         return;
     }
     gen_ctx.state = .running;
@@ -138,7 +138,7 @@ fn generatorAdvance(gen_ctx: *GeneratorContext) void {
     while (gen_ctx.state == .running) {
         gen_ctx.caller_cond.wait(getIo(), &gen_ctx.mutex) catch {};
     }
-    gen_ctx.mutex.unlock();
+    gen_ctx.mutex.unlock(getIo());
 }
 
 pub fn php_generator_yield(
@@ -160,20 +160,20 @@ pub fn php_generator_yield(
         gen_ctx.gen_cond.wait(getIo(), &gen_ctx.mutex);
     }
     if (gen_ctx.state == .completed) {
-        gen_ctx.mutex.unlock();
+        gen_ctx.mutex.unlock(getIo());
         return error.GeneratorClosed;
     }
     if (gen_ctx.has_throw) {
         const throw_val = gen_ctx.throw_value;
         gen_ctx.throw_value = Value.initNull();
         gen_ctx.has_throw = false;
-        gen_ctx.mutex.unlock();
+        gen_ctx.mutex.unlock(getIo());
         setException(throw_val);
         return Value.initNull();
     }
     const sent = gen_ctx.sent_value;
     gen_ctx.sent_value = Value.initNull();
-    gen_ctx.mutex.unlock();
+    gen_ctx.mutex.unlock(getIo());
     return sent;
 }
 
@@ -299,7 +299,7 @@ fn registerGeneratorClass(allocator: Allocator) !void {
                     if (args.len > 0) {
                         while (!gc.mutex.tryLock()) std.atomic.spinLoopHint();
                         gc.sent_value = args[0];
-                        gc.mutex.unlock();
+                        gc.mutex.unlock(getIo());
                     }
                     generatorAdvance(gc);
                     if (gc.state == .completed) return Value.initNull();
@@ -329,7 +329,7 @@ fn registerGeneratorClass(allocator: Allocator) !void {
                     while (gc.state == .running) {
                         gc.caller_cond.wait(getIo(), &gc.mutex) catch {};
                     }
-                    gc.mutex.unlock();
+                    gc.mutex.unlock(getIo());
                     if (gc.state == .completed) return Value.initNull();
                     _ = gc.current_value.retain();
                     return gc.current_value;
@@ -371,10 +371,10 @@ pub fn php_ctype_alnum(text: Value) Value {
         return Value.initBool(std.ascii.isAlphanumeric(c));
     }
     if (!text.isString()) return Value.initBool(false);
-    
+
     const str = text.asString();
     if (str.length == 0) return Value.initBool(false);
-    
+
     for (str.data) |c| {
         if (!std.ascii.isAlphanumeric(c)) return Value.initBool(false);
     }
@@ -388,10 +388,10 @@ pub fn php_ctype_alpha(text: Value) Value {
         return Value.initBool(std.ascii.isAlphabetic(c));
     }
     if (!text.isString()) return Value.initBool(false);
-    
+
     const str = text.asString();
     if (str.length == 0) return Value.initBool(false);
-    
+
     for (str.data) |c| {
         if (!std.ascii.isAlphabetic(c)) return Value.initBool(false);
     }
@@ -405,10 +405,10 @@ pub fn php_ctype_cntrl(text: Value) Value {
         return Value.initBool(std.ascii.isControl(c));
     }
     if (!text.isString()) return Value.initBool(false);
-    
+
     const str = text.asString();
     if (str.length == 0) return Value.initBool(false);
-    
+
     for (str.data) |c| {
         if (!std.ascii.isControl(c)) return Value.initBool(false);
     }
@@ -422,10 +422,10 @@ pub fn php_ctype_digit(text: Value) Value {
         return Value.initBool(std.ascii.isDigit(c));
     }
     if (!text.isString()) return Value.initBool(false);
-    
+
     const str = text.asString();
     if (str.length == 0) return Value.initBool(false);
-    
+
     for (str.data) |c| {
         if (!std.ascii.isDigit(c)) return Value.initBool(false);
     }
@@ -439,10 +439,10 @@ pub fn php_ctype_graph(text: Value) Value {
         return Value.initBool(std.ascii.isPrint(c) and c != ' ');
     }
     if (!text.isString()) return Value.initBool(false);
-    
+
     const str = text.asString();
     if (str.length == 0) return Value.initBool(false);
-    
+
     for (str.data) |c| {
         if (!std.ascii.isPrint(c) or c == ' ') return Value.initBool(false);
     }
@@ -456,10 +456,10 @@ pub fn php_ctype_lower(text: Value) Value {
         return Value.initBool(std.ascii.isLower(c));
     }
     if (!text.isString()) return Value.initBool(false);
-    
+
     const str = text.asString();
     if (str.length == 0) return Value.initBool(false);
-    
+
     for (str.data) |c| {
         if (!std.ascii.isLower(c)) return Value.initBool(false);
     }
@@ -473,10 +473,10 @@ pub fn php_ctype_print(text: Value) Value {
         return Value.initBool(std.ascii.isPrint(c));
     }
     if (!text.isString()) return Value.initBool(false);
-    
+
     const str = text.asString();
     if (str.length == 0) return Value.initBool(false);
-    
+
     for (str.data) |c| {
         if (!std.ascii.isPrint(c)) return Value.initBool(false);
     }
@@ -490,10 +490,10 @@ pub fn php_ctype_punct(text: Value) Value {
         return Value.initBool(isPunct(c));
     }
     if (!text.isString()) return Value.initBool(false);
-    
+
     const str = text.asString();
     if (str.length == 0) return Value.initBool(false);
-    
+
     for (str.data) |c| {
         if (!isPunct(c)) return Value.initBool(false);
     }
@@ -512,10 +512,10 @@ pub fn php_ctype_space(text: Value) Value {
         return Value.initBool(std.ascii.isWhitespace(c));
     }
     if (!text.isString()) return Value.initBool(false);
-    
+
     const str = text.asString();
     if (str.length == 0) return Value.initBool(false);
-    
+
     for (str.data) |c| {
         if (!std.ascii.isWhitespace(c)) return Value.initBool(false);
     }
@@ -529,10 +529,10 @@ pub fn php_ctype_upper(text: Value) Value {
         return Value.initBool(std.ascii.isUpper(c));
     }
     if (!text.isString()) return Value.initBool(false);
-    
+
     const str = text.asString();
     if (str.length == 0) return Value.initBool(false);
-    
+
     for (str.data) |c| {
         if (!std.ascii.isUpper(c)) return Value.initBool(false);
     }
@@ -546,10 +546,10 @@ pub fn php_ctype_xdigit(text: Value) Value {
         return Value.initBool(isXDigit(c));
     }
     if (!text.isString()) return Value.initBool(false);
-    
+
     const str = text.asString();
     if (str.length == 0) return Value.initBool(false);
-    
+
     for (str.data) |c| {
         if (!isXDigit(c)) return Value.initBool(false);
     }
@@ -808,7 +808,10 @@ pub fn php_mb_detect_encoding(str_val: Value, encodings: Value, strict: Value, a
     // 检查是否全部 ASCII
     var is_ascii = true;
     for (data) |b| {
-        if (b >= 0x80) { is_ascii = false; break; }
+        if (b >= 0x80) {
+            is_ascii = false;
+            break;
+        }
     }
     if (is_ascii) {
         const s = try PHPString.init(allocator, "ASCII");
@@ -1443,4 +1446,3 @@ pub fn php_stream_register_wrapper(protocol: Value, classname: Value, allocator:
     _ = allocator;
     return Value.initBool(true);
 }
-

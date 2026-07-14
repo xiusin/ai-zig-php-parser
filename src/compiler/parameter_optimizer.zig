@@ -1,13 +1,12 @@
 const std = @import("std");
 
 /// 参数传递优化器 - 复杂类型指针传参优化
-/// 
+///
 /// 设计目标：
 /// 1. 类型大小分类 - 根据类型大小决定传递方式
 /// 2. 传递方式决策 - 值传递/引用传递/COW传递
 /// 3. 可变性分析 - 检测参数是否被修改
 /// 4. 运行时大小检查 - 处理动态大小类型
-
 /// 类型大小分类
 pub const SizeCategory = enum {
     /// 小类型 (<=16字节) - 直接值传递
@@ -43,7 +42,6 @@ pub const PassingMethod = enum {
     /// 移动语义 - 转移所有权
     by_move,
 };
-
 
 /// 参数修饰符
 pub const ParameterModifier = packed struct {
@@ -130,7 +128,6 @@ pub const TypePassingInfo = struct {
     }
 };
 
-
 /// 参数分析结果
 pub const ParameterAnalysis = struct {
     /// 参数索引
@@ -216,7 +213,6 @@ pub const FunctionSignatureAnalysis = struct {
     }
 };
 
-
 /// 参数优化器
 pub const ParameterOptimizer = struct {
     allocator: std.mem.Allocator,
@@ -287,7 +283,6 @@ pub const ParameterOptimizer = struct {
     pub fn registerType(self: *ParameterOptimizer, type_name: []const u8, info: TypePassingInfo) !void {
         try self.type_cache.put(self.allocator, type_name, info);
     }
-
 
     /// 分析参数的可变性
     pub fn analyzeParameterMutability(
@@ -400,7 +395,6 @@ pub const ParameterOptimizer = struct {
     }
 };
 
-
 /// 可变性分析结果
 pub const MutabilityAnalysis = struct {
     /// 参数名称
@@ -492,7 +486,6 @@ pub const SizeCheckResult = struct {
     large_path_method: PassingMethod,
 };
 
-
 // ============================================================
 // 单元测试
 // ============================================================
@@ -582,7 +575,6 @@ test "ParameterAnalysis determinePassingMethod unmodified cow" {
     analysis.determinePassingMethod();
     try std.testing.expectEqual(PassingMethod.by_cow, analysis.final_method);
 }
-
 
 test "ParameterOptimizer init and deinit" {
     const allocator = std.testing.allocator;
