@@ -7184,7 +7184,15 @@ pub const IRGenerator = struct {
 
         // 引用参数写回
         for (ref_writebacks.items) |wb| {
-            const new_val = try self.emitWithResult(.{ .load = .{ .ptr = wb.temp_reg, .type_ = .php_value } }, .php_value);
+            // no_deref 仅用于全局变量写回：存储 Ref 而非数组值，
+            // 避免 setGlobalVarDirect 对不同指针的数组执行二次 COW。
+            // 局部变量写回需存储数组值（byref 修改需传播回调用者）。
+            const wb_is_global = blk: {
+                const vn = wb.var_name;
+                break :blk self.global_vars.contains(vn) or
+                    (if (self.current_function) |func| std.mem.eql(u8, func.name, "__main__") else false);
+            };
+            const new_val = try self.emitWithResult(.{ .load = .{ .ptr = wb.temp_reg, .type_ = .php_value, .no_deref = wb_is_global } }, .php_value);
 
             // 检查是否是数组元素写回
             if (wb.array_base != null and wb.array_key != null) {
@@ -8156,7 +8164,7 @@ pub const IRGenerator = struct {
             // Get from parent scope
             if (by_ref) {
                 if (self.getVarRegister(var_name)) |ptr_reg| {
-                    const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = ptr_reg } }, .php_value);
+                    const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = ptr_reg, .cow = true } }, .php_value);
                     try captures.append(self.allocator, ref_reg);
                     try cap_names.append(self.allocator, var_name);
                     try cap_by_ref.append(self.allocator, true);
@@ -8170,7 +8178,7 @@ pub const IRGenerator = struct {
                     else
                         try self.emitWithResult(.{ .const_null = {} }, .php_value);
                     _ = try self.emit(.{ .store = .{ .ptr = pre_ptr, .value = init_reg } }, null);
-                    const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = pre_ptr } }, .php_value);
+                    const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = pre_ptr, .cow = true } }, .php_value);
                     // 将 Ref 同步回全局变量，使闭包修改通过引用传播到 __main__ 中的变量
                     if (self.global_vars.contains(var_name)) {
                         _ = try self.emit(.{ .global_set = .{ .name = var_name, .value = ref_reg } }, null);

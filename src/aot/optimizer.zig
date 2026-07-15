@@ -4823,6 +4823,7 @@ pub const IROptimizer = struct {
             .load => |ld| .{ .load = .{
                 .ptr = remapRegister(ld.ptr, reg_map),
                 .type_ = ld.type_,
+                .no_deref = ld.no_deref,
             } },
             .store => |st| .{ .store = .{
                 .ptr = remapRegister(st.ptr, reg_map),

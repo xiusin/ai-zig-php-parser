@@ -1027,6 +1027,7 @@ pub const Instruction = struct {
     pub const LoadOp = struct {
         ptr: Register,
         type_: Type,
+        no_deref: bool = false, // true 时不通过 val_deref 解引用（用于 byref 写回）
     };
 
     /// Store to memory
@@ -1038,6 +1039,7 @@ pub const Instruction = struct {
     /// Create reference to memory
     pub const MakeRefOp = struct {
         ptr: Register,
+        cow: bool = false, // true 时在 make_ref 前对共享数组执行 COW 克隆（闭包捕获场景）
     };
 
     /// Function call

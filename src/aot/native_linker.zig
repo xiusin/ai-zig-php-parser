@@ -7524,6 +7524,18 @@ pub const NativeLinker = struct {
             },
             .make_ref => |op| {
                 if (inst.result) |reg| {
+                    // COW：闭包捕获时，对共享数组先克隆再创建 Ref
+                    // 避免闭包内 array_shift 等修改写穿原始数组
+                    if (op.cow) {
+                        try writer.print("    if (reg_{d}.*.isArray() and !reg_{d}.*.isRef()) {{\n", .{ op.ptr.id, op.ptr.id });
+                        try writer.print("        const __arr = reg_{d}.*.asArray();\n", .{op.ptr.id});
+                        try writer.print("        if (__arr.ref_count > 1) {{\n", .{});
+                        try writer.print("            const __cloned = try __arr.cloneShallow(runtime.runtime_allocator);\n", .{});
+                        try writer.print("            __arr.release(runtime.runtime_allocator);\n", .{});
+                        try writer.print("            reg_{d}.* = runtime.Value.initArray(__cloned);\n", .{op.ptr.id});
+                        try writer.print("        }}\n", .{});
+                        try writer.print("    }}\n", .{});
+                    }
                     // 检查ptr是否是alloca（指针类型）
                     const is_alloca = if (self.current_alloca_regs) |regs|
                         regs.contains(op.ptr.id)
@@ -7596,7 +7608,12 @@ pub const NativeLinker = struct {
                                 if (self.regMayHeap(reg.id)) {
                                     try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
                                 }
-                                try writer.print("    reg_{d} = runtime.val_deref(reg_{d}).*;\n", .{ reg.id, op.ptr.id });
+                                if (op.no_deref) {
+                                    // byref 写回：直接读取 Ref 值，不跟随引用链
+                                    try writer.print("    reg_{d} = reg_{d}.*;\n", .{ reg.id, op.ptr.id });
+                                } else {
+                                    try writer.print("    reg_{d} = runtime.val_deref(reg_{d}).*;\n", .{ reg.id, op.ptr.id });
+                                }
                                 if (self.regMayHeap(reg.id)) {
                                     try writer.print("    _ = reg_{d}.retain();\n", .{reg.id});
                                 }
@@ -7672,7 +7689,12 @@ pub const NativeLinker = struct {
                     // 类型推断可能不准确（如函数参数推断为i64但实际是bool），
                     // 用 asInt()/asFloat()/asBool() 转换会丢失实际类型信息
                     {
-                        try writer.print("    reg_{d}{s} = runtime.val_deref({s}reg_{d}).*;\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
+                        if (op.no_deref) {
+                            // byref 写回：直接读取 Ref 值，不跟随引用链
+                            try writer.print("    reg_{d}{s} = {s}reg_{d}.*;\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
+                        } else {
+                            try writer.print("    reg_{d}{s} = runtime.val_deref({s}reg_{d}).*;\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
+                        }
                         if (self.regMayHeap(reg.id)) {
                             if (result_is_alloca) {
                                 try writer.print("    _ = reg_{d}.*.retain();\n", .{reg.id});
