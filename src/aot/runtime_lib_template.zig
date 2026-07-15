@@ -2870,6 +2870,19 @@ pub fn val_assign(target: *Value, value: Value) void {
     target.* = value;
 }
 
+/// 确保数组的唯一所有权（COW 分离）
+/// 如果 val 指向的数组 ref_count > 1，cloneShallow 并替换 val.*
+/// 用于 byref 数组函数（array_shift 等）调用前，确保修改不写穿共享数组
+pub fn php_ensure_array_separated(val: *Value) void {
+    if (!val.*.isArray()) return;
+    const arr = val.*.asArray();
+    if (arr.ref_count > 1) {
+        const cloned = arr.cloneShallow(runtime_allocator) catch return;
+        arr.release(runtime_allocator);
+        val.* = Value.initArray(cloned);
+    }
+}
+
 /// 引用感知的赋值：如果目标含引用则写穿到堆单元，否则直接赋值
 /// @pre  target 指向有效的 Value（可为 Ref 或普通值）
 /// @post 新值写入实际存储位置，旧值已 release，新值已 retain
@@ -10979,6 +10992,19 @@ pub fn php_array_pop(arr: Value, allocator: Allocator) !Value {
     }
 
     const php_arr = arr.asArray();
+    const value = array_ops_shared.pop(ArrayKey, Value, @TypeOf(php_arr.elements), allocator, &php_arr.elements, &php_arr.next_index) orelse return Value.initNull();
+    return value;
+}
+
+/// array_pop 的引用版本：接收 *Value，内部做 COW 分离并回写
+pub fn php_array_pop_ref(arr_ptr: *Value, allocator: Allocator) !Value {
+    const target = val_deref(arr_ptr);
+    if (!target.*.isArray()) {
+        const got = valueTypeName(target.*);
+        emitTypeFatalError("array_pop", 1, "array", got);
+    }
+    php_ensure_array_separated(target);
+    const php_arr = target.*.asArray();
     const value = array_ops_shared.pop(ArrayKey, Value, @TypeOf(php_arr.elements), allocator, &php_arr.elements, &php_arr.next_index) orelse return Value.initNull();
     return value;
 }
@@ -20614,6 +20640,17 @@ pub fn php_array_shift(arr: Value, allocator: Allocator) !Value {
     if (!arr.isArray()) return Value.initNull();
 
     const php_arr = arr.asArray();
+    const v = array_ops_shared.shift(ArrayKey, Value, @TypeOf(php_arr.elements), allocator, &php_arr.elements, &php_arr.next_index) orelse return Value.initNull();
+    return v;
+}
+
+/// array_shift 的引用版本：接收 *Value，内部做 COW 分离并回写
+/// 用于 byref 场景：array_shift($stack) 中 $stack 可能是 Ref
+pub fn php_array_shift_ref(arr_ptr: *Value, allocator: Allocator) !Value {
+    const target = val_deref(arr_ptr);
+    if (!target.*.isArray()) return Value.initNull();
+    php_ensure_array_separated(target);
+    const php_arr = target.*.asArray();
     const v = array_ops_shared.shift(ArrayKey, Value, @TypeOf(php_arr.elements), allocator, &php_arr.elements, &php_arr.next_index) orelse return Value.initNull();
     return v;
 }
