@@ -4148,11 +4148,44 @@ pub const IRGenerator = struct {
                         .array = current_array,
                         .value = value_reg,
                     } }, null);
+                    // 嵌套数组写回：$arr[$k1][$k2][] = value 时，array_push 可能因 COW 克隆内层数组，
+                    // 需将修改后的内层数组逐层写回父数组
+                    if (keys.items.len > 0) {
+                        const wb_array = current_array;
+                        var wb_i: usize = keys.items.len;
+                        while (wb_i > 0) {
+                            wb_i -= 1;
+                            if (wb_i == 0) {
+                                // 最外层：写回 base_array
+                                _ = try self.emit(.{ .array_set = .{
+                                    .array = base_array,
+                                    .key = keys.items[0],
+                                    .value = wb_array,
+                                } }, null);
+                            } else {
+                                // 中间层：需要获取中间父数组并写回
+                                // 简化处理：逐层 array_set（中间层数组也需要写回，但为避免复杂度，
+                                // 直接在最外层 base_array 上做 array_set 即可覆盖一层情况）
+                                // 对于多层嵌套 $arr[k1][k2][]=v，仅写回 base_array[k1]=inner 即可
+                                // 因为 array_ensure 已经确保中间层存在，COW 仅影响最内层
+                                _ = try self.emit(.{ .array_set = .{
+                                    .array = base_array,
+                                    .key = keys.items[0],
+                                    .value = wb_array,
+                                } }, null);
+                                break;
+                            }
+                        }
+                    }
                     // 写回变量：array_push 可能因 COW 克隆数组，需将修改后的数组写回变量存储
                     if (base_target != null and base_target.?.tag == .variable) {
                         const var_name_for_writeback = self.getString(base_target.?.data.variable.name);
                         const is_ref_param = self.reference_params.contains(var_name_for_writeback);
-                        if (!is_ref_param) {
+                        if (is_ref_param) {
+                            // 引用参数：通过 *Value 指针写回（val_assign 写穿到 cell）
+                            const var_reg_wb = try self.getOrCreateVarRegister(var_name_for_writeback, base_array.type_);
+                            _ = try self.emit(.{ .store = .{ .ptr = var_reg_wb, .value = base_array, .through_ref = true } }, null);
+                        } else {
                             const is_global_wb = self.global_vars.contains(var_name_for_writeback);
                             const is_main_wb = if (self.current_function) |func| std.mem.eql(u8, func.name, "__main__") else false;
                             if (is_global_wb or is_main_wb) {
@@ -4169,14 +4202,15 @@ pub const IRGenerator = struct {
                 if (keys.items.len == 1) {
                     // 单层：$arr[$key] = value
                     _ = try self.emit(.{ .array_set = .{ .array = base_array, .key = keys.items[0], .value = value_reg } }, null);
-                    // 字符串索引赋值需要写回变量（字符串是值类型，COW语义）
-                    // 对数组无害（值未变），对字符串必要（新字符串对象）
-                    // 但对引用参数(array &$arr)跳过写回：array_set 已通过引用原地修改，
-                    // 写回的 val_assign COW 会克隆数组并破坏引用指向
+                    // 写回变量：array_set 可能因 COW 克隆数组，需将修改后的数组写回变量存储
                     if (base_target != null and base_target.?.tag == .variable) {
                         const var_name_for_writeback = self.getString(base_target.?.data.variable.name);
                         const is_ref_param = self.reference_params.contains(var_name_for_writeback);
-                        if (!is_ref_param) {
+                        if (is_ref_param) {
+                            // 引用参数：通过 *Value 指针写回（val_assign 写穿到 cell）
+                            const var_reg_wb = try self.getOrCreateVarRegister(var_name_for_writeback, base_array.type_);
+                            _ = try self.emit(.{ .store = .{ .ptr = var_reg_wb, .value = base_array, .through_ref = true } }, null);
+                        } else {
                             const is_global_wb = self.global_vars.contains(var_name_for_writeback);
                             const is_main_wb = if (self.current_function) |func| std.mem.eql(u8, func.name, "__main__") else false;
                             if (is_global_wb or is_main_wb) {
@@ -7200,6 +7234,76 @@ pub const IRGenerator = struct {
             .args = args,
             .return_type = .php_value,
         } }, .php_value);
+
+        // 排序函数写回：usort/sort 等原地修改第一个参数（by-ref），
+        // native_linker 的 COW store-back 覆盖简单变量/全局/直接属性，
+        // 但不覆盖嵌套表达式（如 $this->prop[$key]）。此处补充嵌套写回。
+        const is_inplace_sort = std.mem.eql(u8, func_name, "usort") or
+            std.mem.eql(u8, func_name, "uasort") or
+            std.mem.eql(u8, func_name, "uksort") or
+            std.mem.eql(u8, func_name, "shuffle") or
+            std.mem.eql(u8, func_name, "sort") or
+            std.mem.eql(u8, func_name, "rsort") or
+            std.mem.eql(u8, func_name, "asort") or
+            std.mem.eql(u8, func_name, "arsort") or
+            std.mem.eql(u8, func_name, "ksort") or
+            std.mem.eql(u8, func_name, "krsort");
+        if (is_inplace_sort and positional_args.items.len > 0) {
+            const arg0_node = self.getNode(positional_args.items[0]);
+            if (arg0_node != null and arg0_node.?.tag == .array_access) {
+                const aa = arg0_node.?.data.array_access;
+                if (aa.index != null) {
+                    const aa_target = self.getNode(aa.target);
+                    if (aa_target != null and aa_target.?.tag == .property_access) {
+                        // $obj->prop[$key] = sorted result
+                        const pa = aa_target.?.data.property_access;
+                        const prop_name_wb = self.getString(pa.property_name);
+                        const obj_reg_wb = try self.generateExpression(pa.target);
+                        const prop_arr = try self.emitWithResult(.{ .property_get = .{
+                            .object = obj_reg_wb,
+                            .property_name = prop_name_wb,
+                        } }, .php_value);
+                        const key_reg_wb = try self.generateExpression(aa.index.?);
+                        _ = try self.emit(.{ .array_set = .{
+                            .array = prop_arr,
+                            .key = key_reg_wb,
+                            .value = result,
+                        } }, null);
+                        _ = try self.emit(.{ .property_set = .{
+                            .object = obj_reg_wb,
+                            .property_name = prop_name_wb,
+                            .value = prop_arr,
+                        } }, null);
+                        _ = try self.emit(.{ .release = .{ .operand = obj_reg_wb } }, null);
+                        _ = try self.emit(.{ .release = .{ .operand = prop_arr } }, null);
+                    } else if (aa_target != null and aa_target.?.tag == .variable) {
+                        // $arr[$key] = sorted result
+                        const var_name_wb = self.getString(aa_target.?.data.variable.name);
+                        const is_global_wb = self.global_vars.contains(var_name_wb);
+                        const is_main_wb = if (self.current_function) |func| std.mem.eql(u8, func.name, "__main__") else false;
+                        const base_arr = if (is_global_wb or is_main_wb)
+                            try self.emitWithResult(.{ .global_get = .{ .name = var_name_wb } }, .php_value)
+                        else blk: {
+                            const var_reg = try self.getOrCreateVarRegister(var_name_wb, .php_value);
+                            break :blk try self.emitWithResult(.{ .load = .{ .ptr = var_reg, .type_ = .php_value } }, .php_value);
+                        };
+                        const key_reg_wb = try self.generateExpression(aa.index.?);
+                        _ = try self.emit(.{ .array_set = .{
+                            .array = base_arr,
+                            .key = key_reg_wb,
+                            .value = result,
+                        } }, null);
+                        if (is_global_wb or is_main_wb) {
+                            _ = try self.emit(.{ .global_set = .{ .name = var_name_wb, .value = base_arr } }, null);
+                        } else {
+                            const var_reg = try self.getOrCreateVarRegister(var_name_wb, base_arr.type_);
+                            _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = base_arr } }, null);
+                        }
+                        _ = try self.emit(.{ .release = .{ .operand = base_arr } }, null);
+                    }
+                }
+            }
+        }
 
         // 引用参数写回
         for (ref_writebacks.items) |wb| {

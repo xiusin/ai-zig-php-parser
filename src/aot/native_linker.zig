@@ -146,6 +146,13 @@ pub const OptimizeLevel = enum {
     }
 };
 
+/// property_get 指令来源追踪：结果寄存器 → {对象寄存器ID, 属性名}
+/// 用于排序函数（usort/sort 等）COW store-back 时写回对象属性
+const PropertyGetOrigin = struct {
+    object_reg_id: usize,
+    property_name: []const u8,
+};
+
 /// 原生链接器
 pub const NativeLinker = struct {
     const Self = @This();
@@ -229,6 +236,7 @@ pub const NativeLinker = struct {
     current_liveness: ?*const @import("liveness_analysis.zig").LivenessAnalysis = null, // 活跃性分析结果
     current_catch_used_regs: ?*const std.AutoHashMap(usize, void) = null, // catch块中引用的寄存器集合（cleanup时跳过）
     current_cond_br_source_block: ?usize = null, // 嵌套cond_br的源块索引（用于PHI incoming选择）
+    current_property_get_origins: ?*const std.AutoHashMap(usize, PropertyGetOrigin) = null,
 
     /// 收集一个基本块中引用的所有寄存器 ID
     fn collectBlockUsedRegs(self: *Self, block: *IR.BasicBlock, set: *std.AutoHashMap(usize, void)) !void {
@@ -2810,6 +2818,12 @@ pub const NativeLinker = struct {
                         "    if ({s}_meta.parent) |p| runtime.php_check_final_inheritance(\"{s}\", p, \"{s}\", {d});\n",
                         .{ short_cname, escaped_full, escaped_file, td.location.line },
                     );
+                    // 继承父类的魔法方法指针（__toString 等）
+                    // 子类未定义时从父类继承，确保 echo $obj 正确调用父类 __toString
+                    try writer.print(
+                        "    if ({s}_meta.magic_toString == null) {{ if ({s}_meta.parent) |p| {s}_meta.magic_toString = p.magic_toString; }}\n",
+                        .{ short_cname, short_cname, short_cname },
+                    );
                 }
 
                 // 设置接口列表
@@ -4870,15 +4884,27 @@ pub const NativeLinker = struct {
         // 收集 array_get 的 result → base_reg 映射（用于回溯）
         var array_get_base = std.AutoHashMap(usize, usize).init(self.allocator);
         defer array_get_base.deinit();
+        // 收集 property_get 的 result → {object_reg_id, property_name} 映射
+        // 用于排序函数 COW store-back 时写回对象属性
+        var property_get_origins = std.AutoHashMap(usize, PropertyGetOrigin).init(self.allocator);
+        defer property_get_origins.deinit();
         for (func.blocks.items) |blk_scan2| {
             for (blk_scan2.instructions.items) |inst_scan| {
                 if (inst_scan.op == .array_get) {
                     if (inst_scan.result) |reg| {
                         try array_get_base.put(reg.id, inst_scan.op.array_get.array.id);
                     }
+                } else if (inst_scan.op == .property_get) {
+                    if (inst_scan.result) |reg| {
+                        try property_get_origins.put(reg.id, .{
+                            .object_reg_id = inst_scan.op.property_get.object.id,
+                            .property_name = inst_scan.op.property_get.property_name,
+                        });
+                    }
                 }
             }
         }
+        self.current_property_get_origins = &property_get_origins;
         // 第二遍：找 coalesce 模式
         for (func.blocks.items) |blk_scan| {
             // 方法1：identical(reg, null_const) 模式检测
@@ -7444,6 +7470,16 @@ pub const NativeLinker = struct {
                 }
             },
             .store => |op| {
+                // through_ref: 引用参数的 array_push/array_set COW 写回
+                // 通过 *Value 指针调用 val_assign 写穿到 cell（make_ref 创建的堆单元）
+                if (op.through_ref) {
+                    if (self.ref_param_alloca_map) |map| {
+                        if (map.get(op.ptr.id)) |param_reg_id| {
+                            try writer.print("    runtime.val_assign(reg_{d}, reg_{d});\n", .{ param_reg_id, op.value.id });
+                            return;
+                        }
+                    }
+                }
                 // 检查是否是引用参数的初始化store（跳过）
                 var is_ref_param_init = false;
                 if (self.current_function_for_resolve) |func_check| {
@@ -10146,11 +10182,18 @@ pub const NativeLinker = struct {
                                             try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull(), blk: { var tmp = runtime.Value.initNull(); break :blk &tmp; }, runtime.Value.initInt(0), runtime.Value.initInt(0), runtime.runtime_allocator);\n");
                                         }
                                     } else {
-                                        // AOT-COW-002: usort/uasort/uksort/shuffle 前对数组参数做 COW
+                                        // AOT-COW-002: 原地排序函数前对数组参数做 COW
+                                        // usort/uasort/uksort/shuffle/sort/rsort/asort/arsort/ksort/krsort
                                         if (op.args.len > 0 and (std.mem.eql(u8, runtime_name, "php_usort") or
                                             std.mem.eql(u8, runtime_name, "php_uasort") or
                                             std.mem.eql(u8, runtime_name, "php_uksort") or
-                                            std.mem.eql(u8, runtime_name, "php_shuffle")))
+                                            std.mem.eql(u8, runtime_name, "php_shuffle") or
+                                            std.mem.eql(u8, runtime_name, "php_sort") or
+                                            std.mem.eql(u8, runtime_name, "php_rsort") or
+                                            std.mem.eql(u8, runtime_name, "php_asort") or
+                                            std.mem.eql(u8, runtime_name, "php_arsort") or
+                                            std.mem.eql(u8, runtime_name, "php_ksort") or
+                                            std.mem.eql(u8, runtime_name, "php_krsort")))
                                         {
                                             const cow_arg = op.args[0];
                                             const cow_arg_alloca = if (self.current_alloca_regs) |regs| regs.contains(cow_arg.id) else false;
@@ -10172,11 +10215,17 @@ pub const NativeLinker = struct {
                                         try self.writeValueArgs(writer, op.args);
                                         try writer.writeAll(", runtime.runtime_allocator);\n");
                                     }
-                                    // COW store-back: usort/uasort/uksort/shuffle 返回排序后的数组，需写回第一个参数寄存器
+                                    // COW store-back: 原地排序函数返回排序后的数组，需写回第一个参数寄存器
                                     if (op.args.len > 0 and (std.mem.eql(u8, runtime_name, "php_usort") or
                                         std.mem.eql(u8, runtime_name, "php_uasort") or
                                         std.mem.eql(u8, runtime_name, "php_uksort") or
-                                        std.mem.eql(u8, runtime_name, "php_shuffle")))
+                                        std.mem.eql(u8, runtime_name, "php_shuffle") or
+                                        std.mem.eql(u8, runtime_name, "php_sort") or
+                                        std.mem.eql(u8, runtime_name, "php_rsort") or
+                                        std.mem.eql(u8, runtime_name, "php_asort") or
+                                        std.mem.eql(u8, runtime_name, "php_arsort") or
+                                        std.mem.eql(u8, runtime_name, "php_ksort") or
+                                        std.mem.eql(u8, runtime_name, "php_krsort")))
                                     {
                                         const arg0_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.args[0].id) else false;
                                         if (arg0_alloca) {
@@ -10191,6 +10240,20 @@ pub const NativeLinker = struct {
                                                 const escaped_var = try self.escapeString(var_name);
                                                 defer self.allocator.free(escaped_var);
                                                 try writer.print("    try setGlobalVar(\"{s}\", reg_{d});\n", .{ escaped_var, reg.id });
+                                            }
+                                        }
+                                        // 属性写回：如果第一个参数来自 property_get（如 $this->data），
+                                        // COW 克隆后排序结果需写回对象属性
+                                        if (self.current_property_get_origins) |origins| {
+                                            if (origins.get(op.args[0].id)) |origin| {
+                                                const escaped_prop = try self.escapeString(origin.property_name);
+                                                defer self.allocator.free(escaped_prop);
+                                                const obj_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(origin.object_reg_id) else false;
+                                                if (obj_is_alloca) {
+                                                    try writer.print("    _ = try runtime.php_object_set(reg_{d}.*, \"{s}\", reg_{d});\n", .{ origin.object_reg_id, escaped_prop, reg.id });
+                                                } else {
+                                                    try writer.print("    _ = try runtime.php_object_set(reg_{d}, \"{s}\", reg_{d});\n", .{ origin.object_reg_id, escaped_prop, reg.id });
+                                                }
                                             }
                                         }
                                     }

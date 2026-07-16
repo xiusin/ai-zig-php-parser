@@ -1034,6 +1034,7 @@ pub const Instruction = struct {
     pub const StoreOp = struct {
         ptr: Register,
         value: Register,
+        through_ref: bool = false, // true 时通过 *Value 指针写入（引用参数的 array_push/array_set COW 写回）
     };
 
     /// Create reference to memory

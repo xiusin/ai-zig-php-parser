@@ -18157,6 +18157,10 @@ pub const PHPObject = struct {
         if (self.class_meta) |meta| {
             if (meta.magic_toString) |to_str| {
                 const this_val = Value_initObject(self);
+                // 设置 calledClass 为对象实际类，确保继承的 __toString 中 static::class 正确解析（LSB）
+                const __prev_called = getCurrentCalledClass();
+                setCurrentCalledClass(meta);
+                defer setCurrentCalledClass(__prev_called);
                 const result = try to_str(this_val, &.{}, allocator);
                 if (result.isString()) {
                     return result.asString();
@@ -19725,19 +19729,22 @@ pub fn php_call_static_with_ctx(ctx: Value, class_name: []const u8, method_name:
 
 /// 获取静态属性
 pub fn php_get_static_property(class_name: []const u8, property_name: []const u8) !Value {
-    const meta = blk: {
-        if (std.mem.eql(u8, class_name, "self")) {
-            // 尝试从当前作用域获取
-            if (getCurrentScopeClass()) |scope| {
-                break :blk scope;
-            }
-            // 如果没有作用域，尝试从调用类获取
-            if (getCurrentCalledClass()) |called| {
-                break :blk called;
-            }
-            std.debug.print("ERROR: getCurrentScopeClass() returned null for 'self'\n", .{});
-            return error.ClassNotFound;
-        }
+const meta = blk: {
+if (std.mem.eql(u8, class_name, "self")) {
+// trait 中 self:: 静态属性应解析为使用类（called class），而非 trait 自身
+if (getCurrentScopeClass()) |scope| {
+if (scope.is_trait) {
+if (getCurrentCalledClass()) |called| break :blk called;
+}
+break :blk scope;
+}
+// 如果没有作用域，尝试从调用类获取
+if (getCurrentCalledClass()) |called| {
+break :blk called;
+}
+std.debug.print("ERROR: getCurrentScopeClass() returned null for 'self'\n", .{});
+return error.ClassNotFound;
+}
         if (std.mem.eql(u8, class_name, "parent")) {
             const scope = getCurrentScopeClass() orelse return error.ClassNotFound;
             break :blk scope.parent orelse return error.ClassNotFound;
@@ -19773,10 +19780,17 @@ pub fn php_get_static_property(class_name: []const u8, property_name: []const u8
 
 /// 设置静态属性
 pub fn php_set_static_property(class_name: []const u8, property_name: []const u8, value: Value) !Value {
-    var meta = blk: {
-        if (std.mem.eql(u8, class_name, "self")) {
-            break :blk @constCast(getCurrentScopeClass() orelse return error.ClassNotFound);
-        }
+var meta = blk: {
+if (std.mem.eql(u8, class_name, "self")) {
+// trait 中 self:: 静态属性应解析为使用类（called class），而非 trait 自身
+if (getCurrentScopeClass()) |scope| {
+if (scope.is_trait) {
+if (getCurrentCalledClass()) |called| break :blk @constCast(called);
+}
+break :blk @constCast(scope);
+}
+break :blk @constCast(getCurrentCalledClass() orelse return error.ClassNotFound);
+}
         if (std.mem.eql(u8, class_name, "parent")) {
             const scope = getCurrentScopeClass() orelse return error.ClassNotFound;
             break :blk @constCast(scope.parent orelse return error.ClassNotFound);
