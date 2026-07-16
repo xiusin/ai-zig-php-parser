@@ -49,7 +49,7 @@ const keyword_map = std.StaticStringMap(Token.Tag).initComptime(.{
     .{ "yield", .k_yield },
     .{ "match", .k_match },
     .{ "array", .k_array },
-    .{ "range", .k_range },
+    // range 是 PHP 内置函数，不是关键字 — 移除以避免与函数调用冲突
     .{ "elseif", .k_elseif },
     .{ "public", .k_public },
     .{ "static", .k_static },

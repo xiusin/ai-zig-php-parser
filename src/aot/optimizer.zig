@@ -2396,19 +2396,24 @@ pub const IROptimizer = struct {
             switch (inst.op) {
                 .load => |op| {
                     if (reg_to_alloca.get(op.ptr.id)) |alloca| {
-                        // Replace result with current value
-                        if (current_values.getPtr(alloca)) |stack| {
-                            if (stack.items.len > 0) {
-                                const val = stack.items[stack.items.len - 1];
-
-                                // 记录寄存器重命名映射：load 的结果寄存器应该被替换为栈顶值
-                                if (inst.result) |res| {
-                                    try reg_rename_map.put(res.id, val.id);
+                        // 替换为栈顶值；栈为空时变量在当前路径未定义（如在条件块内定义但该块 return）
+                        const val: ?Register = blk: {
+                            if (current_values.getPtr(alloca)) |stack| {
+                                if (stack.items.len > 0) {
+                                    break :blk stack.items[stack.items.len - 1];
                                 }
-
-                                // 将 load 转换为 cast（后续会被优化掉）
-                                inst.op = .{ .cast = .{ .value = val, .from_type = val.type_, .to_type = op.type_ } };
                             }
+                            break :blk null;
+                        };
+
+                        if (val) |v| {
+                            if (inst.result) |res| {
+                                try reg_rename_map.put(res.id, v.id);
+                            }
+                            inst.op = .{ .cast = .{ .value = v, .from_type = v.type_, .to_type = op.type_ } };
+                        } else {
+                            // 变量未定义 → const_null（PHP undefined variable 语义）
+                            inst.op = .const_null;
                         }
                     }
                 },

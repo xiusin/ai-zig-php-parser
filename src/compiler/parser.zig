@@ -1740,16 +1740,26 @@ pub const Parser = struct {
         }
 
         // Range loop: for range 10, for $i range 10, or for range 10 as $i
-        if (self.curr.tag == .k_range or self.curr.tag == .t_variable) {
+        // range 不再是关键字，用标识符匹配
+        const range_tok_text = self.lexer.buffer[self.curr.loc.start..self.curr.loc.end];
+        const is_range_token = (self.curr.tag == .t_string and std.mem.eql(u8, range_tok_text, "range"));
+        if (is_range_token or self.curr.tag == .t_variable) {
             var variable: ?ast.Node.Index = null;
 
             // 检查是否有变量（for $i range 10）
             if (self.curr.tag == .t_variable) {
                 variable = try self.parseExpression(0); // 解析变量
-                _ = try self.eat(.k_range); // 吃掉range关键字
+                // 期望下一个token是 "range" 标识符
+                const next_text = self.lexer.buffer[self.curr.loc.start..self.curr.loc.end];
+                if (self.curr.tag == .t_string and std.mem.eql(u8, next_text, "range")) {
+                    self.nextToken(); // consume "range"
+                } else {
+                    self.reportError("Expected 'range' after loop variable");
+                    return error.UnexpectedToken;
+                }
             } else {
                 // for range 10（无变量）
-                _ = try self.eat(.k_range); // 吃掉range关键字
+                self.nextToken(); // consume "range" identifier
             }
 
             const count = try self.parseExpression(0); // 解析范围数值
@@ -3191,12 +3201,7 @@ pub const Parser = struct {
                 const expression = try self.parseExpression(1);
                 return self.createNode(.{ .tag = .throw_stmt, .main_token = token, .data = .{ .throw_stmt = .{ .expression = expression } } });
             },
-            // 允许 range 作为函数调用（PHP内置函数）
-            .k_range => {
-                const t = try self.eat(.k_range);
-                const name_id = try self.context.intern("range");
-                return self.createNode(.{ .tag = .variable, .main_token = t, .data = .{ .variable = .{ .name = name_id } } });
-            },
+            // range 现在是普通标识符，由 t_identifier 路径处理
             .l_paren => {
                 self.nextToken();
                 // Check for type cast: (int), (float), (string), (array), (object), (bool)
@@ -3290,9 +3295,12 @@ pub const Parser = struct {
                         // 去掉末尾的 ]
                         const key_text = if (key_part.len > 0 and key_part[key_part.len - 1] == ']') key_part[0 .. key_part.len - 1] else key_part;
 
-                        // 创建 key 节点（整数或字符串）
+                        // 创建 key 节点（变量、整数或字符串）
                         var index_node: ast.Node.Index = undefined;
-                        if (std.fmt.parseInt(i64, key_text, 10)) |int_val| {
+                        if (key_text.len > 0 and key_text[0] == '$') {
+                            // $var[key] 中 key 是变量：创建 variable 节点
+                            index_node = try self.createNode(.{ .tag = .variable, .main_token = t, .data = .{ .variable = .{ .name = try self.context.intern(key_text) } } });
+                        } else if (std.fmt.parseInt(i64, key_text, 10)) |int_val| {
                             index_node = try self.createNode(.{ .tag = .literal_int, .main_token = t, .data = .{ .literal_int = .{ .value = int_val } } });
                         } else |_| {
                             // 字符串 key（去掉可能的引号）

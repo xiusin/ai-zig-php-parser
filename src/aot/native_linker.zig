@@ -227,6 +227,153 @@ pub const NativeLinker = struct {
     current_ref_ptr_regs: ?*const std.AutoHashMap(usize, void) = null, // 非alloca的指针寄存器（PHI/select合并引用参数）
     param_registers: ?*std.StringHashMap(usize) = null, // 参数名 -> 寄存器ID（用于引用写回）
     current_liveness: ?*const @import("liveness_analysis.zig").LivenessAnalysis = null, // 活跃性分析结果
+    current_catch_used_regs: ?*const std.AutoHashMap(usize, void) = null, // catch块中引用的寄存器集合（cleanup时跳过）
+    current_cond_br_source_block: ?usize = null, // 嵌套cond_br的源块索引（用于PHI incoming选择）
+
+    /// 收集一个基本块中引用的所有寄存器 ID
+    fn collectBlockUsedRegs(self: *Self, block: *IR.BasicBlock, set: *std.AutoHashMap(usize, void)) !void {
+        _ = self;
+        for (block.instructions.items) |inst| {
+            // 处理 result 寄存器本身不需要收集（那是定义，不是引用）
+            switch (inst.op) {
+                .add, .sub, .mul, .div, .mod, .pow, .concat, .eq, .ne, .lt, .le, .gt, .ge, .identical, .not_identical, .spaceship, .and_, .or_, .xor_, .bit_and, .bit_or, .bit_xor, .shl, .shr => |bin| {
+                    try set.put(bin.lhs.id, {});
+                    try set.put(bin.rhs.id, {});
+                },
+                .neg, .not, .bit_not, .get_type, .clone, .move => |un| {
+                    try set.put(un.operand.id, {});
+                },
+                .cast => |op| {
+                    try set.put(op.value.id, {});
+                },
+                .box => |op| {
+                    try set.put(op.value.id, {});
+                },
+                .unbox => |op| {
+                    try set.put(op.value.id, {});
+                },
+                .store => |op| {
+                    try set.put(op.ptr.id, {});
+                    try set.put(op.value.id, {});
+                },
+                .load => |op| {
+                    try set.put(op.ptr.id, {});
+                },
+                .call => |op| {
+                    for (op.args) |arg| {
+                        try set.put(arg.id, {});
+                    }
+                },
+                .call_indirect => |op| {
+                    try set.put(op.func_ptr.id, {});
+                    for (op.args) |arg| {
+                        try set.put(arg.id, {});
+                    }
+                },
+                .method_call => |op| {
+                    try set.put(op.object.id, {});
+                    for (op.args) |arg| {
+                        try set.put(arg.id, {});
+                    }
+                },
+                .new_object => |op| {
+                    for (op.args) |arg| {
+                        try set.put(arg.id, {});
+                    }
+                },
+                .array_get => |op| {
+                    try set.put(op.array.id, {});
+                    try set.put(op.key.id, {});
+                },
+                .array_set => |op| {
+                    try set.put(op.array.id, {});
+                    try set.put(op.key.id, {});
+                    try set.put(op.value.id, {});
+                },
+                .array_push => |op| {
+                    try set.put(op.array.id, {});
+                    try set.put(op.value.id, {});
+                },
+                .property_get => |op| {
+                    try set.put(op.object.id, {});
+                },
+                .property_set => |op| {
+                    try set.put(op.object.id, {});
+                    try set.put(op.value.id, {});
+                },
+                .phi => |op| {
+                    for (op.incoming) |inc| {
+                        try set.put(inc.value.id, {});
+                    }
+                },
+                .select => |op| {
+                    try set.put(op.cond.id, {});
+                    try set.put(op.then_value.id, {});
+                    try set.put(op.else_value.id, {});
+                },
+                .interpolate => |op| {
+                    for (op.parts) |part| {
+                        try set.put(part.id, {});
+                    }
+                },
+                .make_ref => |op| {
+                    try set.put(op.ptr.id, {});
+                },
+                .global_set => |op| {
+                    if (op.value) |val| {
+                        try set.put(val.id, {});
+                    }
+                },
+                .global_get_dynamic => |op| {
+                    try set.put(op.name_reg.id, {});
+                },
+                .global_set_dynamic => |op| {
+                    try set.put(op.name_reg.id, {});
+                    try set.put(op.value.id, {});
+                },
+                .parent_call => |op| {
+                    try set.put(op.object.id, {});
+                    for (op.args) |arg| {
+                        try set.put(arg.id, {});
+                    }
+                },
+                .channel_send => |op| {
+                    try set.put(op.channel.id, {});
+                    try set.put(op.value.id, {});
+                },
+                .channel_recv => |op| {
+                    try set.put(op.channel.id, {});
+                },
+                .go_spawn => |op| {
+                    for (op.args) |arg| {
+                        try set.put(arg.id, {});
+                    }
+                },
+                else => {},
+            }
+        }
+        // 处理 terminator 中的寄存器引用
+        if (block.terminator) |term| {
+            switch (term) {
+                .ret => |ret_reg| {
+                    if (ret_reg) |reg| {
+                        try set.put(reg.id, {});
+                    }
+                },
+                .br => {},
+                .cond_br => |cb| {
+                    try set.put(cb.cond.id, {});
+                },
+                .switch_ => |sw| {
+                    try set.put(sw.value.id, {});
+                },
+                .throw => |reg| {
+                    try set.put(reg.id, {});
+                },
+                else => {},
+            }
+        }
+    }
 
     /// 查找make_ref指令的原始alloca
     fn findMakeRefSource(self: *Self, reg_id: usize) ?usize {
@@ -2940,6 +3087,8 @@ pub const NativeLinker = struct {
         .{ "str_word_count", bi(.{ .runtime_name = "php_str_word_count", .needs_allocator = true }) },
         .{ "count_chars", bi(.{ .runtime_name = "php_count_chars", .needs_allocator = true }) },
         .{ "str_ends_with", bi(.{ .runtime_name = "php_str_ends_with", .needs_allocator = false }) },
+        .{ "spl_object_id", bi(.{ .runtime_name = "php_spl_object_id", .needs_allocator = false }) },
+        .{ "spl_object_hash", bi(.{ .runtime_name = "php_spl_object_hash", .needs_allocator = true }) },
         .{ "ucfirst", bi(.{ .runtime_name = "php_ucfirst", .needs_allocator = true }) },
         .{ "lcfirst", bi(.{ .runtime_name = "php_lcfirst", .needs_allocator = true }) },
         .{ "ucwords", bi(.{ .runtime_name = "php_ucwords", .needs_allocator = true }) },
@@ -5488,9 +5637,11 @@ pub const NativeLinker = struct {
         const prev_alloca_regs = self.current_alloca_regs;
         self.current_cleanup_regs = cleanup_regs;
         self.current_alloca_regs = alloca_regs;
+        const prev_catch_used_regs = self.current_catch_used_regs;
         defer {
             self.current_cleanup_regs = prev_cleanup_regs;
             self.current_alloca_regs = prev_alloca_regs;
+            self.current_catch_used_regs = prev_catch_used_regs;
         }
 
         var writer = ListWriter{ .list = code, .allocator = self.allocator };
@@ -5564,12 +5715,42 @@ pub const NativeLinker = struct {
         // 检查函数是否有返回值
         const func_has_return_value = self.func_return_types.get(func.name) orelse false;
 
+        // 预计算每个 catch 块中引用的寄存器集合
+        // 用于在异常 cleanup 时跳过 catch 块仍需使用的寄存器
+        var catch_used_regs_map = std.AutoHashMap(u32, *std.AutoHashMap(usize, void)).init(self.allocator);
+        defer {
+            var it = catch_used_regs_map.valueIterator();
+            while (it.next()) |set_ptr| {
+                set_ptr.*.deinit();
+                self.allocator.destroy(set_ptr.*);
+            }
+            catch_used_regs_map.deinit();
+        }
+        for (func.blocks.items) |blk| {
+            if (blk.exception_handler) |handler| {
+                const catch_idx = handler.index;
+                if (!catch_used_regs_map.contains(catch_idx)) {
+                    const set_ptr = try self.allocator.create(std.AutoHashMap(usize, void));
+                    set_ptr.* = std.AutoHashMap(usize, void).init(self.allocator);
+                    try self.collectBlockUsedRegs(func.blocks.items[catch_idx], set_ptr);
+                    try catch_used_regs_map.put(catch_idx, set_ptr);
+                }
+            }
+        }
+
         for (func.blocks.items, 0..) |block, block_idx| {
             // 设置当前异常处理器
             if (block.exception_handler) |handler| {
                 self.current_exception_handler = handler.index;
+                // 设置 catch 块引用的寄存器集合
+                if (catch_used_regs_map.get(handler.index)) |catch_regs| {
+                    self.current_catch_used_regs = catch_regs;
+                } else {
+                    self.current_catch_used_regs = null;
+                }
             } else {
                 self.current_exception_handler = null;
+                self.current_catch_used_regs = null;
             }
 
             if (block.exception_handler) |handler| {
@@ -7115,6 +7296,11 @@ pub const NativeLinker = struct {
                     // 跳过 alloca 寄存器（它们是局部变量，会在函数结束时自动清理）
                     if (self.current_alloca_regs) |alloca_regs| {
                         if (alloca_regs.contains(reg_id)) continue;
+                    }
+
+                    // 跳过 catch 块中引用的寄存器（避免在异常路径上释放 catch 块仍需使用的值）
+                    if (self.current_catch_used_regs) |catch_regs| {
+                        if (catch_regs.contains(reg_id)) continue;
                     }
 
                     if (self.regMayHeap(reg_id)) {
@@ -12099,7 +12285,21 @@ pub const NativeLinker = struct {
         return result;
     }
 
-    /// 生成 cond_br 的 if/else 结构（统一处理，支持递归嵌套）
+    /// 查找两个块的共同 br 目标（用于定位嵌套 if/else 的 merge 块）
+fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: usize, blk_b_idx: usize) ?usize {
+    _ = self;
+    const blk_a = func.blocks.items[blk_a_idx];
+    const blk_b = func.blocks.items[blk_b_idx];
+    const a_target = blk_a.terminator orelse return null;
+    const b_target = blk_b.terminator orelse return null;
+    if (a_target != .br or b_target != .br) return null;
+    const a_idx = @as(usize, a_target.br.index);
+    const b_idx = @as(usize, b_target.br.index);
+    if (a_idx == b_idx) return a_idx;
+    return null;
+}
+
+/// 生成 cond_br 的 if/else 结构（统一处理，支持递归嵌套）
     /// indent 为当前 if/else 结构的缩进字符串（如 "    " 表示 4 空格）
     /// use_simple 为 true 时用 generateInstructionSimple，false 时用 generateInstruction
     fn generateCondBrBlock(
@@ -12150,19 +12350,33 @@ pub const NativeLinker = struct {
         } else if (self.countPredecessors(func, then_idx) > 1) {
             // Then 块是汇聚点（多前驱）- 不内联，只生成 PHI 赋值
             // then 分支对应从 cond_br 块直接进入 merge 块的路径
-            // PHI incoming 中排除 else 分支来源即为 cond_br 块来源
+            // AOT-PHI-002 修复：嵌套 cond_br 场景下，使用 source_block 精确匹配 incoming
             const merge_blk = func.blocks.items[then_idx];
             for (merge_blk.instructions.items) |inst| {
                 if (inst.op != .phi) continue;
                 const phi_res = inst.result orelse continue;
                 const phi_op = inst.op.phi;
-                for (phi_op.incoming) |incoming| {
-                    const inc_idx = self.tryFindBlockIndex(func, incoming.block) orelse continue;
-                    if (inc_idx != else_idx) {
-                        var phi_buf: [32]u8 = undefined;
-                        const phi_ref = try self.getOperandRef(&phi_buf, incoming.value.id);
-                        try writer.print("{s}reg_{d} = {s};\n", .{ child_indent, phi_res.id, phi_ref });
-                        break;
+                // 优先使用 source_block 精确匹配
+                if (self.current_cond_br_source_block) |source_idx| {
+                    for (phi_op.incoming) |incoming| {
+                        const inc_idx = @as(usize, incoming.block.index);
+                        if (inc_idx == source_idx) {
+                            var phi_buf: [32]u8 = undefined;
+                            const phi_ref = try self.getOperandRef(&phi_buf, incoming.value.id);
+                            try writer.print("{s}reg_{d} = {s};\n", .{ child_indent, phi_res.id, phi_ref });
+                            break;
+                        }
+                    }
+                } else {
+                    // 回退：排除 else 分支来源
+                    for (phi_op.incoming) |incoming| {
+                        const inc_idx = @as(usize, incoming.block.index);
+                        if (inc_idx != else_idx) {
+                            var phi_buf: [32]u8 = undefined;
+                            const phi_ref = try self.getOperandRef(&phi_buf, incoming.value.id);
+                            try writer.print("{s}reg_{d} = {s};\n", .{ child_indent, phi_res.id, phi_ref });
+                            break;
+                        }
                     }
                 }
             }
@@ -12200,7 +12414,53 @@ pub const NativeLinker = struct {
                         const t_then_idx = @as(usize, t_term.cond_br.then_block.index);
                         const t_else_idx = @as(usize, t_term.cond_br.else_block.index);
                         if (!processed.contains(t_then_idx) or !processed.contains(t_else_idx)) {
+                            const prev_source = self.current_cond_br_source_block;
+                            self.current_cond_br_source_block = then_idx;
+                            defer self.current_cond_br_source_block = prev_source;
                             try self.generateCondBrBlock(writer, func, t_term.cond_br, processed, child_indent, use_simple);
+                        }
+                        // AOT-PHI-001 修复：递归 generateCondBrBlock 后，需要处理 br 链到外层 merge
+                        // inner then/else 可能 br 到不同块，需要追踪每个分支的 br 目标
+                        // 如果目标块是 merge 块（多前驱），generateBrChain 会生成 PHI 拷贝
+                        // 如果目标块不是 merge 块，generateBrChain 会内联并继续追踪 br 链
+                        // 关键：inner then 的 br 目标可能就是 outer merge（跳过 inner merge）
+                        // 或 inner merge 的 br 链最终到达 outer merge
+                        const inner_merge_idx = self.findCommonBrTarget(func, t_then_idx, t_else_idx);
+                        if (inner_merge_idx) |im_idx| {
+                            // 共同 merge 块：处理其 br 到外层
+                            if (!processed.contains(im_idx)) {
+                                const inner_merge_blk = func.blocks.items[im_idx];
+                                if (inner_merge_blk.terminator) |im_term| {
+                                    if (im_term == .br) {
+                                        try self.generateBrChain(writer, func, im_term.br, im_idx, processed, child_indent, use_simple);
+                                    }
+                                }
+                            }
+                        } else {
+                            // 无共同 merge 块：inner then/else br 到不同块
+                            // 分别处理 inner then 和 inner else 的 br 链
+                            // inner then 的 br 目标可能已经是 merge 块（PHI 已由 generateCondBrBlock 内部处理）
+                            // 但 inner merge 块的 br 到 outer merge 可能未处理
+                            // 检查 inner then 的 br 目标是否是 merge 块且有后续 br
+                            const t_then_blk = func.blocks.items[t_then_idx];
+                            if (t_then_blk.terminator) |tt_term| {
+                                if (tt_term == .br) {
+                                    const tt_target_idx = @as(usize, tt_term.br.index);
+                                    if (!processed.contains(tt_target_idx) and self.countPredecessors(func, tt_target_idx) > 1) {
+                                        // inner then 的 br 目标是 merge 块
+                                        // 检查该 merge 块是否有 br 到外层（未被处理）
+                                        const merge_blk = func.blocks.items[tt_target_idx];
+                                        if (merge_blk.terminator) |mt| {
+                                            if (mt == .br) {
+                                                const mt_idx = @as(usize, mt.br.index);
+                                                if (!processed.contains(mt_idx)) {
+                                                    try self.generateBrChain(writer, func, mt.br, tt_target_idx, processed, child_indent, use_simple);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     },
                     .ret => |ret_val| {
@@ -12232,19 +12492,33 @@ pub const NativeLinker = struct {
         } else if (self.countPredecessors(func, else_idx) > 1) {
             // Else 块是汇聚点（多前驱）- 不内联，只生成 PHI 赋值
             // else 分支对应从 cond_br 块直接进入 merge 块的路径
-            // PHI incoming 中排除 then 分支来源即为 cond_br 块来源
+            // AOT-PHI-002 修复：嵌套 cond_br 场景下，使用 source_block 精确匹配 incoming
             const merge_blk = func.blocks.items[else_idx];
             for (merge_blk.instructions.items) |inst| {
                 if (inst.op != .phi) continue;
                 const phi_res = inst.result orelse continue;
                 const phi_op = inst.op.phi;
-                for (phi_op.incoming) |incoming| {
-                    const inc_idx = self.tryFindBlockIndex(func, incoming.block) orelse continue;
-                    if (inc_idx != then_idx) {
-                        var phi_buf: [32]u8 = undefined;
-                        const phi_ref = try self.getOperandRef(&phi_buf, incoming.value.id);
-                        try writer.print("{s}reg_{d} = {s};\n", .{ child_indent, phi_res.id, phi_ref });
-                        break;
+                // 优先使用 source_block 精确匹配
+                if (self.current_cond_br_source_block) |source_idx| {
+                    for (phi_op.incoming) |incoming| {
+                        const inc_idx = @as(usize, incoming.block.index);
+                        if (inc_idx == source_idx) {
+                            var phi_buf: [32]u8 = undefined;
+                            const phi_ref = try self.getOperandRef(&phi_buf, incoming.value.id);
+                            try writer.print("{s}reg_{d} = {s};\n", .{ child_indent, phi_res.id, phi_ref });
+                            break;
+                        }
+                    }
+                } else {
+                    // 回退：排除 then 分支来源
+                    for (phi_op.incoming) |incoming| {
+                        const inc_idx = @as(usize, incoming.block.index);
+                        if (inc_idx != then_idx) {
+                            var phi_buf: [32]u8 = undefined;
+                            const phi_ref = try self.getOperandRef(&phi_buf, incoming.value.id);
+                            try writer.print("{s}reg_{d} = {s};\n", .{ child_indent, phi_res.id, phi_ref });
+                            break;
+                        }
                     }
                 }
             }
@@ -12283,7 +12557,44 @@ pub const NativeLinker = struct {
                         const e_then_idx = @as(usize, e_term.cond_br.then_block.index);
                         const e_else_idx = @as(usize, e_term.cond_br.else_block.index);
                         if (!processed.contains(e_then_idx) or !processed.contains(e_else_idx)) {
+                            const prev_source = self.current_cond_br_source_block;
+                            self.current_cond_br_source_block = else_idx;
+                            defer self.current_cond_br_source_block = prev_source;
                             try self.generateCondBrBlock(writer, func, e_term.cond_br, processed, child_indent, use_simple);
+                        }
+                        // AOT-PHI-001 修复（else 分支对称）：递归 generateCondBrBlock 后，
+                        // 需要处理 br 链到外层 merge 块的 PHI 赋值。
+                        // 嵌套 if-else 的 then/else 可能 br 到外层 merge 块，
+                        // 如果外层 merge 块有 PHI 节点，需要生成正确的 incoming 赋值。
+                        const inner_merge_idx = self.findCommonBrTarget(func, e_then_idx, e_else_idx);
+                        if (inner_merge_idx) |im_idx| {
+                            if (!processed.contains(im_idx)) {
+                                const inner_merge_blk = func.blocks.items[im_idx];
+                                if (inner_merge_blk.terminator) |im_term| {
+                                    if (im_term == .br) {
+                                        try self.generateBrChain(writer, func, im_term.br, im_idx, processed, child_indent, use_simple);
+                                    }
+                                }
+                            }
+                        } else {
+                            // 无共同 merge 块：inner then/else br 到不同块
+                            const e_then_blk = func.blocks.items[e_then_idx];
+                            if (e_then_blk.terminator) |et_term| {
+                                if (et_term == .br) {
+                                    const et_target_idx = @as(usize, et_term.br.index);
+                                    if (!processed.contains(et_target_idx) and self.countPredecessors(func, et_target_idx) > 1) {
+                                        const merge_blk = func.blocks.items[et_target_idx];
+                                        if (merge_blk.terminator) |mt| {
+                                            if (mt == .br) {
+                                                const mt_idx = @as(usize, mt.br.index);
+                                                if (!processed.contains(mt_idx)) {
+                                                    try self.generateBrChain(writer, func, mt.br, et_target_idx, processed, child_indent, use_simple);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     },
                     .ret => |ret_val| {
@@ -12304,19 +12615,17 @@ pub const NativeLinker = struct {
     /// 统计目标块的前驱数量（用于判断是否为汇聚点）
     /// 汇聚点（多前驱块）不应被 br 链内联，否则会导致代码重复或寄存器未初始化
     fn countPredecessors(self: *const Self, func: *const IR.Function, target_idx: usize) usize {
+        _ = self;
         var count: usize = 0;
         for (func.blocks.items) |blk| {
             if (blk.terminator) |term| {
                 switch (term) {
                     .br => |br_target| {
-                        const idx = self.tryFindBlockIndex(func, br_target) orelse continue;
-                        if (idx == target_idx) count += 1;
+                        if (@as(usize, br_target.index) == target_idx) count += 1;
                     },
                     .cond_br => |cb| {
-                        const t_idx = self.tryFindBlockIndex(func, cb.then_block) orelse continue;
-                        if (t_idx == target_idx) count += 1;
-                        const e_idx = self.tryFindBlockIndex(func, cb.else_block) orelse continue;
-                        if (e_idx == target_idx) count += 1;
+                        if (@as(usize, cb.then_block.index) == target_idx) count += 1;
+                        if (@as(usize, cb.else_block.index) == target_idx) count += 1;
                     },
                     else => {},
                 }
@@ -12338,7 +12647,7 @@ pub const NativeLinker = struct {
         use_simple: bool,
     ) anyerror!void {
         const code_list = writer.list;
-        const target_idx = self.tryFindBlockIndex(func, br_target) orelse return;
+        const target_idx = @as(usize, br_target.index);
 
         // 如果目标是循环退出块，生成 break（break 语句的 br → exit_block）
         if (self.in_while_loop and self.current_loop_exit_block != null and target_idx == self.current_loop_exit_block.?) {
@@ -12360,7 +12669,7 @@ pub const NativeLinker = struct {
                 const phi_res = inst.result orelse continue;
                 const phi_op = inst.op.phi;
                 for (phi_op.incoming) |incoming| {
-                    const inc_idx = self.tryFindBlockIndex(func, incoming.block) orelse continue;
+                    const inc_idx = @as(usize, incoming.block.index);
                     if (inc_idx == source_idx) {
                         var phi_buf: [32]u8 = undefined;
                         const phi_ref = try self.getOperandRef(&phi_buf, incoming.value.id);
@@ -13168,6 +13477,12 @@ pub const NativeLinker = struct {
                                 try self.generateInstructionSimple(code_list, inst);
                             }
                             processed_body.put(nb_idx, {}) catch return error.OutOfMemory;
+                            // AOT-PHI-001 修复：处理 br 终止符 — 生成到 merge 块的 PHI 拷贝
+                            if (nb_blk.terminator) |nb_term| {
+                                if (nb_term == .br) {
+                                    try self.generateBrChain(writer, func, nb_term.br, nb_idx, &processed_body, "            ", true);
+                                }
+                            }
                             // 处理 cond_br（如 ?? 运算符产生的 if/else）
                             if (nb_blk.terminator) |nb_term| {
                                 if (nb_term == .cond_br) {
@@ -13279,7 +13594,7 @@ pub const NativeLinker = struct {
                     try self.generateCondBrBlock(writer, func, term.cond_br, &processed_body, "        ", true);
                 } else if (term == .br) {
                     // br 到 exit_block 表示 break 语句（仅非汇聚点块）
-                    const br_target_idx = self.tryFindBlockIndex(func, term.br) orelse continue;
+                    const br_target_idx = @as(usize, term.br.index);
                     if (self.in_while_loop and self.current_loop_exit_block != null and br_target_idx == self.current_loop_exit_block.?) {
                         // 汇聚点的 break 已由 generateCondBrBlock 内联处理，跳过
                         if (self.countPredecessors(func, blk_idx) <= 1) {
@@ -13618,13 +13933,13 @@ pub const NativeLinker = struct {
             /// 用于区分顺序 if 和嵌套 if，避免错误嵌套
             /// 注意：循环 header 也有多个前驱（入口+回边），但不是合并块
             fn isMergeBlock(func_: *const IR.Function, block_idx: usize, loop_: LoopInfo) bool {
+                _ = loop_;
                 const target_block = func_.blocks.items[block_idx];
                 var count: usize = 0;
                 var has_back_edge = false;
-                var blk_iter = loop_.blocks.keyIterator();
-                while (blk_iter.next()) |blk_idx_ptr| {
-                    const blk_idx = blk_idx_ptr.*;
-                    const block = func_.blocks.items[blk_idx];
+                // AOT-PHI-001 修复：检查所有函数块作为前驱，而非仅检查 loop_.blocks
+                for (func_.blocks.items, 0..) |block, blk_idx| {
+                    if (blk_idx == block_idx) continue;
                     if (block.terminator) |term| {
                         switch (term) {
                             .br => |br| {
@@ -13796,7 +14111,9 @@ pub const NativeLinker = struct {
                         // AOT-CODEGEN-002 修复：先检查是否为合并块
                         // 如果目标是合并块（>1 前驱），生成来自当前块的 Phi 赋值后返回
                         // 合并块由 cond_br 处理器在 if/else 之后统一处理
-                        if (!target_is_nested_exit and loop_.blocks.contains(target) and isMergeBlock(func_, target, loop_)) {
+                        // AOT-PHI-001 修复：不要求 target 在 loop_.blocks 中，
+                        // 因为 if/else 的 merge 块可能不在循环块集合中但在循环体内
+                        if (!target_is_nested_exit and isMergeBlock(func_, target, loop_)) {
                             // 生成来自当前块到合并块的 Phi 赋值
                             const target_blk = func_.blocks.items[target];
                             for (target_blk.instructions.items) |phi_inst| {
@@ -14186,7 +14503,9 @@ pub const NativeLinker = struct {
                                     // 在 if 之后处理合并块（else_target），保持同一层级
                                     // 这确保顺序 if 语句不被嵌套
                                     // 注意：传 null 作为 source_block_idx，因为默认 Phi 已在 if 之前生成
-                                    if (loop_.blocks.contains(else_target) and !visited.contains(else_target)) {
+                                    // AOT-PHI-001 修复：不要求 else_target 在 loop_.blocks 中，
+                                    // 因为 if/else 的 merge 块可能不在循环块集合中
+                                    if (!visited.contains(else_target)) {
                                         try go(self_, writer_, code_, func_, loop_, phi_updates_, else_target, visited, depth, null, nested_loop_exit_);
                                     }
                                 } else {
@@ -14265,7 +14584,8 @@ pub const NativeLinker = struct {
                                     }
 
                                     if (merge_block) |mb| {
-                                        if (loop_.blocks.contains(mb) and !visited.contains(mb)) {
+                                        // AOT-PHI-001 修复：不要求 merge block 在 loop_.blocks 中
+                                        if (!visited.contains(mb)) {
                                             try go(self_, writer_, code_, func_, loop_, phi_updates_, mb, visited, depth, block_idx, nested_loop_exit_);
                                         }
                                     }

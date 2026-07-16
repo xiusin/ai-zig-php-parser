@@ -4425,6 +4425,10 @@ pub const IRGenerator = struct {
                 .class_name = class_name,
                 .property_name = prop_name,
             } }, .php_value);
+        } else if (source_node.tag == .property_access) {
+            // 源是对象属性：$current = &$this->data
+            // 生成属性访问表达式获取值（PHPArray 是引用计数的，修改会传播）
+            source_ref = try self.generateExpression(source_idx);
         } else {
             // 其他非变量源不支持引用赋值
             return;

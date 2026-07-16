@@ -2923,6 +2923,12 @@ pub fn make_ref(ptr: *Value, allocator: Allocator) !Value {
 const BuiltinFn = *const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value;
 
 const builtin_function_map = std.StaticStringMap(BuiltinFn).initComptime(.{
+    .{ "is_int", wrapBuiltin_is_int },
+    .{ "is_float", wrapBuiltin_is_float },
+    .{ "is_string", wrapBuiltin_is_string },
+    .{ "is_bool", wrapBuiltin_is_bool },
+    .{ "is_array", wrapBuiltin_is_array },
+    .{ "is_null", wrapBuiltin_is_null },
     .{ "strlen", wrapBuiltin_strlen },
     .{ "strtoupper", wrapBuiltin_strtoupper },
     .{ "strtolower", wrapBuiltin_strtolower },
@@ -3042,6 +3048,12 @@ const builtin_function_map = std.StaticStringMap(BuiltinFn).initComptime(.{
     .{ "rtrim", wrapBuiltin_rtrim },
     .{ "addslashes", wrapBuiltin_addslashes },
     .{ "stripslashes", wrapBuiltin_stripslashes },
+    .{ "str_starts_with", wrapBuiltin_str_starts_with },
+    .{ "str_ends_with", wrapBuiltin_str_ends_with },
+    .{ "str_contains", wrapBuiltin_str_contains },
+    .{ "spl_object_id", wrapBuiltin_spl_object_id },
+    .{ "spl_object_hash", wrapBuiltin_spl_object_hash },
+    .{ "array_splice", wrapBuiltin_array_splice },
 });
 
 fn lookupBuiltinFunction(name: []const u8) ?BuiltinFn {
@@ -3246,6 +3258,87 @@ fn php_object_unset_impl(obj_val: Value, obj: *PHPObject, name: []const u8) !Val
 
     _ = try obj.unsetProperty(name);
     return Value.initNull();
+}
+
+fn wrapBuiltin_str_starts_with(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx; _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_str_starts_with(args[0], args[1]);
+}
+
+fn wrapBuiltin_str_ends_with(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx; _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_str_ends_with(args[0], args[1]);
+}
+
+fn wrapBuiltin_str_contains(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx; _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_str_contains(args[0], args[1]);
+}
+
+fn wrapBuiltin_spl_object_id(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx; _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_spl_object_id(args[0]);
+}
+
+fn wrapBuiltin_spl_object_hash(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_spl_object_hash(args[0], allocator);
+}
+
+fn wrapBuiltin_array_splice(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const offset = if (args.len >= 2) args[1] else Value.initInt(0);
+    const length = if (args.len >= 3) args[2] else Value.initNull();
+    const replacement = if (args.len >= 4) args[3] else Value.initNull();
+    return php_array_splice(args[0], offset, length, replacement, allocator);
+}
+
+fn wrapBuiltin_is_int(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_is_int(args[0]);
+}
+
+fn wrapBuiltin_is_float(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_is_float(args[0]);
+}
+
+fn wrapBuiltin_is_string(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_is_string(args[0]);
+}
+
+fn wrapBuiltin_is_bool(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_is_bool(args[0]);
+}
+
+fn wrapBuiltin_is_array(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_is_array(args[0]);
+}
+
+fn wrapBuiltin_is_null(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_is_null(args[0]);
 }
 
 fn wrapBuiltin_strlen(ctx: Value, args: []const Value, allocator: Allocator) !Value {
@@ -5145,6 +5238,28 @@ pub fn php_object_call_named_args(obj_val: Value, method_name_val: Value, args_a
 // 算术运算符
 // ============================================================================
 
+/// 尝试将 Value 转为 i64（PHP 类型推导语义）
+/// int → 原值；bool → 1/0；null → 0；纯整数字符串 → 解析值；其他 → null
+fn tryAsInt(val: Value) ?i64 {
+    if (val.isInt()) return val.asInt();
+    if (val.isBool()) return if (val.asBool()) 1 else 0;
+    if (val.isNull()) return 0;
+    if (val.isString()) {
+        const s = val.asString();
+        const data = s.data[0..s.length];
+        // 纯整数字符串：^[+-]?[0-9]+$
+        if (data.len == 0) return null;
+        var start: usize = 0;
+        if (data[0] == '+' or data[0] == '-') start = 1;
+        if (start >= data.len) return null;
+        for (data[start..]) |c| {
+            if (c < '0' or c > '9') return null;
+        }
+        return std.fmt.parseInt(i64, data, 10) catch null;
+    }
+    return null;
+}
+
 /// 加法运算（PHP语义）
 pub fn php_add(lhs: Value, rhs: Value) !Value {
     // 数组联合运算：$a + $b（保留左侧值，右侧不存在的键才加入）
@@ -5156,16 +5271,15 @@ pub fn php_add(lhs: Value, rhs: Value) !Value {
     if (!checkArithmeticOperand(lhs) or !checkArithmeticOperand(rhs)) {
         emitUnsupportedOperandError(lhs, rhs, "+");
     }
-    // 整数 + 整数 = 整数（可能溢出为浮点）
-    if (lhs.isInt() and rhs.isInt()) {
-        const a = lhs.asInt();
-        const b = rhs.asInt();
-        const result = @addWithOverflow(a, b);
-        if (result[1] != 0) {
-            // i64 溢出：转为浮点数（PHP 语义）
-            return Value.initFloat(@as(f64, @floatFromInt(a)) + @as(f64, @floatFromInt(b)));
+    // PHP 类型推导：int/bool/null/整数字符串 之间运算 → int
+    if (tryAsInt(lhs)) |a| {
+        if (tryAsInt(rhs)) |b| {
+            const result = @addWithOverflow(a, b);
+            if (result[1] != 0) {
+                return Value.initFloat(@as(f64, @floatFromInt(a)) + @as(f64, @floatFromInt(b)));
+            }
+            return Value.initInt(result[0]);
         }
-        return Value.initInt(result[0]);
     }
 
     // 其他情况：转为浮点数
@@ -5181,14 +5295,14 @@ pub fn php_sub(lhs: Value, rhs: Value) !Value {
     if (!checkArithmeticOperand(lhs) or !checkArithmeticOperand(rhs)) {
         emitUnsupportedOperandError(lhs, rhs, "-");
     }
-    if (lhs.isInt() and rhs.isInt()) {
-        const a = lhs.asInt();
-        const b = rhs.asInt();
-        const result = @subWithOverflow(a, b);
-        if (result[1] != 0) {
-            return Value.initFloat(@as(f64, @floatFromInt(a)) - @as(f64, @floatFromInt(b)));
+    if (tryAsInt(lhs)) |a| {
+        if (tryAsInt(rhs)) |b| {
+            const result = @subWithOverflow(a, b);
+            if (result[1] != 0) {
+                return Value.initFloat(@as(f64, @floatFromInt(a)) - @as(f64, @floatFromInt(b)));
+            }
+            return Value.initInt(result[0]);
         }
-        return Value.initInt(result[0]);
     }
 
     const a = lhs.toFloat();
@@ -5386,14 +5500,14 @@ pub fn php_mul(lhs: Value, rhs: Value) !Value {
     if (!checkArithmeticOperand(lhs) or !checkArithmeticOperand(rhs)) {
         emitUnsupportedOperandError(lhs, rhs, "*");
     }
-    if (lhs.isInt() and rhs.isInt()) {
-        const a = lhs.asInt();
-        const b = rhs.asInt();
-        const result = @mulWithOverflow(a, b);
-        if (result[1] != 0) {
-            return Value.initFloat(@as(f64, @floatFromInt(a)) * @as(f64, @floatFromInt(b)));
+    if (tryAsInt(lhs)) |a| {
+        if (tryAsInt(rhs)) |b| {
+            const result = @mulWithOverflow(a, b);
+            if (result[1] != 0) {
+                return Value.initFloat(@as(f64, @floatFromInt(a)) * @as(f64, @floatFromInt(b)));
+            }
+            return Value.initInt(result[0]);
         }
-        return Value.initInt(result[0]);
     }
 
     const a = lhs.toFloat();
@@ -10493,6 +10607,22 @@ pub fn php_str_ends_with(haystack: Value, needle: Value) !Value {
 
     const start_pos = hay.length - need.length;
     return Value.initBool(std.mem.eql(u8, hay.data[start_pos..], need.data));
+}
+
+/// spl_object_id - 返回对象的唯一整数ID (PHP 7.2+)
+pub fn php_spl_object_id(obj: Value) !Value {
+    if (!Value_isObject(obj)) return Value.initInt(0);
+    const ptr = @intFromPtr(Value_asObject(obj));
+    return Value.initInt(@intCast(ptr & 0x7FFFFFFF));
+}
+
+/// spl_object_hash - 返回对象唯一十六进制哈希字符串
+pub fn php_spl_object_hash(obj: Value, allocator: Allocator) !Value {
+    if (!Value_isObject(obj)) return Value.initString(try PHPString.init(allocator, "0000000000000000"));
+    const ptr = @intFromPtr(Value_asObject(obj));
+    var buf: [16]u8 = undefined;
+    const hex = std.fmt.bufPrint(&buf, "{x:0>16}", .{ptr}) catch return Value.initNull();
+    return Value.initString(try PHPString.init(allocator, hex));
 }
 
 /// ucfirst - 首字母大写

@@ -141,6 +141,9 @@ pub const TypeSpecializationPass = struct {
     }
 
     /// 特化算术操作
+    /// 安全约束：仅当操作数的当前 IR 类型已是原生类型（i64/f64）时才特化。
+    /// 不将 php_value 操作数窄化为原生类型——PHP 算术运算的运行时类型取决于值
+    /// （如 int / int 可能产生 float），编译时类型推断无法覆盖所有情况。
     fn specializeArithmeticOps(self: *TypeSpecializationPass, func: *IR.Function) !void {
         for (func.blocks.items) |block| {
             for (block.instructions.items) |*inst| {
@@ -159,6 +162,10 @@ pub const TypeSpecializationPass = struct {
                                 if (lhs_tag == rhs_tag and lhs_tag == result_tag and
                                     (lhs_tag == .i64 or lhs_tag == .f64))
                                 {
+                                    const lhs_ir_tag = @as(std.meta.Tag(IR.Type), op.lhs.type_);
+                                    const rhs_ir_tag = @as(std.meta.Tag(IR.Type), op.rhs.type_);
+                                    if (lhs_ir_tag == .php_value or rhs_ir_tag == .php_value) continue;
+
                                     op.lhs.type_ = lhs_type.?;
                                     op.rhs.type_ = rhs_type.?;
                                     result.type_ = result_type.?;
@@ -189,6 +196,10 @@ pub const TypeSpecializationPass = struct {
     }
 
     /// 更新指令类型以匹配推断结果
+    /// 注意：算术操作（add/sub/mul/div/mod/neg）不在此处窄化 php_value → i64/f64，
+    /// 因为 PHP 算术运算的运行时结果类型取决于操作数的实际值（int + float = float），
+    /// 而类型推断无法在编译时确定。算术操作的特化由 specializeArithmeticOps 处理，
+    /// 该方法要求 lhs/rhs/result 三者推断类型一致才特化。
     fn updateInstructionTypes(self: *TypeSpecializationPass, func: *IR.Function) !void {
         for (func.blocks.items) |block| {
             for (block.instructions.items) |*inst| {
@@ -198,6 +209,14 @@ pub const TypeSpecializationPass = struct {
                         const new_tag = @as(std.meta.Tag(IR.Type), inferred);
 
                         if (old_tag != new_tag) {
+                            if (old_tag == .php_value and
+                                (new_tag == .i64 or new_tag == .f64 or new_tag == .bool))
+                            {
+                                switch (inst.*.op) {
+                                    .add, .sub, .mul, .div, .mod, .neg => continue,
+                                    else => {},
+                                }
+                            }
                             result.type_ = inferred;
                             self.stats.instructions_modified += 1;
                         }
