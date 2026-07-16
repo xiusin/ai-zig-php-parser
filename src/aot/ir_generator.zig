@@ -4148,6 +4148,21 @@ pub const IRGenerator = struct {
                         .array = current_array,
                         .value = value_reg,
                     } }, null);
+                    // 写回变量：array_push 可能因 COW 克隆数组，需将修改后的数组写回变量存储
+                    if (base_target != null and base_target.?.tag == .variable) {
+                        const var_name_for_writeback = self.getString(base_target.?.data.variable.name);
+                        const is_ref_param = self.reference_params.contains(var_name_for_writeback);
+                        if (!is_ref_param) {
+                            const is_global_wb = self.global_vars.contains(var_name_for_writeback);
+                            const is_main_wb = if (self.current_function) |func| std.mem.eql(u8, func.name, "__main__") else false;
+                            if (is_global_wb or is_main_wb) {
+                                _ = try self.emit(.{ .global_set = .{ .name = var_name_for_writeback, .value = base_array } }, null);
+                            } else {
+                                const var_reg_wb = try self.getOrCreateVarRegister(var_name_for_writeback, base_array.type_);
+                                _ = try self.emit(.{ .store = .{ .ptr = var_reg_wb, .value = base_array } }, null);
+                            }
+                        }
+                    }
                     return value_reg;
                 }
 

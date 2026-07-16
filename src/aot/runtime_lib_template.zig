@@ -21628,6 +21628,19 @@ pub fn php_array_splice(arr: Value, offset: Value, length: Value, replacement: V
         }
     }
 
+    // AOT-SPLICE-001 修复：当 start_idx >= items.len（offset 等于或超过数组长度）时，
+    // 主循环中 idx == start_idx 永远不会命中，replacement 值未被插入。
+    // 此处补充尾部追加逻辑。
+    if (start_idx >= items.len) {
+        if (rep_values) |vals| {
+            for (vals) |v| {
+                _ = v.retain();
+                try new_elements.put(allocator, .{ .integer = next_int_key }, v);
+                next_int_key += 1;
+            }
+        }
+    }
+
     php_arr.elements.deinit();
     php_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
     php_arr.next_index = next_int_key;

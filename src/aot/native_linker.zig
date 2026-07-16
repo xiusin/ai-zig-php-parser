@@ -4541,7 +4541,7 @@ pub const NativeLinker = struct {
                     if (ref_param_alloca_map.get(reg_id)) |_| {
                         // 引用参数的 alloca: reg 类型为 **Value，storage 类型为 *Value
                         // 必须创建 storage 槽位并让 reg 指向它，否则 reg.* 写入会导致段错误
-                        const type_str = self.irTypeToZigTypeString(reg_type);
+                        _ = reg_type;
                         // storage 是 *Value，初始化为 &null_val 占位（后续 param 初始化会覆盖）
                         {
                             const _f = try std.fmt.allocPrint(self.allocator, "    var reg_{d}_storage: *runtime.Value = &null_val_placeholder;\n", .{reg_id});
@@ -4549,7 +4549,10 @@ pub const NativeLinker = struct {
                             try code.appendSlice(self.allocator, _f);
                         }
                         {
-                            const _f = try std.fmt.allocPrint(self.allocator, "    var reg_{d}: {s} = &reg_{d}_storage;\n", .{ reg_id, type_str, reg_id });
+                            // storage 是 *Value，&storage 是 **Value
+                            // reg 类型固定为 **runtime.Value，与 storage 类型匹配
+                            // （无论 IR 类型是 ptr 还是 ptr-to-ptr，storage 始终是 *Value）
+                            const _f = try std.fmt.allocPrint(self.allocator, "    var reg_{d}: **runtime.Value = &reg_{d}_storage;\n", .{ reg_id, reg_id });
                             defer self.allocator.free(_f);
                             try code.appendSlice(self.allocator, _f);
                         }
@@ -8592,7 +8595,9 @@ pub const NativeLinker = struct {
 
                         if (is_ref_param) {
                             // 引用参数：返回args中的指针（不解引用）
-                            try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing() and args[{d}].isRef()) args[{d}].asRef() else &null_val;\n", .{ args_index, args_index, args_index, args_index });
+                            // AOT-REFPTR-002 修复：引用参数存储的是 *Value 指针，
+                            // 不能用 writeRegAssignmentFmt（会对 alloca 生成 .* 解引用）
+                            try writer.print("    reg_{d} = if (args.len > {d} and !args[{d}].isMissing() and args[{d}].isRef()) args[{d}].asRef() else &null_val;\n", .{ reg.id, args_index, args_index, args_index, args_index });
 
                             // 初始化对应的alloca（如果存在）
                             if (self.current_function_for_resolve) |func_check| {
@@ -10141,6 +10146,28 @@ pub const NativeLinker = struct {
                                             try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull(), blk: { var tmp = runtime.Value.initNull(); break :blk &tmp; }, runtime.Value.initInt(0), runtime.Value.initInt(0), runtime.runtime_allocator);\n");
                                         }
                                     } else {
+                                        // AOT-COW-002: usort/uasort/uksort/shuffle 前对数组参数做 COW
+                                        if (op.args.len > 0 and (std.mem.eql(u8, runtime_name, "php_usort") or
+                                            std.mem.eql(u8, runtime_name, "php_uasort") or
+                                            std.mem.eql(u8, runtime_name, "php_uksort") or
+                                            std.mem.eql(u8, runtime_name, "php_shuffle")))
+                                        {
+                                            const cow_arg = op.args[0];
+                                            const cow_arg_alloca = if (self.current_alloca_regs) |regs| regs.contains(cow_arg.id) else false;
+                                            if (cow_arg_alloca) {
+                                                try writer.print("    if (reg_{d}.*.isArray() and reg_{d}.*.asArray().ref_count > 1) {{\n", .{ cow_arg.id, cow_arg.id });
+                                                try writer.print("        const __cow_arr = try reg_{d}.*.asArray().cloneShallow(runtime.runtime_allocator);\n", .{cow_arg.id});
+                                                try writer.print("        reg_{d}.*.release(runtime.runtime_allocator);\n", .{cow_arg.id});
+                                                try writer.print("        reg_{d}.* = runtime.Value.initArray(__cow_arr);\n", .{cow_arg.id});
+                                                try writer.writeAll("    }\n");
+                                            } else {
+                                                try writer.print("    if (reg_{d}.isArray() and reg_{d}.asArray().ref_count > 1) {{\n", .{ cow_arg.id, cow_arg.id });
+                                                try writer.print("        const __cow_arr = try reg_{d}.asArray().cloneShallow(runtime.runtime_allocator);\n", .{cow_arg.id});
+                                                try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{cow_arg.id});
+                                                try writer.print("        reg_{d} = runtime.Value.initArray(__cow_arr);\n", .{cow_arg.id});
+                                                try writer.writeAll("    }\n");
+                                            }
+                                        }
                                         try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                         try self.writeValueArgs(writer, op.args);
                                         try writer.writeAll(", runtime.runtime_allocator);\n");
@@ -10988,12 +11015,24 @@ pub const NativeLinker = struct {
                 try writer.writeAll("});\n");
                 try writer.writeAll("    } else {\n");
                 if (push_arr_is_alloca) {
+                    // AOT-COW-001: 数组 push 前检查 COW（ref_count > 1 时克隆）
+                    try writer.print("        if (reg_{d}.*.isArray() and reg_{d}.*.asArray().ref_count > 1) {{\n", .{ op.array.id, op.array.id });
+                    try writer.print("            const __cow_arr = try reg_{d}.*.asArray().cloneShallow(runtime.runtime_allocator);\n", .{op.array.id});
+                    try writer.print("            reg_{d}.*.release(runtime.runtime_allocator);\n", .{op.array.id});
+                    try writer.print("            reg_{d}.* = runtime.Value.initArray(__cow_arr);\n", .{op.array.id});
+                    try writer.writeAll("        }\n");
                     if (push_val_is_alloca) {
                         try writer.print("        try reg_{d}.*.asArray().push(runtime.runtime_allocator, reg_{d}.*);\n", .{ op.array.id, op.value.id });
                     } else {
                         try writer.print("        try reg_{d}.*.asArray().push(runtime.runtime_allocator, reg_{d});\n", .{ op.array.id, op.value.id });
                     }
                 } else {
+                    // AOT-COW-001: 数组 push 前检查 COW（ref_count > 1 时克隆）
+                    try writer.print("        if (reg_{d}.isArray() and reg_{d}.asArray().ref_count > 1) {{\n", .{ op.array.id, op.array.id });
+                    try writer.print("            const __cow_arr = try reg_{d}.asArray().cloneShallow(runtime.runtime_allocator);\n", .{op.array.id});
+                    try writer.print("            reg_{d}.release(runtime.runtime_allocator);\n", .{op.array.id});
+                    try writer.print("            reg_{d} = runtime.Value.initArray(__cow_arr);\n", .{op.array.id});
+                    try writer.writeAll("        }\n");
                     if (push_val_is_alloca) {
                         try writer.print("        try reg_{d}.asArray().push(runtime.runtime_allocator, reg_{d}.*);\n", .{ op.array.id, op.value.id });
                     } else {
@@ -13615,7 +13654,9 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
         for (phi_updates.items) |update| {
             var src_buf: [32]u8 = undefined;
             const src_ref = try self.getOperandRef(&src_buf, update.value_reg);
+            try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{update.phi_reg});
             try writer.print("        reg_{d} = {s};\n", .{ update.phi_reg, src_ref });
+            try writer.print("        _ = reg_{d}.retain();\n", .{update.phi_reg});
         }
 
         // 生成增量块（如果有且不是 for 循环）
@@ -13995,7 +14036,13 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                     } else {
                         var src_buf: [32]u8 = undefined;
                         const src_ref = try self_.getOperandRef(&src_buf, update.value_reg);
+                        // AOT-RC-001 修复：回边 PHI 更新需要正确的引用计数管理
+                        // 1. release 旧值（避免内存泄漏）
+                        // 2. 赋新值
+                        // 3. retain 新值（避免被后续 release 释放后成为悬垂指针）
+                        try writer_.print("reg_{d}.release(runtime.runtime_allocator);\n", .{update.phi_reg});
                         try writer_.print("reg_{d} = {s};\n", .{ update.phi_reg, src_ref });
+                        try writer_.print("_ = reg_{d}.retain();\n", .{update.phi_reg});
                     }
                 }
             }
@@ -15375,7 +15422,9 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                 // AOT-TYPE-001 修复：所有寄存器都是 runtime.Value，直接赋值
                 var src_buf: [32]u8 = undefined;
                 const src_ref = try self.getOperandRef(&src_buf, update.value_reg);
-                try writer.print("        reg_{d} = {s};\n", .{ update.phi_reg, src_ref });
+                try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{update.phi_reg});
+            try writer.print("        reg_{d} = {s};\n", .{ update.phi_reg, src_ref });
+            try writer.print("        _ = reg_{d}.retain();\n", .{update.phi_reg});
             }
 
             try writer.writeAll("    }\n");
@@ -15444,7 +15493,9 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                     // AOT-TYPE-001 修复：所有寄存器都是 runtime.Value，直接赋值
                     var src_buf: [32]u8 = undefined;
                     const src_ref = try self.getOperandRef(&src_buf, update.value_reg);
-                    try writer.print("        reg_{d} = {s};\n", .{ update.phi_reg, src_ref });
+                    try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{update.phi_reg});
+            try writer.print("        reg_{d} = {s};\n", .{ update.phi_reg, src_ref });
+            try writer.print("        _ = reg_{d}.retain();\n", .{update.phi_reg});
                 }
 
                 try writer.writeAll("    }\n");
