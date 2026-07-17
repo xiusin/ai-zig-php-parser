@@ -6035,19 +6035,13 @@ fn checkSingleType(expected: []const u8, got: []const u8, arg: Value) bool {
         return Value_isObject(arg);
     }
 
-    // callable 接受 string/array/object(Closure)
+    // callable: 深度验证（复用 php_is_callable）
     if (std.mem.eql(u8, expected, "callable")) {
-        if (std.mem.eql(u8, got, "string")) return true;
-        if (std.mem.eql(u8, got, "array")) return true;
-        if (std.mem.eql(u8, got, "object") or std.mem.eql(u8, got, "Closure")) return true;
-        // 检查是否是有 __invoke 的对象
-        if (Value_isObject(arg)) {
-            const obj = Value_asObject(arg);
-            if (obj.class_meta) |meta| {
-                if (meta.findMethodLookup("__invoke") != null) return true;
-            }
-        }
-        return false;
+        // Closure 直接通过
+        if (arg.isFunction()) return true;
+        // 复用 php_is_callable 做深度验证（函数名存在性、array 格式、__invoke 等）
+        const result = php_is_callable(arg) catch return false;
+        return result.isBool() and result.asBool();
     }
 
     // Closure 类型
