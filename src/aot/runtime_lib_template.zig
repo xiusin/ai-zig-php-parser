@@ -323,6 +323,7 @@ var gc_enabled: bool = true;
 var gc_release_events: usize = 0;
 const GC_RELEASE_EVENT_THRESHOLD: usize = 4096;
 const GC_ROOT_THRESHOLD: usize = 256;
+const GC_BATCH_SIZE: usize = 64;
 
 /// 当前异常（线程局部）
 threadlocal var current_exception: Value = undefined;
@@ -908,17 +909,18 @@ fn gcCollectCycles(force: bool) usize {
         if (cycle_roots.items.len < GC_ROOT_THRESHOLD and gc_release_events < GC_RELEASE_EVENT_THRESHOLD) return 0;
     }
 
-    const items = cycle_roots.items;
-
     gc_in_progress = true;
     defer gc_in_progress = false;
     gc_release_events = 0;
+
+    const total = cycle_roots.items.len;
+    const batch_end = if (force) total else @min(total, GC_BATCH_SIZE);
 
     // 保守 GC 策略：仅释放 ref_count == 0 的对象
     // 不执行 MarkGray/Scan 循环检测，避免因栈根扫描缺失导致误释放
     // ref_count > 0 的对象一定有外部引用（包括栈上的局部变量），不会被释放
     var collected: usize = 0;
-    for (items) |r| {
+    for (cycle_roots.items[0..batch_end]) |r| {
         switch (r) {
             .array => |a| {
                 if (a.ref_count == 0) {
@@ -956,7 +958,16 @@ fn gcCollectCycles(force: bool) usize {
         }
     }
 
-    cycle_roots.clearRetainingCapacity();
+    // 增量处理：移除已处理的根，保留未处理的到下次 GC
+    const remaining = total - batch_end;
+    if (remaining > 0) {
+        for (0..remaining) |i| {
+            cycle_roots.items[i] = cycle_roots.items[batch_end + i];
+        }
+        cycle_roots.items.len = remaining;
+    } else {
+        cycle_roots.clearRetainingCapacity();
+    }
     return collected;
 }
 
