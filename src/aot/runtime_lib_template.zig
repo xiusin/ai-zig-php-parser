@@ -909,48 +909,51 @@ fn gcCollectCycles(force: bool) usize {
     }
 
     const items = cycle_roots.items;
-    for (items) |r| {
-        switch (r) {
-            .array => |a| a.gc_info.buffered = false,
-            .object => |o| o.gc_info.buffered = false,
-            .closure => |c| c.gc_info.buffered = false,
-        }
-    }
 
     gc_in_progress = true;
     defer gc_in_progress = false;
     gc_release_events = 0;
 
-    for (items) |r| gcMarkGray(r);
-    for (items) |r| gcScan(r);
-
-    var white_items: std.ArrayListUnmanaged(CycleRoot) = .{ .items = &.{}, .capacity = 0 };
-    defer white_items.deinit(runtime_allocator);
-    var seen_arrays = std.AutoHashMap(*PHPArray, void).init(runtime_allocator);
-    defer seen_arrays.deinit();
-    var seen_objects = std.AutoHashMap(*PHPObject, void).init(runtime_allocator);
-    defer seen_objects.deinit();
-    var seen_closures = std.AutoHashMap(*PHPClosure, void).init(runtime_allocator);
-    defer seen_closures.deinit();
-
+    // 保守 GC 策略：仅释放 ref_count == 0 的对象
+    // 不执行 MarkGray/Scan 循环检测，避免因栈根扫描缺失导致误释放
+    // ref_count > 0 的对象一定有外部引用（包括栈上的局部变量），不会被释放
+    var collected: usize = 0;
     for (items) |r| {
-        gcGatherWhite(
-            r,
-            &white_items,
-            &seen_arrays,
-            &seen_objects,
-            &seen_closures,
-        );
-    }
-
-    const collected = white_items.items.len;
-    for (white_items.items) |r| {
-        gcCollectWhiteKnown(
-            r,
-            &seen_arrays,
-            &seen_objects,
-            &seen_closures,
-        );
+        switch (r) {
+            .array => |a| {
+                if (a.ref_count == 0) {
+                    a.gc_info.buffered = false;
+                    a.gc_info.color = .black;
+                    gcDestroyArray(a);
+                    collected += 1;
+                } else {
+                    a.gc_info.buffered = false;
+                    a.gc_info.color = .black;
+                }
+            },
+            .object => |o| {
+                if (o.ref_count == 0) {
+                    o.gc_info.buffered = false;
+                    o.gc_info.color = .black;
+                    gcDestroyObject(o);
+                    collected += 1;
+                } else {
+                    o.gc_info.buffered = false;
+                    o.gc_info.color = .black;
+                }
+            },
+            .closure => |c| {
+                if (c.ref_count == 0) {
+                    c.gc_info.buffered = false;
+                    c.gc_info.color = .black;
+                    gcDestroyClosure(c);
+                    collected += 1;
+                } else {
+                    c.gc_info.buffered = false;
+                    c.gc_info.color = .black;
+                }
+            },
+        }
     }
 
     cycle_roots.clearRetainingCapacity();
@@ -959,6 +962,18 @@ fn gcCollectCycles(force: bool) usize {
 
 pub fn php_collect_cycles() usize {
     return gcCollectCycles(true);
+}
+
+/// 解引用 Ref 链，返回最终值
+fn gcDerefValue(v: Value) Value {
+    var current = v;
+    var depth: u8 = 0;
+    while (current.isRef()) {
+        if (depth >= 16) break; // 防止循环引用导致无限循环
+        current = current.asRef().*;
+        depth += 1;
+    }
+    return current;
 }
 
 fn gcMarkGray(root: CycleRoot) void {
@@ -970,16 +985,17 @@ fn gcMarkGray(root: CycleRoot) void {
 }
 
 fn gcMarkGrayValue(v: Value) void {
-    if (v.isArray()) {
-        const a = v.asArray();
+    const dv = gcDerefValue(v);
+    if (dv.isArray()) {
+        const a = dv.asArray();
         if (a.ref_count > 0) a.ref_count -= 1;
         gcMarkGrayArray(a);
-    } else if (Value_isObject(v)) {
-        const o = Value_asObject(v);
+    } else if (Value_isObject(dv)) {
+        const o = Value_asObject(dv);
         if (o.ref_count > 0) o.ref_count -= 1;
         gcMarkGrayObject(o);
-    } else if (v.isFunction()) {
-        const c = v.asFunction();
+    } else if (dv.isFunction()) {
+        const c = dv.asFunction();
         if (c.ref_count > 0) c.ref_count -= 1;
         gcMarkGrayClosure(c);
     }
@@ -1042,12 +1058,13 @@ fn gcScan(root: CycleRoot) void {
 }
 
 fn gcScanValue(v: Value) void {
-    if (v.isArray()) {
-        gcScanArray(v.asArray());
-    } else if (Value_isObject(v)) {
-        gcScanObject(Value_asObject(v));
-    } else if (v.isFunction()) {
-        gcScanClosure(v.asFunction());
+    const dv = gcDerefValue(v);
+    if (dv.isArray()) {
+        gcScanArray(dv.asArray());
+    } else if (Value_isObject(dv)) {
+        gcScanObject(Value_asObject(dv));
+    } else if (dv.isFunction()) {
+        gcScanClosure(dv.asFunction());
     }
 }
 
@@ -1090,16 +1107,17 @@ fn gcScanClosure(c: *PHPClosure) void {
 }
 
 fn gcScanBlackValue(v: Value) void {
-    if (v.isArray()) {
-        const a = v.asArray();
+    const dv = gcDerefValue(v);
+    if (dv.isArray()) {
+        const a = dv.asArray();
         a.ref_count += 1;
         gcScanBlackArray(a);
-    } else if (Value_isObject(v)) {
-        const o = Value_asObject(v);
+    } else if (Value_isObject(dv)) {
+        const o = Value_asObject(dv);
         o.ref_count += 1;
         gcScanBlackObject(o);
-    } else if (v.isFunction()) {
-        const c = v.asFunction();
+    } else if (dv.isFunction()) {
+        const c = dv.asFunction();
         c.ref_count += 1;
         gcScanBlackClosure(c);
     }
@@ -1186,12 +1204,13 @@ fn gcGatherWhiteValue(
     seen_objects: *std.AutoHashMap(*PHPObject, void),
     seen_closures: *std.AutoHashMap(*PHPClosure, void),
 ) void {
-    if (v.isArray()) {
-        gcGatherWhite(.{ .array = v.asArray() }, white_items, seen_arrays, seen_objects, seen_closures);
-    } else if (Value_isObject(v)) {
-        gcGatherWhite(.{ .object = Value_asObject(v) }, white_items, seen_arrays, seen_objects, seen_closures);
-    } else if (v.isFunction()) {
-        gcGatherWhite(.{ .closure = v.asFunction() }, white_items, seen_arrays, seen_objects, seen_closures);
+    const dv = gcDerefValue(v);
+    if (dv.isArray()) {
+        gcGatherWhite(.{ .array = dv.asArray() }, white_items, seen_arrays, seen_objects, seen_closures);
+    } else if (Value_isObject(dv)) {
+        gcGatherWhite(.{ .object = Value_asObject(dv) }, white_items, seen_arrays, seen_objects, seen_closures);
+    } else if (dv.isFunction()) {
+        gcGatherWhite(.{ .closure = dv.asFunction() }, white_items, seen_arrays, seen_objects, seen_closures);
     }
 }
 
@@ -1215,20 +1234,21 @@ fn gcReleaseUnlessWhiteKnown(
     seen_objects: *std.AutoHashMap(*PHPObject, void),
     seen_closures: *std.AutoHashMap(*PHPClosure, void),
 ) void {
-    if (v.isArray()) {
-        const a = v.asArray();
+    const dv = gcDerefValue(v);
+    if (dv.isArray()) {
+        const a = dv.asArray();
         if (seen_arrays.contains(a)) return;
         a.release(allocator);
         return;
     }
-    if (Value_isObject(v)) {
-        const o = Value_asObject(v);
+    if (Value_isObject(dv)) {
+        const o = Value_asObject(dv);
         if (seen_objects.contains(o)) return;
         o.release();
         return;
     }
-    if (v.isFunction()) {
-        const c = v.asFunction();
+    if (dv.isFunction()) {
+        const c = dv.asFunction();
         if (seen_closures.contains(c)) return;
         c.release(allocator);
         return;
@@ -1237,32 +1257,34 @@ fn gcReleaseUnlessWhiteKnown(
 }
 
 fn gcCollectWhiteValue(v: Value) void {
-    if (v.isArray()) {
-        gcCollectWhiteArray(v.asArray());
-    } else if (Value_isObject(v)) {
-        gcCollectWhiteObject(Value_asObject(v));
-    } else if (v.isFunction()) {
-        gcCollectWhiteClosure(v.asFunction());
+    const dv = gcDerefValue(v);
+    if (dv.isArray()) {
+        gcCollectWhiteArray(dv.asArray());
+    } else if (Value_isObject(dv)) {
+        gcCollectWhiteObject(Value_asObject(dv));
+    } else if (dv.isFunction()) {
+        gcCollectWhiteClosure(dv.asFunction());
     }
 }
 
 fn gcReleaseOrCollectValue(v: Value, allocator: Allocator) void {
-    if (v.isArray()) {
-        const a = v.asArray();
+    const dv = gcDerefValue(v);
+    if (dv.isArray()) {
+        const a = dv.asArray();
         if (a.gc_info.color != .white) {
             a.release(allocator);
         }
         return;
     }
-    if (Value_isObject(v)) {
-        const o = Value_asObject(v);
+    if (Value_isObject(dv)) {
+        const o = Value_asObject(dv);
         if (o.gc_info.color != .white) {
             o.release();
         }
         return;
     }
-    if (v.isFunction()) {
-        const c = v.asFunction();
+    if (dv.isFunction()) {
+        const c = dv.asFunction();
         if (c.gc_info.color != .white) {
             c.release(allocator);
         }
@@ -1279,6 +1301,7 @@ fn gcCollectWhiteArrayKnown(
 ) void {
     if (a.gc_info.color != .white) return;
     a.gc_info.color = .black;
+    a.gc_info.buffered = false;
     var it = a.elements.iterator();
     while (it.next()) |entry| {
         gcReleaseUnlessWhiteKnown(entry.value_ptr.*, runtime_allocator, seen_arrays, seen_objects, seen_closures);
@@ -1289,6 +1312,7 @@ fn gcCollectWhiteArrayKnown(
 fn gcCollectWhiteArray(a: *PHPArray) void {
     if (a.gc_info.color != .white) return;
     a.gc_info.color = .black;
+    a.gc_info.buffered = false;
     var it = a.elements.iterator();
     while (it.next()) |entry| {
         gcReleaseOrCollectValue(entry.value_ptr.*, runtime_allocator);
@@ -1304,6 +1328,7 @@ fn gcCollectWhiteObjectKnown(
 ) void {
     if (o.gc_info.color != .white) return;
     o.gc_info.color = .black;
+    o.gc_info.buffered = false;
     if (o.class_meta) |meta| {
         if (meta.findMethodLookup("__destruct")) |lookup| {
             const this_val = Value_initObject(o);
@@ -1322,6 +1347,7 @@ fn gcCollectWhiteObjectKnown(
 fn gcCollectWhiteObject(o: *PHPObject) void {
     if (o.gc_info.color != .white) return;
     o.gc_info.color = .black;
+    o.gc_info.buffered = false;
     if (o.class_meta) |meta| {
         if (meta.findMethodLookup("__destruct")) |lookup| {
             const this_val = Value_initObject(o);
@@ -1345,6 +1371,7 @@ fn gcCollectWhiteClosureKnown(
 ) void {
     if (c.gc_info.color != .white) return;
     c.gc_info.color = .black;
+    c.gc_info.buffered = false;
     for (c.captures) |cap| {
         gcReleaseUnlessWhiteKnown(cap, runtime_allocator, seen_arrays, seen_objects, seen_closures);
     }
@@ -1354,6 +1381,7 @@ fn gcCollectWhiteClosureKnown(
 fn gcCollectWhiteClosure(c: *PHPClosure) void {
     if (c.gc_info.color != .white) return;
     c.gc_info.color = .black;
+    c.gc_info.buffered = false;
     for (c.captures) |cap| {
         gcReleaseOrCollectValue(cap, runtime_allocator);
     }
@@ -2031,10 +2059,13 @@ pub const PHPArray = struct {
 
         self.ref_count -= 1;
         if (self.ref_count == 0) {
-            if (self.gc_info.buffered and !gc_in_progress) {
-                // 已被 GC buffer：不能立即释放，否则 GC 扫描时访问已释放内存
-                // 重新 buffer（标记为 purple），让 GC 在下次收集时安全处理
-                gcBufferArray(self);
+            if (self.gc_info.buffered) {
+                if (!gc_in_progress) {
+                    // 已被 GC buffer：不能立即释放，否则 GC 扫描时访问已释放内存
+                    // 重新 buffer（标记为 purple），让 GC 在下次收集时安全处理
+                    gcBufferArray(self);
+                }
+                // GC 进行中时不释放，由 GC 收集阶段统一处理
             } else {
                 self.deinit(allocator);
             }
@@ -2824,8 +2855,11 @@ pub const PHPClosure = struct {
         if (self.ref_count == 0) return;
 self.ref_count -= 1;
 if (self.ref_count == 0) {
-if (self.gc_info.buffered and !gc_in_progress) {
+if (self.gc_info.buffered) {
+if (!gc_in_progress) {
 gcBufferClosure(self);
+}
+// GC 进行中时不释放，由 GC 收集阶段统一处理
 } else {
 for (self.captures) |c| {
 c.release(allocator);
@@ -17934,8 +17968,11 @@ pub const PHPObject = struct {
         }
 self.ref_count -= 1;
 if (self.ref_count == 0) {
-if (self.gc_info.buffered and !gc_in_progress) {
+if (self.gc_info.buffered) {
+if (!gc_in_progress) {
 gcBufferObject(self);
+}
+// GC 进行中时不释放，由 GC 收集阶段统一处理
 } else {
 self.deinit();
 }
