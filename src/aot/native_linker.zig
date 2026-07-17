@@ -3686,6 +3686,58 @@ pub const NativeLinker = struct {
         try code.appendSlice(self.allocator, escaped_prof_name);
         try code.appendSlice(self.allocator, "\");\n");
 
+        // 参数类型检查：查找 TypeDef 中方法的参数类型声明
+        // 当方法有 typed parameters 时，生成运行时类型检查代码
+        if (std.mem.indexOf(u8, func.name, "::")) |_| {
+            const sep_idx = std.mem.indexOf(u8, func.name, "::").?;
+            const class_name = func.name[0..sep_idx];
+            const method_name = func.name[sep_idx + 2 ..];
+            if (self.ir_module) |ir_mod| {
+                for (ir_mod.types.items) |td_ptr| {
+                    const td = td_ptr.*;
+                    if (std.mem.eql(u8, td.name, class_name)) {
+                        for (td.methods) |method| {
+                            if (std.mem.eql(u8, method.name, method_name)) {
+                                for (method.param_types, 0..) |ptype, pidx| {
+                                    if (ptype.len == 0) continue;
+                                    const nullable = if (pidx < method.param_nullable.len) method.param_nullable[pidx] else true;
+                                    const escaped_ptype = try self.escapeString(ptype);
+                                    defer self.allocator.free(escaped_ptype);
+                                    try code.appendSlice(self.allocator, "    if (args.len > ");
+                                    const pidx_str = try std.fmt.allocPrint(self.allocator, "{d}", .{pidx});
+                                    defer self.allocator.free(pidx_str);
+                                    try code.appendSlice(self.allocator, pidx_str);
+                                    try code.appendSlice(self.allocator, ") {\n");
+                                    try code.appendSlice(self.allocator, "        try runtime.php_check_param_type(\"");
+                                    try code.appendSlice(self.allocator, escaped_prof_name);
+                                    try code.appendSlice(self.allocator, "\", ");
+                                    try code.appendSlice(self.allocator, pidx_str);
+                                    try code.appendSlice(self.allocator, ", args[");
+                                    try code.appendSlice(self.allocator, pidx_str);
+                                    try code.appendSlice(self.allocator, "], \"");
+                                    try code.appendSlice(self.allocator, escaped_ptype);
+                                    try code.appendSlice(self.allocator, "\", ");
+                                    try code.appendSlice(self.allocator, if (nullable) "true" else "false");
+                                    const pname = if (pidx < method.param_names.len) method.param_names[pidx] else "param";
+                                    const escaped_pname = try self.escapeString(pname);
+                                    defer self.allocator.free(escaped_pname);
+                                    try code.appendSlice(self.allocator, ", \"");
+                                    try code.appendSlice(self.allocator, escaped_pname);
+                                    try code.appendSlice(self.allocator, "\");\n");
+                                    try code.appendSlice(self.allocator, "        if (runtime.hasException()) {\n");
+                                    try code.appendSlice(self.allocator, "            return error.RuntimeError;\n");
+                                    try code.appendSlice(self.allocator, "        }\n");
+                                    try code.appendSlice(self.allocator, "    }\n");
+                                }
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
         // Generator: extract context from thread-local
         if (func.is_generator) {
             try code.appendSlice(self.allocator, "    const __gen_ctx = runtime.php_generator_get_context();\n");

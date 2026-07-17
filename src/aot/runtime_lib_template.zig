@@ -5849,6 +5849,121 @@ fn emitTypeFatalError(func_name: []const u8, arg_num: u32, expected: []const u8,
     std.process.exit(255);
 }
 
+/// 参数类型检查：当参数类型与声明不匹配时抛出 TypeError
+/// PHP 8 语义：非 nullable 类型参数收到 null 时抛 TypeError
+pub fn php_check_param_type(
+    func_name: []const u8,
+    arg_index: usize,
+    arg: Value,
+    expected_type: []const u8,
+    is_nullable: bool,
+    param_name: []const u8,
+) !void {
+    // 空类型声明 = 无类型约束
+    if (expected_type.len == 0) return;
+
+    // null 检查
+    if (arg.isNull()) {
+        if (is_nullable) return;
+        // 非 nullable 类型收到 null → TypeError
+        const got_type = "null";
+        var buf: [512]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "{s}(): Argument #{d} (${s}) must be of type {s}, {s} given", .{
+            func_name, arg_index + 1, param_name, expected_type, got_type,
+        }) catch "TypeError";
+        _ = try throwThrowable("TypeError", msg, runtime_allocator);
+        return;
+    }
+
+    // 类型匹配检查
+    const got_type = phpGetValueTypeName(arg);
+    const matches = checkTypeMatch(expected_type, got_type, arg);
+    if (!matches) {
+        var buf: [512]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "{s}(): Argument #{d} (${s}) must be of type {s}, {s} given", .{
+            func_name, arg_index + 1, param_name, expected_type, got_type,
+        }) catch "TypeError";
+        _ = try throwThrowable("TypeError", msg, runtime_allocator);
+        return;
+    }
+}
+
+/// 获取 Value 的 PHP 类型名称
+fn phpGetValueTypeName(val: Value) []const u8 {
+    if (val.isNull()) return "null";
+    if (val.isBool()) return "bool";
+    if (val.isInt()) return "int";
+    if (val.isFloat()) return "float";
+    if (val.isString()) return "string";
+    if (val.isArray()) return "array";
+    if (Value_isObject(val)) {
+        if (Value_asObject(val).class_meta) |meta| return meta.name;
+        return "object";
+    }
+    if (val.isFunction()) return "Closure";
+    if (val.isRef()) {
+        return phpGetValueTypeName(val.asRef().*);
+    }
+    return "unknown";
+}
+
+/// 检查类型是否匹配（PHP 8 类型系统）
+fn checkTypeMatch(expected: []const u8, got: []const u8, arg: Value) bool {
+    // 精确匹配
+    if (std.mem.eql(u8, expected, got)) return true;
+
+    // int/float 兼容（PHP 弱类型）
+    if (std.mem.eql(u8, expected, "float") and std.mem.eql(u8, got, "int")) return true;
+
+    // bool 接受 int（PHP 弱类型）
+    if (std.mem.eql(u8, expected, "bool") and std.mem.eql(u8, got, "int")) return true;
+
+    // string 接受 int（PHP 弱类型，但 PHP 8 严格模式下不）
+    // 暂时不做弱类型转换，保持严格
+
+    // mixed 接受任何类型
+    if (std.mem.eql(u8, expected, "mixed")) return true;
+
+    // callable 接受 string/array/object(Closure)
+    if (std.mem.eql(u8, expected, "callable")) {
+        if (std.mem.eql(u8, got, "string")) return true;
+        if (std.mem.eql(u8, got, "array")) return true;
+        if (std.mem.eql(u8, got, "object") or std.mem.eql(u8, got, "Closure")) return true;
+        // 检查是否是有 __invoke 的对象
+        if (Value_isObject(arg)) {
+            const obj = Value_asObject(arg);
+            if (obj.class_meta) |meta| {
+                if (meta.findMethodLookup("__invoke") != null) return true;
+            }
+        }
+        return false;
+    }
+
+    // callable 类型别名
+    if (std.mem.eql(u8, expected, "Closure")) {
+        if (Value_isObject(arg)) {
+            const obj = Value_asObject(arg);
+            if (obj.class_meta) |meta| {
+                if (std.mem.eql(u8, meta.name, "Closure")) return true;
+            }
+        }
+        return false;
+    }
+
+    // 类类型检查：父类/接口
+    if (Value_isObject(arg)) {
+        const obj = Value_asObject(arg);
+        if (obj.class_meta) |meta| {
+            // 检查类名匹配（含继承）
+            if (meta.isSubclassOf(expected)) return true;
+            // 检查接口实现
+            if (meta.implementsInterface(expected)) return true;
+        }
+    }
+
+    return false;
+}
+
 /// 调用未定义函数时输出 PHP Fatal error 并终止执行
 pub fn php_call_undefined_function(name: []const u8) noreturn {
     // PHP 输出顺序：先 stderr，再 stdout
@@ -18709,6 +18824,12 @@ fn coercePropertyType(prop: *const ClassProperty, value: Value, class_name: []co
 
 pub fn php_object_get(obj_val: Value, property_name: []const u8) !Value {
     if (!Value_isObject(obj_val)) {
+        // PHP 8: 对 null 值访问属性时发出警告
+        if (obj_val.isNull()) {
+            var buf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "Attempt to read property \"{s}\" on null", .{property_name}) catch "Attempt to read property on null";
+            emitWarning(msg);
+        }
         return Value.initNull();
     }
 
