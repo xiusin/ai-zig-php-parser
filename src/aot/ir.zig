@@ -338,6 +338,10 @@ pub const Function = struct {
     param_nullable: []const bool = &.{},
     /// 参数名称列表（与 params 一一对应）
     param_names: []const []const u8 = &.{},
+    /// PHP 返回类型声明字符串（无返回类型声明时为 null）
+    php_return_type: ?[]const u8 = null,
+    /// PHP 返回类型是否 nullable
+    php_return_nullable: bool = false,
 
     const Self = @This();
 

@@ -913,8 +913,16 @@ pub const IRGenerator = struct {
 
         // Set up new context
         self.current_function = func;
-        // Note: function_decl AST has no return_type field; only method_decl does
+        // 提取返回类型声明
         self.current_php_return_type = null;
+        if (func_data.return_type) |rt_idx| {
+            const rt_info = self.resolveTypeNodeToString(rt_idx);
+            if (rt_info.name.len > 0) {
+                func.php_return_type = rt_info.name;
+                func.php_return_nullable = rt_info.nullable;
+                self.current_php_return_type = rt_info.name;
+            }
+        }
         self.var_registers = .{ .items = &.{}, .capacity = 0 };
         self.var_usage = .{ .items = &.{}, .capacity = 0 }; // 初始化变量使用跟踪
         self.entry_allocas = .{ .items = &.{}, .capacity = 0 };
@@ -2474,7 +2482,11 @@ pub const IRGenerator = struct {
             self.current_php_return_type = null;
             if (method_data.return_type) |rt_idx| {
                 const rt_info = self.resolveTypeNodeToString(rt_idx);
-                if (rt_info.name.len > 0) self.current_php_return_type = rt_info.name;
+                if (rt_info.name.len > 0) {
+                    func.php_return_type = rt_info.name;
+                    func.php_return_nullable = rt_info.nullable;
+                    self.current_php_return_type = rt_info.name;
+                }
             }
             self.current_class = class_name;
             self.var_registers = .{ .items = &.{}, .capacity = 0 };

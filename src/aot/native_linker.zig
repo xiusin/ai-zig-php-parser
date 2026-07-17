@@ -227,6 +227,9 @@ pub const NativeLinker = struct {
     current_iter_value_ref_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_optimized_alloca_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_function_for_resolve: ?*const IR.Function = null,
+    /// 当前函数返回类型（用于返回值弱类型转换）
+    current_return_type: ?[]const u8 = null,
+    current_return_nullable: bool = false,
     current_register_types: ?*const std.AutoHashMap(usize, IR.Type) = null,
     current_inferred_types: ?*const std.AutoHashMap(usize, IR.Type) = null, // 类型推断结果
     hoisted_instructions: ?std.AutoHashMap(*const IR.Instruction, void) = null, // LICM 已提升指令
@@ -3560,6 +3563,14 @@ pub const NativeLinker = struct {
         self.current_function_for_resolve = func;
         defer self.current_function_for_resolve = null;
 
+        // 设置返回类型（用于返回值弱类型转换）
+        self.current_return_type = func.php_return_type;
+        self.current_return_nullable = func.php_return_nullable;
+        defer {
+            self.current_return_type = null;
+            self.current_return_nullable = false;
+        }
+
         // 初始化参数寄存器映射
         var param_regs = std.StringHashMap(usize).init(self.allocator);
         defer param_regs.deinit();
@@ -6656,6 +6667,26 @@ pub const NativeLinker = struct {
 
     /// 生成完整的赋值语句（包括分号和换行）
     /// format_str 不应包含 "reg_{d} = " 前缀
+    /// 生成带弱类型转换的 return 语句
+    /// 当函数有返回类型声明时，对标量返回值做 php_coerce_value 转换
+    fn writeReturnStmt(self: *Self, writer: anytype, reg_id: usize, is_alloca: bool, indent: []const u8) !void {
+        const val_expr = if (is_alloca)
+            try std.fmt.allocPrint(self.allocator, "reg_{d}.*", .{reg_id})
+        else
+            try std.fmt.allocPrint(self.allocator, "reg_{d}", .{reg_id});
+        defer self.allocator.free(val_expr);
+
+        if (self.current_return_type) |rt| {
+            // 组合类型不做值转换
+            if (rt.len > 0 and std.mem.indexOfScalar(u8, rt, '|') == null and std.mem.indexOfScalar(u8, rt, '&') == null) {
+                const nullable_str = if (self.current_return_nullable) "true" else "false";
+                try writer.print("{s}return if ({s} and {s}.isNull()) {s} else runtime.php_coerce_value({s}, \"{s}\", runtime.runtime_allocator);\n", .{ indent, nullable_str, val_expr, val_expr, val_expr, rt });
+                return;
+            }
+        }
+        try writer.print("{s}return {s};\n", .{ indent, val_expr });
+    }
+
     fn writeRegAssignmentFmt(
         self: *Self,
         writer: anytype,
@@ -13007,11 +13038,7 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
         // 生成 return 语句
         if (ret_val) |reg| {
             const is_alloca = alloca_regs.contains(reg.id);
-            if (is_alloca) {
-                try writer.print("{s}return reg_{d}.*;\n", .{ indent, reg.id });
-            } else {
-                try writer.print("{s}return reg_{d};\n", .{ indent, reg.id });
-            }
+            try self.writeReturnStmt(writer, reg.id, is_alloca, indent);
         } else {
             try writer.print("{s}return runtime.Value.initNull();\n", .{indent});
         }
@@ -13228,10 +13255,10 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                 } else if (reg_type_tag == .bool) {
                     try writer.print("    return runtime.Value.initBool(reg_{d}.asBool());\n", .{reg});
                 } else {
-                    try writer.print("    return reg_{d};\n", .{reg});
+                    try self.writeReturnStmt(writer, reg, false, "    ");
                 }
             } else {
-                try writer.print("    return reg_{d};\n", .{reg});
+                try self.writeReturnStmt(writer, reg, false, "    ");
             }
         } else {
             try writer.writeAll("    return runtime.Value.initNull();\n");
@@ -18156,11 +18183,7 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                 if (maybe_reg) |reg| {
                     // 检查是否是 alloca 寄存器
                     const is_alloca = alloca_regs.contains(reg.id);
-                    if (is_alloca) {
-                        try writer.print("                return reg_{d}.*;\n", .{reg.id});
-                    } else {
-                        try writer.print("                return reg_{d};\n", .{reg.id});
-                    }
+                    try self.writeReturnStmt(writer, reg.id, is_alloca, "                ");
                 } else {
                     // void return - 返回null
                     try writer.writeAll("                return runtime.Value.initNull();\n");
