@@ -18553,12 +18553,12 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
     }
 
     /// Escape a string for use in Zig source code
-    /// 解析类型字符串中的 self/static/parent 为实际类名（含组合类型如 self|null）
+    /// 解析类型字符串中的 self/parent 为实际类名（含组合类型如 self|null）
+    /// static 保持不变，由运行时 checkSingleType 做后期静态绑定
     fn resolveTypeSpecials(self: *Self, ptype: []const u8, class_name: []const u8, parent_name: ?[]const u8) ![]const u8 {
         const has_self = std.mem.indexOf(u8, ptype, "self") != null;
-        const has_static = std.mem.indexOf(u8, ptype, "static") != null;
         const has_parent = std.mem.indexOf(u8, ptype, "parent") != null;
-        if (!has_self and !has_static and !has_parent)
+        if (!has_self and !has_parent)
             return try self.allocator.dupe(u8, ptype);
 
         var result = try std.ArrayList(u8).initCapacity(self.allocator, 0);
@@ -18577,7 +18577,7 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                 if (ch == '|' or ch == '&' or ch == '(' or ch == ')' or ch == ' ' or ch == '\\') break;
             }
             const ident = ptype[start..i];
-            if (std.mem.eql(u8, ident, "self") or std.mem.eql(u8, ident, "static")) {
+            if (std.mem.eql(u8, ident, "self")) {
                 try result.appendSlice(self.allocator, class_name);
             } else if (std.mem.eql(u8, ident, "parent")) {
                 try result.appendSlice(self.allocator, parent_name orelse "parent");

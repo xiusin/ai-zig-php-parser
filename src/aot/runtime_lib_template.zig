@@ -5993,8 +5993,39 @@ fn checkSingleType(expected: []const u8, got: []const u8, arg: Value) bool {
     // bool 接受 int（PHP 弱类型）
     if (std.mem.eql(u8, expected, "bool") and std.mem.eql(u8, got, "int")) return true;
 
+    // PHP 弱类型：数字字符串可转为 int/float
+    if ((std.mem.eql(u8, expected, "int") or std.mem.eql(u8, expected, "float")) and
+        std.mem.eql(u8, got, "string") and arg.isString())
+    {
+        const s = arg.asString();
+        if (isNumericString(s.data[0..s.length])) return true;
+    }
+
+    // PHP 弱类型：int/float/bool 可转为 string
+    if (std.mem.eql(u8, expected, "string") and
+        (std.mem.eql(u8, got, "int") or std.mem.eql(u8, got, "float") or std.mem.eql(u8, got, "bool")))
+        return true;
+
+    // PHP 弱类型：bool 接受 float/string
+    if (std.mem.eql(u8, expected, "bool")) {
+        if (std.mem.eql(u8, got, "float")) return true;
+        if (std.mem.eql(u8, got, "string")) return true;
+    }
+
     // mixed 接受任何类型
     if (std.mem.eql(u8, expected, "mixed")) return true;
+
+    // static: 后期静态绑定（运行时类名）
+    if (std.mem.eql(u8, expected, "static")) {
+        if (!Value_isObject(arg)) return false;
+        const obj = Value_asObject(arg);
+        if (obj.class_meta) |meta| {
+            if (getCurrentCalledClass()) |called_class| {
+                if (meta.isSubclassOf(called_class.name)) return true;
+            }
+        }
+        return false;
+    }
 
     // null 类型
     if (std.mem.eql(u8, expected, "null")) return arg.isNull();
