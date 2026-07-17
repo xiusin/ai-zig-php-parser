@@ -5217,17 +5217,13 @@ pub const NativeLinker = struct {
                                 }
                             }
                             if (is_alloca) {
-                                {
-                                    const _f = try std.fmt.allocPrint(self.allocator, "    return reg_{d}.*;\n", .{reg.id});
-                                    defer self.allocator.free(_f);
-                                    try code.appendSlice(self.allocator, _f);
-                                }
+                                const _ret = try self.generateReturnStr(reg.id, true, "    ");
+                                defer self.allocator.free(_ret);
+                                try code.appendSlice(self.allocator, _ret);
                             } else {
-                                {
-                                    const _f = try std.fmt.allocPrint(self.allocator, "    return reg_{d};\n", .{reg.id});
-                                    defer self.allocator.free(_f);
-                                    try code.appendSlice(self.allocator, _f);
-                                }
+                                const _ret = try self.generateReturnStr(reg.id, false, "    ");
+                                defer self.allocator.free(_ret);
+                                try code.appendSlice(self.allocator, _ret);
                             }
                         } else {
                             try code.appendSlice(self.allocator, "    return runtime.Value.initNull();\n");
@@ -6687,6 +6683,23 @@ pub const NativeLinker = struct {
         try writer.print("{s}return {s};\n", .{ indent, val_expr });
     }
 
+    /// 生成带弱类型转换的 return 字符串（用于 allocPrint+appendSlice 路径）
+    fn generateReturnStr(self: *Self, reg_id: usize, is_alloca: bool, indent: []const u8) ![]const u8 {
+        const val_expr = if (is_alloca)
+            try std.fmt.allocPrint(self.allocator, "reg_{d}.*", .{reg_id})
+        else
+            try std.fmt.allocPrint(self.allocator, "reg_{d}", .{reg_id});
+        defer self.allocator.free(val_expr);
+
+        if (self.current_return_type) |rt| {
+            if (rt.len > 0 and std.mem.indexOfScalar(u8, rt, '|') == null and std.mem.indexOfScalar(u8, rt, '&') == null) {
+                const nullable_str = if (self.current_return_nullable) "true" else "false";
+                return std.fmt.allocPrint(self.allocator, "{s}return if ({s} and {s}.isNull()) {s} else runtime.php_coerce_value({s}, \"{s}\", runtime.runtime_allocator);\n", .{ indent, nullable_str, val_expr, val_expr, val_expr, rt });
+            }
+        }
+        return std.fmt.allocPrint(self.allocator, "{s}return {s};\n", .{ indent, val_expr });
+    }
+
     fn writeRegAssignmentFmt(
         self: *Self,
         writer: anytype,
@@ -7129,11 +7142,7 @@ pub const NativeLinker = struct {
                             try writer.print("                _ = reg_{d}.retain();\n", .{reg.id});
                         }
                     }
-                    if (is_alloca) {
-                        try writer.print("                return reg_{d}.*;\n", .{reg.id});
-                    } else {
-                        try writer.print("                return reg_{d};\n", .{reg.id});
-                    }
+                    try self.writeReturnStmt(writer, reg.id, is_alloca, "                ");
                 } else {
                     try code.appendSlice(self.allocator, "                return runtime.Value.initNull();\n");
                 }
@@ -12388,11 +12397,7 @@ pub const NativeLinker = struct {
                                 else
                                     false;
 
-                                if (is_alloca) {
-                                    try writer.print("    return reg_{d}.*;\n", .{reg.id});
-                                } else {
-                                    try writer.print("    return reg_{d};\n", .{reg.id});
-                                }
+                                try self.writeReturnStmt(writer, reg.id, is_alloca, "    ");
                             } else {
                                 // void return - 返回null
                                 try writer.writeAll("    return runtime.Value.initNull();\n");
@@ -13010,7 +13015,7 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
         const alloca_regs = if (self.current_alloca_regs) |ar| ar else {
             // 没有 alloca_regs 信息，直接返回
             if (ret_val) |reg| {
-                try writer.print("{s}return reg_{d};\n", .{ indent, reg.id });
+                try self.writeReturnStmt(writer, reg.id, false, indent);
             } else {
                 try writer.print("{s}return runtime.Value.initNull();\n", .{indent});
             }
@@ -17443,7 +17448,7 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                                     }
                                 }
                                 if (maybe_reg) |reg| {
-                                    try writer.print("    return reg_{d};\n", .{reg.id});
+                                    try self.writeReturnStmt(writer, reg.id, false, "    ");
                                 } else {
                                     try writer.writeAll("    return runtime.Value.initNull();\n");
                                 }
@@ -17582,7 +17587,7 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                         }
                     }
                     if (term.ret) |reg| {
-                        try writer.print("    return reg_{d};\n", .{reg.id});
+                        try self.writeReturnStmt(writer, reg.id, false, "    ");
                     } else {
                         try writer.writeAll("    return runtime.Value.initNull();\n");
                     }
@@ -17667,7 +17672,7 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                         }
                     }
                     if (term.ret) |reg| {
-                        try writer.print("    return reg_{d};\n", .{reg.id});
+                        try self.writeReturnStmt(writer, reg.id, false, "    ");
                     } else {
                         try writer.writeAll("    return runtime.Value.initNull();\n");
                     }
@@ -17839,9 +17844,9 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                         false;
 
                     if (is_alloca) {
-                        try writer.print("    return reg_{d}.*;\n", .{reg.id});
+                        try self.writeReturnStmt(writer, reg.id, true, "    ");
                     } else {
-                        try writer.print("    return reg_{d};\n", .{reg.id});
+                        try self.writeReturnStmt(writer, reg.id, false, "    ");
                     }
                 } else {
                     try writer.writeAll("    return runtime.Value.initNull();\n");
@@ -18028,9 +18033,9 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                         false;
 
                     if (is_alloca) {
-                        try writer.print("    return reg_{d}.*;\n", .{reg.id});
+                        try self.writeReturnStmt(writer, reg.id, true, "    ");
                     } else {
-                        try writer.print("    return reg_{d};\n", .{reg.id});
+                        try self.writeReturnStmt(writer, reg.id, false, "    ");
                     }
                 } else {
                     try writer.writeAll("    return runtime.Value.initNull();\n");
@@ -18118,9 +18123,9 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                 false;
 
             if (is_alloca) {
-                try writer.print("        return reg_{d}.*;\n", .{reg.id});
+                try self.writeReturnStmt(writer, reg.id, true, "        ");
             } else {
-                try writer.print("        return reg_{d};\n", .{reg.id});
+                try self.writeReturnStmt(writer, reg.id, false, "        ");
             }
         } else {
             try writer.writeAll("        return runtime.Value.initNull();\n");
@@ -18144,9 +18149,9 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                 false;
 
             if (is_alloca) {
-                try writer.print("        return reg_{d}.*;\n", .{reg.id});
+                try self.writeReturnStmt(writer, reg.id, true, "        ");
             } else {
-                try writer.print("        return reg_{d};\n", .{reg.id});
+                try self.writeReturnStmt(writer, reg.id, false, "        ");
             }
         } else {
             try writer.writeAll("        return runtime.Value.initNull();\n");

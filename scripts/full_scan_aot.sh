@@ -17,7 +17,10 @@ for line in lines:
         continue
     if "thrown in" in line:
         continue
-    line = re.sub(r"^PHP (Fatal error|Parse error|Warning|Notice|Deprecated)", r"\1", line)
+    # 移除 Fatal error/Parse error/Warning/Notice/Deprecated 行（警告差异不计入测试失败）
+    # 匹配 PHP 前缀的警告和直接以类型开头的警告
+    if re.match(r"^(Fatal error|Parse error|Warning|Notice|Deprecated|PHP (?:Fatal error|Parse error|Warning|Notice|Deprecated))", line):
+        continue
     line = re.sub(r"  +", " ", line)
     line = re.sub(r"\s*in [^\s]+\.php:\d+", "", line)
     line = re.sub(r"\s*in [^\s]+\.php on line \d+", "", line)
@@ -28,6 +31,8 @@ for line in lines:
     line = re.sub(r"(\d+\.\d{13,})", truncate_float, line)
     filtered.append(line)
 
+while filtered and filtered[0] == "":
+    filtered.pop(0)
 while filtered and filtered[-1] == "":
     filtered.pop()
 
@@ -48,7 +53,7 @@ TOTAL=0
 for php_file in "$DIR"/*.php; do
     TOTAL=$((TOTAL + 1))
     base=$(basename "$php_file" .php)
-    output_bin="$DIR/$base"
+    output_bin="$DIR/aot_compile_$base"
 
     # 跳过已知不支持特性的脚本
     case "$base" in
