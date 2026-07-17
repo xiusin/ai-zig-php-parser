@@ -237,6 +237,7 @@ pub const NativeLinker = struct {
     current_catch_used_regs: ?*const std.AutoHashMap(usize, void) = null, // catch块中引用的寄存器集合（cleanup时跳过）
     current_cond_br_source_block: ?usize = null, // 嵌套cond_br的源块索引（用于PHI incoming选择）
     current_property_get_origins: ?*const std.AutoHashMap(usize, PropertyGetOrigin) = null,
+    current_load_to_alloca: ?*const std.AutoHashMap(usize, usize) = null,
 
     /// 收集一个基本块中引用的所有寄存器 ID
     fn collectBlockUsedRegs(self: *Self, block: *IR.BasicBlock, set: *std.AutoHashMap(usize, void)) !void {
@@ -4905,6 +4906,25 @@ pub const NativeLinker = struct {
             }
         }
         self.current_property_get_origins = &property_get_origins;
+
+        // Build load result → alloca register mapping
+        // Used by usort/sort store-back to write sorted result back to variable
+        // when the argument came from a load (non-mem2reg'd variable)
+        var load_to_alloca = std.AutoHashMap(usize, usize).init(self.allocator);
+        defer load_to_alloca.deinit();
+        for (func.blocks.items) |blk_scan_load| {
+            for (blk_scan_load.instructions.items) |inst_scan_load| {
+                if (inst_scan_load.*.op == .load) {
+                    if (inst_scan_load.result) |load_res| {
+                        if (alloca_registers.contains(inst_scan_load.op.load.ptr.id)) {
+                            try load_to_alloca.put(load_res.id, inst_scan_load.op.load.ptr.id);
+                        }
+                    }
+                }
+            }
+        }
+        self.current_load_to_alloca = &load_to_alloca;
+        defer self.current_load_to_alloca = null;
         // 第二遍：找 coalesce 模式
         for (func.blocks.items) |blk_scan| {
             // 方法1：identical(reg, null_const) 模式检测
@@ -9640,6 +9660,14 @@ pub const NativeLinker = struct {
                                     }
                                     // retain: store-back 后两个寄存器共享同一数组，需增加引用计数
                                     try writer.print("    _ = reg_{d}.retain();\n", .{reg.id});
+                                    // alloca 写回：如果第一个参数来自 load（非 mem2reg'd 变量），
+                                    // 排序结果需写回变量的 alloca 存储
+                                    if (self.current_load_to_alloca) |lta| {
+                                        if (lta.get(op.args[0].id)) |alloca_id| {
+                                            try writer.print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{alloca_id});
+                                            try writer.print("    runtime.val_assign(reg_{d}, reg_{d});\n", .{ alloca_id, reg.id });
+                                        }
+                                    }
                                     if (self.current_global_get_names) |ggn| {
                                         if (ggn.get(op.args[0].id)) |var_name| {
                                             const escaped_var = try self.escapeString(var_name);
@@ -10235,6 +10263,14 @@ pub const NativeLinker = struct {
                                         }
                                         // retain: store-back 后两个寄存器共享同一数组，需增加引用计数
                                         try writer.print("    _ = reg_{d}.retain();\n", .{reg.id});
+                                        // alloca 写回：如果第一个参数来自 load（非 mem2reg'd 变量），
+                                        // 排序结果需写回变量的 alloca 存储
+                                        if (self.current_load_to_alloca) |lta| {
+                                            if (lta.get(op.args[0].id)) |alloca_id| {
+                                                try writer.print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{alloca_id});
+                                                try writer.print("    runtime.val_assign(reg_{d}, reg_{d});\n", .{ alloca_id, reg.id });
+                                            }
+                                        }
                                         if (self.current_global_get_names) |ggn| {
                                             if (ggn.get(op.args[0].id)) |var_name| {
                                                 const escaped_var = try self.escapeString(var_name);

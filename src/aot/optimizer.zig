@@ -1835,11 +1835,29 @@ pub const IROptimizer = struct {
         var reg_to_alloca = std.AutoHashMap(u32, *Instruction).init(self.allocator);
         defer reg_to_alloca.deinit();
 
+        // Pre-scan: collect property_get result register IDs
+        // Variables assigned from property_get ($new = $this->data) must NOT be
+        // promoted by mem2reg, because the store's val_assign does COW cloning
+        // to maintain PHP value semantics. If mem2reg eliminates the store,
+        // the COW never happens and in-place modifications (usort etc.) corrupt
+        // the shared array.
+        var property_get_result_regs = std.AutoHashMap(u32, void).init(self.allocator);
+        defer property_get_result_regs.deinit();
+        for (func.blocks.items) |block_scan| {
+            for (block_scan.instructions.items) |inst_scan| {
+                if (inst_scan.*.op == .property_get) {
+                    if (inst_scan.result) |res| {
+                        try property_get_result_regs.put(res.id, {});
+                    }
+                }
+            }
+        }
+
         // Scan entry block for allocas
         if (func.getEntryBlock()) |entry| {
             for (entry.instructions.items) |inst| {
                 if (inst.*.op == .alloca) {
-                    if (self.isPromotable(inst, func)) {
+                    if (self.isPromotable(inst, func, &property_get_result_regs)) {
                         try promotable_allocas.append(self.allocator, inst);
                         try def_blocks.put(inst, .{ .items = &.{}, .capacity = 0 });
                         if (inst.result) |res| {
@@ -2253,7 +2271,7 @@ pub const IROptimizer = struct {
     }
 
     /// Check if alloca is promotable
-    fn isPromotable(self: *Self, alloca: *Instruction, func: *Function) bool {
+    fn isPromotable(self: *Self, alloca: *Instruction, func: *Function, property_get_regs: *const std.AutoHashMap(u32, void)) bool {
         // Check if marked as no_optimize
         if (alloca.op == .alloca and alloca.op.alloca.no_optimize) {
             return false;
@@ -2281,6 +2299,12 @@ pub const IROptimizer = struct {
                             // Valid use
                             if (op.value.id == result_id) {
                                 // std.debug.print("  reg_{d} NOT promotable: storing pointer to itself\n", .{result_id});
+                                return false;
+                            }
+                            // property_get 结果赋值给变量时不可提升：
+                            // $new = $this->data 后 usort($new, ...) 需 val_assign 做 COW 克隆
+                            // 若 mem2reg 消除 store，COW 丢失，usort 原地修改共享数组
+                            if (property_get_regs.contains(op.value.id)) {
                                 return false;
                             }
                             // 数组变量需要 COW 语义，不能被 mem2reg 提升
