@@ -917,8 +917,10 @@ fn gcCollectCycles(force: bool) usize {
     const batch_end = if (force) total else @min(total, GC_BATCH_SIZE);
 
     // 保守 GC 策略：仅释放 ref_count == 0 的对象
-    // 不执行 MarkGray/Scan 循环检测，避免因栈根扫描缺失导致误释放
-    // ref_count > 0 的对象一定有外部引用（包括栈上的局部变量），不会被释放
+    // 完整循环检测（MarkGray/Scan/CollectWhite）已实现但未启用
+    // 根因：AOT 生成的 retain/release 不完全精确，部分栈变量未 retain
+    //       导致 MarkGray 递减后 ref_count 误判为 0，引发提前释放 SEGV
+    // 需先修复所有 retain/release 不精确问题后才能安全启用
     var collected: usize = 0;
     for (cycle_roots.items[0..batch_end]) |r| {
         switch (r) {
