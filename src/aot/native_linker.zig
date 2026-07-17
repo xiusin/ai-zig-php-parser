@@ -8857,7 +8857,7 @@ pub const NativeLinker = struct {
                                         // 跳过 COW：只做 retain + 赋值
                                         try writer.print("    {{\n", .{});
                                         if (php_ptype.len > 0) {
-                                            try writer.print("        var __pv = if (args.len > {d} and !args[{d}].isMissing()) (if (args[{d}].isNull() and {s}) args[{d}] else runtime.php_coerce_value(args[{d}], \"{s}\", runtime.runtime_allocator)) else runtime.Value.initNull();\n", .{ args_index, args_index, args_index, if (php_nullable) "true" else "false", php_ptype });
+                                            try writer.print("        var __pv = if (args.len > {d} and !args[{d}].isMissing()) (if (args[{d}].isNull() and {s}) args[{d}] else runtime.php_coerce_value(args[{d}], \"{s}\", runtime.runtime_allocator)) else runtime.Value.initNull();\n", .{ args_index, args_index, args_index, if (php_nullable) "true" else "false", args_index, args_index, php_ptype });
                                         } else {
                                             try writer.print("        const __pv = if (args.len > {d} and !args[{d}].isMissing()) args[{d}] else runtime.Value.initNull();\n", .{ args_index, args_index, args_index });
                                         }
@@ -8872,7 +8872,7 @@ pub const NativeLinker = struct {
                                         // COW 检查：数组在 ref_count > 1 时深拷贝
                                         try writer.print("    {{\n", .{});
                                         if (php_ptype.len > 0) {
-                                            try writer.print("        var __pv = if (args.len > {d} and !args[{d}].isMissing()) (if (args[{d}].isNull() and {s}) args[{d}] else runtime.php_coerce_value(args[{d}], \"{s}\", runtime.runtime_allocator)) else runtime.Value.initNull();\n", .{ args_index, args_index, args_index, if (php_nullable) "true" else "false", php_ptype });
+                                            try writer.print("        var __pv = if (args.len > {d} and !args[{d}].isMissing()) (if (args[{d}].isNull() and {s}) args[{d}] else runtime.php_coerce_value(args[{d}], \"{s}\", runtime.runtime_allocator)) else runtime.Value.initNull();\n", .{ args_index, args_index, args_index, if (php_nullable) "true" else "false", args_index, args_index, php_ptype });
                                         } else {
                                             try writer.print("        const __pv = if (args.len > {d} and !args[{d}].isMissing()) args[{d}] else runtime.Value.initNull();\n", .{ args_index, args_index, args_index });
                                         }
