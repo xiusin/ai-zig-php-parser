@@ -916,48 +916,39 @@ fn gcCollectCycles(force: bool) usize {
     const total = cycle_roots.items.len;
     const batch_end = if (force) total else @min(total, GC_BATCH_SIZE);
 
-    // 保守 GC 策略：仅释放 ref_count == 0 的对象
-    // 完整循环检测（MarkGray/Scan/CollectWhite）已实现但未启用
-    // 根因：AOT 生成的 retain/release 不完全精确，部分栈变量未 retain
-    //       导致 MarkGray 递减后 ref_count 误判为 0，引发提前释放 SEGV
-    // 需先修复所有 retain/release 不精确问题后才能安全启用
-    var collected: usize = 0;
+    // 三阶段循环检测：MarkGray → Scan → CollectWhite
+    // 前置条件：AOT 生成的所有栈变量赋值均已正确 retain（PHI 节点已修复）
+    // 清除 buffered 标记
     for (cycle_roots.items[0..batch_end]) |r| {
         switch (r) {
-            .array => |a| {
-                if (a.ref_count == 0) {
-                    a.gc_info.buffered = false;
-                    a.gc_info.color = .black;
-                    gcDestroyArray(a);
-                    collected += 1;
-                } else {
-                    a.gc_info.buffered = false;
-                    a.gc_info.color = .black;
-                }
-            },
-            .object => |o| {
-                if (o.ref_count == 0) {
-                    o.gc_info.buffered = false;
-                    o.gc_info.color = .black;
-                    gcDestroyObject(o);
-                    collected += 1;
-                } else {
-                    o.gc_info.buffered = false;
-                    o.gc_info.color = .black;
-                }
-            },
-            .closure => |c| {
-                if (c.ref_count == 0) {
-                    c.gc_info.buffered = false;
-                    c.gc_info.color = .black;
-                    gcDestroyClosure(c);
-                    collected += 1;
-                } else {
-                    c.gc_info.buffered = false;
-                    c.gc_info.color = .black;
-                }
-            },
+            .array => |a| a.gc_info.buffered = false,
+            .object => |o| o.gc_info.buffered = false,
+            .closure => |c| c.gc_info.buffered = false,
         }
+    }
+
+    // Phase 1: MarkGray — 递减所有内部引用的 ref_count
+    for (cycle_roots.items[0..batch_end]) |r| gcMarkGray(r);
+    // Phase 2: Scan — ref_count > 0 → black（存活），== 0 → white（垃圾）
+    for (cycle_roots.items[0..batch_end]) |r| gcScan(r);
+
+    // Phase 3: GatherWhite + CollectWhite
+    var white_items: std.ArrayListUnmanaged(CycleRoot) = .{ .items = &.{}, .capacity = 0 };
+    defer white_items.deinit(runtime_allocator);
+    var seen_arrays = std.AutoHashMap(*PHPArray, void).init(runtime_allocator);
+    defer seen_arrays.deinit();
+    var seen_objects = std.AutoHashMap(*PHPObject, void).init(runtime_allocator);
+    defer seen_objects.deinit();
+    var seen_closures = std.AutoHashMap(*PHPClosure, void).init(runtime_allocator);
+    defer seen_closures.deinit();
+
+    for (cycle_roots.items[0..batch_end]) |r| {
+        gcGatherWhite(r, &white_items, &seen_arrays, &seen_objects, &seen_closures);
+    }
+
+    const collected = white_items.items.len;
+    for (white_items.items) |r| {
+        gcCollectWhiteKnown(r, &seen_arrays, &seen_objects, &seen_closures);
     }
 
     // 增量处理：移除已处理的根，保留未处理的到下次 GC
@@ -8034,9 +8025,10 @@ pub fn php_iterator_to_array(iterator: Value, preserve_keys: Value, allocator: A
 }
 
 pub fn php_array_iter_free(iter_val: Value, allocator: Allocator) !Value {
-    // Iterator对象不需要释放（由GC管理）
+    // Iterator对象不需要释放（由GC管理 / releaseDeadOperands 管理）
     if (Value_isObject(iter_val)) {
-        iter_val.release(runtime_allocator);
+        // 不调用 release：迭代器对象的释放由 releaseDeadOperands 或 cleanup 负责
+        // 调用 release 会导致 releaseDeadOperands double free
         return Value.initNull();
     }
 
@@ -29071,7 +29063,14 @@ pub fn getStaticVar(func_name_val: Value, var_name_val: Value) !Value {
     const key = try std.fmt.allocPrint(runtime_allocator, "{s}::{s}", .{ func_name, var_name });
     defer runtime_allocator.free(key);
 
-    return static_vars.?.get(key) orelse Value.initNull();
+    // retain 返回值：调用方获得独立引用，release 后静态变量仍持有有效值
+    if (static_vars.?.get(key)) |val| {
+        if (!val.isNull()) {
+            _ = val.retain();
+        }
+        return val;
+    }
+    return Value.initNull();
 }
 
 pub fn setStaticVar(func_name_val: Value, var_name_val: Value, value: Value) !Value {
@@ -29086,7 +29085,18 @@ pub fn setStaticVar(func_name_val: Value, var_name_val: Value, value: Value) !Va
     // 构造键：函数名::变量名
     const key = try runtime_allocator.dupe(u8, try std.fmt.allocPrint(runtime_allocator, "{s}::{s}", .{ func_name, var_name }));
 
-    try static_vars.?.put(key, value);
+    // 先 retain 新值（防止 old_val == value 时 release 导致对象被释放）
+    var stored_val = value;
+    if (!stored_val.isNull()) {
+        _ = stored_val.retain();
+    }
+    // 释放旧值（如果存在）
+    if (static_vars.?.get(key)) |old_val| {
+        if (!old_val.isNull()) {
+            old_val.release(runtime_allocator);
+        }
+    }
+    try static_vars.?.put(key, stored_val);
     return value;
 }
 

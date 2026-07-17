@@ -237,6 +237,8 @@ pub const NativeLinker = struct {
     current_ref_ptr_regs: ?*const std.AutoHashMap(usize, void) = null, // 非alloca的指针寄存器（PHI/select合并引用参数）
     param_registers: ?*std.StringHashMap(usize) = null, // 参数名 -> 寄存器ID（用于引用写回）
     current_liveness: ?*const @import("liveness_analysis.zig").LivenessAnalysis = null, // 活跃性分析结果
+    current_gen_block_idx: ?usize = null, // 当前正在生成代码的基本块索引（用于 releaseDeadOperands）
+    current_gen_inst_idx: ?usize = null, // 当前正在生成代码的指令索引（用于 releaseDeadOperands）
     current_catch_used_regs: ?*const std.AutoHashMap(usize, void) = null, // catch块中引用的寄存器集合（cleanup时跳过）
     current_cond_br_source_block: ?usize = null, // 嵌套cond_br的源块索引（用于PHI incoming选择）
     current_property_get_origins: ?*const std.AutoHashMap(usize, PropertyGetOrigin) = null,
@@ -3946,7 +3948,7 @@ pub const NativeLinker = struct {
                                 // 对象创建：无论类型是php_object还是php_value都需要清理
                                 try cleanup_registers_set.put(reg.id, {});
                             },
-                            .const_string, .concat, .array_new, .call => {
+                            .const_string, .concat, .array_new, .call, .global_get, .load => {
                                 if (corrected_type == .php_value) {
                                     try cleanup_registers_set.put(reg.id, {});
                                 }
@@ -5932,16 +5934,11 @@ pub const NativeLinker = struct {
                 try self.emitMissingConstStrings(code, func, block_idx);
             }
 
-            // 生成非 phi 指令
+            // 生成非 phi 指令（状态机路径暂不启用 releaseDeadOperands，需修复 liveness PHI/loop back-edge）
             for (block.instructions.items[first_non_phi_idx..], first_non_phi_idx..) |inst, inst_idx| {
                 try code.appendSlice(self.allocator, "    ");
-                try self.generateInstructionSimple(code, inst);
-
-                // 在指令后，release死亡的操作数（暂时禁用）
                 _ = inst_idx;
-                // if (self.current_liveness) |liveness| {
-                //     try self.releaseDeadOperands(code, block_idx, inst_idx, inst.*, liveness, alloca_regs);
-                // }
+                try self.generateInstructionSimple(code, inst);
             }
 
             // 生成终止指令
@@ -7378,55 +7375,128 @@ pub const NativeLinker = struct {
     ) !void {
         var writer = ListWriter{ .list = code, .allocator = self.allocator };
 
-        // 收集指令使用的寄存器
+        // 收集指令使用的寄存器（完整覆盖所有含寄存器操作数的指令类型）
         var used_regs = try std.ArrayList(usize).initCapacity(self.allocator, 0);
         defer used_regs.deinit(self.allocator);
 
         switch (inst.op) {
-            .add, .sub, .mul, .div, .mod, .pow, .concat, .eq, .ne, .lt, .le, .gt, .ge, .bit_and, .bit_or, .bit_xor, .shl, .shr => |bin| {
+            // === BinaryOp (lhs, rhs) ===
+            .add, .sub, .mul, .div, .mod, .pow, .concat, .eq, .ne, .lt, .le, .gt, .ge,
+            .bit_and, .bit_or, .bit_xor, .shl, .shr,
+            .identical, .not_identical, .spaceship, .and_, .or_ => |bin| {
                 try used_regs.append(self.allocator, bin.lhs.id);
                 try used_regs.append(self.allocator, bin.rhs.id);
             },
-            .neg, .not, .bit_not => |un| {
+            // === UnaryOp (operand) — 排除 move/clone/retain/release（可能修改操作数）===
+            .neg, .not, .bit_not, .get_type,
+            .unset_var, .strlen, .array_count, .channel_close, .await_, .debug_print, .yield_from => |un| {
                 try used_regs.append(self.allocator, un.operand.id);
             },
             .cast => |op| {
                 try used_regs.append(self.allocator, op.value.id);
             },
-            .call => |call| {
-                for (call.args) |arg| {
-                    try used_regs.append(self.allocator, arg.id);
-                }
-            },
-            .call_indirect => |call| {
-                try used_regs.append(self.allocator, call.func_ptr.id);
-                for (call.args) |arg| {
-                    try used_regs.append(self.allocator, arg.id);
-                }
-            },
-            .load => |op| {
-                try used_regs.append(self.allocator, op.ptr.id);
-            },
-            .store => |op| {
-                try used_regs.append(self.allocator, op.ptr.id);
+            .type_check => |op| {
                 try used_regs.append(self.allocator, op.value.id);
             },
-            .array_get => |op| {
+            // call 可能消费参数（如 php_array_iter_free），不释放 args
+            .call => {},
+            // call_indirect 可能消费参数，不释放
+            .call_indirect => {},
+            // load 的 ptr 被结果引用（bitwise copy），不释放
+            .load => {},
+            // store 的 ptr 被修改（mem2reg），不释放 ptr 和 value
+            .store => {},
+            // make_ref 的 ptr 被修改，不释放
+            .make_ref => {},
+            // global_set 的 value 被全局变量管理，不释放
+            .global_set => {},
+            // global_unset 的 name 可能被修改，不释放
+            .global_unset => {},
+            // global_get_dynamic 的 name_reg 可能被消费，不释放
+            .global_get_dynamic => {},
+            // global_set_dynamic 的 name_reg 和 value 可能被消费，不释放
+            .global_set_dynamic => {},
+            // array_get/array_ensure: array 被结果引用，key 可以释放
+            .array_get, .array_ensure => |op| {
+                try used_regs.append(self.allocator, op.key.id);
+            },
+            // array_set: array 被 COW 修改，不释放
+            .array_set => {},
+            // array_set_nested: outer_array 被修改，不释放
+            .array_set_nested => {},
+            // array_push: array 被 COW 修改，不释放
+            .array_push => {},
+            .array_key_exists => |op| {
                 try used_regs.append(self.allocator, op.array.id);
                 try used_regs.append(self.allocator, op.key.id);
             },
-            .array_set => |op| {
-                try used_regs.append(self.allocator, op.array.id);
-                try used_regs.append(self.allocator, op.key.id);
+            // array_unset: array 被修改，不释放
+            .array_unset => {},
+            .interpolate => |op| {
+                for (op.parts) |part| {
+                    try used_regs.append(self.allocator, part.id);
+                }
+            },
+            // new_object 的 args 可能被消费，不释放
+            .new_object => {},
+            .property_get => {
+                // object 属性可能被结果引用（bitwise copy 不 retain），不释放 object
+            },
+            // property_set 的 object 可能被修改，不释放
+            .property_set => {},
+            // method_call 的 object 被结果引用，args 可能被消费，不释放
+            .method_call => {},
+            // static_method_call 的 args 可能被消费，不释放
+            .static_method_call => {},
+            .static_property_set => |op| {
                 try used_regs.append(self.allocator, op.value.id);
             },
-            .property_get => |op| {
+            .closure_new => |op| {
+                try used_regs.append(self.allocator, op.func_ptr.id);
+                for (op.captures) |cap| {
+                    try used_regs.append(self.allocator, cap.id);
+                }
+            },
+            .closure_bind => |op| {
+                try used_regs.append(self.allocator, op.closure.id);
                 try used_regs.append(self.allocator, op.object.id);
             },
-            .property_set => |op| {
+            .implements_interface => |op| {
                 try used_regs.append(self.allocator, op.object.id);
+            },
+            // parent_call 的 object 被结果引用，不释放
+            .parent_call => {},
+            .box => |op| {
                 try used_regs.append(self.allocator, op.value.id);
             },
+            .unbox => |op| {
+                try used_regs.append(self.allocator, op.value.id);
+            },
+            .instanceof => |op| {
+                try used_regs.append(self.allocator, op.object.id);
+                try used_regs.append(self.allocator, op.class_name.id);
+            },
+            .phi => |phi| {
+                for (phi.incoming) |inc| {
+                    try used_regs.append(self.allocator, inc.value.id);
+                }
+            },
+            .select => |op| {
+                try used_regs.append(self.allocator, op.cond.id);
+                try used_regs.append(self.allocator, op.then_value.id);
+                try used_regs.append(self.allocator, op.else_value.id);
+            },
+            // go_spawn 的 args 可能被消费，不释放
+            .go_spawn => {},
+            // channel_send 的 channel 和 value 可能被消费，不释放
+            .channel_send => {},
+            .channel_recv => |op| {
+                try used_regs.append(self.allocator, op.channel.id);
+            },
+            // select_channel 的 cases 可能被消费，不释放
+            .select_ => {},
+            // yield_val 的 key 和 value 可能被消费，不释放
+            .yield_val => {},
             else => {},
         }
 
@@ -7440,7 +7510,7 @@ pub const NativeLinker = struct {
             if (seen.contains(reg_id)) continue;
             try seen.put(reg_id, {});
 
-            // 跳过alloca
+            // 跳过alloca（由函数退出 cleanup 管理）
             if (alloca_regs.contains(reg_id)) continue;
 
             // 跳过result寄存器（正在被赋值）
@@ -7448,12 +7518,59 @@ pub const NativeLinker = struct {
                 if (reg_id == result_reg.id) continue;
             }
 
-            // 检查是否需要release
+            // 跳过 ref_ptr 寄存器（PHI/select 合并引用参数，不拥有值）
+            if (self.current_ref_ptr_regs) |rpr| {
+                if (rpr.contains(reg_id)) continue;
+            }
+
+            // 跳过 $this 寄存器（持有 ctx 借用引用，不可释放）
+            if (self.current_this_regs) |tr| {
+                if (tr.contains(reg_id)) continue;
+            }
+
+            // 跳过引用参数的 alloca
+            if (self.ref_param_alloca_map) |map| {
+                if (map.get(reg_id)) |_| continue;
+            }
+
+            // 检查是否需要 release（标量类型不需要）
+            if (!self.shouldReleaseReg(reg_id)) continue;
             if (!self.regMayHeap(reg_id)) continue;
 
-            // 检查是否在指令后死亡（不在live_out中）
+            // 检查是否在指令后死亡（不在 inst_live_out 中）
             if (!liveness.isLiveAfter(block_idx, inst_idx, reg_id)) {
-                try writer.print("                reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id});
+                // 双重保护：检查是否在块出口活跃（防止 liveness 分析 bug 导致误释放）
+                if (liveness.isLiveAtBlockExit(block_idx, reg_id)) continue;
+                // 使用 null 检查避免对已释放寄存器调用 release
+                try writer.print("    if (!reg_{d}.isNull()) {{ reg_{d}.release(runtime.runtime_allocator); reg_{d} = runtime.Value.initNull(); }}\n", .{ reg_id, reg_id, reg_id });
+            }
+        }
+    }
+
+    /// GC 收集前释放临时寄存器引用
+    /// 释放所有非 alloca、非 $this、非 ref_ptr 的 cleanup 寄存器
+    /// 避免 getGlobalVar/load 等临时寄存器持有的 retain 导致 ref_count 膨胀
+    fn emitPreGcCleanup(self: *Self, writer: anytype, skip_reg: ?IR.Register) !void {
+        try writer.writeAll("    // Pre-GC cleanup: release temporary register references\n");
+        if (self.current_cleanup_regs) |regs| {
+            for (regs) |reg_id| {
+                if (skip_reg) |sr| {
+                    if (sr.id == reg_id) continue;
+                }
+                if (self.current_alloca_regs) |allocas| {
+                    if (allocas.contains(reg_id)) continue;
+                }
+                if (self.current_this_regs) |tr| {
+                    if (tr.contains(reg_id)) continue;
+                }
+                if (self.current_ref_ptr_regs) |rpr| {
+                    if (rpr.contains(reg_id)) continue;
+                }
+                if (self.ref_param_alloca_map) |map| {
+                    if (map.get(reg_id)) |_| continue;
+                }
+                if (!self.shouldReleaseReg(reg_id)) continue;
+                try writer.print("    if (!reg_{d}.isNull()) {{ reg_{d}.release(runtime.runtime_allocator); reg_{d} = runtime.Value.initNull(); }}\n", .{ reg_id, reg_id, reg_id });
             }
         }
     }
@@ -7949,7 +8066,11 @@ pub const NativeLinker = struct {
                     // 检查是否是引用参数的alloca（使用映射表重定向到param）
                     if (self.ref_param_alloca_map) |map| {
                         if (map.get(op.ptr.id)) |param_reg_id| {
-                            // 重定向：从param读取而不是alloca
+                            // 重定向：从param读取（安全 retain：先 retain 新值，再 release 旧值）
+                            if (self.regMayHeap(reg.id)) {
+                                try writer.print("    _ = reg_{d}.*.retain();\n", .{param_reg_id});
+                                try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
+                            }
                             try writer.print("    reg_{d} = reg_{d}.*;\n", .{ reg.id, param_reg_id });
                             return;
                         }
@@ -8018,9 +8139,13 @@ pub const NativeLinker = struct {
                                 return;
                             }
                         }
-                        // mem2reg 优化：直接读取
+                        // mem2reg 优化：直接读取（安全 retain：先 retain 新值，再 release 旧值）
                         var src_buf: [32]u8 = undefined;
                         const src_ref = try self.getOperandRef(&src_buf, op.ptr.id);
+                        if (self.regMayHeap(reg.id)) {
+                            try writer.print("    _ = {s}.retain();\n", .{src_ref});
+                            try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
+                        }
                         try writer.print("    reg_{d} = {s};\n", .{ reg.id, src_ref });
                         return;
                     }
@@ -9573,6 +9698,10 @@ pub const NativeLinker = struct {
                 }
             },
             .call => |op| {
+                // GC 收集前：释放临时寄存器持有的引用，避免 ref_count 膨胀阻止循环检测
+                if (std.mem.eql(u8, op.func_name, "php_gc_collect_cycles") or std.mem.eql(u8, op.func_name, "gc_collect_cycles")) {
+                    try self.emitPreGcCleanup(writer, inst.result);
+                }
                 // @ 错误抑制运算符：直接调用运行时函数
                 if (std.mem.eql(u8, op.func_name, "php_error_suppress_push")) {
                     try writer.writeAll("    runtime.php_error_suppress_push();\n");
@@ -12318,18 +12447,16 @@ pub const NativeLinker = struct {
                         try regs.put(op.operand.id, {});
                     }
 
-                    // alloca寄存器：通知弱引用 + release
+                    // alloca寄存器：通知弱引用 + release（单次，双重 release 会导致循环引用对象提前释放）
                     try writer.print("    if (!reg_{d}.*.isNull()) {{\n", .{op.operand.id});
                     try writer.print("        runtime.php_weak_mark_dead(reg_{d}.*);\n", .{op.operand.id});
-                    try writer.print("        reg_{d}.*.release(runtime.runtime_allocator);\n", .{op.operand.id});
                     try writer.print("        reg_{d}.*.release(runtime.runtime_allocator);\n", .{op.operand.id});
                     try writer.print("        reg_{d}.* = runtime.Value.initNull();\n", .{op.operand.id});
                     try writer.print("    }}\n", .{});
                 } else {
-                    // 普通寄存器：通知弱引用 + release
+                    // 普通寄存器：通知弱引用 + release（单次）
                     try writer.print("    if (!reg_{d}.isNull()) {{\n", .{op.operand.id});
                     try writer.print("        runtime.php_weak_mark_dead(reg_{d});\n", .{op.operand.id});
-                    try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{op.operand.id});
                     try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{op.operand.id});
                     try writer.print("        reg_{d} = runtime.Value.initNull();\n", .{op.operand.id});
                     try writer.print("    }}\n", .{});
@@ -12338,6 +12465,17 @@ pub const NativeLinker = struct {
             else => {
                 try self.handleUnsupportedOp(inst);
             },
+        }
+
+        // 指令生成后：释放死亡的操作数（基于 liveness analysis）
+        if (self.current_liveness) |liveness| {
+            if (self.current_alloca_regs) |alloca_regs| {
+                if (self.current_gen_block_idx) |blk_idx| {
+                    if (self.current_gen_inst_idx) |inst_idx| {
+                        try self.releaseDeadOperands(code, blk_idx, inst_idx, inst.*, liveness, alloca_regs);
+                    }
+                }
+            }
         }
     }
 
@@ -12371,8 +12509,12 @@ pub const NativeLinker = struct {
                 self.current_exception_handler = null;
 
                 // 生成所有指令
-                for (block.instructions.items) |inst| {
+                for (block.instructions.items, 0..) |inst, inst_idx| {
+                    self.current_gen_block_idx = 0;
+                    self.current_gen_inst_idx = inst_idx;
                     try self.generateInstruction(writer, inst);
+                    self.current_gen_block_idx = null;
+                    self.current_gen_inst_idx = null;
                 }
 
                 // 恢复异常处理器
@@ -12440,9 +12582,13 @@ pub const NativeLinker = struct {
             try writer.print("            {d} => {{ // {s}\n", .{ block_idx, block.label });
 
             // 生成块内的指令
-            for (block.instructions.items) |inst| {
+            for (block.instructions.items, 0..) |inst, inst_idx| {
                 try writer.writeAll("    ");
+                self.current_gen_block_idx = block_idx;
+                self.current_gen_inst_idx = inst_idx;
                 try self.generateInstruction(writer, inst);
+                self.current_gen_block_idx = null;
+                self.current_gen_inst_idx = null;
             }
 
             // 生成终止指令
@@ -13101,9 +13247,13 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
             self.current_exception_handler = if (block.exception_handler) |h| h.index else null;
 
             try writer.print("    // Block {d}: {s}\n", .{ idx, block.label });
-            for (block.instructions.items) |inst| {
+            for (block.instructions.items, 0..) |inst, inst_idx| {
                 try writer.writeAll("    ");
+                self.current_gen_block_idx = idx;
+                self.current_gen_inst_idx = inst_idx;
                 try self.generateInstruction(writer, inst);
+                self.current_gen_block_idx = null;
+                self.current_gen_inst_idx = null;
             }
             // 处理终止指令（cond_br 生成 if/else 结构）
             if (block.terminator) |term| {
@@ -17396,9 +17546,13 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                 const block = func.blocks.items[idx];
                 try writer.print("    // Block {d}: {s}\n", .{ idx, block.label });
 
-                for (block.instructions.items) |inst| {
+                for (block.instructions.items, 0..) |inst, inst_idx| {
                     try writer.writeAll("    ");
+                    self.current_gen_block_idx = idx;
+                    self.current_gen_inst_idx = inst_idx;
                     try self.generateInstruction(writer, inst);
+                    self.current_gen_block_idx = null;
+                    self.current_gen_inst_idx = null;
                 }
 
                 // 处理终止指令（如果不是跳转到循环头）
@@ -17431,9 +17585,13 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                     const block = func.blocks.items[idx];
                     try writer.print("    // Block {d}: {s}\n", .{ idx, block.label });
 
-                    for (block.instructions.items) |inst| {
+                    for (block.instructions.items, 0..) |inst, inst_idx| {
                         try writer.writeAll("    ");
+                        self.current_gen_block_idx = idx;
+                        self.current_gen_inst_idx = inst_idx;
                         try self.generateInstruction(writer, inst);
+                        self.current_gen_block_idx = null;
+                        self.current_gen_inst_idx = null;
                     }
 
                     // 处理终止指令
