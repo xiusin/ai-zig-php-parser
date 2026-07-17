@@ -5891,6 +5891,40 @@ pub fn php_check_param_type(
     }
 }
 
+/// 弱类型模式下的值强制转换（PHP 非严格模式）
+/// 仅对标量类型（int/float/bool/string）执行转换，其他类型原样返回
+pub fn php_coerce_value(val: Value, expected_type: []const u8, allocator: Allocator) Value {
+    // 组合类型不做值转换（只做类型检查）
+    if (std.mem.indexOfScalar(u8, expected_type, '|') != null) return val;
+    if (std.mem.indexOfScalar(u8, expected_type, '&') != null) return val;
+
+    if (std.mem.eql(u8, expected_type, "int")) {
+        if (val.isInt()) return val;
+        if (val.isFloat() or val.isBool() or val.isNull() or val.isString())
+            return Value.initInt(val.toInt());
+        return val;
+    }
+    if (std.mem.eql(u8, expected_type, "float")) {
+        if (val.isFloat()) return val;
+        if (val.isInt() or val.isBool() or val.isNull() or val.isString())
+            return Value.initFloat(val.toFloat());
+        return val;
+    }
+    if (std.mem.eql(u8, expected_type, "bool")) {
+        if (val.isBool()) return val;
+        return Value.initBool(val.toBool());
+    }
+    if (std.mem.eql(u8, expected_type, "string")) {
+        if (val.isString()) return val;
+        if (val.isInt() or val.isFloat() or val.isBool() or val.isNull()) {
+            const s = val.toString(allocator) catch return val;
+            return Value.initString(s);
+        }
+        return val;
+    }
+    return val;
+}
+
 /// 获取 Value 的 PHP 类型名称
 fn phpGetValueTypeName(val: Value) []const u8 {
     if (val.isNull()) return "null";
@@ -5989,6 +6023,14 @@ fn checkSingleType(expected: []const u8, got: []const u8, arg: Value) bool {
 
     // int/float 兼容（PHP 弱类型）
     if (std.mem.eql(u8, expected, "float") and std.mem.eql(u8, got, "int")) return true;
+
+    // bool → int/float（PHP 弱类型）
+    if ((std.mem.eql(u8, expected, "int") or std.mem.eql(u8, expected, "float")) and
+        std.mem.eql(u8, got, "bool"))
+        return true;
+
+    // float → int（PHP 弱类型，可能有精度损失警告但允许）
+    if (std.mem.eql(u8, expected, "int") and std.mem.eql(u8, got, "float")) return true;
 
     // bool 接受 int（PHP 弱类型）
     if (std.mem.eql(u8, expected, "bool") and std.mem.eql(u8, got, "int")) return true;

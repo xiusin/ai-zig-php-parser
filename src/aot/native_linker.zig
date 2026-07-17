@@ -8843,10 +8843,20 @@ pub const NativeLinker = struct {
 
                                     const is_alloca = if (self.current_alloca_regs) |allocas| allocas.contains(reg.id) else false;
 
+                                    // 弱类型值转换：PHP 非严格模式下对标量类型参数做值转换
+                                    const php_ptype = if (self.current_function_for_resolve) |func|
+                                        (if (args_index < func.param_types.len) func.param_types[args_index] else "")
+                                    else
+                                        "";
+
                                     if (cow_skip) {
                                         // 跳过 COW：只做 retain + 赋值
                                         try writer.print("    {{\n", .{});
-                                        try writer.print("        const __pv = if (args.len > {d} and !args[{d}].isMissing()) args[{d}] else runtime.Value.initNull();\n", .{ args_index, args_index, args_index });
+                                        if (php_ptype.len > 0) {
+                                            try writer.print("        var __pv = if (args.len > {d} and !args[{d}].isMissing()) runtime.php_coerce_value(args[{d}], \"{s}\", runtime.runtime_allocator) else runtime.Value.initNull();\n", .{ args_index, args_index, args_index, php_ptype });
+                                        } else {
+                                            try writer.print("        const __pv = if (args.len > {d} and !args[{d}].isMissing()) args[{d}] else runtime.Value.initNull();\n", .{ args_index, args_index, args_index });
+                                        }
                                         try writer.print("        _ = __pv.retain();\n", .{});
                                         if (is_alloca) {
                                             try writer.print("        reg_{d}.* = __pv;\n", .{reg.id});
@@ -8857,7 +8867,11 @@ pub const NativeLinker = struct {
                                     } else {
                                         // COW 检查：数组在 ref_count > 1 时深拷贝
                                         try writer.print("    {{\n", .{});
-                                        try writer.print("        const __pv = if (args.len > {d} and !args[{d}].isMissing()) args[{d}] else runtime.Value.initNull();\n", .{ args_index, args_index, args_index });
+                                        if (php_ptype.len > 0) {
+                                            try writer.print("        var __pv = if (args.len > {d} and !args[{d}].isMissing()) runtime.php_coerce_value(args[{d}], \"{s}\", runtime.runtime_allocator) else runtime.Value.initNull();\n", .{ args_index, args_index, args_index, php_ptype });
+                                        } else {
+                                            try writer.print("        const __pv = if (args.len > {d} and !args[{d}].isMissing()) args[{d}] else runtime.Value.initNull();\n", .{ args_index, args_index, args_index });
+                                        }
                                         try writer.print("        if (__pv.isArray() and !__pv.isRef() and __pv.asArray().ref_count > 1) {{\n", .{});
                                         try writer.print("            const __cloned = try __pv.asArray().cloneShallow(runtime.runtime_allocator);\n", .{});
                                         if (is_alloca) {
