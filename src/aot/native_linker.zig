@@ -3701,7 +3701,14 @@ pub const NativeLinker = struct {
                                 for (method.param_types, 0..) |ptype, pidx| {
                                     if (ptype.len == 0) continue;
                                     const nullable = if (pidx < method.param_nullable.len) method.param_nullable[pidx] else true;
-                                    const escaped_ptype = try self.escapeString(ptype);
+                                    // 解析 self/static/parent 为实际类名
+                                    const resolved_ptype = if (std.mem.eql(u8, ptype, "self") or std.mem.eql(u8, ptype, "static"))
+                                        class_name
+                                    else if (std.mem.eql(u8, ptype, "parent"))
+                                        (td.parent orelse ptype)
+                                    else
+                                        ptype;
+                                    const escaped_ptype = try self.escapeString(resolved_ptype);
                                     defer self.allocator.free(escaped_ptype);
                                     try code.appendSlice(self.allocator, "    if (args.len > ");
                                     const pidx_str = try std.fmt.allocPrint(self.allocator, "{d}", .{pidx});
@@ -7699,11 +7706,11 @@ pub const NativeLinker = struct {
                         try writer.print("    _ = ({s}).retain();\n", .{src_ref});
                         // 释放旧值
                         try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{op.ptr.id});
-                        if (needs_cow) {
+                        if (needs_cow and !op.no_cow) {
                             // COW 赋值：val_assign 内部对数组 ref_count > 1 时深拷贝，确保值语义
                             try writer.print("    runtime.val_assign(&reg_{d}, {s});\n", .{ op.ptr.id, src_ref });
                         } else {
-                            // string/object 不需要 COW，直接赋值
+                            // string/object 不需要 COW，或 no_cow 引用赋值共享 PHPArray，直接赋值
                             try writer.print("    reg_{d} = {s};\n", .{ op.ptr.id, src_ref });
                         }
                     } else {
@@ -7767,7 +7774,17 @@ pub const NativeLinker = struct {
                                 try writer.print("    _ = reg_{d}.retain();\n", .{op.value.id});
                             }
                         }
-                        if (value_is_ref_param) {
+                        if (op.no_cow) {
+                            // 引用赋值 $ref = &$this->prop：直接赋值共享 PHPArray，不做 val_assign COW
+                            // retain 已在上方执行，release 旧值已执行，直接赋值即可
+                            if (value_is_ref_param) {
+                                try writer.print("    reg_{d}.* = reg_{d}.*;\n", .{ op.ptr.id, op.value.id });
+                            } else if (value_is_alloca) {
+                                try writer.print("    reg_{d}.* = reg_{d}.*;\n", .{ op.ptr.id, op.value.id });
+                            } else {
+                                try writer.print("    reg_{d}.* = reg_{d};\n", .{ op.ptr.id, op.value.id });
+                            }
+                        } else if (value_is_ref_param) {
                             try writer.print("    runtime.val_assign({s}reg_{d}, reg_{d}.*);\n", .{ ptr_prefix, op.ptr.id, op.value.id });
                         } else if (value_is_alloca) {
                             try writer.print("    runtime.val_assign({s}reg_{d}, reg_{d}.*);\n", .{ ptr_prefix, op.ptr.id, op.value.id });

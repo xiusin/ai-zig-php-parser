@@ -1035,6 +1035,7 @@ pub const Instruction = struct {
         ptr: Register,
         value: Register,
         through_ref: bool = false, // true 时通过 *Value 指针写入（引用参数的 array_push/array_set COW 写回）
+        no_cow: bool = false, // true 时跳过 val_assign COW（引用赋值 $ref = &$this->prop 共享 PHPArray）
     };
 
     /// Create reference to memory

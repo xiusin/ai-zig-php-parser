@@ -4210,6 +4210,10 @@ pub const IRGenerator = struct {
                     // 写回变量：array_push 可能因 COW 克隆数组，需将修改后的数组写回变量存储
                     if (base_target != null and base_target.?.tag == .variable) {
                         const var_name_for_writeback = self.getString(base_target.?.data.variable.name);
+                        // 引用变量（$ref = &$this->prop / 闭包 use(&$var)）：
+                        //   - ref_capture_allocas 中的走 php_ref_assign_ptr（step 4，no_cow 不影响）
+                        //   - 不在 ref_capture_allocas 中的走 no_cow 直接赋值（避免 val_assign 写穿旧 Ref）
+                        const is_ref_var = self.isRefVar(var_name_for_writeback);
                         const is_ref_param = self.reference_params.contains(var_name_for_writeback);
                         if (is_ref_param) {
                             // 引用参数：通过 *Value 指针写回（val_assign 写穿到 cell）
@@ -4222,7 +4226,7 @@ pub const IRGenerator = struct {
                                 _ = try self.emit(.{ .global_set = .{ .name = var_name_for_writeback, .value = base_array } }, null);
                             } else {
                                 const var_reg_wb = try self.getOrCreateVarRegister(var_name_for_writeback, base_array.type_);
-                                _ = try self.emit(.{ .store = .{ .ptr = var_reg_wb, .value = base_array } }, null);
+                                _ = try self.emit(.{ .store = .{ .ptr = var_reg_wb, .value = base_array, .no_cow = is_ref_var } }, null);
                             }
                         }
                     }
@@ -4235,6 +4239,10 @@ pub const IRGenerator = struct {
                     // 写回变量：array_set 可能因 COW 克隆数组，需将修改后的数组写回变量存储
                     if (base_target != null and base_target.?.tag == .variable) {
                         const var_name_for_writeback = self.getString(base_target.?.data.variable.name);
+                        // 引用变量（$ref = &$this->prop / 闭包 use(&$var)）：
+                        //   - ref_capture_allocas 中的走 php_ref_assign_ptr（step 4，no_cow 不影响）
+                        //   - 不在 ref_capture_allocas 中的走 no_cow 直接赋值（避免 val_assign 写穿旧 Ref）
+                        const is_ref_var = self.isRefVar(var_name_for_writeback);
                         const is_ref_param = self.reference_params.contains(var_name_for_writeback);
                         if (is_ref_param) {
                             // 引用参数：通过 *Value 指针写回（val_assign 写穿到 cell）
@@ -4247,7 +4255,7 @@ pub const IRGenerator = struct {
                                 _ = try self.emit(.{ .global_set = .{ .name = var_name_for_writeback, .value = base_array } }, null);
                             } else {
                                 const var_reg_wb = try self.getOrCreateVarRegister(var_name_for_writeback, base_array.type_);
-                                _ = try self.emit(.{ .store = .{ .ptr = var_reg_wb, .value = base_array } }, null);
+                                _ = try self.emit(.{ .store = .{ .ptr = var_reg_wb, .value = base_array, .no_cow = is_ref_var } }, null);
                             }
                         }
                     }
@@ -4427,6 +4435,8 @@ pub const IRGenerator = struct {
 
         // 获取源引用
         var source_ref: ?Register = null;
+        // property_access/static_property_access 源：引用赋值共享 PHPArray，store 不做 COW
+        var no_cow_store: bool = false;
 
         // 源是变量
         if (source_node.tag == .variable) {
@@ -4489,6 +4499,7 @@ pub const IRGenerator = struct {
             // 生成 static_property_get 获取静态属性值
             // 对于数组类型的静态属性，由于 runtime.Value 数组是引用计数的，
             // 获取的值与静态属性共享底层 PHPArray，修改会同步传播
+            no_cow_store = true;
             const sp_data = source_node.data.static_property_access;
             var class_name = self.getString(sp_data.class_name);
             const prop_name = self.getString(sp_data.property_name);
@@ -4507,6 +4518,8 @@ pub const IRGenerator = struct {
         } else if (source_node.tag == .property_access) {
             // 源是对象属性：$current = &$this->data
             // 生成属性访问表达式获取值（PHPArray 是引用计数的，修改会传播）
+            // 标记 no_cow：引用赋值共享 PHPArray，store 不做 val_assign COW 克隆
+            no_cow_store = true;
             source_ref = try self.generateExpression(source_idx);
         } else {
             // 其他非变量源不支持引用赋值
@@ -4556,8 +4569,9 @@ pub const IRGenerator = struct {
                     try self.putRefVar(tgt_name);
                 } else {
                     // 局部变量引用
+                    // no_cow=true：引用赋值直接替换变量值，不做 val_assign COW 也不写穿旧 Ref
                     const tgt_reg = try self.getOrCreateVarRegister(tgt_name, .php_value);
-                    _ = try self.emit(.{ .store = .{ .ptr = tgt_reg, .value = ref_val } }, null);
+                    _ = try self.emit(.{ .store = .{ .ptr = tgt_reg, .value = ref_val, .no_cow = true } }, null);
                     try self.putRefVar(tgt_name);
                 }
             },
@@ -7915,9 +7929,13 @@ pub const IRGenerator = struct {
         defer iface_list.deinit(self.allocator);
         for (anon_data.implements) |impl_idx| {
             const impl_node = self.getNode(impl_idx) orelse continue;
-            if (impl_node.tag == .named_type) {
-                const iname = self.getString(impl_node.data.named_type.name);
-                try iface_list.append(self.allocator, try self.resolveClassName(iname));
+            const iname: ?[]const u8 = switch (impl_node.tag) {
+                .named_type => self.getString(impl_node.data.named_type.name),
+                .variable => self.getString(impl_node.data.variable.name),
+                else => null,
+            };
+            if (iname) |name| {
+                try iface_list.append(self.allocator, try self.resolveClassName(name));
             }
         }
         const interfaces_slice = try iface_list.toOwnedSlice(self.allocator);

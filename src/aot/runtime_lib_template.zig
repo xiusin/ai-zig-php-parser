@@ -5862,6 +5862,9 @@ pub fn php_check_param_type(
     // 空类型声明 = 无类型约束
     if (expected_type.len == 0) return;
 
+    // mixed 类型隐含 nullable（PHP 8 语义：mixed 等价于所有类型含 null）
+    if (containsTypeComponent(expected_type, "mixed")) return;
+
     // null 检查
     if (arg.isNull()) {
         if (is_nullable) return;
@@ -5907,8 +5910,80 @@ fn phpGetValueTypeName(val: Value) []const u8 {
     return "unknown";
 }
 
-/// 检查类型是否匹配（PHP 8 类型系统）
+/// 检查类型声明中是否包含某个类型名作为完整组件（按 | 和 & 分割）
+fn containsTypeComponent(type_str: []const u8, target: []const u8) bool {
+    var it = std.mem.tokenizeAny(u8, type_str, "|&() ");
+    while (it.next()) |part| {
+        var n = part;
+        while (n.len > 0 and n[0] == '\\') n = n[1..];
+        if (std.mem.eql(u8, n, target)) return true;
+    }
+    return false;
+}
+
+/// 检查类型是否匹配（PHP 8 类型系统，支持 union/intersection/DNF/命名空间前缀）
 fn checkTypeMatch(expected: []const u8, got: []const u8, arg: Value) bool {
+    // 去掉空格和前导反斜杠
+    var exp = std.mem.trim(u8, expected, " ");
+    while (exp.len > 0 and exp[0] == '\\') exp = exp[1..];
+
+    // 空类型 = 无约束
+    if (exp.len == 0) return true;
+
+    // union 类型（包含 |）
+    if (std.mem.indexOfScalar(u8, exp, '|') != null) {
+        return checkUnionType(exp, got, arg);
+    }
+
+    // intersection 类型（包含 &）
+    if (std.mem.indexOfScalar(u8, exp, '&') != null) {
+        return checkIntersectionType(exp, got, arg);
+    }
+
+    // 单一类型
+    return checkSingleType(exp, got, arg);
+}
+
+/// 去掉类型名前导反斜杠和空格
+fn normalizeTypeName(name: []const u8) []const u8 {
+    var n = std.mem.trim(u8, name, " ");
+    while (n.len > 0 and n[0] == '\\') n = n[1..];
+    return n;
+}
+
+/// union 类型检查：匹配任一成员即可（如 "int|string|null"）
+fn checkUnionType(expected: []const u8, got: []const u8, arg: Value) bool {
+    var it = std.mem.splitScalar(u8, expected, '|');
+    while (it.next()) |part| {
+        const normalized = normalizeTypeName(part);
+        if (normalized.len == 0) continue;
+
+        // 每个成员可能是 intersection 类型
+        if (std.mem.indexOfScalar(u8, normalized, '&') != null) {
+            if (checkIntersectionType(normalized, got, arg)) return true;
+        } else {
+            if (checkSingleType(normalized, got, arg)) return true;
+        }
+    }
+    return false;
+}
+
+/// intersection 类型检查：必须匹配所有成员（如 "Cacheable&Loggable"）
+fn checkIntersectionType(expected: []const u8, got: []const u8, arg: Value) bool {
+    // 对非对象类型，intersection 无意义
+    if (!Value_isObject(arg)) return false;
+
+    var it = std.mem.splitScalar(u8, expected, '&');
+    while (it.next()) |part| {
+        const normalized = normalizeTypeName(part);
+        if (normalized.len == 0) continue;
+        if (!checkSingleType(normalized, got, arg)) return false;
+    }
+    return true;
+}
+
+/// 单一类型检查
+fn checkSingleType(expected: []const u8, got: []const u8, arg: Value) bool {
     // 精确匹配
     if (std.mem.eql(u8, expected, got)) return true;
 
@@ -5918,11 +5993,16 @@ fn checkTypeMatch(expected: []const u8, got: []const u8, arg: Value) bool {
     // bool 接受 int（PHP 弱类型）
     if (std.mem.eql(u8, expected, "bool") and std.mem.eql(u8, got, "int")) return true;
 
-    // string 接受 int（PHP 弱类型，但 PHP 8 严格模式下不）
-    // 暂时不做弱类型转换，保持严格
-
     // mixed 接受任何类型
     if (std.mem.eql(u8, expected, "mixed")) return true;
+
+    // null 类型
+    if (std.mem.eql(u8, expected, "null")) return arg.isNull();
+
+    // object 伪类型：接受任何对象实例
+    if (std.mem.eql(u8, expected, "object")) {
+        return Value_isObject(arg);
+    }
 
     // callable 接受 string/array/object(Closure)
     if (std.mem.eql(u8, expected, "callable")) {
@@ -5939,8 +6019,9 @@ fn checkTypeMatch(expected: []const u8, got: []const u8, arg: Value) bool {
         return false;
     }
 
-    // callable 类型别名
+    // Closure 类型
     if (std.mem.eql(u8, expected, "Closure")) {
+        if (arg.isFunction()) return true;
         if (Value_isObject(arg)) {
             const obj = Value_asObject(arg);
             if (obj.class_meta) |meta| {
