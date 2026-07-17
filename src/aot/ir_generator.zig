@@ -4204,21 +4204,25 @@ pub const IRGenerator = struct {
 
                 if (is_push_assignment) {
                     var current_array = base_array;
+                    // 保存中间层 array_ensure 结果，用于逐层写回
+                    var intermediate_arrays = std.ArrayListUnmanaged(Register){ .items = &.{}, .capacity = 0 };
+                    defer intermediate_arrays.deinit(self.allocator);
                     var i: usize = 0;
                     while (i < keys.items.len) : (i += 1) {
                         current_array = try self.emitWithResult(.{ .array_ensure = .{
                             .array = current_array,
                             .key = keys.items[i],
                         } }, .php_value);
+                        try intermediate_arrays.append(self.allocator, current_array);
                     }
                     _ = try self.emit(.{ .array_push = .{
                         .array = current_array,
                         .value = value_reg,
                     } }, null);
-                    // 嵌套数组写回：$arr[$k1][$k2][] = value 时，array_push 可能因 COW 克隆内层数组，
-                    // 需将修改后的内层数组逐层写回父数组
+                    // 嵌套数组写回：array_push 可能因 COW 克隆最内层数组（ref_count > 1），
+                    // 需从最内层开始逐层写回到父数组
                     if (keys.items.len > 0) {
-                        const wb_array = current_array;
+                        var wb_val = current_array;
                         var wb_i: usize = keys.items.len;
                         while (wb_i > 0) {
                             wb_i -= 1;
@@ -4227,20 +4231,16 @@ pub const IRGenerator = struct {
                                 _ = try self.emit(.{ .array_set = .{
                                     .array = base_array,
                                     .key = keys.items[0],
-                                    .value = wb_array,
+                                    .value = wb_val,
                                 } }, null);
                             } else {
-                                // 中间层：需要获取中间父数组并写回
-                                // 简化处理：逐层 array_set（中间层数组也需要写回，但为避免复杂度，
-                                // 直接在最外层 base_array 上做 array_set 即可覆盖一层情况）
-                                // 对于多层嵌套 $arr[k1][k2][]=v，仅写回 base_array[k1]=inner 即可
-                                // 因为 array_ensure 已经确保中间层存在，COW 仅影响最内层
+                                // 中间层：写回到上一层 array_ensure 的结果
                                 _ = try self.emit(.{ .array_set = .{
-                                    .array = base_array,
-                                    .key = keys.items[0],
-                                    .value = wb_array,
+                                    .array = intermediate_arrays.items[wb_i - 1],
+                                    .key = keys.items[wb_i],
+                                    .value = wb_val,
                                 } }, null);
-                                break;
+                                wb_val = intermediate_arrays.items[wb_i - 1];
                             }
                         }
                     }
