@@ -1415,14 +1415,14 @@ pub const Parser = struct {
         _ = try self.eat(.r_paren);
 
         // Parse optional return type declaration (: type or : ?type)
-        // We skip the return type as the AST doesn't currently store it
+        var return_type_idx: ?ast.Node.Index = null;
         if (self.curr.tag == .colon) {
             self.nextToken(); // consume ':'
-            _ = try self.parseType();
+            return_type_idx = try self.parseType();
         }
 
         const body = try self.parseBlock();
-        return self.createNode(.{ .tag = .function_decl, .main_token = token, .data = .{ .function_decl = .{ .attributes = attributes, .name = name_id, .params = try self.context.arena.allocator().dupe(ast.Node.Index, params.items), .body = body, .returns_reference = returns_reference } } });
+        return self.createNode(.{ .tag = .function_decl, .main_token = token, .data = .{ .function_decl = .{ .attributes = attributes, .name = name_id, .params = try self.context.arena.allocator().dupe(ast.Node.Index, params.items), .return_type = return_type_idx, .body = body, .returns_reference = returns_reference } } });
     }
 
     fn parseParameter(self: *Parser) anyerror!ast.Node.Index {

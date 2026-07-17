@@ -225,7 +225,7 @@ pub const Node = struct {
         clone_with_expr: struct { object: Index, properties: Index },
         struct_instantiation: struct { struct_type: Index, args: []const Index },
         object_instantiation: struct { class_name: Index, args: []const Index },
-        function_decl: struct { attributes: []const Index, name: StringId, params: []const Index, body: Index, returns_reference: bool = false },
+        function_decl: struct { attributes: []const Index, name: StringId, params: []const Index, return_type: ?Index = null, body: Index, returns_reference: bool = false },
         block: struct { stmts: []const Index },
         variable: struct { name: StringId },
         variable_variable: struct { expr: Index }, // $$var 的 expr 是内层变量
