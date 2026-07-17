@@ -815,14 +815,14 @@ pub const IRGenerator = struct {
                     const method_name = self.getString(method_data.name);
                     if (method_name.len == 0) continue;
 
-                    // 方法的参数索引需要 +1（跳过 $this）
                     var ref_indices = std.ArrayListUnmanaged(u32){ .items = &.{}, .capacity = 0 };
                     defer ref_indices.deinit(self.allocator);
-                    // 索引 0 是 $this，用户参数从索引 1 开始
+                    // 实例方法索引 0 是 $this，用户参数从索引 1 开始；静态方法无 $this，用户参数从索引 0 开始
+                    const offset: u32 = if (method_data.modifiers.is_static) 0 else 1;
                     for (method_data.params, 0..) |param_idx, i| {
                         if (self.getNode(param_idx)) |pnode| {
                             if (pnode.tag == .parameter and pnode.data.parameter.is_reference) {
-                                try ref_indices.append(self.allocator, @intCast(i + 1));
+                                try ref_indices.append(self.allocator, @intCast(i + offset));
                             }
                         }
                     }
@@ -4094,39 +4094,69 @@ pub const IRGenerator = struct {
                         } }, null);
                     } else {
                         // 复杂情况：$obj->prop[k0][k1]... = value
-                        // 回退到普通处理（可能不完全正确，但这种情况较少见）
-                        const base_array = try self.emitWithResult(.{ .property_get = .{
-                            .object = obj_reg,
-                            .property_name = prop_name,
-                        } }, .php_value);
-
-                        if (is_push_assignment) {
-                            var current_array = base_array;
-                            var i: usize = 0;
-                            while (i < keys.items.len) : (i += 1) {
-                                current_array = try self.emitWithResult(.{ .array_ensure = .{
-                                    .array = current_array,
-                                    .key = keys.items[i],
-                                } }, .php_value);
-                            }
-                            _ = try self.emit(.{ .array_push = .{
-                                .array = current_array,
-                                .value = value_reg,
+                        if (is_push_assignment and keys.items.len == 2) {
+                            // $obj->prop[k0][k1][] = value — 使用专用运行时函数
+                            const args = try self.allocator.alloc(Register, 6);
+                            args[0] = obj_reg;
+                            args[1] = prop_name_reg;
+                            args[2] = keys.items[0];
+                            args[3] = keys.items[1];
+                            args[4] = value_reg;
+                            args[5] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                            _ = try self.emit(.{ .call = .{
+                                .func_name = "php_property_array_push_key2_with_obj",
+                                .args = args,
+                                .return_type = .void,
+                            } }, null);
+                        } else if (!is_push_assignment and keys.items.len == 2) {
+                            // $obj->prop[k0][k1] = value — 使用专用运行时函数
+                            const args = try self.allocator.alloc(Register, 6);
+                            args[0] = obj_reg;
+                            args[1] = prop_name_reg;
+                            args[2] = keys.items[0];
+                            args[3] = keys.items[1];
+                            args[4] = value_reg;
+                            args[5] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                            _ = try self.emit(.{ .call = .{
+                                .func_name = "php_property_array_set_key2_with_obj",
+                                .args = args,
+                                .return_type = .void,
                             } }, null);
                         } else {
-                            var current_array = base_array;
-                            var i: usize = 0;
-                            while (i + 1 < keys.items.len) : (i += 1) {
-                                current_array = try self.emitWithResult(.{ .array_ensure = .{
+                            // 更深层嵌套：回退到 array_ensure + push/set + 写回
+                            const base_array = try self.emitWithResult(.{ .property_get = .{
+                                .object = obj_reg,
+                                .property_name = prop_name,
+                            } }, .php_value);
+
+                            if (is_push_assignment) {
+                                var current_array = base_array;
+                                var i: usize = 0;
+                                while (i < keys.items.len) : (i += 1) {
+                                    current_array = try self.emitWithResult(.{ .array_ensure = .{
+                                        .array = current_array,
+                                        .key = keys.items[i],
+                                    } }, .php_value);
+                                }
+                                _ = try self.emit(.{ .array_push = .{
                                     .array = current_array,
-                                    .key = keys.items[i],
-                                } }, .php_value);
+                                    .value = value_reg,
+                                } }, null);
+                            } else {
+                                var current_array = base_array;
+                                var i: usize = 0;
+                                while (i + 1 < keys.items.len) : (i += 1) {
+                                    current_array = try self.emitWithResult(.{ .array_ensure = .{
+                                        .array = current_array,
+                                        .key = keys.items[i],
+                                    } }, .php_value);
+                                }
+                                _ = try self.emit(.{ .array_set = .{
+                                    .array = current_array,
+                                    .key = keys.items[keys.items.len - 1],
+                                    .value = value_reg,
+                                } }, null);
                             }
-                            _ = try self.emit(.{ .array_set = .{
-                                .array = current_array,
-                                .key = keys.items[keys.items.len - 1],
-                                .value = value_reg,
-                            } }, null);
                         }
                     }
                     return value_reg;
@@ -5956,10 +5986,16 @@ pub const IRGenerator = struct {
                     const prop_name = self.getString(en.data.static_property_access.property_name);
 
                     // 解析特殊类名
-                    if (std.mem.eql(u8, class_name, "self") or std.mem.eql(u8, class_name, "static")) {
-                        if (self.current_class) |cls| {
-                            class_name = cls;
+                    // self:: 在 trait 中保留，运行时通过 getCurrentScopeClass() 解析到使用类
+                    // static:: 保留运行时 LSB 解析
+                    if (std.mem.eql(u8, class_name, "self")) {
+                        if (!self.is_in_trait) {
+                            if (self.current_class) |cls| {
+                                class_name = cls;
+                            }
                         }
+                    } else if (std.mem.eql(u8, class_name, "static")) {
+                        // static:: 保留运行时 LSB 解析
                     }
 
                     _ = try self.emit(.{ .static_property_set = .{
@@ -7304,6 +7340,18 @@ pub const IRGenerator = struct {
                 }
             }
         }
+        // 排序函数写回：by-reference 参数（如 trait Sortable::sort(array &$items)）
+        // usort 的 COW 克隆了数组但排序结果未通过 Ref 写回调用者
+        if (is_inplace_sort and positional_args.items.len > 0) {
+            const arg0_node = self.getNode(positional_args.items[0]);
+            if (arg0_node != null and arg0_node.?.tag == .variable) {
+                const var_name_wb = self.getString(arg0_node.?.data.variable.name);
+                if (self.reference_params.contains(var_name_wb)) {
+                    const var_reg_wb = try self.getOrCreateVarRegister(var_name_wb, .php_value);
+                    _ = try self.emit(.{ .store = .{ .ptr = var_reg_wb, .value = result, .through_ref = true } }, null);
+                }
+            }
+        }
 
         // 引用参数写回
         for (ref_writebacks.items) |wb| {
@@ -7653,17 +7701,122 @@ pub const IRGenerator = struct {
             } }, .php_value);
         }
 
-        // Generate arguments
+        // 查找静态方法的引用参数信息（与 generateMethodCall 逻辑一致）
+        const ref_params = blk: {
+            // 先精确匹配 ClassName::methodName
+            const full_name = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, method_name });
+            defer self.allocator.free(full_name);
+            if (self.module) |mod| {
+                if (mod.findFunction(full_name)) |func| {
+                    break :blk func.ref_params.items;
+                }
+            }
+            if (self.function_ref_params.get(full_name)) |rp| {
+                break :blk rp;
+            }
+            // 回退：搜索所有 module 函数中以 ::methodName 结尾的（处理 trait/父类继承）
+            if (self.module) |mod| {
+                for (mod.functions.items) |f| {
+                    if (std.mem.endsWith(u8, f.name, method_name) and
+                        f.name.len > method_name.len + 2 and
+                        f.name[f.name.len - method_name.len - 2] == ':' and
+                        f.name[f.name.len - method_name.len - 1] == ':')
+                    {
+                        if (f.ref_params.items.len > 0) {
+                            break :blk f.ref_params.items;
+                        }
+                    }
+                }
+            }
+            break :blk &[_]u32{};
+        };
+
+        // 引用参数写回信息
+        const RefWb = struct { var_name: []const u8, temp_reg: ?u32 = null };
+        var ref_wbs: std.ArrayListUnmanaged(RefWb) = .{ .items = &.{}, .capacity = 0 };
+        defer ref_wbs.deinit(self.allocator);
+
+        // Generate arguments（含引用参数处理）
         const args = try self.allocator.alloc(Register, call_data.args.len);
         for (call_data.args, 0..) |arg_idx, i| {
+            // 静态方法无 $this，用户参数从索引 0 开始
+            const param_idx = i;
+            var is_ref = false;
+            for (ref_params) |ref_idx| {
+                if (ref_idx == param_idx) {
+                    is_ref = true;
+                    break;
+                }
+            }
+
+            if (is_ref) {
+                const expr_node = self.getNode(arg_idx);
+                if (expr_node != null and expr_node.?.tag == .variable) {
+                    const var_name = self.getString(expr_node.?.data.variable.name);
+                    // 引用参数本身：直接透传
+                    if (self.reference_params.contains(var_name)) {
+                        if (self.getVarRegister(var_name)) |var_reg| {
+                            args[i] = var_reg;
+                            continue;
+                        }
+                    }
+                    // 局部变量：make_ref
+                    if (self.getVarRegister(var_name)) |var_reg| {
+                        const r = try self.emitWithResult(.{ .make_ref = .{ .ptr = var_reg } }, .php_value);
+                        args[i] = r;
+                        continue;
+                    }
+                    // 全局变量或 __main__ 中的变量：创建临时 alloca
+                    const is_global = self.global_vars.contains(var_name);
+                    const is_main = if (self.current_function) |func| std.mem.eql(u8, func.name, "__main__") else false;
+                    if (is_global or is_main) {
+                        const func = self.current_function orelse return error.NoCurrentFunction;
+                        const alloca_type = Type.php_value;
+                        const type_ptr = try self.allocator.create(Type);
+                        type_ptr.* = alloca_type;
+                        const ptr_type = Type{ .ptr = type_ptr };
+                        const temp_reg = func.newRegister(ptr_type);
+                        const alloca_inst = try self.allocator.create(Instruction);
+                        alloca_inst.* = .{
+                            .result = temp_reg,
+                            .op = .{ .alloca = .{ .type_ = alloca_type, .count = 1, .no_optimize = true } },
+                            .location = self.current_location,
+                        };
+                        try self.entry_allocas.append(self.allocator, alloca_inst);
+                        const current_val = try self.generateExpression(arg_idx);
+                        _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = current_val } }, null);
+                        const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = temp_reg } }, .php_value);
+                        args[i] = ref_reg;
+                        // 记录写回（静态方法调用后执行）
+                        try ref_wbs.append(self.allocator, .{ .var_name = var_name, .temp_reg = temp_reg.id });
+                        continue;
+                    }
+                }
+            }
+
             args[i] = try self.generateExpression(arg_idx);
         }
 
-        return self.emitWithResult(.{ .static_method_call = .{
+        const call_result = try self.emitWithResult(.{ .static_method_call = .{
             .class_name = class_name,
             .method_name = method_name,
             .args = args,
         } }, .php_value);
+
+        // 引用参数写回（静态方法调用后）
+        for (ref_wbs.items) |wb| {
+            if (wb.temp_reg) |tr| {
+                const new_val = try self.emitWithResult(.{ .load = .{ .ptr = .{ .id = tr, .type_ = .php_value }, .type_ = .php_value } }, .php_value);
+                if (self.global_vars.contains(wb.var_name)) {
+                    _ = try self.emit(.{ .global_set = .{ .name = wb.var_name, .value = new_val } }, null);
+                } else {
+                    // __main__ 中的变量也通过 global_set 写回
+                    _ = try self.emit(.{ .global_set = .{ .name = wb.var_name, .value = new_val } }, null);
+                }
+            }
+        }
+
+        return call_result;
     }
 
     /// Generate IR for array initialization

@@ -2031,7 +2031,13 @@ pub const PHPArray = struct {
 
         self.ref_count -= 1;
         if (self.ref_count == 0) {
-            self.deinit(allocator);
+            if (self.gc_info.buffered and !gc_in_progress) {
+                // 已被 GC buffer：不能立即释放，否则 GC 扫描时访问已释放内存
+                // 重新 buffer（标记为 purple），让 GC 在下次收集时安全处理
+                gcBufferArray(self);
+            } else {
+                self.deinit(allocator);
+            }
         } else if (!gc_in_progress) {
             gcBufferArray(self);
         }
@@ -2816,20 +2822,24 @@ pub const PHPClosure = struct {
 
     pub fn release(self: *PHPClosure, allocator: Allocator) void {
         if (self.ref_count == 0) return;
-        self.ref_count -= 1;
-        if (self.ref_count == 0) {
-            for (self.captures) |c| {
-                c.release(allocator);
-            }
-            self.bound_this.release(allocator);
-            allocator.free(self.captures);
-            if (alloc_counters.php_closure_live_objects > 0) {
-                alloc_counters.php_closure_live_objects -= 1;
-            }
-            destroyPHPClosure(self, allocator);
-        } else if (!gc_in_progress) {
-            gcBufferClosure(self);
-        }
+self.ref_count -= 1;
+if (self.ref_count == 0) {
+if (self.gc_info.buffered and !gc_in_progress) {
+gcBufferClosure(self);
+} else {
+for (self.captures) |c| {
+c.release(allocator);
+}
+self.bound_this.release(allocator);
+allocator.free(self.captures);
+if (alloc_counters.php_closure_live_objects > 0) {
+alloc_counters.php_closure_live_objects -= 1;
+}
+destroyPHPClosure(self, allocator);
+}
+} else if (!gc_in_progress) {
+gcBufferClosure(self);
+}
     }
 };
 
@@ -17922,12 +17932,16 @@ pub const PHPObject = struct {
         if (self.ref_count == 0) {
             return;
         }
-        self.ref_count -= 1;
-        if (self.ref_count == 0) {
-            self.deinit();
-        } else if (!gc_in_progress) {
-            gcBufferObject(self);
-        }
+self.ref_count -= 1;
+if (self.ref_count == 0) {
+if (self.gc_info.buffered and !gc_in_progress) {
+gcBufferObject(self);
+} else {
+self.deinit();
+}
+} else if (!gc_in_progress) {
+gcBufferObject(self);
+}
     }
 
     /// 释放对象
@@ -19063,7 +19077,75 @@ pub fn php_property_array_push_key_with_obj(obj_val: Value, prop_name: Value, ke
     try sub_arr.push(runtime_allocator, value);
 }
 
-/// $obj->prop[key] = value — 向对象属性数组设置元素
+/// $obj->prop[key1][key2][] = value — 向对象属性二级子数组追加元素
+pub fn php_property_array_push_key2_with_obj(obj_val: Value, prop_name: Value, key1: Value, key2: Value, value: Value, _: Value) !void {
+    if (!Value_isObject(obj_val)) return;
+    const obj = Value_asObject(obj_val);
+    const name = if (prop_name.isString()) prop_name.asString().data else return;
+
+    var prop_val = obj.getPropertyDirect(name) orelse Value.initNull();
+    if (!prop_val.isArray()) {
+        const arr = try PHPArray.init(runtime_allocator);
+        prop_val = Value.initArray(arr);
+        try obj.setProperty(name, prop_val);
+    }
+
+    const arr = prop_val.asArray();
+    const arr_key1 = normalizeArrayKeyFromValue(key1);
+
+    var sub_val = arr.get(arr_key1) orelse Value.initNull();
+    if (sub_val.isNull() or !sub_val.isArray()) {
+        if (!sub_val.isNull()) sub_val.release(runtime_allocator);
+        const sub_arr = try PHPArray.init(runtime_allocator);
+        sub_val = Value.initArray(sub_arr);
+        try arr.set(runtime_allocator, arr_key1, sub_val);
+    }
+
+    const sub_arr = sub_val.asArray();
+    const arr_key2 = normalizeArrayKeyFromValue(key2);
+
+    var sub2_val = sub_arr.get(arr_key2) orelse Value.initNull();
+    if (sub2_val.isNull() or !sub2_val.isArray()) {
+        if (!sub2_val.isNull()) sub2_val.release(runtime_allocator);
+        const sub2_arr = try PHPArray.init(runtime_allocator);
+        sub2_val = Value.initArray(sub2_arr);
+        try sub_arr.set(runtime_allocator, arr_key2, sub2_val);
+    }
+
+    const sub2_arr = sub2_val.asArray();
+    _ = value.retain();
+    try sub2_arr.push(runtime_allocator, value);
+}
+
+/// $obj->prop[key1][key2] = value — 向对象属性二级子数组设置元素
+pub fn php_property_array_set_key2_with_obj(obj_val: Value, prop_name: Value, key1: Value, key2: Value, value: Value, _: Value) !void {
+    if (!Value_isObject(obj_val)) return;
+    const obj = Value_asObject(obj_val);
+    const name = if (prop_name.isString()) prop_name.asString().data else return;
+
+    var prop_val = obj.getPropertyDirect(name) orelse Value.initNull();
+    if (!prop_val.isArray()) {
+        const arr = try PHPArray.init(runtime_allocator);
+        prop_val = Value.initArray(arr);
+        try obj.setProperty(name, prop_val);
+    }
+
+    const arr = prop_val.asArray();
+    const arr_key1 = normalizeArrayKeyFromValue(key1);
+
+    var sub_val = arr.get(arr_key1) orelse Value.initNull();
+    if (sub_val.isNull() or !sub_val.isArray()) {
+        if (!sub_val.isNull()) sub_val.release(runtime_allocator);
+        const sub_arr = try PHPArray.init(runtime_allocator);
+        sub_val = Value.initArray(sub_arr);
+        try arr.set(runtime_allocator, arr_key1, sub_val);
+    }
+
+    const sub_arr = sub_val.asArray();
+    const arr_key2 = normalizeArrayKeyFromValue(key2);
+    _ = value.retain();
+    try sub_arr.set(runtime_allocator, arr_key2, value);
+}
 pub fn php_property_array_set_with_obj(obj_val: Value, prop_name: Value, key: Value, value: Value, _: Value) !void {
     if (!Value_isObject(obj_val)) return;
     const obj = Value_asObject(obj_val);
@@ -27095,13 +27177,12 @@ pub fn php_hash_pbkdf2(algo: Value, password: Value, salt: Value, iterations: Va
 
 /// crc32 - 计算字符串的CRC32校验值
 pub fn php_crc32(str: Value) !Value {
-    if (!str.isString()) return error.InvalidArgument;
+if (!str.isString()) return error.InvalidArgument;
 
-    const input = str.asString().data;
-    const crc = std.hash.Crc32.hash(input);
-    // PHP crc32() 返回有符号32位整数（与C的crc32行为一致）
-    const signed: i32 = @bitCast(crc);
-    return Value.initInt(@intCast(signed));
+const input = str.asString().data;
+const crc = std.hash.Crc32.hash(input);
+// PHP 64-bit: crc32() 返回无符号32位整数（0 to 4294967295）
+return Value.initInt(@intCast(crc));
 }
 
 /// hash_algos - 返回支持的哈希算法列表
