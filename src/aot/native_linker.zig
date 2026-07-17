@@ -3701,13 +3701,9 @@ pub const NativeLinker = struct {
                                 for (method.param_types, 0..) |ptype, pidx| {
                                     if (ptype.len == 0) continue;
                                     const nullable = if (pidx < method.param_nullable.len) method.param_nullable[pidx] else true;
-                                    // 解析 self/static/parent 为实际类名
-                                    const resolved_ptype = if (std.mem.eql(u8, ptype, "self") or std.mem.eql(u8, ptype, "static"))
-                                        class_name
-                                    else if (std.mem.eql(u8, ptype, "parent"))
-                                        (td.parent orelse ptype)
-                                    else
-                                        ptype;
+                                    // 解析 self/static/parent 为实际类名（含组合类型如 self|null）
+                                    const resolved_ptype = try self.resolveTypeSpecials(ptype, class_name, td.parent);
+                                    defer self.allocator.free(resolved_ptype);
                                     const escaped_ptype = try self.escapeString(resolved_ptype);
                                     defer self.allocator.free(escaped_ptype);
                                     try code.appendSlice(self.allocator, "    if (args.len > ");
@@ -3742,6 +3738,41 @@ pub const NativeLinker = struct {
                         break;
                     }
                 }
+            }
+        }
+
+        // 全局函数参数类型检查（func.param_types 由 ir_generator 填充）
+        if (std.mem.indexOf(u8, func.name, "::") == null) {
+            for (func.param_types, 0..) |ptype, pidx| {
+                if (ptype.len == 0) continue;
+                const nullable = if (pidx < func.param_nullable.len) func.param_nullable[pidx] else true;
+                const escaped_ptype = try self.escapeString(ptype);
+                defer self.allocator.free(escaped_ptype);
+                try code.appendSlice(self.allocator, "    if (args.len > ");
+                const pidx_str = try std.fmt.allocPrint(self.allocator, "{d}", .{pidx});
+                defer self.allocator.free(pidx_str);
+                try code.appendSlice(self.allocator, pidx_str);
+                try code.appendSlice(self.allocator, ") {\n");
+                try code.appendSlice(self.allocator, "        try runtime.php_check_param_type(\"");
+                try code.appendSlice(self.allocator, escaped_prof_name);
+                try code.appendSlice(self.allocator, "\", ");
+                try code.appendSlice(self.allocator, pidx_str);
+                try code.appendSlice(self.allocator, ", args[");
+                try code.appendSlice(self.allocator, pidx_str);
+                try code.appendSlice(self.allocator, "], \"");
+                try code.appendSlice(self.allocator, escaped_ptype);
+                try code.appendSlice(self.allocator, "\", ");
+                try code.appendSlice(self.allocator, if (nullable) "true" else "false");
+                const pname = if (pidx < func.param_names.len) func.param_names[pidx] else "param";
+                const escaped_pname = try self.escapeString(pname);
+                defer self.allocator.free(escaped_pname);
+                try code.appendSlice(self.allocator, ", \"");
+                try code.appendSlice(self.allocator, escaped_pname);
+                try code.appendSlice(self.allocator, "\");\n");
+                try code.appendSlice(self.allocator, "        if (runtime.hasException()) {\n");
+                try code.appendSlice(self.allocator, "            return error.RuntimeError;\n");
+                try code.appendSlice(self.allocator, "        }\n");
+                try code.appendSlice(self.allocator, "    }\n");
             }
         }
 
@@ -18522,6 +18553,41 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
     }
 
     /// Escape a string for use in Zig source code
+    /// 解析类型字符串中的 self/static/parent 为实际类名（含组合类型如 self|null）
+    fn resolveTypeSpecials(self: *Self, ptype: []const u8, class_name: []const u8, parent_name: ?[]const u8) ![]const u8 {
+        const has_self = std.mem.indexOf(u8, ptype, "self") != null;
+        const has_static = std.mem.indexOf(u8, ptype, "static") != null;
+        const has_parent = std.mem.indexOf(u8, ptype, "parent") != null;
+        if (!has_self and !has_static and !has_parent)
+            return try self.allocator.dupe(u8, ptype);
+
+        var result = try std.ArrayList(u8).initCapacity(self.allocator, 0);
+        errdefer result.deinit(self.allocator);
+        var i: usize = 0;
+        while (i < ptype.len) {
+            const c = ptype[i];
+            if (c == '|' or c == '&' or c == '(' or c == ')' or c == ' ' or c == '\\') {
+                try result.append(self.allocator, c);
+                i += 1;
+                continue;
+            }
+            const start = i;
+            while (i < ptype.len) : (i += 1) {
+                const ch = ptype[i];
+                if (ch == '|' or ch == '&' or ch == '(' or ch == ')' or ch == ' ' or ch == '\\') break;
+            }
+            const ident = ptype[start..i];
+            if (std.mem.eql(u8, ident, "self") or std.mem.eql(u8, ident, "static")) {
+                try result.appendSlice(self.allocator, class_name);
+            } else if (std.mem.eql(u8, ident, "parent")) {
+                try result.appendSlice(self.allocator, parent_name orelse "parent");
+            } else {
+                try result.appendSlice(self.allocator, ident);
+            }
+        }
+        return try result.toOwnedSlice(self.allocator);
+    }
+
     fn escapeString(self: *Self, str: []const u8) ![]const u8 {
         var buf = try std.ArrayList(u8).initCapacity(self.allocator, 0);
         defer buf.deinit(self.allocator);

@@ -937,6 +937,43 @@ pub const IRGenerator = struct {
         // Process parameters with unified control flow
         try self.generateParameters(func_data.params);
 
+        // 提取参数 PHP 类型声明（用于运行时类型检查）
+        if (func_data.params.len > 0) {
+            var ptype_list = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
+            defer ptype_list.deinit(self.allocator);
+            var pnullable_list = std.ArrayListUnmanaged(bool){ .items = &.{}, .capacity = 0 };
+            defer pnullable_list.deinit(self.allocator);
+            var pname_list = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
+            defer pname_list.deinit(self.allocator);
+            for (func_data.params) |pidx| {
+                const pnode = self.getNode(pidx) orelse {
+                    ptype_list.append(self.allocator, "") catch {};
+                    pnullable_list.append(self.allocator, true) catch {};
+                    pname_list.append(self.allocator, "") catch {};
+                    continue;
+                };
+                if (pnode.tag != .parameter) {
+                    ptype_list.append(self.allocator, "") catch {};
+                    pnullable_list.append(self.allocator, true) catch {};
+                    pname_list.append(self.allocator, "") catch {};
+                    continue;
+                }
+                const pdata = pnode.data.parameter;
+                pname_list.append(self.allocator, self.getString(pdata.name)) catch {};
+                if (pdata.type) |type_idx| {
+                    const ti = self.resolveTypeNodeToString(type_idx);
+                    ptype_list.append(self.allocator, ti.name) catch {};
+                    pnullable_list.append(self.allocator, ti.nullable) catch {};
+                } else {
+                    ptype_list.append(self.allocator, "") catch {};
+                    pnullable_list.append(self.allocator, true) catch {};
+                }
+            }
+            func.param_types = self.allocator.dupe([]const u8, ptype_list.items) catch &.{};
+            func.param_nullable = self.allocator.dupe(bool, pnullable_list.items) catch &.{};
+            func.param_names = self.allocator.dupe([]const u8, pname_list.items) catch &.{};
+        }
+
         // Generate function body
         try self.generateStatement(func_data.body);
 

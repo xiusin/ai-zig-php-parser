@@ -332,6 +332,12 @@ pub const Function = struct {
     returns_reference: bool = false,
     /// PHP variable register ID → variable name (survives optimization)
     var_names: std.AutoHashMapUnmanaged(u32, []const u8) = .{},
+    /// 参数类型字符串列表（与 params 一一对应，无类型声明时为空字符串）
+    param_types: []const []const u8 = &.{},
+    /// 参数是否允许 null
+    param_nullable: []const bool = &.{},
+    /// 参数名称列表（与 params 一一对应）
+    param_names: []const []const u8 = &.{},
 
     const Self = @This();
 
