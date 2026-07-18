@@ -2584,22 +2584,22 @@ pub fn php_create_exception(class_name: []const u8, message: []const u8, code: i
 
 /// Mutex type for lock statement
 pub const PHPMutex = struct {
-    /// Internal mutex implementation
-    mutex: std.Thread.Mutex,
+    /// Internal mutex implementation (std.Thread.Mutex removed in 0.16, use std.atomic.Mutex)
+    mutex: std.atomic.Mutex,
     /// Reference count
     ref_count: u32,
 
     /// Initialize a new mutex
     pub fn init() PHPMutex {
         return .{
-            .mutex = .{},
+            .mutex = .unlocked,
             .ref_count = 1,
         };
     }
 
     /// Lock the mutex
     pub fn lock(self: *PHPMutex) void {
-        self.mutex.lock();
+        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
     }
 
     /// Unlock the mutex
