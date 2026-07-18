@@ -162,12 +162,8 @@ pub const SourceLocation = struct {
 
     pub fn format(
         self: SourceLocation,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = fmt;
-        _ = options;
+        writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
         if (self.line > 0) {
             try writer.print("{s}:{d}:{d}", .{ self.file, self.line, self.column });
         } else {

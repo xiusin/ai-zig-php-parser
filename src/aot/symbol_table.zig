@@ -57,12 +57,8 @@ pub const InferredType = union(enum) {
     /// Format for display
     pub fn format(
         self: InferredType,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = fmt;
-        _ = options;
+        writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
         switch (self) {
             .concrete => |ct| try writer.print("{s}", .{ct.toString()}),
             .union_type => |types| {

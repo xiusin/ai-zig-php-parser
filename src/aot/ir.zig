@@ -551,12 +551,8 @@ pub const Register = struct {
     /// Format register for display
     pub fn format(
         self: Register,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = fmt;
-        _ = options;
+        writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
         try writer.print("%{d}", .{self.id});
     }
 
@@ -687,12 +683,8 @@ pub const Type = union(enum) {
     /// Format type for display
     pub fn format(
         self: Type,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = fmt;
-        _ = options;
+        writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
         switch (self) {
             .void => try writer.writeAll("void"),
             .bool => try writer.writeAll("bool"),

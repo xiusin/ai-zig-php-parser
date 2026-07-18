@@ -46,12 +46,8 @@ pub const PerformanceBaseline = struct {
 
     pub fn format(
         self: PerformanceBaseline,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = fmt;
-        _ = options;
+        writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
         try writer.print("Baseline({s}): avg={d}ns, stddev={d:.2}ns, commit={s}", .{
             self.benchmark_name,
             self.avg_time_ns,
@@ -79,12 +75,8 @@ pub const BenchmarkResult = struct {
 
     pub fn format(
         self: BenchmarkResult,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = fmt;
-        _ = options;
+        writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
         try writer.print("Result({s}): avg={d}ns, stddev={d:.2}ns, iters={d}", .{
             self.benchmark_name,
             self.avg_time_ns,
@@ -128,12 +120,8 @@ pub const RegressionResult = struct {
 
     pub fn format(
         self: RegressionResult,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        writer: anytype,
-    ) !void {
-        _ = fmt;
-        _ = options;
+        writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
         const status = if (self.is_regression) "REGRESSION" else "OK";
         if (self.alloc_bytes_change_percent) |p| {
             try writer.print("{s}: {s} (time {d:.2}%, alloc_bytes {d:.2}%, baseline={d}ns, current={d}ns)", .{
