@@ -250,11 +250,28 @@ pub const LivenessAnalysis = struct {
             num_succs += 1;
         }
 
-        // 合并后继块的 live_in
+        // 合并后继块的 live_in + PHI incoming（标准 SSA liveness 语义）
+        // PHI incoming 不在后继块的 live_in 中（addUsedRegs 不添加），
+        // 而是对应前驱块末尾活跃。此处按前驱-后继对应关系精确添加。
         for (successors_buf[0..num_succs]) |succ_idx| {
             if (succ_idx < self.num_blocks) {
                 const succ_live_in = self.getLiveIn(succ_idx);
                 bitUnion(out, succ_live_in);
+
+                // 添加后继块中 PHI 节点的 incoming（仅对应当前前驱块的）
+                const succ_block = func.blocks.items[succ_idx];
+                for (succ_block.instructions.items) |inst| {
+                    switch (inst.op) {
+                        .phi => |phi| {
+                            for (phi.incoming) |inc| {
+                                if (@as(usize, inc.block.index) == block_idx) {
+                                    bitSet(out, inc.value.id);
+                                }
+                            }
+                        },
+                        else => break, // PHI 节点总是在块首，遇到非 PHI 即止
+                    }
+                }
             }
         }
     }
@@ -473,10 +490,11 @@ pub const LivenessAnalysis = struct {
                 bitSet(set, op.object.id);
                 bitSet(set, op.class_name.id);
             },
-            // === PhiOp (incoming values) ===
-            .phi => |phi| {
-                for (phi.incoming) |inc| bitSet(set, inc.value.id);
-            },
+            // === PhiOp ===
+            // PHI incoming values are NOT used in the PHI block itself.
+            // They are "used" at the end of the corresponding predecessor block.
+            // This is handled in computeLiveOut (standard SSA liveness semantics).
+            .phi => {},
             // === SelectOp (cond, then_value, else_value) ===
             .select => |op| {
                 bitSet(set, op.cond.id);

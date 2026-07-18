@@ -3942,18 +3942,12 @@ pub const NativeLinker = struct {
 
                     // 检查是否需要释放（字符串、数组等需要分配内存的类型）
                     if (inst.op != .alloca) {
-                        // 只cleanup创建新值的指令
-                        switch (inst.op) {
-                            .new_object => {
-                                // 对象创建：无论类型是php_object还是php_value都需要清理
-                                try cleanup_registers_set.put(reg.id, {});
-                            },
-                            .const_string, .concat, .array_new, .call, .global_get, .load => {
-                                if (corrected_type == .php_value) {
-                                    try cleanup_registers_set.put(reg.id, {});
-                                }
-                            },
-                            else => {},
+                        // 所有 php_value/php_object result 都纳入 cleanup
+                        // 覆盖 call/method_call/property_get/clone/cast/box/array_get/interpolate 等产生堆值的指令
+                        // 安全保证：generateCleanupCodeExcept 有 ref_ptr/this/ref_param_alloca 跳过 + regMayHeap 检查
+                        // release 对 null/基本类型值（int/float/bool 包装在 Value 中）是 no-op
+                        if (corrected_type == .php_value or corrected_type == .php_object) {
+                            try cleanup_registers_set.put(reg.id, {});
                         }
                     } else {
                         // alloca 指令（局部变量）也需要在函数结束时释放
@@ -5934,12 +5928,21 @@ pub const NativeLinker = struct {
                 try self.emitMissingConstStrings(code, func, block_idx);
             }
 
-            // 生成非 phi 指令（状态机路径暂不启用 releaseDeadOperands，需修复 liveness PHI/loop back-edge）
+            // 生成非 phi 指令
+            // 启用 releaseDeadOperands：generateInstructionSimple 内部调用 releaseDeadOperands
+            // 依赖 current_gen_block_idx/current_gen_inst_idx（此处设置）
+            const prev_gen_block_idx = self.current_gen_block_idx;
+            const prev_gen_inst_idx = self.current_gen_inst_idx;
+            self.current_gen_block_idx = block_idx;
+            defer self.current_gen_block_idx = prev_gen_block_idx;
             for (block.instructions.items[first_non_phi_idx..], first_non_phi_idx..) |inst, inst_idx| {
+                self.current_gen_inst_idx = inst_idx;
                 try code.appendSlice(self.allocator, "    ");
-                _ = inst_idx;
                 try self.generateInstructionSimple(code, inst);
+                // releaseDeadOperands 由 generateInstructionSimple 内部调用（line 12391）
+                // 无需外部重复调用（会导致双重释放）
             }
+            self.current_gen_inst_idx = prev_gen_inst_idx;
 
             // 生成终止指令
             if (block.terminator) |term| {
@@ -6011,33 +6014,12 @@ pub const NativeLinker = struct {
         }
 
         // 如果都是单个 incoming，直接赋值（不需要 switch）
+        // 复用 generatePhiValueAssignment 的 retain/release 逻辑：
+        // 防止 releaseDeadOperands 释放 incoming 后 PHI 结果成为悬垂引用
         if (all_single_incoming) {
             for (phi_infos.items) |info| {
                 if (info.incoming.len > 0) {
-                    const result_is_ptr = self.isPointerReg(info.result_reg.id);
-                    const value_is_ptr = self.isPointerReg(info.incoming[0].value.id);
-
-                    if (result_is_ptr and value_is_ptr) {
-                        try writer.print("    reg_{d}.* = reg_{d}.*;\n", .{
-                            info.result_reg.id,
-                            info.incoming[0].value.id,
-                        });
-                    } else if (result_is_ptr) {
-                        try writer.print("    reg_{d}.* = reg_{d};\n", .{
-                            info.result_reg.id,
-                            info.incoming[0].value.id,
-                        });
-                    } else if (value_is_ptr) {
-                        try writer.print("    reg_{d} = reg_{d}.*;\n", .{
-                            info.result_reg.id,
-                            info.incoming[0].value.id,
-                        });
-                    } else {
-                        try writer.print("    reg_{d} = reg_{d};\n", .{
-                            info.result_reg.id,
-                            info.incoming[0].value.id,
-                        });
-                    }
+                    try self.generatePhiValueAssignment(writer, info.result_reg, info.incoming[0].value, "    ");
                 }
             }
             return;
@@ -6129,30 +6111,7 @@ pub const NativeLinker = struct {
         try writer.writeAll("            // Fallback: use first incoming value\n");
         for (phi_infos.items) |info| {
             if (info.incoming.len > 0) {
-                const result_is_ptr = self.isPointerReg(info.result_reg.id);
-                const value_is_ptr = self.isPointerReg(info.incoming[0].value.id);
-
-                if (result_is_ptr and value_is_ptr) {
-                    try writer.print("            reg_{d}.* = reg_{d}.*;\n", .{
-                        info.result_reg.id,
-                        info.incoming[0].value.id,
-                    });
-                } else if (result_is_ptr) {
-                    try writer.print("            reg_{d}.* = reg_{d};\n", .{
-                        info.result_reg.id,
-                        info.incoming[0].value.id,
-                    });
-                } else if (value_is_ptr) {
-                    try writer.print("            reg_{d} = reg_{d}.*;\n", .{
-                        info.result_reg.id,
-                        info.incoming[0].value.id,
-                    });
-                } else {
-                    try writer.print("            reg_{d} = reg_{d};\n", .{
-                        info.result_reg.id,
-                        info.incoming[0].value.id,
-                    });
-                }
+                try self.generatePhiValueAssignment(writer, info.result_reg, info.incoming[0].value, "            ");
             }
         }
         try writer.writeAll("        },\n");
@@ -6164,14 +6123,6 @@ pub const NativeLinker = struct {
         const phi = inst.op.phi;
 
         const result_reg = inst.result orelse return;
-
-        // 使用修正后的类型
-        const dest_type = if (self.current_register_types) |types|
-            types.get(result_reg.id) orelse result_reg.type_
-        else
-            result_reg.type_;
-        const dest_tag = @as(std.meta.Tag(IR.Type), dest_type);
-        const dest_is_value = !(dest_tag == .i64 or dest_tag == .f64 or dest_tag == .bool);
 
         // 收集有效的 incoming 块
         const IncomingItem = struct { idx: u32, src: IR.Register };
@@ -6205,72 +6156,26 @@ pub const NativeLinker = struct {
             return;
         }
 
-        // 如果只有一个 incoming 值，直接赋值
+        // 如果只有一个 incoming 值，直接赋值（含 retain/release）
+        // 复用 generatePhiValueAssignment：防止 releaseDeadOperands 释放 incoming 后 PHI 结果悬垂
         if (valid_incoming.items.len == 1) {
             const src = valid_incoming.items[0].src;
-            const src_real_type = self.current_reg_types.?.get(src.id) orelse src.type_;
-            const src_tag = @as(std.meta.Tag(IR.Type), src_real_type);
-            const result_is_ptr = self.isPointerReg(result_reg.id);
-            if (result_is_ptr) {
-                try writer.print("    reg_{d}.* = ", .{result_reg.id});
-            } else {
-                try writer.print("    reg_{d} = ", .{result_reg.id});
-            }
-            try self.writePhiSourceExpr(writer, dest_is_value, dest_tag, src_tag, src.id);
-            try writer.writeAll(";");
-            // 注释掉phi的自动retain，因为它导致ref_count多1
-            // mem2reg优化后，phi代替store，store本身不应该retain
-            // if (dest_is_value and dest_may_heap) {
-            //     const src_may_heap = switch (src_tag) {
-            //         .i64, .f64, .bool => false,
-            //         else => if (self.current_reg_may_heap) |mh| mh[src.id] else true,
-            //     };
-            //     if (src_may_heap) {
-            //         try writer.print(" _ = reg_{d}.retain();", .{result_reg.id});
-            //     }
-            // }
-            try writer.writeAll("\n");
+            try self.generatePhiValueAssignment(writer, result_reg, src, "    ");
             return;
         }
 
-        // 多个 incoming 值，生成 switch
-        const result_is_ptr = self.isPointerReg(result_reg.id);
+        // 多个 incoming 值，生成 switch（每个 case 含 retain/release）
         try writer.writeAll("    switch (prev_block) {\n");
         for (valid_incoming.items) |item| {
-            const src = item.src;
-            const src_real_type = self.current_reg_types.?.get(src.id) orelse src.type_;
-            const src_tag = @as(std.meta.Tag(IR.Type), src_real_type);
-            if (result_is_ptr) {
-                try writer.print("        {d} => {{ reg_{d}.* = ", .{ item.idx, result_reg.id });
-            } else {
-                try writer.print("        {d} => {{ reg_{d} = ", .{ item.idx, result_reg.id });
-            }
-            try self.writePhiSourceExpr(writer, dest_is_value, dest_tag, src_tag, src.id);
-            try writer.writeAll(";");
-            // 注释掉phi的自动retain
-            // if (dest_is_value and dest_may_heap) {
-            //     const src_may_heap = switch (src_tag) {
-            //         .i64, .f64, .bool => false,
-            //         else => if (self.current_reg_may_heap) |mh| mh[src.id] else true,
-            //     };
-            //     if (src_may_heap) {
-            //         try writer.print(" _ = reg_{d}.retain();", .{result_reg.id});
-            //     }
-            // }
-            try writer.writeAll(" },\n");
+            try writer.print("        {d} => {{\n", .{item.idx});
+            try self.generatePhiValueAssignment(writer, result_reg, item.src, "            ");
+            try writer.writeAll("        },\n");
         }
-        // 默认情况：使用第一个incoming值作为fallback
+        // 默认情况：使用第一个 incoming 值作为 fallback（含 retain/release）
         if (valid_incoming.items.len > 0) {
-            const first_src = valid_incoming.items[0].src;
-            const src_real_type = self.current_reg_types.?.get(first_src.id) orelse first_src.type_;
-            const src_tag = @as(std.meta.Tag(IR.Type), src_real_type);
-            if (result_is_ptr) {
-                try writer.print("        else => {{ reg_{d}.* = ", .{result_reg.id});
-            } else {
-                try writer.print("        else => {{ reg_{d} = ", .{result_reg.id});
-            }
-            try self.writePhiSourceExpr(writer, dest_is_value, dest_tag, src_tag, first_src.id);
-            try writer.writeAll("; },\n");
+            try writer.writeAll("        else => {\n");
+            try self.generatePhiValueAssignment(writer, result_reg, valid_incoming.items[0].src, "            ");
+            try writer.writeAll("        },\n");
         } else {
             try writer.writeAll("        else => {},\n");
         }
@@ -6520,6 +6425,8 @@ pub const NativeLinker = struct {
         const need_refcount = !result_is_alloca and !result_is_ref_ptr;
 
         // 如果结果是 php_value，总是直接赋值（所有寄存器都是 Value）
+        // 安全 retain 顺序：先 retain 新值，再 release 旧值，再 assign
+        // 防 self-loop PHI（x = phi(x from L)）时 release 旧值使值被回收
         if (result_tag == .php_value) {
             if (result_is_alloca and value_is_alloca) {
                 try writer.print("{s}reg_{d}.* = reg_{d}.*;\n", .{ indent, result_reg.id, value_reg.id });
@@ -6527,20 +6434,16 @@ pub const NativeLinker = struct {
                 try writer.print("{s}reg_{d}.* = reg_{d};\n", .{ indent, result_reg.id, value_reg.id });
             } else if (value_is_alloca) {
                 if (need_refcount) {
+                    try writer.print("{s}_ = reg_{d}.*.retain();\n", .{ indent, value_reg.id });
                     try writer.print("{s}reg_{d}.release(runtime.runtime_allocator);\n", .{ indent, result_reg.id });
                 }
                 try writer.print("{s}reg_{d} = reg_{d}.*;\n", .{ indent, result_reg.id, value_reg.id });
-                if (need_refcount) {
-                    try writer.print("{s}_ = reg_{d}.retain();\n", .{ indent, result_reg.id });
-                }
             } else {
                 if (need_refcount) {
+                    try writer.print("{s}_ = reg_{d}.retain();\n", .{ indent, value_reg.id });
                     try writer.print("{s}reg_{d}.release(runtime.runtime_allocator);\n", .{ indent, result_reg.id });
                 }
                 try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, result_reg.id, value_reg.id });
-                if (need_refcount) {
-                    try writer.print("{s}_ = reg_{d}.retain();\n", .{ indent, result_reg.id });
-                }
             }
         } else {
             // 结果是原生类型（不应该发生，因为所有寄存器都是 Value）
@@ -6551,20 +6454,16 @@ pub const NativeLinker = struct {
                 try writer.print("{s}reg_{d}.* = reg_{d};\n", .{ indent, result_reg.id, value_reg.id });
             } else if (value_is_alloca) {
                 if (need_refcount) {
+                    try writer.print("{s}_ = reg_{d}.*.retain();\n", .{ indent, value_reg.id });
                     try writer.print("{s}reg_{d}.release(runtime.runtime_allocator);\n", .{ indent, result_reg.id });
                 }
                 try writer.print("{s}reg_{d} = reg_{d}.*;\n", .{ indent, result_reg.id, value_reg.id });
-                if (need_refcount) {
-                    try writer.print("{s}_ = reg_{d}.retain();\n", .{ indent, result_reg.id });
-                }
             } else {
                 if (need_refcount) {
+                    try writer.print("{s}_ = reg_{d}.retain();\n", .{ indent, value_reg.id });
                     try writer.print("{s}reg_{d}.release(runtime.runtime_allocator);\n", .{ indent, result_reg.id });
                 }
                 try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, result_reg.id, value_reg.id });
-                if (need_refcount) {
-                    try writer.print("{s}_ = reg_{d}.retain();\n", .{ indent, result_reg.id });
-                }
             }
         }
     }
@@ -6607,18 +6506,22 @@ pub const NativeLinker = struct {
         if (!has_any_dependency) {
             // 无依赖，直接赋值
             // phi 赋值需要 retain/release 以维护引用计数语义：
-            // 循环中源寄存器可能被释放，若 phi 目标未 retain 则成为悬垂指针
+            // 安全顺序：先 retain 新值(incoming)，再 release 旧值(result)，再 assign
+            // 防 self-loop PHI（x = phi(x from L)）时 release 旧值使值被回收
             for (assignments) |assign| {
                 const result_is_alloca = self.isAllocaReg(assign.result.id);
                 const result_is_ref_ptr = if (self.current_ref_ptr_regs) |rpr| rpr.contains(assign.result.id) else false;
                 const need_refcount = !result_is_alloca and !result_is_ref_ptr;
+                const value_is_ptr = self.isPointerReg(assign.value.id);
                 if (need_refcount) {
+                    if (value_is_ptr) {
+                        try writer.print("{s}_ = reg_{d}.*.retain();\n", .{ indent, assign.value.id });
+                    } else {
+                        try writer.print("{s}_ = reg_{d}.retain();\n", .{ indent, assign.value.id });
+                    }
                     try writer.print("{s}reg_{d}.release(runtime.runtime_allocator);\n", .{ indent, assign.result.id });
                 }
                 try self.writePtrAwareAssign(writer, indent, assign.result.id, assign.value.id);
-                if (need_refcount) {
-                    try writer.print("{s}_ = reg_{d}.retain();\n", .{ indent, assign.result.id });
-                }
             }
         } else {
             // 有依赖，仅为需要的赋值使用临时变量
@@ -6634,11 +6537,23 @@ pub const NativeLinker = struct {
                 }
             }
             // 第二步：赋值（含 retain/release）
+            // 安全顺序：先 retain 新值，再 release 旧值，再 assign
+            // 防 self-loop PHI（x = phi(x from L)）时 release 旧值使值被回收
             for (assignments, 0..) |assign, i| {
                 const result_is_alloca = self.isAllocaReg(assign.result.id);
                 const result_is_ref_ptr = if (self.current_ref_ptr_regs) |rpr| rpr.contains(assign.result.id) else false;
                 const need_refcount = !result_is_alloca and !result_is_ref_ptr;
                 if (need_refcount) {
+                    if (needs_temp.items[i]) {
+                        try writer.print("{s}_ = phi_temp_{d}.retain();\n", .{ indent, i });
+                    } else {
+                        const value_is_ptr = self.isPointerReg(assign.value.id);
+                        if (value_is_ptr) {
+                            try writer.print("{s}_ = reg_{d}.*.retain();\n", .{ indent, assign.value.id });
+                        } else {
+                            try writer.print("{s}_ = reg_{d}.retain();\n", .{ indent, assign.value.id });
+                        }
+                    }
                     try writer.print("{s}reg_{d}.release(runtime.runtime_allocator);\n", .{ indent, assign.result.id });
                 }
                 if (needs_temp.items[i]) {
@@ -6650,9 +6565,6 @@ pub const NativeLinker = struct {
                     }
                 } else {
                     try self.writePtrAwareAssign(writer, indent, assign.result.id, assign.value.id);
-                }
-                if (need_refcount) {
-                    try writer.print("{s}_ = reg_{d}.retain();\n", .{ indent, assign.result.id });
                 }
             }
         }
@@ -7439,8 +7351,9 @@ pub const NativeLinker = struct {
             },
             // new_object 的 args 可能被消费，不释放
             .new_object => {},
-            .property_get => {
-                // object 属性可能被结果引用（bitwise copy 不 retain），不释放 object
+            // property_get: getProperty 内部已 retain 返回值，result 独立于 object，可释放 object
+            .property_get => |op| {
+                try used_regs.append(self.allocator, op.object.id);
             },
             // property_set 的 object 可能被修改，不释放
             .property_set => {},
@@ -7466,12 +7379,13 @@ pub const NativeLinker = struct {
             },
             // parent_call 的 object 被结果引用，不释放
             .parent_call => {},
-            .box => |op| {
-                try used_regs.append(self.allocator, op.value.id);
+            // clone: php_clone 是深拷贝，result 是全新对象，独立于 operand，可释放 operand
+            .clone => |op| {
+                try used_regs.append(self.allocator, op.operand.id);
             },
-            .unbox => |op| {
-                try used_regs.append(self.allocator, op.value.id);
-            },
+            // box/unbox 是 bitwise copy（类型包装/解包），result 与操作数共享值，不释放
+            .box => {},
+            .unbox => {},
             .instanceof => |op| {
                 try used_regs.append(self.allocator, op.object.id);
                 try used_regs.append(self.allocator, op.class_name.id);
@@ -7483,8 +7397,16 @@ pub const NativeLinker = struct {
             },
             .select => |op| {
                 try used_regs.append(self.allocator, op.cond.id);
-                try used_regs.append(self.allocator, op.then_value.id);
-                try used_regs.append(self.allocator, op.else_value.id);
+                // 指针类型 select（ref_ptr result）: reg_X = reg_then 或 &reg_then（bitwise copy，无 retain），不释放 then/else
+                // 普通值类型 select: result 已 retain 被选中的值，释放 then/else 安全
+                const is_result_ptr = if (inst.result) |r|
+                    if (self.current_ref_ptr_regs) |rpr| rpr.contains(r.id) else false
+                else
+                    false;
+                if (!is_result_ptr) {
+                    try used_regs.append(self.allocator, op.then_value.id);
+                    try used_regs.append(self.allocator, op.else_value.id);
+                }
             },
             // go_spawn 的 args 可能被消费，不释放
             .go_spawn => {},
@@ -7500,15 +7422,15 @@ pub const NativeLinker = struct {
             else => {},
         }
 
-        // 去重
-        var seen = std.AutoHashMap(usize, void).init(self.allocator);
-        defer seen.deinit();
-
         // Release死亡的寄存器（这是它们的最后使用）
-        for (used_regs.items) |reg_id| {
-            // 去重
-            if (seen.contains(reg_id)) continue;
-            try seen.put(reg_id, {});
+        // 线性查找去重：used_regs 通常仅 1-4 个元素，远快于 HashMap
+        for (used_regs.items, 0..) |reg_id, i| {
+            // 去重：跳过前面已处理的重复寄存器
+            var is_dup = false;
+            for (used_regs.items[0..i]) |prev_id| {
+                if (prev_id == reg_id) { is_dup = true; break; }
+            }
+            if (is_dup) continue;
 
             // 跳过alloca（由函数退出 cleanup 管理）
             if (alloca_regs.contains(reg_id)) continue;
@@ -7597,6 +7519,21 @@ pub const NativeLinker = struct {
                     // 跳过 catch 块中引用的寄存器（避免在异常路径上释放 catch 块仍需使用的值）
                     if (self.current_catch_used_regs) |catch_regs| {
                         if (catch_regs.contains(reg_id)) continue;
+                    }
+
+                    // 跳过 ref_ptr 寄存器（PHI/select 合并引用参数，不拥有值）
+                    if (self.current_ref_ptr_regs) |rpr| {
+                        if (rpr.contains(reg_id)) continue;
+                    }
+
+                    // 跳过 $this 寄存器（持有 ctx 借用引用，不可释放）
+                    if (self.current_this_regs) |tr| {
+                        if (tr.contains(reg_id)) continue;
+                    }
+
+                    // 跳过引用参数的 alloca
+                    if (self.ref_param_alloca_map) |map| {
+                        if (map.get(reg_id)) |_| continue;
                     }
 
                     if (self.regMayHeap(reg_id)) {
@@ -8099,29 +8036,30 @@ pub const NativeLinker = struct {
                         if (self.current_ref_capture_allocas) |rca| {
                             if (rca.contains(op.ptr.id)) {
                                 if (self.regMayHeap(reg.id)) {
+                                    // 安全 retain 顺序：先 retain 新值，再 release 旧值，防 old==new use-after-free
+                                    try writer.print("    _ = runtime.val_deref(&reg_{d}).*.retain();\n", .{op.ptr.id});
                                     try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
                                 }
                                 try writer.print("    reg_{d} = runtime.val_deref(&reg_{d}).*;\n", .{ reg.id, op.ptr.id });
-                                if (self.regMayHeap(reg.id)) {
-                                    try writer.print("    _ = reg_{d}.retain();\n", .{reg.id});
-                                }
                                 return;
                             }
                         }
                         // make_ref'd alloca：需要通过 val_deref 解引用读取实际值
                         if (self.current_make_ref_allocas) |mra| {
                             if (mra.contains(op.ptr.id)) {
-                                if (self.regMayHeap(reg.id)) {
-                                    try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
-                                }
                                 if (op.no_deref) {
                                     // byref 写回：直接读取 Ref 值，不跟随引用链
+                                    if (self.regMayHeap(reg.id)) {
+                                        try writer.print("    _ = reg_{d}.*.retain();\n", .{op.ptr.id});
+                                        try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
+                                    }
                                     try writer.print("    reg_{d} = reg_{d}.*;\n", .{ reg.id, op.ptr.id });
                                 } else {
+                                    if (self.regMayHeap(reg.id)) {
+                                        try writer.print("    _ = runtime.val_deref(reg_{d}).*.retain();\n", .{op.ptr.id});
+                                        try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
+                                    }
                                     try writer.print("    reg_{d} = runtime.val_deref(reg_{d}).*;\n", .{ reg.id, op.ptr.id });
-                                }
-                                if (self.regMayHeap(reg.id)) {
-                                    try writer.print("    _ = reg_{d}.retain();\n", .{reg.id});
                                 }
                                 return;
                             }
@@ -8130,12 +8068,11 @@ pub const NativeLinker = struct {
                         if (self.current_foreach_ref_allocas) |fra| {
                             if (fra.contains(op.ptr.id)) {
                                 if (self.regMayHeap(reg.id)) {
+                                    // 安全 retain 顺序：先 retain 新值，再 release 旧值，防 old==new use-after-free
+                                    try writer.print("    _ = runtime.val_deref(reg_{d}).*.retain();\n", .{op.ptr.id});
                                     try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
                                 }
                                 try writer.print("    reg_{d} = runtime.val_deref(reg_{d}).*;\n", .{ reg.id, op.ptr.id });
-                                if (self.regMayHeap(reg.id)) {
-                                    try writer.print("    _ = reg_{d}.retain();\n", .{reg.id});
-                                }
                                 return;
                             }
                         }
