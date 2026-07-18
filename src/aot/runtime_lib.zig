@@ -32,6 +32,18 @@ pub fn getGlobalAllocator() Allocator {
     return global_gpa.?.allocator();
 }
 
+/// Zig 0.16 兼容：直接 syscall 写入 fd（替代 std.io.getStdOut().writer().writeAll()）
+pub inline fn fileWriteAll(fd: std.posix.fd_t, data: []const u8) void {
+    _ = std.posix.system.write(fd, data.ptr, data.len);
+}
+
+/// Zig 0.16 兼容：格式化写入 fd（替代 stderr.print()）
+fn filePrint(fd: std.posix.fd_t, comptime fmt: []const u8, args: anytype) void {
+    var buf: [4096]u8 = undefined;
+    const formatted = std.fmt.bufPrint(&buf, fmt, args) catch return;
+    _ = std.posix.system.write(fd, formatted.ptr, formatted.len);
+}
+
 /// Initialize the runtime with a custom allocator (for testing)
 pub fn initRuntime(allocator: Allocator) void {
     _ = allocator; // 忽略传入的allocator，使用内部GPA
@@ -1730,8 +1742,7 @@ pub fn php_echo(val: *PHPValue) !void {
     defer php_gc_release(str_val);
 
     if (str_val.data.string_ptr) |str| {
-        const stdout = std.io.getStdOut().writer();
-        stdout.writeAll(str.data[0..str.length]) catch {};
+        fileWriteAll(1, str.data[0..str.length]);
     }
 }
 
@@ -1744,8 +1755,7 @@ pub fn php_print(val: *PHPValue) i64 {
 /// Print with newline
 pub fn php_println(val: *PHPValue) void {
     php_echo(val) catch {};
-    const stdout = std.io.getStdOut().writer();
-    stdout.writeAll("\n") catch {};
+    fileWriteAll(1, "\n");
 }
 
 /// Print formatted string (printf-style)
@@ -1793,8 +1803,7 @@ pub fn php_builtin_var_dump(val: *PHPValue) void {
     defer buffer.deinit(allocator);
 
     dumpValue(buffer.writer(), val, 0) catch {};
-    const stdout = std.io.getStdOut().writer();
-    stdout.writeAll(buffer.items) catch {};
+    fileWriteAll(1, buffer.items);
 }
 
 /// print_r - Print human-readable representation
@@ -1808,8 +1817,7 @@ pub fn php_builtin_print_r(val: *PHPValue, return_output: bool) *PHPValue {
     if (return_output) {
         return php_value_create_string(buffer.items);
     } else {
-        const stdout = std.io.getStdOut().writer();
-        stdout.writeAll(buffer.items) catch {};
+        fileWriteAll(1, buffer.items);
         return php_value_create_bool(true);
     }
 }
@@ -1825,8 +1833,7 @@ pub fn php_builtin_var_export(val: *PHPValue, return_output: bool) *PHPValue {
     if (return_output) {
         return php_value_create_string(buffer.items);
     } else {
-        const stdout = std.io.getStdOut().writer();
-        stdout.writeAll(buffer.items) catch {};
+        fileWriteAll(1, buffer.items);
         return php_value_create_null();
     }
 }
@@ -2492,19 +2499,17 @@ pub fn php_get_stack_trace() *PHPValue {
 
 /// Print stack trace to stderr
 pub fn php_print_stack_trace() void {
-    const stderr = std.io.getStdErr().writer();
-
-    stderr.writeAll("Stack trace:\n") catch {};
+    fileWriteAll(2, "Stack trace:\n");
 
     var frame = exception_state.stack_trace;
     var depth: usize = 0;
     while (frame) |f| {
-        stderr.print("#{d} {s}", .{ depth, f.file_name }) catch {};
-        stderr.print("({d}): ", .{f.line}) catch {};
+        filePrint(2, "#{d} {s}", .{ depth, f.file_name });
+        filePrint(2, "({d}): ", .{f.line});
         if (f.class_name) |cn| {
-            stderr.print("{s}::", .{cn}) catch {};
+            filePrint(2, "{s}::", .{cn});
         }
-        stderr.print("{s}()\n", .{f.function_name}) catch {};
+        filePrint(2, "{s}()\n", .{f.function_name});
 
         frame = f.next;
         depth += 1;
@@ -2514,21 +2519,19 @@ pub fn php_print_stack_trace() void {
 /// Handle uncaught exception (called at program exit if exception is pending)
 pub fn php_handle_uncaught_exception() void {
     if (exception_state.current_exception) |ex| {
-        const stderr = std.io.getStdErr().writer();
-
-        stderr.writeAll("\nFatal error: Uncaught ") catch {};
+        fileWriteAll(2, "\nFatal error: Uncaught ");
 
         if (ex.tag == .object) {
             if (ex.data.object_ptr) |obj| {
-                stderr.print("{s}", .{obj.class_name}) catch {};
+                filePrint(2, "{s}", .{obj.class_name});
             }
         }
 
         if (exception_state.message) |msg| {
-            stderr.print(": {s}", .{msg}) catch {};
+            filePrint(2, ": {s}", .{msg});
         }
 
-        stderr.writeAll("\n") catch {};
+        fileWriteAll(2, "\n");
         php_print_stack_trace();
 
         php_clear_exception();
