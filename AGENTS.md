@@ -108,3 +108,25 @@
    - 复测路径（体验流程）
 7. 是否有遗留问题/潜在问题
 8. 后续开发/优化建议
+
+## 十一、已知无引用代码知识库（参考用）
+
+仓库中存在一处"已知无 `@import` 引用、决定保留供后续参考"的代码留存，登记于：
+
+📄 [docs/knowledge/2026-07-18/已知无引用代码参考索引_d971e5b.md](docs/knowledge/2026-07-18/已知无引用代码参考索引_d971e5b.md)
+
+- **来源 commit**：`d971e5b20e87bb0831129c4d765d8b4e9cfa78f9`（xiusin，2026-07-18，"不删除无效代码，保留后续可能有用"）
+- **范围**：`src/runtime/` 下 23 个非空文件（共 12371 行）+ 2 个 0 字节空文件
+- **性质**：不参与编译，仅供后续参考；禁止以"清理死代码"为由删除（删除须走第六节确认机制）
+- **参考分类**（详见索引文档第 4 节）：
+  - GC 与内存 → `complete_gc` / `gc_roots` / `cow`
+  - 高性能数组 → `packed_array` / `value_array`；对象形状 → `shape`；NaN-Boxing 演进 → `nan_boxing`
+  - 性能优化 → `optimizations`（小整数缓存）/ `performance_pool` / `optimized_bridge`
+  - 高精度运算 → `bigdecimal`（bcmath 蓝本）
+  - 错误处理 → `advanced_error_handling` / `error_handler`
+  - 方法封装 → `array_wrapper` / `string_wrapper`
+  - 内置函数分发 → `builtin_dispatch`（已 deprecated，技术可参考）
+  - 并发协程（AOT 排除项，长期参考）→ `preemptive_scheduler` / `sync` / `select` / `io_integration` / `vm_scheduler_integration`
+- **取用前核对**：依赖闭包、类型系统差异（`types.Value` vs `nanbox_abi`）、所有权约定、并发模型、宪法合规（见索引文档第 6 节）
+
+AI 在进行 AOT 优化（GC 升级、数组 SIMD、bcmath、属性访问缓存、小整数缓存等）时，应先查阅该索引文档，避免重复造轮子。索引文档内容更新时同步更新对应记忆（ID `17843867355330182024`）。

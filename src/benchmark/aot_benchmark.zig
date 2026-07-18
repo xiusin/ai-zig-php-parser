@@ -30,8 +30,56 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const fs = std.fs;
-const process = std.process;
+
+/// 0.16 兼容：获取 Io 实例
+inline fn getIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
+/// 0.16 兼容：获取当前工作目录
+inline fn getCwd() std.Io.Dir {
+    return std.Io.Dir.cwd();
+}
+
+/// 0.16 兼容：获取毫秒时间戳（替代 std.time.milliTimestamp）
+inline fn milliTimestamp() i64 {
+    return std.Io.Timestamp.now(getIo(), .real).toMilliseconds();
+}
+
+/// 0.16 兼容：获取微秒时间戳（替代 std.time.microTimestamp）
+inline fn microTimestamp() i64 {
+    const ts = std.Io.Timestamp.now(getIo(), .real);
+    return @intCast(@divTrunc(ts.nanoseconds, 1000));
+}
+
+/// 0.16 兼容：获取秒级时间戳（替代 std.time.timestamp）
+inline fn unixTimestamp() i64 {
+    const ts = std.Io.Timestamp.now(getIo(), .real);
+    return @intCast(@divTrunc(ts.nanoseconds, std.time.ns_per_s));
+}
+
+/// 0.16 兼容：获取纳秒时间戳（替代 std.time.nanoTimestamp）
+inline fn nanoTimestamp() i128 {
+    return @intCast(std.Io.Timestamp.now(getIo(), .real).nanoseconds);
+}
+
+/// 0.16 兼容：运行命令（替代 std.ChildProcess.exec）
+fn runCommand(allocator: Allocator, argv: []const []const u8) !struct { exit_code: u8, stdout: []u8, stderr: []u8 } {
+    const result = std.process.run(allocator, getIo(), .{
+        .argv = argv,
+        .stdout_limit = .limited(1024 * 1024),
+        .stderr_limit = .limited(1024 * 1024),
+    }) catch |err| {
+        return err;
+    };
+
+    const exit_code: u8 = switch (result.term) {
+        .exited => |code| code,
+        else => 255,
+    };
+
+    return .{ .exit_code = exit_code, .stdout = result.stdout, .stderr = result.stderr };
+}
 
 /// AOT 性能测试配置
 pub const AOTBenchmarkConfig = struct {
@@ -126,15 +174,14 @@ pub const ExecutableSizeStats = struct {
     bss_size_bytes: u64,
 
     pub fn measure(executable_path: []const u8) !ExecutableSizeStats {
-        const file = try fs.cwd().openFile(executable_path, .{});
-        defer file.close();
+        const file = try getCwd().openFile(getIo(), executable_path, .{});
+        defer file.close(getIo());
 
-        const stat = try file.stat();
+        const stat = try file.stat(getIo());
 
         // 完整实现：解析可执行文件格式
         var header_buf: [64]u8 = undefined;
-        const bytes_read = try file.read(&header_buf);
-        if (bytes_read < 4) {
+        _ = file.readPositionalAll(getIo(), &header_buf, 0) catch {
             // 文件太小，回退到简单实现
             return .{
                 .size_bytes = stat.size,
@@ -142,13 +189,13 @@ pub const ExecutableSizeStats = struct {
                 .data_size_bytes = 0,
                 .bss_size_bytes = 0,
             };
-        }
+        };
 
         // 检测文件格式
-        if (bytes_read >= 4 and std.mem.eql(u8, header_buf[0..4], "\x7fELF")) {
+        if (std.mem.eql(u8, header_buf[0..4], "\x7fELF")) {
             // ELF 格式（Linux）
             return try parseELF(file, stat.size);
-        } else if (bytes_read >= 4 and
+        } else if (
             (std.mem.eql(u8, header_buf[0..4], "\xfe\xed\xfa\xce") or
                 std.mem.eql(u8, header_buf[0..4], "\xce\xfa\xed\xfe") or
                 std.mem.eql(u8, header_buf[0..4], "\xfe\xed\xfa\xcf") or
@@ -156,7 +203,7 @@ pub const ExecutableSizeStats = struct {
         {
             // Mach-O 格式（macOS）
             return try parseMachO(file, stat.size);
-        } else if (bytes_read >= 2 and std.mem.eql(u8, header_buf[0..2], "MZ")) {
+        } else if (std.mem.eql(u8, header_buf[0..2], "MZ")) {
             // PE 格式（Windows）
             return try parsePE(file, stat.size);
         }
@@ -171,11 +218,9 @@ pub const ExecutableSizeStats = struct {
     }
 
     /// 解析 ELF 格式（Linux）
-    fn parseELF(file: fs.File, total_size: u64) !ExecutableSizeStats {
-        try file.seekTo(0);
-
+    fn parseELF(file: std.Io.File, total_size: u64) !ExecutableSizeStats {
         var header: [64]u8 = undefined;
-        _ = try file.read(&header);
+        _ = try file.readPositionalAll(getIo(), &header, 0);
 
         // 检查是 32 位还是 64 位
         const is_64bit = header[4] == 2;
@@ -194,9 +239,8 @@ pub const ExecutableSizeStats = struct {
             const shstrndx = std.mem.readInt(u16, header[62..64], .little);
 
             // 读取段头字符串表
-            try file.seekTo(shoff + @as(u64, shstrndx) * @as(u64, shentsize));
             var shstrtab_header: [64]u8 = undefined;
-            _ = try file.read(&shstrtab_header);
+            _ = try file.readPositionalAll(getIo(), &shstrtab_header, shoff + @as(u64, shstrndx) * @as(u64, shentsize));
 
             const shstrtab_offset = std.mem.readInt(u64, shstrtab_header[24..32], .little);
             const shstrtab_size = std.mem.readInt(u64, shstrtab_header[32..40], .little);
@@ -205,15 +249,13 @@ pub const ExecutableSizeStats = struct {
             const shstrtab = try std.heap.page_allocator.alloc(u8, @intCast(shstrtab_size));
             defer std.heap.page_allocator.free(shstrtab);
 
-            try file.seekTo(shstrtab_offset);
-            _ = try file.read(shstrtab);
+            _ = try file.readPositionalAll(getIo(), shstrtab, shstrtab_offset);
 
             // 遍历所有段头
             var i: u16 = 0;
             while (i < shnum) : (i += 1) {
-                try file.seekTo(shoff + @as(u64, i) * @as(u64, shentsize));
                 var sh: [64]u8 = undefined;
-                _ = try file.read(&sh);
+                _ = try file.readPositionalAll(getIo(), &sh, shoff + @as(u64, i) * @as(u64, shentsize));
 
                 const name_offset = std.mem.readInt(u32, sh[0..4], .little);
                 const sh_size = std.mem.readInt(u64, sh[32..40], .little);
@@ -249,11 +291,9 @@ pub const ExecutableSizeStats = struct {
     }
 
     /// 解析 Mach-O 格式（macOS）
-    fn parseMachO(file: fs.File, total_size: u64) !ExecutableSizeStats {
-        try file.seekTo(0);
-
+    fn parseMachO(file: std.Io.File, total_size: u64) !ExecutableSizeStats {
         var header: [32]u8 = undefined;
-        _ = try file.read(&header);
+        _ = try file.readPositionalAll(getIo(), &header, 0);
 
         const magic = std.mem.readInt(u32, header[0..4], .little);
         const is_64bit = (magic == 0xfeedfacf or magic == 0xcffaedfe);
@@ -268,9 +308,8 @@ pub const ExecutableSizeStats = struct {
 
             var i: u32 = 0;
             while (i < ncmds) : (i += 1) {
-                try file.seekTo(offset);
                 var cmd_header: [8]u8 = undefined;
-                _ = try file.read(&cmd_header);
+                _ = try file.readPositionalAll(getIo(), &cmd_header, offset);
 
                 const cmd = std.mem.readInt(u32, cmd_header[0..4], .little);
                 const cmdsize = std.mem.readInt(u32, cmd_header[4..8], .little);
@@ -278,8 +317,7 @@ pub const ExecutableSizeStats = struct {
                 // LC_SEGMENT_64 = 0x19
                 if (cmd == 0x19) {
                     var segment: [72]u8 = undefined;
-                    try file.seekTo(offset);
-                    _ = try file.read(&segment);
+                    _ = try file.readPositionalAll(getIo(), &segment, offset);
 
                     const segname = segment[8..24];
                     const vmsize = std.mem.readInt(u64, segment[40..48], .little);
@@ -311,20 +349,17 @@ pub const ExecutableSizeStats = struct {
     }
 
     /// 解析 PE 格式（Windows）
-    fn parsePE(file: fs.File, total_size: u64) !ExecutableSizeStats {
-        try file.seekTo(0);
-
+    fn parsePE(file: std.Io.File, total_size: u64) !ExecutableSizeStats {
         // 读取 DOS 头
         var dos_header: [64]u8 = undefined;
-        _ = try file.read(&dos_header);
+        _ = try file.readPositionalAll(getIo(), &dos_header, 0);
 
         // 获取 PE 头偏移
         const pe_offset = std.mem.readInt(u32, dos_header[60..64], .little);
 
         // 读取 PE 头
-        try file.seekTo(pe_offset);
         var pe_sig: [4]u8 = undefined;
-        _ = try file.read(&pe_sig);
+        _ = try file.readPositionalAll(getIo(), &pe_sig, pe_offset);
 
         if (!std.mem.eql(u8, &pe_sig, "PE\x00\x00")) {
             return error.InvalidPEFormat;
@@ -332,13 +367,10 @@ pub const ExecutableSizeStats = struct {
 
         // 读取 COFF 头
         var coff_header: [20]u8 = undefined;
-        _ = try file.read(&coff_header);
+        _ = try file.readPositionalAll(getIo(), &coff_header, pe_offset + 4);
 
         const num_sections = std.mem.readInt(u16, coff_header[2..4], .little);
         const opt_header_size = std.mem.readInt(u16, coff_header[16..18], .little);
-
-        // 跳过可选头
-        try file.seekTo(pe_offset + 24 + @as(u64, opt_header_size));
 
         var text_size: u64 = 0;
         var data_size: u64 = 0;
@@ -348,7 +380,7 @@ pub const ExecutableSizeStats = struct {
         var i: u16 = 0;
         while (i < num_sections) : (i += 1) {
             var section: [40]u8 = undefined;
-            _ = try file.read(&section);
+            _ = try file.readPositionalAll(getIo(), &section, pe_offset + 24 + @as(u64, opt_header_size) + @as(u64, i) * 40);
 
             const name = section[0..8];
             const virtual_size = std.mem.readInt(u32, section[8..12], .little);
@@ -540,7 +572,7 @@ pub const AOTBenchmarkResult = struct {
             .aot_execution_time = aot_exec,
             .php_execution_time = php_exec,
             .speedup = speedup,
-            .timestamp = std.time.timestamp(),
+            .timestamp = unixTimestamp(),
         };
     }
 };
@@ -566,10 +598,10 @@ pub const AOTBenchmarkFramework = struct {
         const self = try allocator.create(Self);
         self.allocator = allocator;
         self.config = config;
-        self.results = .{};
+        self.results = .empty;
 
         // 创建临时目录
-        fs.cwd().makeDir(config.temp_dir) catch |err| {
+        getCwd().createDirPath(getIo(), config.temp_dir) catch |err| {
             if (err != error.PathAlreadyExists) {
                 return err;
             }
@@ -583,7 +615,7 @@ pub const AOTBenchmarkFramework = struct {
         self.results.deinit(self.allocator);
 
         // 清理临时目录
-        fs.cwd().deleteTree(self.config.temp_dir) catch |err| {
+        getCwd().deleteTree(getIo(), self.config.temp_dir) catch |err| {
             if (self.config.verbose) {
                 std.debug.print("警告: 无法删除临时目录: {s}\n", .{@errorName(err)});
             }
@@ -670,7 +702,7 @@ pub const AOTBenchmarkFramework = struct {
         while (i < self.config.warmup_iterations) : (i += 1) {
             _ = try self.compileSource(source_path, output_path);
             // 删除生成的文件
-            fs.cwd().deleteFile(output_path) catch {};
+            getCwd().deleteFile(getIo(), output_path) catch {};
         }
 
         // 测试阶段
@@ -680,14 +712,14 @@ pub const AOTBenchmarkFramework = struct {
 
         i = 0;
         while (i < self.config.test_iterations) : (i += 1) {
-            const start = std.time.milliTimestamp();
+            const start = milliTimestamp();
             _ = try self.compileSource(source_path, output_path);
-            const end = std.time.milliTimestamp();
+            const end = milliTimestamp();
 
             samples[i] = @intCast(end - start);
 
             // 删除生成的文件
-            fs.cwd().deleteFile(output_path) catch {};
+            getCwd().deleteFile(getIo(), output_path) catch {};
 
             if (self.config.verbose and (i + 1) % 10 == 0) {
                 std.debug.print("    完成 {d}/{d}\n", .{ i + 1, self.config.test_iterations });
@@ -711,11 +743,7 @@ pub const AOTBenchmarkFramework = struct {
             self.config.optimize_level,
         };
 
-        const result = std.ChildProcess.exec(.{
-            .allocator = self.allocator,
-            .argv = &argv,
-            .max_output_bytes = 1024 * 1024,
-        }) catch |err| {
+        const result = runCommand(self.allocator, &argv) catch |err| {
             if (self.config.verbose) {
                 std.debug.print("编译失败: {s}\n", .{@errorName(err)});
             }
@@ -724,9 +752,9 @@ pub const AOTBenchmarkFramework = struct {
         defer self.allocator.free(result.stdout);
         defer self.allocator.free(result.stderr);
 
-        if (result.term.Exited != 0) {
+        if (result.exit_code != 0) {
             if (self.config.verbose) {
-                std.debug.print("编译器退出码: {d}\n", .{result.term.Exited});
+                std.debug.print("编译器退出码: {d}\n", .{result.exit_code});
                 std.debug.print("错误输出: {s}\n", .{result.stderr});
             }
             return error.CompilationFailed;
@@ -773,13 +801,9 @@ pub const AOTBenchmarkFramework = struct {
         // 使用 time 命令或直接测量进程启动时间
         var argv = [_][]const u8{executable_path};
 
-        const start = std.time.microTimestamp();
+        const start = microTimestamp();
 
-        const result = std.ChildProcess.exec(.{
-            .allocator = self.allocator,
-            .argv = &argv,
-            .max_output_bytes = 1024 * 1024,
-        }) catch |err| {
+        const result = runCommand(self.allocator, &argv) catch |err| {
             if (self.config.verbose) {
                 std.debug.print("执行失败: {s}\n", .{@errorName(err)});
             }
@@ -788,11 +812,11 @@ pub const AOTBenchmarkFramework = struct {
         defer self.allocator.free(result.stdout);
         defer self.allocator.free(result.stderr);
 
-        const end = std.time.microTimestamp();
+        const end = microTimestamp();
 
-        if (result.term.Exited != 0) {
+        if (result.exit_code != 0) {
             if (self.config.verbose) {
-                std.debug.print("程序退出码: {d}\n", .{result.term.Exited});
+                std.debug.print("程序退出码: {d}\n", .{result.exit_code});
             }
             return error.ExecutionFailed;
         }
@@ -839,13 +863,9 @@ pub const AOTBenchmarkFramework = struct {
     fn executeAndMeasure(self: *Self, executable_path: []const u8) !u64 {
         var argv = [_][]const u8{executable_path};
 
-        const start = std.time.nanoTimestamp();
+        const start = nanoTimestamp();
 
-        const result = std.ChildProcess.exec(.{
-            .allocator = self.allocator,
-            .argv = &argv,
-            .max_output_bytes = 1024 * 1024,
-        }) catch |err| {
+        const result = runCommand(self.allocator, &argv) catch |err| {
             if (self.config.verbose) {
                 std.debug.print("执行失败: {s}\n", .{@errorName(err)});
             }
@@ -854,9 +874,9 @@ pub const AOTBenchmarkFramework = struct {
         defer self.allocator.free(result.stdout);
         defer self.allocator.free(result.stderr);
 
-        const end = std.time.nanoTimestamp();
+        const end = nanoTimestamp();
 
-        if (result.term.Exited != 0) {
+        if (result.exit_code != 0) {
             return error.ExecutionFailed;
         }
 
@@ -890,13 +910,9 @@ pub const AOTBenchmarkFramework = struct {
     fn executePHP(self: *Self, source_path: []const u8) !u64 {
         var argv = [_][]const u8{ self.config.php_executable, source_path };
 
-        const start = std.time.nanoTimestamp();
+        const start = nanoTimestamp();
 
-        const result = std.ChildProcess.exec(.{
-            .allocator = self.allocator,
-            .argv = &argv,
-            .max_output_bytes = 1024 * 1024,
-        }) catch |err| {
+        const result = runCommand(self.allocator, &argv) catch |err| {
             if (self.config.verbose) {
                 std.debug.print("PHP 执行失败: {s}\n", .{@errorName(err)});
             }
@@ -905,9 +921,9 @@ pub const AOTBenchmarkFramework = struct {
         defer self.allocator.free(result.stdout);
         defer self.allocator.free(result.stderr);
 
-        const end = std.time.nanoTimestamp();
+        const end = nanoTimestamp();
 
-        if (result.term.Exited != 0) {
+        if (result.exit_code != 0) {
             return error.ExecutionFailed;
         }
 
@@ -916,7 +932,7 @@ pub const AOTBenchmarkFramework = struct {
 
     /// 获取可执行文件路径
     fn getExecutablePath(self: *Self, source_path: []const u8) ![]u8 {
-        const basename = fs.path.basename(source_path);
+        const basename = std.fs.path.basename(source_path);
         const name_without_ext = if (std.mem.lastIndexOf(u8, basename, ".")) |idx|
             basename[0..idx]
         else
@@ -936,10 +952,9 @@ pub const AOTBenchmarkFramework = struct {
         output_path: []const u8,
         format: ReportFormat,
     ) !void {
-        const file = try fs.cwd().createFile(output_path, .{});
-        defer file.close();
-
-        const writer = file.writer();
+        var aw: std.Io.Writer.Allocating = .init(self.allocator);
+        defer aw.deinit();
+        const writer = &aw.writer;
 
         switch (format) {
             .json => try self.generateJsonReport(writer, result),
@@ -947,6 +962,10 @@ pub const AOTBenchmarkFramework = struct {
             .markdown => try self.generateMarkdownReport(writer, result),
             .html => try self.generateHtmlReport(writer, result),
         }
+
+        const file = try getCwd().createFile(getIo(), output_path, .{});
+        defer file.close(getIo());
+        try file.writeStreamingAll(getIo(), aw.writer.buffer[0..aw.writer.end]);
 
         if (self.config.verbose) {
             std.debug.print("报告已生成: {s}\n", .{output_path});
@@ -1137,6 +1156,76 @@ pub const AOTBenchmarkFramework = struct {
         try writer.writeAll("</body>\n</html>\n");
     }
 };
+
+// ============================================================================
+// Main 入口
+// ============================================================================
+
+pub fn main(init: std.process.Init.Minimal) !void {
+    var gpa = std.heap.DebugAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var io_environ: [0:null]?[*:0]u8 = [_:null]?[*:0]u8{};
+    var io_threaded = std.Io.Threaded.init(allocator, .{
+        .argv0 = .init(.{ .vector = &.{} }),
+        .environ = .{ .block = .{ .slice = &io_environ } },
+    });
+    defer io_threaded.deinit();
+
+    var args_iter = try std.process.Args.Iterator.initAllocator(init.args, allocator);
+    defer args_iter.deinit();
+
+    _ = args_iter.next(); // skip program name
+
+    var php_file: ?[]const u8 = null;
+    var warmup: u32 = 10;
+    var iterations: u32 = 100;
+    var verbose = false;
+
+    while (args_iter.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--warmup")) {
+            if (args_iter.next()) |val| {
+                warmup = std.fmt.parseInt(u32, val, 10) catch 10;
+            }
+        } else if (std.mem.eql(u8, arg, "--iterations")) {
+            if (args_iter.next()) |val| {
+                iterations = std.fmt.parseInt(u32, val, 10) catch 100;
+            }
+        } else if (std.mem.eql(u8, arg, "--verbose") or std.mem.eql(u8, arg, "-v")) {
+            verbose = true;
+        } else if (!std.mem.startsWith(u8, arg, "--")) {
+            php_file = arg;
+        }
+    }
+
+    if (php_file == null) {
+        std.debug.print("Usage: aot-benchmark <php_file> [--warmup N] [--iterations N] [--verbose]\n", .{});
+        return;
+    }
+
+    var framework = try AOTBenchmarkFramework.init(allocator, .{
+        .warmup_iterations = warmup,
+        .test_iterations = iterations,
+        .verbose = verbose,
+    });
+    defer framework.deinit();
+
+    const result = try framework.runFullBenchmark(php_file.?);
+
+    std.debug.print("\n=== AOT Benchmark Results ===\n", .{});
+    std.debug.print("Test: {s}\n", .{result.test_name});
+    std.debug.print("Speedup: {d:.2}x\n", .{result.speedup});
+    std.debug.print("Compile time (mean): {d:.2} ms\n", .{result.compile_time.mean_ms});
+    std.debug.print("Executable size: {d} bytes\n", .{result.executable_size.size_bytes});
+    std.debug.print("Startup time (mean): {d:.2} us\n", .{result.startup_time.mean_us});
+    std.debug.print("AOT execution (mean): {d:.2} ns\n", .{result.aot_execution_time.mean_ns});
+    std.debug.print("PHP execution (mean): {d:.2} ns\n", .{result.php_execution_time.mean_ns});
+
+    const report_path = "aot_benchmark_report.md";
+    try framework.generateReport(result, report_path, .markdown);
+    std.debug.print("\nReport saved to: {s}\n", .{report_path});
+}
 
 // ============================================================================
 // 测试
