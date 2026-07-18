@@ -5,18 +5,26 @@ const INTERPRETER_BIN = "zig-out/bin/php-interpreter";
 const DEFAULT_CACHE_DIR = ".zig-cache/aot_diff_bins";
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{ .thread_safe = true }){};
+    var gpa = std.heap.DebugAllocator(.{ .thread_safe = true }){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Ensure interpreter exists
-    const cwd = try std.fs.cwd.realpathAlloc(allocator, ".");
-    defer allocator.free(cwd);
+    var threaded_io = std.Io.Threaded.init(allocator, .{
+        .argv0 = .init(.{ .vector = &.{} }),
+        .environ = .{ .block = .{ .slice = &.{} } },
+    });
+    defer threaded_io.deinit();
+    const io = threaded_io.io();
+    const cwd = std.Io.Dir.cwd();
 
-    const interpreter_path = try std.fs.path.join(allocator, &.{ cwd, INTERPRETER_BIN });
+    // Ensure interpreter exists
+    const cwd_path = try cwd.realPathFileAlloc(io, ".", allocator);
+    defer allocator.free(cwd_path);
+
+    const interpreter_path = try std.fs.path.join(allocator, &.{ cwd_path, INTERPRETER_BIN });
     defer allocator.free(interpreter_path);
 
-    std.fs.cwd.access(interpreter_path, .{}) catch {
+    cwd.access(io, interpreter_path, .{}) catch {
         std.debug.print("Error: Interpreter not found at {s}\n", .{interpreter_path});
         std.debug.print("Please run 'zig build' first.\n", .{});
         std.process.exit(1);
@@ -54,14 +62,14 @@ pub fn main() !void {
     const timeout_compile_ms = getenvU64(allocator, "AOT_DIFF_TIMEOUT_COMPILE_MS") orelse 120_000;
     const timeout_run_ms = getenvU64(allocator, "AOT_DIFF_TIMEOUT_RUN_MS") orelse 10_000;
 
-    var skip = try loadListFile(allocator, skip_list_path);
+    var skip = try loadListFile(allocator, io, cwd, skip_list_path);
     defer freeListMap(allocator, &skip);
-    var xfail = try loadListFile(allocator, xfail_list_path);
+    var xfail = try loadListFile(allocator, io, cwd, xfail_list_path);
     defer freeListMap(allocator, &xfail);
 
     // Walk directory
-    var dir = try std.fs.cwd.openDir(test_dir, .{ .iterate = true });
-    defer dir.close();
+    var dir = try cwd.openDir(io, test_dir, .{ .iterate = true });
+    defer dir.close(io);
 
     var walker = try dir.walk(allocator);
     defer walker.deinit();
@@ -79,7 +87,7 @@ pub fn main() !void {
     var xfailed_tests: usize = 0;
     var xpassed_tests: usize = 0;
 
-    while (try walker.next()) |entry| {
+    while (try walker.next(io)) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.path, ".php")) continue;
 
@@ -94,16 +102,18 @@ pub fn main() !void {
     total_tests = test_paths.items.len;
 
     if (cache_enabled) {
-        std.fs.cwd.makePath(cache_dir) catch {};
+        cwd.createDirPath(io, cache_dir) catch {};
     }
 
-    var output_mutex: std.Thread.Mutex = .{};
-    var compile_mutex: std.Thread.Mutex = .{};
+    var output_mutex: std.Io.Mutex = .init;
+    var compile_mutex: std.Io.Mutex = .init;
     var index = std.atomic.Value(usize).init(0);
 
     const Shared = struct {
         allocator: std.mem.Allocator,
-        cwd: []const u8,
+        io: std.Io,
+        cwd: std.Io.Dir,
+        cwd_path: []const u8,
         test_dir: []const u8,
         cache_dir: []const u8,
         cache_enabled: bool,
@@ -115,8 +125,8 @@ pub fn main() !void {
         xfail: *std.StringHashMap([]const u8),
         test_paths: []const []const u8,
         index: *std.atomic.Value(usize),
-        output_mutex: *std.Thread.Mutex,
-        compile_mutex: *std.Thread.Mutex,
+        output_mutex: *std.Io.Mutex,
+        compile_mutex: *std.Io.Mutex,
         passed: *std.atomic.Value(usize),
         failed: *std.atomic.Value(usize),
         skipped: *std.atomic.Value(usize),
@@ -132,7 +142,9 @@ pub fn main() !void {
 
     const shared = Shared{
         .allocator = allocator,
+        .io = io,
         .cwd = cwd,
+        .cwd_path = cwd_path,
         .test_dir = test_dir,
         .cache_dir = cache_dir,
         .cache_enabled = cache_enabled,
@@ -187,32 +199,32 @@ fn workerLoop(shared: anytype) void {
 
         const entry_path = shared.test_paths[i];
 
-        shared.output_mutex.lock();
+        shared.output_mutex.lockUncancelable(shared.io);
         std.debug.print("[TEST] {s} ... ", .{entry_path});
-        shared.output_mutex.unlock();
+        shared.output_mutex.unlock(shared.io);
 
         if (shared.skip.contains(entry_path)) {
-            shared.output_mutex.lock();
+            shared.output_mutex.lockUncancelable(shared.io);
             std.debug.print("SKIP\n", .{});
-            shared.output_mutex.unlock();
+            shared.output_mutex.unlock(shared.io);
             _ = shared.skipped.fetchAdd(1, .acq_rel);
             continue;
         }
 
         const is_xfail = shared.xfail.get(entry_path) != null;
         const relative_path = std.fs.path.join(arena, &.{ shared.test_dir, entry_path }) catch {
-            shared.output_mutex.lock();
+            shared.output_mutex.lockUncancelable(shared.io);
             std.debug.print("FAIL (Path)\n", .{});
-            shared.output_mutex.unlock();
+            shared.output_mutex.unlock(shared.io);
             _ = shared.failed.fetchAdd(1, .acq_rel);
             continue;
         };
 
         const interp_args = &[_][]const u8{ shared.interpreter_path, "--mode=tree", relative_path };
-        const interp_result = runCommand(shared.allocator, interp_args, shared.timeout_interp_ms) catch {
-            shared.output_mutex.lock();
+        const interp_result = runCommand(shared.allocator, shared.io, interp_args, shared.timeout_interp_ms) catch {
+            shared.output_mutex.lockUncancelable(shared.io);
             std.debug.print("FAIL (Interpreter Spawn)\n", .{});
-            shared.output_mutex.unlock();
+            shared.output_mutex.unlock(shared.io);
             _ = shared.failed.fetchAdd(1, .acq_rel);
             continue;
         };
@@ -222,7 +234,7 @@ fn workerLoop(shared: anytype) void {
         }
 
         if (interp_result.exit_code != 0) {
-            shared.output_mutex.lock();
+            shared.output_mutex.lockUncancelable(shared.io);
             if (is_xfail) {
                 std.debug.print("XFAIL (Interpreter Error)\n", .{});
                 _ = shared.xfailed.fetchAdd(1, .acq_rel);
@@ -231,11 +243,11 @@ fn workerLoop(shared: anytype) void {
                 std.debug.print("Stderr: {s}\n", .{interp_result.stderr});
                 _ = shared.failed.fetchAdd(1, .acq_rel);
             }
-            shared.output_mutex.unlock();
+            shared.output_mutex.unlock(shared.io);
             continue;
         }
 
-        const cache_key = hashFileHex(arena, relative_path) catch null;
+        const cache_key = hashFileHex(arena, shared.io, shared.cwd, relative_path) catch null;
         var bin_path: []const u8 = undefined;
         var should_cleanup: bool = false;
 
@@ -245,37 +257,37 @@ fn workerLoop(shared: anytype) void {
             if (name) |n| {
                 bin_path = std.fs.path.join(arena, &.{ shared.cache_dir, n }) catch "";
                 if (bin_path.len != 0) {
-                    std.fs.cwd.access(bin_path, .{}) catch {
-                        const timestamp = std.time.milliTimestamp();
+                    shared.cwd.access(shared.io, bin_path, .{}) catch {
+                        const timestamp = std.Io.Timestamp.now(shared.io, .real).toMilliseconds();
                         const temp_name = std.fmt.allocPrint(arena, "tmp_{d}_{d}.bin", .{ timestamp, i }) catch "";
                         const temp_path = std.fs.path.join(arena, &.{ shared.cache_dir, temp_name }) catch "";
                         if (temp_path.len == 0) {
-                            shared.output_mutex.lock();
+                            shared.output_mutex.lockUncancelable(shared.io);
                             std.debug.print("FAIL (Cache Path)\n", .{});
-                            shared.output_mutex.unlock();
+                            shared.output_mutex.unlock(shared.io);
                             _ = shared.failed.fetchAdd(1, .acq_rel);
                             continue;
                         }
 
                         const output_arg = std.fmt.allocPrint(arena, "--output={s}", .{temp_path}) catch "";
                         const compile_args = &[_][]const u8{ shared.interpreter_path, "--mode=tree", "--compile", output_arg, relative_path };
-                        shared.compile_mutex.lock();
-                        const compile_result = runCommand(shared.allocator, compile_args, shared.timeout_compile_ms) catch {
-                            shared.compile_mutex.unlock();
-                            shared.output_mutex.lock();
+                        shared.compile_mutex.lockUncancelable(shared.io);
+                        const compile_result = runCommand(shared.allocator, shared.io, compile_args, shared.timeout_compile_ms) catch {
+                            shared.compile_mutex.unlock(shared.io);
+                            shared.output_mutex.lockUncancelable(shared.io);
                             std.debug.print("FAIL (Compilation Spawn)\n", .{});
-                            shared.output_mutex.unlock();
+                            shared.output_mutex.unlock(shared.io);
                             _ = shared.failed.fetchAdd(1, .acq_rel);
                             continue;
                         };
-                        shared.compile_mutex.unlock();
+                        shared.compile_mutex.unlock(shared.io);
                         defer {
                             shared.allocator.free(compile_result.stdout);
                             shared.allocator.free(compile_result.stderr);
                         }
 
                         if (compile_result.exit_code != 0) {
-                            shared.output_mutex.lock();
+                            shared.output_mutex.lockUncancelable(shared.io);
                             if (is_xfail) {
                                 std.debug.print("XFAIL (Compilation Error)\n", .{});
                                 _ = shared.xfailed.fetchAdd(1, .acq_rel);
@@ -284,26 +296,26 @@ fn workerLoop(shared: anytype) void {
                                 std.debug.print("Stderr: {s}\n", .{compile_result.stderr});
                                 _ = shared.failed.fetchAdd(1, .acq_rel);
                             }
-                            shared.output_mutex.unlock();
-                            std.fs.cwd.deleteFile(temp_path) catch {};
+                            shared.output_mutex.unlock(shared.io);
+                            shared.cwd.deleteFile(shared.io, temp_path) catch {};
                             continue;
                         }
 
-                        std.fs.cwd.rename(temp_path, bin_path) catch {
-                            std.fs.cwd.deleteFile(temp_path) catch {};
+                        shared.cwd.rename(temp_path, shared.cwd, bin_path, shared.io) catch {
+                            shared.cwd.deleteFile(shared.io, temp_path) catch {};
                         };
                     };
                 }
             }
             should_cleanup = false;
         } else {
-            const timestamp = std.time.milliTimestamp();
+            const timestamp = std.Io.Timestamp.now(shared.io, .real).toMilliseconds();
             const temp_name = std.fmt.allocPrint(arena, "temp_aot_{d}_{d}.bin", .{ timestamp, i }) catch "";
-            const temp_path = std.fs.path.join(arena, &.{ shared.cwd, temp_name }) catch "";
+            const temp_path = std.fs.path.join(arena, &.{ shared.cwd_path, temp_name }) catch "";
             if (temp_path.len == 0) {
-                shared.output_mutex.lock();
+                shared.output_mutex.lockUncancelable(shared.io);
                 std.debug.print("FAIL (Temp Path)\n", .{});
-                shared.output_mutex.unlock();
+                shared.output_mutex.unlock(shared.io);
                 _ = shared.failed.fetchAdd(1, .acq_rel);
                 continue;
             }
@@ -312,23 +324,23 @@ fn workerLoop(shared: anytype) void {
 
             const output_arg = std.fmt.allocPrint(arena, "--output={s}", .{bin_path}) catch "";
             const compile_args = &[_][]const u8{ shared.interpreter_path, "--mode=tree", "--compile", output_arg, relative_path };
-            shared.compile_mutex.lock();
-            const compile_result = runCommand(shared.allocator, compile_args, shared.timeout_compile_ms) catch {
-                shared.compile_mutex.unlock();
-                shared.output_mutex.lock();
+            shared.compile_mutex.lockUncancelable(shared.io);
+            const compile_result = runCommand(shared.allocator, shared.io, compile_args, shared.timeout_compile_ms) catch {
+                shared.compile_mutex.unlock(shared.io);
+                shared.output_mutex.lockUncancelable(shared.io);
                 std.debug.print("FAIL (Compilation Spawn)\n", .{});
-                shared.output_mutex.unlock();
+                shared.output_mutex.unlock(shared.io);
                 _ = shared.failed.fetchAdd(1, .acq_rel);
                 continue;
             };
-            shared.compile_mutex.unlock();
+            shared.compile_mutex.unlock(shared.io);
             defer {
                 shared.allocator.free(compile_result.stdout);
                 shared.allocator.free(compile_result.stderr);
             }
 
             if (compile_result.exit_code != 0) {
-                shared.output_mutex.lock();
+                shared.output_mutex.lockUncancelable(shared.io);
                 if (is_xfail) {
                     std.debug.print("XFAIL (Compilation Error)\n", .{});
                     _ = shared.xfailed.fetchAdd(1, .acq_rel);
@@ -337,29 +349,29 @@ fn workerLoop(shared: anytype) void {
                     std.debug.print("Stderr: {s}\n", .{compile_result.stderr});
                     _ = shared.failed.fetchAdd(1, .acq_rel);
                 }
-                shared.output_mutex.unlock();
-                std.fs.deleteFileAbsolute(bin_path) catch {};
+                shared.output_mutex.unlock(shared.io);
+                std.Io.Dir.deleteFileAbsolute(shared.io, bin_path) catch {};
                 continue;
             }
         }
 
         const aot_args = &[_][]const u8{bin_path};
-        const aot_result = runCommand(shared.allocator, aot_args, shared.timeout_run_ms) catch {
-            shared.output_mutex.lock();
+        const aot_result = runCommand(shared.allocator, shared.io, aot_args, shared.timeout_run_ms) catch {
+            shared.output_mutex.lockUncancelable(shared.io);
             std.debug.print("FAIL (AOT Spawn)\n", .{});
-            shared.output_mutex.unlock();
+            shared.output_mutex.unlock(shared.io);
             _ = shared.failed.fetchAdd(1, .acq_rel);
-            if (should_cleanup) std.fs.deleteFileAbsolute(bin_path) catch {};
+            if (should_cleanup) std.Io.Dir.deleteFileAbsolute(shared.io, bin_path) catch {};
             continue;
         };
         defer {
             shared.allocator.free(aot_result.stdout);
             shared.allocator.free(aot_result.stderr);
-            if (should_cleanup) std.fs.deleteFileAbsolute(bin_path) catch {};
+            if (should_cleanup) std.Io.Dir.deleteFileAbsolute(shared.io, bin_path) catch {};
         }
 
         if (aot_result.exit_code != 0) {
-            shared.output_mutex.lock();
+            shared.output_mutex.lockUncancelable(shared.io);
             if (is_xfail) {
                 std.debug.print("XFAIL (Runtime Error)\n", .{});
                 _ = shared.xfailed.fetchAdd(1, .acq_rel);
@@ -368,12 +380,12 @@ fn workerLoop(shared: anytype) void {
                 std.debug.print("Stderr: {s}\n", .{aot_result.stderr});
                 _ = shared.failed.fetchAdd(1, .acq_rel);
             }
-            shared.output_mutex.unlock();
+            shared.output_mutex.unlock(shared.io);
             continue;
         }
 
         const ok = std.mem.eql(u8, interp_result.stdout, aot_result.stdout);
-        shared.output_mutex.lock();
+        shared.output_mutex.lockUncancelable(shared.io);
         if (!ok) {
             if (is_xfail) {
                 std.debug.print("XFAIL (Output Mismatch)\n", .{});
@@ -393,14 +405,12 @@ fn workerLoop(shared: anytype) void {
                 _ = shared.passed.fetchAdd(1, .acq_rel);
             }
         }
-        shared.output_mutex.unlock();
+        shared.output_mutex.unlock(shared.io);
     }
 }
 
-fn hashFileHex(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
-    const file = try std.fs.cwd.openFile(path, .{});
-    defer file.close();
-    const data = try file.readToEndAlloc(allocator, 64 * 1024 * 1024);
+fn hashFileHex(allocator: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, path: []const u8) ![]const u8 {
+    const data = try cwd.readFileAlloc(io, path, allocator, .limited(64 * 1024 * 1024));
     defer allocator.free(data);
 
     var digest: [32]u8 = undefined;
@@ -424,93 +434,58 @@ const CommandResult = struct {
     exit_code: u8,
 };
 
-fn runCommand(allocator: std.mem.Allocator, argv: []const []const u8, timeout_ms: u64) !CommandResult {
-    var child = std.process.Child.init(argv, allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Pipe;
+fn runCommand(allocator: std.mem.Allocator, io: std.Io, argv: []const []const u8, timeout_ms: u64) !CommandResult {
+    const timeout: std.Io.Timeout = if (timeout_ms == 0) .none else .{ .duration = .{
+        .raw = std.Io.Duration.fromMilliseconds(@intCast(timeout_ms)),
+        .clock = .real,
+    } };
 
-    try child.spawn();
-
-    var done = std.atomic.Value(bool).init(false);
-    var killed = std.atomic.Value(bool).init(false);
-    const killer = try std.Thread.spawn(.{}, killAfterTimeout, .{ &child, &done, &killed, timeout_ms });
-
-    var stdout_buf: std.ArrayList(u8) = .empty;
-    defer stdout_buf.deinit(allocator);
-    var stderr_buf: std.ArrayList(u8) = .empty;
-    defer stderr_buf.deinit(allocator);
-
-    child.collectOutput(allocator, &stdout_buf, &stderr_buf, 16 * 1024 * 1024) catch |err| switch (err) {
-        error.StdoutStreamTooLong, error.StderrStreamTooLong => {},
+    const result = std.process.run(allocator, io, .{
+        .argv = argv,
+        .timeout = timeout,
+        .stdout_limit = .limited(16 * 1024 * 1024),
+        .stderr_limit = .limited(16 * 1024 * 1024),
+    }) catch |err| switch (err) {
+        error.Timeout => return CommandResult{
+            .stdout = try allocator.dupe(u8, ""),
+            .stderr = try std.fmt.allocPrint(allocator, "\n[AOT-DIFF] timeout\n", .{}),
+            .exit_code = 124,
+        },
         else => return err,
     };
 
-    const stdout = try stdout_buf.toOwnedSlice(allocator);
-    errdefer allocator.free(stdout);
-    var stderr = try stderr_buf.toOwnedSlice(allocator);
-    errdefer allocator.free(stderr);
-
-    const term = child.wait() catch std.process.Child.Term{ .Signal = 15 };
-    done.store(true, .release);
-    killer.join();
-
-    if (killed.load(.acquire)) {
-        const suffix = "\n[AOT-DIFF] timeout\n";
-        const combined = allocator.alloc(u8, stderr.len + suffix.len) catch return CommandResult{
-            .stdout = stdout,
-            .stderr = stderr,
-            .exit_code = 124,
-        };
-        @memcpy(combined[0..stderr.len], stderr);
-        @memcpy(combined[stderr.len..], suffix);
-        allocator.free(stderr);
-        stderr = combined;
-    }
-
-    const exit_code: u8 = if (killed.load(.acquire)) 124 else switch (term) {
-        .Exited => |code| code,
+    const exit_code: u8 = switch (result.term) {
+        .exited => |code| code,
         else => 255,
     };
 
     return CommandResult{
-        .stdout = stdout,
-        .stderr = stderr,
+        .stdout = result.stdout,
+        .stderr = result.stderr,
         .exit_code = exit_code,
     };
 }
 
-fn killAfterTimeout(child: *std.process.Child, done: *std.atomic.Value(bool), killed: *std.atomic.Value(bool), timeout_ms: u64) void {
-    var remaining = timeout_ms;
-    while (remaining > 0) {
-        const slice_ms: u64 = if (remaining > 50) 50 else remaining;
-        std.Thread.sleep(slice_ms * std.time.ns_per_ms);
-        if (done.load(.acquire)) return;
-        remaining -= slice_ms;
-    }
-    std.posix.kill(child.id, std.posix.SIG.KILL) catch |err| switch (err) {
-        error.ProcessNotFound => return,
-        else => return,
-    };
-    killed.store(true, .release);
-}
-
 fn getenvU64(allocator: std.mem.Allocator, name: []const u8) ?u64 {
-    const raw = std.process.getEnvVarOwned(allocator, name) catch return null;
+    const raw = getenvOwned(allocator, name) orelse return null;
     defer allocator.free(raw);
     return std.fmt.parseInt(u64, raw, 10) catch null;
 }
 
 fn getenvOwned(allocator: std.mem.Allocator, name: []const u8) ?[]u8 {
-    return std.process.getEnvVarOwned(allocator, name) catch return null;
+    // std.c.getenv 需要 sentinel-terminated 字符串
+    var name_buf: [256]u8 = undefined;
+    if (name.len + 1 > name_buf.len) return null;
+    @memcpy(name_buf[0..name.len], name);
+    name_buf[name.len] = 0;
+    const name_z: [*:0]const u8 = @ptrCast(&name_buf);
+    const raw = std.c.getenv(name_z) orelse return null;
+    return allocator.dupe(u8, std.mem.span(raw)) catch return null;
 }
 
-fn loadListFile(allocator: std.mem.Allocator, path: []const u8) !std.StringHashMap([]const u8) {
+fn loadListFile(allocator: std.mem.Allocator, io: std.Io, cwd: std.Io.Dir, path: []const u8) !std.StringHashMap([]const u8) {
     var map = std.StringHashMap([]const u8).init(allocator);
-    const file = std.fs.cwd.openFile(path, .{}) catch return map;
-    defer file.close();
-
-    const contents = try file.readToEndAlloc(allocator, 1024 * 1024);
+    const contents = cwd.readFileAlloc(io, path, allocator, .limited(1024 * 1024)) catch return map;
     defer allocator.free(contents);
 
     var it = std.mem.splitScalar(u8, contents, '\n');
