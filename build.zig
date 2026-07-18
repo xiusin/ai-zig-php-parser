@@ -130,6 +130,7 @@ pub fn build(b: *std.Build) void {
         "src/aot/test_optimizer_metrics.zig",
         "src/aot/test_licm.zig",
         "src/aot/test_loop_unroll.zig",
+        "src/aot/test_liveness_analysis.zig",
         "src/aot/test_runtime_arrays.zig",
         "src/aot/test_runtime_cycle_gc.zig",
         "src/aot/test_runtime_comprehensive.zig",

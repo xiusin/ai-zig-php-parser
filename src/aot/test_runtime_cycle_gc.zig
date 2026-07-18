@@ -5,7 +5,7 @@ const Value = runtime.Value;
 const PHPArray = runtime.PHPArray;
 
 fn withRuntime(allocator: std.mem.Allocator, comptime f: fn (std.mem.Allocator) anyerror!void) !void {
-    runtime.initRuntime(allocator);
+    try runtime.initRuntime(allocator);
     defer runtime.deinitRuntime();
     try f(allocator);
 }
@@ -22,7 +22,7 @@ test "AOT runtime - cycle GC collects cyclic arrays" {
             a.release(allocator);
             b.release(allocator);
 
-            runtime.php_collect_cycles();
+            _ = runtime.php_collect_cycles();
         }
     }.run);
 }
@@ -39,7 +39,7 @@ test "AOT runtime - cycle GC collects cyclic objects" {
             o1.release();
             o2.release();
 
-            runtime.php_collect_cycles();
+            _ = runtime.php_collect_cycles();
         }
     }.run);
 }

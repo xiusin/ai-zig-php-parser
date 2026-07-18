@@ -319,6 +319,7 @@ pub const LivenessAnalysis = struct {
         if (block_idx >= self.num_blocks) return false;
         if (self.inst_offsets == null or self.inst_counts == null) return false;
         if (inst_idx >= self.inst_counts.?[block_idx]) return false;
+        if (reg_id >= self.max_reg_id) return false;
         const inst_live = self.getInstLiveOut(block_idx, inst_idx);
         if (inst_live.len == 0) return false;
         return bitIsSet(inst_live, reg_id);
@@ -328,6 +329,7 @@ pub const LivenessAnalysis = struct {
     pub fn isLiveAtBlockExit(self: *const Self, block_idx: usize, reg_id: usize) bool {
         if (self.live_out_storage == null) return false;
         if (block_idx >= self.num_blocks) return false;
+        if (reg_id >= self.max_reg_id) return false;
         const start = block_idx * self.words_per_set;
         const block_live_out = self.live_out_storage.?[start .. start + self.words_per_set];
         return bitIsSet(block_live_out, reg_id);

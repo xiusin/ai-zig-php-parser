@@ -4,6 +4,10 @@
 const std = @import("std");
 const RegressionDetector = @import("regression_detector.zig").RegressionDetector;
 const BenchmarkResult = @import("regression_detector.zig").BenchmarkResult;
+const getIo = @import("regression_detector.zig").getIo;
+const getCwd = @import("regression_detector.zig").getCwd;
+const getTimestamp = @import("regression_detector.zig").getTimestamp;
+const getEnvVarOwned = @import("regression_detector.zig").getEnvVarOwned;
 
 /// CI 环境配置
 pub const CIConfig = struct {
@@ -18,21 +22,21 @@ pub const CIConfig = struct {
         var config = CIConfig{};
 
         // 从环境变量读取配置
-        if (std.process.getEnvVarOwned(allocator, "PERF_BASELINE_DIR")) |dir| {
+        if (getEnvVarOwned(allocator, "PERF_BASELINE_DIR")) |dir| {
             config.baseline_dir = dir;
         } else |_| {}
 
-        if (std.process.getEnvVarOwned(allocator, "PERF_THRESHOLD")) |threshold_str| {
+        if (getEnvVarOwned(allocator, "PERF_THRESHOLD")) |threshold_str| {
             defer allocator.free(threshold_str);
             config.threshold_percent = try std.fmt.parseFloat(f64, threshold_str);
         } else |_| {}
 
-        if (std.process.getEnvVarOwned(allocator, "PERF_MEM_THRESHOLD")) |threshold_str| {
+        if (getEnvVarOwned(allocator, "PERF_MEM_THRESHOLD")) |threshold_str| {
             defer allocator.free(threshold_str);
             config.mem_threshold_percent = try std.fmt.parseFloat(f64, threshold_str);
         } else |_| {}
 
-        if (std.process.getEnvVarOwned(allocator, "PERF_FAIL_ON_REGRESSION")) |fail_str| {
+        if (getEnvVarOwned(allocator, "PERF_FAIL_ON_REGRESSION")) |fail_str| {
             defer allocator.free(fail_str);
             config.fail_on_regression = std.mem.eql(u8, fail_str, "true");
         } else |_| {}
@@ -55,10 +59,7 @@ pub const CIRunner = struct {
             config.mem_threshold_percent,
         );
 
-        // 确保报告目录存在
-        std.fs.cwd.makePath(config.report_dir) catch |err| {
-            if (err != error.PathAlreadyExists) return err;
-        };
+        getCwd().createDirPath(getIo(), config.report_dir) catch {};
 
         return CIRunner{
             .allocator = allocator,
@@ -70,58 +71,44 @@ pub const CIRunner = struct {
     /// 获取当前 Git commit
     fn getGitCommit(self: *CIRunner) ![]u8 {
         // 尝试从环境变量获取
-        if (std.process.getEnvVarOwned(self.allocator, "GIT_COMMIT")) |commit| {
+        if (getEnvVarOwned(self.allocator, "GIT_COMMIT")) |commit| {
             return commit;
         } else |_| {}
 
-        if (std.process.getEnvVarOwned(self.allocator, "GITHUB_SHA")) |commit| {
+        if (getEnvVarOwned(self.allocator, "GITHUB_SHA")) |commit| {
             return commit;
         } else |_| {}
 
-        // 尝试从 git 命令获取
-        var child = std.process.Child.init(
-            &[_][]const u8{ "git", "rev-parse", "HEAD" },
-            self.allocator,
-        );
-        child.stdout_behavior = .Pipe;
+        // 0.16: process.run 替代 Child.init + spawn + readToEndAlloc + wait
+        const result = std.process.run(self.allocator, getIo(), .{
+            .argv = &[_][]const u8{ "git", "rev-parse", "HEAD" },
+        }) catch return try self.allocator.dupe(u8, "unknown");
+        defer self.allocator.free(result.stdout);
+        defer self.allocator.free(result.stderr);
 
-        try child.spawn();
-
-        const stdout = try child.stdout.?.readToEndAlloc(self.allocator, 1024);
-        _ = try child.wait();
-
-        // 去除换行符并复制为可变切片
-        const trimmed = std.mem.trim(u8, stdout, &std.ascii.whitespace);
-        defer self.allocator.free(stdout);
+        const trimmed = std.mem.trim(u8, result.stdout, &std.ascii.whitespace);
         return try self.allocator.dupe(u8, trimmed);
     }
 
     /// 获取当前分支
     fn getGitBranch(self: *CIRunner) ![]u8 {
         // 尝试从环境变量获取
-        if (std.process.getEnvVarOwned(self.allocator, "GIT_BRANCH")) |branch| {
+        if (getEnvVarOwned(self.allocator, "GIT_BRANCH")) |branch| {
             return branch;
         } else |_| {}
 
-        if (std.process.getEnvVarOwned(self.allocator, "GITHUB_REF_NAME")) |branch| {
+        if (getEnvVarOwned(self.allocator, "GITHUB_REF_NAME")) |branch| {
             return branch;
         } else |_| {}
 
-        // 尝试从 git 命令获取
-        var child = std.process.Child.init(
-            &[_][]const u8{ "git", "rev-parse", "--abbrev-ref", "HEAD" },
-            self.allocator,
-        );
-        child.stdout_behavior = .Pipe;
+        // 0.16: process.run 替代 Child.init + spawn + readToEndAlloc + wait
+        const result = std.process.run(self.allocator, getIo(), .{
+            .argv = &[_][]const u8{ "git", "rev-parse", "--abbrev-ref", "HEAD" },
+        }) catch return try self.allocator.dupe(u8, "unknown");
+        defer self.allocator.free(result.stdout);
+        defer self.allocator.free(result.stderr);
 
-        try child.spawn();
-
-        const stdout = try child.stdout.?.readToEndAlloc(self.allocator, 1024);
-        _ = try child.wait();
-
-        // 去除换行符并复制为可变切片
-        const trimmed = std.mem.trim(u8, stdout, &std.ascii.whitespace);
-        defer self.allocator.free(stdout);
+        const trimmed = std.mem.trim(u8, result.stdout, &std.ascii.whitespace);
         return try self.allocator.dupe(u8, trimmed);
     }
 
@@ -148,12 +135,12 @@ pub const CIRunner = struct {
         const report_filename = try std.fmt.allocPrint(
             self.allocator,
             "{s}/perf_report_{d}.md",
-            .{ self.config.report_dir, std.time.timestamp() },
+            .{ self.config.report_dir, getTimestamp() },
         );
         defer self.allocator.free(report_filename);
 
-        const report_file = try std.fs.cwd.createFile(report_filename, .{});
-        defer report_file.close();
+        const report_file = try getCwd().createFile(getIo(), report_filename, .{});
+        defer report_file.close(getIo());
 
         // 生成报告（直接传递文件）
         try self.detector.generateReport(regressions, report_file);
@@ -263,8 +250,8 @@ test "CIRunner - basic functionality" {
         .update_baseline_on_main = false,
     };
 
-    defer std.fs.cwd.deleteTree(config.baseline_dir) catch {};
-    defer std.fs.cwd.deleteTree(config.report_dir) catch {};
+    defer getCwd().deleteTree(getIo(), config.baseline_dir) catch {};
+    defer getCwd().deleteTree(getIo(), config.report_dir) catch {};
 
     var runner = try CIRunner.init(allocator, config);
 

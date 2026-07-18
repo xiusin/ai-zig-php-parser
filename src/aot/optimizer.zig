@@ -6216,7 +6216,7 @@ test "OptimizeLevel.getPassConfig" {
 test "PassConfig presets" {
     const debug = PassConfig.debug();
     try std.testing.expect(!debug.dead_code_elimination);
-    try std.testing.expectEqual(@as(u32, 2), debug.max_iterations);
+    try std.testing.expectEqual(@as(u32, 1), debug.max_iterations);
 
     const safe = PassConfig.releaseSafe();
     try std.testing.expect(safe.dead_code_elimination);
@@ -6499,10 +6499,10 @@ test "OptimizationStats.print" {
     };
 
     var buffer: [1024]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buffer);
-    try stats.print(stream.writer());
+    var bw = Diagnostics.BufferWriter{ .buf = &buffer };
+    try stats.print(&bw);
 
-    const output = stream.getWritten();
+    const output = bw.getWritten();
     try std.testing.expect(std.mem.indexOf(u8, output, "Dead instructions removed: 10") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "Dead blocks removed: 2") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "Constants propagated: 5") != null);

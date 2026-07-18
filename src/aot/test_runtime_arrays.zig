@@ -5,7 +5,7 @@ const Value = runtime.Value;
 const PHPArray = runtime.PHPArray;
 
 fn withRuntime(allocator: std.mem.Allocator, comptime f: fn (std.mem.Allocator) anyerror!void) !void {
-    runtime.initRuntime(allocator);
+    try runtime.initRuntime(allocator);
     defer runtime.deinitRuntime();
     try f(allocator);
 }
@@ -30,7 +30,7 @@ test "AOT runtime - array_unshift/array_shift/array_pop" {
             const last = try runtime.php_array_pop(arr_val, allocator);
             try testing.expectEqual(@as(i64, 3), last.asInt());
 
-            const cnt = try runtime.php_count(arr_val);
+            const cnt = try runtime.php_count(arr_val, Value.initInt(0));
             try testing.expectEqual(@as(i64, 2), cnt.asInt());
         }
     }.run);
@@ -59,7 +59,7 @@ test "AOT runtime - array_splice modifies array and returns removed" {
             try testing.expectEqual(@as(i64, 2), v0.asInt());
             try testing.expectEqual(@as(i64, 3), v1.asInt());
 
-            const cnt = try runtime.php_count(arr_val);
+            const cnt = try runtime.php_count(arr_val, Value.initInt(0));
             try testing.expectEqual(@as(i64, 2), cnt.asInt());
 
             const a0 = try runtime.php_array_shift(arr_val, allocator);
@@ -80,8 +80,9 @@ test "AOT runtime - sort and ksort" {
             try arr.push(allocator, Value.initInt(2));
             const arr_val = Value.initArray(arr);
 
-            const ok = try runtime.php_sort(arr_val, allocator);
-            try testing.expect(ok.asBool());
+            const sorted = try runtime.php_sort(arr_val, allocator);
+            // php_sort 返回排序后的数组（原地排序，返回数组引用）
+            try testing.expect(sorted.isArray());
             const v0 = try runtime.php_array_shift(arr_val, allocator);
             const v1 = try runtime.php_array_shift(arr_val, allocator);
             const v2 = try runtime.php_array_shift(arr_val, allocator);
@@ -95,8 +96,9 @@ test "AOT runtime - sort and ksort" {
             try assoc.set(allocator, .{ .integer = 1 }, Value.initInt(10));
             const assoc_val = Value.initArray(assoc);
 
-            const ok2 = try runtime.php_ksort(assoc_val, allocator);
-            try testing.expect(ok2.asBool());
+            const sorted2 = try runtime.php_ksort(assoc_val, allocator);
+            // php_ksort 返回排序后的数组（原地排序，返回数组引用）
+            try testing.expect(sorted2.isArray());
 
             var it = assoc.elements.iterator();
             const e0 = it.next().?;

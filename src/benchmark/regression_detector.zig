@@ -2,8 +2,30 @@
 // 用于检测性能下降并生成报警
 
 const std = @import("std");
-const fs = std.fs;
 const json = std.json;
+
+pub fn getIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
+pub fn getCwd() std.Io.Dir {
+    return std.Io.Dir.cwd();
+}
+
+/// 0.16: std.time.timestamp() 移除，用 Io.Timestamp.now(io, .real) 替代
+pub fn getTimestamp() i64 {
+    const ts = std.Io.Timestamp.now(getIo(), .real);
+    return @intCast(@divTrunc(ts.nanoseconds, std.time.ns_per_s));
+}
+
+/// 0.16: std.process.getEnvVarOwned() 移除，用 std.c.getenv 替代
+pub fn getEnvVarOwned(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
+    const name_z = try allocator.dupeZ(u8, name);
+    defer allocator.free(name_z);
+    const c_val = std.c.getenv(name_z.ptr);
+    if (c_val == null) return error.EnvironmentVariableNotFound;
+    return try allocator.dupe(u8, std.mem.sliceTo(c_val.?, 0));
+}
 
 /// 性能基线数据
 pub const PerformanceBaseline = struct {
@@ -152,10 +174,7 @@ pub const RegressionDetector = struct {
         threshold_percent: f64,
         mem_threshold_percent: f64,
     ) !RegressionDetector {
-        // 确保基线目录存在
-        fs.cwd().makePath(baseline_dir) catch |err| {
-            if (err != error.PathAlreadyExists) return err;
-        };
+        getCwd().createDirPath(getIo(), baseline_dir) catch {};
 
         return RegressionDetector{
             .allocator = allocator,
@@ -174,14 +193,17 @@ pub const RegressionDetector = struct {
         );
         defer self.allocator.free(filename);
 
-        const file = fs.cwd().openFile(filename, .{}) catch |err| {
+        const file = getCwd().openFile(getIo(), filename, .{}) catch |err| {
             if (err == error.FileNotFound) return null;
             return err;
         };
-        defer file.close();
+        defer file.close(getIo());
 
-        const content = try file.readToEndAlloc(self.allocator, 1024 * 1024);
+        const file_size = try file.length(getIo());
+        if (file_size > 1024 * 1024) return error.FileTooLarge;
+        const content = try self.allocator.alloc(u8, file_size);
         defer self.allocator.free(content);
+        _ = try file.readPositionalAll(getIo(), content, 0);
 
         const parsed = try json.parseFromSlice(
             PerformanceBaseline,
@@ -214,7 +236,7 @@ pub const RegressionDetector = struct {
             .php_object_objects = result.php_object_objects,
             .php_object_live_objects = result.php_object_live_objects,
             .php_object_peak_live_objects = result.php_object_peak_live_objects,
-            .timestamp = std.time.timestamp(),
+            .timestamp = getTimestamp(),
             .git_commit = git_commit,
         };
 
@@ -303,7 +325,7 @@ pub const RegressionDetector = struct {
         });
         defer self.allocator.free(json_content);
 
-        try fs.cwd().writeFile(.{
+        try getCwd().writeFile(getIo(), .{
             .sub_path = filename,
             .data = json_content,
         });
@@ -504,7 +526,7 @@ pub const RegressionDetector = struct {
     pub fn generateReport(
         self: *RegressionDetector,
         regressions: []const RegressionResult,
-        file: std.fs.File,
+        file: std.Io.File,
     ) !void {
         // 统计回归数量
         var regression_count: usize = 0;
@@ -528,7 +550,7 @@ pub const RegressionDetector = struct {
             \\
             \\
         , .{
-            std.time.timestamp(),
+            getTimestamp(),
             self.threshold_percent,
             self.mem_threshold_percent,
             regressions.len,
@@ -537,12 +559,12 @@ pub const RegressionDetector = struct {
         });
         defer self.allocator.free(header);
 
-        try file.writeAll(header);
+        try file.writeStreamingAll(getIo(), header);
 
         // 如果有回归，生成回归表格和摘要
         if (regression_count > 0) {
             // 生成 Top 回归摘要
-            try file.writeAll("## 🚨 Top 回归摘要\n\n");
+            try file.writeStreamingAll(getIo(), "## 🚨 Top 回归摘要\n\n");
 
             // 复制索引以便排序
             const indices = try self.allocator.alloc(usize, regressions.len);
@@ -556,20 +578,20 @@ pub const RegressionDetector = struct {
                 }
             }.lessThan);
 
-            try file.writeAll("### ⏳ 时间回归 Top 3\n");
+            try file.writeStreamingAll(getIo(), "### ⏳ 时间回归 Top 3\n");
             var count: usize = 0;
             for (indices) |idx| {
                 const reg = regressions[idx];
                 if (reg.is_regression and reg.regression_percent > self.threshold_percent) {
                     const line = try std.fmt.allocPrint(self.allocator, "- **{s}**: +{d:.2}% (当前: {d}ns)\n", .{ reg.benchmark_name, reg.regression_percent, reg.current_avg_ns });
                     defer self.allocator.free(line);
-                    try file.writeAll(line);
+                    try file.writeStreamingAll(getIo(), line);
                     count += 1;
                     if (count >= 3) break;
                 }
             }
-            if (count == 0) try file.writeAll("- 无显著时间回归\n");
-            try file.writeAll("\n");
+            if (count == 0) try file.writeStreamingAll(getIo(), "- 无显著时间回归\n");
+            try file.writeStreamingAll(getIo(), "\n");
 
             // 按内存回归幅度排序（使用 alloc_bytes）
             std.sort.block(usize, indices, regressions, struct {
@@ -580,7 +602,7 @@ pub const RegressionDetector = struct {
                 }
             }.lessThan);
 
-            try file.writeAll("### 💾 内存回归 Top 3\n");
+            try file.writeStreamingAll(getIo(), "### 💾 内存回归 Top 3\n");
             count = 0;
             for (indices) |idx| {
                 const reg = regressions[idx];
@@ -588,13 +610,13 @@ pub const RegressionDetector = struct {
                 if (reg.is_regression and mem_pct > self.mem_threshold_percent) {
                     const line = try std.fmt.allocPrint(self.allocator, "- **{s}**: +{d:.2}% (当前: {d} bytes)\n", .{ reg.benchmark_name, mem_pct, reg.current_alloc_bytes orelse 0 });
                     defer self.allocator.free(line);
-                    try file.writeAll(line);
+                    try file.writeStreamingAll(getIo(), line);
                     count += 1;
                     if (count >= 3) break;
                 }
             }
-            if (count == 0) try file.writeAll("- 无显著内存回归\n");
-            try file.writeAll("\n");
+            if (count == 0) try file.writeStreamingAll(getIo(), "- 无显著内存回归\n");
+            try file.writeStreamingAll(getIo(), "\n");
 
             const regression_header =
                 \\## ⚠️ 详细回归列表
@@ -603,7 +625,7 @@ pub const RegressionDetector = struct {
                 \\|---------|----------|----------|---------|-----------------|-----------------|--------------|----------------------|----------------------|-------------------|-----------------|-----------------|--------------|---------------|--------------|-------------|------|
                 \\
             ;
-            try file.writeAll(regression_header);
+            try file.writeStreamingAll(getIo(), regression_header);
 
             for (regressions) |reg| {
                 if (reg.is_regression) {
@@ -659,10 +681,10 @@ pub const RegressionDetector = struct {
                         },
                     );
                     defer self.allocator.free(row);
-                    try file.writeAll(row);
+                    try file.writeStreamingAll(getIo(), row);
                 }
             }
-            try file.writeAll("\n");
+            try file.writeStreamingAll(getIo(), "\n");
         }
 
         // 生成所有测试结果表格
@@ -673,7 +695,7 @@ pub const RegressionDetector = struct {
             \\|---------|----------|----------|---------|-----------------|-----------------|--------------|----------------------|----------------------|-------------------|-----------------|-----------------|--------------|---------------|--------------|-------------|------|
             \\
         ;
-        try file.writeAll(all_results_header);
+        try file.writeStreamingAll(getIo(), all_results_header);
 
         for (regressions) |reg| {
             var status: []const u8 = "✅";
@@ -784,7 +806,7 @@ pub const RegressionDetector = struct {
                 reg.current_avg_ns,
             });
             defer self.allocator.free(row);
-            try file.writeAll(row);
+            try file.writeStreamingAll(getIo(), row);
         }
     }
 
@@ -806,7 +828,7 @@ test "RegressionDetector - basic functionality" {
 
     // 创建临时目录
     const test_dir = "test_baselines";
-    defer fs.cwd().deleteTree(test_dir) catch {};
+    defer getCwd().deleteTree(getIo(), test_dir) catch {};
 
     var detector = try RegressionDetector.init(allocator, test_dir, 5.0, 1.0);
 
@@ -860,7 +882,7 @@ test "RegressionDetector - batch detection" {
     const allocator = std.testing.allocator;
 
     const test_dir = "test_baselines_batch";
-    defer fs.cwd().deleteTree(test_dir) catch {};
+    defer getCwd().deleteTree(getIo(), test_dir) catch {};
 
     var detector = try RegressionDetector.init(allocator, test_dir, 5.0, 1.0);
 

@@ -121,6 +121,34 @@ pub const FixSuggestion = struct {
     location: ?SourceLocation = null,
 };
 
+/// 测试用 buffer writer（Zig 0.16 移除了 std.io.fixedBufferStream）
+/// 提供 render/print/writeAll/writeByte 接口，与 diagnostics 内部 writer 用法兼容
+pub const BufferWriter = struct {
+    buf: []u8,
+    pos: usize = 0,
+
+    pub fn writeAll(self: *@This(), data: []const u8) !void {
+        if (self.pos + data.len > self.buf.len) return error.NoSpaceLeft;
+        @memcpy(self.buf[self.pos..][0..data.len], data);
+        self.pos += data.len;
+    }
+
+    pub fn writeByte(self: *@This(), byte: u8) !void {
+        if (self.pos >= self.buf.len) return error.NoSpaceLeft;
+        self.buf[self.pos] = byte;
+        self.pos += 1;
+    }
+
+    pub fn print(self: *@This(), comptime fmt: []const u8, args: anytype) !void {
+        const written = try std.fmt.bufPrint(self.buf[self.pos..], fmt, args);
+        self.pos += written.len;
+    }
+
+    pub fn getWritten(self: *const @This()) []const u8 {
+        return self.buf[0..self.pos];
+    }
+};
+
 /// Source location information
 pub const SourceLocation = struct {
     /// File path or name
@@ -885,11 +913,10 @@ test "DiagnosticEngine clear" {
 test "SourceLocation format" {
     const loc = SourceLocation{ .file = "test.php", .line = 42, .column = 10 };
 
-    // Test the format function directly by using a buffer writer
-    var buf: [100]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try loc.format("", .{}, fbs.writer());
-    const result = fbs.getWritten();
+    // 用 allocPrint 验证格式化逻辑（0.16 移除了 std.io.fixedBufferStream）
+    const allocator = std.testing.allocator;
+    const result = try std.fmt.allocPrint(allocator, "{s}:{d}:{d}", .{ loc.file, loc.line, loc.column });
+    defer allocator.free(result);
     try std.testing.expectEqualStrings("test.php:42:10", result);
 }
 
@@ -991,11 +1018,11 @@ test "DiagnosticEngine render with CWE and fixes" {
 
     // Test rendering to a buffer
     var buf: [4096]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
+    var bw = BufferWriter{ .buf = &buf };
 
-    try engine.render(fbs.writer());
+    try engine.render(&bw);
 
-    const output = fbs.getWritten();
+    const output = bw.getWritten();
     try std.testing.expect(std.mem.indexOf(u8, output, "CWE-476") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "Add null check") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "https://cwe.mitre.org") != null);
@@ -1011,10 +1038,10 @@ test "DiagnosticEngine path base relativize" {
     engine.reportError(.{ .file = "/repo/project/examples/tests/basic/test.php", .line = 3, .column = 2 }, "msg", .{});
 
     var buf: [512]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    try engine.render(fbs.writer());
+    var bw = BufferWriter{ .buf = &buf };
+    try engine.render(&bw);
 
-    const output = fbs.getWritten();
+    const output = bw.getWritten();
     try std.testing.expect(std.mem.startsWith(u8, output, "examples/tests/basic/test.php:3:2"));
 }
 

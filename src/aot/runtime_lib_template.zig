@@ -454,6 +454,13 @@ pub fn initRuntime(allocator: Allocator) !void {
     gc_in_progress = false;
     gc_enabled = true;
 
+    // 内存池须先初始化，再注册内置类：类注册（registerDateTimeClasses 等）会分配
+    // PHPString/PHPArray/PHPClosure，若 pool 未就绪则走 allocator.create 直接分配，
+    // 释放时却走 pool.destroy 路径，导致内存泄漏（顺序错误）
+    php_string_pool = try std.heap.MemoryPool(PHPString).initCapacity(runtime_allocator, 64);
+    php_array_pool = try std.heap.MemoryPool(PHPArray).initCapacity(runtime_allocator, 64);
+    php_closure_pool = try std.heap.MemoryPool(PHPClosure).initCapacity(runtime_allocator, 16);
+
     // 注册内置类
     ClassMeta.registerStdClass(runtime_allocator) catch {};
     registerArrayIterator(runtime_allocator) catch {};
@@ -467,9 +474,6 @@ pub fn initRuntime(allocator: Allocator) !void {
     gc_release_events = 0;
     current_exception = Value.initNull();
     has_exception = false;
-    php_string_pool = try std.heap.MemoryPool(PHPString).initCapacity(runtime_allocator, 64);
-    php_array_pool = try std.heap.MemoryPool(PHPArray).initCapacity(runtime_allocator, 64);
-    php_closure_pool = try std.heap.MemoryPool(PHPClosure).initCapacity(runtime_allocator, 16);
     resetAllocStats();
     initPredefinedConstants() catch {};
 }

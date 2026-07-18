@@ -286,7 +286,7 @@ test "数学 - sqrt" {
 test "数学 - round" {
     const val = Value.initFloat(3.7);
     const precision = Value.initInt(0);
-    const result = try runtime.php_round(val, precision);
+    const result = try runtime.php_round(val, precision, Value.initInt(0));
     try testing.expectApproxEqAbs(@as(f64, 4.0), result.asFloat(), 0.001);
 }
 
@@ -462,7 +462,7 @@ test "数组 - 创建和count" {
     try arr.push(allocator, Value.initInt(3));
 
     const arr_val = Value.initArray(arr);
-    const count = try runtime.php_count(arr_val);
+    const count = try runtime.php_count(arr_val, Value.initInt(0));
     try testing.expectEqual(@as(i64, 3), count.asInt());
 }
 
@@ -477,10 +477,10 @@ test "数组 - in_array" {
 
     const arr_val = Value.initArray(arr);
 
-    const r1 = try runtime.php_in_array(Value.initInt(2), arr_val);
+    const r1 = try runtime.php_in_array(Value.initInt(2), arr_val, Value.initBool(false));
     try testing.expect(r1.asBool());
 
-    const r2 = try runtime.php_in_array(Value.initInt(5), arr_val);
+    const r2 = try runtime.php_in_array(Value.initInt(5), arr_val, Value.initBool(false));
     try testing.expect(!r2.asBool());
 }
 
@@ -493,7 +493,7 @@ test "数组 - array_keys" {
     try arr.push(allocator, Value.initInt(20));
 
     const arr_val = Value.initArray(arr);
-    const keys = try runtime.php_array_keys(arr_val, allocator);
+    const keys = try runtime.php_array_keys(arr_val, Value.initNull(), allocator);
     defer keys.asArray().release(allocator);
 
     try testing.expectEqual(@as(usize, 2), keys.asArray().count());
@@ -531,7 +531,7 @@ test "高阶数组函数 - array_map with strtoupper" {
     defer callback_name.release(allocator);
     const callback = Value.initString(callback_name);
 
-    const result = try runtime.php_array_map(callback, arr_val, allocator);
+    const result = try runtime.php_array_map(&.{ callback, arr_val }, allocator);
     defer result.asArray().release(allocator);
 
     try testing.expectEqual(@as(usize, 2), result.asArray().count());
@@ -554,7 +554,7 @@ test "高阶数组函数 - array_filter with callback" {
     try arr.push(allocator, Value.initInt(3));
 
     const arr_val = Value.initArray(arr);
-    const result = try runtime.php_array_filter(arr_val, Value.initNull(), allocator);
+    const result = try runtime.php_array_filter(arr_val, Value.initNull(), Value.initInt(0), allocator);
     defer result.asArray().release(allocator);
 
     try testing.expectEqual(@as(usize, 3), result.asArray().count());
