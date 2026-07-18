@@ -119,10 +119,6 @@ pub const MultiFileCompiler = MultiFileCompilerMod.MultiFileCompiler;
 pub const MultiFileCompileResult = MultiFileCompilerMod.MultiFileCompileResult;
 pub const CompiledFile = MultiFileCompilerMod.CompiledFile;
 
-// Incremental Compiler module
-pub const IncrementalCompilerMod = @import("incremental_compiler.zig");
-pub const IncrementalCompiler = IncrementalCompilerMod.IncrementalCompiler;
-
 // OOP Runtime module
 pub const OOPRuntime = @import("oop_runtime.zig");
 pub const OOPObject = OOPRuntime.PHPObject;

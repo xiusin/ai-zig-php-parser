@@ -18914,17 +18914,6 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
             .{ .src = "src/aot/concurrency_runtime.zig", .dst = "concurrency_runtime.zig" },
             .{ .src = "src/aot/array_ops_shared.zig", .dst = "array_ops_shared.zig" },
             .{ .src = "src/aot/nanbox_abi.zig", .dst = "nanbox_abi.zig" },
-            // 拆分文件（用于降低编译内存峰值）
-            .{ .src = "src/aot/rt_core.zig", .dst = "rt_core.zig" },
-            .{ .src = "src/aot/rt_runtime.zig", .dst = "rt_runtime.zig" },
-            .{ .src = "src/aot/rt_string.zig", .dst = "rt_string.zig" },
-            .{ .src = "src/aot/rt_array.zig", .dst = "rt_array.zig" },
-            .{ .src = "src/aot/rt_value.zig", .dst = "rt_value.zig" },
-            .{ .src = "src/aot/rt_io.zig", .dst = "rt_io.zig" },
-            .{ .src = "src/aot/rt_funcs1.zig", .dst = "rt_funcs1.zig" },
-            .{ .src = "src/aot/rt_class.zig", .dst = "rt_class.zig" },
-            .{ .src = "src/aot/rt_funcs2.zig", .dst = "rt_funcs2.zig" },
-            .{ .src = "src/aot/rt_funcs3.zig", .dst = "rt_funcs3.zig" },
         };
 
         const io = getIo();
