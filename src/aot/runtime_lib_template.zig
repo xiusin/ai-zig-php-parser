@@ -2127,20 +2127,25 @@ pub const PHPArray = struct {
 
     /// 设置元素
     /// PHP 值语义：存储的数组值若被共享（ref_count > 1），执行浅拷贝（COW）
+    /// 引用类型（Ref）在存储前解引用，确保数组元素持有值而非引用
     pub fn set(self: *PHPArray, allocator: Allocator, key: ArrayKey, value: Value) !void {
         // 释放旧值
         if (self.elements.get(key)) |old_value| {
             old_value.release(allocator);
         }
 
+        // 解引用：PHP 值语义要求数组元素持有值而非引用
+        var resolved = value;
+        while (resolved.isRef()) resolved = resolved.asRef().*;
+
         // COW：若值是被共享的数组，浅拷贝后再存储（PHP 值语义）
         var val_to_store: Value = undefined;
-        if (value.isArray() and !value.isRef() and value.asArray().ref_count > 1) {
-            const cloned = try value.asArray().cloneShallow(allocator);
+        if (resolved.isArray() and resolved.asArray().ref_count > 1) {
+            const cloned = try resolved.asArray().cloneShallow(allocator);
             val_to_store = Value.initArray(cloned);
         } else {
-            _ = value.retain();
-            val_to_store = value;
+            _ = resolved.retain();
+            val_to_store = resolved;
         }
 
         // 如果是字符串键，保留键
@@ -2158,15 +2163,19 @@ pub const PHPArray = struct {
 
     /// 追加元素（使用下一个整数索引）
     /// PHP 值语义：存储的数组值若被共享（ref_count > 1），执行浅拷贝（COW）
+    /// 引用类型（Ref）在存储前解引用，确保数组元素持有值而非引用
     pub fn push(self: *PHPArray, allocator: Allocator, value: Value) !void {
         const key = ArrayKey{ .integer = self.next_index };
+        // 解引用：PHP 值语义要求数组元素持有值而非引用
+        var resolved = value;
+        while (resolved.isRef()) resolved = resolved.asRef().*;
         var val_to_store: Value = undefined;
-        if (value.isArray() and !value.isRef() and value.asArray().ref_count > 1) {
-            const cloned = try value.asArray().cloneShallow(allocator);
+        if (resolved.isArray() and resolved.asArray().ref_count > 1) {
+            const cloned = try resolved.asArray().cloneShallow(allocator);
             val_to_store = Value.initArray(cloned);
         } else {
-            _ = value.retain();
-            val_to_store = value;
+            _ = resolved.retain();
+            val_to_store = resolved;
         }
         try self.elements.put(key, val_to_store);
         self.next_index += 1;
@@ -2893,6 +2902,10 @@ pub fn val_assign(target: *Value, value: Value) void {
     // 如果目标是 Ref，写穿到引用指向的位置
     if (target.*.isRef()) {
         const ptr = target.*.asRef();
+        // 自引用保护：by-ref 数组参数写回时，value 可能是 Ref 且指向同一 cell
+        // （array_set 通过 __arr_deref 修改数组后，store 将原始 Ref 值写回）
+        // 此时 cell.* 已包含修改后的数组，写回 Ref 会产生循环引用
+        if (value.isRef() and value.asRef() == ptr) return;
         ptr.release(runtime_allocator);
         _ = value.retain();
         val_assign(ptr, value);
@@ -18204,15 +18217,16 @@ pub const PHPObject = struct {
                         if (m != meta and meta.properties.get(prop_name) != null) continue;
                         if (obj.properties.get(prop_name) == null) {
                             if (prop_def.default_value) |default| {
+                                const key_copy = try allocator.dupe(u8, prop_name);
                                 if (default.isInt() and default.asInt() == -1) {
                                     const new_array = try PHPArray.init(allocator);
-                                    try obj.properties.put(prop_name, Value.initArray(new_array));
+                                    try obj.properties.put(key_copy, Value.initArray(new_array));
                                 } else if (default.isArray()) {
                                     const cloned_array = try default.asArray().cloneDeep(allocator);
-                                    try obj.properties.put(prop_name, Value.initArray(cloned_array));
+                                    try obj.properties.put(key_copy, Value.initArray(cloned_array));
                                 } else {
                                     _ = default.retain();
-                                    try obj.properties.put(prop_name, default);
+                                    try obj.properties.put(key_copy, default);
                                 }
                             }
                         }
@@ -18296,10 +18310,11 @@ gcBufferObject(self);
             }
         }
 
-        // 释放所有属性值
+        // 释放所有属性值和键字符串
         var iter = self.properties.iterator();
         while (iter.next()) |entry| {
             entry.value_ptr.release(self.allocator);
+            self.allocator.free(entry.key_ptr.*);
         }
         self.properties.deinit();
 
@@ -18391,8 +18406,12 @@ gcBufferObject(self);
         // 保留新值
         _ = value.retain();
 
-        // 存储属性
-        try self.properties.put(name, value);
+        // 存储属性（新键时复制键字符串，避免动态属性名被释放后悬垂指针）
+        const gop = try self.properties.getOrPut(name);
+        if (!gop.found_existing) {
+            gop.key_ptr.* = try self.allocator.dupe(u8, name);
+        }
+        gop.value_ptr.* = value;
     }
 
     /// 调用方法（支持 __call 魔法函数和继承）
@@ -19944,6 +19963,11 @@ pub fn php_property_exists(obj_val: Value, property_name: Value) !Value {
 
     if (Value_isObject(obj_val)) {
         const obj = Value_asObject(obj_val);
+        // 首先检查类元数据中是否有该属性声明（包括类型化属性无默认值的情况）
+        if (obj.class_meta) |meta| {
+            if (findPropertyDeclaringClass(meta, name) != null) return Value.initBool(true);
+        }
+        // 然后检查对象实例中的动态属性
         return Value.initBool(obj.hasProperty(name));
     }
 
@@ -27068,7 +27092,7 @@ pub fn php_password_hash(password: Value, algo: Value, allocator: Allocator) !Va
             .allocator = allocator,
             .params = .{ .rounds_log = cost, .silently_truncate_password = true },
             .encoding = .crypt,
-        }, &hash_buf);
+        }, &hash_buf, getIo());
 
         // Zig生成$2b$前缀，PHP使用$2y$前缀，替换以保持兼容
         var result_buf: [128]u8 = undefined;
@@ -27244,7 +27268,7 @@ pub fn php_sha256(str: Value, allocator: Allocator) !Value {
 }
 
 /// hash - 生成哈希值
-pub fn php_hash(algorithm: Value, data: Value, allocator: Allocator) !Value {
+pub fn php_hash(algorithm: Value, data: Value, raw_output: Value, allocator: Allocator) !Value {
     if (!algorithm.isString() or !data.isString()) return Value.initBool(false);
 
     const algo = algorithm.asString().data;
@@ -27252,9 +27276,9 @@ pub fn php_hash(algorithm: Value, data: Value, allocator: Allocator) !Value {
     const input = data.asString().data;
 
     if (std.mem.eql(u8, algo, "md5")) {
-        return php_md5(data, Value.initBool(false), allocator);
+        return php_md5(data, raw_output, allocator);
     } else if (std.mem.eql(u8, algo, "sha1")) {
-        return php_sha1(data, Value.initBool(false), allocator);
+        return php_sha1(data, raw_output, allocator);
     } else if (std.mem.eql(u8, algo, "sha256")) {
         return php_sha256(data, allocator);
     } else if (std.mem.eql(u8, algo, "sha224")) {

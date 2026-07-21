@@ -658,7 +658,7 @@ fn runAOTCompilation(allocator: std.mem.Allocator, io: std.Io, cwd_dir: std.Io.D
         const result = multi_compiler.compile(options.input_file, output_path) catch |err| {
             std.debug.print("Error: Multi-file compilation failed: {s}\n", .{@errorName(err)});
             diagnostics.printToStderr();
-            return;
+            return error.CompilationFailed;
         };
 
         if (result.success) {

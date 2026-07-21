@@ -213,6 +213,12 @@ pub const NativeLinker = struct {
     current_this_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_var_name_map: ?*const std.AutoHashMap(usize, []const u8) = null,
     in_while_loop: bool = false,
+    /// i64 快速路径优化标志：当为 true 时，call 生成处对 php_increment/php_lt/php_add 等生成运行时类型检查 + i64 操作
+    i64_loop_optimize_active: bool = false,
+    /// P1: 循环内已知整数寄存器集合（load loop_var_reg 的结果）
+    /// 当 i64_loop_optimize_active 为 true 且此集合非 null 时，
+    /// 集合中的寄存器被视为 i64 类型，省略 isInt() 运行时检查
+    i64_loop_known_int_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_loop_exit_block: ?usize = null,
     current_byref_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_switch_value_regs: ?*const std.AutoHashMap(usize, void) = null,
@@ -223,6 +229,7 @@ pub const NativeLinker = struct {
     ref_param_alloca_map: ?*std.AutoHashMap(usize, usize) = null,
     current_ref_capture_allocas: ?*const std.AutoHashMap(usize, usize) = null,
     current_make_ref_allocas: ?*const std.AutoHashMap(usize, void) = null,
+    current_make_ref_result_regs: ?*const std.AutoHashMap(usize, void) = null, // make_ref 指令的结果寄存器（Ref Value，传递时不需要再 initRef）
     current_foreach_ref_allocas: ?*const std.AutoHashMap(usize, void) = null,
     current_iter_value_ref_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_optimized_alloca_regs: ?*const std.AutoHashMap(usize, void) = null,
@@ -241,6 +248,7 @@ pub const NativeLinker = struct {
     current_gen_inst_idx: ?usize = null, // 当前正在生成代码的指令索引（用于 releaseDeadOperands）
     current_catch_used_regs: ?*const std.AutoHashMap(usize, void) = null, // catch块中引用的寄存器集合（cleanup时跳过）
     current_cond_br_source_block: ?usize = null, // 嵌套cond_br的源块索引（用于PHI incoming选择）
+    current_cond_br_header_idx: ?usize = null, // 嵌套循环头块索引（用于while内重生成非phi指令）
     current_property_get_origins: ?*const std.AutoHashMap(usize, PropertyGetOrigin) = null,
     current_load_to_alloca: ?*const std.AutoHashMap(usize, usize) = null,
 
@@ -506,13 +514,27 @@ pub const NativeLinker = struct {
         } else if (value_is_alloca) {
             // value ← alloca: 读出内存
             try writer.print("{s}reg_{d} = reg_{d}.*;\n", .{ indent, result_id, value_id });
-        } else if ((result_is_ref_ptr or value_is_ref_ptr)) {
+        } else if (result_is_ref_ptr and value_is_ref_ptr) {
             // ptr ← ptr: 指针拷贝
             try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, result_id, value_id });
+        } else if (result_is_ref_ptr) {
+            // ref_ptr ← value: 解引用赋值（ref_ptr 是 *Value，需写入 .* ）
+            try writer.print("{s}reg_{d}.* = reg_{d};\n", .{ indent, result_id, value_id });
+        } else if (value_is_ref_ptr) {
+            // value ← ref_ptr: 读取指针指向的值
+            try writer.print("{s}reg_{d} = reg_{d}.*;\n", .{ indent, result_id, value_id });
         } else {
             // value ← value: 普通赋值
             try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, result_id, value_id });
         }
+    }
+
+    /// PHI 赋值 + retain：处理指针类型（alloca/ref_ptr）的解引用
+    /// 用于 generateLoopBodyFromBlock 中的 PHI 赋值路径
+    fn writePhiAssignWithRetain(self: *Self, writer: anytype, phi_res_id: usize, incoming_value_id: usize) !void {
+        try self.writePtrAwareAssign(writer, "", phi_res_id, incoming_value_id);
+        const phi_deref = if (self.isPointerReg(phi_res_id)) ".*" else "";
+        try writer.print("_ = reg_{d}{s}.retain();\n", .{ phi_res_id, phi_deref });
     }
 
     /// 写入转义后的 Zig 字符串字面量内容（处理反斜杠等特殊字符）
@@ -636,6 +658,15 @@ pub const NativeLinker = struct {
     /// 释放资源
     pub fn deinit(self: *Self) void {
         if (self.temp_dir) |dir| {
+            // 删除临时目录（除非 ZIGPHP_AOT_KEEP_TEMP 环境变量设置）
+            const keep_env = std.c.getenv("ZIGPHP_AOT_KEEP_TEMP");
+            const keep = keep_env != null and keep_env.?[0] != 0;
+            if (keep) {
+                std.debug.print("[AOT] ZIGPHP_AOT_KEEP_TEMP=1, temp dir preserved: {s}\n", .{dir});
+            } else {
+                const io = getIo();
+                getCwd().deleteTree(io, dir) catch {};
+            }
             self.allocator.free(dir);
         }
         self.func_return_types.deinit();
@@ -650,17 +681,15 @@ pub const NativeLinker = struct {
             return dir;
         }
 
-        // 使用固定的临时目录名
-        const temp_name = ".zigphp_aot_build";
+        // 使用进程唯一临时目录名（支持并行编译）
+        // PID 已足够区分不同进程，同一进程内通过 self.temp_dir 缓存复用
+        const pid = @as(u64, @intCast(std.posix.system.getpid()));
+        const temp_name = try std.fmt.allocPrint(self.allocator, ".zigphp_aot_build_{d}", .{pid});
+        defer self.allocator.free(temp_name);
 
-        // 不删除已存在的目录，让zig使用增量编译缓存
-        // std.fs.cwd().deleteTree(temp_name) catch {};
-
-        // 创建目录（如果不存在）
+        // 创建目录
         const io = getIo();
-        getCwd().createDir(io, temp_name, .default_dir) catch |err| {
-            if (err != error.PathAlreadyExists) return err;
-        };
+        try getCwd().createDir(io, temp_name, .default_dir);
 
         // 返回绝对路径
         const abs_path = try getCwd().realPathFileAlloc(io, temp_name, self.allocator);
@@ -4529,12 +4558,18 @@ pub const NativeLinker = struct {
         // 后续 store 到这些 alloca 需要通过 val_deref 写穿引用槽
         var make_ref_allocas = std.AutoHashMap(usize, void).init(self.allocator);
         defer make_ref_allocas.deinit();
+        // make_ref 指令的结果寄存器（Ref Value），传递引用参数时直接传递，不需要 initRef 包装
+        var make_ref_result_regs = std.AutoHashMap(usize, void).init(self.allocator);
+        defer make_ref_result_regs.deinit();
         for (func.blocks.items) |blk_scan| {
             for (blk_scan.instructions.items) |inst_scan| {
                 if (inst_scan.op == .make_ref) {
                     const ptr_id = inst_scan.op.make_ref.ptr.id;
                     if (alloca_registers.contains(ptr_id)) {
                         try make_ref_allocas.put(ptr_id, {});
+                    }
+                    if (inst_scan.result) |res| {
+                        try make_ref_result_regs.put(res.id, {});
                     }
                 }
             }
@@ -4596,6 +4631,16 @@ pub const NativeLinker = struct {
                                 try ref_ptr_regs.put(res.id, {});
                             },
                             else => {},
+                        }
+                    }
+                    // 引用参数无论 IR 类型如何，都是 *Value 指针
+                    if (inst_scan.op == .param) {
+                        const param_op = inst_scan.op.param;
+                        for (func.ref_params.items) |ref_idx| {
+                            if (ref_idx == param_op.index) {
+                                try ref_ptr_regs.put(res.id, {});
+                                break;
+                            }
                         }
                     }
                 }
@@ -5085,6 +5130,9 @@ pub const NativeLinker = struct {
 
         self.current_make_ref_allocas = &make_ref_allocas;
         defer self.current_make_ref_allocas = null;
+
+        self.current_make_ref_result_regs = &make_ref_result_regs;
+        defer self.current_make_ref_result_regs = null;
 
         // std.debug.print("alloca_registers.count() = {d}\n", .{alloca_registers.count()});
         var alloca_it = alloca_registers.keyIterator();
@@ -6317,8 +6365,17 @@ pub const NativeLinker = struct {
             alloca_regs.contains(reg_id)
         else
             false;
+        const is_ref_ptr = if (self.current_ref_ptr_regs) |rpr| rpr.contains(reg_id) else false;
 
         if (is_alloca) {
+            if (self.isRefParamAlloca(reg_id)) {
+                // ref_param_alloca: reg 为 **Value，需要双重解引用获取 Value
+                try writer.print("reg_{d}.*.*", .{reg_id});
+            } else {
+                try writer.print("reg_{d}.*", .{reg_id});
+            }
+        } else if (is_ref_ptr) {
+            // ref_ptr: reg 为 *Value，需要解引用获取 Value
             try writer.print("reg_{d}.*", .{reg_id});
         } else {
             try writer.print("reg_{d}", .{reg_id});
@@ -6508,10 +6565,12 @@ pub const NativeLinker = struct {
             // phi 赋值需要 retain/release 以维护引用计数语义：
             // 安全顺序：先 retain 新值(incoming)，再 release 旧值(result)，再 assign
             // 防 self-loop PHI（x = phi(x from L)）时 release 旧值使值被回收
+            // 注意：alloca 类型也必须 retain/release，否则 incoming 被 releaseDeadOperands
+            // 释放后 alloca 中的值变悬垂引用，函数出口再 release 时 double free
             for (assignments) |assign| {
                 const result_is_alloca = self.isAllocaReg(assign.result.id);
                 const result_is_ref_ptr = if (self.current_ref_ptr_regs) |rpr| rpr.contains(assign.result.id) else false;
-                const need_refcount = !result_is_alloca and !result_is_ref_ptr;
+                const need_refcount = !result_is_ref_ptr;
                 const value_is_ptr = self.isPointerReg(assign.value.id);
                 if (need_refcount) {
                     if (value_is_ptr) {
@@ -6519,7 +6578,11 @@ pub const NativeLinker = struct {
                     } else {
                         try writer.print("{s}_ = reg_{d}.retain();\n", .{ indent, assign.value.id });
                     }
-                    try writer.print("{s}reg_{d}.release(runtime.runtime_allocator);\n", .{ indent, assign.result.id });
+                    if (result_is_alloca) {
+                        try writer.print("{s}reg_{d}.*.release(runtime.runtime_allocator);\n", .{ indent, assign.result.id });
+                    } else {
+                        try writer.print("{s}reg_{d}.release(runtime.runtime_allocator);\n", .{ indent, assign.result.id });
+                    }
                 }
                 try self.writePtrAwareAssign(writer, indent, assign.result.id, assign.value.id);
             }
@@ -6539,10 +6602,11 @@ pub const NativeLinker = struct {
             // 第二步：赋值（含 retain/release）
             // 安全顺序：先 retain 新值，再 release 旧值，再 assign
             // 防 self-loop PHI（x = phi(x from L)）时 release 旧值使值被回收
+            // 注意：alloca 类型也必须 retain/release（同无依赖分支）
             for (assignments, 0..) |assign, i| {
                 const result_is_alloca = self.isAllocaReg(assign.result.id);
                 const result_is_ref_ptr = if (self.current_ref_ptr_regs) |rpr| rpr.contains(assign.result.id) else false;
-                const need_refcount = !result_is_alloca and !result_is_ref_ptr;
+                const need_refcount = !result_is_ref_ptr;
                 if (need_refcount) {
                     if (needs_temp.items[i]) {
                         try writer.print("{s}_ = phi_temp_{d}.retain();\n", .{ indent, i });
@@ -6554,7 +6618,11 @@ pub const NativeLinker = struct {
                             try writer.print("{s}_ = reg_{d}.retain();\n", .{ indent, assign.value.id });
                         }
                     }
-                    try writer.print("{s}reg_{d}.release(runtime.runtime_allocator);\n", .{ indent, assign.result.id });
+                    if (result_is_alloca) {
+                        try writer.print("{s}reg_{d}.*.release(runtime.runtime_allocator);\n", .{ indent, assign.result.id });
+                    } else {
+                        try writer.print("{s}reg_{d}.release(runtime.runtime_allocator);\n", .{ indent, assign.result.id });
+                    }
                 }
                 if (needs_temp.items[i]) {
                     const result_is_ptr = self.isPointerReg(assign.result.id);
@@ -6575,7 +6643,12 @@ pub const NativeLinker = struct {
     /// 生成带弱类型转换的 return 语句
     /// 当函数有返回类型声明时，对标量返回值做 php_coerce_value 转换
     fn writeReturnStmt(self: *Self, writer: anytype, reg_id: usize, is_alloca: bool, indent: []const u8) !void {
-        const val_expr = if (is_alloca)
+        const is_rpa = if (self.ref_param_alloca_map) |map| map.contains(reg_id) else false;
+        const is_ref_ptr = if (self.current_ref_ptr_regs) |rpr| rpr.contains(reg_id) else false;
+        const actual_is_alloca = self.isAllocaReg(reg_id) or is_alloca;
+        const val_expr = if (is_rpa)
+            try std.fmt.allocPrint(self.allocator, "reg_{d}.*.*", .{reg_id})
+        else if (actual_is_alloca or is_ref_ptr)
             try std.fmt.allocPrint(self.allocator, "reg_{d}.*", .{reg_id})
         else
             try std.fmt.allocPrint(self.allocator, "reg_{d}", .{reg_id});
@@ -6594,7 +6667,12 @@ pub const NativeLinker = struct {
 
     /// 生成带弱类型转换的 return 字符串（用于 allocPrint+appendSlice 路径）
     fn generateReturnStr(self: *Self, reg_id: usize, is_alloca: bool, indent: []const u8) ![]const u8 {
-        const val_expr = if (is_alloca)
+        const is_rpa = if (self.ref_param_alloca_map) |map| map.contains(reg_id) else false;
+        const is_ref_ptr = if (self.current_ref_ptr_regs) |rpr| rpr.contains(reg_id) else false;
+        const actual_is_alloca = self.isAllocaReg(reg_id) or is_alloca;
+        const val_expr = if (is_rpa)
+            try std.fmt.allocPrint(self.allocator, "reg_{d}.*.*", .{reg_id})
+        else if (actual_is_alloca or is_ref_ptr)
             try std.fmt.allocPrint(self.allocator, "reg_{d}.*", .{reg_id})
         else
             try std.fmt.allocPrint(self.allocator, "reg_{d}", .{reg_id});
@@ -6917,8 +6995,26 @@ pub const NativeLinker = struct {
                             try writer.print("runtime.Value.initRef(reg_{d})", .{arg.id});
                         }
                     } else {
-                        // 不是指针，按普通参数处理
-                        try self.writeRegRef(writer, arg.id);
+                        // arg_type != .ptr，但可能是 ref_param_alloca/alloca/ref_ptr/make_ref_result
+                        if (self.isRefParamAlloca(arg.id)) {
+                            // ref_param_alloca: reg 为 **Value，reg_X.* 是 *Value
+                            try writer.print("runtime.Value.initRef(reg_{d}.*)", .{arg.id});
+                        } else if (self.current_alloca_regs != null and self.current_alloca_regs.?.contains(arg.id)) {
+                            // 普通 alloca: reg 为 *Value，&reg_X.* 是 *Value
+                            try writer.print("runtime.Value.initRef(&reg_{d}.*)", .{arg.id});
+                        } else if (self.current_ref_ptr_regs != null and self.current_ref_ptr_regs.?.contains(arg.id)) {
+                            // ref_ptr: reg 为 *Value，直接 initRef
+                            try writer.print("runtime.Value.initRef(reg_{d})", .{arg.id});
+                        } else if (self.current_make_ref_result_regs != null and self.current_make_ref_result_regs.?.contains(arg.id)) {
+                            // make_ref 结果：reg 已经是 Ref Value，直接传递
+                            try writer.print("reg_{d}", .{arg.id});
+                        } else if (is_ref) {
+                            // 引用参数但变量被 mem2reg 优化（非 alloca）：用 &reg_X 创建引用
+                            try writer.print("runtime.Value.initRef(&reg_{d})", .{arg.id});
+                        } else {
+                            // 普通值：按值传递（fallback）
+                            try self.writeRegRef(writer, arg.id);
+                        }
                     }
                 } else {
                     // 普通参数
@@ -7678,8 +7774,16 @@ pub const NativeLinker = struct {
                 // 通过 *Value 指针调用 val_assign 写穿到 cell（make_ref 创建的堆单元）
                 if (op.through_ref) {
                     if (self.ref_param_alloca_map) |map| {
-                        if (map.get(op.ptr.id)) |param_reg_id| {
-                            try writer.print("    runtime.val_assign(reg_{d}, reg_{d});\n", .{ param_reg_id, op.value.id });
+                        if (map.get(op.ptr.id)) |_| {
+                            // op.ptr.id 是 ref_param_alloca_map 的键（alloca 存放引用参数指针）
+                            // alloca 类型: **Value -> .* 得到 *Value; mem2reg 后: Value -> & 得到 *Value
+                            if (self.isAllocaReg(op.ptr.id)) {
+                                try writer.print("    runtime.val_assign(reg_{d}.*, ", .{op.ptr.id});
+                            } else {
+                                try writer.print("    runtime.val_assign(&reg_{d}, ", .{op.ptr.id});
+                            }
+                            try self.writeRegRef(writer, op.value.id);
+                            try writer.print(");\n", .{});
                             return;
                         }
                     }
@@ -7808,7 +7912,9 @@ pub const NativeLinker = struct {
 
                 // 如果 ptr 是指针类型，但不在 alloca_registers 中，说明被 mem2reg 提升了
                 const is_real_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.ptr.id) else false;
-                const ptr_is_optimized = (ptr_tag == .ptr and !is_real_alloca) or ptr_tag != .ptr;
+                // 真正的 alloca 寄存器始终需要解引用处理，无论 IR 类型如何
+                // 因为 alloca 声明为 *Value（普通）或 **Value（ref_param_alloca）
+                const ptr_is_optimized = !is_real_alloca and ((ptr_tag == .ptr and !is_real_alloca) or ptr_tag != .ptr);
 
                 if (ptr_is_optimized) {
                     // mem2reg 优化：直接赋值
@@ -7846,10 +7952,16 @@ pub const NativeLinker = struct {
                     // 原有的 store 逻辑（指针操作）
                     // 检查是否是 alloca 寄存器（即指针类型）
                     const is_ptr = if (self.current_alloca_regs) |regs| regs.contains(op.ptr.id) else false;
+                    const is_rpa = if (self.ref_param_alloca_map) |map| map.contains(op.ptr.id) else false;
                     const ptr_prefix = if (is_ptr) "" else "&";
+                    // release/val_assign 需要 *Value：ref_param_alloca(**Value)→.* 得到 *Value；普通 alloca(*Value)→直接用
+                    const ptr_release_deref = if (is_rpa) ".*" else "";
+                    // 直接赋值需要 Value：ref_param_alloca(**Value)→.*.* 得到 Value；普通 alloca(*Value)→.* 得到 Value
+                    const ptr_assign_deref = if (is_rpa) ".*.*" else ".*";
+                    const ptr_val_deref = ptr_release_deref;
 
                     // 1. 释放旧值
-                    try writer.print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{op.ptr.id});
+                    try writer.print("    reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ op.ptr.id, ptr_release_deref });
 
                     // 2. 增加新值引用计数并赋值
                     // 使用修正后的类型
@@ -7903,39 +8015,39 @@ pub const NativeLinker = struct {
                             // 引用赋值 $ref = &$this->prop：直接赋值共享 PHPArray，不做 val_assign COW
                             // retain 已在上方执行，release 旧值已执行，直接赋值即可
                             if (value_is_ref_param) {
-                                try writer.print("    reg_{d}.* = reg_{d}.*;\n", .{ op.ptr.id, op.value.id });
+                                try writer.print("    reg_{d}{s} = reg_{d}.*;\n", .{ op.ptr.id, ptr_assign_deref, op.value.id });
                             } else if (value_is_alloca) {
-                                try writer.print("    reg_{d}.* = reg_{d}.*;\n", .{ op.ptr.id, op.value.id });
+                                try writer.print("    reg_{d}{s} = reg_{d}.*;\n", .{ op.ptr.id, ptr_assign_deref, op.value.id });
                             } else {
-                                try writer.print("    reg_{d}.* = reg_{d};\n", .{ op.ptr.id, op.value.id });
+                                try writer.print("    reg_{d}{s} = reg_{d};\n", .{ op.ptr.id, ptr_assign_deref, op.value.id });
                             }
                         } else if (value_is_ref_param) {
-                            try writer.print("    runtime.val_assign({s}reg_{d}, reg_{d}.*);\n", .{ ptr_prefix, op.ptr.id, op.value.id });
+                            try writer.print("    runtime.val_assign({s}reg_{d}{s}, reg_{d}.*);\n", .{ ptr_prefix, op.ptr.id, ptr_val_deref, op.value.id });
                         } else if (value_is_alloca) {
-                            try writer.print("    runtime.val_assign({s}reg_{d}, reg_{d}.*);\n", .{ ptr_prefix, op.ptr.id, op.value.id });
+                            try writer.print("    runtime.val_assign({s}reg_{d}{s}, reg_{d}.*);\n", .{ ptr_prefix, op.ptr.id, ptr_val_deref, op.value.id });
                         } else {
-                            try writer.print("    runtime.val_assign({s}reg_{d}, reg_{d});\n", .{ ptr_prefix, op.ptr.id, op.value.id });
+                            try writer.print("    runtime.val_assign({s}reg_{d}{s}, reg_{d});\n", .{ ptr_prefix, op.ptr.id, ptr_val_deref, op.value.id });
                         }
                     } else if (corrected_value_tag == .i64) {
                         if (value_is_alloca) {
-                            try writer.print("    runtime.val_assign({s}reg_{d}, reg_{d}.*);\n", .{ ptr_prefix, op.ptr.id, op.value.id });
+                            try writer.print("    runtime.val_assign({s}reg_{d}{s}, reg_{d}.*);\n", .{ ptr_prefix, op.ptr.id, ptr_val_deref, op.value.id });
                         } else {
                             // 普通寄存器都是Value类型，需要.toInt()转换
-                            try writer.print("    runtime.val_assign({s}reg_{d}, runtime.Value.initInt(reg_{d}.toInt()));\n", .{ ptr_prefix, op.ptr.id, op.value.id });
+                            try writer.print("    runtime.val_assign({s}reg_{d}{s}, runtime.Value.initInt(reg_{d}.toInt()));\n", .{ ptr_prefix, op.ptr.id, ptr_val_deref, op.value.id });
                         }
                     } else if (corrected_value_tag == .f64) {
                         if (value_is_alloca) {
-                            try writer.print("    runtime.val_assign({s}reg_{d}, reg_{d}.*);\n", .{ ptr_prefix, op.ptr.id, op.value.id });
+                            try writer.print("    runtime.val_assign({s}reg_{d}{s}, reg_{d}.*);\n", .{ ptr_prefix, op.ptr.id, ptr_val_deref, op.value.id });
                         } else {
                             // 普通寄存器都是Value类型，需要.toFloat()转换
-                            try writer.print("    runtime.val_assign({s}reg_{d}, runtime.Value.initFloat(reg_{d}.toFloat()));\n", .{ ptr_prefix, op.ptr.id, op.value.id });
+                            try writer.print("    runtime.val_assign({s}reg_{d}{s}, runtime.Value.initFloat(reg_{d}.toFloat()));\n", .{ ptr_prefix, op.ptr.id, ptr_val_deref, op.value.id });
                         }
                     } else if (corrected_value_tag == .bool) {
                         if (value_is_alloca) {
-                            try writer.print("    runtime.val_assign({s}reg_{d}, reg_{d}.*);\n", .{ ptr_prefix, op.ptr.id, op.value.id });
+                            try writer.print("    runtime.val_assign({s}reg_{d}{s}, reg_{d}.*);\n", .{ ptr_prefix, op.ptr.id, ptr_val_deref, op.value.id });
                         } else {
                             // 普通寄存器都是Value类型，需要.toBool()转换
-                            try writer.print("    runtime.val_assign({s}reg_{d}, runtime.Value.initBool(reg_{d}.toBool()));\n", .{ ptr_prefix, op.ptr.id, op.value.id });
+                            try writer.print("    runtime.val_assign({s}reg_{d}{s}, runtime.Value.initBool(reg_{d}.toBool()));\n", .{ ptr_prefix, op.ptr.id, ptr_val_deref, op.value.id });
                         }
                     } else {
                         // Fallback for other types
@@ -7947,9 +8059,9 @@ pub const NativeLinker = struct {
                             }
                         }
                         if (value_is_alloca) {
-                            try writer.print("    runtime.val_assign({s}reg_{d}, reg_{d}.*);\n", .{ ptr_prefix, op.ptr.id, op.value.id });
+                            try writer.print("    runtime.val_assign({s}reg_{d}{s}, reg_{d}.*);\n", .{ ptr_prefix, op.ptr.id, ptr_val_deref, op.value.id });
                         } else {
-                            try writer.print("    runtime.val_assign({s}reg_{d}, reg_{d});\n", .{ ptr_prefix, op.ptr.id, op.value.id });
+                            try writer.print("    runtime.val_assign({s}reg_{d}{s}, reg_{d});\n", .{ ptr_prefix, op.ptr.id, ptr_val_deref, op.value.id });
                         }
                     }
                 } // end of optimized_alloca else
@@ -7966,12 +8078,13 @@ pub const NativeLinker = struct {
                     // COW：闭包捕获时，对共享数组先克隆再创建 Ref
                     // 避免闭包内 array_shift 等修改写穿原始数组
                     if (op.cow) {
-                        try writer.print("    if (reg_{d}.*.isArray() and !reg_{d}.*.isRef()) {{\n", .{ op.ptr.id, op.ptr.id });
-                        try writer.print("        const __arr = reg_{d}.*.asArray();\n", .{op.ptr.id});
+                        const cow_suffix = if (self.isRefParamAlloca(op.ptr.id)) ".*.*" else if (self.isAllocaReg(op.ptr.id)) ".*" else "";
+                        try writer.print("    if (reg_{d}{s}.isArray() and !reg_{d}{s}.isRef()) {{\n", .{ op.ptr.id, cow_suffix, op.ptr.id, cow_suffix });
+                        try writer.print("        const __arr = reg_{d}{s}.asArray();\n", .{ op.ptr.id, cow_suffix });
                         try writer.print("        if (__arr.ref_count > 1) {{\n", .{});
                         try writer.print("            const __cloned = try __arr.cloneShallow(runtime.runtime_allocator);\n", .{});
                         try writer.print("            __arr.release(runtime.runtime_allocator);\n", .{});
-                        try writer.print("            reg_{d}.* = runtime.Value.initArray(__cloned);\n", .{op.ptr.id});
+                        try writer.print("            reg_{d}{s} = runtime.Value.initArray(__cloned);\n", .{ op.ptr.id, cow_suffix });
                         try writer.print("        }}\n", .{});
                         try writer.print("    }}\n", .{});
                     }
@@ -8131,6 +8244,8 @@ pub const NativeLinker = struct {
                     };
 
                     const ptr_prefix = if (is_ptr or ptr_is_ref_param) "" else "&";
+                    const is_rpa = self.isRefParamAlloca(op.ptr.id);
+                    const ptr_extra_deref = if (is_rpa) ".*" else "";
 
                     // 始终使用通用加载路径，保留实际运行时类型
                     // 类型推断可能不准确（如函数参数推断为i64但实际是bool），
@@ -8138,9 +8253,9 @@ pub const NativeLinker = struct {
                     {
                         if (op.no_deref) {
                             // byref 写回：直接读取 Ref 值，不跟随引用链
-                            try writer.print("    reg_{d}{s} = {s}reg_{d}.*;\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
+                            try writer.print("    reg_{d}{s} = {s}reg_{d}{s}.*;\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id, ptr_extra_deref });
                         } else {
-                            try writer.print("    reg_{d}{s} = runtime.val_deref({s}reg_{d}).*;\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id });
+                            try writer.print("    reg_{d}{s} = runtime.val_deref({s}reg_{d}{s}).*;\n", .{ reg.id, result_prefix, ptr_prefix, op.ptr.id, ptr_extra_deref });
                         }
                         if (self.regMayHeap(reg.id)) {
                             if (result_is_alloca) {
@@ -8282,11 +8397,28 @@ pub const NativeLinker = struct {
                         try self.writeRegAssignmentPrefix(writer, reg.id);
                         switch (result_tag) {
                             .php_value => {
-                                try writer.writeAll("try runtime.php_add(");
-                                try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
-                                try writer.writeAll(", ");
-                                try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
-                                try writer.writeAll(");\n");
+                                if (self.i64_loop_optimize_active) {
+                                    const lhs_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(op.lhs.id) else false) ".*" else "";
+                                    const rhs_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(op.rhs.id) else false) ".*" else "";
+                                    const lhs_known = if (self.i64_loop_known_int_regs) |known_regs| known_regs.contains(op.lhs.id) else false;
+                                    const rhs_known = if (self.i64_loop_known_int_regs) |known_regs| known_regs.contains(op.rhs.id) else false;
+                                    if (lhs_known and rhs_known) {
+                                        try writer.print("runtime.Value.initInt(reg_{d}{s}.asInt() + reg_{d}{s}.asInt());\n", .{ op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx });
+                                    } else {
+                                        try writer.print("if (reg_{d}{s}.isInt() and reg_{d}{s}.isInt()) runtime.Value.initInt(reg_{d}{s}.asInt() + reg_{d}{s}.asInt()) else ", .{ op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx, op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx });
+                                        try writer.writeAll("try runtime.php_add(");
+                                        try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
+                                        try writer.writeAll(", ");
+                                        try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
+                                        try writer.writeAll(");\n");
+                                    }
+                                } else {
+                                    try writer.writeAll("try runtime.php_add(");
+                                    try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
+                                    try writer.writeAll(", ");
+                                    try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
+                                    try writer.writeAll(");\n");
+                                }
                             },
                             .i64 => {
                                 // 所有寄存器都是 Value 类型，需要包装
@@ -8363,11 +8495,28 @@ pub const NativeLinker = struct {
                         try self.writeRegAssignmentPrefix(writer, reg.id);
                         switch (result_tag) {
                             .php_value => {
-                                try writer.writeAll("try runtime.php_sub(");
-                                try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
-                                try writer.writeAll(", ");
-                                try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
-                                try writer.writeAll(");\n");
+                                if (self.i64_loop_optimize_active) {
+                                    const lhs_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(op.lhs.id) else false) ".*" else "";
+                                    const rhs_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(op.rhs.id) else false) ".*" else "";
+                                    const lhs_known = if (self.i64_loop_known_int_regs) |known_regs| known_regs.contains(op.lhs.id) else false;
+                                    const rhs_known = if (self.i64_loop_known_int_regs) |known_regs| known_regs.contains(op.rhs.id) else false;
+                                    if (lhs_known and rhs_known) {
+                                        try writer.print("runtime.Value.initInt(reg_{d}{s}.asInt() - reg_{d}{s}.asInt());\n", .{ op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx });
+                                    } else {
+                                        try writer.print("if (reg_{d}{s}.isInt() and reg_{d}{s}.isInt()) runtime.Value.initInt(reg_{d}{s}.asInt() - reg_{d}{s}.asInt()) else ", .{ op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx, op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx });
+                                        try writer.writeAll("try runtime.php_sub(");
+                                        try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
+                                        try writer.writeAll(", ");
+                                        try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
+                                        try writer.writeAll(");\n");
+                                    }
+                                } else {
+                                    try writer.writeAll("try runtime.php_sub(");
+                                    try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
+                                    try writer.writeAll(", ");
+                                    try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
+                                    try writer.writeAll(");\n");
+                                }
                             },
                             .i64 => {
                                 try writer.writeAll("(try runtime.php_sub(");
@@ -8442,11 +8591,28 @@ pub const NativeLinker = struct {
                         try self.writeRegAssignmentPrefix(writer, reg.id);
                         switch (result_tag) {
                             .php_value => {
-                                try writer.writeAll("try runtime.php_mul(");
-                                try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
-                                try writer.writeAll(", ");
-                                try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
-                                try writer.writeAll(");\n");
+                                if (self.i64_loop_optimize_active) {
+                                    const lhs_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(op.lhs.id) else false) ".*" else "";
+                                    const rhs_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(op.rhs.id) else false) ".*" else "";
+                                    const lhs_known = if (self.i64_loop_known_int_regs) |known_regs| known_regs.contains(op.lhs.id) else false;
+                                    const rhs_known = if (self.i64_loop_known_int_regs) |known_regs| known_regs.contains(op.rhs.id) else false;
+                                    if (lhs_known and rhs_known) {
+                                        try writer.print("runtime.Value.initInt(reg_{d}{s}.asInt() * reg_{d}{s}.asInt());\n", .{ op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx });
+                                    } else {
+                                        try writer.print("if (reg_{d}{s}.isInt() and reg_{d}{s}.isInt()) runtime.Value.initInt(reg_{d}{s}.asInt() * reg_{d}{s}.asInt()) else ", .{ op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx, op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx });
+                                        try writer.writeAll("try runtime.php_mul(");
+                                        try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
+                                        try writer.writeAll(", ");
+                                        try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
+                                        try writer.writeAll(");\n");
+                                    }
+                                } else {
+                                    try writer.writeAll("try runtime.php_mul(");
+                                    try self.writePhpValueExpr(writer, lhs_expr_tag, op.lhs.id);
+                                    try writer.writeAll(", ");
+                                    try self.writePhpValueExpr(writer, rhs_expr_tag, op.rhs.id);
+                                    try writer.writeAll(");\n");
+                                }
                             },
                             .i64 => {
                                 try writer.writeAll("(try runtime.php_mul(");
@@ -9258,14 +9424,19 @@ pub const NativeLinker = struct {
                     const type_tag = @as(std.meta.Tag(IR.Type), corrected_type);
 
                     // 获取操作数的修正类型
-                    const lhs_corrected = if (self.current_register_types) |types|
+                    var lhs_corrected = if (self.current_register_types) |types|
                         types.get(op.lhs.id) orelse op.lhs.type_
                     else
                         op.lhs.type_;
-                    const rhs_corrected = if (self.current_register_types) |types|
+                    var rhs_corrected = if (self.current_register_types) |types|
                         types.get(op.rhs.id) orelse op.rhs.type_
                     else
                         op.rhs.type_;
+                    // P1: 循环变量类型推断——已知整数寄存器视为 i64，省略 isInt() 检查
+                    if (self.i64_loop_known_int_regs) |known_regs| {
+                        if (known_regs.contains(op.lhs.id)) lhs_corrected = .i64;
+                        if (known_regs.contains(op.rhs.id)) rhs_corrected = .i64;
+                    }
 
                     const lhs_type_tag = @as(std.meta.Tag(IR.Type), lhs_corrected);
                     const rhs_type_tag = @as(std.meta.Tag(IR.Type), rhs_corrected);
@@ -9286,14 +9457,25 @@ pub const NativeLinker = struct {
                         } else {
                             try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool(reg_{d}.asFloat() < reg_{d}.asFloat());\n", .{ op.lhs.id, op.rhs.id });
                         }
-                    } else if (lhs_type_tag == .php_value and rhs_type_tag == .php_value) {
-                        // 两个Value类型，直接调用运行时函数
-                        const lhs_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(op.lhs.id) else false) ".*" else "";
-                        const rhs_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(op.rhs.id) else false) ".*" else "";
-                        if (type_tag == .bool) {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "(try runtime.php_lt(reg_{d}{s}, reg_{d}{s})).toBool();\n", .{ op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx });
+                    } else if ((lhs_type_tag == .php_value or lhs_type_tag == .i64) and (rhs_type_tag == .php_value or rhs_type_tag == .i64)) {
+                        // i64 快速路径：循环内生成运行时类型检查 + i64 比较
+                        if (self.i64_loop_optimize_active) {
+                            const lhs_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(op.lhs.id) else false) ".*" else "";
+                            const rhs_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(op.rhs.id) else false) ".*" else "";
+                            if (type_tag == .bool) {
+                                try self.writeRegAssignmentFmt(writer, reg.id, "if (reg_{d}{s}.isInt() and reg_{d}{s}.isInt()) (reg_{d}{s}.asInt() < reg_{d}{s}.asInt()) else (try runtime.php_lt(reg_{d}{s}, reg_{d}{s})).toBool();\n", .{ op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx, op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx, op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx });
+                            } else {
+                                try self.writeRegAssignmentFmt(writer, reg.id, "if (reg_{d}{s}.isInt() and reg_{d}{s}.isInt()) runtime.Value.initBool(reg_{d}{s}.asInt() < reg_{d}{s}.asInt()) else try runtime.php_lt(reg_{d}{s}, reg_{d}{s});\n", .{ op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx, op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx, op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx });
+                            }
                         } else {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_lt(reg_{d}{s}, reg_{d}{s});\n", .{ op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx });
+                            // 两个Value类型，直接调用运行时函数
+                            const lhs_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(op.lhs.id) else false) ".*" else "";
+                            const rhs_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(op.rhs.id) else false) ".*" else "";
+                            if (type_tag == .bool) {
+                                try self.writeRegAssignmentFmt(writer, reg.id, "(try runtime.php_lt(reg_{d}{s}, reg_{d}{s})).toBool();\n", .{ op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx });
+                            } else {
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_lt(reg_{d}{s}, reg_{d}{s});\n", .{ op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx });
+                            }
                         }
                     } else {
                         if (type_tag == .bool) {
@@ -9321,14 +9503,19 @@ pub const NativeLinker = struct {
                     const type_tag = @as(std.meta.Tag(IR.Type), corrected_type);
 
                     // 获取操作数的修正类型
-                    const lhs_corrected = if (self.current_register_types) |types|
+                    var lhs_corrected = if (self.current_register_types) |types|
                         types.get(op.lhs.id) orelse op.lhs.type_
                     else
                         op.lhs.type_;
-                    const rhs_corrected = if (self.current_register_types) |types|
+                    var rhs_corrected = if (self.current_register_types) |types|
                         types.get(op.rhs.id) orelse op.rhs.type_
                     else
                         op.rhs.type_;
+                    // P1: 循环变量类型推断——已知整数寄存器视为 i64，省略 isInt() 检查
+                    if (self.i64_loop_known_int_regs) |known_regs| {
+                        if (known_regs.contains(op.lhs.id)) lhs_corrected = .i64;
+                        if (known_regs.contains(op.rhs.id)) rhs_corrected = .i64;
+                    }
 
                     const lhs_type_tag = @as(std.meta.Tag(IR.Type), lhs_corrected);
                     const rhs_type_tag = @as(std.meta.Tag(IR.Type), rhs_corrected);
@@ -9345,14 +9532,25 @@ pub const NativeLinker = struct {
                         } else {
                             try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool(reg_{d}.asFloat() <= reg_{d}.asFloat());\n", .{ op.lhs.id, op.rhs.id });
                         }
-                    } else if (lhs_type_tag == .php_value and rhs_type_tag == .php_value) {
-                        // 两个Value类型，直接调用运行时函数
-                        const lhs_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(op.lhs.id) else false) ".*" else "";
-                        const rhs_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(op.rhs.id) else false) ".*" else "";
-                        if (type_tag == .bool) {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "(try runtime.php_le(reg_{d}{s}, reg_{d}{s})).toBool();\n", .{ op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx });
+                    } else if ((lhs_type_tag == .php_value or lhs_type_tag == .i64) and (rhs_type_tag == .php_value or rhs_type_tag == .i64)) {
+                        // i64 快速路径：循环内生成运行时类型检查 + i64 比较
+                        if (self.i64_loop_optimize_active) {
+                            const lhs_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(op.lhs.id) else false) ".*" else "";
+                            const rhs_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(op.rhs.id) else false) ".*" else "";
+                            if (type_tag == .bool) {
+                                try self.writeRegAssignmentFmt(writer, reg.id, "if (reg_{d}{s}.isInt() and reg_{d}{s}.isInt()) (reg_{d}{s}.asInt() <= reg_{d}{s}.asInt()) else (try runtime.php_le(reg_{d}{s}, reg_{d}{s})).toBool();\n", .{ op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx, op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx, op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx });
+                            } else {
+                                try self.writeRegAssignmentFmt(writer, reg.id, "if (reg_{d}{s}.isInt() and reg_{d}{s}.isInt()) runtime.Value.initBool(reg_{d}{s}.asInt() <= reg_{d}{s}.asInt()) else try runtime.php_le(reg_{d}{s}, reg_{d}{s});\n", .{ op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx, op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx, op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx });
+                            }
                         } else {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_le(reg_{d}{s}, reg_{d}{s});\n", .{ op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx });
+                            // 两个Value类型，直接调用运行时函数
+                            const lhs_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(op.lhs.id) else false) ".*" else "";
+                            const rhs_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(op.rhs.id) else false) ".*" else "";
+                            if (type_tag == .bool) {
+                                try self.writeRegAssignmentFmt(writer, reg.id, "(try runtime.php_le(reg_{d}{s}, reg_{d}{s})).toBool();\n", .{ op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx });
+                            } else {
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_le(reg_{d}{s}, reg_{d}{s});\n", .{ op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx });
+                            }
                         }
                     } else {
                         if (type_tag == .bool) {
@@ -9380,14 +9578,19 @@ pub const NativeLinker = struct {
                     const type_tag = @as(std.meta.Tag(IR.Type), corrected_type);
 
                     // 获取操作数的修正类型
-                    const lhs_corrected = if (self.current_register_types) |types|
+                    var lhs_corrected = if (self.current_register_types) |types|
                         types.get(op.lhs.id) orelse op.lhs.type_
                     else
                         op.lhs.type_;
-                    const rhs_corrected = if (self.current_register_types) |types|
+                    var rhs_corrected = if (self.current_register_types) |types|
                         types.get(op.rhs.id) orelse op.rhs.type_
                     else
                         op.rhs.type_;
+                    // P1: 循环变量类型推断——已知整数寄存器视为 i64，省略 isInt() 检查
+                    if (self.i64_loop_known_int_regs) |known_regs| {
+                        if (known_regs.contains(op.lhs.id)) lhs_corrected = .i64;
+                        if (known_regs.contains(op.rhs.id)) rhs_corrected = .i64;
+                    }
 
                     const lhs_type_tag = @as(std.meta.Tag(IR.Type), lhs_corrected);
                     const rhs_type_tag = @as(std.meta.Tag(IR.Type), rhs_corrected);
@@ -9404,14 +9607,25 @@ pub const NativeLinker = struct {
                         } else {
                             try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool(reg_{d}.asFloat() > reg_{d}.asFloat());\n", .{ op.lhs.id, op.rhs.id });
                         }
-                    } else if (lhs_type_tag == .php_value and rhs_type_tag == .php_value) {
-                        // 两个Value类型，直接调用运行时函数
-                        const lhs_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(op.lhs.id) else false) ".*" else "";
-                        const rhs_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(op.rhs.id) else false) ".*" else "";
-                        if (type_tag == .bool) {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "(try runtime.php_gt(reg_{d}{s}, reg_{d}{s})).toBool();\n", .{ op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx });
+                    } else if ((lhs_type_tag == .php_value or lhs_type_tag == .i64) and (rhs_type_tag == .php_value or rhs_type_tag == .i64)) {
+                        // i64 快速路径：循环内生成运行时类型检查 + i64 比较
+                        if (self.i64_loop_optimize_active) {
+                            const lhs_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(op.lhs.id) else false) ".*" else "";
+                            const rhs_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(op.rhs.id) else false) ".*" else "";
+                            if (type_tag == .bool) {
+                                try self.writeRegAssignmentFmt(writer, reg.id, "if (reg_{d}{s}.isInt() and reg_{d}{s}.isInt()) (reg_{d}{s}.asInt() > reg_{d}{s}.asInt()) else (try runtime.php_gt(reg_{d}{s}, reg_{d}{s})).toBool();\n", .{ op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx, op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx, op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx });
+                            } else {
+                                try self.writeRegAssignmentFmt(writer, reg.id, "if (reg_{d}{s}.isInt() and reg_{d}{s}.isInt()) runtime.Value.initBool(reg_{d}{s}.asInt() > reg_{d}{s}.asInt()) else try runtime.php_gt(reg_{d}{s}, reg_{d}{s});\n", .{ op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx, op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx, op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx });
+                            }
                         } else {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_gt(reg_{d}{s}, reg_{d}{s});\n", .{ op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx });
+                            // 两个Value类型，直接调用运行时函数
+                            const lhs_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(op.lhs.id) else false) ".*" else "";
+                            const rhs_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(op.rhs.id) else false) ".*" else "";
+                            if (type_tag == .bool) {
+                                try self.writeRegAssignmentFmt(writer, reg.id, "(try runtime.php_gt(reg_{d}{s}, reg_{d}{s})).toBool();\n", .{ op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx });
+                            } else {
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_gt(reg_{d}{s}, reg_{d}{s});\n", .{ op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx });
+                            }
                         }
                     } else {
                         if (type_tag == .bool) {
@@ -9439,14 +9653,19 @@ pub const NativeLinker = struct {
                     const type_tag = @as(std.meta.Tag(IR.Type), corrected_type);
 
                     // 获取操作数的修正类型
-                    const lhs_corrected = if (self.current_register_types) |types|
+                    var lhs_corrected = if (self.current_register_types) |types|
                         types.get(op.lhs.id) orelse op.lhs.type_
                     else
                         op.lhs.type_;
-                    const rhs_corrected = if (self.current_register_types) |types|
+                    var rhs_corrected = if (self.current_register_types) |types|
                         types.get(op.rhs.id) orelse op.rhs.type_
                     else
                         op.rhs.type_;
+                    // P1: 循环变量类型推断——已知整数寄存器视为 i64，省略 isInt() 检查
+                    if (self.i64_loop_known_int_regs) |known_regs| {
+                        if (known_regs.contains(op.lhs.id)) lhs_corrected = .i64;
+                        if (known_regs.contains(op.rhs.id)) rhs_corrected = .i64;
+                    }
 
                     const lhs_type_tag = @as(std.meta.Tag(IR.Type), lhs_corrected);
                     const rhs_type_tag = @as(std.meta.Tag(IR.Type), rhs_corrected);
@@ -9463,14 +9682,25 @@ pub const NativeLinker = struct {
                         } else {
                             try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool(reg_{d}.asFloat() >= reg_{d}.asFloat());\n", .{ op.lhs.id, op.rhs.id });
                         }
-                    } else if (lhs_type_tag == .php_value and rhs_type_tag == .php_value) {
-                        // 两个Value类型，直接调用运行时函数
-                        const lhs_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(op.lhs.id) else false) ".*" else "";
-                        const rhs_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(op.rhs.id) else false) ".*" else "";
-                        if (type_tag == .bool) {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "(try runtime.php_ge(reg_{d}{s}, reg_{d}{s})).toBool();\n", .{ op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx });
+                    } else if ((lhs_type_tag == .php_value or lhs_type_tag == .i64) and (rhs_type_tag == .php_value or rhs_type_tag == .i64)) {
+                        // i64 快速路径：循环内生成运行时类型检查 + i64 比较
+                        if (self.i64_loop_optimize_active) {
+                            const lhs_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(op.lhs.id) else false) ".*" else "";
+                            const rhs_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(op.rhs.id) else false) ".*" else "";
+                            if (type_tag == .bool) {
+                                try self.writeRegAssignmentFmt(writer, reg.id, "if (reg_{d}{s}.isInt() and reg_{d}{s}.isInt()) (reg_{d}{s}.asInt() >= reg_{d}{s}.asInt()) else (try runtime.php_ge(reg_{d}{s}, reg_{d}{s})).toBool();\n", .{ op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx, op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx, op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx });
+                            } else {
+                                try self.writeRegAssignmentFmt(writer, reg.id, "if (reg_{d}{s}.isInt() and reg_{d}{s}.isInt()) runtime.Value.initBool(reg_{d}{s}.asInt() >= reg_{d}{s}.asInt()) else try runtime.php_ge(reg_{d}{s}, reg_{d}{s});\n", .{ op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx, op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx, op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx });
+                            }
                         } else {
-                            try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_ge(reg_{d}{s}, reg_{d}{s});\n", .{ op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx });
+                            // 两个Value类型，直接调用运行时函数
+                            const lhs_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(op.lhs.id) else false) ".*" else "";
+                            const rhs_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(op.rhs.id) else false) ".*" else "";
+                            if (type_tag == .bool) {
+                                try self.writeRegAssignmentFmt(writer, reg.id, "(try runtime.php_ge(reg_{d}{s}, reg_{d}{s})).toBool();\n", .{ op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx });
+                            } else {
+                                try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_ge(reg_{d}{s}, reg_{d}{s});\n", .{ op.lhs.id, lhs_sfx, op.rhs.id, rhs_sfx });
+                            }
                         }
                     } else {
                         if (type_tag == .bool) {
@@ -9677,6 +9907,9 @@ pub const NativeLinker = struct {
                         if (type_tag != .i64 and type_tag != .f64 and type_tag != .bool) {
                             try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
                         }
+
+                        // i64 快速路径优化：循环内算术/比较函数生成运行时类型检查 + i64 操作
+                        if (try self.tryEmitI64FastPath(writer, op, reg)) return;
 
                         // 有返回值寄存器
                         if (is_builtin) {
@@ -9888,8 +10121,11 @@ pub const NativeLinker = struct {
                                     // 排序结果需写回变量的 alloca 存储
                                     if (self.current_load_to_alloca) |lta| {
                                         if (lta.get(op.args[0].id)) |alloca_id| {
-                                            try writer.print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{alloca_id});
-                                            try writer.print("    runtime.val_assign(reg_{d}, reg_{d});\n", .{ alloca_id, reg.id });
+                                            const alloca_is_rpa = if (self.ref_param_alloca_map) |rpm| rpm.contains(alloca_id) else false;
+                                            const alloca_deref = if (alloca_is_rpa) ".*" else "";
+                                            const alloca_val_deref = alloca_deref;
+                                            try writer.print("    reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ alloca_id, alloca_deref });
+                                            try writer.print("    runtime.val_assign(reg_{d}{s}, reg_{d});\n", .{ alloca_id, alloca_val_deref, reg.id });
                                         }
                                     }
                                     if (self.current_global_get_names) |ggn| {
@@ -10257,6 +10493,18 @@ pub const NativeLinker = struct {
                                         try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull(), runtime.Value.initInt(0)");
                                     }
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
+                                } else if (std.mem.eql(u8, runtime_name, "php_hash")) {
+                                    // hash(algo, data, raw_output=false, allocator)
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                    if (op.args.len > 0) {
+                                        try self.writeValueArgs(writer, op.args);
+                                        if (op.args.len < 3) {
+                                            try writer.writeAll(", runtime.Value.initBool(false)");
+                                        }
+                                    } else {
+                                        try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull(), runtime.Value.initBool(false)");
+                                    }
+                                    try writer.writeAll(", runtime.runtime_allocator);\n");
                                 } else if (std.mem.eql(u8, runtime_name, "preg_split") or std.mem.eql(u8, runtime_name, "php_preg_split")) {
                                     // preg_split(pattern, subject, limit=-1, flags=0, allocator)
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
@@ -10491,8 +10739,10 @@ pub const NativeLinker = struct {
                                         // 排序结果需写回变量的 alloca 存储
                                         if (self.current_load_to_alloca) |lta| {
                                             if (lta.get(op.args[0].id)) |alloca_id| {
-                                                try writer.print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{alloca_id});
-                                                try writer.print("    runtime.val_assign(reg_{d}, reg_{d});\n", .{ alloca_id, reg.id });
+                                                const alloca_is_rpa = if (self.ref_param_alloca_map) |map| map.contains(alloca_id) else false;
+                                                const alloca_deref = if (alloca_is_rpa) ".*" else "";
+                                                try writer.print("    reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ alloca_id, alloca_deref });
+                                                try writer.print("    runtime.val_assign(reg_{d}{s}, reg_{d});\n", .{ alloca_id, alloca_deref, reg.id });
                                             }
                                         }
                                         if (self.current_global_get_names) |ggn| {
@@ -10795,6 +11045,18 @@ pub const NativeLinker = struct {
                                         try writer.writeAll(", runtime.Value.initInt(1)");
                                     } else {
                                         try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(1)");
+                                    }
+                                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                                } else if (std.mem.eql(u8, runtime_name, "php_hash")) {
+                                    // hash(algo, data, raw_output=false, allocator)
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                    if (op.args.len > 0) {
+                                        try self.writeValueArgs(writer, op.args);
+                                        if (op.args.len < 3) {
+                                            try writer.writeAll(", runtime.Value.initBool(false)");
+                                        }
+                                    } else {
+                                        try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull(), runtime.Value.initBool(false)");
                                     }
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
                                 } else if (std.mem.eql(u8, runtime_name, "php_hash_file")) {
@@ -11390,10 +11652,11 @@ pub const NativeLinker = struct {
                 try self.writeRegRef(writer, op.key.id);
                 try writer.writeAll("});\n");
                 try writer.writeAll("    } else {\n");
-                try writer.print(
-                    "        _ = reg_{d}.asArray().unsetByValue(runtime.runtime_allocator, reg_{d});\n",
-                    .{ op.array.id, op.key.id },
-                );
+                try writer.writeAll("        _ = ");
+                try self.writeRegRef(writer, op.array.id);
+                try writer.writeAll(".asArray().unsetByValue(runtime.runtime_allocator, ");
+                try self.writeRegRef(writer, op.key.id);
+                try writer.writeAll(");\n");
                 try writer.writeAll("    }\n");
             },
             .interpolate => |op| {
@@ -11750,6 +12013,16 @@ pub const NativeLinker = struct {
                     defer self.allocator.free(escaped_direct);
                     const has_return = self.func_return_types.get(direct_name) orelse false;
 
+                    // 查找方法的引用参数
+                    const ref_params: []const u32 = rp_blk: {
+                        if (self.ir_module) |ir_mod| {
+                            if (self.findFunction(ir_mod, direct_name)) |func| {
+                                break :rp_blk func.ref_params.items;
+                            }
+                        }
+                        break :rp_blk &[_]u32{};
+                    };
+
                     // 设置ClassContext
                     try writer.print("    {{\n", .{});
                     try writer.print("        const meta = runtime.findClass(\"{s}\");\n", .{escaped_class});
@@ -11757,20 +12030,22 @@ pub const NativeLinker = struct {
                     try writer.writeAll("        defer if (guard) |*g| g.deinit();\n");
 
                     if (inst.result) |reg| {
-                        try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
+                        const star = if (self.isRefParamAlloca(reg.id)) ".*.*" else self.getRegSuffix(reg.id);
+                        try writer.print("        reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ reg.id, star });
+                        // 静态方法无 $this，ref_params 索引不含 $this 偏移，param_offset = 0
                         if (has_return) {
-                            try writer.print("        reg_{d} = try @\"{s}\"(runtime.Value.initNull(), ", .{ reg.id, escaped_direct });
-                            try self.writeValueArgsArray(writer, op.args);
+                            try writer.print("        reg_{d}{s} = try @\"{s}\"(runtime.Value.initNull(), ", .{ reg.id, star, escaped_direct });
+                            try self.writeValueArgsArrayWithRefsOffset(writer, op.args, direct_name, ref_params, 0);
                             try writer.writeAll(", runtime.runtime_allocator);\n");
                         } else {
                             try writer.print("        _ = try @\"{s}\"(runtime.Value.initNull(), ", .{escaped_direct});
-                            try self.writeValueArgsArray(writer, op.args);
+                            try self.writeValueArgsArrayWithRefsOffset(writer, op.args, direct_name, ref_params, 0);
                             try writer.writeAll(", runtime.runtime_allocator);\n");
-                            try writer.print("        reg_{d} = runtime.Value.initNull();\n", .{reg.id});
+                            try writer.print("        reg_{d}{s} = runtime.Value.initNull();\n", .{ reg.id, star });
                         }
                     } else {
                         try writer.print("        _ = try @\"{s}\"(runtime.Value.initNull(), ", .{escaped_direct});
-                        try self.writeValueArgsArray(writer, op.args);
+                        try self.writeValueArgsArrayWithRefsOffset(writer, op.args, direct_name, ref_params, 0);
                         try writer.writeAll(", runtime.runtime_allocator);\n");
                     }
 
@@ -12112,16 +12387,6 @@ pub const NativeLinker = struct {
             .cast => |op| {
                 // cast: 类型转换
                 if (inst.result) |reg| {
-                    // 调试
-                    if (reg.id == 3) {
-                        // std.debug.print("CAST reg_3: from={s}, to={s}, value.id={d}, value.type={s}\n", .{
-                        //     @tagName(@as(std.meta.Tag(IR.Type), op.from_type)),
-                        //     @tagName(@as(std.meta.Tag(IR.Type), op.to_type)),
-                        //     op.value.id,
-                        //     @tagName(@as(std.meta.Tag(IR.Type), op.value.type_)),
-                        // });
-                    }
-
                     // Get the actual type of the source register
                     const src_fallback = if (self.current_reg_types) |types|
                         (types.get(op.value.id) orelse op.value.type_)
@@ -12132,14 +12397,6 @@ pub const NativeLinker = struct {
                     const src_real_type = self.getInferredRegType(op.value.id, src_fallback);
                     const src_tag = @as(std.meta.Tag(IR.Type), src_real_type);
                     const to_tag = @as(std.meta.Tag(IR.Type), op.to_type);
-
-                    if (reg.id == 3) {
-                        // std.debug.print("  src_real_type={s}, src_tag={s}, to_tag={s}\n", .{
-                        //     @tagName(@as(std.meta.Tag(IR.Type), src_real_type)),
-                        //     @tagName(src_tag),
-                        //     @tagName(to_tag),
-                        // });
-                    }
 
                     const dest_is_alloca = if (self.current_alloca_regs) |alloca_regs|
                         alloca_regs.contains(reg.id)
@@ -12292,6 +12549,12 @@ pub const NativeLinker = struct {
                         const src_wrapped = try self.getValueWrapper(&src_buf2, op.operand.id, src_tag);
                         try self.writeRegAssignmentFmt(writer, reg.id, "{s};\n", .{src_wrapped});
                     } else {
+                        // php_value → php_value: 需 retain（move 结果可能被 releaseDeadOperands 释放）
+                        // move 是 bitwise copy，结果与源共享值。若不 retain，释放 move 结果会导致源 ref_count 错误减少
+                        if (self.regMayHeap(reg.id)) {
+                            try writer.print("    _ = {s}.retain();\n", .{src_ref});
+                            try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
+                        }
                         try self.writeRegAssignmentFmt(writer, reg.id, "{s};\n", .{src_ref});
                     }
                 }
@@ -12562,7 +12825,6 @@ pub const NativeLinker = struct {
         const prev_alloca_regs = self.current_alloca_regs;
         self.current_alloca_regs = alloca_regs;
         defer self.current_alloca_regs = prev_alloca_regs;
-
         // 分析控制流
         var cfg = ControlFlowAnalysis.init(self.allocator);
         defer cfg.deinit();
@@ -12697,6 +12959,20 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
         const then_idx = @as(usize, cb.then_block.index);
         const else_idx = @as(usize, cb.else_block.index);
 
+        // 检测嵌套循环：then 块的 br 目标已处理（回边到循环头）
+        var is_nested_loop = false;
+        if (then_idx < func.blocks.items.len) {
+            const then_blk_peek = func.blocks.items[then_idx];
+            if (then_blk_peek.terminator) |then_term| {
+                if (then_term == .br) {
+                    const br_target_idx = @as(usize, then_term.br.index);
+                    if (br_target_idx < func.blocks.items.len and processed.contains(br_target_idx)) {
+                        is_nested_loop = true;
+                    }
+                }
+            }
+        }
+
         // 生成 if 条件
         // 所有寄存器都是 runtime.Value 类型，需调用 toBool()
         // alloca 寄存器是 *runtime.Value，需先解引用
@@ -12704,7 +12980,27 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
             alloca_regs.contains(cb.cond.id)
         else
             false;
-        if (is_alloca_cond) {
+        if (is_nested_loop) {
+            // 嵌套循环：生成 while (true) { 头块非phi指令; if (!(cond)) break; ... }
+            try writer.print("{s}while (true) {{\n", .{indent});
+            // 生成头块非 phi 指令（每次迭代重新求值条件）
+            if (self.current_cond_br_header_idx) |hdr_idx| {
+                if (hdr_idx < func.blocks.items.len) {
+                    const hdr_blk = func.blocks.items[hdr_idx];
+                    for (hdr_blk.instructions.items) |inst| {
+                        if (inst.op == .phi) continue;
+                        try code_list.appendSlice(self.allocator, indent);
+                        try code_list.appendSlice(self.allocator, "    ");
+                        try self.generateInstructionSimple(code_list, inst);
+                    }
+                }
+            }
+            if (is_alloca_cond) {
+                try writer.print("{s}    if (!reg_{d}.*.toBool()) break;\n", .{ indent, cb.cond.id });
+            } else {
+                try writer.print("{s}    if (!reg_{d}.toBool()) break;\n", .{ indent, cb.cond.id });
+            }
+        } else if (is_alloca_cond) {
             try writer.print("{s}if (reg_{d}.*.toBool()) {{\n", .{ indent, cb.cond.id });
         } else {
             try writer.print("{s}if (reg_{d}.toBool()) {{\n", .{ indent, cb.cond.id });
@@ -12732,13 +13028,14 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                 const phi_res = inst.result orelse continue;
                 const phi_op = inst.op.phi;
                 // 优先使用 source_block 精确匹配
+                const phi_deref = if (self.isPointerReg(phi_res.id)) ".*" else "";
                 if (self.current_cond_br_source_block) |source_idx| {
                     for (phi_op.incoming) |incoming| {
                         const inc_idx = @as(usize, incoming.block.index);
                         if (inc_idx == source_idx) {
                             var phi_buf: [32]u8 = undefined;
                             const phi_ref = try self.getOperandRef(&phi_buf, incoming.value.id);
-                            try writer.print("{s}reg_{d} = {s};\n", .{ child_indent, phi_res.id, phi_ref });
+                            try writer.print("{s}reg_{d}{s} = {s};\n", .{ child_indent, phi_res.id, phi_deref, phi_ref });
                             break;
                         }
                     }
@@ -12749,7 +13046,7 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                         if (inc_idx != else_idx) {
                             var phi_buf: [32]u8 = undefined;
                             const phi_ref = try self.getOperandRef(&phi_buf, incoming.value.id);
-                            try writer.print("{s}reg_{d} = {s};\n", .{ child_indent, phi_res.id, phi_ref });
+                            try writer.print("{s}reg_{d}{s} = {s};\n", .{ child_indent, phi_res.id, phi_deref, phi_ref });
                             break;
                         }
                     }
@@ -12850,7 +13147,11 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
         }
 
         try writer.writeAll(indent);
-        try writer.writeAll("} else {\n");
+        if (is_nested_loop) {
+            try writer.writeAll("}\n");
+        } else {
+            try writer.writeAll("} else {\n");
+        }
 
         // 生成 else 块
         if (processed.contains(else_idx)) {
@@ -12873,6 +13174,7 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                 if (inst.op != .phi) continue;
                 const phi_res = inst.result orelse continue;
                 const phi_op = inst.op.phi;
+                const phi_deref = if (self.isPointerReg(phi_res.id)) ".*" else "";
                 // 优先使用 source_block 精确匹配
                 if (self.current_cond_br_source_block) |source_idx| {
                     for (phi_op.incoming) |incoming| {
@@ -12880,7 +13182,7 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                         if (inc_idx == source_idx) {
                             var phi_buf: [32]u8 = undefined;
                             const phi_ref = try self.getOperandRef(&phi_buf, incoming.value.id);
-                            try writer.print("{s}reg_{d} = {s};\n", .{ child_indent, phi_res.id, phi_ref });
+                            try writer.print("{s}reg_{d}{s} = {s};\n", .{ child_indent, phi_res.id, phi_deref, phi_ref });
                             break;
                         }
                     }
@@ -12891,7 +13193,7 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                         if (inc_idx != then_idx) {
                             var phi_buf: [32]u8 = undefined;
                             const phi_ref = try self.getOperandRef(&phi_buf, incoming.value.id);
-                            try writer.print("{s}reg_{d} = {s};\n", .{ child_indent, phi_res.id, phi_ref });
+                            try writer.print("{s}reg_{d}{s} = {s};\n", .{ child_indent, phi_res.id, phi_deref, phi_ref });
                             break;
                         }
                     }
@@ -12984,7 +13286,9 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
         }
 
         try writer.writeAll(indent);
-        try writer.writeAll("}\n");
+        if (!is_nested_loop) {
+            try writer.writeAll("}\n");
+        }
     }
 
     /// 统计目标块的前驱数量（用于判断是否为汇聚点）
@@ -13031,8 +13335,24 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
             return;
         }
 
-        // 已处理（回边或已生成）→ 跳过
-        if (processed.contains(target_idx)) return;
+        // 已处理（回边或已生成）→ 生成来自 source 的 PHI 赋值后跳过
+        if (processed.contains(target_idx)) {
+            // 回边到循环头：生成来自 source_idx 的 PHI 赋值
+            const target_blk = func.blocks.items[target_idx];
+            for (target_blk.instructions.items) |inst| {
+                if (inst.op != .phi) continue;
+                const phi_res = inst.result orelse continue;
+                const phi_op = inst.op.phi;
+                for (phi_op.incoming) |incoming| {
+                    const inc_idx = @as(usize, incoming.block.index);
+                    if (inc_idx == source_idx) {
+                        try self.writePhiAssignWithRetain(writer, phi_res.id, incoming.value.id);
+                        break;
+                    }
+                }
+            }
+            return;
+        }
 
         // 汇聚点检查：如果目标块有多个前驱（如 if/else 合并块、循环 header），
         // 不应内联到当前分支内部，否则会导致代码重复或寄存器未初始化
@@ -13043,12 +13363,13 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                 if (inst.op != .phi) continue;
                 const phi_res = inst.result orelse continue;
                 const phi_op = inst.op.phi;
+                const phi_deref = if (self.isPointerReg(phi_res.id)) ".*" else "";
                 for (phi_op.incoming) |incoming| {
                     const inc_idx = @as(usize, incoming.block.index);
                     if (inc_idx == source_idx) {
                         var phi_buf: [32]u8 = undefined;
                         const phi_ref = try self.getOperandRef(&phi_buf, incoming.value.id);
-                        try writer.print("{s}reg_{d} = {s};\n", .{ indent, phi_res.id, phi_ref });
+                        try writer.print("{s}reg_{d}{s} = {s};\n", .{ indent, phi_res.id, phi_deref, phi_ref });
                         break;
                     }
                 }
@@ -13395,6 +13716,9 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
 
         try writer.writeAll("    // Optimized: structured while loop\n");
 
+        // 🔥 LICM 代码生成层优化：检测并提升循环不变量
+        try self.hoistLoopInvariantsAtCodegen(writer, func, loop);
+
         var code_list = writer.list;
 
         const header_block = func.blocks.items[loop.header];
@@ -13574,6 +13898,29 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                     }
                 }
             }
+        }
+
+        // P2: while 循环 PHI 整数收集——分析 header PHI 节点的 init/latch，
+        // 如果循环变量在循环内始终为整数（init=const_int, latch=整数运算结果），
+        // 激活 i64 快速路径，省略 isInt() 检查
+        var while_known_int_regs = std.AutoHashMap(usize, void).init(self.allocator);
+        defer while_known_int_regs.deinit();
+        const prev_known_int_regs = self.i64_loop_known_int_regs;
+        defer self.i64_loop_known_int_regs = prev_known_int_regs;
+        const prev_optimize_active = self.i64_loop_optimize_active;
+        defer self.i64_loop_optimize_active = prev_optimize_active;
+        const while_collected = self.collectKnownIntRegsWhileLoop(func, loop, &while_known_int_regs);
+        // P2: while 路径也收集 int 类型注解参数
+        self.collectKnownIntParamRegs(func, loop, &while_known_int_regs);
+        if (while_collected or while_known_int_regs.count() > 0) {
+            self.i64_loop_known_int_regs = &while_known_int_regs;
+            self.i64_loop_optimize_active = true;
+        }
+
+        // P3-2: i64 快速路径覆盖率统计
+        if (std.c.getenv("ZIGPHP_AOT_STATS") != null) {
+            const func_name = if (@hasField(@TypeOf(func.*), "name")) func.name else "<unknown>";
+            std.debug.print("[AOT-STATS] while_loop func={s} known_int_regs={d} active={}\n", .{ func_name, while_known_int_regs.count(), self.i64_loop_optimize_active });
         }
 
         // 第二遍：生成非常量指令
@@ -13833,6 +14180,7 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                         // 回边源块（增量块）放到最后
                         nested_body_indices.append(self.allocator, nested_be_idx) catch return error.OutOfMemory;
                         // 生成嵌套循环体块
+                        var nested_broke_out = false;
                         for (nested_body_indices.items) |nb_idx| {
                             if (processed_body.contains(nb_idx)) continue;
                             const nb_blk = func.blocks.items[nb_idx];
@@ -13846,16 +14194,44 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                             if (has_non_phi or nb_blk.terminator != null) {
                                 try writer.print("            // Body block: {s}\n", .{nb_blk.label});
                             }
-                            for (nb_blk.instructions.items) |inst| {
-                                if (inst.op == .phi) continue;
-                                try code_list.appendSlice(self.allocator, "            ");
-                                try self.generateInstructionSimple(code_list, inst);
+                            // 检测嵌套循环头块：cond_br 的 then 块有 br 回边到已处理块
+                            var is_nested_loop_hdr = false;
+                            if (nb_blk.terminator) |nb_term| {
+                                if (nb_term == .cond_br) {
+                                    const then_idx_peek = @as(usize, nb_term.cond_br.then_block.index);
+                                    if (then_idx_peek < func.blocks.items.len) {
+                                        const then_blk_peek = func.blocks.items[then_idx_peek];
+                                        if (then_blk_peek.terminator) |then_term| {
+                                            if (then_term == .br) {
+                                                const br_target = @as(usize, then_term.br.index);
+                                                if (br_target < func.blocks.items.len and processed_body.contains(br_target)) {
+                                                    is_nested_loop_hdr = true;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            // 嵌套循环头块的非 phi 指令由 generateCondBrBlock 在 while 内部生成
+                            if (!is_nested_loop_hdr) {
+                                for (nb_blk.instructions.items) |inst| {
+                                    if (inst.op == .phi) continue;
+                                    try code_list.appendSlice(self.allocator, "            ");
+                                    try self.generateInstructionSimple(code_list, inst);
+                                }
                             }
                             processed_body.put(nb_idx, {}) catch return error.OutOfMemory;
                             // AOT-PHI-001 修复：处理 br 终止符 — 生成到 merge 块的 PHI 拷贝
                             if (nb_blk.terminator) |nb_term| {
                                 if (nb_term == .br) {
+                                    const nb_target_idx = @as(usize, nb_term.br.index);
                                     try self.generateBrChain(writer, func, nb_term.br, nb_idx, &processed_body, "            ", true);
+                                    // 如果 br 目标是循环退出块，generateBrChain 已生成 break（退出 while 循环），
+                                    // 后续块的代码将不可达，退出 for 循环防止生成 unreachable code
+                                    if (self.in_while_loop and self.current_loop_exit_block != null and nb_target_idx == self.current_loop_exit_block.?) {
+                                        nested_broke_out = true;
+                                        break;
+                                    }
                                 }
                             }
                             // 处理 cond_br（如 ?? 运算符产生的 if/else）
@@ -13888,13 +14264,17 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                                             }
                                         }
                                     }
-                                    if (!is_deeper_nested) {
-                                        try self.generateCondBrBlock(writer, func, nb_term.cond_br, &processed_body, "            ", true);
-                                    }
+                                    // is_deeper_nested 为 true 时也调用 generateCondBrBlock（内部 is_nested_loop 检测会处理）
+                                    const prev_hdr_idx = self.current_cond_br_header_idx;
+                                    self.current_cond_br_header_idx = nb_idx;
+                                    try self.generateCondBrBlock(writer, func, nb_term.cond_br, &processed_body, "            ", true);
+                                    self.current_cond_br_header_idx = prev_hdr_idx;
                                 }
                             }
                         }
                         // 嵌套循环的 PHI 更新：从 header 块的 phi 节点中提取来自回边源的 incoming
+                        // 如果循环体因 break 退出，phi 更新不可达，跳过
+                        if (!nested_broke_out) {
                         for (blk.instructions.items) |phi_inst| {
                             if (phi_inst.op != .phi) continue;
                             const phi_res = phi_inst.result orelse continue;
@@ -13926,6 +14306,7 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                                     }
                                 }
                             }
+                        }
                         }
                         try writer.writeAll("        }\n");
                         // 生成 cleanup 块指令（else 块）
@@ -13974,6 +14355,7 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                         // 汇聚点的 break 已由 generateCondBrBlock 内联处理，跳过
                         if (self.countPredecessors(func, blk_idx) <= 1) {
                             try writer.writeAll("        break;\n");
+                            break; // 退出 for 循环，不再生成后续块（防止 unreachable code）
                         }
                     } else if (self.in_while_loop and self.current_loop_exit_block != null and br_target_idx != self.current_loop_exit_block.?) {
                         // br 到非 exit 块：可能是回边或 continue
@@ -14072,6 +14454,25 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                     }
                 }
             }
+        } else if (loop.is_for_loop) {
+            // increment 合并到 body 块（ir_generator 未生成独立 for_loop 块）
+            // 从 body 块查找 php_increment/php_decrement call，取其参数作为 loop_var_reg
+            const body_blk = func.blocks.items[loop.body_start];
+            for (body_blk.instructions.items) |inst| {
+                if (inst.op == .call) {
+                    const fname = inst.op.call.func_name;
+                    if (std.mem.eql(u8, fname, "php_increment") or
+                        std.mem.eql(u8, fname, "php_decrement") or
+                        std.mem.eql(u8, fname, "php_inc") or
+                        std.mem.eql(u8, fname, "php_dec"))
+                    {
+                        if (inst.op.call.args.len >= 1) {
+                            loop_var_reg = inst.op.call.args[0].id;
+                            break;
+                        }
+                    }
+                }
+            }
         }
 
         // 如果找到循环变量，生成优化的循环
@@ -14110,22 +14511,23 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
         var loop_blocks = try std.ArrayList(usize).initCapacity(self.allocator, 0);
         defer loop_blocks.deinit(self.allocator);
 
-        // 添加 body（只检查 body，不包括 header 和 increment）
-        try loop_blocks.append(self.allocator, loop.body_start);
-
-        // 收集循环内修改的地址（store 的目标）
+        // 收集循环内修改的地址（store 的目标）——遍历所有循环块
         var modified_addrs = std.AutoHashMap(usize, void).init(self.allocator);
         defer modified_addrs.deinit();
 
-        // 扫描所有循环块（包括 header 和 increment）
-        const all_blocks = [_]?usize{ loop.header, loop.body_start, loop.increment };
-        for (all_blocks) |maybe_idx| {
-            if (maybe_idx) |block_idx| {
-                const block = func.blocks.items[block_idx];
-                for (block.instructions.items) |inst| {
-                    if (inst.op == .store) {
-                        try modified_addrs.put(inst.op.store.ptr.id, {});
-                    }
+        // 遍历 loop.blocks（包含所有循环块：header, body, increment, 分支块等）
+        var blk_it = loop.blocks.keyIterator();
+        while (blk_it.next()) |blk_idx_ptr| {
+            const block_idx = blk_idx_ptr.*;
+            // body 块加入 loop_blocks 用于后续 load 扫描（排除 header 和 increment）
+            if (block_idx != loop.header and (loop.increment == null or block_idx != loop.increment.?)) {
+                try loop_blocks.append(self.allocator, block_idx);
+            }
+            // 收集所有 store 目标
+            const block = func.blocks.items[block_idx];
+            for (block.instructions.items) |inst| {
+                if (inst.op == .store) {
+                    try modified_addrs.put(inst.op.store.ptr.id, {});
                 }
             }
         }
@@ -14139,7 +14541,7 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
             while (i < block.instructions.items.len) : (i += 1) {
                 const inst = block.instructions.items[i];
 
-                // 检测模式：load + call(纯函数)
+                // 检测模式：load(循环不变地址)，尝试匹配后续 call(纯函数) 一起提升
                 if (inst.op == .load) {
                     const load_ptr = inst.op.load.ptr.id;
                     const load_result = inst.result orelse continue;
@@ -14149,60 +14551,164 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                         continue;
                     }
 
-                    // 查找使用 load 结果的 call
+                    // 尝试匹配 load + call(纯函数) 序列
+                    var matched_call = false;
                     if (i + 1 < block.instructions.items.len) {
                         const next_inst = block.instructions.items[i + 1];
                         if (next_inst.op == .call) {
                             const call_op = next_inst.op.call;
 
                             // 检查是否是纯函数
-                            if (!pure_functions.has(call_op.func_name)) {
-                                continue;
-                            }
+                            if (pure_functions.has(call_op.func_name)) {
+                                // 检查参数是否是 load 的结果
+                                if (call_op.args.len > 0 and call_op.args[0].id == load_result.id) {
+                                    // 🎯 找到可提升的序列！生成提升后的代码（在循环前）
+                                    try writer.writeAll("    // LICM: hoisted loop-invariant call\n");
 
-                            // 检查参数是否是 load 的结果
-                            if (call_op.args.len > 0 and call_op.args[0].id == load_result.id) {
-                                // 🎯 找到可提升的序列！生成提升后的代码（在循环前）
-                                try writer.writeAll("    // LICM: hoisted loop-invariant call\n");
-
-                                // 生成 load
-                                const suffix = self.getRegSuffix(load_result.id);
-                                if (self.regMayHeap(load_result.id)) {
-                                    try writer.print("    reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ load_result.id, suffix });
-                                }
-                                try writer.print("    reg_{d}{s} = ", .{ load_result.id, suffix });
-                                try self.generateLoadValue(writer, inst.op.load.ptr);
-                                try writer.writeAll(";\n");
-
-                                // 生成 call
-                                if (next_inst.result) |call_result| {
-                                    const call_suffix = self.getRegSuffix(call_result.id);
-                                    if (self.regMayHeap(call_result.id)) {
-                                        try writer.print("    reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ call_result.id, call_suffix });
+                                    // 生成 load
+                                    const suffix = self.getRegSuffix(load_result.id);
+                                    if (self.regMayHeap(load_result.id)) {
+                                        try writer.print("    reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ load_result.id, suffix });
                                     }
-                                    try writer.print("    reg_{d}{s} = try runtime.php_{s}(reg_{d}{s}", .{
-                                        call_result.id,
-                                        call_suffix,
-                                        call_op.func_name,
-                                        load_result.id,
-                                        suffix,
-                                    });
-                                    // 其他参数
-                                    for (call_op.args[1..]) |arg| {
-                                        try writer.print(", reg_{d}", .{arg.id});
+                                    try writer.print("    reg_{d}{s} = ", .{ load_result.id, suffix });
+                                    try self.generateLoadValue(writer, inst.op.load.ptr);
+                                    try writer.writeAll(";\n");
+
+                                    // 生成 call
+                                    if (next_inst.result) |call_result| {
+                                        const call_suffix = self.getRegSuffix(call_result.id);
+                                        if (self.regMayHeap(call_result.id)) {
+                                            try writer.print("    reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ call_result.id, call_suffix });
+                                        }
+                                        try writer.print("    reg_{d}{s} = try runtime.php_{s}(reg_{d}{s}", .{
+                                            call_result.id,
+                                            call_suffix,
+                                            call_op.func_name,
+                                            load_result.id,
+                                            suffix,
+                                        });
+                                        // 其他参数
+                                        for (call_op.args[1..]) |arg| {
+                                            try writer.print(", reg_{d}", .{arg.id});
+                                        }
+                                        try writer.writeAll(");\n");
+
+                                        // 标记这两条指令为已提升（在循环体生成时跳过）
+                                        try self.markInstructionHoisted(inst);
+                                        try self.markInstructionHoisted(next_inst);
                                     }
-                                    try writer.writeAll(");\n");
 
-                                    // 标记这两条指令为已提升（在循环体生成时跳过）
-                                    try self.markInstructionHoisted(inst);
-                                    try self.markInstructionHoisted(next_inst);
+                                    hoisted_count += 1;
+                                    matched_call = true;
+                                    i += 1; // 跳过 call 指令
                                 }
-
-                                hoisted_count += 1;
-                                i += 1; // 跳过 call 指令
                             }
                         }
                     }
+
+                    // 没有匹配的 call 时，也提升单独的 load
+                    if (!matched_call) {
+                        try writer.writeAll("    // LICM: hoisted loop-invariant load\n");
+                        const suffix = self.getRegSuffix(load_result.id);
+                        if (self.regMayHeap(load_result.id)) {
+                            try writer.print("    reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ load_result.id, suffix });
+                        }
+                        try writer.print("    reg_{d}{s} = ", .{ load_result.id, suffix });
+                        try self.generateLoadValue(writer, inst.op.load.ptr);
+                        try writer.writeAll(";\n");
+                        try self.markInstructionHoisted(inst);
+                        hoisted_count += 1;
+                    }
+                }
+            }
+        }
+
+        // P1: 算术运算提升——迭代不动点收集操作数不变的 .add/.sub/.mul 指令
+        // 核心思路：构建循环内定义的寄存器集合，操作数不在其中即为循环不变
+        var invariant_regs = std.AutoHashMap(usize, void).init(self.allocator);
+        defer invariant_regs.deinit();
+
+        // 收集循环内定义的所有寄存器（用于判断操作数是否在循环外定义）
+        var loop_defined_regs = std.AutoHashMap(usize, void).init(self.allocator);
+        defer loop_defined_regs.deinit();
+        var ldr_it = loop.blocks.keyIterator();
+        while (ldr_it.next()) |blk_idx_ptr| {
+            const block = func.blocks.items[blk_idx_ptr.*];
+            for (block.instructions.items) |inst| {
+                if (inst.result) |res| {
+                    try loop_defined_regs.put(res.id, {});
+                }
+            }
+        }
+
+        // 初始化不变寄存器：仅已提升的 load 结果
+        // 注意：const_int 在循环体内的结果不能视为不变——其赋值在循环体执行时才完成
+        // 循环外定义的寄存器通过 !loop_defined_regs.contains() 判断
+        for (loop_blocks.items) |block_idx| {
+            const block = func.blocks.items[block_idx];
+            for (block.instructions.items) |inst| {
+                if (inst.result) |res| {
+                    if (inst.op == .load and self.isInstructionHoisted(inst)) {
+                        try invariant_regs.put(res.id, {});
+                    }
+                }
+            }
+        }
+
+        // 迭代不动点：收集 .add/.sub/.mul 操作数全不变的指令
+        // 操作数不变 = 在 invariant_regs 中 或 在循环外定义（不在 loop_defined_regs 中）
+        var changed = true;
+        while (changed) {
+            changed = false;
+            for (loop_blocks.items) |block_idx| {
+                const block = func.blocks.items[block_idx];
+                for (block.instructions.items) |inst| {
+                    if (self.isInstructionHoisted(inst)) continue;
+                    const result_reg = if (inst.result) |r| r.id else continue;
+                    if (invariant_regs.contains(result_reg)) continue;
+
+                    const operands_invariant: bool = switch (inst.op) {
+                        .add => (invariant_regs.contains(inst.op.add.lhs.id) or !loop_defined_regs.contains(inst.op.add.lhs.id)) and
+                            (invariant_regs.contains(inst.op.add.rhs.id) or !loop_defined_regs.contains(inst.op.add.rhs.id)),
+                        .sub => (invariant_regs.contains(inst.op.sub.lhs.id) or !loop_defined_regs.contains(inst.op.sub.lhs.id)) and
+                            (invariant_regs.contains(inst.op.sub.rhs.id) or !loop_defined_regs.contains(inst.op.sub.rhs.id)),
+                        .mul => (invariant_regs.contains(inst.op.mul.lhs.id) or !loop_defined_regs.contains(inst.op.mul.lhs.id)) and
+                            (invariant_regs.contains(inst.op.mul.rhs.id) or !loop_defined_regs.contains(inst.op.mul.rhs.id)),
+                        else => false,
+                    };
+                    if (operands_invariant) {
+                        try invariant_regs.put(result_reg, {});
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        // 生成提升的算术指令：遍历 loop_blocks，按出现顺序生成
+        for (loop_blocks.items) |block_idx| {
+            const block = func.blocks.items[block_idx];
+            for (block.instructions.items) |inst| {
+                const result_reg = if (inst.result) |r| r.id else continue;
+                if (!invariant_regs.contains(result_reg)) continue;
+                if (self.isInstructionHoisted(inst)) continue;
+
+                const is_arith = switch (inst.op) {
+                    .add => true,
+                    .sub => true,
+                    .mul => true,
+                    else => false,
+                };
+                if (!is_arith) continue;
+
+                // 用 generateInstructionSimple 生成到临时缓冲区（未标记 hoisted，不会跳过）
+                var temp_code = try std.ArrayList(u8).initCapacity(self.allocator, 0);
+                defer temp_code.deinit(self.allocator);
+                try self.generateInstructionSimple(&temp_code, inst);
+                if (temp_code.items.len > 0) {
+                    try writer.writeAll("    // LICM: hoisted loop-invariant arithmetic\n");
+                    try writer.writeAll(temp_code.items);
+                    try self.markInstructionHoisted(inst);
+                    hoisted_count += 1;
                 }
             }
         }
@@ -14230,8 +14736,13 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
 
     /// 生成 load 指令的值读取代码
     fn generateLoadValue(self: *Self, writer: anytype, ptr_reg: IR.Register) !void {
-        const suffix = self.getRegSuffix(ptr_reg.id);
-        try writer.print("runtime.val_deref(&reg_{d}{s}).*", .{ ptr_reg.id, suffix });
+        if (self.isRefParamAlloca(ptr_reg.id)) {
+            // ref_param_alloca: **Value → reg_X.* 是 *Value
+            try writer.print("runtime.val_deref(reg_{d}.*).*", .{ptr_reg.id});
+        } else {
+            const suffix = self.getRegSuffix(ptr_reg.id);
+            try writer.print("runtime.val_deref(&reg_{d}{s}).*", .{ ptr_reg.id, suffix });
+        }
     }
 
     /// 检测并优化增量模式: load → const → add → store → reg += const
@@ -14443,8 +14954,7 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                                 for (phi_op.incoming) |incoming| {
                                     if (incoming.block == source_block) {
                                         try LoopBodyIndent.writeIndent(code_, self_.allocator, depth);
-                                        try writer_.print("reg_{d} = reg_{d};\n", .{ phi_res.id, incoming.value.id });
-                                        try writer_.print("_ = reg_{d}.retain();\n", .{phi_res.id});
+                                        try self_.writePhiAssignWithRetain(writer_, phi_res.id, incoming.value.id);
                                         break;
                                     }
                                 }
@@ -14479,8 +14989,7 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                                     for (phi_op.incoming) |incoming| {
                                         if (incoming.block == block) {
                                             try LoopBodyIndent.writeIndent(code_, self_.allocator, depth);
-                                            try writer_.print("reg_{d} = reg_{d};\n", .{ phi_res.id, incoming.value.id });
-                                            try writer_.print("_ = reg_{d}.retain();\n", .{phi_res.id});
+                                            try self_.writePhiAssignWithRetain(writer_, phi_res.id, incoming.value.id);
                                             break;
                                         }
                                     }
@@ -14506,8 +15015,8 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                                         for (phi_op.incoming) |incoming| {
                                             if (incoming.block == block) {
                                                 try LoopBodyIndent.writeIndent(code_, self_.allocator, depth);
-                                                try writer_.print("reg_{d} = reg_{d};\n", .{ phi_res.id, incoming.value.id });
-                                                try writer_.print("_ = reg_{d}.retain();\n", .{phi_res.id});
+                                                try self_.writePhiAssignWithRetain(writer_, phi_res.id, incoming.value.id);
+    
                                                 break;
                                             }
                                         }
@@ -14521,6 +15030,31 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                                 // 仅在 if 分支内部（depth > 2）生成 continue
                                 // 顶层（depth == 2）的 br inc 是自然流程，
                                 // 增量由 generateStandardForLoop 在循环体后统一生成
+                                if (depth > 2) {
+                                    try emitIncAndPhi(self_, writer_, code_, func_, loop_, phi_updates_, depth);
+                                    try LoopBodyIndent.writeIndent(code_, self_.allocator, depth);
+                                    try writer_.writeAll("continue;\n");
+                                }
+                                return;
+                            }
+                        }
+                        // 检查目标是否是任何循环的 header（有回边指向它）
+                        // 这处理嵌套循环中 br 跳到外层循环 header 的情况，
+                        // 避免外层 header 代码被生成在内层循环的 break 之后（unreachable code）
+                        {
+                            var has_back_edge = false;
+                            for (func_.blocks.items, 0..) |blk_check, blk_idx| {
+                                if (blk_idx <= target) continue;
+                                if (blk_check.terminator) |blk_term| {
+                                    switch (blk_term) {
+                                        .br => |b| if (b.index == target) { has_back_edge = true; break; },
+                                        .cond_br => |cb| if (cb.then_block.index == target or cb.else_block.index == target) { has_back_edge = true; break; },
+                                        else => {},
+                                    }
+                                }
+                            }
+                            if (has_back_edge) {
+                                // 目标是循环 header（有回边），生成 continue 或直接返回
                                 if (depth > 2) {
                                     try emitIncAndPhi(self_, writer_, code_, func_, loop_, phi_updates_, depth);
                                     try LoopBodyIndent.writeIndent(code_, self_.allocator, depth);
@@ -14639,16 +15173,16 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                                             .br => |b| {
                                                 if (b.index == block.index) {
                                                     try LoopBodyIndent.writeIndent(code_, self_.allocator, depth + 1);
-                                                    try writer_.print("reg_{d} = reg_{d};\n", .{ phi_res.id, incoming.value.id });
-                                                    try writer_.print("_ = reg_{d}.retain();\n", .{phi_res.id});
+                                                    try self_.writePhiAssignWithRetain(writer_, phi_res.id, incoming.value.id);
+        
                                                     break;
                                                 }
                                             },
                                             .cond_br => |cb| {
                                                 if (cb.then_block.index == block.index or cb.else_block.index == block.index) {
                                                     try LoopBodyIndent.writeIndent(code_, self_.allocator, depth + 1);
-                                                    try writer_.print("reg_{d} = reg_{d};\n", .{ phi_res.id, incoming.value.id });
-                                                    try writer_.print("_ = reg_{d}.retain();\n", .{phi_res.id});
+                                                    try self_.writePhiAssignWithRetain(writer_, phi_res.id, incoming.value.id);
+        
                                                     break;
                                                 }
                                             },
@@ -14675,8 +15209,8 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                                         for (phi_op.incoming) |incoming| {
                                             if (incoming.block == block) {
                                                 try LoopBodyIndent.writeIndent(code_, self_.allocator, depth);
-                                                try writer_.print("reg_{d} = reg_{d};\n", .{ phi_res.id, incoming.value.id });
-                                                try writer_.print("_ = reg_{d}.retain();\n", .{phi_res.id});
+                                                try self_.writePhiAssignWithRetain(writer_, phi_res.id, incoming.value.id);
+    
                                                 break;
                                             }
                                         }
@@ -14826,8 +15360,8 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                                                 for (phi_op.incoming) |incoming| {
                                                     if (incoming.block == block) {
                                                         try LoopBodyIndent.writeIndent(code_, self_.allocator, depth);
-                                                        try writer_.print("reg_{d} = reg_{d};\n", .{ phi_res.id, incoming.value.id });
-                                                        try writer_.print("_ = reg_{d}.retain();\n", .{phi_res.id});
+                                                        try self_.writePhiAssignWithRetain(writer_, phi_res.id, incoming.value.id);
+            
                                                         break;
                                                     }
                                                 }
@@ -14908,8 +15442,8 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                                                     for (phi_op.incoming) |incoming| {
                                                         if (incoming.block == block) {
                                                             try LoopBodyIndent.writeIndent(code_, self_.allocator, depth + 1);
-                                                            try writer_.print("reg_{d} = reg_{d};\n", .{ phi_res.id, incoming.value.id });
-                                                            try writer_.print("_ = reg_{d}.retain();\n", .{phi_res.id});
+                                                            try self_.writePhiAssignWithRetain(writer_, phi_res.id, incoming.value.id);
+                
                                                             break;
                                                         }
                                                     }
@@ -15866,11 +16400,584 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
         return reg_id;
     }
 
-    fn generateOptimizedForLoop(self: *Self, writer: anytype, func: *const IR.Function, loop: LoopInfo, loop_var_reg: usize) !void {
-        // TODO: 实现优化的循环
-        // 暂时回退到标准循环
-        try self.generateStandardForLoop(writer, func, loop);
+    /// P1: 分析循环变量是否在循环内始终为整数，收集已知整数寄存器
+    /// 支持两种路径：
+    /// 1. 全局变量路径：loop_var_reg 是 global_get 的结果
+    /// 2. alloca 路径：loop_var_reg 是 alloca 寄存器
+    /// 安全条件：初始值为 const_int + body 中无非 increment 的重新赋值
+    fn collectKnownIntRegs(self: *Self, func: *const IR.Function, loop: LoopInfo, loop_var_reg: usize, known_int_regs: *std.AutoHashMap(usize, void)) bool {
+        // 路径 1: 全局变量
+        if (self.current_global_get_names) |global_names| {
+            if (global_names.get(loop_var_reg)) |var_name| {
+                return self.collectKnownIntRegsGlobal(func, loop, var_name, known_int_regs);
+            }
+        }
+        // 路径 1.5: PHI 循环变量（函数内非 alloca，SSA）
+        if (findRegDef(func, loop_var_reg)) |def| {
+            if (def.op == .phi) {
+                return self.collectKnownIntRegsPhi(func, loop, loop_var_reg, known_int_regs);
+            }
+        }
+        // 路径 2: alloca 寄存器
+        return self.collectKnownIntRegsAlloca(func, loop, loop_var_reg, known_int_regs);
+    }
+
+    /// P2: PHI 路径——委托给 collectKnownIntRegsWhileLoop 统一处理
+    /// collectKnownIntRegsWhileLoop 迭代收集 header 所有 PHI 节点（含 loop_var_reg），
+    /// 支持 .add/.sub/.mul/.call latch，是 collectKnownIntRegsPhi 的超集
+    fn collectKnownIntRegsPhi(self: *Self, func: *const IR.Function, loop: LoopInfo, loop_var_reg: usize, known_int_regs: *std.AutoHashMap(usize, void)) bool {
         _ = loop_var_reg;
+        return self.collectKnownIntRegsWhileLoop(func, loop, known_int_regs);
+    }
+
+    /// P2: while 循环 PHI 整数收集——遍历 header 所有 PHI 节点，迭代不动点收集已知整数寄存器
+    /// 安全条件：PHI init 是 const_int/已知整数 + latch 是整数运算（php_increment/php_decrement/php_add/php_sub）结果
+    /// 且 latch 操作数是 {自身PHI, const_int, 已知整数} 之一
+    /// 支持 $i+=N（php_add latch）和 $s+=$i（php_add 依赖已知整数 $i）
+    fn collectKnownIntRegsWhileLoop(self: *Self, func: *const IR.Function, loop: LoopInfo, known_int_regs: *std.AutoHashMap(usize, void)) bool {
+        const header_block = func.blocks.items[loop.header];
+
+        var changed = true;
+        while (changed) {
+            changed = false;
+            for (header_block.instructions.items) |inst| {
+                if (inst.op != .phi) continue;
+                const result_reg = inst.result orelse continue;
+                if (known_int_regs.contains(result_reg.id)) continue;
+
+                const phi = inst.op.phi;
+
+                var init_ok = false;
+                var latch_reg: ?usize = null;
+                for (phi.incoming) |incoming| {
+                    if (isInitBlock(incoming.block, loop)) {
+                        if (isWhilePhiOperandIntSafe(func, incoming.value.id, result_reg.id, known_int_regs)) {
+                            init_ok = true;
+                        }
+                    } else {
+                        latch_reg = incoming.value.id;
+                    }
+                }
+                if (!init_ok) continue;
+                const l_reg = latch_reg orelse continue;
+
+                if (isWhileLoopLatchIntSafe(func, l_reg, result_reg.id, known_int_regs)) {
+                    known_int_regs.put(result_reg.id, {}) catch {};
+                    changed = true;
+                }
+            }
+        }
+
+        // 收集循环内所有 const_int 寄存器（编译时已知整数，SSA 不会被重新赋值）
+        var blk_it = loop.blocks.keyIterator();
+        while (blk_it.next()) |blk_idx_ptr| {
+            const blk_idx = blk_idx_ptr.*;
+            const block = func.blocks.items[blk_idx];
+            for (block.instructions.items) |inst| {
+                if (inst.op == .const_int) {
+                    if (inst.result) |res| {
+                        known_int_regs.put(res.id, {}) catch {};
+                    }
+                }
+            }
+        }
+
+        // P3: alloca 路径——扫描所有 alloca 寄存器，收集整数安全的变量
+        self.collectKnownIntRegsAllocaWhileLoop(func, loop, known_int_regs);
+
+        return known_int_regs.count() > 0;
+    }
+
+    /// 辅助：操作数是否为整数安全——自身PHI / 已知整数寄存器 / const_int
+    fn isWhilePhiOperandIntSafe(func: *const IR.Function, reg_id: usize, phi_reg: usize, known: *const std.AutoHashMap(usize, void)) bool {
+        if (reg_id == phi_reg) return true;
+        if (known.contains(reg_id)) return true;
+        if (findRegDef(func, reg_id)) |def| {
+            if (def.op == .const_int) return true;
+        }
+        return false;
+    }
+
+    /// 辅助：latch 值是否为整数安全——const_int / php_increment(已知) / php_add(已知,已知) / php_sub(已知,已知) / php_mul(已知,已知)
+    fn isWhileLoopLatchIntSafe(func: *const IR.Function, latch_reg: usize, phi_reg: usize, known: *const std.AutoHashMap(usize, void)) bool {
+        const def = findRegDef(func, latch_reg) orelse return false;
+        switch (def.op) {
+            .const_int => return true,
+            // IR 二元运算：.add/.sub/.mul 结果是整数（当两操作数是整数时）
+            .add => {
+                return isWhilePhiOperandIntSafe(func, def.op.add.lhs.id, phi_reg, known) and
+                    isWhilePhiOperandIntSafe(func, def.op.add.rhs.id, phi_reg, known);
+            },
+            .sub => {
+                return isWhilePhiOperandIntSafe(func, def.op.sub.lhs.id, phi_reg, known) and
+                    isWhilePhiOperandIntSafe(func, def.op.sub.rhs.id, phi_reg, known);
+            },
+            .mul => {
+                return isWhilePhiOperandIntSafe(func, def.op.mul.lhs.id, phi_reg, known) and
+                    isWhilePhiOperandIntSafe(func, def.op.mul.rhs.id, phi_reg, known);
+            },
+            .call => {
+                const fname = def.op.call.func_name;
+                if (std.mem.eql(u8, fname, "php_increment") or
+                    std.mem.eql(u8, fname, "php_decrement") or
+                    std.mem.eql(u8, fname, "php_inc") or
+                    std.mem.eql(u8, fname, "php_dec"))
+                {
+                    if (def.op.call.args.len >= 1) {
+                        return isWhilePhiOperandIntSafe(func, def.op.call.args[0].id, phi_reg, known);
+                    }
+                    return false;
+                }
+                if (std.mem.eql(u8, fname, "php_add") or std.mem.eql(u8, fname, "php_sub") or std.mem.eql(u8, fname, "php_mul")) {
+                    if (def.op.call.args.len >= 2) {
+                        const a = def.op.call.args[0].id;
+                        const b = def.op.call.args[1].id;
+                        return isWhilePhiOperandIntSafe(func, a, phi_reg, known) and
+                            isWhilePhiOperandIntSafe(func, b, phi_reg, known);
+                    }
+                    return false;
+                }
+                return false;
+            },
+            else => return false,
+        }
+    }
+
+    /// P3: alloca 路径——扫描所有 alloca 寄存器，收集整数安全的变量
+    /// 安全条件：init=const_int + body 中所有 store 值为整数运算（.add/.sub/.mul/.call）且操作数为 {load(自身), const_int, 已知整数}
+    fn collectKnownIntRegsAllocaWhileLoop(self: *Self, func: *const IR.Function, loop: LoopInfo, known_int_regs: *std.AutoHashMap(usize, void)) void {
+        const alloca_regs = self.current_alloca_regs orelse return;
+
+        // 迭代不动点：alloca 变量可能互相依赖（如 $a += $b, $b += $a）
+        var changed = true;
+        while (changed) {
+            changed = false;
+            var it = alloca_regs.keyIterator();
+            while (it.next()) |alloca_ptr| {
+                const alloca_reg = alloca_ptr.*;
+
+                // 已收集的 alloca 跳过（检查是否有 load 结果已收集）
+                // 1. 检查 init：循环前 store(alloca, const_int)
+                var init_ok = false;
+                for (0..loop.header) |idx| {
+                    const block = func.blocks.items[idx];
+                    for (block.instructions.items) |inst| {
+                        if (inst.op == .store and inst.op.store.ptr.id == alloca_reg) {
+                            if (findRegDef(func, inst.op.store.value.id)) |def| {
+                                if (def.op == .const_int) {
+                                    init_ok = true;
+                                } else {
+                                    init_ok = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (!init_ok) break;
+                }
+                if (!init_ok) continue;
+
+                // 2. 检查 body：所有 store(alloca, X) 的 X 必须整数安全
+                var body_ok = true;
+                var body_it = loop.blocks.iterator();
+                while (body_it.next()) |entry| {
+                    const block_idx = entry.key_ptr.*;
+                    if (block_idx == loop.header) continue;
+                    const block = func.blocks.items[block_idx];
+                    for (block.instructions.items) |inst| {
+                        if (inst.op == .store and inst.op.store.ptr.id == alloca_reg) {
+                            if (!isAllocaLatchIntSafe(func, inst.op.store.value.id, alloca_reg, known_int_regs)) {
+                                body_ok = false;
+                                break;
+                            }
+                        }
+                    }
+                    if (!body_ok) break;
+                }
+                if (!body_ok) continue;
+
+                // 3. 收集所有 load(alloca) 结果
+                var collected_any = false;
+                var collect_it = loop.blocks.iterator();
+                while (collect_it.next()) |entry| {
+                    const block_idx = entry.key_ptr.*;
+                    const block = func.blocks.items[block_idx];
+                    for (block.instructions.items) |inst| {
+                        if (inst.op == .load and inst.op.load.ptr.id == alloca_reg) {
+                            if (inst.result) |res| {
+                                if (!known_int_regs.contains(res.id)) {
+                                    known_int_regs.put(res.id, {}) catch {};
+                                    collected_any = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                if (collected_any) changed = true;
+            }
+        }
+    }
+
+    /// 辅助：alloca 操作数是否整数安全——load(自身alloca) / 已知整数 / const_int
+    fn isAllocaOperandIntSafe(func: *const IR.Function, reg_id: usize, alloca_reg: usize, known: *const std.AutoHashMap(usize, void)) bool {
+        if (known.contains(reg_id)) return true;
+        if (findRegDef(func, reg_id)) |def| {
+            if (def.op == .const_int) return true;
+            // load(自身 alloca) 是自引用
+            if (def.op == .load and def.op.load.ptr.id == alloca_reg) return true;
+        }
+        return false;
+    }
+
+    /// 辅助：alloca latch 值是否整数安全——const_int / .add / .sub / .mul / php_inc / php_add / php_sub / php_mul
+    fn isAllocaLatchIntSafe(func: *const IR.Function, latch_reg: usize, alloca_reg: usize, known: *const std.AutoHashMap(usize, void)) bool {
+        const def = findRegDef(func, latch_reg) orelse return false;
+        switch (def.op) {
+            .const_int => return true,
+            .add => {
+                return isAllocaOperandIntSafe(func, def.op.add.lhs.id, alloca_reg, known) and
+                    isAllocaOperandIntSafe(func, def.op.add.rhs.id, alloca_reg, known);
+            },
+            .sub => {
+                return isAllocaOperandIntSafe(func, def.op.sub.lhs.id, alloca_reg, known) and
+                    isAllocaOperandIntSafe(func, def.op.sub.rhs.id, alloca_reg, known);
+            },
+            .mul => {
+                return isAllocaOperandIntSafe(func, def.op.mul.lhs.id, alloca_reg, known) and
+                    isAllocaOperandIntSafe(func, def.op.mul.rhs.id, alloca_reg, known);
+            },
+            .call => {
+                const fname = def.op.call.func_name;
+                if (std.mem.eql(u8, fname, "php_increment") or
+                    std.mem.eql(u8, fname, "php_decrement") or
+                    std.mem.eql(u8, fname, "php_inc") or
+                    std.mem.eql(u8, fname, "php_dec"))
+                {
+                    if (def.op.call.args.len >= 1) {
+                        return isAllocaOperandIntSafe(func, def.op.call.args[0].id, alloca_reg, known);
+                    }
+                    return false;
+                }
+                if (std.mem.eql(u8, fname, "php_add") or std.mem.eql(u8, fname, "php_sub") or std.mem.eql(u8, fname, "php_mul")) {
+                    if (def.op.call.args.len >= 2) {
+                        const a = def.op.call.args[0].id;
+                        const b = def.op.call.args[1].id;
+                        return isAllocaOperandIntSafe(func, a, alloca_reg, known) and
+                            isAllocaOperandIntSafe(func, b, alloca_reg, known);
+                    }
+                    return false;
+                }
+                return false;
+            },
+            else => return false,
+        }
+    }
+
+    /// P2: 收集循环内用到的、有 int 类型注解的函数参数的 load 寄存器
+    /// 安全条件：参数有 int 类型注解（非 nullable、非引用）+ 循环 body 中未重新赋值该参数
+    fn collectKnownIntParamRegs(self: *Self, func: *const IR.Function, loop: LoopInfo, known_int_regs: *std.AutoHashMap(usize, void)) void {
+        _ = self;
+        if (func.param_types.len == 0) return;
+
+        for (func.param_types, 0..) |ptype, i| {
+            if (!std.mem.eql(u8, ptype, "int")) continue;
+            // ?int（nullable）不安全：null 值 asInt 行为未定义
+            if (i < func.param_nullable.len and func.param_nullable[i]) continue;
+            if (i < func.params.items.len and func.params.items[i].is_reference) continue;
+            const param_name = if (i < func.param_names.len) func.param_names[i] else continue;
+
+            var param_reg: ?usize = null;
+            for (func.blocks.items) |block| {
+                for (block.instructions.items) |inst| {
+                    if (inst.op == .param and std.mem.eql(u8, inst.op.param.name, param_name)) {
+                        if (inst.result) |res| param_reg = res.id;
+                        break;
+                    }
+                }
+                if (param_reg != null) break;
+            }
+            const p_reg = param_reg orelse continue;
+
+            // param_reg 是 SSA，值不变；参数有 int 注解，直接收集为已知整数
+            // （IR 优化可能消除 store/load，循环内直接用 param_reg）
+            known_int_regs.put(p_reg, {}) catch {};
+
+            var alloca_reg: ?usize = null;
+            for (func.blocks.items) |block| {
+                for (block.instructions.items) |inst| {
+                    if (inst.op == .store and inst.op.store.value.id == p_reg) {
+                        alloca_reg = inst.op.store.ptr.id;
+                        break;
+                    }
+                }
+                if (alloca_reg != null) break;
+            }
+            const a_reg = alloca_reg orelse continue;
+
+            var reassigned = false;
+            var it = loop.blocks.iterator();
+            while (it.next()) |entry| {
+                const block_idx = entry.key_ptr.*;
+                if (block_idx == loop.header) continue;
+                const block = func.blocks.items[block_idx];
+                for (block.instructions.items) |inst| {
+                    if (inst.op == .store and inst.op.store.ptr.id == a_reg) {
+                        reassigned = true;
+                        break;
+                    }
+                }
+                if (reassigned) break;
+            }
+            if (reassigned) continue;
+
+            var collect_it = loop.blocks.iterator();
+            while (collect_it.next()) |entry| {
+                const block_idx = entry.key_ptr.*;
+                const block = func.blocks.items[block_idx];
+                for (block.instructions.items) |inst| {
+                    if (inst.op == .load and inst.op.load.ptr.id == a_reg) {
+                        if (inst.result) |res| {
+                            known_int_regs.put(res.id, {}) catch {};
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// P1: 全局变量路径——分析全局变量是否在循环内始终为整数
+    fn collectKnownIntRegsGlobal(self: *Self, func: *const IR.Function, loop: LoopInfo, var_name: []const u8, known_int_regs: *std.AutoHashMap(usize, void)) bool {
+        _ = self;
+        // 1. 检查初始值为 const_int
+        var init_is_const_int = false;
+        for (0..loop.header) |idx| {
+            const block = func.blocks.items[idx];
+            for (block.instructions.items) |inst| {
+                if (inst.op == .global_set and std.mem.eql(u8, inst.op.global_set.name, var_name)) {
+                    if (inst.op.global_set.value) |val_reg| {
+                        if (findRegDef(func, val_reg.id)) |def| {
+                            if (def.op == .const_int) {
+                                init_is_const_int = true;
+                            } else {
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (!init_is_const_int) return false;
+
+        // 2. 检查 body 中所有 global_set 的值是否整数安全
+        // 支持 .add/.sub/.mul/.call(php_add/php_sub/php_mul/php_increment/php_decrement) latch
+        var it = loop.blocks.iterator();
+        while (it.next()) |entry| {
+            const block_idx = entry.key_ptr.*;
+            if (block_idx == loop.header) continue;
+            const block = func.blocks.items[block_idx];
+            for (block.instructions.items) |inst| {
+                if (inst.op == .global_set and std.mem.eql(u8, inst.op.global_set.name, var_name)) {
+                    if (inst.op.global_set.value) |val_reg| {
+                        if (!isGlobalLatchIntSafe(func, val_reg.id, var_name, known_int_regs)) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. 收集所有 global_get "$var_name" 的结果寄存器
+        var collect_it = loop.blocks.iterator();
+        while (collect_it.next()) |entry| {
+            const block_idx = entry.key_ptr.*;
+            const block = func.blocks.items[block_idx];
+            for (block.instructions.items) |inst| {
+                if (inst.op == .global_get and std.mem.eql(u8, inst.op.global_get.name, var_name)) {
+                    if (inst.result) |res| {
+                        known_int_regs.put(res.id, {}) catch {};
+                    }
+                }
+            }
+        }
+
+        return true;
+    }
+
+    /// 辅助：全局变量操作数是否整数安全——global_get(自身) / 已知整数 / const_int
+    fn isGlobalOperandIntSafe(func: *const IR.Function, reg_id: usize, var_name: []const u8, known: *const std.AutoHashMap(usize, void)) bool {
+        if (known.contains(reg_id)) return true;
+        if (findRegDef(func, reg_id)) |def| {
+            if (def.op == .const_int) return true;
+            if (def.op == .global_get and std.mem.eql(u8, def.op.global_get.name, var_name)) return true;
+        }
+        return false;
+    }
+
+    /// 辅助：全局变量 latch 值是否整数安全
+    fn isGlobalLatchIntSafe(func: *const IR.Function, latch_reg: usize, var_name: []const u8, known: *const std.AutoHashMap(usize, void)) bool {
+        const def = findRegDef(func, latch_reg) orelse return false;
+        switch (def.op) {
+            .const_int => return true,
+            .add => {
+                return isGlobalOperandIntSafe(func, def.op.add.lhs.id, var_name, known) and
+                    isGlobalOperandIntSafe(func, def.op.add.rhs.id, var_name, known);
+            },
+            .sub => {
+                return isGlobalOperandIntSafe(func, def.op.sub.lhs.id, var_name, known) and
+                    isGlobalOperandIntSafe(func, def.op.sub.rhs.id, var_name, known);
+            },
+            .mul => {
+                return isGlobalOperandIntSafe(func, def.op.mul.lhs.id, var_name, known) and
+                    isGlobalOperandIntSafe(func, def.op.mul.rhs.id, var_name, known);
+            },
+            .call => {
+                const fname = def.op.call.func_name;
+                if (std.mem.eql(u8, fname, "php_increment") or
+                    std.mem.eql(u8, fname, "php_decrement") or
+                    std.mem.eql(u8, fname, "php_inc") or
+                    std.mem.eql(u8, fname, "php_dec"))
+                {
+                    if (def.op.call.args.len >= 1) {
+                        return isGlobalOperandIntSafe(func, def.op.call.args[0].id, var_name, known);
+                    }
+                    return false;
+                }
+                if (std.mem.eql(u8, fname, "php_add") or std.mem.eql(u8, fname, "php_sub") or std.mem.eql(u8, fname, "php_mul")) {
+                    if (def.op.call.args.len >= 2) {
+                        const a = def.op.call.args[0].id;
+                        const b = def.op.call.args[1].id;
+                        return isGlobalOperandIntSafe(func, a, var_name, known) and
+                            isGlobalOperandIntSafe(func, b, var_name, known);
+                    }
+                    return false;
+                }
+                return false;
+            },
+            else => return false,
+        }
+    }
+
+    /// P1: alloca 路径——委托给 collectKnownIntRegsAllocaWhileLoop（迭代不动点，超集）
+    fn collectKnownIntRegsAlloca(self: *Self, func: *const IR.Function, loop: LoopInfo, loop_var_reg: usize, known_int_regs: *std.AutoHashMap(usize, void)) bool {
+        _ = loop_var_reg;
+        const prev_count = known_int_regs.count();
+        self.collectKnownIntRegsAllocaWhileLoop(func, loop, known_int_regs);
+        return known_int_regs.count() > prev_count or known_int_regs.count() > 0;
+    }
+
+    fn generateOptimizedForLoop(self: *Self, writer: anytype, func: *const IR.Function, loop: LoopInfo, loop_var_reg: usize) !void {
+        // i64 快速路径优化：激活 call 生成处的运行时类型检查 + i64 操作
+        const prev = self.i64_loop_optimize_active;
+        self.i64_loop_optimize_active = true;
+        defer self.i64_loop_optimize_active = prev;
+
+        // P1: 编译时类型分析——如果循环变量初始值为 const_int 且 body 中未重新赋值，
+        // 收集所有 load/global_get 循环变量的结果寄存器，标记为已知整数，省略 isInt() 检查
+        var known_int_regs = std.AutoHashMap(usize, void).init(self.allocator);
+        defer known_int_regs.deinit();
+        const prev_known_int_regs = self.i64_loop_known_int_regs;
+        defer self.i64_loop_known_int_regs = prev_known_int_regs;
+        if (self.collectKnownIntRegs(func, loop, loop_var_reg, &known_int_regs)) {
+            self.i64_loop_known_int_regs = &known_int_regs;
+        }
+
+        // P2: 收集循环内用到的、有 int 类型注解的函数参数的 load 寄存器
+        self.collectKnownIntParamRegs(func, loop, &known_int_regs);
+        if (self.i64_loop_known_int_regs == null and known_int_regs.count() > 0) {
+            self.i64_loop_known_int_regs = &known_int_regs;
+        }
+
+        // P3-2: i64 快速路径覆盖率统计
+        if (std.c.getenv("ZIGPHP_AOT_STATS") != null) {
+            const func_name = if (@hasField(@TypeOf(func.*), "name")) func.name else "<unknown>";
+            std.debug.print("[AOT-STATS] for_loop func={s} known_int_regs={d} active={}\n", .{ func_name, known_int_regs.count(), self.i64_loop_optimize_active });
+        }
+
+        try self.generateStandardForLoop(writer, func, loop);
+    }
+
+    /// i64 快速路径：当 i64_loop_optimize_active 为 true 时，对算术/比较内置函数生成运行时类型检查 + i64 操作
+    /// 避免 php_increment/php_lt/php_add 等函数调用开销（当操作数为 i64 时）
+    /// 返回 true 表示已生成优化代码，false 表示未匹配（走标准生成）
+    fn tryEmitI64FastPath(self: *Self, writer: anytype, op: IR.Instruction.CallOp, reg: IR.Register) !bool {
+        if (!self.i64_loop_optimize_active) return false;
+
+        // 一元：php_increment / php_decrement
+        if (op.args.len == 1) {
+            const a = op.args[0];
+            const a_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(a.id) else false) ".*" else "";
+            const a_known = if (self.i64_loop_known_int_regs) |known_regs| known_regs.contains(a.id) else false;
+            if (std.mem.eql(u8, op.func_name, "php_increment")) {
+                try self.writeRegAssignmentPrefix(writer, reg.id);
+                if (a_known) {
+                    try writer.print("runtime.Value.initInt(reg_{d}{s}.asInt() + 1);\n", .{ a.id, a_sfx });
+                } else {
+                    try writer.print("if (reg_{d}{s}.isInt()) runtime.Value.initInt(reg_{d}{s}.asInt() + 1) else try runtime.php_increment(reg_{d}{s});\n", .{ a.id, a_sfx, a.id, a_sfx, a.id, a_sfx });
+                }
+                return true;
+            }
+            if (std.mem.eql(u8, op.func_name, "php_decrement")) {
+                try self.writeRegAssignmentPrefix(writer, reg.id);
+                if (a_known) {
+                    try writer.print("runtime.Value.initInt(reg_{d}{s}.asInt() - 1);\n", .{ a.id, a_sfx });
+                } else {
+                    try writer.print("if (reg_{d}{s}.isInt()) runtime.Value.initInt(reg_{d}{s}.asInt() - 1) else try runtime.php_decrement(reg_{d}{s});\n", .{ a.id, a_sfx, a.id, a_sfx, a.id, a_sfx });
+                }
+                return true;
+            }
+            return false;
+        }
+
+        // 二元：比较 + 算术
+        if (op.args.len == 2) {
+            const a = op.args[0];
+            const b = op.args[1];
+
+            // 比较：php_lt/le/gt/ge → Value.initBool
+            const cmp_op: ?[]const u8 = blk: {
+                if (std.mem.eql(u8, op.func_name, "php_lt")) break :blk "<";
+                if (std.mem.eql(u8, op.func_name, "php_le")) break :blk "<=";
+                if (std.mem.eql(u8, op.func_name, "php_gt")) break :blk ">";
+                if (std.mem.eql(u8, op.func_name, "php_ge")) break :blk ">=";
+                break :blk null;
+            };
+            if (cmp_op) |c| {
+                try self.writeRegAssignmentPrefix(writer, reg.id);
+                const a_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(a.id) else false) ".*" else "";
+                const b_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(b.id) else false) ".*" else "";
+                const a_known = if (self.i64_loop_known_int_regs) |known_regs| known_regs.contains(a.id) else false;
+                const b_known = if (self.i64_loop_known_int_regs) |known_regs| known_regs.contains(b.id) else false;
+                if (a_known and b_known) {
+                    try writer.print("runtime.Value.initBool(reg_{d}{s}.asInt() {s} reg_{d}{s}.asInt());\n", .{ a.id, a_sfx, c, b.id, b_sfx });
+                } else {
+                    try writer.print("if (reg_{d}{s}.isInt() and reg_{d}{s}.isInt()) runtime.Value.initBool(reg_{d}{s}.asInt() {s} reg_{d}{s}.asInt()) else try runtime.{s}(reg_{d}{s}, reg_{d}{s});\n", .{ a.id, a_sfx, b.id, b_sfx, a.id, a_sfx, c, b.id, b_sfx, op.func_name, a.id, a_sfx, b.id, b_sfx });
+                }
+                return true;
+            }
+
+            // 算术：php_add/sub/mul → Value.initInt
+            const arith_op: ?[]const u8 = blk: {
+                if (std.mem.eql(u8, op.func_name, "php_add")) break :blk "+";
+                if (std.mem.eql(u8, op.func_name, "php_sub")) break :blk "-";
+                if (std.mem.eql(u8, op.func_name, "php_mul")) break :blk "*";
+                break :blk null;
+            };
+            if (arith_op) |c| {
+                try self.writeRegAssignmentPrefix(writer, reg.id);
+                const a_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(a.id) else false) ".*" else "";
+                const b_sfx = if (if (self.current_alloca_regs) |regs| regs.contains(b.id) else false) ".*" else "";
+                const a_known = if (self.i64_loop_known_int_regs) |known_regs| known_regs.contains(a.id) else false;
+                const b_known = if (self.i64_loop_known_int_regs) |known_regs| known_regs.contains(b.id) else false;
+                if (a_known and b_known) {
+                    try writer.print("runtime.Value.initInt(reg_{d}{s}.asInt() {s} reg_{d}{s}.asInt());\n", .{ a.id, a_sfx, c, b.id, b_sfx });
+                } else {
+                    try writer.print("if (reg_{d}{s}.isInt() and reg_{d}{s}.isInt()) runtime.Value.initInt(reg_{d}{s}.asInt() {s} reg_{d}{s}.asInt()) else try runtime.{s}(reg_{d}{s}, reg_{d}{s});\n", .{ a.id, a_sfx, b.id, b_sfx, a.id, a_sfx, c, b.id, b_sfx, op.func_name, a.id, a_sfx, b.id, b_sfx });
+                }
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /// 写布尔表达式到 writer
@@ -15901,14 +17008,19 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                 }
             },
             .lt => |op| {
-                const lhs_corrected = if (self.current_register_types) |types|
+                var lhs_corrected = if (self.current_register_types) |types|
                     types.get(op.lhs.id) orelse op.lhs.type_
                 else
                     op.lhs.type_;
-                const rhs_corrected = if (self.current_register_types) |types|
+                var rhs_corrected = if (self.current_register_types) |types|
                     types.get(op.rhs.id) orelse op.rhs.type_
                 else
                     op.rhs.type_;
+                // P1: 循环变量类型推断——已知整数寄存器视为 i64，省略 isInt() 检查
+                if (self.i64_loop_known_int_regs) |known_regs| {
+                    if (known_regs.contains(op.lhs.id)) lhs_corrected = .i64;
+                    if (known_regs.contains(op.rhs.id)) rhs_corrected = .i64;
+                }
 
                 const lhs_type_tag = @as(std.meta.Tag(IR.Type), lhs_corrected);
                 const rhs_type_tag = @as(std.meta.Tag(IR.Type), rhs_corrected);
@@ -15925,22 +17037,35 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                     const rhs_id = self.resolveLoadSource(op.rhs.id);
                     try writer.print("reg_{d}.asFloat() < reg_{d}.asFloat()", .{ lhs_id, rhs_id });
                 } else {
-                    try writer.writeAll("(try runtime.php_lt(");
-                    try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
-                    try writer.writeAll(", ");
-                    try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
-                    try writer.writeAll(")).toBool()");
+                    if (self.i64_loop_optimize_active) {
+                        const lhs_id = self.resolveLoadSource(op.lhs.id);
+                        const rhs_id = self.resolveLoadSource(op.rhs.id);
+                        const lhs_sfx: []const u8 = if (if (self.current_alloca_regs) |regs| regs.contains(lhs_id) else false) ".*" else "";
+                        const rhs_sfx: []const u8 = if (if (self.current_alloca_regs) |regs| regs.contains(rhs_id) else false) ".*" else "";
+                        try writer.print("(if (reg_{d}{s}.isInt() and reg_{d}{s}.isInt()) (reg_{d}{s}.asInt() < reg_{d}{s}.asInt()) else (try runtime.php_lt(reg_{d}{s}, reg_{d}{s})).toBool())", .{ lhs_id, lhs_sfx, rhs_id, rhs_sfx, lhs_id, lhs_sfx, rhs_id, rhs_sfx, lhs_id, lhs_sfx, rhs_id, rhs_sfx });
+                    } else {
+                        try writer.writeAll("(try runtime.php_lt(");
+                        try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
+                        try writer.writeAll(", ");
+                        try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
+                        try writer.writeAll(")).toBool()");
+                    }
                 }
             },
             .le => |op| {
-                const lhs_corrected = if (self.current_register_types) |types|
+                var lhs_corrected = if (self.current_register_types) |types|
                     types.get(op.lhs.id) orelse op.lhs.type_
                 else
                     op.lhs.type_;
-                const rhs_corrected = if (self.current_register_types) |types|
+                var rhs_corrected = if (self.current_register_types) |types|
                     types.get(op.rhs.id) orelse op.rhs.type_
                 else
                     op.rhs.type_;
+                // P1: 循环变量类型推断——已知整数寄存器视为 i64，省略 isInt() 检查
+                if (self.i64_loop_known_int_regs) |known_regs| {
+                    if (known_regs.contains(op.lhs.id)) lhs_corrected = .i64;
+                    if (known_regs.contains(op.rhs.id)) rhs_corrected = .i64;
+                }
 
                 const lhs_type_tag = @as(std.meta.Tag(IR.Type), lhs_corrected);
                 const rhs_type_tag = @as(std.meta.Tag(IR.Type), rhs_corrected);
@@ -15950,22 +17075,35 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                 } else if (lhs_type_tag == .f64 and rhs_type_tag == .f64) {
                     try writer.print("reg_{d}.asFloat() <= reg_{d}.asFloat()", .{ op.lhs.id, op.rhs.id });
                 } else {
-                    try writer.writeAll("(try runtime.php_le(");
-                    try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
-                    try writer.writeAll(", ");
-                    try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
-                    try writer.writeAll(")).toBool()");
+                    if (self.i64_loop_optimize_active) {
+                        const lhs_id = self.resolveLoadSource(op.lhs.id);
+                        const rhs_id = self.resolveLoadSource(op.rhs.id);
+                        const lhs_sfx: []const u8 = if (if (self.current_alloca_regs) |regs| regs.contains(lhs_id) else false) ".*" else "";
+                        const rhs_sfx: []const u8 = if (if (self.current_alloca_regs) |regs| regs.contains(rhs_id) else false) ".*" else "";
+                        try writer.print("(if (reg_{d}{s}.isInt() and reg_{d}{s}.isInt()) (reg_{d}{s}.asInt() <= reg_{d}{s}.asInt()) else (try runtime.php_le(reg_{d}{s}, reg_{d}{s})).toBool())", .{ lhs_id, lhs_sfx, rhs_id, rhs_sfx, lhs_id, lhs_sfx, rhs_id, rhs_sfx, lhs_id, lhs_sfx, rhs_id, rhs_sfx });
+                    } else {
+                        try writer.writeAll("(try runtime.php_le(");
+                        try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
+                        try writer.writeAll(", ");
+                        try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
+                        try writer.writeAll(")).toBool()");
+                    }
                 }
             },
             .gt => |op| {
-                const lhs_corrected = if (self.current_register_types) |types|
+                var lhs_corrected = if (self.current_register_types) |types|
                     types.get(op.lhs.id) orelse op.lhs.type_
                 else
                     op.lhs.type_;
-                const rhs_corrected = if (self.current_register_types) |types|
+                var rhs_corrected = if (self.current_register_types) |types|
                     types.get(op.rhs.id) orelse op.rhs.type_
                 else
                     op.rhs.type_;
+                // P1: 循环变量类型推断——已知整数寄存器视为 i64，省略 isInt() 检查
+                if (self.i64_loop_known_int_regs) |known_regs| {
+                    if (known_regs.contains(op.lhs.id)) lhs_corrected = .i64;
+                    if (known_regs.contains(op.rhs.id)) rhs_corrected = .i64;
+                }
 
                 const lhs_type_tag = @as(std.meta.Tag(IR.Type), lhs_corrected);
                 const rhs_type_tag = @as(std.meta.Tag(IR.Type), rhs_corrected);
@@ -15975,22 +17113,35 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                 } else if (lhs_type_tag == .f64 and rhs_type_tag == .f64) {
                     try writer.print("reg_{d}.asFloat() > reg_{d}.asFloat()", .{ op.lhs.id, op.rhs.id });
                 } else {
-                    try writer.writeAll("(try runtime.php_gt(");
-                    try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
-                    try writer.writeAll(", ");
-                    try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
-                    try writer.writeAll(")).toBool()");
+                    if (self.i64_loop_optimize_active) {
+                        const lhs_id = self.resolveLoadSource(op.lhs.id);
+                        const rhs_id = self.resolveLoadSource(op.rhs.id);
+                        const lhs_sfx: []const u8 = if (if (self.current_alloca_regs) |regs| regs.contains(lhs_id) else false) ".*" else "";
+                        const rhs_sfx: []const u8 = if (if (self.current_alloca_regs) |regs| regs.contains(rhs_id) else false) ".*" else "";
+                        try writer.print("(if (reg_{d}{s}.isInt() and reg_{d}{s}.isInt()) (reg_{d}{s}.asInt() > reg_{d}{s}.asInt()) else (try runtime.php_gt(reg_{d}{s}, reg_{d}{s})).toBool())", .{ lhs_id, lhs_sfx, rhs_id, rhs_sfx, lhs_id, lhs_sfx, rhs_id, rhs_sfx, lhs_id, lhs_sfx, rhs_id, rhs_sfx });
+                    } else {
+                        try writer.writeAll("(try runtime.php_gt(");
+                        try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
+                        try writer.writeAll(", ");
+                        try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
+                        try writer.writeAll(")).toBool()");
+                    }
                 }
             },
             .ge => |op| {
-                const lhs_corrected = if (self.current_register_types) |types|
+                var lhs_corrected = if (self.current_register_types) |types|
                     types.get(op.lhs.id) orelse op.lhs.type_
                 else
                     op.lhs.type_;
-                const rhs_corrected = if (self.current_register_types) |types|
+                var rhs_corrected = if (self.current_register_types) |types|
                     types.get(op.rhs.id) orelse op.rhs.type_
                 else
                     op.rhs.type_;
+                // P1: 循环变量类型推断——已知整数寄存器视为 i64，省略 isInt() 检查
+                if (self.i64_loop_known_int_regs) |known_regs| {
+                    if (known_regs.contains(op.lhs.id)) lhs_corrected = .i64;
+                    if (known_regs.contains(op.rhs.id)) rhs_corrected = .i64;
+                }
 
                 const lhs_type_tag = @as(std.meta.Tag(IR.Type), lhs_corrected);
                 const rhs_type_tag = @as(std.meta.Tag(IR.Type), rhs_corrected);
@@ -16000,11 +17151,19 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                 } else if (lhs_type_tag == .f64 and rhs_type_tag == .f64) {
                     try writer.print("reg_{d}.asFloat() >= reg_{d}.asFloat()", .{ op.lhs.id, op.rhs.id });
                 } else {
-                    try writer.writeAll("(try runtime.php_ge(");
-                    try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
-                    try writer.writeAll(", ");
-                    try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
-                    try writer.writeAll(")).toBool()");
+                    if (self.i64_loop_optimize_active) {
+                        const lhs_id = self.resolveLoadSource(op.lhs.id);
+                        const rhs_id = self.resolveLoadSource(op.rhs.id);
+                        const lhs_sfx: []const u8 = if (if (self.current_alloca_regs) |regs| regs.contains(lhs_id) else false) ".*" else "";
+                        const rhs_sfx: []const u8 = if (if (self.current_alloca_regs) |regs| regs.contains(rhs_id) else false) ".*" else "";
+                        try writer.print("(if (reg_{d}{s}.isInt() and reg_{d}{s}.isInt()) (reg_{d}{s}.asInt() >= reg_{d}{s}.asInt()) else (try runtime.php_ge(reg_{d}{s}, reg_{d}{s})).toBool())", .{ lhs_id, lhs_sfx, rhs_id, rhs_sfx, lhs_id, lhs_sfx, rhs_id, rhs_sfx, lhs_id, lhs_sfx, rhs_id, rhs_sfx });
+                    } else {
+                        try writer.writeAll("(try runtime.php_ge(");
+                        try self.writePhpValueExpr(writer, lhs_type_tag, op.lhs.id);
+                        try writer.writeAll(", ");
+                        try self.writePhpValueExpr(writer, rhs_type_tag, op.rhs.id);
+                        try writer.writeAll(")).toBool()");
+                    }
                 }
             },
             .eq => |op| {
@@ -16279,8 +17438,6 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
         cleanup_regs: []const usize,
         depth: usize,
     ) !void {
-        // std.debug.print("generateLoopRecursive: header={d}, is_for={}, children={d}, depth={d}\n", .{ loop.header, loop.is_for_loop, loop.children.items.len, depth });
-
         // 标记循环块为已处理
         try processed.put(loop.header, {});
         if (loop.increment) |inc| try processed.put(inc, {});
@@ -16443,18 +17600,6 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
         cleanup_regs: []const usize,
         depth: usize,
     ) anyerror!void {
-        // TODO: 使用 depth 生成动态缩进
-        // var indent_buf: [256]u8 = undefined;
-        // var indent_len: usize = 0;
-        // var d: usize = 0;
-        // while (d <= depth) : (d += 1) {
-        //     @memcpy(indent_buf[indent_len..][0..4], "    ");
-        //     indent_len += 4;
-        // }
-        // const base_indent = indent_buf[0..indent_len];
-
-        // std.debug.print("=== V2: generateForLoopWithChildren header={d}, children={d}, depth={d} ===\n", .{ loop.header, loop.children.items.len, depth });
-
         // 分析当前循环的累加器
         var accumulators = try self.analyzeLoopAccumulators(func, loop);
         defer accumulators.deinit(self.allocator);
@@ -16467,32 +17612,9 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
         const body_has_cond = if (body_block.terminator) |term| term == .cond_br else false;
 
         if (loop.children.items.len == 0) {
-            // 简化路径：无子循环，无条件分支
-            // 但仍需初始化 PHI 节点
-            const header_block = func.blocks.items[loop.header];
-
-            // 初始化 PHI 节点（从循环外块获取初始值）
-            for (header_block.instructions.items) |inst| {
-                if (inst.op == .phi) {
-                    const phi_op = inst.op.phi;
-                    if (inst.result) |res| {
-                        for (phi_op.incoming) |incoming| {
-                            if (isInitBlock(incoming.block, loop)) {
-                                var src_buf: [32]u8 = undefined;
-                                const src_ref = try self.getOperandRef(&src_buf, incoming.value.id);
-                                try writer.print("        reg_{d} = {s};\n", .{ res.id, src_ref });
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (body_has_cond) {
-                try self.generateForLoopStructured(writer, func, loop, cleanup_regs);
-            } else {
-                try self.generateForLoopStructuredNew(writer, func, loop, cleanup_regs);
-            }
+            // 简化路径：无子循环
+            // 统一走新版（含 PHI 初始化 + LICM + 循环变量分析）
+            try self.generateForLoopStructuredNew(writer, func, loop, cleanup_regs);
             return;
         }
 
@@ -16647,21 +17769,22 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                     }
                 }
             }
+        }
 
-            // 生成 increment 块
-            if (effective_inc_idx) |inc_idx| {
-                const inc_block = func.blocks.items[inc_idx];
-                try writer.print("        // Increment: {s}\n", .{inc_block.label});
-                for (inc_block.instructions.items) |inst| {
-                    if (inst.op != .phi) { // PHI 在后面统一处理
-                        try code_list.appendSlice(self.allocator, "        ");
-                        try self.generateInstructionSimple(code_list, inst);
-                    }
+        // 生成 increment 块（在所有子循环之后，while 闭合之前）
+        if (effective_inc_idx) |inc_idx| {
+            const inc_block = func.blocks.items[inc_idx];
+            try writer.print("        // Increment: {s}\n", .{inc_block.label});
+            for (inc_block.instructions.items) |inst| {
+                if (inst.op != .phi) { // PHI 在后面统一处理
+                    try code_list.appendSlice(self.allocator, "        ");
+                    try self.generateInstructionSimple(code_list, inst);
                 }
             }
+        }
 
-            // 更新所有 PHI 节点
-            for (header_block.instructions.items) |inst| {
+        // 更新所有 PHI 节点（在所有子循环之后，while 闭合之前）
+        for (header_block.instructions.items) |inst| {
                 if (inst.op == .phi) {
                     const phi_op = inst.op.phi;
                     const result_reg = inst.result orelse continue;
@@ -16763,7 +17886,6 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
             }
 
             try writer.writeAll("    }\n");
-        }
     }
 
     /// 从展开块标签中提取原始块名
@@ -17408,6 +18530,32 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
 
         // back_edge_source 就是潜在的增量块（for 循环的回边源是增量块）
         // 不再依赖 back_edge_source > body_start 的索引比较（块可能非拓扑序）
+
+        // 当 back_edge_source == body_start 时，ir_generator 未生成独立 for_loop 块，
+        // increment 指令（$i++）被合并到 body 块末尾。
+        // 检查 body 块是否包含 increment 模式（php_increment/php_inc 等）
+        if (back_edge_source == body_start) {
+            const body_blk = func.blocks.items[body_start];
+            var has_increment_pattern = false;
+            for (body_blk.instructions.items) |inst| {
+                if (inst.op == .call) {
+                    const fname = inst.op.call.func_name;
+                    if (std.mem.eql(u8, fname, "php_increment") or
+                        std.mem.eql(u8, fname, "php_decrement") or
+                        std.mem.eql(u8, fname, "php_inc") or
+                        std.mem.eql(u8, fname, "php_dec"))
+                    {
+                        has_increment_pattern = true;
+                        break;
+                    }
+                }
+            }
+            if (has_increment_pattern) {
+                is_for_loop = true;
+                increment = null; // increment 在 body 中，无独立块
+            }
+        }
+
         if (back_edge_source != body_start) {
             const inc_block = func.blocks.items[back_edge_source];
             var is_simple_increment = true;
@@ -17603,16 +18751,6 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
         }
 
         try writer.writeAll("    }\n");
-    }
-
-    /// 生成结构化 for 循环
-    fn generateForLoopStructured(self: *Self, writer: anytype, func: *const IR.Function, loop: LoopInfo, cleanup_regs: []const usize) !void {
-        // 复用 generateStandardForLoop 的完整逻辑（包括 PHI 更新修复）
-        const prev_in_while = self.in_while_loop;
-        self.in_while_loop = true;
-        defer self.in_while_loop = prev_in_while;
-        try self.generateStandardForLoop(writer, func, loop);
-        _ = cleanup_regs;
     }
 
     /// 直接生成 while 循环
@@ -18877,13 +20015,9 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
             );
             defer self.allocator.free(template_path);
 
-            const template_content = cwd.readFileAlloc(
-                io,
-                template_path,
-                self.allocator,
-                .limited(10 * 1024 * 1024),
-            ) catch continue;
-            defer self.allocator.free(template_content);
+            // 获取源文件绝对路径（符号链接需要绝对路径）
+            const abs_template = cwd.realPathFileAlloc(io, template_path, self.allocator) catch continue;
+            defer self.allocator.free(abs_template);
 
             const runtime_path = try std.fs.path.join(
                 self.allocator,
@@ -18891,11 +20025,19 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
             );
             defer self.allocator.free(runtime_path);
 
-            const file = try cwd.createFile(io, runtime_path, .{});
-            defer file.close(io);
-            try file.writeStreamingAll(io, template_content);
+            // 创建符号链接（减少 I/O：无需读取+写入文件内容）
+            // Windows 或无权限时回退到复制
+            std.Io.Dir.symLinkAbsolute(io, abs_template, runtime_path, .{}) catch |err| switch (err) {
+                error.PathAlreadyExists => {
+                    cwd.deleteFile(io, runtime_path) catch {};
+                    std.Io.Dir.symLinkAbsolute(io, abs_template, runtime_path, .{}) catch {
+                        try self.copyFileFallback(io, cwd, abs_template, runtime_path);
+                    };
+                },
+                else => try self.copyFileFallback(io, cwd, abs_template, runtime_path),
+            };
 
-            // 复制其他运行时文件
+            // 链接其他运行时文件
             try self.copyOtherRuntimeFiles(temp_dir, base);
             found = true;
             break;
@@ -18926,15 +20068,11 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
             );
             defer self.allocator.free(src_path);
 
-            const content = cwd.readFileAlloc(
-                io,
-                src_path,
-                self.allocator,
-                .limited(10 * 1024 * 1024),
-            ) catch {
+            // 获取源文件绝对路径（符号链接需要绝对路径）
+            const abs_src = cwd.realPathFileAlloc(io, src_path, self.allocator) catch {
                 continue;
             };
-            defer self.allocator.free(content);
+            defer self.allocator.free(abs_src);
 
             const dest = try std.fs.path.join(
                 self.allocator,
@@ -18942,14 +20080,32 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
             );
             defer self.allocator.free(dest);
 
-            const dest_file = try cwd.createFile(io, dest, .{});
-            defer dest_file.close(io);
-            try dest_file.writeStreamingAll(io, content);
+            // 创建符号链接（减少 I/O），失败时回退到复制
+            std.Io.Dir.symLinkAbsolute(io, abs_src, dest, .{}) catch |err| switch (err) {
+                error.PathAlreadyExists => {
+                    cwd.deleteFile(io, dest) catch {};
+                    std.Io.Dir.symLinkAbsolute(io, abs_src, dest, .{}) catch {
+                        self.copyFileFallback(io, cwd, abs_src, dest) catch continue;
+                    };
+                },
+                else => {
+                    self.copyFileFallback(io, cwd, abs_src, dest) catch continue;
+                },
+            };
         }
 
         if (self.config.verbose) {
             // std.debug.print("  Copied runtime libraries to {s}\n", .{temp_dir});
         }
+    }
+
+    /// 符号链接失败时的回退：复制文件内容
+    fn copyFileFallback(self: *Self, io: std.Io, cwd: std.Io.Dir, src_path: []const u8, dst_path: []const u8) !void {
+        const content = cwd.readFileAlloc(io, src_path, self.allocator, .limited(10 * 1024 * 1024)) catch return;
+        defer self.allocator.free(content);
+        const file = try cwd.createFile(io, dst_path, .{});
+        defer file.close(io);
+        try file.writeStreamingAll(io, content);
     }
 
     /// 调用 Zig 编译器

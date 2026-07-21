@@ -21,3 +21,4 @@ aot_debug.zig
 .cursor
 .kiro/steering
 aot_compile_*
+.zigphp_aot_build*

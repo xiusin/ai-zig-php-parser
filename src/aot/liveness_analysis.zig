@@ -37,6 +37,7 @@ pub const LivenessAnalysis = struct {
 
     inline fn bitSet(set: []u64, idx: usize) void {
         const word_idx = idx / WORD_BITS;
+        if (word_idx >= set.len) return;
         const bit_idx: u6 = @intCast(idx % WORD_BITS);
         set[word_idx] |= (@as(u64, 1) << bit_idx);
     }
@@ -100,23 +101,21 @@ pub const LivenessAnalysis = struct {
         if (self.num_blocks == 0) return;
 
         // 1. 预计算最大寄存器 ID + 指令数
+        // 根本性修复：遍历指令 result + 所有操作数 + PHI incoming + 终止指令操作数
+        // 之前仅遍历 result + 终止指令操作数，遗漏 PHI incoming 和部分指令操作数，
+        // 导致 bitSet 越界（c047/c050 崩溃）
         self.max_reg_id = 0;
         var total_insts: usize = 0;
         for (func.blocks.items) |block| {
             for (block.instructions.items) |inst| {
                 if (inst.result) |reg| {
-                    if (reg.id + 1 > self.max_reg_id) self.max_reg_id = reg.id + 1;
+                    self.updateMaxReg(reg.id);
                 }
+                self.updateMaxRegIdFromInst(inst.*);
             }
             // 终止指令操作数
             if (block.terminator) |term| {
-                switch (term) {
-                    .ret => |r| if (r) |reg| { if (reg.id + 1 > self.max_reg_id) self.max_reg_id = reg.id + 1; },
-                    .cond_br => |br| { if (br.cond.id + 1 > self.max_reg_id) self.max_reg_id = br.cond.id + 1; },
-                    .switch_ => |sw| { if (sw.value.id + 1 > self.max_reg_id) self.max_reg_id = sw.value.id + 1; },
-                    .throw => |val| { if (val.id + 1 > self.max_reg_id) self.max_reg_id = val.id + 1; },
-                    .br, .unreachable_ => {},
-                }
+                self.updateMaxRegIdFromTerminator(term);
             }
             total_insts += block.instructions.items.len;
         }
@@ -335,199 +334,255 @@ pub const LivenessAnalysis = struct {
         return bitIsSet(block_live_out, reg_id);
     }
 
-    // === 寄存器使用收集 ===
+    // === max_reg_id 计算辅助函数 ===
 
-    /// 添加终止指令使用的寄存器
-    fn addTerminatorUsedRegs(self: *const Self, set: []u64, term: IR.Terminator) void {
-        _ = self;
-        switch (term) {
-            .ret => |ret_val| {
-                if (ret_val) |reg| bitSet(set, reg.id);
-            },
-            .cond_br => |br| {
-                bitSet(set, br.cond.id);
-            },
-            .switch_ => |sw| {
-                bitSet(set, sw.value.id);
-            },
-            .throw => |val| {
-                bitSet(set, val.id);
-            },
-            .br, .unreachable_ => {},
-        }
+    /// 更新 max_reg_id 以覆盖给定寄存器 ID
+    inline fn updateMaxReg(self: *Self, reg_id: usize) void {
+        if (reg_id + 1 > self.max_reg_id) self.max_reg_id = reg_id + 1;
     }
 
-    /// 添加指令使用的寄存器（完整覆盖所有含寄存器操作数的指令类型）
-    fn addUsedRegs(self: *const Self, set: []u64, inst: IR.Instruction) void {
-        _ = self;
+    // === 统一寄存器遍历（comptime 回调，消除 addUsedRegs/updateMaxRegIdFromInst 重复） ===
+
+    /// bitSet 回调：对 set 中的 reg_id 位设置为 1
+    fn bitSetCb(set: []u64, reg_id: usize) void {
+        Self.bitSet(set, reg_id);
+    }
+
+    /// updateMaxReg 回调：更新 max_reg_id 覆盖 reg_id
+    fn updateMaxRegCb(self: *Self, reg_id: usize) void {
+        self.updateMaxReg(reg_id);
+    }
+
+    /// 遍历指令引用的所有寄存器操作数，对每个寄存器调用回调
+    /// 统一 addUsedRegs（bitSet）和 updateMaxRegIdFromInst（updateMaxReg）的 switch 逻辑
+    /// include_phi_incoming: 是否遍历 PHI incoming 值
+    ///   - false: addUsedRegs 语义（PHI incoming 不在 PHI 块本身使用，由 computeLiveOut 处理）
+    ///   - true: updateMaxRegIdFromInst 语义（max_reg_id 必须覆盖 PHI incoming 引用的寄存器 ID）
+    fn forEachOperandReg(
+        inst: IR.Instruction,
+        ctx: anytype,
+        comptime callback: anytype,
+        comptime include_phi_incoming: bool,
+    ) void {
         switch (inst.op) {
             // === BinaryOp (lhs, rhs) ===
             .add, .sub, .mul, .div, .mod, .pow, .concat, .eq, .ne, .lt, .le, .gt, .ge,
             .bit_and, .bit_or, .bit_xor, .shl, .shr,
             .identical, .not_identical, .spaceship, .and_, .or_ => |bin| {
-                bitSet(set, bin.lhs.id);
-                bitSet(set, bin.rhs.id);
+                callback(ctx, bin.lhs.id);
+                callback(ctx, bin.rhs.id);
             },
             // === UnaryOp (operand) ===
             .neg, .not, .bit_not, .move, .get_type, .clone, .retain, .release,
             .unset_var, .strlen, .array_count, .channel_close, .await_, .debug_print, .yield_from => |un| {
-                bitSet(set, un.operand.id);
+                callback(ctx, un.operand.id);
             },
             // === CastOp (value) ===
-            .cast => |op| bitSet(set, op.value.id),
+            .cast => |op| callback(ctx, op.value.id),
             // === TypeCheckOp (value) ===
-            .type_check => |op| bitSet(set, op.value.id),
+            .type_check => |op| callback(ctx, op.value.id),
             // === CallOp (args) ===
             .call => |call| {
-                for (call.args) |arg| bitSet(set, arg.id);
+                for (call.args) |arg| callback(ctx, arg.id);
             },
             // === CallIndirectOp (func_ptr, args) ===
             .call_indirect => |call| {
-                bitSet(set, call.func_ptr.id);
-                for (call.args) |arg| bitSet(set, arg.id);
+                callback(ctx, call.func_ptr.id);
+                for (call.args) |arg| callback(ctx, arg.id);
             },
             // === LoadOp (ptr) ===
-            .load => |op| bitSet(set, op.ptr.id),
+            .load => |op| callback(ctx, op.ptr.id),
             // === StoreOp (ptr, value) ===
             .store => |op| {
-                bitSet(set, op.ptr.id);
-                bitSet(set, op.value.id);
+                callback(ctx, op.ptr.id);
+                callback(ctx, op.value.id);
             },
             // === MakeRefOp (ptr) ===
-            .make_ref => |op| bitSet(set, op.ptr.id),
+            .make_ref => |op| callback(ctx, op.ptr.id),
             // === global_set (value) ===
             .global_set => |op| {
-                if (op.value) |val| bitSet(set, val.id);
+                if (op.value) |val| callback(ctx, val.id);
             },
             // === global_unset (name) ===
-            .global_unset => |op| bitSet(set, op.name.id),
+            .global_unset => |op| callback(ctx, op.name.id),
             // === global_get_dynamic (name_reg) ===
-            .global_get_dynamic => |op| bitSet(set, op.name_reg.id),
+            .global_get_dynamic => |op| callback(ctx, op.name_reg.id),
             // === global_set_dynamic (name_reg, value) ===
             .global_set_dynamic => |op| {
-                bitSet(set, op.name_reg.id);
-                bitSet(set, op.value.id);
+                callback(ctx, op.name_reg.id);
+                callback(ctx, op.value.id);
             },
             // === ArrayGetOp (array, key) — array_get, array_ensure ===
             .array_get, .array_ensure => |op| {
-                bitSet(set, op.array.id);
-                bitSet(set, op.key.id);
+                callback(ctx, op.array.id);
+                callback(ctx, op.key.id);
             },
             // === ArraySetOp (array, key, value) ===
             .array_set => |op| {
-                bitSet(set, op.array.id);
-                bitSet(set, op.key.id);
-                bitSet(set, op.value.id);
+                callback(ctx, op.array.id);
+                callback(ctx, op.key.id);
+                callback(ctx, op.value.id);
             },
             // === ArraySetNestedOp ===
             .array_set_nested => |op| {
-                bitSet(set, op.outer_array.id);
-                bitSet(set, op.outer_key.id);
-                bitSet(set, op.inner_key.id);
-                bitSet(set, op.value.id);
+                callback(ctx, op.outer_array.id);
+                callback(ctx, op.outer_key.id);
+                callback(ctx, op.inner_key.id);
+                callback(ctx, op.value.id);
             },
             // === ArrayPushOp (array, value) ===
             .array_push => |op| {
-                bitSet(set, op.array.id);
-                bitSet(set, op.value.id);
+                callback(ctx, op.array.id);
+                callback(ctx, op.value.id);
             },
             // === ArrayKeyExistsOp (array, key) ===
             .array_key_exists => |op| {
-                bitSet(set, op.array.id);
-                bitSet(set, op.key.id);
+                callback(ctx, op.array.id);
+                callback(ctx, op.key.id);
             },
             // === ArrayUnsetOp (array, key) ===
             .array_unset => |op| {
-                bitSet(set, op.array.id);
-                bitSet(set, op.key.id);
+                callback(ctx, op.array.id);
+                callback(ctx, op.key.id);
             },
             // === InterpolateOp (parts) ===
             .interpolate => |op| {
-                for (op.parts) |part| bitSet(set, part.id);
+                for (op.parts) |part| callback(ctx, part.id);
             },
             // === NewObjectOp (args) ===
             .new_object => |op| {
-                for (op.args) |arg| bitSet(set, arg.id);
+                for (op.args) |arg| callback(ctx, arg.id);
             },
             // === PropertyGetOp (object) ===
-            .property_get => |op| bitSet(set, op.object.id),
+            .property_get => |op| callback(ctx, op.object.id),
             // === PropertySetOp (object, value) ===
             .property_set => |op| {
-                bitSet(set, op.object.id);
-                bitSet(set, op.value.id);
+                callback(ctx, op.object.id);
+                callback(ctx, op.value.id);
             },
             // === MethodCallOp (object, args) ===
             .method_call => |op| {
-                bitSet(set, op.object.id);
-                for (op.args) |arg| bitSet(set, arg.id);
+                callback(ctx, op.object.id);
+                for (op.args) |arg| callback(ctx, arg.id);
             },
             // === StaticMethodCallOp (args) ===
             .static_method_call => |op| {
-                for (op.args) |arg| bitSet(set, arg.id);
+                for (op.args) |arg| callback(ctx, arg.id);
             },
             // === StaticPropertySetOp (value) ===
-            .static_property_set => |op| bitSet(set, op.value.id),
+            .static_property_set => |op| callback(ctx, op.value.id),
             // === ClosureNewOp (func_ptr, captures) ===
             .closure_new => |op| {
-                bitSet(set, op.func_ptr.id);
-                for (op.captures) |cap| bitSet(set, cap.id);
+                callback(ctx, op.func_ptr.id);
+                for (op.captures) |cap| callback(ctx, cap.id);
             },
             // === ClosureBindOp (closure, object) ===
             .closure_bind => |op| {
-                bitSet(set, op.closure.id);
-                bitSet(set, op.object.id);
+                callback(ctx, op.closure.id);
+                callback(ctx, op.object.id);
             },
             // === ImplementsInterfaceOp (object) ===
-            .implements_interface => |op| bitSet(set, op.object.id),
+            .implements_interface => |op| callback(ctx, op.object.id),
             // === ParentCallOp (object, args) ===
             .parent_call => |op| {
-                bitSet(set, op.object.id);
-                for (op.args) |arg| bitSet(set, arg.id);
+                callback(ctx, op.object.id);
+                for (op.args) |arg| callback(ctx, arg.id);
             },
             // === BoxOp / UnboxOp (value) ===
-            .box => |op| bitSet(set, op.value.id),
-            .unbox => |op| bitSet(set, op.value.id),
+            .box => |op| callback(ctx, op.value.id),
+            .unbox => |op| callback(ctx, op.value.id),
             // === InstanceOfOp (object, class_name) ===
             .instanceof => |op| {
-                bitSet(set, op.object.id);
-                bitSet(set, op.class_name.id);
+                callback(ctx, op.object.id);
+                callback(ctx, op.class_name.id);
             },
             // === PhiOp ===
-            // PHI incoming values are NOT used in the PHI block itself.
-            // They are "used" at the end of the corresponding predecessor block.
-            // This is handled in computeLiveOut (standard SSA liveness semantics).
-            .phi => {},
+            // PHI incoming 值：addUsedRegs 中不遍历（incoming 不在 PHI 块本身使用），
+            // updateMaxRegIdFromInst 中遍历（max_reg_id 必须覆盖 PHI incoming 引用的寄存器 ID）
+            .phi => |phi| {
+                if (include_phi_incoming) {
+                    for (phi.incoming) |inc| callback(ctx, inc.value.id);
+                }
+            },
             // === SelectOp (cond, then_value, else_value) ===
             .select => |op| {
-                bitSet(set, op.cond.id);
-                bitSet(set, op.then_value.id);
-                bitSet(set, op.else_value.id);
+                callback(ctx, op.cond.id);
+                callback(ctx, op.then_value.id);
+                callback(ctx, op.else_value.id);
             },
             // === GoSpawnOp (args) ===
             .go_spawn => |op| {
-                for (op.args) |arg| bitSet(set, arg.id);
+                for (op.args) |arg| callback(ctx, arg.id);
             },
             // === ChannelSendOp (channel, value) ===
             .channel_send => |op| {
-                bitSet(set, op.channel.id);
-                bitSet(set, op.value.id);
+                callback(ctx, op.channel.id);
+                callback(ctx, op.value.id);
             },
             // === ChannelRecvOp (channel) ===
-            .channel_recv => |op| bitSet(set, op.channel.id),
+            .channel_recv => |op| callback(ctx, op.channel.id),
             // === SelectChannelOp (cases) ===
             .select_ => |op| {
                 for (op.cases) |case| {
-                    bitSet(set, case.channel.id);
-                    if (case.value) |val| bitSet(set, val.id);
+                    callback(ctx, case.channel.id);
+                    if (case.value) |val| callback(ctx, val.id);
                 }
             },
             // === YieldOp (key, value) ===
             .yield_val => |op| {
-                if (op.key) |key| bitSet(set, key.id);
-                if (op.value) |val| bitSet(set, val.id);
+                if (op.key) |key| callback(ctx, key.id);
+                if (op.value) |val| callback(ctx, val.id);
             },
             // === Instructions with no register operands ===
             else => {},
         }
+    }
+
+    /// 遍历终止指令引用的所有寄存器，对每个寄存器调用回调
+    fn forEachTerminatorReg(
+        term: IR.Terminator,
+        ctx: anytype,
+        comptime callback: anytype,
+    ) void {
+        switch (term) {
+            .ret => |ret_val| {
+                if (ret_val) |reg| callback(ctx, reg.id);
+            },
+            .cond_br => |br| {
+                callback(ctx, br.cond.id);
+            },
+            .switch_ => |sw| {
+                callback(ctx, sw.value.id);
+            },
+            .throw => |val| {
+                callback(ctx, val.id);
+            },
+            .br, .unreachable_ => {},
+        }
+    }
+
+    // === 寄存器使用收集（委托给 forEachOperandReg / forEachTerminatorReg） ===
+
+    /// 遍历指令引用的所有寄存器（操作数 + PHI incoming），更新 max_reg_id
+    /// 根本性修复：确保 max_reg_id 覆盖所有 bitSet 可能设置的寄存器 ID
+    fn updateMaxRegIdFromInst(self: *Self, inst: IR.Instruction) void {
+        forEachOperandReg(inst, self, Self.updateMaxRegCb, true);
+    }
+
+    /// 遍历终止指令引用的所有寄存器，更新 max_reg_id
+    fn updateMaxRegIdFromTerminator(self: *Self, term: IR.Terminator) void {
+        forEachTerminatorReg(term, self, Self.updateMaxRegCb);
+    }
+
+    /// 添加终止指令使用的寄存器
+    fn addTerminatorUsedRegs(self: *const Self, set: []u64, term: IR.Terminator) void {
+        _ = self;
+        forEachTerminatorReg(term, set, Self.bitSetCb);
+    }
+
+    /// 添加指令使用的寄存器（完整覆盖所有含寄存器操作数的指令类型）
+    fn addUsedRegs(self: *const Self, set: []u64, inst: IR.Instruction) void {
+        _ = self;
+        forEachOperandReg(inst, set, Self.bitSetCb, false);
     }
 };

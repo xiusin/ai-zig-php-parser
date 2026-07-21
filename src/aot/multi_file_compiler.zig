@@ -271,7 +271,12 @@ pub const MultiFileCompiler = struct {
         merged.* = IR.Module.init(self.allocator, "merged", "merged.php");
         self.merged_module = merged;
 
+        // 维护已见函数名集合（检测多文件间的函数名冲突）
+        var seen_func_names = std.StringHashMap(void).init(self.allocator);
+        defer seen_func_names.deinit();
+
         // 合并所有文件的 IR
+        var file_idx: usize = 0;
         var it = self.compiled_files.iterator();
         while (it.next()) |entry| {
             const file_result = entry.value_ptr;
@@ -283,6 +288,17 @@ pub const MultiFileCompiler = struct {
             var string_index_map = std.AutoHashMap(usize, usize).init(self.allocator);
             defer string_index_map.deinit();
 
+            // 该文件的函数名重命名映射（旧名→新名），解决多文件箭头函数/闭包命名冲突
+            // 注意：键需要独立分配，因为原函数名会在重命名后被释放
+            var rename_map = std.StringHashMap([]const u8).init(self.allocator);
+            defer {
+                var rit_clean = rename_map.iterator();
+                while (rit_clean.next()) |rn_entry| {
+                    self.allocator.free(rn_entry.key_ptr.*);
+                }
+                rename_map.deinit();
+            }
+
             // 合并字符串表并记录映射
             for (source_module.string_table.items, 0..) |str, old_idx| {
                 const new_idx = merged.string_table.items.len;
@@ -290,10 +306,37 @@ pub const MultiFileCompiler = struct {
                 try string_index_map.put(old_idx, new_idx);
             }
 
+            // 记录此文件函数在 merged.functions 中的起始索引
+            // 用于后续回溯更新 const_string 中的箭头函数/闭包名引用
+            const func_start_idx = merged.functions.items.len;
+
             // 合并函数并更新字符串索引（转移所有权）
             for (source_module.functions.items) |func| {
-                const new_func = func;
-                // 更新函数中的所有 const_string 指令
+                var new_func = func;
+
+                // 检测多文件间函数名冲突：对 __arrow_ 和 __closure_ 前缀的函数
+                // 追加文件索引后缀以确保全局唯一
+                if (seen_func_names.contains(new_func.name)) {
+                    if (std.mem.startsWith(u8, new_func.name, "__arrow_") or
+                        std.mem.startsWith(u8, new_func.name, "__closure_"))
+                    {
+                        const renamed = std.fmt.allocPrint(self.allocator, "{s}_mf{d}", .{ new_func.name, file_idx }) catch new_func.name;
+                        // 复制旧名作为 rename_map 的键，因为下方会释放原 new_func.name
+                        const old_name_copy = try self.allocator.dupe(u8, new_func.name);
+                        try rename_map.put(old_name_copy, renamed);
+                        if (self.options.verbose) {
+                            std.debug.print("    Renamed: {s} -> {s} (file_idx={d})\n", .{ new_func.name, renamed, file_idx });
+                        }
+                        if (new_func.name_owned) {
+                            self.allocator.free(new_func.name);
+                        }
+                        new_func.name = renamed;
+                        new_func.name_owned = true;
+                    }
+                }
+                try seen_func_names.put(new_func.name, {});
+
+                // 更新函数中的所有 const_string 指令和 call 指令
                 for (new_func.blocks.items) |block| {
                     for (block.*.instructions.items) |*inst| {
                         if (inst.*.op == .const_string) {
@@ -302,9 +345,48 @@ pub const MultiFileCompiler = struct {
                                 inst.*.op = .{ .const_string = @intCast(new_idx) };
                             }
                         }
+                        // 更新 call 指令中的函数名引用（应用重命名）
+                        if (inst.*.op == .call) {
+                            const call_op = inst.*.op.call;
+                            if (rename_map.get(call_op.func_name)) |renamed| {
+                                inst.*.op = .{ .call = .{
+                                    .func_name = renamed,
+                                    .args = call_op.args,
+                                    .return_type = call_op.return_type,
+                                } };
+                            }
+                        }
                     }
                 }
                 try merged.functions.append(self.allocator, new_func);
+            }
+
+            // 回溯更新 const_string 中的箭头函数/闭包名引用
+            // 箭头函数/闭包的名字通过 const_string 指令存入字符串表，
+            // 再传递给 php_create_closure 作为回调名。
+            // 上面重命名只更新了 call 指令的 func_name，未更新 const_string 中的函数名。
+            // 此处补全：扫描本文件所有函数中的 const_string 指令，
+            // 若其字符串值匹配 rename_map 中的旧名，则更新为新名对应的字符串索引。
+            if (rename_map.count() > 0) {
+                for (merged.functions.items[func_start_idx..]) |func| {
+                    for (func.blocks.items) |block| {
+                        for (block.*.instructions.items) |*inst| {
+                            if (inst.*.op == .const_string) {
+                                const str_idx = inst.*.op.const_string;
+                                if (str_idx < merged.string_table.items.len) {
+                                    const str_val = merged.string_table.items[str_idx];
+                                    if (rename_map.get(str_val)) |new_name| {
+                                        if (self.options.verbose) {
+                                            std.debug.print("    Updated const_string in func '{s}': '{s}' -> '{s}'\n", .{func.name, str_val, new_name});
+                                        }
+                                        const new_name_id = try merged.internString(new_name);
+                                        inst.*.op = .{ .const_string = new_name_id };
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             // 合并类型定义（转移所有权）
@@ -322,6 +404,7 @@ pub const MultiFileCompiler = struct {
             source_module.types.clearRetainingCapacity();
             source_module.globals.clearRetainingCapacity();
             source_module.string_table.clearRetainingCapacity();
+            file_idx += 1;
         }
 
         if (self.options.verbose) {
