@@ -2049,8 +2049,10 @@ fn lcsLength(s1: []const u8, s2: []const u8) usize {
         return count;
     }
 
-    var prev: [1025]usize = .{0} ** 1025;
-    var curr: [1025]usize = .{0} ** 1025;
+    var prev: [1025]usize = undefined;
+    @memset(&prev, 0);
+    var curr: [1025]usize = undefined;
+    @memset(&curr, 0);
 
     var i: usize = 1;
     while (i <= m) : (i += 1) {

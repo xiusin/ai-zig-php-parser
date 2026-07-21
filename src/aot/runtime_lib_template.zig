@@ -22649,7 +22649,8 @@ pub fn php_count_chars(str: Value, mode: Value, allocator: Allocator) !Value {
     }
 
     const bytes = str.asString().data;
-    var counts = [_]usize{0} ** 256;
+    var counts: [256]usize = undefined;
+    @memset(&counts, 0);
     for (bytes) |b| {
         counts[b] += 1;
     }
@@ -24798,8 +24799,16 @@ const IPC_CREAT = 0o1000;
 const IPC_RMID = 0;
 const MAX_SIGNALS = 32;
 
-var signal_handlers: [MAX_SIGNALS]Value = .{Value.initNull()} ** MAX_SIGNALS;
-var pending_signals: [MAX_SIGNALS]bool = .{false} ** MAX_SIGNALS;
+var signal_handlers: [MAX_SIGNALS]Value = blk: {
+    var arr: [MAX_SIGNALS]Value = undefined;
+    for (0..MAX_SIGNALS) |i| arr[i] = Value.initNull();
+    break :blk arr;
+};
+var pending_signals: [MAX_SIGNALS]bool = blk: {
+    var arr: [MAX_SIGNALS]bool = undefined;
+    for (0..MAX_SIGNALS) |i| arr[i] = false;
+    break :blk arr;
+};
 var last_wait_status: c_int = 0;
 
 /// C 信号处理函数（仅设置标志位）
@@ -25446,7 +25455,7 @@ pub fn php_array_walk_recursive(arr: Value, callback: Value, userdata: Value, al
 extern fn snprintf(buf: [*]u8, size: usize, fmt: [*:0]const u8, ...) c_int;
 fn formatFloatPrecision(buf: []u8, val: f64, precision: usize) []const u8 {
     var fmt_buf: [16]u8 = undefined;
-    const fmt_str = std.fmt.bufPrintZ(&fmt_buf, "%.{d}f", .{precision}) catch "%.6f";
+    const fmt_str = std.fmt.bufPrintSentinel(&fmt_buf, "%.{d}f", .{precision}, 0) catch "%.6f";
     const len = snprintf(buf.ptr, buf.len, fmt_str.ptr, val);
     if (len > 0 and @as(usize, @intCast(len)) < buf.len) {
         return buf[0..@intCast(len)];
@@ -27314,7 +27323,7 @@ pub fn php_hash(algorithm: Value, data: Value, raw_output: Value, allocator: All
         }
         return Value.initString(try PHPString.init(allocator, &hex_str));
     } else if (std.mem.eql(u8, algo, "crc32") or std.mem.eql(u8, algo, "crc32b")) {
-        const crc = std.hash.crc.Crc32.hash(input);
+        const crc = std.hash.Crc32.hash(input);
         var hex_buf: [8]u8 = undefined;
         _ = std.fmt.bufPrint(&hex_buf, "{x:0>8}", .{crc}) catch return Value.initBool(false);
         return Value.initString(try PHPString.init(allocator, &hex_buf));
@@ -29282,7 +29291,7 @@ pub fn php_generator_yield(
     gen_ctx.state = .suspended;
     gen_ctx.caller_cond.signal(getIo());
     while (gen_ctx.state == .suspended) {
-        gen_ctx.gen_cond.wait(getIo(), &gen_ctx.mutex);
+        gen_ctx.gen_cond.wait(getIo(), &gen_ctx.mutex) catch {};
     }
     if (gen_ctx.state == .completed) {
         gen_ctx.mutex.unlock(getIo());

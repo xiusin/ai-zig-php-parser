@@ -559,7 +559,8 @@ const HANDLER_NAME_MAP = std.StaticStringMap(BuiltinHandler).initComptime(HANDLE
 /// null 表示该函数尚未实现 handler
 pub const COMPTIME_HANDLER_TABLE: [BUILTIN_COUNT]?BuiltinHandler = blk: {
     @setEvalBranchQuota(fn_table.FN_TABLE.len * HANDLER_MAP_KVS.len * 4 + 50000);
-    var table: [BUILTIN_COUNT]?BuiltinHandler = .{null} ** BUILTIN_COUNT;
+    var table: [BUILTIN_COUNT]?BuiltinHandler = undefined;
+    for (0..BUILTIN_COUNT) |i| table[i] = null;
     for (fn_table.FN_TABLE, 0..) |entry, i| {
         table[i] = HANDLER_NAME_MAP.get(entry.name);
     }
