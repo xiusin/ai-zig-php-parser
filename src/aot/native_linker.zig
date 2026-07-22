@@ -15458,6 +15458,10 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                                     try go(self_, writer_, code_, func_, loop_, phi_updates_, then_target, visited, depth + 1, block_idx, nested_loop_exit_);
                                 }
 
+                                // 重置 return_generated 标志：then 块可能有 return，但 else 块仍需正常生成
+                                // 否则 emitIncAndPhi 会因 return_generated=true 跳过 PHI 更新，导致循环变量不递增
+                                self_.return_generated = false;
+
                                 if (else_is_merge) {
                                     // "if 无 else"：关闭 if 块，无 else
                                     try LoopBodyIndent.writeIndent(code_, self_.allocator, depth);
