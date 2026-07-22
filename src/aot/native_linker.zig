@@ -12990,7 +12990,11 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
         const then_idx = @as(usize, cb.then_block.index);
         const else_idx = @as(usize, cb.else_block.index);
 
-        // 检测嵌套循环：then 块的 br 目标已处理（回边到循环头）
+        // 检测嵌套循环：then 块的 br 目标是当前循环头的回边
+        // 注意：仅检查 processed.contains 是不够的，因为 if 语句的 then 块
+        // 也可能 br 到已处理的 merge 点（如外层 if 的汇聚点或循环体块），
+        // 导致误判为嵌套循环，生成 while(true){if(!cond)break;...} 无限循环
+        // 正确做法：只有 br 目标 == 当前循环头索引时才标记为嵌套循环
         var is_nested_loop = false;
         if (then_idx < func.blocks.items.len) {
             const then_blk_peek = func.blocks.items[then_idx];
@@ -12998,7 +13002,10 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                 if (then_term == .br) {
                     const br_target_idx = @as(usize, then_term.br.index);
                     if (br_target_idx < func.blocks.items.len and processed.contains(br_target_idx)) {
-                        is_nested_loop = true;
+                        // 只有 br 目标是当前循环头时才是真正的回边
+                        if (self.current_cond_br_header_idx) |hdr_idx| {
+                            is_nested_loop = (br_target_idx == hdr_idx);
+                        }
                     }
                 }
             }
