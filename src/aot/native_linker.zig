@@ -13355,11 +13355,11 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
         indent: []const u8,
         use_simple: bool,
     ) anyerror!void {
-        // 如果已生成 return 语句，跳过后续 br 链的代码生成（避免 unreachable code）
-        if (self.return_generated) return;
+    // 如果已生成 return 语句，跳过后续 br 链的代码生成（避免 unreachable code）
+    if (self.return_generated) return;
 
-        const code_list = writer.list;
-        const target_idx = @as(usize, br_target.index);
+    const code_list = writer.list;
+    const target_idx = @as(usize, br_target.index);
 
         // 如果目标是循环退出块，生成 break（break 语句的 br → exit_block）
         if (self.in_while_loop and self.current_loop_exit_block != null and target_idx == self.current_loop_exit_block.?) {
