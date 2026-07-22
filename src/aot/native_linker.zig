@@ -252,6 +252,7 @@ pub const NativeLinker = struct {
     current_catch_used_regs: ?*const std.AutoHashMap(usize, void) = null, // catch块中引用的寄存器集合（cleanup时跳过）
     current_cond_br_source_block: ?usize = null, // 嵌套cond_br的源块索引（用于PHI incoming选择）
     current_cond_br_header_idx: ?usize = null, // 嵌套循环头块索引（用于while内重生成非phi指令）
+    cond_br_merge_phi_generated: ?*std.AutoHashMap(usize, void) = null, // 已在cond_br内部处理过PHI的merge块索引集合
     current_property_get_origins: ?*const std.AutoHashMap(usize, PropertyGetOrigin) = null,
     current_load_to_alloca: ?*const std.AutoHashMap(usize, usize) = null,
 
@@ -13060,6 +13061,10 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
             // Then 块是汇聚点（多前驱）- 不内联，只生成 PHI 赋值
             // then 分支对应从 cond_br 块直接进入 merge 块的路径
             // AOT-PHI-002 修复：嵌套 cond_br 场景下，使用 source_block 精确匹配 incoming
+            // AOT-PHI-003: 标记此 merge 块的 PHI 已在 cond_br 内处理
+            if (self.cond_br_merge_phi_generated) |set| {
+                set.put(then_idx, {}) catch {};
+            }
             const merge_blk = func.blocks.items[then_idx];
             for (merge_blk.instructions.items) |inst| {
                 if (inst.op != .phi) continue;
@@ -13097,6 +13102,25 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                         }
                         try writer.print("{s}break;\n", .{child_indent});
                         try processed.put(then_idx, {});
+                    } else if (self.countPredecessors(func, merge_target_idx) > 1) {
+                        // AOT-PHI-003: merge 块 br 到另一个 merge 块
+                        // 在当前 THEN 分支内生成目标 merge 块的 PHI 赋值（来自此 merge 块）
+                        const next_merge_blk = func.blocks.items[merge_target_idx];
+                        for (next_merge_blk.instructions.items) |phi_inst| {
+                            if (phi_inst.op != .phi) continue;
+                            const phi_res = phi_inst.result orelse continue;
+                            const phi_op = phi_inst.op.phi;
+                            for (phi_op.incoming) |incoming| {
+                                const inc_idx = @as(usize, incoming.block.index);
+                                if (inc_idx == then_idx) {
+                                    try self.writePtrAwareAssign(writer, child_indent, phi_res.id, incoming.value.id);
+                                    break;
+                                }
+                            }
+                        }
+                        if (self.cond_br_merge_phi_generated) |set| {
+                            set.put(merge_target_idx, {}) catch {};
+                        }
                     }
                 }
             }
@@ -13204,6 +13228,10 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
             // Else 块是汇聚点（多前驱）- 不内联，只生成 PHI 赋值
             // else 分支对应从 cond_br 块直接进入 merge 块的路径
             // AOT-PHI-002 修复：嵌套 cond_br 场景下，使用 source_block 精确匹配 incoming
+            // AOT-PHI-003: 标记此 merge 块的 PHI 已在 cond_br 内处理
+            if (self.cond_br_merge_phi_generated) |set| {
+                set.put(else_idx, {}) catch {};
+            }
             const merge_blk = func.blocks.items[else_idx];
             for (merge_blk.instructions.items) |inst| {
                 if (inst.op != .phi) continue;
@@ -13242,6 +13270,27 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                         }
                         try writer.print("{s}break;\n", .{child_indent});
                         try processed.put(else_idx, {});
+                    } else if (self.countPredecessors(func, merge_target_idx) > 1) {
+                        // AOT-PHI-003: merge 块 br 到另一个 merge 块
+                        // 在当前 ELSE 分支内生成目标 merge 块的 PHI 赋值（来自此 merge 块）
+                        // 避免在 if/else 之外无条件生成，覆盖 THEN 路径的值
+                        const next_merge_blk = func.blocks.items[merge_target_idx];
+                        for (next_merge_blk.instructions.items) |phi_inst| {
+                            if (phi_inst.op != .phi) continue;
+                            const phi_res = phi_inst.result orelse continue;
+                            const phi_op = phi_inst.op.phi;
+                            for (phi_op.incoming) |incoming| {
+                                const inc_idx = @as(usize, incoming.block.index);
+                                if (inc_idx == else_idx) {
+                                    try self.writePtrAwareAssign(writer, child_indent, phi_res.id, incoming.value.id);
+                                    break;
+                                }
+                            }
+                        }
+                        // 标记目标 merge 块的 PHI 已在此分支内处理
+                        if (self.cond_br_merge_phi_generated) |set| {
+                            set.put(merge_target_idx, {}) catch {};
+                        }
                     }
                 }
             }
@@ -13403,6 +13452,11 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                         break;
                     }
                 }
+            }
+            // AOT-PHI-003: 标记此 merge 块的 PHI 已在 generateBrChain 内处理
+            // 防止 generateLoopBodyFromBlock.go 的 br 处理逻辑重复生成 PHI 赋值
+            if (self.cond_br_merge_phi_generated) |set| {
+                set.put(target_idx, {}) catch {};
             }
             return;
         }
@@ -14046,6 +14100,14 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
         var processed_body = std.AutoHashMap(usize, void).init(self.allocator);
         defer processed_body.deinit();
 
+        // AOT-PHI-003: 跟踪已被 generateCondBrBlock 处理过 PHI 的 merge 块
+        // 防止重复生成 PHI 赋值，覆盖 THEN 路径的值
+        var cond_br_merge_phi_set = std.AutoHashMap(usize, void).init(self.allocator);
+        defer cond_br_merge_phi_set.deinit();
+        const saved_merge_phi = self.cond_br_merge_phi_generated;
+        self.cond_br_merge_phi_generated = &cond_br_merge_phi_set;
+        defer self.cond_br_merge_phi_generated = saved_merge_phi;
+
         // 标记 header 和 exit 为已处理，防止 generateCondBrBlock 重复生成
         try processed_body.put(loop.header, {});
         if (loop.exit_block) |exit| {
@@ -14401,7 +14463,15 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                         // br 到非 exit 块：可能是回边或 continue
                         const header_idx = loop.header;
                         if (br_target_idx != header_idx) {
-                            try self.generateBrChain(writer, func, term.br, blk_idx, &processed_body, "        ", true);
+                            // AOT-PHI-003: 如果 br 目标的 PHI 已在 cond_br 分支内处理过，跳过
+                            // 避免在 if/else 之外无条件生成 PHI 赋值，覆盖 THEN/ELSE 路径的值
+                            const target_phi_handled = if (self.cond_br_merge_phi_generated) |set|
+                                set.contains(br_target_idx)
+                            else
+                                false;
+                            if (!target_phi_handled) {
+                                try self.generateBrChain(writer, func, term.br, blk_idx, &processed_body, "        ", true);
+                            }
                         }
                     }
                 }
@@ -14864,7 +14934,6 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
             /// 用于区分顺序 if 和嵌套 if，避免错误嵌套
             /// 注意：循环 header 也有多个前驱（入口+回边），但不是合并块
             fn isMergeBlock(func_: *const IR.Function, block_idx: usize, loop_: LoopInfo) bool {
-                _ = loop_;
                 const target_block = func_.blocks.items[block_idx];
                 var count: usize = 0;
                 var has_back_edge = false;
@@ -14876,18 +14945,20 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                             .br => |br| {
                                 if (br.index == target_block.index) {
                                     count += 1;
-                                    // 回边：前驱块索引 > 目标块索引
-                                    if (blk_idx > block_idx) has_back_edge = true;
+                                    // 回边：前驱块索引 > 目标块索引，且前驱块在循环体内
+                                    // AOT-PHI-003 修复：只检查循环体内的块作为回边源
+                                    // 避免将 if/else 的 merge 块误判为循环头
+                                    if (blk_idx > block_idx and loop_.blocks.contains(blk_idx)) has_back_edge = true;
                                 }
                             },
                             .cond_br => |cb| {
                                 if (cb.then_block.index == target_block.index) {
                                     count += 1;
-                                    if (blk_idx > block_idx) has_back_edge = true;
+                                    if (blk_idx > block_idx and loop_.blocks.contains(blk_idx)) has_back_edge = true;
                                 }
                                 if (cb.else_block.index == target_block.index) {
                                     count += 1;
-                                    if (blk_idx > block_idx) has_back_edge = true;
+                                    if (blk_idx > block_idx and loop_.blocks.contains(blk_idx)) has_back_edge = true;
                                 }
                             },
                             else => {},
@@ -14990,20 +15061,36 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                 }
 
                 // 生成该块的 phi 赋值（来自 source_block）
-                if (source_block_idx) |src_idx| {
-                    const source_block = func_.blocks.items[src_idx];
-                    for (block.instructions.items) |inst| {
-                        if (inst.op == .phi) {
-                            const phi_op = inst.op.phi;
-                            if (inst.result) |phi_res| {
-                                // 查找来自 source_block 的 incoming
-                                for (phi_op.incoming) |incoming| {
-                                    if (incoming.block == source_block) {
-                                        try LoopBodyIndent.writeIndent(code_, self_.allocator, depth);
-                                        try self_.writePhiAssignWithRetain(writer_, phi_res.id, incoming.value.id);
-                                        break;
+                // AOT-PHI-003: 如果当前块的 PHI 已被 generateCondBrBlock 处理，跳过
+                const current_block_phi_handled = if (self_.cond_br_merge_phi_generated) |set|
+                    set.contains(block_idx)
+                else
+                    false;
+                if (!current_block_phi_handled) {
+                    if (source_block_idx) |src_idx| {
+                        const source_block = func_.blocks.items[src_idx];
+                        var has_phi_generated = false;
+                        for (block.instructions.items) |inst| {
+                            if (inst.op == .phi) {
+                                const phi_op = inst.op.phi;
+                                if (inst.result) |phi_res| {
+                                    // 查找来自 source_block 的 incoming
+                                    for (phi_op.incoming) |incoming| {
+                                        if (incoming.block == source_block) {
+                                            try LoopBodyIndent.writeIndent(code_, self_.allocator, depth);
+                                            try self_.writePhiAssignWithRetain(writer_, phi_res.id, incoming.value.id);
+                                            has_phi_generated = true;
+                                            break;
+                                        }
                                     }
                                 }
+                            }
+                        }
+                        // AOT-PHI-003: 如果生成了 PHI 赋值，标记当前块
+                        // 防止后续 br 到当前块时重复生成 PHI 赋值（覆盖 THEN 路径的值）
+                        if (has_phi_generated) {
+                            if (self_.cond_br_merge_phi_generated) |set| {
+                                set.put(block_idx, {}) catch {};
                             }
                         }
                     }
@@ -15026,7 +15113,13 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                         const target = @as(usize, br.index);
                         // 如果目标已访问且在循环内，生成来自当前块的 PHI 赋值
                         // 这处理合并块被 if/else 的两个分支共享的情况
-                        if (visited.contains(target) and loop_.blocks.contains(target)) {
+                        // AOT-PHI-003 修复：如果目标块的 PHI 已被 generateCondBrBlock
+                        // 内部的 generateBrChain 处理过，则跳过（避免重复赋值覆盖 THEN 路径）
+                        const target_phi_already_handled = if (self_.cond_br_merge_phi_generated) |set|
+                            set.contains(target)
+                        else
+                            false;
+                        if (!target_phi_already_handled and visited.contains(target) and loop_.blocks.contains(target)) {
                             const target_blk = func_.blocks.items[target];
                             for (target_blk.instructions.items) |phi_inst| {
                                 if (phi_inst.op != .phi) continue;
@@ -15041,8 +15134,14 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                                     }
                                 }
                             }
+                            // AOT-PHI-003: 标记目标块的 PHI 已在此处理
+                            // 防止后续块 br 到此目标块时重复生成 PHI 赋值
+                            if (self_.cond_br_merge_phi_generated) |set| {
+                                set.put(target, {}) catch {};
+                            }
                             return;
                         }
+                        if (target_phi_already_handled) return;
                         // 嵌套循环内：如果 br 目标是嵌套循环退出块，不视为合并块
                         // 因为该块可能包含控制循环的 cond_br（如 && 复合条件的 merge 块）
                         const target_is_nested_exit = nested_loop_exit_ != null and target == nested_loop_exit_.?;
@@ -15051,7 +15150,8 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                         // 合并块由 cond_br 处理器在 if/else 之后统一处理
                         // AOT-PHI-001 修复：不要求 target 在 loop_.blocks 中，
                         // 因为 if/else 的 merge 块可能不在循环块集合中但在循环体内
-                        if (!target_is_nested_exit and isMergeBlock(func_, target, loop_)) {
+                        // AOT-PHI-003: 如果 PHI 已被 generateCondBrBlock 处理，跳过
+                        if (!target_is_nested_exit and !target_phi_already_handled and isMergeBlock(func_, target, loop_)) {
                             // 生成来自当前块到合并块的 Phi 赋值
                             const target_blk = func_.blocks.items[target];
                             for (target_blk.instructions.items) |phi_inst| {
@@ -15069,6 +15169,11 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                                     }
                                 }
                             }
+                            // AOT-PHI-003: 标记此 merge 块的 PHI 已在 go 的 br 处理中生成
+                            // 防止后续 br 到此 merge 块时重复生成 PHI 赋值
+                            if (self_.cond_br_merge_phi_generated) |set| {
+                                set.put(target, {}) catch {};
+                            }
                             return;
                         }
                         if (loop_.increment) |inc| {
@@ -15084,13 +15189,16 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                                 return;
                             }
                         }
-                        // 检查目标是否是任何循环的 header（有回边指向它）
-                        // 这处理嵌套循环中 br 跳到外层循环 header 的情况，
-                        // 避免外层 header 代码被生成在内层循环的 break 之后（unreachable code）
+                        // 检查目标是否是循环 header（有来自循环体内的回边指向它）
+                        // AOT-PHI-003 修复：只检查来自 loop_.blocks 内部的回边，
+                        // 避免将 if/else 的 merge 块（如 if_merge_9 → if_merge_7）误判为循环头
+                        // 这处理嵌套循环中 br 跳到外层循环 header 的情况
                         {
                             var has_back_edge = false;
                             for (func_.blocks.items, 0..) |blk_check, blk_idx| {
                                 if (blk_idx <= target) continue;
+                                // AOT-PHI-003: 只检查循环体内的块作为回边源
+                                if (!loop_.blocks.contains(blk_idx)) continue;
                                 if (blk_check.terminator) |blk_term| {
                                     switch (blk_term) {
                                         .br => |b| if (b.index == target) { has_back_edge = true; break; },
@@ -15120,7 +15228,7 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                             // AOT-CODEGEN-002 修复：不递归跟随合并块（>1 前驱）
                             // 合并块由 cond_br 处理器在 if/else 之后处理
                             // 但嵌套循环退出块需要正常处理（可能包含控制循环的 cond_br）
-                            if (!target_is_nested_exit and isMergeBlock(func_, target, loop_)) {
+                            if (!target_is_nested_exit and !target_phi_already_handled and isMergeBlock(func_, target, loop_)) {
                                 return;
                             }
                             try go(self_, writer_, code_, func_, loop_, phi_updates_, target, visited, depth, block_idx, nested_loop_exit_);
@@ -16271,6 +16379,13 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                             go_used = true;
                             var visited = std.AutoHashMap(usize, void).init(self.allocator);
                             defer visited.deinit();
+                            // AOT-PHI-003: 跟踪已被 generateCondBrBlock 处理过 PHI 的 merge 块
+                            // 防止 go 函数的 br 处理逻辑重复生成 PHI 赋值，覆盖 THEN 路径的值
+                            var cond_br_merge_phi_set = std.AutoHashMap(usize, void).init(self.allocator);
+                            defer cond_br_merge_phi_set.deinit();
+                            const saved_merge_phi = self.cond_br_merge_phi_generated;
+                            self.cond_br_merge_phi_generated = &cond_br_merge_phi_set;
+                            defer self.cond_br_merge_phi_generated = saved_merge_phi;
                             // 标记 header 和 increment 块为已访问，防止 go 函数重复处理
                             // increment 块由 emitIncAndPhi 统一生成，header 块已在上方处理
                             try visited.put(loop.header, {});
