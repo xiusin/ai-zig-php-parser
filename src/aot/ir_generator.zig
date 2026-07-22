@@ -5210,6 +5210,9 @@ pub const IRGenerator = struct {
             .function_call => self.generateFunctionCall(node),
             .method_call => self.generateMethodCall(node),
             .static_method_call => self.generateStaticMethodCall(node),
+            .dynamic_static_method_call => self.generateDynamicStaticMethodCall(node),
+            .dynamic_static_property_access => self.generateDynamicStaticPropertyAccess(node),
+            .dynamic_class_constant_access => self.generateDynamicClassConstantAccess(node),
 
             // Array operations
             .array_init => self.generateArrayInit(node),
@@ -8316,6 +8319,79 @@ pub const IRGenerator = struct {
         return self.emitWithResult(.{ .call = .{
             .func_name = func_name,
             .args = args,
+            .return_type = .php_value,
+        } }, .php_value);
+    }
+
+    /// Generate IR for dynamic static method call: ($expr)::method()
+    /// 运行时通过 php_call_static_dynamic 分发，类名由表达式求值得到
+    fn generateDynamicStaticMethodCall(self: *Self, node: *const Node) !Register {
+        const call_data = node.data.dynamic_static_method_call;
+        const method_name = self.getString(call_data.method_name);
+
+        // 求值类名表达式，得到 runtime.Value（字符串类型）
+        const class_val_reg = try self.generateExpression(call_data.class_expr);
+
+        // 构造方法名常量
+        const method_name_reg = try self.emitWithResult(.{ .const_string = try self.module.?.internString(method_name) }, .php_string);
+
+        // 构造参数：[class_val, method_name, ...args]
+        const dyn_args = try self.allocator.alloc(Register, call_data.args.len + 2);
+        dyn_args[0] = class_val_reg;
+        dyn_args[1] = method_name_reg;
+        for (call_data.args, 0..) |arg_idx, i| {
+            dyn_args[i + 2] = try self.generateExpression(arg_idx);
+        }
+
+        return self.emitWithResult(.{ .call = .{
+            .func_name = "php_call_static_dynamic",
+            .args = dyn_args,
+            .return_type = .php_value,
+        } }, .php_value);
+    }
+
+    /// 动态静态属性访问：($expr)::$prop
+    fn generateDynamicStaticPropertyAccess(self: *Self, node: *const Node) !Register {
+        const access_data = node.data.dynamic_static_property_access;
+        const prop_name = self.getString(access_data.property_name);
+
+        // 求值类名表达式
+        const class_val_reg = try self.generateExpression(access_data.class_expr);
+
+        // 构造属性名常量
+        const prop_name_reg = try self.emitWithResult(.{ .const_string = try self.module.?.internString(prop_name) }, .php_string);
+
+        // 调用 php_get_static_property_dynamic([class_val, prop_name])
+        const dyn_args = try self.allocator.alloc(Register, 2);
+        dyn_args[0] = class_val_reg;
+        dyn_args[1] = prop_name_reg;
+
+        return self.emitWithResult(.{ .call = .{
+            .func_name = "php_get_static_property_dynamic",
+            .args = dyn_args,
+            .return_type = .php_value,
+        } }, .php_value);
+    }
+
+    /// 动态类常量访问：($expr)::CONSTANT
+    fn generateDynamicClassConstantAccess(self: *Self, node: *const Node) !Register {
+        const access_data = node.data.dynamic_class_constant_access;
+        const const_name = self.getString(access_data.constant_name);
+
+        // 求值类名表达式
+        const class_val_reg = try self.generateExpression(access_data.class_expr);
+
+        // 构造常量名常量
+        const const_name_reg = try self.emitWithResult(.{ .const_string = try self.module.?.internString(const_name) }, .php_string);
+
+        // 调用 php_get_class_constant_dynamic([class_val, const_name])
+        const dyn_args = try self.allocator.alloc(Register, 2);
+        dyn_args[0] = class_val_reg;
+        dyn_args[1] = const_name_reg;
+
+        return self.emitWithResult(.{ .call = .{
+            .func_name = "php_get_class_constant_dynamic",
+            .args = dyn_args,
             .return_type = .php_value,
         } }, .php_value);
     }

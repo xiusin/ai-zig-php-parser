@@ -232,6 +232,9 @@ pub const NativeLinker = struct {
     current_make_ref_result_regs: ?*const std.AutoHashMap(usize, void) = null, // make_ref 指令的结果寄存器（Ref Value，传递时不需要再 initRef）
     current_foreach_ref_allocas: ?*const std.AutoHashMap(usize, void) = null,
     current_iter_value_ref_regs: ?*const std.AutoHashMap(usize, void) = null,
+    /// return 语句已生成标志：在 generateReturnInBlock 中设置为 true，
+    /// 用于阻止 generateBrChain 在 return 后继续生成 dead code（Zig 0.17.0-dev 将 unreachable code 从警告升级为错误）
+    return_generated: bool = false,
     current_optimized_alloca_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_function_for_resolve: ?*const IR.Function = null,
     /// 当前函数返回类型（用于返回值弱类型转换）
@@ -3061,7 +3064,7 @@ pub const NativeLinker = struct {
         .{ "json_last_error_msg", bi(.{ .runtime_name = "php_json_last_error_msg", .needs_allocator = true, .may_raise = false }) },
         .{ "func_get_args", bi(.{ .runtime_name = "php_func_get_args", .needs_allocator = true }) },
         .{ "func_get_arg", bi(.{ .runtime_name = "php_func_get_arg", .needs_allocator = false }) },
-        .{ "func_num_args", bi(.{ .runtime_name = "php_func_num_args", .needs_allocator = false, .may_raise = false }) },
+        .{ "func_num_args", bi(.{ .runtime_name = "php_func_num_args", .needs_allocator = false, .may_raise = true }) },
         .{ "memory_get_usage", bi(.{ .runtime_name = "php_memory_get_usage", .needs_allocator = true, .may_raise = false }) },
         .{ "memory_get_peak_usage", bi(.{ .runtime_name = "php_memory_get_peak_usage", .needs_allocator = true, .may_raise = false }) },
         .{ "shell_exec", bi(.{ .runtime_name = "php_shell_exec", .needs_allocator = true, .may_raise = false }) },
@@ -3408,6 +3411,8 @@ pub const NativeLinker = struct {
 
         .{ "go", bi(.{ .runtime_name = "php_go_builtin", .needs_allocator = true }) },
         .{ "php_call_static_dynamic", bi(.{ .runtime_name = "php_call_static_dynamic", .needs_allocator = true }) },
+        .{ "php_get_static_property_dynamic", bi(.{ .runtime_name = "php_get_static_property_dynamic", .needs_allocator = true, .may_raise = true }) },
+        .{ "php_get_class_constant_dynamic", bi(.{ .runtime_name = "php_get_class_constant_dynamic", .needs_allocator = true, .may_raise = true }) },
 
         .{ "php_bool_or", bi(.{ .runtime_name = "php_bool_or", .needs_allocator = false, .may_raise = false }) },
         .{ "php_property_array_push_with_obj", bi(.{ .runtime_name = "php_property_array_push_with_obj", .needs_allocator = false }) },
@@ -3593,6 +3598,8 @@ pub const NativeLinker = struct {
         self.current_function_has_this = has_this;
         self.current_function_for_resolve = func;
         defer self.current_function_for_resolve = null;
+        // 重置 return_generated 标志（每个函数开始时清除）
+        self.return_generated = false;
 
         // 设置返回类型（用于返回值弱类型转换）
         self.current_return_type = func.php_return_type;
@@ -6478,8 +6485,9 @@ pub const NativeLinker = struct {
         else
             false;
         const result_is_ref_ptr = if (self.current_ref_ptr_regs) |rpr| rpr.contains(result_reg.id) else false;
+        const value_is_ref_ptr = if (self.current_ref_ptr_regs) |rpr| rpr.contains(value_reg.id) else false;
         // value ← value 的 phi 赋值需要 retain/release 维护引用计数
-        const need_refcount = !result_is_alloca and !result_is_ref_ptr;
+        const need_refcount = !result_is_alloca and !result_is_ref_ptr and !value_is_ref_ptr;
 
         // 如果结果是 php_value，总是直接赋值（所有寄存器都是 Value）
         // 安全 retain 顺序：先 retain 新值，再 release 旧值，再 assign
@@ -6487,7 +6495,22 @@ pub const NativeLinker = struct {
         if (result_tag == .php_value) {
             if (result_is_alloca and value_is_alloca) {
                 try writer.print("{s}reg_{d}.* = reg_{d}.*;\n", .{ indent, result_reg.id, value_reg.id });
+            } else if (result_is_alloca and value_is_ref_ptr) {
+                // alloca ← ref_ptr: 区分 ref_param_alloca (**Value) 与普通 alloca (*Value)
+                if (self.isRefParamAlloca(result_reg.id)) {
+                    // ref_param_alloca (**Value): reg.* = *Value，写入槽位
+                    try writer.print("{s}reg_{d}.* = reg_{d};\n", .{ indent, result_reg.id, value_reg.id });
+                } else {
+                    // 普通 alloca (*Value): reg = *Value，指针重定向
+                    try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, result_reg.id, value_reg.id });
+                }
             } else if (result_is_alloca) {
+                try writer.print("{s}reg_{d}.* = reg_{d};\n", .{ indent, result_reg.id, value_reg.id });
+            } else if (result_is_ref_ptr and value_is_ref_ptr) {
+                // ref_ptr ← ref_ptr: 指针拷贝（*Value = *Value）
+                try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, result_reg.id, value_reg.id });
+            } else if (result_is_ref_ptr) {
+                // ref_ptr ← value: 解引用赋值（ref_ptr 是 *Value，需写入 .* ）
                 try writer.print("{s}reg_{d}.* = reg_{d};\n", .{ indent, result_reg.id, value_reg.id });
             } else if (value_is_alloca) {
                 if (need_refcount) {
@@ -6507,6 +6530,12 @@ pub const NativeLinker = struct {
             // 但为了安全，还是处理一下
             if (result_is_alloca and value_is_alloca) {
                 try writer.print("{s}reg_{d}.* = reg_{d}.*;\n", .{ indent, result_reg.id, value_reg.id });
+            } else if (result_is_alloca and value_is_ref_ptr) {
+                if (self.isRefParamAlloca(result_reg.id)) {
+                    try writer.print("{s}reg_{d}.* = reg_{d};\n", .{ indent, result_reg.id, value_reg.id });
+                } else {
+                    try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, result_reg.id, value_reg.id });
+                }
             } else if (result_is_alloca) {
                 try writer.print("{s}reg_{d}.* = reg_{d};\n", .{ indent, result_reg.id, value_reg.id });
             } else if (value_is_alloca) {
@@ -6659,10 +6688,12 @@ pub const NativeLinker = struct {
             if (rt.len > 0 and std.mem.indexOfScalar(u8, rt, '|') == null and std.mem.indexOfScalar(u8, rt, '&') == null) {
                 const nullable_str = if (self.current_return_nullable) "true" else "false";
                 try writer.print("{s}return if ({s} and {s}.isNull()) {s} else runtime.php_coerce_value({s}, \"{s}\", runtime.runtime_allocator);\n", .{ indent, nullable_str, val_expr, val_expr, val_expr, rt });
+                self.return_generated = true;
                 return;
             }
         }
         try writer.print("{s}return {s};\n", .{ indent, val_expr });
+        self.return_generated = true;
     }
 
     /// 生成带弱类型转换的 return 字符串（用于 allocPrint+appendSlice 路径）
@@ -10303,7 +10334,7 @@ pub const NativeLinker = struct {
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     try self.writeStrGetcsvArgs(writer, op.args);
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
-                                } else if (std.mem.eql(u8, runtime_name, "php_array_merge") or std.mem.eql(u8, runtime_name, "php_array_replace") or std.mem.eql(u8, runtime_name, "php_array_intersect") or std.mem.eql(u8, runtime_name, "php_array_diff") or std.mem.eql(u8, runtime_name, "php_array_diff_key") or std.mem.eql(u8, runtime_name, "php_array_diff_assoc") or std.mem.eql(u8, runtime_name, "php_array_intersect_key") or std.mem.eql(u8, runtime_name, "php_array_multisort") or std.mem.eql(u8, runtime_name, "php_compact") or std.mem.eql(u8, runtime_name, "php_array_map") or std.mem.eql(u8, runtime_name, "php_json_decode") or std.mem.eql(u8, runtime_name, "php_func_get_args") or std.mem.eql(u8, runtime_name, "php_memory_get_usage") or std.mem.eql(u8, runtime_name, "php_memory_get_peak_usage") or std.mem.eql(u8, runtime_name, "php_shell_exec") or std.mem.eql(u8, runtime_name, "php_exec") or std.mem.eql(u8, runtime_name, "php_system") or std.mem.eql(u8, runtime_name, "php_substr_replace") or std.mem.eql(u8, runtime_name, "php_function_exists") or std.mem.eql(u8, runtime_name, "php_gc_enable") or std.mem.eql(u8, runtime_name, "php_gc_collect_cycles") or std.mem.eql(u8, runtime_name, "php_ini_get") or std.mem.eql(u8, runtime_name, "php_getrusage") or std.mem.eql(u8, runtime_name, "php_unset") or std.mem.eql(u8, runtime_name, "php_bcadd") or std.mem.eql(u8, runtime_name, "php_bcsub") or std.mem.eql(u8, runtime_name, "php_bcmul") or std.mem.eql(u8, runtime_name, "php_bcdiv") or std.mem.eql(u8, runtime_name, "php_bcmod") or std.mem.eql(u8, runtime_name, "php_bcpow") or std.mem.eql(u8, runtime_name, "php_bcsqrt") or std.mem.eql(u8, runtime_name, "php_bccomp") or std.mem.eql(u8, runtime_name, "php_call_static_dynamic")) {
+                                } else if (std.mem.eql(u8, runtime_name, "php_array_merge") or std.mem.eql(u8, runtime_name, "php_array_replace") or std.mem.eql(u8, runtime_name, "php_array_intersect") or std.mem.eql(u8, runtime_name, "php_array_diff") or std.mem.eql(u8, runtime_name, "php_array_diff_key") or std.mem.eql(u8, runtime_name, "php_array_diff_assoc") or std.mem.eql(u8, runtime_name, "php_array_intersect_key") or std.mem.eql(u8, runtime_name, "php_array_multisort") or std.mem.eql(u8, runtime_name, "php_compact") or std.mem.eql(u8, runtime_name, "php_array_map") or std.mem.eql(u8, runtime_name, "php_json_decode") or std.mem.eql(u8, runtime_name, "php_func_get_args") or std.mem.eql(u8, runtime_name, "php_memory_get_usage") or std.mem.eql(u8, runtime_name, "php_memory_get_peak_usage") or std.mem.eql(u8, runtime_name, "php_shell_exec") or std.mem.eql(u8, runtime_name, "php_exec") or std.mem.eql(u8, runtime_name, "php_system") or std.mem.eql(u8, runtime_name, "php_substr_replace") or std.mem.eql(u8, runtime_name, "php_function_exists") or std.mem.eql(u8, runtime_name, "php_gc_enable") or std.mem.eql(u8, runtime_name, "php_gc_collect_cycles") or std.mem.eql(u8, runtime_name, "php_ini_get") or std.mem.eql(u8, runtime_name, "php_getrusage") or std.mem.eql(u8, runtime_name, "php_unset") or std.mem.eql(u8, runtime_name, "php_bcadd") or std.mem.eql(u8, runtime_name, "php_bcsub") or std.mem.eql(u8, runtime_name, "php_bcmul") or std.mem.eql(u8, runtime_name, "php_bcdiv") or std.mem.eql(u8, runtime_name, "php_bcmod") or std.mem.eql(u8, runtime_name, "php_bcpow") or std.mem.eql(u8, runtime_name, "php_bcsqrt") or std.mem.eql(u8, runtime_name, "php_bccomp") or std.mem.eql(u8, runtime_name, "php_call_static_dynamic") or std.mem.eql(u8, runtime_name, "php_get_static_property_dynamic") or std.mem.eql(u8, runtime_name, "php_get_class_constant_dynamic")) {
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     try self.writeValueArgsArray(writer, op.args);
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
@@ -11239,7 +11270,7 @@ pub const NativeLinker = struct {
                                     try writer.print("    _ = try runtime.{s}(", .{runtime_name});
                                     try self.writeStrGetcsvArgs(writer, op.args);
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
-                                } else if (std.mem.eql(u8, runtime_name, "php_array_merge") or std.mem.eql(u8, runtime_name, "php_array_intersect") or std.mem.eql(u8, runtime_name, "php_array_diff") or std.mem.eql(u8, runtime_name, "php_array_diff_key") or std.mem.eql(u8, runtime_name, "php_array_diff_assoc") or std.mem.eql(u8, runtime_name, "php_array_multisort") or std.mem.eql(u8, runtime_name, "php_array_map") or std.mem.eql(u8, runtime_name, "php_json_decode") or std.mem.eql(u8, runtime_name, "php_memory_get_usage") or std.mem.eql(u8, runtime_name, "php_memory_get_peak_usage") or std.mem.eql(u8, runtime_name, "php_shell_exec") or std.mem.eql(u8, runtime_name, "php_exec") or std.mem.eql(u8, runtime_name, "php_system") or std.mem.eql(u8, runtime_name, "php_substr_replace") or std.mem.eql(u8, runtime_name, "php_function_exists") or std.mem.eql(u8, runtime_name, "php_gc_enable") or std.mem.eql(u8, runtime_name, "php_gc_collect_cycles") or std.mem.eql(u8, runtime_name, "php_ini_get") or std.mem.eql(u8, runtime_name, "php_getrusage") or std.mem.eql(u8, runtime_name, "php_unset") or std.mem.eql(u8, runtime_name, "php_call_static_dynamic")) {
+                                } else if (std.mem.eql(u8, runtime_name, "php_array_merge") or std.mem.eql(u8, runtime_name, "php_array_intersect") or std.mem.eql(u8, runtime_name, "php_array_diff") or std.mem.eql(u8, runtime_name, "php_array_diff_key") or std.mem.eql(u8, runtime_name, "php_array_diff_assoc") or std.mem.eql(u8, runtime_name, "php_array_multisort") or std.mem.eql(u8, runtime_name, "php_array_map") or std.mem.eql(u8, runtime_name, "php_json_decode") or std.mem.eql(u8, runtime_name, "php_memory_get_usage") or std.mem.eql(u8, runtime_name, "php_memory_get_peak_usage") or std.mem.eql(u8, runtime_name, "php_shell_exec") or std.mem.eql(u8, runtime_name, "php_exec") or std.mem.eql(u8, runtime_name, "php_system") or std.mem.eql(u8, runtime_name, "php_substr_replace") or std.mem.eql(u8, runtime_name, "php_function_exists") or std.mem.eql(u8, runtime_name, "php_gc_enable") or std.mem.eql(u8, runtime_name, "php_gc_collect_cycles") or std.mem.eql(u8, runtime_name, "php_ini_get") or std.mem.eql(u8, runtime_name, "php_getrusage") or std.mem.eql(u8, runtime_name, "php_unset") or std.mem.eql(u8, runtime_name, "php_call_static_dynamic") or std.mem.eql(u8, runtime_name, "php_get_static_property_dynamic") or std.mem.eql(u8, runtime_name, "php_get_class_constant_dynamic")) {
                                     try writer.print("    _ = try runtime.{s}(", .{runtime_name});
                                     try self.writeValueArgsArray(writer, op.args);
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
@@ -13028,14 +13059,11 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                 const phi_res = inst.result orelse continue;
                 const phi_op = inst.op.phi;
                 // 优先使用 source_block 精确匹配
-                const phi_deref = if (self.isPointerReg(phi_res.id)) ".*" else "";
                 if (self.current_cond_br_source_block) |source_idx| {
                     for (phi_op.incoming) |incoming| {
                         const inc_idx = @as(usize, incoming.block.index);
                         if (inc_idx == source_idx) {
-                            var phi_buf: [32]u8 = undefined;
-                            const phi_ref = try self.getOperandRef(&phi_buf, incoming.value.id);
-                            try writer.print("{s}reg_{d}{s} = {s};\n", .{ child_indent, phi_res.id, phi_deref, phi_ref });
+                            try self.writePtrAwareAssign(writer, child_indent, phi_res.id, incoming.value.id);
                             break;
                         }
                     }
@@ -13044,9 +13072,7 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                     for (phi_op.incoming) |incoming| {
                         const inc_idx = @as(usize, incoming.block.index);
                         if (inc_idx != else_idx) {
-                            var phi_buf: [32]u8 = undefined;
-                            const phi_ref = try self.getOperandRef(&phi_buf, incoming.value.id);
-                            try writer.print("{s}reg_{d}{s} = {s};\n", .{ child_indent, phi_res.id, phi_deref, phi_ref });
+                            try self.writePtrAwareAssign(writer, child_indent, phi_res.id, incoming.value.id);
                             break;
                         }
                     }
@@ -13150,6 +13176,8 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
         if (is_nested_loop) {
             try writer.writeAll("}\n");
         } else {
+            // 重置 return_generated 标志：then 块可能有 return，但 else 块仍需正常生成
+            self.return_generated = false;
             try writer.writeAll("} else {\n");
         }
 
@@ -13174,15 +13202,12 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                 if (inst.op != .phi) continue;
                 const phi_res = inst.result orelse continue;
                 const phi_op = inst.op.phi;
-                const phi_deref = if (self.isPointerReg(phi_res.id)) ".*" else "";
                 // 优先使用 source_block 精确匹配
                 if (self.current_cond_br_source_block) |source_idx| {
                     for (phi_op.incoming) |incoming| {
                         const inc_idx = @as(usize, incoming.block.index);
                         if (inc_idx == source_idx) {
-                            var phi_buf: [32]u8 = undefined;
-                            const phi_ref = try self.getOperandRef(&phi_buf, incoming.value.id);
-                            try writer.print("{s}reg_{d}{s} = {s};\n", .{ child_indent, phi_res.id, phi_deref, phi_ref });
+                            try self.writePtrAwareAssign(writer, child_indent, phi_res.id, incoming.value.id);
                             break;
                         }
                     }
@@ -13191,9 +13216,7 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                     for (phi_op.incoming) |incoming| {
                         const inc_idx = @as(usize, incoming.block.index);
                         if (inc_idx != then_idx) {
-                            var phi_buf: [32]u8 = undefined;
-                            const phi_ref = try self.getOperandRef(&phi_buf, incoming.value.id);
-                            try writer.print("{s}reg_{d}{s} = {s};\n", .{ child_indent, phi_res.id, phi_deref, phi_ref });
+                            try self.writePtrAwareAssign(writer, child_indent, phi_res.id, incoming.value.id);
                             break;
                         }
                     }
@@ -13325,6 +13348,9 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
         indent: []const u8,
         use_simple: bool,
     ) anyerror!void {
+        // 如果已生成 return 语句，跳过后续 br 链的代码生成（避免 unreachable code）
+        if (self.return_generated) return;
+
         const code_list = writer.list;
         const target_idx = @as(usize, br_target.index);
 
@@ -13363,13 +13389,10 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                 if (inst.op != .phi) continue;
                 const phi_res = inst.result orelse continue;
                 const phi_op = inst.op.phi;
-                const phi_deref = if (self.isPointerReg(phi_res.id)) ".*" else "";
                 for (phi_op.incoming) |incoming| {
                     const inc_idx = @as(usize, incoming.block.index);
                     if (inc_idx == source_idx) {
-                        var phi_buf: [32]u8 = undefined;
-                        const phi_ref = try self.getOperandRef(&phi_buf, incoming.value.id);
-                        try writer.print("{s}reg_{d}{s} = {s};\n", .{ indent, phi_res.id, phi_deref, phi_ref });
+                        try self.writePtrAwareAssign(writer, indent, phi_res.id, incoming.value.id);
                         break;
                     }
                 }
@@ -13406,7 +13429,10 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                     try self.generateReturnInBlock(writer, ret_val, indent);
                 },
                 .br => |next_target| {
-                    try self.generateBrChain(writer, func, next_target, target_idx, processed, indent, use_simple);
+                    // 如果已生成 return 语句，不再递归处理 br 链（避免 unreachable code）
+                    if (!self.return_generated) {
+                        try self.generateBrChain(writer, func, next_target, target_idx, processed, indent, use_simple);
+                    }
                 },
                 else => {},
             }
@@ -13423,6 +13449,7 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
             } else {
                 try writer.print("{s}return runtime.Value.initNull();\n", .{indent});
             }
+            self.return_generated = true;
             return;
         };
 
@@ -13451,6 +13478,7 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
         } else {
             try writer.print("{s}return runtime.Value.initNull();\n", .{indent});
         }
+        self.return_generated = true;
     }
 
     /// 生成结构化代码（新版本，支持多循环）
@@ -14369,12 +14397,15 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
         }
 
         // while 循环的 phi 更新必须在循环体末尾回写，否则会导致循环变量不递增
-        for (phi_updates.items) |update| {
-            var src_buf: [32]u8 = undefined;
-            const src_ref = try self.getOperandRef(&src_buf, update.value_reg);
-            try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{update.phi_reg});
-            try writer.print("        reg_{d} = {s};\n", .{ update.phi_reg, src_ref });
-            try writer.print("        _ = reg_{d}.retain();\n", .{update.phi_reg});
+        // 如果循环体内已生成 return 语句，跳过 PHI 更新（避免 unreachable code）
+        if (!self.return_generated) {
+            for (phi_updates.items) |update| {
+                var src_buf: [32]u8 = undefined;
+                const src_ref = try self.getOperandRef(&src_buf, update.value_reg);
+                try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{update.phi_reg});
+                try writer.print("        reg_{d} = {s};\n", .{ update.phi_reg, src_ref });
+                try writer.print("        _ = reg_{d}.retain();\n", .{update.phi_reg});
+            }
         }
 
         // 生成增量块（如果有且不是 for 循环）
@@ -14872,6 +14903,9 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                         try self_.generateInstructionSimple(code_, inst);
                     }
                 }
+
+                // 如果已生成 return 语句，跳过 PHI 更新（避免 unreachable code）
+                if (self_.return_generated) return;
 
                 for (phi_updates_) |update| {
                     // AOT-TYPE-001 修复：所有寄存器都是 runtime.Value 类型
@@ -16282,19 +16316,22 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
             }
 
             // 更新 phi 节点的值（在循环末尾）
-            for (phi_updates.items) |update| {
-                // 移除错误的自增优化
-                // if (update.phi_reg == update.value_reg) {
-                //     try writer.print("        reg_{d} = try runtime.php_add(reg_{d}, runtime.Value.initInt(1));\n", .{ update.phi_reg, update.phi_reg });
-                //     continue;
-                // }
+            // 如果循环体内已生成 return 语句，跳过 PHI 更新（避免 unreachable code）
+            if (!self.return_generated) {
+                for (phi_updates.items) |update| {
+                    // 移除错误的自增优化
+                    // if (update.phi_reg == update.value_reg) {
+                    //     try writer.print("        reg_{d} = try runtime.php_add(reg_{d}, runtime.Value.initInt(1));\n", .{ update.phi_reg, update.phi_reg });
+                    //     continue;
+                    // }
 
-                // AOT-TYPE-001 修复：所有寄存器都是 runtime.Value，直接赋值
-                var src_buf: [32]u8 = undefined;
-                const src_ref = try self.getOperandRef(&src_buf, update.value_reg);
-                try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{update.phi_reg});
-            try writer.print("        reg_{d} = {s};\n", .{ update.phi_reg, src_ref });
-            try writer.print("        _ = reg_{d}.retain();\n", .{update.phi_reg});
+                    // AOT-TYPE-001 修复：所有寄存器都是 runtime.Value，直接赋值
+                    var src_buf: [32]u8 = undefined;
+                    const src_ref = try self.getOperandRef(&src_buf, update.value_reg);
+                    try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{update.phi_reg});
+                try writer.print("        reg_{d} = {s};\n", .{ update.phi_reg, src_ref });
+                try writer.print("        _ = reg_{d}.retain();\n", .{update.phi_reg});
+                }
             }
 
             try writer.writeAll("    }\n");
@@ -16359,13 +16396,16 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                 }
 
                 // 更新 phi 节点的值（在循环末尾）
-                for (phi_updates.items) |update| {
-                    // AOT-TYPE-001 修复：所有寄存器都是 runtime.Value，直接赋值
-                    var src_buf: [32]u8 = undefined;
-                    const src_ref = try self.getOperandRef(&src_buf, update.value_reg);
-                    try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{update.phi_reg});
-            try writer.print("        reg_{d} = {s};\n", .{ update.phi_reg, src_ref });
-            try writer.print("        _ = reg_{d}.retain();\n", .{update.phi_reg});
+                // 如果循环体内已生成 return 语句，跳过 PHI 更新（避免 unreachable code）
+                if (!self.return_generated) {
+                    for (phi_updates.items) |update| {
+                        // AOT-TYPE-001 修复：所有寄存器都是 runtime.Value，直接赋值
+                        var src_buf: [32]u8 = undefined;
+                        const src_ref = try self.getOperandRef(&src_buf, update.value_reg);
+                        try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{update.phi_reg});
+                try writer.print("        reg_{d} = {s};\n", .{ update.phi_reg, src_ref });
+                try writer.print("        _ = reg_{d}.retain();\n", .{update.phi_reg});
+                    }
                 }
 
                 try writer.writeAll("    }\n");

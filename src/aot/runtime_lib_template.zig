@@ -20071,6 +20071,42 @@ pub fn php_call_static_dynamic(args: []const Value, allocator: Allocator) !Value
     return php_call_static_with_ctx(Value.initNull(), class_name, method_name, args[2..], allocator);
 }
 
+/// 动态静态属性访问：($expr)::$prop
+/// args[0] = 类名 Value（字符串）, args[1] = 属性名 Value（字符串）
+pub fn php_get_static_property_dynamic(args: []const Value, allocator: Allocator) !Value {
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const class_name = if (args[0].isString()) args[0].asString().data else "";
+    const prop_name = if (args[1].isString()) args[1].asString().data else "";
+    _ = allocator;
+    return php_get_static_property(class_name, prop_name);
+}
+
+/// 动态类常量访问：($expr)::CONSTANT
+/// args[0] = 类名 Value（字符串）, args[1] = 常量名 Value（字符串）
+pub fn php_get_class_constant_dynamic(args: []const Value, allocator: Allocator) !Value {
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const class_name = if (args[0].isString()) args[0].asString().data else "";
+    const const_name = if (args[1].isString()) args[1].asString().data else "";
+
+    // 特殊处理 ::class
+    if (std.mem.eql(u8, const_name, "class")) {
+        const str = try PHPString.init(allocator, class_name);
+        return Value.initString(str);
+    }
+
+    const meta = findClass(class_name) orelse {
+        return Value.initNull();
+    };
+
+    // 查找类常量
+    if (meta.constants.get(const_name)) |val| {
+        _ = val.retain();
+        return val;
+    }
+
+    return Value.initNull();
+}
+
 pub fn php_call_static_with_ctx(ctx: Value, class_name: []const u8, method_name: []const u8, args: []const Value, allocator: Allocator) !Value {
     const lookup_meta = blk: {
         if (std.mem.eql(u8, class_name, "self")) {

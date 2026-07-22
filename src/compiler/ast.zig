@@ -96,6 +96,9 @@ pub const Node = struct {
         function_call,
         function_decl,
         static_method_call,
+        dynamic_static_method_call, // ($expr)::method() 动态类名静态调用
+        dynamic_static_property_access, // ($expr)::$prop 动态类名静态属性访问
+        dynamic_class_constant_access, // ($expr)::CONSTANT 动态类名常量访问
         static_property_access, // 静态成员访问
         use_stmt,
         namespace_stmt,
@@ -197,6 +200,9 @@ pub const Node = struct {
         variable_property_access: struct { target: Index, prop_variable: Index }, // $obj->$varName
         array_access: struct { target: Index, index: ?Index },
         static_method_call: struct { class_name: StringId, method_name: StringId, args: []const Index },
+        dynamic_static_method_call: struct { class_expr: Index, method_name: StringId, args: []const Index },
+        dynamic_static_property_access: struct { class_expr: Index, property_name: StringId },
+        dynamic_class_constant_access: struct { class_expr: Index, constant_name: StringId },
         static_property_access: struct { class_name: StringId, property_name: StringId },
         class_constant_access: struct { class_name: StringId, constant_name: StringId },
         use_stmt: struct { namespace: StringId, alias: ?StringId, use_type: u8 }, // use_type: 0=class, 1=function, 2=const

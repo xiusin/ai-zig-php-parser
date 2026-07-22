@@ -2529,19 +2529,17 @@ pub const Parser = struct {
                 // 安全导航操作符目前只支持属性访问，不支持方法调用
                 left = try self.createNode(.{ .tag = .safe_property_access, .main_token = op, .data = .{ .safe_property_access = .{ .target = left, .property_name = member_id } } });
             } else if (tag == .double_colon) {
-                // Static access: ClassName::member, self::member, parent::member, $obj::member
+                // Static access: ClassName::member, self::member, parent::member, $obj::member, ($expr)::method()
                 const left_node = self.context.nodes.items[left];
 
                 // 获取类名ID，支持variable、self_expr、parent_expr节点
-                const class_name_id = switch (left_node.tag) {
+                // 返回 null 表示动态类名（括号表达式等），需使用 dynamic_static_method_call
+                const class_name_id: ?ast.Node.StringId = switch (left_node.tag) {
                     .variable => left_node.data.variable.name,
                     .self_expr => left_node.data.variable.name,
                     .parent_expr => left_node.data.variable.name,
                     .static_expr => left_node.data.variable.name,
-                    else => {
-                        self.reportError("Invalid static access target");
-                        return error.InvalidStaticAccess;
-                    },
+                    else => null,
                 };
 
                 if (self.curr.tag == .t_variable) {
@@ -2552,7 +2550,12 @@ pub const Parser = struct {
                         prop_str = prop_str[1..];
                     }
                     const prop_id = try self.context.intern(prop_str);
-                    left = try self.createNode(.{ .tag = .static_property_access, .main_token = op, .data = .{ .static_property_access = .{ .class_name = class_name_id, .property_name = prop_id } } });
+                    if (class_name_id) |cid| {
+                        left = try self.createNode(.{ .tag = .static_property_access, .main_token = op, .data = .{ .static_property_access = .{ .class_name = cid, .property_name = prop_id } } });
+                    } else {
+                        // 动态类名：($expr)::$prop
+                        left = try self.createNode(.{ .tag = .dynamic_static_property_access, .main_token = op, .data = .{ .dynamic_static_property_access = .{ .class_expr = left, .property_name = prop_id } } });
+                    }
                 } else {
                     // Allow keywords as valid member names after ::
                     const member_name_tok = if (self.curr.tag == .t_string)
@@ -2566,10 +2569,14 @@ pub const Parser = struct {
                         self.nextToken();
                         // Check for first-class callable: Class::method(...)
                         if (self.curr.tag == .ellipsis and self.peek.tag == .r_paren) {
+                            if (class_name_id == null) {
+                                self.reportError("Invalid static access target");
+                                return error.InvalidStaticAccess;
+                            }
                             self.nextToken(); // consume ...
                             _ = try self.eat(.r_paren);
                             // Build "ClassName::methodName" string for Closure::fromCallable
-                            const class_str = self.context.string_pool.keys()[class_name_id];
+                            const class_str = self.context.string_pool.keys()[class_name_id.?];
                             const method_str = self.context.string_pool.keys()[member_id];
                             var buf: [512]u8 = undefined;
                             const callable_name = std.fmt.bufPrint(&buf, "{s}::{s}", .{ class_str, method_str }) catch "unknown";
@@ -2602,9 +2609,20 @@ pub const Parser = struct {
                             if (self.curr.tag == .comma) self.nextToken();
                         }
                         _ = try self.eat(.r_paren);
-                        left = try self.createNode(.{ .tag = .static_method_call, .main_token = op, .data = .{ .static_method_call = .{ .class_name = class_name_id, .method_name = member_id, .args = try self.context.arena.allocator().dupe(ast.Node.Index, args.items) } } });
+                        const args_slice = try self.context.arena.allocator().dupe(ast.Node.Index, args.items);
+                        if (class_name_id) |cid| {
+                            left = try self.createNode(.{ .tag = .static_method_call, .main_token = op, .data = .{ .static_method_call = .{ .class_name = cid, .method_name = member_id, .args = args_slice } } });
+                        } else {
+                            // 动态类名：($expr)::method() — 运行时通过 php_call_static_dynamic 分发
+                            left = try self.createNode(.{ .tag = .dynamic_static_method_call, .main_token = op, .data = .{ .dynamic_static_method_call = .{ .class_expr = left, .method_name = member_id, .args = args_slice } } });
+                        }
                     } else {
-                        left = try self.createNode(.{ .tag = .class_constant_access, .main_token = op, .data = .{ .class_constant_access = .{ .class_name = class_name_id, .constant_name = member_id } } });
+                        if (class_name_id) |cid| {
+                            left = try self.createNode(.{ .tag = .class_constant_access, .main_token = op, .data = .{ .class_constant_access = .{ .class_name = cid, .constant_name = member_id } } });
+                        } else {
+                            // 动态类名：($expr)::CONSTANT
+                            left = try self.createNode(.{ .tag = .dynamic_class_constant_access, .main_token = op, .data = .{ .dynamic_class_constant_access = .{ .class_expr = left, .constant_name = member_id } } });
+                        }
                     }
                 }
             } else if (tag == .l_paren) {
