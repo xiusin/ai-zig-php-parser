@@ -14045,6 +14045,11 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
             try processed_body.put(exit, {});
         }
 
+        // 保存外层作用域的 return_generated，循环体内独立跟踪 return 路径
+        const saved_return_generated = self.return_generated;
+        self.return_generated = false;
+        defer self.return_generated = saved_return_generated;
+
         for (body_block_indices.items) |blk_idx| {
             if (processed_body.contains(blk_idx)) continue;
             const blk = func.blocks.items[blk_idx];
@@ -16085,6 +16090,11 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                 }
             }
 
+            // 保存外层作用域的 return_generated，循环体内独立跟踪 return 路径
+            const saved_return_generated = self.return_generated;
+            self.return_generated = false;
+            defer self.return_generated = saved_return_generated;
+
             try writer.writeAll("    while (true) {\n");
             try writer.print("        // Header: {s}\n", .{header_block.label});
 
@@ -16338,6 +16348,11 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
 
             // Epilogue：处理剩余迭代（< unroll_factor）
             if (unroll_factor > 1) {
+                // 保存外层作用域的 return_generated，epilogue 循环体内独立跟踪 return 路径
+                const saved_return_generated_epilogue = self.return_generated;
+                self.return_generated = false;
+                defer self.return_generated = saved_return_generated_epilogue;
+
                 try writer.writeAll("    // Epilogue: remaining iterations\n");
                 try writer.writeAll("    while (true) {\n");
                 try writer.print("        // Header: {s}\n", .{header_block.label});
