@@ -20094,14 +20094,14 @@ pub fn php_get_class_constant_dynamic(args: []const Value, allocator: Allocator)
         return Value.initString(str);
     }
 
-    const meta = findClass(class_name) orelse {
-        return Value.initNull();
-    };
-
-    // 查找类常量
-    if (meta.constants.get(const_name)) |val| {
-        _ = val.retain();
-        return val;
+    // 类常量存储在 static_properties 中，需遍历继承链查找
+    var current_meta: ?*const ClassMeta = findClass(class_name);
+    while (current_meta) |meta| {
+        if (meta.static_properties.get(const_name)) |val| {
+            _ = val.retain();
+            return val;
+        }
+        current_meta = meta.parent;
     }
 
     return Value.initNull();

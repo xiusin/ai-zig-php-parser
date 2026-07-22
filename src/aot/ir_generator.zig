@@ -8402,6 +8402,23 @@ pub const IRGenerator = struct {
         var class_name = self.getString(access_data.class_name);
         const prop_name = self.getString(access_data.property_name);
 
+        // 动态类名：$var::$prop — 读取变量值，使用 php_get_static_property_dynamic
+        if (class_name.len > 0 and class_name[0] == '$') {
+            const class_val_reg = if (self.getVarRegister(class_name)) |ptr_reg|
+                try self.emitWithResult(.{ .load = .{ .ptr = ptr_reg, .type_ = .php_value } }, .php_value)
+            else
+                try self.emitWithResult(.{ .global_get = .{ .name = class_name } }, .php_value);
+            const prop_name_reg = try self.emitWithResult(.{ .const_string = try self.module.?.internString(prop_name) }, .php_string);
+            const dyn_args = try self.allocator.alloc(Register, 2);
+            dyn_args[0] = class_val_reg;
+            dyn_args[1] = prop_name_reg;
+            return self.emitWithResult(.{ .call = .{
+                .func_name = "php_get_static_property_dynamic",
+                .args = dyn_args,
+                .return_type = .php_value,
+            } }, .php_value);
+        }
+
         // 解析特殊类名
         // self:: → 编译时解析为定义类（不需要 LSB）
         //   但在 trait 方法中，self:: 应保留运行时解析（LSB 到使用类）
@@ -8429,6 +8446,23 @@ pub const IRGenerator = struct {
 
         const class_name = self.getString(class_name_id);
         const const_name = self.getString(const_name_id);
+
+        // 动态类名：$var::CONSTANT — 读取变量值，使用 php_get_class_constant_dynamic
+        if (class_name.len > 0 and class_name[0] == '$') {
+            const class_val_reg = if (self.getVarRegister(class_name)) |ptr_reg|
+                try self.emitWithResult(.{ .load = .{ .ptr = ptr_reg, .type_ = .php_value } }, .php_value)
+            else
+                try self.emitWithResult(.{ .global_get = .{ .name = class_name } }, .php_value);
+            const const_name_reg = try self.emitWithResult(.{ .const_string = try self.module.?.internString(const_name) }, .php_string);
+            const dyn_args = try self.allocator.alloc(Register, 2);
+            dyn_args[0] = class_val_reg;
+            dyn_args[1] = const_name_reg;
+            return self.emitWithResult(.{ .call = .{
+                .func_name = "php_get_class_constant_dynamic",
+                .args = dyn_args,
+                .return_type = .php_value,
+            } }, .php_value);
+        }
 
         // 特殊处理 ClassName::class → 返回类名字符串
         if (std.mem.eql(u8, const_name, "class")) {
