@@ -2181,6 +2181,16 @@ pub const PHPArray = struct {
         self.next_index += 1;
     }
 
+    /// 追加元素（保留 Ref 值，不解引用）
+    /// 用于闭包 use(&$var) 捕获：Ref 必须原样存储，使闭包内修改写穿到父作用域
+    pub fn pushRaw(self: *PHPArray, allocator: Allocator, value: Value) !void {
+        const key = ArrayKey{ .integer = self.next_index };
+        _ = allocator;
+        _ = value.retain();
+        try self.elements.put(key, value);
+        self.next_index += 1;
+    }
+
     /// 检查是否包含字符串键（关联数组）
     pub fn hasStringKeys(self: *PHPArray) bool {
         return self.elements.hasStringKeys();

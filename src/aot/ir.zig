@@ -1126,6 +1126,8 @@ pub const Instruction = struct {
     pub const ArrayPushOp = struct {
         array: Register,
         value: Register,
+        /// 保留 Ref 值（不解引用），用于闭包 use(&$var) 捕获
+        preserve_ref: bool = false,
     };
 
     /// Array key exists check

@@ -8731,7 +8731,7 @@ pub const IRGenerator = struct {
         const caps_arr_reg = try self.emitWithResult(.{ .array_new = .{ .capacity = @intCast(captures.items.len) } }, .php_array);
 
         for (captures.items) |cap_reg| {
-            _ = try self.emit(.{ .array_push = .{ .array = caps_arr_reg, .value = cap_reg } }, null);
+            _ = try self.emit(.{ .array_push = .{ .array = caps_arr_reg, .value = cap_reg, .preserve_ref = true } }, null);
         }
 
         // Closure name

@@ -11621,6 +11621,8 @@ pub const NativeLinker = struct {
                 const push_arr_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.array.id) else false;
                 const push_val_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.value.id) else false;
                 const arr_deref = if (push_arr_is_alloca) ".*" else "";
+                // preserve_ref: 闭包 use(&$var) 捕获时，Ref 值必须原样存储（调用 pushRaw 而非 push）
+                const push_method = if (op.preserve_ref) "pushRaw" else "push";
                 // 检查是否是对象（ArrayAccess），调用offsetSet(null, value)
                 try writer.print("    if (runtime.Value_isObject(reg_{d}{s})) {{\n", .{ op.array.id, arr_deref });
                 try writer.print("        _ = try runtime.php_object_call(reg_{d}{s}, \"offsetSet\", &[_]runtime.Value{{runtime.Value.initNull(), ", .{ op.array.id, arr_deref });
@@ -11639,9 +11641,9 @@ pub const NativeLinker = struct {
                     try writer.print("            reg_{d}.* = runtime.Value.initArray(__cow_arr);\n", .{op.array.id});
                     try writer.writeAll("        }\n");
                     if (push_val_is_alloca) {
-                        try writer.print("        try reg_{d}.*.asArray().push(runtime.runtime_allocator, reg_{d}.*);\n", .{ op.array.id, op.value.id });
+                        try writer.print("        try reg_{d}.*.asArray().{s}(runtime.runtime_allocator, reg_{d}.*);\n", .{ op.array.id, push_method, op.value.id });
                     } else {
-                        try writer.print("        try reg_{d}.*.asArray().push(runtime.runtime_allocator, reg_{d});\n", .{ op.array.id, op.value.id });
+                        try writer.print("        try reg_{d}.*.asArray().{s}(runtime.runtime_allocator, reg_{d});\n", .{ op.array.id, push_method, op.value.id });
                     }
                 } else {
                     // AOT-COW-001: 数组 push 前检查 COW（ref_count > 1 时克隆）
@@ -11651,9 +11653,9 @@ pub const NativeLinker = struct {
                     try writer.print("            reg_{d} = runtime.Value.initArray(__cow_arr);\n", .{op.array.id});
                     try writer.writeAll("        }\n");
                     if (push_val_is_alloca) {
-                        try writer.print("        try reg_{d}.asArray().push(runtime.runtime_allocator, reg_{d}.*);\n", .{ op.array.id, op.value.id });
+                        try writer.print("        try reg_{d}.asArray().{s}(runtime.runtime_allocator, reg_{d}.*);\n", .{ op.array.id, push_method, op.value.id });
                     } else {
-                        try writer.print("        try reg_{d}.asArray().push(runtime.runtime_allocator, reg_{d});\n", .{ op.array.id, op.value.id });
+                        try writer.print("        try reg_{d}.asArray().{s}(runtime.runtime_allocator, reg_{d});\n", .{ op.array.id, push_method, op.value.id });
                     }
                 }
                 try writer.writeAll("    }\n");
