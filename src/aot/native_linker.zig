@@ -14012,6 +14012,66 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
             }
         }
 
+        // 解析 PHI 回边更新：回边值可能是内层循环 exit 块的 PHI 节点，
+        // 该 PHI 在结构化代码生成中不会被 lowering 为赋值语句（始终为 null）。
+        // 需要追溯到实际定义的寄存器，或判断变量在循环体内未修改则跳过更新。
+        if (phi_updates.items.len > 0) {
+            // 收集所有非 PHI 指令定义的寄存器（这些会在生成代码中实际赋值）
+            var materialized_regs = std.AutoHashMap(usize, void).init(self.allocator);
+            defer materialized_regs.deinit();
+            // PHI 指令结果 → 其 incoming 值列表（用于追溯）
+            var phi_map = std.AutoHashMap(usize, []const IR.Instruction.PhiIncoming).init(self.allocator);
+            defer phi_map.deinit();
+            for (func.blocks.items) |blk| {
+                for (blk.instructions.items) |inst| {
+                    if (inst.result) |res| {
+                        if (inst.op == .phi) {
+                            try phi_map.put(res.id, inst.op.phi.incoming);
+                        } else {
+                            try materialized_regs.put(res.id, {});
+                        }
+                    }
+                }
+            }
+            // 递归解析 PHI 链：找到第一个被 materialize 的寄存器
+            // 如果追溯到 phi_reg 本身，说明变量在循环体内未修改
+            const resolvePhi = struct {
+                fn run(
+                    reg_id: usize,
+                    phi_reg: usize,
+                    pmap: *std.AutoHashMap(usize, []const IR.Instruction.PhiIncoming),
+                    mat: *std.AutoHashMap(usize, void),
+                    depth: u32,
+                ) ?usize {
+                    if (depth > 10) return null; // 防止无限递归
+                    if (reg_id == phi_reg) return null; // 变量未修改，无需更新
+                    if (mat.contains(reg_id)) return reg_id; // 已 materialize
+                    if (pmap.get(reg_id)) |incoming| {
+                        // PHI 节点：追溯 incoming 值
+                        for (incoming) |inc| {
+                            if (inc.value.id == phi_reg) continue; // 跳过自身
+                            if (mat.contains(inc.value.id)) return inc.value.id;
+                            const resolved = run(inc.value.id, phi_reg, pmap, mat, depth + 1);
+                            if (resolved != null) return resolved;
+                        }
+                        return null; // 所有 incoming 都追溯到 phi_reg → 变量未修改
+                    }
+                    return reg_id; // 非 PHI 也非 materialize（如 undef）→ 保留但可能无效
+                }
+            }.run;
+
+            var write_idx: usize = 0;
+            for (phi_updates.items) |update| {
+                const resolved = resolvePhi(update.value_reg, update.phi_reg, &phi_map, &materialized_regs, 0);
+                if (resolved) |actual_reg| {
+                    phi_updates.items[write_idx] = .{ .phi_reg = update.phi_reg, .value_reg = actual_reg };
+                    write_idx += 1;
+                }
+                // resolved == null → 变量在循环体内未修改，跳过 PHI 更新
+            }
+            phi_updates.shrinkRetainingCapacity(write_idx);
+        }
+
         // P2: while 循环 PHI 整数收集——分析 header PHI 节点的 init/latch，
         // 如果循环变量在循环内始终为整数（init=const_int, latch=整数运算结果），
         // 激活 i64 快速路径，省略 isInt() 检查
