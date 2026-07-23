@@ -5889,9 +5889,10 @@ pub const NativeLinker = struct {
         // 修复内容：合并块检测防止顺序 if 嵌套、Phi 类型统一为 runtime.Value
         if (true) {
             // 如果有特殊控制流，直接跳过结构化尝试
-            // foreach 嵌套在其他循环中时也使用状态机（结构化生成器无法正确处理）
-            const has_nested_foreach = has_foreach and func.blocks.items.len > 10; // 简单启发式
-            if (!func.has_multi_level_break and !has_do_while and !has_switch and !has_match and !has_recursive_call and !has_nested_foreach and !has_exception_handler) {
+            // AOT-NESTED-LOOP-004: 移除 has_nested_foreach 限制，让结构化生成器尝试处理 foreach
+            // 结构化生成器已修复嵌套循环（for/while inside if inside foreach）的块排序问题
+            // 如果结构化生成失败，会自动回退到状态机
+            if (!func.has_multi_level_break and !has_do_while and !has_switch and !has_match and !has_recursive_call and !has_exception_handler) {
                 const structured_result = try self.tryGenerateStructuredControlFlowNew(&writer, func, cleanup_regs, alloca_regs);
                 if (structured_result) {
                     return;
@@ -11528,12 +11529,14 @@ pub const NativeLinker = struct {
                 try writer.writeAll(", ");
                 try self.writeRegRef(writer, op.value.id);
                 try writer.writeAll(", runtime.runtime_allocator);\n");
-                try writer.writeAll("        } else {\n");
+                try writer.writeAll("        } else if (__arr_deref.isArray()) {\n");
                 try writer.writeAll("            try __arr_deref.asArray().setByValue(runtime.runtime_allocator, ");
                 try self.writeRegRef(writer, op.key.id);
                 try writer.writeAll(", ");
                 try self.writeRegRef(writer, op.value.id);
                 try writer.writeAll(");\n");
+                try writer.writeAll("        } else {\n");
+                try writer.writeAll("            // null 或其他类型：跳过（PHP 会警告但不崩溃）\n");
                 try writer.writeAll("        }\n");
                 try writer.writeAll("    }\n");
             },
@@ -11586,31 +11589,42 @@ pub const NativeLinker = struct {
                     try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
                     try writer.writeAll(
                         \\    {
-                        \\        const arr = reg_
+                        \\        var __ensure_val = reg_
                     );
                     try writer.print("{d}", .{op.array.id});
                     try writer.writeAll(
-                        \\.asArray();
-                        \\        var elem = arr.getByValue(reg_
+                        \\;
+                        \\        while (__ensure_val.isRef()) __ensure_val = __ensure_val.asRef().*;
+                        \\        if (!__ensure_val.isArray()) {
+                        \\            runtime.emitWarning("Trying to access array offset on null");
+                        \\            reg_
+                    );
+                    try writer.print("{d}", .{reg.id});
+                    try writer.writeAll(
+                        \\ = runtime.Value.initNull();
+                        \\        } else {
+                        \\            const arr = __ensure_val.asArray();
+                        \\            var elem = arr.getByValue(reg_
                     );
                     try writer.print("{d}", .{op.key.id});
                     try writer.writeAll(
                         \\);
-                        \\        if (elem == null or elem.?.isNull()) {
-                        \\            const new_arr = try runtime.PHPArray.init(runtime.runtime_allocator);
-                        \\            const new_val = runtime.Value.initArray(new_arr);
-                        \\            try arr.setByValue(runtime.runtime_allocator, reg_
+                        \\            if (elem == null or elem.?.isNull()) {
+                        \\                const new_arr = try runtime.PHPArray.init(runtime.runtime_allocator);
+                        \\                const new_val = runtime.Value.initArray(new_arr);
+                        \\                try arr.setByValue(runtime.runtime_allocator, reg_
                     );
                     try writer.print("{d}", .{op.key.id});
                     try writer.writeAll(
                         \\, new_val);
-                        \\            elem = new_val;
-                        \\        }
-                        \\        reg_
+                        \\                elem = new_val;
+                        \\            }
+                        \\            reg_
                     );
                     try writer.print("{d}", .{reg.id});
                     try writer.writeAll(
                         \\ = elem.?;
+                        \\        }
                         \\    }
                         \\
                     );
@@ -11820,12 +11834,20 @@ pub const NativeLinker = struct {
                         } else {
                             try writer.print("    reg_{d}.* = try runtime.php_object_get(reg_{d}, \"{s}\");\n", .{ reg.id, op.object.id, escaped_prop });
                         }
+                        // 必须 retain：php_object_get 返回借用引用，不 retain 会导致
+                        // 后续 release 释放对象属性持有的值，造成悬垂指针
+                        if (self.regMayHeap(reg.id)) {
+                            try writer.print("    _ = reg_{d}.*.retain();\n", .{reg.id});
+                        }
                     } else {
                         try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
                         if (object_is_alloca) {
                             try writer.print("    reg_{d} = try runtime.php_object_get(reg_{d}.*, \"{s}\");\n", .{ reg.id, op.object.id, escaped_prop });
                         } else {
                             try writer.print("    reg_{d} = try runtime.php_object_get(reg_{d}, \"{s}\");\n", .{ reg.id, op.object.id, escaped_prop });
+                        }
+                        if (self.regMayHeap(reg.id)) {
+                            try writer.print("    _ = reg_{d}.retain();\n", .{reg.id});
                         }
                     }
                     // 属性可见性检查可能抛出 PHP 异常（Error），需要检查并路由到 catch 块
@@ -13208,6 +13230,28 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
         try writer.writeAll(indent);
         if (is_nested_loop) {
             try writer.writeAll("}\n");
+            // AOT-NESTED-LOOP-005: 生成退出块（else_idx）的 PHI 赋值
+            // break 发生在循环头块（current_cond_br_header_idx），退出块的 PHI
+            // 需要使用来自循环头块的 incoming 值（即循环变量最后一次迭代的值）
+            if (self.current_cond_br_header_idx) |hdr_idx| {
+                if (else_idx < func.blocks.items.len) {
+                    const exit_blk = func.blocks.items[else_idx];
+                    for (exit_blk.instructions.items) |phi_inst| {
+                        if (phi_inst.op != .phi) continue;
+                        const phi_res = phi_inst.result orelse continue;
+                        const phi_op = phi_inst.op.phi;
+                        for (phi_op.incoming) |incoming| {
+                            const inc_idx = @as(usize, incoming.block.index);
+                            if (inc_idx == hdr_idx) {
+                                try self.writePtrAwareAssign(writer, indent, phi_res.id, incoming.value.id);
+                                const phi_deref = if (self.isPointerReg(phi_res.id)) ".*" else "";
+                                try writer.print("{s}_ = reg_{d}{s}.retain();\n", .{ indent, phi_res.id, phi_deref });
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
         } else {
             // 重置 return_generated 标志：then 块可能有 return，但 else 块仍需正常生成
             self.return_generated = false;
@@ -13412,6 +13456,23 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
 
         // 如果目标是循环退出块，生成 break（break 语句的 br → exit_block）
         if (self.in_while_loop and self.current_loop_exit_block != null and target_idx == self.current_loop_exit_block.?) {
+            // AOT-PHI-EXIT: 生成 exit block 的 PHI 赋值（使用来自 source block 的 incoming 值）
+            // 否则 exit block 的 PHI 寄存器保持初始 null 值，导致后续使用时出错
+            const exit_blk = func.blocks.items[target_idx];
+            for (exit_blk.instructions.items) |inst| {
+                if (inst.op != .phi) continue;
+                const phi_res = inst.result orelse continue;
+                const phi_op = inst.op.phi;
+                for (phi_op.incoming) |incoming| {
+                    const inc_idx = @as(usize, incoming.block.index);
+                    if (inc_idx == source_idx) {
+                        try self.writePtrAwareAssign(writer, indent, phi_res.id, incoming.value.id);
+                        const phi_deref = if (self.isPointerReg(phi_res.id)) ".*" else "";
+                        try writer.print("{s}_ = reg_{d}{s}.retain();\n", .{ indent, phi_res.id, phi_deref });
+                        break;
+                    }
+                }
+            }
             try writer.writeAll(indent);
             try writer.writeAll("break;\n");
             return;
@@ -13431,6 +13492,51 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                         try self.writePhiAssignWithRetain(writer, phi_res.id, incoming.value.id);
                         break;
                     }
+                }
+            }
+            return;
+        }
+
+        // 嵌套循环 header 检测：目标块有回边（后续块 br 回到目标块）
+        // 嵌套循环 header 也有多个前驱（前向边 + 回边），但不是合并块
+        // 需要在 if 分支内部生成 while(true) 循环，而非跳过
+        var target_is_nested_loop_hdr = false;
+        {
+            for (func.blocks.items, 0..) |check_blk, check_idx| {
+                if (check_idx <= target_idx) continue;
+                if (check_blk.terminator) |check_term| {
+                    switch (check_term) {
+                        .br => |b| if (b.index == target_idx) { target_is_nested_loop_hdr = true; break; },
+                        .cond_br => |cb| if (cb.then_block.index == target_idx or cb.else_block.index == target_idx) { target_is_nested_loop_hdr = true; break; },
+                        else => {},
+                    }
+                }
+            }
+        }
+        if (target_is_nested_loop_hdr) {
+            const nl_blk = func.blocks.items[target_idx];
+            // 生成嵌套循环 PHI 初始化（来自循环外来源的初始值）
+            for (nl_blk.instructions.items) |phi_inst| {
+                if (phi_inst.op != .phi) continue;
+                const phi_res = phi_inst.result orelse continue;
+                const phi_op = phi_inst.op.phi;
+                for (phi_op.incoming) |incoming| {
+                    const inc_idx = @as(usize, incoming.block.index);
+                    if (inc_idx == source_idx) {
+                        try self.writePtrAwareAssign(writer, indent, phi_res.id, incoming.value.id);
+                        const phi_deref = if (self.isPointerReg(phi_res.id)) ".*" else "";
+                        try writer.print("{s}_ = reg_{d}{s}.retain();\n", .{ indent, phi_res.id, phi_deref });
+                        break;
+                    }
+                }
+            }
+            try processed.put(target_idx, {});
+            if (nl_blk.terminator) |nl_term| {
+                if (nl_term == .cond_br) {
+                    const prev_hdr = self.current_cond_br_header_idx;
+                    self.current_cond_br_header_idx = target_idx;
+                    defer self.current_cond_br_header_idx = prev_hdr;
+                    try self.generateCondBrBlock(writer, func, nl_term.cond_br, processed, indent, use_simple);
                 }
             }
             return;
@@ -14047,7 +14153,31 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                     if (reg_id == phi_reg) return null; // 变量未修改，无需更新
                     if (mat.contains(reg_id)) return reg_id; // 已 materialize
                     if (pmap.get(reg_id)) |incoming| {
-                        // PHI 节点：追溯 incoming 值
+                        // 检查是否是 merge PHI（如 if-else 后的合并 PHI）。
+                        // 如果 PHI 的 incoming 同时包含 phi_reg（一个分支未修改变量）
+                        // 和 materialized 寄存器（另一个分支修改了变量），
+                        // 说明该 PHI 已在结构化代码生成中被 lower 为 if-else 赋值，
+                        // 直接返回该 PHI 寄存器本身。
+                        // 这避免了错误地选取 if-branch 值（当 if-branch 未执行时为 null）。
+                        var has_phi_reg_incoming = false;
+                        var has_materialized_incoming = false;
+                        for (incoming) |inc| {
+                            if (inc.value.id == phi_reg) {
+                                has_phi_reg_incoming = true;
+                            } else if (mat.contains(inc.value.id)) {
+                                has_materialized_incoming = true;
+                            }
+                        }
+                        if (has_phi_reg_incoming and has_materialized_incoming) {
+                            return reg_id; // Merge PHI：已被 lower，直接使用
+                        }
+                        // 如果至少一个 incoming 是 materialized，且没有 incoming 是 phi_reg，
+                        // 则该 PHI 也已被 lower（所有分支都修改了变量，或嵌套 merge PHI）。
+                        // 直接返回 PHI 寄存器本身，避免错误追溯到第一个分支的值。
+                        if (has_materialized_incoming and !has_phi_reg_incoming) {
+                            return reg_id;
+                        }
+                        // 非 merge PHI：递归追溯 incoming 值
                         for (incoming) |inc| {
                             if (inc.value.id == phi_reg) continue; // 跳过自身
                             if (mat.contains(inc.value.id)) return inc.value.id;
@@ -14056,7 +14186,7 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                         }
                         return null; // 所有 incoming 都追溯到 phi_reg → 变量未修改
                     }
-                    return reg_id; // 非 PHI 也非 materialize（如 undef）→ 保留但可能无效
+                    return null; // 非 PHI 也非 materialize（如 undef/函数参数）→ 变量未修改，跳过更新
                 }
             }.run;
 
@@ -14302,7 +14432,28 @@ defer self.cond_br_merge_phi_generated = saved_merge_phi;
                                 try writer.print("reg_{d}.toBool()", .{term.cond_br.cond.id});
                             }
                         }
-                        try writer.writeAll(")) break;\n");
+                        try writer.writeAll(")) {\n");
+                        // AOT-PHI-EXIT: 正常退出时生成 exit block 的 PHI 赋值
+                        // 使用来自内层循环 header (blk_idx) 的 incoming 值
+                        {
+                            const exit_blk_nl = func.blocks.items[else_idx_nl];
+                            for (exit_blk_nl.instructions.items) |phi_inst| {
+                                if (phi_inst.op != .phi) continue;
+                                const phi_res = phi_inst.result orelse continue;
+                                const phi_op = phi_inst.op.phi;
+                                for (phi_op.incoming) |incoming| {
+                                    const inc_idx = self.tryFindBlockIndex(func, incoming.block);
+                                    if (inc_idx != null and inc_idx.? == blk_idx) {
+                                        try self.writePtrAwareAssign(writer, "            ", phi_res.id, incoming.value.id);
+                                        const phi_deref = if (self.isPointerReg(phi_res.id)) ".*" else "";
+                                        try writer.print("            _ = reg_{d}{s}.retain();\n", .{ phi_res.id, phi_deref });
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        try writer.writeAll("            break;\n");
+                        try writer.writeAll("        }\n");
                         // 生成循环体：处理内层循环的所有块
                         // 收集嵌套循环体内的块索引
                         var nested_body_indices = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return error.OutOfMemory;
@@ -14762,7 +14913,8 @@ defer self.cond_br_merge_phi_generated = saved_merge_phi;
                                     // 🎯 找到可提升的序列！生成提升后的代码（在循环前）
                                     try writer.writeAll("    // LICM: hoisted loop-invariant call\n");
 
-                                    // 生成 load
+                                    // 生成 load（必须 retain：与 generateInstructionSimple 的 load 一致，
+                                    // 否则循环迭代时 release 会减少 alloca 持有的引用计数导致 use-after-free）
                                     const suffix = self.getRegSuffix(load_result.id);
                                     if (self.regMayHeap(load_result.id)) {
                                         try writer.print("    reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ load_result.id, suffix });
@@ -14770,6 +14922,9 @@ defer self.cond_br_merge_phi_generated = saved_merge_phi;
                                     try writer.print("    reg_{d}{s} = ", .{ load_result.id, suffix });
                                     try self.generateLoadValue(writer, inst.op.load.ptr);
                                     try writer.writeAll(";\n");
+                                    if (self.regMayHeap(load_result.id)) {
+                                        try writer.print("    _ = reg_{d}{s}.retain();\n", .{ load_result.id, suffix });
+                                    }
 
                                     // 生成 call
                                     if (next_inst.result) |call_result| {
@@ -14813,6 +14968,11 @@ defer self.cond_br_merge_phi_generated = saved_merge_phi;
                         try writer.print("    reg_{d}{s} = ", .{ load_result.id, suffix });
                         try self.generateLoadValue(writer, inst.op.load.ptr);
                         try writer.writeAll(";\n");
+                        // 必须retain：与 generateInstructionSimple 的 load 一致，
+                        // 否则循环迭代时 release 会减少 alloca 持有的引用计数导致 use-after-free
+                        if (self.regMayHeap(load_result.id)) {
+                            try writer.print("    _ = reg_{d}{s}.retain();\n", .{ load_result.id, suffix });
+                        }
                         try self.markInstructionHoisted(inst);
                         hoisted_count += 1;
                     }
@@ -15073,7 +15233,23 @@ defer self.cond_br_merge_phi_generated = saved_merge_phi;
                 // 如果已生成 return 语句，跳过 PHI 更新（避免 unreachable code）
                 if (self_.return_generated) return;
 
+                // AOT-NESTED-LOOP-PHI-001 修复：过滤不属于当前循环的 PHI 更新
+                // 在嵌套循环中，phi_updates_ 可能包含外层循环的 PHI 节点，
+                // 错误地更新外层循环变量会导致内层循环变量被重置。
+                // 判断标准：PHI 寄存器必须在当前循环的 header 块中定义。
+                const header_block = func_.blocks.items[loop_.header];
+                var loop_phi_regs = std.AutoHashMap(usize, void).init(self_.allocator);
+                defer loop_phi_regs.deinit();
+                for (header_block.instructions.items) |inst| {
+                    if (inst.op == .phi and inst.result != null) {
+                        try loop_phi_regs.put(inst.result.?.id, {});
+                    }
+                }
+
                 for (phi_updates_) |update| {
+                    // 跳过不属于当前循环的 PHI 更新
+                    if (!loop_phi_regs.contains(update.phi_reg)) continue;
+
                     // AOT-TYPE-001 修复：所有寄存器都是 runtime.Value 类型
                     // 移除类型推断驱动的转换，使用直接赋值
                     try LoopBodyIndent.writeIndent(code_, self_.allocator, depth);
@@ -15254,13 +15430,19 @@ defer self.cond_br_merge_phi_generated = saved_merge_phi;
                                 }
                             }
                             if (has_back_edge) {
-                                // 目标是循环 header（有回边），生成 continue 或直接返回
-                                if (depth > 2) {
-                                    try emitIncAndPhi(self_, writer_, code_, func_, loop_, phi_updates_, depth);
-                                    try LoopBodyIndent.writeIndent(code_, self_.allocator, depth);
-                                    try writer_.writeAll("continue;\n");
+                                // 目标是循环 header（有回边）
+                                // 如果目标是当前循环的 header，生成 continue 或直接返回
+                                // 如果目标是嵌套循环的 header（非当前循环 header），
+                                // 需要 fall through 到下方递归生成嵌套循环
+                                if (target == loop_.header) {
+                                    if (depth > 2) {
+                                        try emitIncAndPhi(self_, writer_, code_, func_, loop_, phi_updates_, depth);
+                                        try LoopBodyIndent.writeIndent(code_, self_.allocator, depth);
+                                        try writer_.writeAll("continue;\n");
+                                    }
+                                    return;
                                 }
-                                return;
+                                // 嵌套循环 header：fall through 到递归生成
                             }
                         }
                         if (loop_.exit_block) |exit_idx| {
@@ -15427,9 +15609,42 @@ defer self.cond_br_merge_phi_generated = saved_merge_phi;
                             const else_is_nested_exit = nested_loop_exit_ != null and else_target == nested_loop_exit_.?;
                             const then_is_nested_exit = nested_loop_exit_ != null and then_target == nested_loop_exit_.?;
 
+                            // AOT-CONTINUE-001 修复：检查 then_target 是否是循环的 continue 目标
+                            // （即 then_target 的 br 目标是循环 header，有回边指向它）
+                            // 如果是 continue 目标，不应将其误判为循环体，否则 else_target
+                            // 会被错误地当作退出块并生成 break，导致整个循环体被跳过。
+                            var then_is_continue_target = false;
+                            if (loop_.blocks.contains(then_target)) {
+                                // 排除外层循环自身的 increment（由 generateStandardForLoop 统一处理）
+                                if (loop_.increment == null or then_target != loop_.increment.?) {
+                                    const then_blk_0 = func_.blocks.items[then_target];
+                                if (then_blk_0.terminator) |then_term_0| {
+                                    switch (then_term_0) {
+                                        .br => |tb0| {
+                                            const tgt_idx = @as(usize, tb0.index);
+                                            if (visited.contains(tgt_idx)) {
+                                                // 检查 tgt_idx 是否是循环 header（有回边指向它）
+                                                for (func_.blocks.items, 0..) |chk_blk, chk_idx| {
+                                                    if (chk_idx <= tgt_idx) continue;
+                                                    if (chk_blk.terminator) |chk_term| {
+                                                        switch (chk_term) {
+                                                            .br => |cb| if (cb.index == tgt_idx) { then_is_continue_target = true; break; },
+                                                            .cond_br => |ccb| if (ccb.then_block.index == tgt_idx or ccb.else_block.index == tgt_idx) { then_is_continue_target = true; break; },
+                                                            else => {},
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        },
+                                        else => {},
+                                    }
+                                }
+                                }
+                            }
+
                             // 检查 then_target 是否是循环体（有回边到已访问的循环头）
                             var then_is_loop_body = false;
-                            if (nested_loop_exit_ != null and !else_is_nested_exit and !then_is_nested_exit) {
+                            if (nested_loop_exit_ != null and !else_is_nested_exit and !then_is_nested_exit and !then_is_continue_target) {
                                 if (loop_.blocks.contains(then_target)) {
                                     const then_blk = func_.blocks.items[then_target];
                                     if (then_blk.terminator) |then_term| {
@@ -15457,7 +15672,47 @@ defer self.cond_br_merge_phi_generated = saved_merge_phi;
                             const else_is_exit_block = loop_.exit_block != null and else_target == loop_.exit_block.?;
                             const else_is_merge = !cond_controls_loop and !else_is_exit_block and isMergeBlock(func_, else_target, loop_);
 
-                            if (cond_controls_loop and !else_is_nested_exit and !then_is_nested_exit) {
+                            // AOT-CONTINUE-001 修复：显式处理 if(cond) continue; 的情况
+                            // 在 while(true) 中，continue 跳过循环体剩余部分（包括 increment），
+                            // 这与 PHP for 循环语义不同（PHP continue 会执行 increment）。
+                            // 解决方案：不使用 continue，改用 if(!cond) { body } 结构，
+                            // 让 increment 在两个路径都执行。
+                            // 结构: if (!cond) { body_continuation } increment_block
+                            // cond 为真时跳过 body，直接执行 increment（等价于 continue 语义）
+                            if (then_is_continue_target and !else_is_nested_exit and !then_is_nested_exit and !cond_controls_loop) {
+                                // 先标记 then_target 为已访问，防止 else_target 的 br 递归进入
+                                try visited.put(then_target, {});
+                                // 生成 if (!cond) { body }
+                                try LoopBodyIndent.writeIndent(code_, self_.allocator, depth);
+                                try writer_.writeAll("if (!(");
+                                var inlined_c = false;
+                                for (block.instructions.items) |inst| {
+                                    if (inst.result) |rr| {
+                                        if (rr.id == cbr.cond.id) {
+                                            try self_.writeInlinedConditionExpr(writer_, inst);
+                                            inlined_c = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if (!inlined_c) {
+                                    const cond_type = self_.getInferredRegType(cbr.cond.id, cbr.cond.type_);
+                                    const cond_tag = @as(std.meta.Tag(IR.Type), cond_type);
+                                    try self_.writeBoolExpr(writer_, cond_tag, cbr.cond.id);
+                                }
+                                try writer_.writeAll(")) {\n");
+                                // 处理 else_target（循环体继续）
+                                if (loop_.blocks.contains(else_target) and !visited.contains(else_target)) {
+                                    try go(self_, writer_, code_, func_, loop_, phi_updates_, else_target, visited, depth + 1, block_idx, nested_loop_exit_);
+                                }
+                                try LoopBodyIndent.writeIndent(code_, self_.allocator, depth);
+                                try writer_.writeAll("}\n");
+                                // 解除 then_target 的已访问标记，处理 increment 块
+                                _ = visited.remove(then_target);
+                                if (loop_.blocks.contains(then_target) and !visited.contains(then_target)) {
+                                    try go(self_, writer_, code_, func_, loop_, phi_updates_, then_target, visited, depth, block_idx, nested_loop_exit_);
+                                }
+                            } else if (cond_controls_loop and !else_is_nested_exit and !then_is_nested_exit) {
                                 // then_target 是循环体，else_target 是退出块
                                 try LoopBodyIndent.writeIndent(code_, self_.allocator, depth);
                                 try writer_.writeAll("if (");
@@ -17820,17 +18075,15 @@ defer self.cond_br_merge_phi_generated = saved_merge_phi;
         cleanup_regs: []const usize,
         depth: usize,
     ) anyerror!void {
-        // 分析当前循环的累加器
-        var accumulators = try self.analyzeLoopAccumulators(func, loop);
-        defer accumulators.deinit(self.allocator);
+        _ = processed;
+        _ = block_to_loop;
+        _ = all_loops;
+        _ = depth;
 
         // 如果没有子循环，根据 body 是否包含 cond_br 选择不同路径：
         // - 无 cond_br：走 StructuredNew（更紧凑）
         // - 有 cond_br：走 generateStandardForLoop（覆盖 break/continue 等控制流）
         // 这里仍需初始化 PHI 节点。
-        const body_block = func.blocks.items[loop.body_start];
-        const body_has_cond = if (body_block.terminator) |term| term == .cond_br else false;
-
         if (loop.children.items.len == 0) {
             // 简化路径：无子循环
             // 统一走新版（含 PHI 初始化 + LICM + 循环变量分析）
@@ -17838,274 +18091,13 @@ defer self.cond_br_merge_phi_generated = saved_merge_phi;
             return;
         }
 
-        // 有子循环：使用新的生成策略
-        // 但如果 body 块有 cond_br（如 if 条件包裹子循环），回退到 generateStandardForLoop
-        // 因为 generateForLoopWithChildren 无法正确处理 body 的条件分支
-        if (body_has_cond) {
-            try self.generateStandardForLoop(writer, func, loop);
-            return;
-        }
-
-        var code_list = writer.list;
-
-        const header_block = func.blocks.items[loop.header];
-
-        // 初始化 PHI 寄存器（从 init 块 incoming 获取初始值）
-        for (header_block.instructions.items) |inst| {
-            if (inst.op == .phi) {
-                const phi_op = inst.op.phi;
-                if (inst.result) |res| {
-                    for (phi_op.incoming) |incoming| {
-                        if (isInitBlock(incoming.block, loop)) {
-                            var src_buf: [32]u8 = undefined;
-                            const src_ref = try self.getOperandRef(&src_buf, incoming.value.id);
-                            try writer.print("    reg_{d} = {s};\n", .{ res.id, src_ref });
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // 生成外层循环结构
-        try writer.writeAll("    while (true) {\n");
-        try writer.print("        // Header: {s}\n", .{header_block.label});
-
-        // 生成 header 指令
-        for (header_block.instructions.items) |inst| {
-            try code_list.appendSlice(self.allocator, "        ");
-            try self.generateInstructionSimple(code_list, inst);
-        }
-
-        // 生成条件判断
-        if (header_block.terminator) |term| {
-            if (term == .cond_br) {
-                try writer.writeAll("        if (!(");
-                for (header_block.instructions.items) |inst| {
-                    if (inst.result) |result_reg| {
-                        if (term.cond_br.cond.id == result_reg.id) {
-                            try self.writeInlinedConditionExpr(writer, inst);
-                            break;
-                        }
-                    }
-                }
-                try writer.writeAll(")) break;\n");
-            }
-        }
-
-        // 生成 body
-        try writer.print("        // Body: {s}\n", .{body_block.label});
-        for (body_block.instructions.items) |inst| {
-            try code_list.appendSlice(self.allocator, "        ");
-            try self.generateInstructionSimple(code_list, inst);
-        }
-        try processed.put(loop.body_start, {});
-
-        // 计算当前循环的 exit 块索引（cond_br 的 false target）
-        // 用于过滤被误识别为子循环的 exit 块
-        const exit_block_idx: ?usize = if (header_block.terminator) |term| blk: {
-            if (term == .cond_br) {
-                break :blk @as(usize, term.cond_br.else_block.index);
-            }
-            break :blk null;
-        } else null;
-
-        // 规范化 increment 块：优先使用非 _unroll_ 的原始块，避免引用展开寄存器
-        var effective_inc_idx: ?usize = loop.increment;
-        if (loop.increment) |inc_idx| {
-            const raw_inc_block = func.blocks.items[inc_idx];
-            const is_unroll_inc = std.mem.indexOf(u8, raw_inc_block.label, "_unroll_") != null;
-            if (is_unroll_inc) {
-                if (findOriginalBlockLabel(raw_inc_block.label)) |orig_label| {
-                    for (func.blocks.items) |candidate| {
-                        const candidate_is_unroll = std.mem.indexOf(u8, candidate.label, "_unroll_") != null;
-                        if (!candidate_is_unroll and std.mem.eql(u8, candidate.label, orig_label)) {
-                            effective_inc_idx = @as(usize, candidate.index);
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        // 生成子循环
-        for (loop.children.items) |child_idx| {
-            const child_loop = all_loops[child_idx];
-
-            // 跳过被误识别为循环的 exit 块（unroll 假阳性）
-            if (exit_block_idx) |exit_idx| {
-                if (child_loop.header == exit_idx) continue;
-            }
-
-            try writer.writeAll("        // Nested loop\n");
-            try self.generateLoopRecursive(writer, func, child_loop, processed, block_to_loop, all_loops, cleanup_regs, depth + 1);
-
-            // 标记子循环所有块为已处理
-            var child_blk_iter = child_loop.blocks.keyIterator();
-            while (child_blk_iter.next()) |child_blk_ptr| {
-                try processed.put(child_blk_ptr.*, {});
-            }
-
-            // 生成内层循环退出后、外层增量前的未处理块
-            // 这些块包含 echo、swap 等在内层循环之后执行的代码
-            var post_loop_blocks = std.ArrayList(usize).initCapacity(self.allocator, 0) catch return error.OutOfMemory;
-            defer post_loop_blocks.deinit(self.allocator);
-
-            var pl_iter = loop.blocks.keyIterator();
-            while (pl_iter.next()) |blk_idx_ptr| {
-                const blk_idx = blk_idx_ptr.*;
-                if (processed.contains(blk_idx)) continue;
-                if (blk_idx == loop.header) continue;
-                if (effective_inc_idx) |inc| {
-                    if (blk_idx == inc) continue;
-                }
-                if (exit_block_idx) |exit_idx| {
-                    if (blk_idx == exit_idx) continue;
-                }
-                // 跳过子循环块
-                if (child_loop.blocks.contains(blk_idx)) continue;
-                post_loop_blocks.append(self.allocator, blk_idx) catch return error.OutOfMemory;
-            }
-            std.mem.sort(usize, post_loop_blocks.items, {}, std.sort.asc(usize));
-
-            for (post_loop_blocks.items) |blk_idx| {
-                if (processed.contains(blk_idx)) continue;
-                const blk = func.blocks.items[blk_idx];
-                if (blk.instructions.items.len == 0 and blk.terminator == null) {
-                    processed.put(blk_idx, {}) catch return error.OutOfMemory;
-                    continue;
-                }
-                try writer.print("        // Post-loop block: {s}\n", .{blk.label});
-                for (blk.instructions.items) |inst| {
-                    if (inst.op == .phi) continue;
-                    try code_list.appendSlice(self.allocator, "        ");
-                    try self.generateInstructionSimple(code_list, inst);
-                }
-                processed.put(blk_idx, {}) catch return error.OutOfMemory;
-                // 处理 cond_br（如 if/else）
-                if (blk.terminator) |blk_term| {
-                    if (blk_term == .cond_br) {
-                        try self.generateCondBrBlock(writer, func, blk_term.cond_br, processed, "        ", true);
-                    }
-                }
-            }
-        }
-
-        // 生成 increment 块（在所有子循环之后，while 闭合之前）
-        if (effective_inc_idx) |inc_idx| {
-            const inc_block = func.blocks.items[inc_idx];
-            try writer.print("        // Increment: {s}\n", .{inc_block.label});
-            for (inc_block.instructions.items) |inst| {
-                if (inst.op != .phi) { // PHI 在后面统一处理
-                    try code_list.appendSlice(self.allocator, "        ");
-                    try self.generateInstructionSimple(code_list, inst);
-                }
-            }
-        }
-
-        // 更新所有 PHI 节点（在所有子循环之后，while 闭合之前）
-        for (header_block.instructions.items) |inst| {
-                if (inst.op == .phi) {
-                    const phi_op = inst.op.phi;
-                    const result_reg = inst.result orelse continue;
-
-                    // 找到来自 increment 或 body 的值
-                    var update_value: ?usize = null;
-                    if (effective_inc_idx) |inc_idx| {
-                        const inc_block = func.blocks.items[inc_idx];
-                        for (phi_op.incoming) |incoming| {
-                            // 优先用指针比较
-                            if (incoming.block == inc_block) {
-                                update_value = incoming.value.id;
-                                break;
-                            }
-                            // 指针失效后用索引比较
-                            const inc_idx_resolved = self.tryFindBlockIndex(func, incoming.block);
-                            if (inc_idx_resolved) |idx| {
-                                if (idx == inc_idx) {
-                                    update_value = incoming.value.id;
-                                    break;
-                                }
-                            }
-                        }
-                        // 回退：在 increment 块中查找定义了 incoming.value 的指令
-                        if (update_value == null) {
-                            for (phi_op.incoming) |incoming| {
-                                for (inc_block.instructions.items) |inc_inst| {
-                                    if (inc_inst.result) |inc_res| {
-                                        if (inc_res.id == incoming.value.id) {
-                                            update_value = incoming.value.id;
-                                            break;
-                                        }
-                                    }
-                                }
-                                if (update_value != null) break;
-                            }
-                        }
-                    }
-
-                    if (update_value == null) {
-                        for (phi_op.incoming) |incoming| {
-                            if (incoming.block == body_block) {
-                                update_value = incoming.value.id;
-                                break;
-                            }
-                            // 指针失效后用索引比较
-                            const body_idx_resolved = self.tryFindBlockIndex(func, incoming.block);
-                            if (body_idx_resolved) |idx| {
-                                if (idx == loop.body_start) {
-                                    update_value = incoming.value.id;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    // 判定当前 PHI 是否为循环条件变量（如 i < N 里的 i）
-                    var is_loop_var = false;
-                    for (header_block.instructions.items) |cond_inst| {
-                        switch (cond_inst.op) {
-                            .lt, .le, .gt, .ge => |op| {
-                                if (op.lhs.id == result_reg.id or op.rhs.id == result_reg.id) {
-                                    is_loop_var = true;
-                                    break;
-                                }
-                            },
-                            else => {},
-                        }
-                    }
-
-                    if (update_value) |val_reg| {
-                        // 解析展开块寄存器：当 val_reg 定义在 _unroll_* 块中时，
-                        // 追踪到原始块中的等价寄存器
-                        const resolved_reg = self.resolveUnrolledReg(func, val_reg, loop);
-                        // 检查 resolved_reg 是否在函数中有定义（包括 PHI 指令）
-                        // PHI 节点也是有效的定义，不应跳过
-                        var has_real_def = false;
-                        for (func.blocks.items) |def_blk| {
-                            for (def_blk.instructions.items) |def_inst| {
-                                if (def_inst.result) |dr| {
-                                    if (dr.id == resolved_reg) {
-                                        has_real_def = true;
-                                        break;
-                                    }
-                                }
-                            }
-                            if (has_real_def) break;
-                        }
-                        if (!has_real_def and resolved_reg != result_reg.id) {
-                            try writer.print("        reg_{d} = reg_{d};\n", .{ result_reg.id, result_reg.id });
-                        } else {
-                            // AOT-TYPE-001 修复：所有寄存器都是 runtime.Value，直接赋值
-                            var src_buf: [32]u8 = undefined;
-                            const src_ref = try self.getOperandRef(&src_buf, resolved_reg);
-                            try writer.print("        reg_{d} = {s};\n", .{ result_reg.id, src_ref });
-                        }
-                    }
-                }
-            }
-
-            try writer.writeAll("    }\n");
+        // AOT-NESTED-LOOP-003 修复：有子循环时统一使用 generateStandardForLoop
+        // generateForLoopWithChildren 使用全局变量（getGlobalVar/setGlobalVar）管理循环变量，
+        // 而非 SSA/PHI。在复杂嵌套循环中（如矩阵逆运算），这会导致循环变量管理不一致，
+        // 子循环的 SSA/PHI 与父循环的全局变量产生冲突。
+        // generateStandardForLoop 使用 go 函数递归生成循环体，能正确处理嵌套循环的 PHI。
+        try self.generateStandardForLoop(writer, func, loop);
+        return;
     }
 
     /// 从展开块标签中提取原始块名

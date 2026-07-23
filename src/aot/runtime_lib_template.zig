@@ -21484,13 +21484,15 @@ pub fn php_array_flip(arr: Value, allocator: Allocator) !Value {
         const key = entry.key_ptr.*;
 
         // 值变成键，键变成值
+        // PHP 语义：数字字符串键需规范化为整数键（与数组赋值/查找一致）
         if (val.isInt()) {
             try result.set(allocator, .{ .integer = val.asInt() }, switch (key) {
                 .integer => |k| Value.initInt(k),
                 .string => |k| Value.initString(k),
             });
         } else if (val.isString()) {
-            try result.set(allocator, .{ .string = val.asString() }, switch (key) {
+            const new_key = normalizeArrayKeyFromValue(val);
+            try result.set(allocator, new_key, switch (key) {
                 .integer => |k| Value.initInt(k),
                 .string => |k| Value.initString(k),
             });
