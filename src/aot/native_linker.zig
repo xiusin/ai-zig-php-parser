@@ -235,6 +235,9 @@ pub const NativeLinker = struct {
     /// return 语句已生成标志：在 generateReturnInBlock 中设置为 true，
     /// 用于阻止 generateBrChain 在 return 后继续生成 dead code（Zig 0.17.0-dev 将 unreachable code 从警告升级为错误）
     return_generated: bool = false,
+    /// break 语句已生成标志：在 generateCondBrBlock/generateBrChain 中设置为 true，
+    /// 用于阻止循环体块生成器在 break 后继续生成 unreachable code
+    break_generated: bool = false,
     current_optimized_alloca_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_function_for_resolve: ?*const IR.Function = null,
     /// 当前函数返回类型（用于返回值弱类型转换）
@@ -252,6 +255,7 @@ pub const NativeLinker = struct {
     current_catch_used_regs: ?*const std.AutoHashMap(usize, void) = null, // catch块中引用的寄存器集合（cleanup时跳过）
     current_cond_br_source_block: ?usize = null, // 嵌套cond_br的源块索引（用于PHI incoming选择）
     current_cond_br_header_idx: ?usize = null, // 嵌套循环头块索引（用于while内重生成非phi指令）
+    force_nested_loop: bool = false, // 由 generateBrChain 嵌套循环处理设置，强制 generateCondBrBlock 生成 while(true)
     cond_br_merge_phi_generated: ?*std.AutoHashMap(usize, void) = null, // 已在cond_br分支内处理过PHI的merge块索引集合
     current_property_get_origins: ?*const std.AutoHashMap(usize, PropertyGetOrigin) = null,
     current_load_to_alloca: ?*const std.AutoHashMap(usize, usize) = null,
@@ -13004,6 +13008,8 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
         indent: []const u8,
         use_simple: bool,
     ) !void {
+        // AOT-BREAK-001 修复：如果已生成 break/return，后续代码不可达，跳过生成
+        if (self.break_generated or self.return_generated) return;
         const code_list = writer.list;
         // 动态分配子缩进（indent + 4 空格）
         const child_indent = try self.allocator.alloc(u8, indent.len + 4);
@@ -13021,7 +13027,11 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
         // 导致误判为嵌套循环，生成 while(true){if(!cond)break;...} 无限循环
         // 正确做法：只有 br 目标 == 当前循环头索引时才标记为嵌套循环
         var is_nested_loop = false;
-        if (then_idx < func.blocks.items.len) {
+        // generateBrChain 嵌套循环处理已确认为循环头，强制生成 while(true)
+        if (self.force_nested_loop) {
+            is_nested_loop = true;
+            self.force_nested_loop = false; // 消费标志，防止泄漏到后续 cond_br
+        } else if (then_idx < func.blocks.items.len) {
             const then_blk_peek = func.blocks.items[then_idx];
             if (then_blk_peek.terminator) |then_term| {
                 if (then_term == .br) {
@@ -13075,6 +13085,7 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
             try writer.writeAll(child_indent);
             if (self.in_while_loop and self.current_loop_exit_block != null and then_idx == self.current_loop_exit_block.?) {
                 try writer.writeAll("break;");
+                self.break_generated = true;
             } else if (self.in_while_loop) {
                 try writer.writeAll("// loop back-edge (fall through to PHI update)");
             } else {
@@ -13172,6 +13183,9 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                             defer self.current_cond_br_source_block = prev_source;
                             try self.generateCondBrBlock(writer, func, t_term.cond_br, processed, child_indent, use_simple);
                         }
+                        // AOT-BREAK-001 修复：递归 generateCondBrBlock 后，如果已生成 break/return，
+                        // 跳过 inner merge 处理，避免生成 unreachable code
+                        if (!self.break_generated and !self.return_generated) {
                         // AOT-PHI-001 修复：递归 generateCondBrBlock 后，需要处理 br 链到外层 merge
                         // inner then/else 可能 br 到不同块，需要追踪每个分支的 br 目标
                         // 如果目标块是 merge 块（多前驱），generateBrChain 会生成 PHI 拷贝
@@ -13215,12 +13229,25 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
                                 }
                             }
                         }
+                        }
                     },
                     .ret => |ret_val| {
                         try self.generateReturnInBlock(writer, ret_val, child_indent);
                     },
                     .br => |br_target| {
                         try self.generateBrChain(writer, func, br_target, then_idx, processed, child_indent, use_simple);
+                        // AOT-BREAK-001 修复：generateBrChain 可能生成了 break，
+                        // 跳过后续 else 块处理避免 unreachable code
+                        if (self.break_generated or self.return_generated) {
+                            // 跳过 else 块，直接关闭 if/else
+                            try writer.writeAll(indent);
+                            if (is_nested_loop) {
+                                try writer.writeAll("}\n");
+                            } else {
+                                try writer.writeAll("}\n");
+                            }
+                            return;
+                        }
                     },
                     else => {},
                 }
@@ -13264,6 +13291,7 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
             try writer.writeAll(child_indent);
             if (self.in_while_loop and self.current_loop_exit_block != null and else_idx == self.current_loop_exit_block.?) {
                 try writer.writeAll("break;");
+                self.break_generated = true;
             } else if (self.in_while_loop) {
                 try writer.writeAll("// loop back-edge (fall through to PHI update)");
             } else {
@@ -13448,8 +13476,8 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
         indent: []const u8,
         use_simple: bool,
     ) anyerror!void {
-    // 如果已生成 return 语句，跳过后续 br 链的代码生成（避免 unreachable code）
-    if (self.return_generated) return;
+    // 如果已生成 return/break 语句，跳过后续 br 链的代码生成（避免 unreachable code）
+    if (self.return_generated or self.break_generated) return;
 
     const code_list = writer.list;
     const target_idx = @as(usize, br_target.index);
@@ -13475,6 +13503,7 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
             }
             try writer.writeAll(indent);
             try writer.writeAll("break;\n");
+            self.break_generated = true;
             return;
         }
 
@@ -13500,20 +13529,54 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
         // 嵌套循环 header 检测：目标块有回边（后续块 br 回到目标块）
         // 嵌套循环 header 也有多个前驱（前向边 + 回边），但不是合并块
         // 需要在 if 分支内部生成 while(true) 循环，而非跳过
+        // 注意：只有 cond_br 块才可能是循环头（循环头检查条件后分支到 body 或 exit）
+        // foreach_increment 等回边块只有 br，不是循环头
         var target_is_nested_loop_hdr = false;
         {
-            for (func.blocks.items, 0..) |check_blk, check_idx| {
-                if (check_idx <= target_idx) continue;
-                if (check_blk.terminator) |check_term| {
-                    switch (check_term) {
-                        .br => |b| if (b.index == target_idx) { target_is_nested_loop_hdr = true; break; },
-                        .cond_br => |cb| if (cb.then_block.index == target_idx or cb.else_block.index == target_idx) { target_is_nested_loop_hdr = true; break; },
-                        else => {},
+            const target_blk_for_check = func.blocks.items[target_idx];
+            if (target_blk_for_check.terminator) |target_term| {
+                if (target_term == .cond_br) {
+                    for (func.blocks.items, 0..) |check_blk, check_idx| {
+                        if (check_idx <= target_idx) continue;
+                        if (check_blk.terminator) |check_term| {
+                            switch (check_term) {
+                                .br => |b| if (b.index == target_idx) { target_is_nested_loop_hdr = true; break; },
+                                .cond_br => |cb| if (cb.then_block.index == target_idx or cb.else_block.index == target_idx) { target_is_nested_loop_hdr = true; break; },
+                                else => {},
+                            }
+                        }
                     }
                 }
             }
         }
         if (target_is_nested_loop_hdr) {
+            // AOT-PRE-LOOP-001 修复：当不在 while 循环内时（如 generateStructuredCodeNew
+            // 的 pre-loop 块处理阶段），不应将顶层循环 header 内联到 if/else 分支内部。
+            // 原因：generateCondBrBlock/generateBrChain 对 merge 块只生成 PHI 赋值，
+            // 不生成非 PHI 指令（如 +1、数组赋值、增量），导致循环体不完整、循环变量不递增。
+            // 正确做法：只生成 PHI 赋值后返回，让 generateStructuredCodeNew 的 step 2
+            // （generateLoopRecursive → generateWhileLoopStructuredNew）处理该循环。
+            if (!self.in_while_loop) {
+                const nl_blk = func.blocks.items[target_idx];
+                for (nl_blk.instructions.items) |phi_inst| {
+                    if (phi_inst.op != .phi) continue;
+                    const phi_res = phi_inst.result orelse continue;
+                    const phi_op = phi_inst.op.phi;
+                    for (phi_op.incoming) |incoming| {
+                        const inc_idx = @as(usize, incoming.block.index);
+                        if (inc_idx == source_idx) {
+                            try self.writePtrAwareAssign(writer, indent, phi_res.id, incoming.value.id);
+                            const phi_deref = if (self.isPointerReg(phi_res.id)) ".*" else "";
+                            try writer.print("{s}_ = reg_{d}{s}.retain();\n", .{ indent, phi_res.id, phi_deref });
+                            break;
+                        }
+                    }
+                }
+                // 标记为已处理，防止 step 2 之前的剩余块处理重复生成
+                try processed.put(target_idx, {});
+                return;
+            }
+
             const nl_blk = func.blocks.items[target_idx];
             // 生成嵌套循环 PHI 初始化（来自循环外来源的初始值）
             for (nl_blk.instructions.items) |phi_inst| {
@@ -13534,8 +13597,15 @@ fn findCommonBrTarget(self: *const Self, func: *const IR.Function, blk_a_idx: us
             if (nl_blk.terminator) |nl_term| {
                 if (nl_term == .cond_br) {
                     const prev_hdr = self.current_cond_br_header_idx;
+                    const prev_source = self.current_cond_br_source_block;
                     self.current_cond_br_header_idx = target_idx;
+                    // 设置 source_block 为循环头块，使 ELSE 块（循环退出 = if_merge）
+                    // 的 PHI 处理能正确匹配来自循环头的 incoming 值（THEN 路径）
+                    self.current_cond_br_source_block = target_idx;
+                    self.force_nested_loop = true;
                     defer self.current_cond_br_header_idx = prev_hdr;
+                    defer self.force_nested_loop = false;
+                    defer self.current_cond_br_source_block = prev_source;
                     try self.generateCondBrBlock(writer, func, nl_term.cond_br, processed, indent, use_simple);
                 }
             }
@@ -14330,6 +14400,10 @@ defer self.cond_br_merge_phi_generated = saved_merge_phi;
         const saved_return_generated = self.return_generated;
         self.return_generated = false;
         defer self.return_generated = saved_return_generated;
+        // 保存外层作用域的 break_generated，循环体内独立跟踪 break 路径
+        const saved_break_generated = self.break_generated;
+        self.break_generated = false;
+        defer self.break_generated = saved_break_generated;
 
         for (body_block_indices.items) |blk_idx| {
             if (processed_body.contains(blk_idx)) continue;
@@ -14357,12 +14431,17 @@ defer self.cond_br_merge_phi_generated = saved_merge_phi;
                                 switch (be_term) {
                                     .br => |br| {
                                         if (br.index == blk.index) {
+                                            // 跳过已处理的块：IR 优化器可能重排块顺序，
+                                            // 导致前驱块（forward edge）的数组索引大于当前块。
+                                            // 已处理的块不是回边（回边源在嵌套循环体内，尚未处理）。
+                                            if (processed_body.contains(be_idx)) continue;
                                             nested_back_edge_src = be_idx;
                                             break;
                                         }
                                     },
                                     .cond_br => |cb2| {
                                         if (cb2.then_block.index == blk.index or cb2.else_block.index == blk.index) {
+                                            if (processed_body.contains(be_idx)) continue;
                                             nested_back_edge_src = be_idx;
                                             break;
                                         }
@@ -14602,8 +14681,18 @@ defer self.cond_br_merge_phi_generated = saved_merge_phi;
                                     // is_deeper_nested 为 true 时也调用 generateCondBrBlock（内部 is_nested_loop 检测会处理）
                                     const prev_hdr_idx = self.current_cond_br_header_idx;
                                     self.current_cond_br_header_idx = nb_idx;
-                                    try self.generateCondBrBlock(writer, func, nb_term.cond_br, &processed_body, "            ", true);
-                                    self.current_cond_br_header_idx = prev_hdr_idx;
+                            try self.generateCondBrBlock(writer, func, nb_term.cond_br, &processed_body, "            ", true);
+                            self.current_cond_br_header_idx = prev_hdr_idx;
+                            // AOT-BREAK-001 修复：如果 exit block 已被处理，说明 break 已生成，停止生成更多 body 块
+                            if (processed_body.contains(else_idx_nl) and self.in_while_loop and self.current_loop_exit_block != null and else_idx_nl == self.current_loop_exit_block.?) {
+                                nested_broke_out = true;
+                                break;
+                            }
+                            // AOT-BREAK-001 修复：如果 break_generated 标志已设置，也停止生成
+                            if (self.break_generated) {
+                                nested_broke_out = true;
+                                break;
+                            }
                                 }
                             }
                         }
@@ -14673,7 +14762,21 @@ defer self.cond_br_merge_phi_generated = saved_merge_phi;
             }
 
             try writer.print("        // Body block: {s}\n", .{blk.label});
+            // 对已由 generateCondBrBlock 处理过 PHI 的 merge 块，
+            // 跳过 phi/move 指令，防止覆盖 if-else 分支已设置的值。
+            // IR 优化器（mem2reg）可能将 PHI 转为 move 指令，
+            // 这些指令使用原始寄存器值，会覆盖 if-else 分支设置的更新值。
+            const is_merge_phi_handled = if (self.cond_br_merge_phi_generated) |set|
+                set.contains(blk_idx)
+            else
+                false;
             for (blk.instructions.items) |inst| {
+                if (is_merge_phi_handled) {
+                    switch (inst.op) {
+                        .phi, .move => continue,
+                        else => {},
+                    }
+                }
                 try code_list.appendSlice(self.allocator, "        ");
                 try self.generateInstructionSimple(code_list, inst);
             }
@@ -14683,6 +14786,9 @@ defer self.cond_br_merge_phi_generated = saved_merge_phi;
             if (blk.terminator) |term| {
                 if (term == .cond_br) {
                     try self.generateCondBrBlock(writer, func, term.cond_br, &processed_body, "        ", true);
+                    // AOT-BREAK-001 修复：generateCondBrBlock 可能内部生成了 break，
+                    // 后续 body 块将不可达，退出 for 循环防止生成 unreachable code
+                    if (self.break_generated) break;
                 } else if (term == .br) {
                     // br 到 exit_block 表示 break 语句（仅非汇聚点块）
                     const br_target_idx = @as(usize, term.br.index);
@@ -14690,6 +14796,7 @@ defer self.cond_br_merge_phi_generated = saved_merge_phi;
                         // 汇聚点的 break 已由 generateCondBrBlock 内联处理，跳过
                         if (self.countPredecessors(func, blk_idx) <= 1) {
                             try writer.writeAll("        break;\n");
+                            self.break_generated = true;
                             break; // 退出 for 循环，不再生成后续块（防止 unreachable code）
                         }
                     } else if (self.in_while_loop and self.current_loop_exit_block != null and br_target_idx != self.current_loop_exit_block.?) {
@@ -14714,8 +14821,8 @@ defer self.cond_br_merge_phi_generated = saved_merge_phi;
         }
 
         // while 循环的 phi 更新必须在循环体末尾回写，否则会导致循环变量不递增
-        // 如果循环体内已生成 return 语句，跳过 PHI 更新（避免 unreachable code）
-        if (!self.return_generated) {
+        // 如果循环体内已生成 return 或 break 语句，跳过 PHI 更新（避免 unreachable code）
+        if (!self.return_generated and !self.break_generated) {
             for (phi_updates.items) |update| {
                 var src_buf: [32]u8 = undefined;
                 const src_ref = try self.getOperandRef(&src_buf, update.value_reg);
@@ -18633,8 +18740,6 @@ defer self.cond_br_merge_phi_generated = saved_merge_phi;
 
             for (loops.items, 0..) |*other, j| {
                 if (i == j) continue;
-
-                std.debug.print("  vs loop {d} (header={d}, blocks={d}): contains header? {}\n", .{ j, other.header, other.blocks.count(), other.contains(loop.header) });
 
                 // 如果 other 包含 loop 的 header，且 other 的块数更少（更内层）
                 if (other.contains(loop.header) and other.blocks.count() < min_blocks) {
