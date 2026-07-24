@@ -1094,6 +1094,10 @@ pub const AOTCompiler = struct {
             return;
         };
 
+        // Pass AST data to native linker for AST-direct code generation
+        native_linker.ast_nodes = self.ast_nodes;
+        native_linker.string_table = self.string_table;
+
         // 生成 Zig 代码
         const zig_code = native_linker.generateZigCode(ir_module) catch |err| {
             const linker_message = switch (err) {

@@ -982,6 +982,9 @@ pub const IRGenerator = struct {
             func.param_names = self.allocator.dupe([]const u8, pname_list.items) catch &.{};
         }
 
+        // Store AST body node index for AST-direct code generation
+        self.current_function.?.ast_body = func_data.body;
+
         // Generate function body
         try self.generateStatement(func_data.body);
 

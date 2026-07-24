@@ -342,6 +342,8 @@ pub const Function = struct {
     php_return_type: ?[]const u8 = null,
     /// PHP 返回类型是否 nullable
     php_return_nullable: bool = false,
+    /// AST 函数体节点索引（由 ir_generator 设置，供 AST-direct 代码生成使用）
+    ast_body: u32 = 0,
 
     const Self = @This();
 
