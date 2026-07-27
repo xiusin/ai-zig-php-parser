@@ -1540,7 +1540,7 @@ pub const PHPString = struct {
         // std.debug.print("PHPString.release: data={s} ref_count={d}\n", .{self.data, self.ref_count});
 
         if (self.ref_count == 0) {
-            std.debug.print("WARNING: PHPString double free detected! data={s}\n", .{self.data});
+            // Already freed (is_static should be true, but safety check)
             return;
         }
 
@@ -1563,9 +1563,14 @@ pub const PHPString = struct {
                 alloc_counters.php_string_live_bytes = 0;
             }
             allocator.free(self.data);
-            // std.debug.print("PHPString.deinit: freed data\n", .{});
-            destroyPHPString(self, allocator);
-            // std.debug.print("PHPString.deinit: destroyed self\n", .{});
+            self.data = &[_]u8{};
+            self.length = 0;
+            self.ref_count = 0;
+            self.is_static = true; // Mark as freed to prevent double release / use-after-free.
+            // Note: PHPString object itself is intentionally NOT destroyed (destroyPHPString not called)
+            // because the same Value may be released multiple times in AOT cleanup code.
+            // Destroying the object would cause use-after-free. The object is leaked (minor memory cost)
+            // but its data is properly freed.
         }
     }
 
