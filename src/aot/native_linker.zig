@@ -5898,10 +5898,133 @@ pub const NativeLinker = struct {
         }
 
         if (!all_processed) {
+            std.debug.print("[AST-DIRECT-FAIL] function={s} unprocessed blocks:", .{func.name});
+            for (0..func.blocks.items.len) |i| {
+                if (!processed.contains(i)) {
+                    std.debug.print(" {d}:{s}", .{ i, func.blocks.items[i].label });
+                }
+            }
+            std.debug.print("\n", .{});
             return false;
         }
 
         return true;
+    }
+
+    /// 处理循环条件链（&& / ||）：从 cond_idx 开始，跟随 logical_rhs / logical_merge 链，
+    /// 为每个条件生成 `if (!cond) break :label;` 语句。
+    /// 返回最后一个条件块的索引（其 cond_br 直接指向 body 或 exit）。
+    fn generateLoopConditionChain(
+        self: *Self,
+        writer: anytype,
+        func: *const IR.Function,
+        cond_idx: usize,
+        end_idx: usize,
+        body_ptr: *const IR.BasicBlock,
+        exit_ptr: *const IR.BasicBlock,
+        processed: *std.AutoHashMap(usize, void),
+        label_name: []const u8,
+        indent: []const u8,
+    ) !usize {
+        var current_idx = cond_idx;
+        while (true) {
+            const current_block = func.blocks.items[current_idx];
+            if (!processed.contains(current_idx)) {
+                try processed.put(current_idx, {});
+                for (current_block.instructions.items) |inst| {
+                    try writer.writeAll(indent);
+                    try self.generateInstructionSimple(writer.list, inst);
+                }
+            }
+
+            if (current_block.terminator) |term| {
+                if (term == .cond_br) {
+                    const cb = term.cond_br;
+                    const then_is_body = cb.then_block == body_ptr;
+                    const else_is_body = cb.else_block == body_ptr;
+                    const then_is_exit = cb.then_block == exit_ptr;
+                    const else_is_exit = cb.else_block == exit_ptr;
+
+                    if (then_is_body or else_is_body or then_is_exit or else_is_exit) {
+                        // 直接指向 body 或 exit，生成 break 条件
+                        if (then_is_body and else_is_exit) {
+                            try writer.print("{s}if (!(", .{indent});
+                            try self.writeConditionExpr(writer, cb.cond.id, cb.cond.type_);
+                            try writer.print(")) {{\n", .{});
+                            try writer.print("{s}    break :{s};\n", .{ indent, label_name });
+                            try writer.print("{s}}}\n", .{indent});
+                        } else if (else_is_body and then_is_exit) {
+                            try writer.print("{s}if (", .{indent});
+                            try self.writeConditionExpr(writer, cb.cond.id, cb.cond.type_);
+                            try writer.print(") {{\n", .{});
+                            try writer.print("{s}    break :{s};\n", .{ indent, label_name });
+                            try writer.print("{s}}}\n", .{indent});
+                        } else if (then_is_body) {
+                            try writer.print("{s}if (!(", .{indent});
+                            try self.writeConditionExpr(writer, cb.cond.id, cb.cond.type_);
+                            try writer.print(")) {{\n", .{});
+                            try writer.print("{s}    break :{s};\n", .{ indent, label_name });
+                            try writer.print("{s}}}\n", .{indent});
+                        } else if (else_is_body) {
+                            try writer.print("{s}if (", .{indent});
+                            try self.writeConditionExpr(writer, cb.cond.id, cb.cond.type_);
+                            try writer.print(") {{\n", .{});
+                            try writer.print("{s}    break :{s};\n", .{ indent, label_name });
+                            try writer.print("{s}}}\n", .{indent});
+                        } else if (then_is_exit) {
+                            try writer.print("{s}if (", .{indent});
+                            try self.writeConditionExpr(writer, cb.cond.id, cb.cond.type_);
+                            try writer.print(") {{\n", .{});
+                            try writer.print("{s}    break :{s};\n", .{ indent, label_name });
+                            try writer.print("{s}}}\n", .{indent});
+                        } else if (else_is_exit) {
+                            try writer.print("{s}if (!(", .{indent});
+                            try self.writeConditionExpr(writer, cb.cond.id, cb.cond.type_);
+                            try writer.print(")) {{\n", .{});
+                            try writer.print("{s}    break :{s};\n", .{ indent, label_name });
+                            try writer.print("{s}}}\n", .{indent});
+                        }
+                        return current_idx;
+                    }
+
+                    // 未直接指向 body/exit：跟随链
+                    // 对于 &&：then_block 是下一个条件块，else_block 是 merge/exit → if (!(cond)) break
+                    // 对于 ||：then_block 是 body（已处理），else_block 是下一个条件块 → if (!(cond)) { ... }
+                    var next_idx: ?usize = null;
+                    if (cb.then_block != body_ptr and cb.then_block != exit_ptr) {
+                        for (current_idx + 1..@min(end_idx, func.blocks.items.len)) |i| {
+                            if (func.blocks.items[i] == cb.then_block) { next_idx = i; break; }
+                        }
+                    }
+                    if (next_idx == null and cb.else_block != body_ptr and cb.else_block != exit_ptr) {
+                        for (current_idx + 1..@min(end_idx, func.blocks.items.len)) |i| {
+                            if (func.blocks.items[i] == cb.else_block) { next_idx = i; break; }
+                        }
+                    }
+
+                    if (next_idx) |ni| {
+                        if (func.blocks.items[ni] == cb.then_block) {
+                            // then 是下一个条件块：if (!(cond)) break
+                            try writer.print("{s}if (!(", .{indent});
+                            try self.writeConditionExpr(writer, cb.cond.id, cb.cond.type_);
+                            try writer.print(")) {{\n", .{});
+                            try writer.print("{s}    break :{s};\n", .{ indent, label_name });
+                            try writer.print("{s}}}\n", .{indent});
+                        } else {
+                            // else 是下一个条件块：if (cond) break
+                            try writer.print("{s}if (", .{indent});
+                            try self.writeConditionExpr(writer, cb.cond.id, cb.cond.type_);
+                            try writer.print(") {{\n", .{});
+                            try writer.print("{s}    break :{s};\n", .{ indent, label_name });
+                            try writer.print("{s}}}\n", .{indent});
+                        }
+                        current_idx = ni;
+                        continue;
+                    }
+                }
+            }
+            return current_idx;
+        }
     }
 
     /// 递归处理一个块范围内的所有块
@@ -5954,8 +6077,26 @@ pub const NativeLinker = struct {
                 continue;
             }
 
-            // 检查是否是 if 语句
-            if (std.mem.startsWith(u8, label, "if_then_")) {
+            // 检查是否是 if 语句（需要有对应的 if_merge_ 块）
+            if (std.mem.startsWith(u8, label, "if_then_") and
+                self.findBlockByLabelPrefix(func, i + 1, end_idx, "if_merge_") != null)
+            {
+                i = try self.generateIfFromLabels(writer, func, i, end_idx, cleanup_regs, processed, loop_label_counter, indent);
+                continue;
+            }
+
+            // 检查是否是 ternary 表达式（ternary_then_ / ternary_else_ / ternary_merge_）
+            if (std.mem.startsWith(u8, label, "ternary_then_") and
+                self.findBlockByLabelPrefix(func, i + 1, end_idx, "ternary_merge_") != null)
+            {
+                i = try self.generateIfFromLabels(writer, func, i, end_idx, cleanup_regs, processed, loop_label_counter, indent);
+                continue;
+            }
+
+            // 检查是否是 coalesce 表达式（coalesce_rhs_ / coalesce_merge_）
+            if (std.mem.startsWith(u8, label, "coalesce_rhs_") and
+                self.findBlockByLabelPrefix(func, i + 1, end_idx, "coalesce_merge_") != null)
+            {
                 i = try self.generateIfFromLabels(writer, func, i, end_idx, cleanup_regs, processed, loop_label_counter, indent);
                 continue;
             }
@@ -5966,7 +6107,7 @@ pub const NativeLinker = struct {
                 continue;
             }
 
-            // 普通线性块：生成指令并标记为已处理
+            // 普通线性块
             try processed.put(i, {});
 
             // 如果块已有 ret 终止符，生成 return
@@ -5983,7 +6124,7 @@ pub const NativeLinker = struct {
                             try writer.writeAll(indent);
                             try writer.writeAll("// Cleanup: release all allocated values\n");
                             for (cleanup_regs) |reg_id| {
-                                try writer.print("{s}reg_{d}.release(runtime.runtime_allocator);\n", .{ indent, reg_id });
+                                if (self.isAllocaReg(reg_id)) try writer.print("{s}reg_{d}.*.release(runtime.runtime_allocator);\n", .{ indent, reg_id }) else try writer.print("{s}reg_{d}.release(runtime.runtime_allocator);\n", .{ indent, reg_id });
                             }
                         }
                         if (ret_val) |reg| {
@@ -6028,7 +6169,6 @@ pub const NativeLinker = struct {
 
                         // 生成隐式 if/else 结构
                         // 注意：不保存/恢复 return_generated，让 if/else 内的 return 正确传播
-                        // generateLabelDrivenBlockRange 的 early-exit 会标记剩余块为已处理
 
                         try writer.print("{s}if (", .{indent});
                         try self.writeConditionExpr(writer, cond_br_data.cond.id, cond_br_data.cond.type_);
@@ -6041,7 +6181,25 @@ pub const NativeLinker = struct {
 
                         // 处理 then 块
                         if (then_bi) |ti| {
-                            if (!processed.contains(ti)) {
+                            // 检测 ||/&& 模式：then 块本身就是 merge 块
+                            const then_is_logical_merge = std.mem.startsWith(u8, func.blocks.items[ti].label, "logical_merge_");
+                            if (then_is_logical_merge) {
+                                merge_bi = ti;
+                                // PHI 消解：在 then 分支添加 PHI 赋值（来自当前 cond_br 块）
+                                const merge_blk_phi = func.blocks.items[ti];
+                                for (merge_blk_phi.instructions.items) |phi_inst| {
+                                    if (phi_inst.op == .phi) {
+                                        if (phi_inst.result) |result| {
+                                            for (phi_inst.op.phi.incoming) |incoming| {
+                                                if (incoming.block == block) {
+                                                    try self.writePtrAwareAssign(writer, body_indent, result.id, incoming.value.id);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } else if (!processed.contains(ti)) {
                                 try processed.put(ti, {});
                                 const then_blk = func.blocks.items[ti];
                                 for (then_blk.instructions.items) |inst| {
@@ -6054,7 +6212,30 @@ pub const NativeLinker = struct {
                                         .br => {
                                             for (0..func.blocks.items.len) |blk_i| {
                                                 if (func.blocks.items[blk_i] == t.br) {
-                                                    merge_bi = blk_i;
+                                                    const target_label = func.blocks.items[blk_i].label;
+                                                    // 如果目标是控制结构（循环/if/ternary/coalesce），
+                                                    // 在 then 分支内递归处理
+                                                    if (std.mem.startsWith(u8, target_label, "for_cond_") or
+                                                        std.mem.startsWith(u8, target_label, "while_cond_") or
+                                                        std.mem.startsWith(u8, target_label, "foreach_cond_") or
+                                                        (std.mem.startsWith(u8, target_label, "if_then_") and
+                                                        self.findBlockByLabelPrefix(func, blk_i + 1, end_idx, "if_merge_") != null) or
+                                                        (std.mem.startsWith(u8, target_label, "ternary_then_") and
+                                                        self.findBlockByLabelPrefix(func, blk_i + 1, end_idx, "ternary_merge_") != null) or
+                                                        (std.mem.startsWith(u8, target_label, "coalesce_rhs_") and
+                                                        self.findBlockByLabelPrefix(func, blk_i + 1, end_idx, "coalesce_merge_") != null) or
+                                                        std.mem.startsWith(u8, target_label, "do_while_body_"))
+                                                    {
+                                                        const saved_rg = self.return_generated;
+                                                        const saved_break = self.break_generated;
+                                                        self.return_generated = false;
+                                                        self.break_generated = false;
+                                                        try self.generateLabelDrivenBlockRange(writer, func, blk_i, end_idx, cleanup_regs, processed, loop_label_counter, body_indent);
+                                                        self.return_generated = saved_rg;
+                                                        self.break_generated = saved_break;
+                                                    } else {
+                                                        merge_bi = blk_i;
+                                                    }
                                                     break;
                                                 }
                                             }
@@ -6063,7 +6244,7 @@ pub const NativeLinker = struct {
                                             if (cleanup_regs.len > 0) {
                                                 try writer.print("{s}    // Cleanup\n", .{body_indent});
                                                 for (cleanup_regs) |reg_id| {
-                                                    try writer.print("{s}    reg_{d}.release(runtime.runtime_allocator);\n", .{ body_indent, reg_id });
+                                                    if (self.isAllocaReg(reg_id)) try writer.print("{s}    reg_{d}.*.release(runtime.runtime_allocator);\n", .{ body_indent, reg_id }) else try writer.print("{s}    reg_{d}.release(runtime.runtime_allocator);\n", .{ body_indent, reg_id });
                                                 }
                                             }
                                             if (ret_val) |reg| {
@@ -6072,6 +6253,16 @@ pub const NativeLinker = struct {
                                             } else {
                                                 try writer.print("{s}    return runtime.Value.initNull();\n", .{body_indent});
                                             }
+                                        },
+                                        .cond_br => {
+                                            // then 块有嵌套 cond_br（如 ternary），递归处理后续块
+                                            const saved_rg = self.return_generated;
+                                            const saved_break = self.break_generated;
+                                            self.return_generated = false;
+                                            self.break_generated = false;
+                                            try self.generateLabelDrivenBlockRange(writer, func, ti + 1, end_idx, cleanup_regs, processed, loop_label_counter, body_indent);
+                                            self.return_generated = saved_rg;
+                                            self.break_generated = saved_break;
                                         },
                                         else => {},
                                     }
@@ -6086,10 +6277,15 @@ pub const NativeLinker = struct {
                                 if (phi_inst.op == .phi) {
                                     if (phi_inst.result) |result| {
                                         for (phi_inst.op.phi.incoming) |incoming| {
+                                            // 匹配 then 分支的 incoming：
+                                            // 1. incoming 来自 then 块本身（常规 if/else）
+                                            // 2. incoming 来自当前 cond_br 块（||/&& 短路：
+                                            //    then_block 是 logical_merge_，incoming 来自 cond_br）
                                             if (incoming.block == cond_br_data.then_block or
-                                                std.mem.eql(u8, incoming.block.label, cond_br_data.then_block.label))
+                                                std.mem.eql(u8, incoming.block.label, cond_br_data.then_block.label) or
+                                                incoming.block == block)
                                             {
-                                                try writer.print("{s}reg_{d} = reg_{d};\n", .{ body_indent, result.id, incoming.value.id });
+                                                try self.writePtrAwareAssign(writer, body_indent, result.id, incoming.value.id);
                                                 break;
                                             }
                                         }
@@ -6102,24 +6298,14 @@ pub const NativeLinker = struct {
                         if (else_bi) |ei| {
                             try writer.print("{s}}} else {{\n", .{indent});
 
-                            // 检测 coalesce 模式（null 合并运算符 $a ?? $b）：
-                            // else 块本身就是 merge 块（then 块的 .br 目标 == else 块），
-                            // 且 merge 块只含 PHI 指令（无非 PHI 副作用指令）。
+                            // 检测 coalesce / if-without-else 模式：
+                            // else 块本身就是 merge 块（then 块的 .br 目标 == else 块）。
                             // 此模式中 else 分支无 body，PHI 应取自 entry 块（cond_br 所在块），
-                            // merge 块的 ret 由 if/else 之后的 merge 处理逻辑生成。
+                            // merge 块的非 PHI 指令（副作用）和 ret 由 if/else 之后的 merge 处理逻辑生成。
+                            // 典型场景：$a ?? $b（null 合并）、if (cond) {body} 无 else 后跟副作用代码
                             const else_is_coalesce_merge = blk: {
                                 if (merge_bi) |mi| {
-                                    if (mi == ei) {
-                                        const merge_blk_check = func.blocks.items[mi];
-                                        var only_phi = true;
-                                        for (merge_blk_check.instructions.items) |inst| {
-                                            if (inst.op != .phi) {
-                                                only_phi = false;
-                                                break;
-                                            }
-                                        }
-                                        if (only_phi) break :blk true;
-                                    }
+                                    if (mi == ei) break :blk true;
                                 }
                                 break :blk false;
                             };
@@ -6136,7 +6322,7 @@ pub const NativeLinker = struct {
                                                     if (incoming2.block == block or
                                                         std.mem.eql(u8, incoming2.block.label, block.label))
                                                     {
-                                                        try writer.print("{s}reg_{d} = reg_{d};\n", .{ body_indent, result2.id, incoming2.value.id });
+                                                        try self.writePtrAwareAssign(writer, body_indent, result2.id, incoming2.value.id);
                                                         break;
                                                     }
                                                 }
@@ -6158,7 +6344,29 @@ pub const NativeLinker = struct {
                                         .br => {
                                             for (0..func.blocks.items.len) |blk_i| {
                                                 if (func.blocks.items[blk_i] == t.br) {
-                                                    merge_bi = blk_i;
+                                                    const target_label = func.blocks.items[blk_i].label;
+                                                    // 如果目标是控制结构，在 else 分支内递归处理
+                                                    if (std.mem.startsWith(u8, target_label, "for_cond_") or
+                                                        std.mem.startsWith(u8, target_label, "while_cond_") or
+                                                        std.mem.startsWith(u8, target_label, "foreach_cond_") or
+                                                        (std.mem.startsWith(u8, target_label, "if_then_") and
+                                                        self.findBlockByLabelPrefix(func, blk_i + 1, end_idx, "if_merge_") != null) or
+                                                        (std.mem.startsWith(u8, target_label, "ternary_then_") and
+                                                        self.findBlockByLabelPrefix(func, blk_i + 1, end_idx, "ternary_merge_") != null) or
+                                                        (std.mem.startsWith(u8, target_label, "coalesce_rhs_") and
+                                                        self.findBlockByLabelPrefix(func, blk_i + 1, end_idx, "coalesce_merge_") != null) or
+                                                        std.mem.startsWith(u8, target_label, "do_while_body_"))
+                                                    {
+                                                        const saved_rg = self.return_generated;
+                                                        const saved_break = self.break_generated;
+                                                        self.return_generated = false;
+                                                        self.break_generated = false;
+                                                        try self.generateLabelDrivenBlockRange(writer, func, blk_i, end_idx, cleanup_regs, processed, loop_label_counter, body_indent);
+                                                        self.return_generated = saved_rg;
+                                                        self.break_generated = saved_break;
+                                                    } else {
+                                                        merge_bi = blk_i;
+                                                    }
                                                     break;
                                                 }
                                             }
@@ -6167,7 +6375,7 @@ pub const NativeLinker = struct {
                                             if (cleanup_regs.len > 0) {
                                                 try writer.print("{s}    // Cleanup\n", .{body_indent});
                                                 for (cleanup_regs) |reg_id| {
-                                                    try writer.print("{s}    reg_{d}.release(runtime.runtime_allocator);\n", .{ body_indent, reg_id });
+                                                    if (self.isAllocaReg(reg_id)) try writer.print("{s}    reg_{d}.*.release(runtime.runtime_allocator);\n", .{ body_indent, reg_id }) else try writer.print("{s}    reg_{d}.release(runtime.runtime_allocator);\n", .{ body_indent, reg_id });
                                                 }
                                             }
                                             if (ret_val) |reg| {
@@ -6191,6 +6399,8 @@ pub const NativeLinker = struct {
                             }
 
                             // PHI 消解（非 coalesce 情况）：在 else 分支末尾添加 PHI 赋值
+                            // 当 else 块有嵌套 cond_br（if/elseif）时，PHI 的 incoming
+                            // 来自嵌套 if 的 merge 块而非 else 块本身，需扩展匹配范围
                             if (!else_is_coalesce_merge) {
                                 if (merge_bi) |mi| {
                                     const merge_blk_phi2 = func.blocks.items[mi];
@@ -6198,10 +6408,15 @@ pub const NativeLinker = struct {
                                         if (phi_inst2.op == .phi) {
                                             if (phi_inst2.result) |result2| {
                                                 for (phi_inst2.op.phi.incoming) |incoming2| {
-                                                    if (incoming2.block == cond_br_data.else_block or
-                                                        std.mem.eql(u8, incoming2.block.label, cond_br_data.else_block.label))
-                                                    {
-                                                        try writer.print("{s}reg_{d} = reg_{d};\n", .{ body_indent, result2.id, incoming2.value.id });
+                                                    // 匹配 else 分支的 incoming：else 块本身，或
+                                                    // 嵌套结构（非 then 块、非当前 cond_br 块）中已被处理的块
+                                                    const is_else_block = incoming2.block == cond_br_data.else_block or
+                                                        std.mem.eql(u8, incoming2.block.label, cond_br_data.else_block.label);
+                                                    const is_not_then = incoming2.block != cond_br_data.then_block and
+                                                        !std.mem.eql(u8, incoming2.block.label, cond_br_data.then_block.label) and
+                                                        incoming2.block != block;
+                                                    if (is_else_block or is_not_then) {
+                                                        try self.writePtrAwareAssign(writer, body_indent, result2.id, incoming2.value.id);
                                                         break;
                                                     }
                                                 }
@@ -6218,8 +6433,33 @@ pub const NativeLinker = struct {
                         // 处理 merge 块（跳过 PHI 指令，它们已在分支中消解）
                         if (merge_bi) |mi| {
                             if (!processed.contains(mi)) {
-                                try processed.put(mi, {});
                                 const merge_blk = func.blocks.items[mi];
+                                const merge_label = merge_blk.label;
+
+                                // 如果 merge 块是循环条件块（for/while/foreach），
+                                // 不在此处处理，让主循环分派到对应的循环生成函数
+                                if (std.mem.startsWith(u8, merge_label, "for_cond_") or
+                                    std.mem.startsWith(u8, merge_label, "while_cond_") or
+                                    std.mem.startsWith(u8, merge_label, "foreach_cond_"))
+                                {
+                                    i = mi; // i += 1 会让主循环处理此块
+                                    continue; // 跳到主 while 循环的下一迭代
+                                }
+
+                                // 如果 merge 块是 if/ternary/coalesce 块，
+                                // 也不在此处处理，让主循环分派
+                                if ((std.mem.startsWith(u8, merge_label, "if_then_") and
+                                    self.findBlockByLabelPrefix(func, mi + 1, end_idx, "if_merge_") != null) or
+                                    (std.mem.startsWith(u8, merge_label, "ternary_then_") and
+                                    self.findBlockByLabelPrefix(func, mi + 1, end_idx, "ternary_merge_") != null) or
+                                    (std.mem.startsWith(u8, merge_label, "coalesce_rhs_") and
+                                    self.findBlockByLabelPrefix(func, mi + 1, end_idx, "coalesce_merge_") != null))
+                                {
+                                    i = mi;
+                                    continue;
+                                }
+
+                                try processed.put(mi, {});
                                 for (merge_blk.instructions.items) |inst| {
                                     if (inst.op != .phi) {
                                         try writer.writeAll(indent);
@@ -6233,7 +6473,7 @@ pub const NativeLinker = struct {
                                             if (cleanup_regs.len > 0) {
                                                 try writer.print("{s}// Cleanup\n", .{indent});
                                                 for (cleanup_regs) |reg_id| {
-                                                    try writer.print("{s}reg_{d}.release(runtime.runtime_allocator);\n", .{ indent, reg_id });
+                                                    if (self.isAllocaReg(reg_id)) try writer.print("{s}reg_{d}.*.release(runtime.runtime_allocator);\n", .{ indent, reg_id }) else try writer.print("{s}reg_{d}.release(runtime.runtime_allocator);\n", .{ indent, reg_id });
                                                 }
                                             }
                                             if (ret_val) |reg| {
@@ -6299,13 +6539,66 @@ pub const NativeLinker = struct {
         // 查找 foreach 的各个块
         const cond_block = func.blocks.items[cond_idx];
 
-        const body_idx = self.findBlockByLabelPrefix(func, cond_idx + 1, end_idx, "foreach_body_") orelse return end_idx;
-        // increment 块可能不存在（增量逻辑被内联到 body 中）
-        const increment_idx = self.findBlockByLabelPrefix(func, body_idx + 1, end_idx, "foreach_increment_");
-        const cleanup_search_start = if (increment_idx) |inc_idx| inc_idx + 1 else body_idx + 1;
-        const cleanup_idx = self.findBlockByLabelPrefix(func, cleanup_search_start, end_idx, "foreach_cleanup_") orelse return end_idx;
-        // exit 块可能不存在（cleanup 兼作 exit）
-        const exit_idx = self.findBlockByLabelPrefix(func, cleanup_idx + 1, end_idx, "foreach_exit_");
+        // 查找 foreach_body_ 块（可能不存在——IR 生成器在 body 为单语句时可能省略 foreach_body_ 块）
+        const body_by_label = self.findBlockByLabelPrefix(func, cond_idx + 1, end_idx, "foreach_body_");
+
+        var body_idx: usize = undefined;
+        var cleanup_idx: usize = undefined;
+        var increment_idx: ?usize = null;
+        var exit_idx: ?usize = null;
+
+        if (body_by_label) |found_bi| {
+            // 正常路径：foreach_body_ 存在，顺序搜索 increment → cleanup → exit
+            body_idx = found_bi;
+            increment_idx = self.findBlockByLabelPrefix(func, body_idx + 1, end_idx, "foreach_increment_");
+            const cleanup_search_start = if (increment_idx) |inc_idx| inc_idx + 1 else body_idx + 1;
+            cleanup_idx = self.findBlockByLabelPrefix(func, cleanup_search_start, end_idx, "foreach_cleanup_") orelse blk: {
+                // foreach_cleanup_ 未找到：从 cond_br 的非 body 目标推导 cleanup
+                if (cond_block.terminator) |term| {
+                    if (term == .cond_br) {
+                        const cb = term.cond_br;
+                        const body_ptr = func.blocks.items[body_idx];
+                        if (cb.then_block != body_ptr) {
+                            for (0..func.blocks.items.len) |idx| {
+                                if (func.blocks.items[idx] == cb.then_block) break :blk idx;
+                            }
+                        }
+                        if (cb.else_block != body_ptr) {
+                            for (0..func.blocks.items.len) |idx| {
+                                if (func.blocks.items[idx] == cb.else_block) break :blk idx;
+                            }
+                        }
+                    }
+                }
+                return end_idx;
+            };
+            exit_idx = self.findBlockByLabelPrefix(func, cleanup_idx + 1, end_idx, "foreach_exit_");
+        } else {
+            // foreach_body_ 不存在：IR 生成器将 body 直接作为 cond_br 的目标
+            // 策略：先找 foreach_cleanup_，再从 cond_br 的非 cleanup 目标推导出 body
+            cleanup_idx = self.findBlockByLabelPrefix(func, cond_idx + 1, end_idx, "foreach_cleanup_") orelse return end_idx;
+            body_idx = blk: {
+                if (cond_block.terminator) |term| {
+                    if (term == .cond_br) {
+                        const cb = term.cond_br;
+                        const cleanup_ptr = func.blocks.items[cleanup_idx];
+                        if (cb.then_block != cleanup_ptr) {
+                            for (0..func.blocks.items.len) |idx| {
+                                if (func.blocks.items[idx] == cb.then_block) break :blk idx;
+                            }
+                        }
+                        if (cb.else_block != cleanup_ptr) {
+                            for (0..func.blocks.items.len) |idx| {
+                                if (func.blocks.items[idx] == cb.else_block) break :blk idx;
+                            }
+                        }
+                    }
+                }
+                return end_idx;
+            };
+            increment_idx = self.findBlockByLabelPrefix(func, cond_idx + 1, end_idx, "foreach_increment_");
+            exit_idx = self.findBlockByLabelPrefix(func, cleanup_idx + 1, end_idx, "foreach_exit_");
+        }
 
         // 生成带标签的 while 循环
         const label_name = try std.fmt.allocPrint(self.allocator, "__foreach_{d}", .{loop_label_counter.*});
@@ -6334,7 +6627,7 @@ pub const NativeLinker = struct {
                         const is_from_body = incoming.block == func.blocks.items[body_idx] or
                             std.mem.eql(u8, incoming.block.label, func.blocks.items[body_idx].label);
                         if (!is_from_increment and !is_from_body) {
-                            try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, result.id, incoming.value.id });
+                            try self.writePtrAwareAssign(writer, indent, result.id, incoming.value.id);
                             break;
                         }
                     }
@@ -6352,25 +6645,10 @@ pub const NativeLinker = struct {
         const body_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{indent});
         defer self.allocator.free(body_indent);
 
-        // 生成条件块指令（在循环内部，每次迭代重新计算）
-        try processed.put(cond_idx, {});
-        for (cond_block.instructions.items) |inst| {
-            try writer.writeAll(body_indent);
-            try self.generateInstructionSimple(writer.list, inst);
-        }
-
-        // 生成条件块终止符（cond_br → if/break）
-        // cond_br 的 then_block 是 body，else_block 是 cleanup
-        if (cond_block.terminator) |term| {
-            if (term == .cond_br) {
-                const cond_br = term.cond_br;
-                try writer.print("{s}    if (!(", .{indent});
-                try self.writeConditionExpr(writer, cond_br.cond.id, cond_br.cond.type_);
-                try writer.print(")) {{\n", .{});
-                try writer.print("{s}        break :{s};\n", .{ indent, label_name });
-                try writer.print("{s}    }}\n", .{indent});
-            }
-        }
+        // 生成条件链（处理 && /|| 条件链，生成 if (!cond) break :label; 语句）
+        const fe_body_ptr = func.blocks.items[body_idx];
+        const fe_cleanup_ptr = func.blocks.items[cleanup_idx];
+        _ = try self.generateLoopConditionChain(writer, func, cond_idx, end_idx, fe_body_ptr, fe_cleanup_ptr, processed, label_name, body_indent);
 
         // 处理 body 块的指令
         const body_block = func.blocks.items[body_idx];
@@ -6391,6 +6669,30 @@ pub const NativeLinker = struct {
                         (if (exit_idx) |ei| br_target == func.blocks.items[ei] else false);
                     if (is_break) {
                         try writer.print("{s}    break :{s};\n", .{ indent, label_name });
+                    } else {
+                        // br 到非 cleanup/exit 块：嵌套控制流（如内层循环），递归处理
+                        const cond_block_ptr = func.blocks.items[cond_idx];
+                        const inc_block_ptr = if (increment_idx) |inc_idx| func.blocks.items[inc_idx] else cond_block_ptr;
+                        const is_back_edge = br_target == cond_block_ptr or br_target == inc_block_ptr;
+                        if (!is_back_edge) {
+                            // 预标记 cleanup/increment/exit 为已处理
+                            try processed.put(cleanup_idx, {});
+                            if (increment_idx) |inc_idx| try processed.put(inc_idx, {});
+                            if (exit_idx) |ei| try processed.put(ei, {});
+                            // 搜索回边
+                            var last_be: usize = if (increment_idx) |inc_idx| inc_idx else body_idx;
+                            for (body_idx + 1..end_idx) |blk_i| {
+                                const blk = func.blocks.items[blk_i];
+                                if (blk.terminator) |t| {
+                                    if (t == .br and (t.br == cond_block_ptr or t.br == inc_block_ptr)) last_be = blk_i;
+                                    if (t == .cond_br) {
+                                        if (t.cond_br.then_block == cond_block_ptr or t.cond_br.then_block == inc_block_ptr or
+                                            t.cond_br.else_block == cond_block_ptr or t.cond_br.else_block == inc_block_ptr) last_be = blk_i;
+                                    }
+                                }
+                            }
+                            try self.generateLabelDrivenBlockRange(writer, func, body_idx + 1, last_be + 1, cleanup_regs, processed, loop_label_counter, body_indent);
+                        }
                     }
                     // br 到 increment/cond 或其他块：正常流程，不需要额外代码
                 },
@@ -6398,7 +6700,7 @@ pub const NativeLinker = struct {
                     if (cleanup_regs.len > 0) {
                         try writer.print("{s}    // Cleanup\n", .{indent});
                         for (cleanup_regs) |reg_id| {
-                            try writer.print("{s}    reg_{d}.release(runtime.runtime_allocator);\n", .{ indent, reg_id });
+                            if (self.isAllocaReg(reg_id)) try writer.print("{s}    reg_{d}.*.release(runtime.runtime_allocator);\n", .{ indent, reg_id }) else try writer.print("{s}    reg_{d}.release(runtime.runtime_allocator);\n", .{ indent, reg_id });
                         }
                     }
                     if (ret_val) |reg| {
@@ -6410,8 +6712,196 @@ pub const NativeLinker = struct {
                     }
                 },
                 .cond_br => {
-                    // body 内有 cond_br，可能是嵌套 if
-                    try self.generateLabelDrivenBlockRange(writer, func, body_idx + 1, next_after_body, cleanup_regs, processed, loop_label_counter, body_indent);
+                    // body 内有嵌套 if，需要生成 if/else 结构
+                    const body_cond_br = term.cond_br;
+                    const cond_block_ptr = func.blocks.items[cond_idx];
+                    const inc_block_ptr = if (increment_idx) |inc_idx| func.blocks.items[inc_idx] else cond_block_ptr;
+
+                    // 查找 then/else 块索引
+                    var then_bi: ?usize = null;
+                    var else_bi: ?usize = null;
+                    for (0..func.blocks.items.len) |blk_i| {
+                        if (func.blocks.items[blk_i] == body_cond_br.then_block) then_bi = blk_i;
+                        if (func.blocks.items[blk_i] == body_cond_br.else_block) else_bi = blk_i;
+                    }
+
+                    // 判断块是否是循环回边目标（cond 或 increment）
+                    const isLoopBackEdge = struct {
+                        fn check(ptr: anytype, cond_ptr: anytype, inc_ptr: anytype) bool {
+                            return ptr == cond_ptr or ptr == inc_ptr;
+                        }
+                    }.check;
+
+                    const if_indent = body_indent;
+                    try writer.print("{s}if (", .{if_indent});
+                    try self.writeConditionExpr(writer, body_cond_br.cond.id, body_cond_br.cond.type_);
+                    try writer.print(") {{\n", .{});
+
+                    const then_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{if_indent});
+                    defer self.allocator.free(then_indent);
+
+                    // 处理 then 块
+                    var then_is_be = false;
+                    if (then_bi) |ti| {
+                        if (isLoopBackEdge(func.blocks.items[ti], cond_block_ptr, inc_block_ptr)) {
+                            then_is_be = true;
+                        } else if (!processed.contains(ti)) {
+                            try processed.put(ti, {});
+                            const then_blk = func.blocks.items[ti];
+                            for (then_blk.instructions.items) |inst| {
+                                try writer.writeAll(then_indent);
+                                try self.generateInstructionSimple(writer.list, inst);
+                            }
+                            if (then_blk.terminator) |tt| {
+                                switch (tt) {
+                                    .ret => |ret_val| {
+                                        if (cleanup_regs.len > 0) {
+                                            try writer.print("{s}    // Cleanup\n", .{then_indent});
+                                            for (cleanup_regs) |reg_id| {
+                                                if (self.isAllocaReg(reg_id)) try writer.print("{s}    reg_{d}.*.release(runtime.runtime_allocator);\n", .{ then_indent, reg_id }) else try writer.print("{s}    reg_{d}.release(runtime.runtime_allocator);\n", .{ then_indent, reg_id });
+                                            }
+                                        }
+                                        if (ret_val) |reg| {
+                                            const is_alloca = self.isAllocaReg(reg.id);
+                                            try self.writeReturnStmt(writer, reg.id, is_alloca, then_indent);
+                                        } else {
+                                            try writer.print("{s}    return runtime.Value.initNull();\n", .{then_indent});
+                                            self.return_generated = true;
+                                        }
+                                    },
+                                    .cond_br => {
+                                        const saved_rg = self.return_generated;
+                                        self.return_generated = false;
+                                        try self.generateLabelDrivenBlockRange(writer, func, ti + 1, end_idx, cleanup_regs, processed, loop_label_counter, then_indent);
+                                        self.return_generated = saved_rg;
+                                    },
+                                    else => {},
+                                }
+                            }
+                        }
+                    }
+
+                    // 处理 else 块
+                    var else_is_be = false;
+                    if (else_bi) |ei| {
+                        if (isLoopBackEdge(func.blocks.items[ei], cond_block_ptr, inc_block_ptr)) {
+                            else_is_be = true;
+                        }
+                    }
+
+                    if (else_is_be) {
+                        try writer.print("{s}}}\n", .{if_indent});
+                    } else if (then_is_be) {
+                        if (else_bi) |ei| {
+                            if (!processed.contains(ei)) {
+                                try writer.print("{s}}} else {{\n", .{if_indent});
+                                try processed.put(ei, {});
+                                const else_blk = func.blocks.items[ei];
+                                for (else_blk.instructions.items) |inst| {
+                                    try writer.writeAll(then_indent);
+                                    try self.generateInstructionSimple(writer.list, inst);
+                                }
+                                if (else_blk.terminator) |tt| {
+                                    switch (tt) {
+                                        .ret => |ret_val| {
+                                            if (cleanup_regs.len > 0) {
+                                                try writer.print("{s}    // Cleanup\n", .{then_indent});
+                                                for (cleanup_regs) |reg_id| {
+                                                    if (self.isAllocaReg(reg_id)) try writer.print("{s}    reg_{d}.*.release(runtime.runtime_allocator);\n", .{ then_indent, reg_id }) else try writer.print("{s}    reg_{d}.release(runtime.runtime_allocator);\n", .{ then_indent, reg_id });
+                                                }
+                                            }
+                                            if (ret_val) |reg| {
+                                                const is_alloca = self.isAllocaReg(reg.id);
+                                                try self.writeReturnStmt(writer, reg.id, is_alloca, then_indent);
+                                            } else {
+                                                try writer.print("{s}    return runtime.Value.initNull();\n", .{then_indent});
+                                                self.return_generated = true;
+                                            }
+                                        },
+                                        .cond_br => {
+                                            const saved_rg = self.return_generated;
+                                            self.return_generated = false;
+                                            try self.generateLabelDrivenBlockRange(writer, func, ei + 1, end_idx, cleanup_regs, processed, loop_label_counter, then_indent);
+                                            self.return_generated = saved_rg;
+                                        },
+                                        else => {},
+                                    }
+                                }
+                                try writer.print("{s}}}\n", .{if_indent});
+                            } else {
+                                try writer.print("{s}}}\n", .{if_indent});
+                            }
+                        } else {
+                            try writer.print("{s}}}\n", .{if_indent});
+                        }
+                    } else {
+                        if (else_bi) |ei| {
+                            if (!processed.contains(ei)) {
+                                try writer.print("{s}}} else {{\n", .{if_indent});
+                                try processed.put(ei, {});
+                                const else_blk = func.blocks.items[ei];
+                                for (else_blk.instructions.items) |inst| {
+                                    try writer.writeAll(then_indent);
+                                    try self.generateInstructionSimple(writer.list, inst);
+                                }
+                                if (else_blk.terminator) |tt| {
+                                    switch (tt) {
+                                        .ret => |ret_val| {
+                                            if (cleanup_regs.len > 0) {
+                                                try writer.print("{s}    // Cleanup\n", .{then_indent});
+                                                for (cleanup_regs) |reg_id| {
+                                                    if (self.isAllocaReg(reg_id)) try writer.print("{s}    reg_{d}.*.release(runtime.runtime_allocator);\n", .{ then_indent, reg_id }) else try writer.print("{s}    reg_{d}.release(runtime.runtime_allocator);\n", .{ then_indent, reg_id });
+                                                }
+                                            }
+                                            if (ret_val) |reg| {
+                                                const is_alloca = self.isAllocaReg(reg.id);
+                                                try self.writeReturnStmt(writer, reg.id, is_alloca, then_indent);
+                                            } else {
+                                                try writer.print("{s}    return runtime.Value.initNull();\n", .{then_indent});
+                                                self.return_generated = true;
+                                            }
+                                        },
+                                        .cond_br => {
+                                            const saved_rg = self.return_generated;
+                                            self.return_generated = false;
+                                            try self.generateLabelDrivenBlockRange(writer, func, ei + 1, end_idx, cleanup_regs, processed, loop_label_counter, then_indent);
+                                            self.return_generated = saved_rg;
+                                        },
+                                        else => {},
+                                    }
+                                }
+                                try writer.print("{s}}}\n", .{if_indent});
+                            } else {
+                                try writer.print("{s}}}\n", .{if_indent});
+                            }
+                        } else {
+                            try writer.print("{s}}}\n", .{if_indent});
+                        }
+                    }
+
+                    // 预标记 loop 自身块为已处理
+                    if (increment_idx) |inc_idx| try processed.put(inc_idx, {});
+                    try processed.put(cleanup_idx, {});
+                    if (exit_idx) |ei| try processed.put(ei, {});
+
+                    // 搜索回边（.br 和 .cond_br），递归处理 body 嵌套块
+                    var last_back_edge: usize = if (increment_idx) |inc_idx| inc_idx else body_idx;
+                    for (body_idx + 1..end_idx) |blk_i| {
+                        const blk = func.blocks.items[blk_i];
+                        if (blk.terminator) |t| {
+                            if (t == .br and (t.br == cond_block_ptr or t.br == inc_block_ptr)) {
+                                last_back_edge = blk_i;
+                            }
+                            if (t == .cond_br) {
+                                if (t.cond_br.then_block == cond_block_ptr or t.cond_br.then_block == inc_block_ptr or
+                                    t.cond_br.else_block == cond_block_ptr or t.cond_br.else_block == inc_block_ptr)
+                                {
+                                    last_back_edge = blk_i;
+                                }
+                            }
+                        }
+                    }
+                    try self.generateLabelDrivenBlockRange(writer, func, body_idx + 1, last_back_edge + 1, cleanup_regs, processed, loop_label_counter, body_indent);
                 },
                 else => {},
             }
@@ -6422,15 +6912,18 @@ pub const NativeLinker = struct {
 
         // 生成 increment 块指令（如果存在）
         if (increment_idx) |inc_idx| {
-            const inc_block = func.blocks.items[inc_idx];
             try processed.put(inc_idx, {});
-            for (inc_block.instructions.items) |inst| {
-                try writer.writeAll(body_indent);
-                try self.generateInstructionSimple(writer.list, inst);
+            if (!self.return_generated) {
+                const inc_block = func.blocks.items[inc_idx];
+                for (inc_block.instructions.items) |inst| {
+                    try writer.writeAll(body_indent);
+                    try self.generateInstructionSimple(writer.list, inst);
+                }
             }
         }
 
         // PHI 消解：在 increment 块后添加循环回边 PHI 赋值
+        if (!self.return_generated) {
         for (cond_block.instructions.items) |phi_inst| {
             if (phi_inst.op == .phi) {
                 if (phi_inst.result) |result| {
@@ -6442,16 +6935,19 @@ pub const NativeLinker = struct {
                         const is_from_body = incoming.block == func.blocks.items[body_idx] or
                             std.mem.eql(u8, incoming.block.label, func.blocks.items[body_idx].label);
                         if (is_from_increment or is_from_body) {
-                            try writer.print("{s}reg_{d} = reg_{d};\n", .{ body_indent, result.id, incoming.value.id });
+                            try self.writePtrAwareAssign(writer, body_indent, result.id, incoming.value.id);
                             break;
                         }
                     }
                 }
             }
         }
+        }
 
         // 生成 continue
-        try writer.print("{s}    continue :{s};\n", .{ indent, label_name });
+        if (!self.return_generated) {
+            try writer.print("{s}    continue :{s};\n", .{ indent, label_name });
+        }
         try writer.print("{s}}}\n", .{indent});
 
         // 生成 cleanup 块
@@ -6477,7 +6973,7 @@ pub const NativeLinker = struct {
                         if (cleanup_regs.len > 0) {
                             try writer.print("{s}// Cleanup: release all allocated values\n", .{indent});
                             for (cleanup_regs) |reg_id| {
-                                try writer.print("{s}reg_{d}.release(runtime.runtime_allocator);\n", .{ indent, reg_id });
+                                if (self.isAllocaReg(reg_id)) try writer.print("{s}reg_{d}.*.release(runtime.runtime_allocator);\n", .{ indent, reg_id }) else try writer.print("{s}reg_{d}.release(runtime.runtime_allocator);\n", .{ indent, reg_id });
                             }
                         }
                         if (ret_val) |reg| {
@@ -6516,13 +7012,62 @@ pub const NativeLinker = struct {
     ) anyerror!usize {
         const cond_block = func.blocks.items[cond_idx];
 
-        const body_idx = self.findBlockByLabelPrefix(func, cond_idx + 1, end_idx, "for_body_") orelse return end_idx;
-        const loop_idx = self.findBlockByLabelPrefix(func, body_idx + 1, end_idx, "for_loop_") orelse blk: {
-            // 某些情况下 ir_generator 未生成独立 for_loop 块
-            // 此时增量逻辑在 body 块末尾，使用 body_idx 作为 loop_idx
-            break :blk body_idx;
-        };
-        const exit_idx = self.findBlockByLabelPrefix(func, loop_idx + 1, end_idx, "for_exit_") orelse return end_idx;
+        // 查找 for_body_ 块（可能不存在——IR 生成器在 body 为单语句时可能省略 for_body_ 块）
+        const body_by_label = self.findBlockByLabelPrefix(func, cond_idx + 1, end_idx, "for_body_");
+
+        var body_idx: usize = undefined;
+        var loop_idx: usize = undefined;
+        var exit_idx: usize = undefined;
+
+        if (body_by_label) |found_bi| {
+            // 正常路径：for_body_ 存在，顺序搜索 loop → exit
+            body_idx = found_bi;
+            loop_idx = self.findBlockByLabelPrefix(func, body_idx + 1, end_idx, "for_loop_") orelse body_idx;
+            exit_idx = self.findBlockByLabelPrefix(func, loop_idx + 1, end_idx, "for_exit_") orelse blk: {
+                // for_exit_ 未找到：从 cond_br 的非 body 目标推导 exit
+                if (cond_block.terminator) |term| {
+                    if (term == .cond_br) {
+                        const cb = term.cond_br;
+                        const body_ptr = func.blocks.items[body_idx];
+                        if (cb.then_block != body_ptr) {
+                            for (0..func.blocks.items.len) |idx| {
+                                if (func.blocks.items[idx] == cb.then_block) break :blk idx;
+                            }
+                        }
+                        if (cb.else_block != body_ptr) {
+                            for (0..func.blocks.items.len) |idx| {
+                                if (func.blocks.items[idx] == cb.else_block) break :blk idx;
+                            }
+                        }
+                    }
+                }
+                return end_idx;
+            };
+        } else {
+            // for_body_ 不存在：IR 生成器将 body 直接作为 cond_br 的目标
+            // 策略：先找 for_exit_，再从 cond_br 的非 exit 目标推导出 body
+            exit_idx = self.findBlockByLabelPrefix(func, cond_idx + 1, end_idx, "for_exit_") orelse return end_idx;
+            body_idx = blk: {
+                if (cond_block.terminator) |term| {
+                    if (term == .cond_br) {
+                        const cb = term.cond_br;
+                        const exit_ptr = func.blocks.items[exit_idx];
+                        if (cb.then_block != exit_ptr) {
+                            for (0..func.blocks.items.len) |idx| {
+                                if (func.blocks.items[idx] == cb.then_block) break :blk idx;
+                            }
+                        }
+                        if (cb.else_block != exit_ptr) {
+                            for (0..func.blocks.items.len) |idx| {
+                                if (func.blocks.items[idx] == cb.else_block) break :blk idx;
+                            }
+                        }
+                    }
+                }
+                return end_idx;
+            };
+            loop_idx = self.findBlockByLabelPrefix(func, cond_idx + 1, end_idx, "for_loop_") orelse body_idx;
+        }
 
         // 生成带标签的 while 循环
         const label_name = try std.fmt.allocPrint(self.allocator, "__for_{d}", .{loop_label_counter.*});
@@ -6537,7 +7082,7 @@ pub const NativeLinker = struct {
                         const is_from_body = incoming.block == func.blocks.items[body_idx] or
                             std.mem.eql(u8, incoming.block.label, func.blocks.items[body_idx].label);
                         if (!is_from_body) {
-                            try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, result.id, incoming.value.id });
+                            try self.writePtrAwareAssign(writer, indent, result.id, incoming.value.id);
                             break;
                         }
                     }
@@ -6555,24 +7100,10 @@ pub const NativeLinker = struct {
         const body_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{indent});
         defer self.allocator.free(body_indent);
 
-        // 生成条件块指令（在循环内部，每次迭代重新计算）
-        try processed.put(cond_idx, {});
-        for (cond_block.instructions.items) |inst| {
-            try writer.writeAll(body_indent);
-            try self.generateInstructionSimple(writer.list, inst);
-        }
-
-        // 生成条件判断：if (!(cond)) break :label;
-        if (cond_block.terminator) |term| {
-            if (term == .cond_br) {
-                const cond_br = term.cond_br;
-                try writer.print("{s}    if (!(", .{indent});
-                try self.writeConditionExpr(writer, cond_br.cond.id, cond_br.cond.type_);
-                try writer.print(")) {{\n", .{});
-                try writer.print("{s}        break :{s};\n", .{ indent, label_name });
-                try writer.print("{s}    }}\n", .{indent});
-            }
-        }
+        // 生成条件链（处理 && /|| 条件链，生成 if (!cond) break :label; 语句）
+        const for_body_ptr = func.blocks.items[body_idx];
+        const for_exit_ptr = func.blocks.items[exit_idx];
+        _ = try self.generateLoopConditionChain(writer, func, cond_idx, end_idx, for_body_ptr, for_exit_ptr, processed, label_name, body_indent);
 
         // 生成 body 块指令
         const body_block = func.blocks.items[body_idx];
@@ -6588,13 +7119,31 @@ pub const NativeLinker = struct {
                 .br => |br_target| {
                     if (br_target == func.blocks.items[exit_idx]) {
                         try writer.print("{s}    break :{s};\n", .{ body_indent, label_name });
+                    } else {
+                        // br 到非 exit 块：嵌套控制流（如内层循环），搜索回边并递归处理
+                        const cond_block_ptr = func.blocks.items[cond_idx];
+                        const loop_block_ptr = func.blocks.items[loop_idx];
+                        try processed.put(exit_idx, {});
+                        if (loop_idx != body_idx) try processed.put(loop_idx, {});
+                        var last_be: usize = exit_idx;
+                        for (body_idx + 1..end_idx) |blk_i| {
+                            const blk = func.blocks.items[blk_i];
+                            if (blk.terminator) |t| {
+                                if (t == .br and (t.br == cond_block_ptr or t.br == loop_block_ptr)) last_be = blk_i;
+                                if (t == .cond_br) {
+                                    if (t.cond_br.then_block == cond_block_ptr or t.cond_br.then_block == loop_block_ptr or
+                                        t.cond_br.else_block == cond_block_ptr or t.cond_br.else_block == loop_block_ptr) last_be = blk_i;
+                                }
+                            }
+                        }
+                        try self.generateLabelDrivenBlockRange(writer, func, body_idx + 1, end_idx, cleanup_regs, processed, loop_label_counter, body_indent);
                     }
                 },
                 .ret => |ret_val| {
                     if (cleanup_regs.len > 0) {
                         try writer.print("{s}    // Cleanup\n", .{body_indent});
                         for (cleanup_regs) |reg_id| {
-                            try writer.print("{s}    reg_{d}.release(runtime.runtime_allocator);\n", .{ body_indent, reg_id });
+                            if (self.isAllocaReg(reg_id)) try writer.print("{s}    reg_{d}.*.release(runtime.runtime_allocator);\n", .{ body_indent, reg_id }) else try writer.print("{s}    reg_{d}.release(runtime.runtime_allocator);\n", .{ body_indent, reg_id });
                         }
                     }
                     if (ret_val) |reg| {
@@ -6606,8 +7155,191 @@ pub const NativeLinker = struct {
                     }
                 },
                 .cond_br => {
-                    // body 内有嵌套 if，递归处理
-                    try self.generateLabelDrivenBlockRange(writer, func, body_idx + 1, loop_idx, cleanup_regs, processed, loop_label_counter, body_indent);
+                    // body 内有嵌套 if，需要生成 if/else 结构
+                    const body_cond_br = term.cond_br;
+                    const cond_block_ptr = func.blocks.items[cond_idx];
+                    const loop_block_ptr = func.blocks.items[loop_idx];
+
+                    var then_bi: ?usize = null;
+                    var else_bi: ?usize = null;
+                    for (0..func.blocks.items.len) |blk_i| {
+                        if (func.blocks.items[blk_i] == body_cond_br.then_block) then_bi = blk_i;
+                        if (func.blocks.items[blk_i] == body_cond_br.else_block) else_bi = blk_i;
+                    }
+
+                    const isLoopBE = struct {
+                        fn check(ptr: anytype, cond_ptr: anytype, loop_ptr: anytype) bool {
+                            return ptr == cond_ptr or ptr == loop_ptr;
+                        }
+                    }.check;
+
+                    const if_indent = body_indent;
+                    try writer.print("{s}if (", .{if_indent});
+                    try self.writeConditionExpr(writer, body_cond_br.cond.id, body_cond_br.cond.type_);
+                    try writer.print(") {{\n", .{});
+
+                    const then_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{if_indent});
+                    defer self.allocator.free(then_indent);
+
+                    var then_is_be = false;
+                    if (then_bi) |ti| {
+                        if (isLoopBE(func.blocks.items[ti], cond_block_ptr, loop_block_ptr)) {
+                            then_is_be = true;
+                        } else if (!processed.contains(ti)) {
+                            try processed.put(ti, {});
+                            const then_blk = func.blocks.items[ti];
+                            for (then_blk.instructions.items) |inst| {
+                                try writer.writeAll(then_indent);
+                                try self.generateInstructionSimple(writer.list, inst);
+                            }
+                            if (then_blk.terminator) |tt| {
+                                switch (tt) {
+                                    .ret => |ret_val| {
+                                        if (cleanup_regs.len > 0) {
+                                            try writer.print("{s}    // Cleanup\n", .{then_indent});
+                                            for (cleanup_regs) |reg_id| {
+                                                if (self.isAllocaReg(reg_id)) try writer.print("{s}    reg_{d}.*.release(runtime.runtime_allocator);\n", .{ then_indent, reg_id }) else try writer.print("{s}    reg_{d}.release(runtime.runtime_allocator);\n", .{ then_indent, reg_id });
+                                            }
+                                        }
+                                        if (ret_val) |reg| {
+                                            const is_alloca = self.isAllocaReg(reg.id);
+                                            try self.writeReturnStmt(writer, reg.id, is_alloca, then_indent);
+                                        } else {
+                                            try writer.print("{s}    return runtime.Value.initNull();\n", .{then_indent});
+                                            self.return_generated = true;
+                                        }
+                                    },
+                                    .cond_br => {
+                                        const saved_rg = self.return_generated;
+                                        self.return_generated = false;
+                                        try self.generateLabelDrivenBlockRange(writer, func, ti + 1, end_idx, cleanup_regs, processed, loop_label_counter, then_indent);
+                                        self.return_generated = saved_rg;
+                                    },
+                                    else => {},
+                                }
+                            }
+                        }
+                    }
+
+                    var else_is_be = false;
+                    if (else_bi) |ei| {
+                        if (isLoopBE(func.blocks.items[ei], cond_block_ptr, loop_block_ptr)) {
+                            else_is_be = true;
+                        }
+                    }
+
+                    if (else_is_be) {
+                        try writer.print("{s}}}\n", .{if_indent});
+                    } else if (then_is_be) {
+                        if (else_bi) |ei| {
+                            if (!processed.contains(ei)) {
+                                try writer.print("{s}}} else {{\n", .{if_indent});
+                                try processed.put(ei, {});
+                                const else_blk = func.blocks.items[ei];
+                                for (else_blk.instructions.items) |inst| {
+                                    try writer.writeAll(then_indent);
+                                    try self.generateInstructionSimple(writer.list, inst);
+                                }
+                                if (else_blk.terminator) |tt| {
+                                    switch (tt) {
+                                        .ret => |ret_val| {
+                                            if (cleanup_regs.len > 0) {
+                                                try writer.print("{s}    // Cleanup\n", .{then_indent});
+                                                for (cleanup_regs) |reg_id| {
+                                                    if (self.isAllocaReg(reg_id)) try writer.print("{s}    reg_{d}.*.release(runtime.runtime_allocator);\n", .{ then_indent, reg_id }) else try writer.print("{s}    reg_{d}.release(runtime.runtime_allocator);\n", .{ then_indent, reg_id });
+                                                }
+                                            }
+                                            if (ret_val) |reg| {
+                                                const is_alloca = self.isAllocaReg(reg.id);
+                                                try self.writeReturnStmt(writer, reg.id, is_alloca, then_indent);
+                                            } else {
+                                                try writer.print("{s}    return runtime.Value.initNull();\n", .{then_indent});
+                                                self.return_generated = true;
+                                            }
+                                        },
+                                        .cond_br => {
+                                            const saved_rg = self.return_generated;
+                                            self.return_generated = false;
+                                            try self.generateLabelDrivenBlockRange(writer, func, ei + 1, end_idx, cleanup_regs, processed, loop_label_counter, then_indent);
+                                            self.return_generated = saved_rg;
+                                        },
+                                        else => {},
+                                    }
+                                }
+                                try writer.print("{s}}}\n", .{if_indent});
+                            } else {
+                                try writer.print("{s}}}\n", .{if_indent});
+                            }
+                        } else {
+                            try writer.print("{s}}}\n", .{if_indent});
+                        }
+                    } else {
+                        if (else_bi) |ei| {
+                            if (!processed.contains(ei)) {
+                                try writer.print("{s}}} else {{\n", .{if_indent});
+                                try processed.put(ei, {});
+                                const else_blk = func.blocks.items[ei];
+                                for (else_blk.instructions.items) |inst| {
+                                    try writer.writeAll(then_indent);
+                                    try self.generateInstructionSimple(writer.list, inst);
+                                }
+                                if (else_blk.terminator) |tt| {
+                                    switch (tt) {
+                                        .ret => |ret_val| {
+                                            if (cleanup_regs.len > 0) {
+                                                try writer.print("{s}    // Cleanup\n", .{then_indent});
+                                                for (cleanup_regs) |reg_id| {
+                                                    if (self.isAllocaReg(reg_id)) try writer.print("{s}    reg_{d}.*.release(runtime.runtime_allocator);\n", .{ then_indent, reg_id }) else try writer.print("{s}    reg_{d}.release(runtime.runtime_allocator);\n", .{ then_indent, reg_id });
+                                                }
+                                            }
+                                            if (ret_val) |reg| {
+                                                const is_alloca = self.isAllocaReg(reg.id);
+                                                try self.writeReturnStmt(writer, reg.id, is_alloca, then_indent);
+                                            } else {
+                                                try writer.print("{s}    return runtime.Value.initNull();\n", .{then_indent});
+                                                self.return_generated = true;
+                                            }
+                                        },
+                                        .cond_br => {
+                                            const saved_rg = self.return_generated;
+                                            self.return_generated = false;
+                                            try self.generateLabelDrivenBlockRange(writer, func, ei + 1, end_idx, cleanup_regs, processed, loop_label_counter, then_indent);
+                                            self.return_generated = saved_rg;
+                                        },
+                                        else => {},
+                                    }
+                                }
+                                try writer.print("{s}}}\n", .{if_indent});
+                            } else {
+                                try writer.print("{s}}}\n", .{if_indent});
+                            }
+                        } else {
+                            try writer.print("{s}}}\n", .{if_indent});
+                        }
+                    }
+
+                    // 预标记 loop 自身块
+                    try processed.put(exit_idx, {});
+                    if (loop_idx != body_idx) try processed.put(loop_idx, {});
+
+                    // 搜索回边（.br 和 .cond_br）
+                    var last_back_edge: usize = exit_idx;
+                    for (body_idx + 1..end_idx) |blk_i| {
+                        const blk = func.blocks.items[blk_i];
+                        if (blk.terminator) |t| {
+                            if (t == .br and (t.br == cond_block_ptr or t.br == loop_block_ptr)) {
+                                last_back_edge = blk_i;
+                            }
+                            if (t == .cond_br) {
+                                if (t.cond_br.then_block == cond_block_ptr or t.cond_br.then_block == loop_block_ptr or
+                                    t.cond_br.else_block == cond_block_ptr or t.cond_br.else_block == loop_block_ptr)
+                                {
+                                    last_back_edge = blk_i;
+                                }
+                            }
+                        }
+                    }
+                    try self.generateLabelDrivenBlockRange(writer, func, body_idx + 1, last_back_edge + 1, cleanup_regs, processed, loop_label_counter, body_indent);
                 },
                 else => {},
             }
@@ -6617,16 +7349,19 @@ pub const NativeLinker = struct {
         try self.generateLabelDrivenBlockRange(writer, func, body_idx + 1, loop_idx, cleanup_regs, processed, loop_label_counter, body_indent);
 
         // 生成 loop（增量）块指令
-        if (loop_idx != body_idx) {
+        if (loop_idx != body_idx and !self.return_generated) {
             const loop_block = func.blocks.items[loop_idx];
             try processed.put(loop_idx, {});
             for (loop_block.instructions.items) |inst| {
                 try writer.writeAll(body_indent);
                 try self.generateInstructionSimple(writer.list, inst);
             }
+        } else if (loop_idx != body_idx) {
+            try processed.put(loop_idx, {});
         }
 
         // PHI 消解：在 for 循环回边处添加 PHI 赋值（来自 loop/body 块的 incoming 值）
+        if (!self.return_generated) {
         for (cond_block.instructions.items) |phi_inst| {
             if (phi_inst.op == .phi) {
                 if (phi_inst.result) |result| {
@@ -6636,15 +7371,18 @@ pub const NativeLinker = struct {
                         const is_from_body = incoming.block == func.blocks.items[body_idx] or
                             std.mem.eql(u8, incoming.block.label, func.blocks.items[body_idx].label);
                         if (is_from_loop or is_from_body) {
-                            try writer.print("{s}    reg_{d} = reg_{d};\n", .{ indent, result.id, incoming.value.id });
+                            if (self.isAllocaReg(incoming.value.id)) try writer.print("{s}    reg_{d} = reg_{d}.*;\n", .{ indent, result.id, incoming.value.id }) else if (self.isAllocaReg(result.id)) try writer.print("{s}    reg_{d}.* = reg_{d};\n", .{ indent, result.id, incoming.value.id }) else try writer.print("{s}    reg_{d} = reg_{d};\n", .{ indent, result.id, incoming.value.id });
                             break;
                         }
                     }
                 }
             }
         }
+        }
 
-        try writer.print("{s}    continue :{s};\n", .{ indent, label_name });
+        if (!self.return_generated) {
+            try writer.print("{s}    continue :{s};\n", .{ indent, label_name });
+        }
         try writer.print("{s}}}\n", .{indent});
 
         // 生成 exit 块
@@ -6661,7 +7399,7 @@ pub const NativeLinker = struct {
                     if (cleanup_regs.len > 0) {
                         try writer.print("{s}// Cleanup\n", .{indent});
                         for (cleanup_regs) |reg_id| {
-                            try writer.print("{s}reg_{d}.release(runtime.runtime_allocator);\n", .{ indent, reg_id });
+                            if (self.isAllocaReg(reg_id)) try writer.print("{s}reg_{d}.*.release(runtime.runtime_allocator);\n", .{ indent, reg_id }) else try writer.print("{s}reg_{d}.release(runtime.runtime_allocator);\n", .{ indent, reg_id });
                         }
                     }
                     if (ret_val) |reg| {
@@ -6697,8 +7435,65 @@ pub const NativeLinker = struct {
     ) anyerror!usize {
         const cond_block = func.blocks.items[cond_idx];
 
-        const body_idx = self.findBlockByLabelPrefix(func, cond_idx + 1, end_idx, "while_body_") orelse return end_idx;
-        const exit_idx = self.findBlockByLabelPrefix(func, body_idx + 1, end_idx, "while_exit_") orelse return end_idx;
+        // 查找 while_body_ 块（可能不存在——IR 生成器在 body 为单语句时可能省略 while_body_ 块）
+        const body_by_label = self.findBlockByLabelPrefix(func, cond_idx + 1, end_idx, "while_body_");
+
+        var body_idx: usize = undefined;
+        var exit_idx: usize = undefined;
+
+        if (body_by_label) |found_bi| {
+            // 正常路径：while_body_ 存在，顺序搜索 exit
+            body_idx = found_bi;
+            exit_idx = self.findBlockByLabelPrefix(func, body_idx + 1, end_idx, "while_exit_") orelse blk: {
+                // while_exit_ 未找到：从 cond_br 的非 body 目标推导 exit
+                if (cond_block.terminator) |term| {
+                    if (term == .cond_br) {
+                        const cb = term.cond_br;
+                        const body_ptr = func.blocks.items[body_idx];
+                        if (cb.then_block != body_ptr) {
+                            for (0..func.blocks.items.len) |idx| {
+                                if (func.blocks.items[idx] == cb.then_block) break :blk idx;
+                            }
+                        }
+                        if (cb.else_block != body_ptr) {
+                            for (0..func.blocks.items.len) |idx| {
+                                if (func.blocks.items[idx] == cb.else_block) break :blk idx;
+                            }
+                        }
+                    }
+                }
+                return end_idx;
+            };
+        } else {
+            // while_body_ 不存在：IR 生成器将 body 直接作为 cond_br 的目标
+            // 策略：先找 while_exit_，再从 cond_br 的非 exit 目标推导出 body
+            exit_idx = self.findBlockByLabelPrefix(func, cond_idx + 1, end_idx, "while_exit_") orelse return end_idx;
+            body_idx = blk: {
+                if (cond_block.terminator) |term| {
+                    if (term == .cond_br) {
+                        const cb = term.cond_br;
+                        const exit_ptr = func.blocks.items[exit_idx];
+                        if (cb.then_block != exit_ptr) {
+                            for (0..func.blocks.items.len) |idx| {
+                                if (func.blocks.items[idx] == cb.then_block) break :blk idx;
+                            }
+                        }
+                        if (cb.else_block != exit_ptr) {
+                            for (0..func.blocks.items.len) |idx| {
+                                if (func.blocks.items[idx] == cb.else_block) break :blk idx;
+                            }
+                        }
+                    }
+                    // while(true) 循环：cond 块的 .br 目标就是 body
+                    if (term == .br) {
+                        for (0..func.blocks.items.len) |idx| {
+                            if (func.blocks.items[idx] == term.br) break :blk idx;
+                        }
+                    }
+                }
+                return end_idx;
+            };
+        }
 
         const label_name = try std.fmt.allocPrint(self.allocator, "__while_{d}", .{loop_label_counter.*});
         defer self.allocator.free(label_name);
@@ -6712,7 +7507,7 @@ pub const NativeLinker = struct {
                         const is_from_body = incoming.block == func.blocks.items[body_idx] or
                             std.mem.eql(u8, incoming.block.label, func.blocks.items[body_idx].label);
                         if (!is_from_body) {
-                            try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, result.id, incoming.value.id });
+                            try self.writePtrAwareAssign(writer, indent, result.id, incoming.value.id);
                             break;
                         }
                     }
@@ -6730,24 +7525,10 @@ pub const NativeLinker = struct {
         const body_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{indent});
         defer self.allocator.free(body_indent);
 
-        // 生成条件块指令（在循环内部，每次迭代重新计算）
-        try processed.put(cond_idx, {});
-        for (cond_block.instructions.items) |inst| {
-            try writer.writeAll(body_indent);
-            try self.generateInstructionSimple(writer.list, inst);
-        }
-
-        // 生成条件判断：if (!(cond)) break :label;
-        if (cond_block.terminator) |term| {
-            if (term == .cond_br) {
-                const cond_br = term.cond_br;
-                try writer.print("{s}    if (!(", .{indent});
-                try self.writeConditionExpr(writer, cond_br.cond.id, cond_br.cond.type_);
-                try writer.print(")) {{\n", .{});
-                try writer.print("{s}        break :{s};\n", .{ indent, label_name });
-                try writer.print("{s}    }}\n", .{indent});
-            }
-        }
+        // 生成条件链（处理 && /|| 条件链，生成 if (!cond) break :label; 语句）
+        const body_ptr = func.blocks.items[body_idx];
+        const exit_ptr = func.blocks.items[exit_idx];
+        _ = try self.generateLoopConditionChain(writer, func, cond_idx, end_idx, body_ptr, exit_ptr, processed, label_name, body_indent);
 
         // 生成 body 块指令
         const body_block = func.blocks.items[body_idx];
@@ -6772,7 +7553,7 @@ pub const NativeLinker = struct {
                     if (cleanup_regs.len > 0) {
                         try writer.print("{s}    // Cleanup\n", .{body_indent});
                         for (cleanup_regs) |reg_id| {
-                            try writer.print("{s}    reg_{d}.release(runtime.runtime_allocator);\n", .{ body_indent, reg_id });
+                            if (self.isAllocaReg(reg_id)) try writer.print("{s}    reg_{d}.*.release(runtime.runtime_allocator);\n", .{ body_indent, reg_id }) else try writer.print("{s}    reg_{d}.release(runtime.runtime_allocator);\n", .{ body_indent, reg_id });
                         }
                     }
                     if (ret_val) |reg| {
@@ -6784,11 +7565,175 @@ pub const NativeLinker = struct {
                     }
                 },
                 .cond_br => {
-                    // body 内有嵌套 if，if 块可能在 exit 之后
-                    // IR 生成器先创建 while_cond/body/exit 块，再处理 body 内嵌套的 if
-                    // 搜索 exit 之后的块，找到最后一个分支回 cond 块的块（循环回边）
-                    // 该块是循环体的最后一个块，extended_end 设为其后一个块
+                    // body 内有嵌套 if，需要生成 if/else 结构
+                    // body 的 cond_br 的 then/else 目标可能包括：
+                    //   - 嵌套 if 的 then 块（如 throw 块）
+                    //   - while_cond 块（循环回边，继续循环）
+                    const body_cond_br = term.cond_br;
                     const cond_block_ptr = func.blocks.items[cond_idx];
+
+                    // 查找 then/else 块索引
+                    var then_bi: ?usize = null;
+                    var else_bi: ?usize = null;
+                    for (0..func.blocks.items.len) |blk_i| {
+                        if (func.blocks.items[blk_i] == body_cond_br.then_block) then_bi = blk_i;
+                        if (func.blocks.items[blk_i] == body_cond_br.else_block) else_bi = blk_i;
+                    }
+
+                    // 生成 if (body_cond) { ... } else { ... }
+                    const if_indent = body_indent;
+                    try writer.print("{s}if (", .{if_indent});
+                    try self.writeConditionExpr(writer, body_cond_br.cond.id, body_cond_br.cond.type_);
+                    try writer.print(") {{\n", .{});
+
+                    const then_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{if_indent});
+                    defer self.allocator.free(then_indent);
+
+                    // 处理 then 块
+                    var then_is_back_edge = false;
+                    if (then_bi) |ti| {
+                        if (func.blocks.items[ti] == cond_block_ptr) {
+                            then_is_back_edge = true;
+                        } else if (!processed.contains(ti)) {
+                            try processed.put(ti, {});
+                            const then_blk = func.blocks.items[ti];
+                            for (then_blk.instructions.items) |inst| {
+                                try writer.writeAll(then_indent);
+                                try self.generateInstructionSimple(writer.list, inst);
+                            }
+                            // 处理 then 块终止符
+                            if (then_blk.terminator) |tt| {
+                                switch (tt) {
+                                    .ret => |ret_val| {
+                                        if (cleanup_regs.len > 0) {
+                                            try writer.print("{s}    // Cleanup\n", .{then_indent});
+                                            for (cleanup_regs) |reg_id| {
+                                                if (self.isAllocaReg(reg_id)) try writer.print("{s}    reg_{d}.*.release(runtime.runtime_allocator);\n", .{ then_indent, reg_id }) else try writer.print("{s}    reg_{d}.release(runtime.runtime_allocator);\n", .{ then_indent, reg_id });
+                                            }
+                                        }
+                                        if (ret_val) |reg| {
+                                            const is_alloca = self.isAllocaReg(reg.id);
+                                            try self.writeReturnStmt(writer, reg.id, is_alloca, then_indent);
+                                        } else {
+                                            try writer.print("{s}    return runtime.Value.initNull();\n", .{then_indent});
+                                            self.return_generated = true;
+                                        }
+                                    },
+                                    .cond_br => {
+                                        // then 块内有嵌套 if，递归处理后续块
+                                        const saved_rg = self.return_generated;
+                                        self.return_generated = false;
+                                        try self.generateLabelDrivenBlockRange(writer, func, ti + 1, end_idx, cleanup_regs, processed, loop_label_counter, then_indent);
+                                        self.return_generated = saved_rg;
+                                    },
+                                    else => {},
+                                }
+                            }
+                        }
+                    }
+
+                    // 处理 else 块
+                    var else_is_back_edge = false;
+                    if (else_bi) |ei| {
+                        if (func.blocks.items[ei] == cond_block_ptr) {
+                            else_is_back_edge = true;
+                        }
+                    }
+
+                    if (else_is_back_edge) {
+                        // else 是回边（继续循环），不生成 else 块
+                        try writer.print("{s}}}\n", .{if_indent});
+                    } else if (then_is_back_edge) {
+                        // then 是回边，else 有实际代码 → 反转条件
+                        if (else_bi) |ei| {
+                            if (!processed.contains(ei)) {
+                                try writer.print("{s}}} else {{\n", .{if_indent});
+                                try processed.put(ei, {});
+                                const else_blk = func.blocks.items[ei];
+                                for (else_blk.instructions.items) |inst| {
+                                    try writer.writeAll(then_indent);
+                                    try self.generateInstructionSimple(writer.list, inst);
+                                }
+                                if (else_blk.terminator) |tt| {
+                                    switch (tt) {
+                                        .ret => |ret_val| {
+                                            if (cleanup_regs.len > 0) {
+                                                try writer.print("{s}    // Cleanup\n", .{then_indent});
+                                                for (cleanup_regs) |reg_id| {
+                                                    if (self.isAllocaReg(reg_id)) try writer.print("{s}    reg_{d}.*.release(runtime.runtime_allocator);\n", .{ then_indent, reg_id }) else try writer.print("{s}    reg_{d}.release(runtime.runtime_allocator);\n", .{ then_indent, reg_id });
+                                                }
+                                            }
+                                            if (ret_val) |reg| {
+                                                const is_alloca = self.isAllocaReg(reg.id);
+                                                try self.writeReturnStmt(writer, reg.id, is_alloca, then_indent);
+                                            } else {
+                                                try writer.print("{s}    return runtime.Value.initNull();\n", .{then_indent});
+                                                self.return_generated = true;
+                                            }
+                                        },
+                                        .cond_br => {
+                                            const saved_rg = self.return_generated;
+                                            self.return_generated = false;
+                                            try self.generateLabelDrivenBlockRange(writer, func, ei + 1, end_idx, cleanup_regs, processed, loop_label_counter, then_indent);
+                                            self.return_generated = saved_rg;
+                                        },
+                                        else => {},
+                                    }
+                                }
+                                try writer.print("{s}}}\n", .{if_indent});
+                            } else {
+                                try writer.print("{s}}}\n", .{if_indent});
+                            }
+                        } else {
+                            try writer.print("{s}}}\n", .{if_indent});
+                        }
+                    } else {
+                        // 两个目标都有实际代码
+                        if (else_bi) |ei| {
+                            if (!processed.contains(ei)) {
+                                try writer.print("{s}}} else {{\n", .{if_indent});
+                                try processed.put(ei, {});
+                                const else_blk = func.blocks.items[ei];
+                                for (else_blk.instructions.items) |inst| {
+                                    try writer.writeAll(then_indent);
+                                    try self.generateInstructionSimple(writer.list, inst);
+                                }
+                                if (else_blk.terminator) |tt| {
+                                    switch (tt) {
+                                        .ret => |ret_val| {
+                                            if (cleanup_regs.len > 0) {
+                                                try writer.print("{s}    // Cleanup\n", .{then_indent});
+                                                for (cleanup_regs) |reg_id| {
+                                                    if (self.isAllocaReg(reg_id)) try writer.print("{s}    reg_{d}.*.release(runtime.runtime_allocator);\n", .{ then_indent, reg_id }) else try writer.print("{s}    reg_{d}.release(runtime.runtime_allocator);\n", .{ then_indent, reg_id });
+                                                }
+                                            }
+                                            if (ret_val) |reg| {
+                                                const is_alloca = self.isAllocaReg(reg.id);
+                                                try self.writeReturnStmt(writer, reg.id, is_alloca, then_indent);
+                                            } else {
+                                                try writer.print("{s}    return runtime.Value.initNull();\n", .{then_indent});
+                                                self.return_generated = true;
+                                            }
+                                        },
+                                        .cond_br => {
+                                            const saved_rg = self.return_generated;
+                                            self.return_generated = false;
+                                            try self.generateLabelDrivenBlockRange(writer, func, ei + 1, end_idx, cleanup_regs, processed, loop_label_counter, then_indent);
+                                            self.return_generated = saved_rg;
+                                        },
+                                        else => {},
+                                    }
+                                }
+                                try writer.print("{s}}}\n", .{if_indent});
+                            } else {
+                                try writer.print("{s}}}\n", .{if_indent});
+                            }
+                        } else {
+                            try writer.print("{s}}}\n", .{if_indent});
+                        }
+                    }
+
+                    // 计算 extended_end：搜索回边（.br 和 .cond_br）
                     var last_back_edge: usize = exit_idx;
                     for (exit_idx + 1..end_idx) |i| {
                         const block = func.blocks.items[i];
@@ -6796,9 +7741,17 @@ pub const NativeLinker = struct {
                             if (t == .br and t.br == cond_block_ptr) {
                                 last_back_edge = i;
                             }
+                            if (t == .cond_br) {
+                                if (t.cond_br.then_block == cond_block_ptr or t.cond_br.else_block == cond_block_ptr) {
+                                    last_back_edge = i;
+                                }
+                            }
                         }
                     }
                     extended_end = last_back_edge + 1;
+                    // 包含 then/else 块索引
+                    if (then_bi) |ti| { if (ti + 1 > extended_end) extended_end = ti + 1; }
+                    if (else_bi) |ei| { if (ei + 1 > extended_end) extended_end = ei + 1; }
                 },
                 else => {},
             }
@@ -6811,6 +7764,7 @@ pub const NativeLinker = struct {
         try self.generateLabelDrivenBlockRange(writer, func, body_idx + 1, extended_end, cleanup_regs, processed, loop_label_counter, body_indent);
 
         // PHI 消解：在循环回边处添加 PHI 赋值（来自 body 块的 incoming 值）
+        if (!self.return_generated) {
         for (cond_block.instructions.items) |phi_inst| {
             if (phi_inst.op == .phi) {
                 if (phi_inst.result) |result| {
@@ -6818,15 +7772,18 @@ pub const NativeLinker = struct {
                         const is_from_body = incoming.block == func.blocks.items[body_idx] or
                             std.mem.eql(u8, incoming.block.label, func.blocks.items[body_idx].label);
                         if (is_from_body) {
-                            try writer.print("{s}    reg_{d} = reg_{d};\n", .{ indent, result.id, incoming.value.id });
+                            if (self.isAllocaReg(incoming.value.id)) try writer.print("{s}    reg_{d} = reg_{d}.*;\n", .{ indent, result.id, incoming.value.id }) else if (self.isAllocaReg(result.id)) try writer.print("{s}    reg_{d}.* = reg_{d};\n", .{ indent, result.id, incoming.value.id }) else try writer.print("{s}    reg_{d} = reg_{d};\n", .{ indent, result.id, incoming.value.id });
                             break;
                         }
                     }
                 }
             }
         }
+        }
 
-        try writer.print("{s}    continue :{s};\n", .{ indent, label_name });
+        if (!self.return_generated) {
+            try writer.print("{s}    continue :{s};\n", .{ indent, label_name });
+        }
         try writer.print("{s}}}\n", .{indent});
 
         // 生成 exit 块（exit_idx 已标记为 processed，这里只生成指令）
@@ -6842,7 +7799,7 @@ pub const NativeLinker = struct {
                     if (cleanup_regs.len > 0) {
                         try writer.print("{s}// Cleanup\n", .{indent});
                         for (cleanup_regs) |reg_id| {
-                            try writer.print("{s}reg_{d}.release(runtime.runtime_allocator);\n", .{ indent, reg_id });
+                            if (self.isAllocaReg(reg_id)) try writer.print("{s}reg_{d}.*.release(runtime.runtime_allocator);\n", .{ indent, reg_id }) else try writer.print("{s}reg_{d}.release(runtime.runtime_allocator);\n", .{ indent, reg_id });
                         }
                     }
                     if (ret_val) |reg| {
@@ -6853,11 +7810,22 @@ pub const NativeLinker = struct {
                         self.return_generated = true;
                     }
                 },
+                .cond_br => {
+                    // exit 块有 cond_br（如 while 循环后的 if 语句），
+                    // 递归处理后续块（包括 if_then/if_merge）
+                    const saved_rg = self.return_generated;
+                    const saved_br = self.break_generated;
+                    self.return_generated = false;
+                    self.break_generated = false;
+                    try self.generateLabelDrivenBlockRange(writer, func, exit_idx + 1, end_idx, cleanup_regs, processed, loop_label_counter, indent);
+                    self.return_generated = self.return_generated or saved_rg;
+                    self.break_generated = saved_br;
+                },
                 else => {},
             }
         }
 
-        return exit_idx + 1;
+        return extended_end;
     }
 
     /// 从标签生成 if 语句
@@ -6878,16 +7846,43 @@ pub const NativeLinker = struct {
     ) anyerror!usize {
         const then_block = func.blocks.items[then_idx];
 
-        // 查找 else 和 merge 块
-        const else_idx = self.findBlockByLabelPrefix(func, then_idx + 1, end_idx, "if_else_");
-        const merge_idx = self.findBlockByLabelPrefix(func, then_idx + 1, end_idx, "if_merge_") orelse return end_idx;
+        // 查找 else 和 merge 块（支持 if_else_/if_merge_, ternary_else_/ternary_merge_, coalesce_merge_）
+        const else_idx = self.findBlockByLabelPrefix(func, then_idx + 1, end_idx, "if_else_") orelse
+            self.findBlockByLabelPrefix(func, then_idx + 1, end_idx, "ternary_else_");
+        const merge_idx = self.findBlockByLabelPrefix(func, then_idx + 1, end_idx, "if_merge_") orelse
+            self.findBlockByLabelPrefix(func, then_idx + 1, end_idx, "ternary_merge_") orelse
+            self.findBlockByLabelPrefix(func, then_idx + 1, end_idx, "coalesce_merge_") orelse return end_idx;
 
         // Step 1: 查找并生成条件块（紧邻 then_idx 之前的块）
         // 条件块的 cond_br 终止符包含 if 条件
+        // 如果前驱块是 logical_merge_（||/&& 结果），需要先处理 ||/&& 的
+        // logical_rhs_ 块和 cond_br 块（它们在 logical_merge_ 之前）
         var cond_reg: ?IR.Register = null;
         if (then_idx > 0) {
             const prev_idx = then_idx - 1;
             const prev_block = func.blocks.items[prev_idx];
+
+            // 检测 ||/&& 模式：前驱块是 logical_merge_
+            const prev_is_logical_merge = std.mem.startsWith(u8, prev_block.label, "logical_merge_");
+            if (prev_is_logical_merge) {
+                // 搜索 ||/&& 的 cond_br 块（cond_br 目标包含 logical_merge_）
+                // 和 logical_rhs_ 块，用 generateLabelDrivenBlockRange 处理
+                for (0..prev_idx) |lbi| {
+                    if (processed.contains(lbi)) continue;
+                    const blk = func.blocks.items[lbi];
+                    if (blk.terminator) |bt| {
+                        if (bt == .cond_br) {
+                            const cb = bt.cond_br;
+                            if (cb.then_block == prev_block or cb.else_block == prev_block) {
+                                // 找到 ||/&& 的 cond_br 块，处理从该块到 logical_merge_ 的范围
+                                try self.generateLabelDrivenBlockRange(writer, func, lbi, prev_idx, cleanup_regs, processed, loop_label_counter, indent);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
             // 如果前一个块未被处理，生成其指令
             if (!processed.contains(prev_idx)) {
                 try processed.put(prev_idx, {});
@@ -6896,10 +7891,14 @@ pub const NativeLinker = struct {
                     try self.generateInstructionSimple(writer.list, inst);
                 }
             }
-            // 提取 cond_br 条件（无论是否已处理）
+            // 提取 cond_br 条件：仅当 prev 块的 cond_br 目标包含 then 块时才使用
+            // 避免 prev 块的 cond_br 是其他控制流（如 while 条件）导致错误条件
             if (prev_block.terminator) |term| {
                 if (term == .cond_br) {
-                    cond_reg = term.cond_br.cond;
+                    const then_block_ptr = func.blocks.items[then_idx];
+                    if (term.cond_br.then_block == then_block_ptr or term.cond_br.else_block == then_block_ptr) {
+                        cond_reg = term.cond_br.cond;
+                    }
                 }
             }
         }
@@ -6959,7 +7958,7 @@ pub const NativeLinker = struct {
                     if (cleanup_regs.len > 0) {
                         try writer.print("{s}    // Cleanup\n", .{then_indent});
                         for (cleanup_regs) |reg_id| {
-                            try writer.print("{s}    reg_{d}.release(runtime.runtime_allocator);\n", .{ then_indent, reg_id });
+                            if (self.isAllocaReg(reg_id)) try writer.print("{s}    reg_{d}.*.release(runtime.runtime_allocator);\n", .{ then_indent, reg_id }) else try writer.print("{s}    reg_{d}.release(runtime.runtime_allocator);\n", .{ then_indent, reg_id });
                         }
                     }
                     if (ret_val) |reg| {
@@ -6991,7 +7990,7 @@ pub const NativeLinker = struct {
                                             if (incoming.block == func.blocks.items[then_idx] or
                                                 std.mem.eql(u8, incoming.block.label, func.blocks.items[then_idx].label))
                                             {
-                                                try writer.print("{s}reg_{d} = reg_{d};\n", .{ then_indent, result.id, incoming.value.id });
+                                                try self.writePtrAwareAssign(writer, then_indent, result.id, incoming.value.id);
                                                 break;
                                             }
                                         }
@@ -7018,7 +8017,7 @@ pub const NativeLinker = struct {
                         if (cleanup_regs.len > 0) {
                             try writer.print("{s}    // Cleanup\n", .{then_indent});
                             for (cleanup_regs) |reg_id| {
-                                try writer.print("{s}    reg_{d}.release(runtime.runtime_allocator);\n", .{ then_indent, reg_id });
+                                if (self.isAllocaReg(reg_id)) try writer.print("{s}    reg_{d}.*.release(runtime.runtime_allocator);\n", .{ then_indent, reg_id }) else try writer.print("{s}    reg_{d}.release(runtime.runtime_allocator);\n", .{ then_indent, reg_id });
                             }
                         }
                         if (ret_val) |reg| {
@@ -7030,7 +8029,13 @@ pub const NativeLinker = struct {
                         }
                     },
                     .cond_br => {
-                        // else 块内有嵌套 if，递归处理
+                        // else 块内有嵌套 if，递归处理（从 else 块开始，因为它可能嵌套更多 cond_br）
+                        // 临时移除 else_idx 标记，使递归能处理该块
+                        _ = processed.remove(ei);
+                        const saved_return_generated = self.return_generated;
+                        self.return_generated = false;
+                        defer self.return_generated = saved_return_generated;
+                        try self.generateLabelDrivenBlockRange(writer, func, ei, merge_idx, cleanup_regs, processed, loop_label_counter, then_indent);
                     },
                     else => {},
                 }
@@ -7040,17 +8045,21 @@ pub const NativeLinker = struct {
             try self.generateLabelDrivenBlockRange(writer, func, ei + 1, merge_idx, cleanup_regs, processed, loop_label_counter, then_indent);
 
             // PHI 消解：在 else 分支末尾添加 PHI 赋值
+            // 当 else 块有嵌套 if（if/elseif）时，PHI 的 incoming
+            // 可能来自嵌套 if 的 merge 块而非 else 块本身
             if (!self.return_generated and !self.break_generated) {
                 const merge_blk_phi2 = func.blocks.items[merge_idx];
                 for (merge_blk_phi2.instructions.items) |phi_inst2| {
                     if (phi_inst2.op == .phi) {
                         if (phi_inst2.result) |result2| {
                             for (phi_inst2.op.phi.incoming) |incoming2| {
-                                if (incoming2.block == func.blocks.items[ei] or
-                                    std.mem.eql(u8, incoming2.block.label, func.blocks.items[ei].label))
-                                            {
-                                                try writer.print("{s}reg_{d} = reg_{d};\n", .{ then_indent, result2.id, incoming2.value.id });
-                                                break;
+                                const is_else_block = incoming2.block == func.blocks.items[ei] or
+                                    std.mem.eql(u8, incoming2.block.label, func.blocks.items[ei].label);
+                                const is_not_then = incoming2.block != func.blocks.items[then_idx] and
+                                    !std.mem.eql(u8, incoming2.block.label, func.blocks.items[then_idx].label);
+                                if (is_else_block or is_not_then) {
+                                    try self.writePtrAwareAssign(writer, then_indent, result2.id, incoming2.value.id);
+                                    break;
                                 }
                             }
                         }
@@ -7080,7 +8089,7 @@ pub const NativeLinker = struct {
                     if (cleanup_regs.len > 0) {
                         try writer.print("{s}// Cleanup\n", .{indent});
                         for (cleanup_regs) |reg_id| {
-                            try writer.print("{s}reg_{d}.release(runtime.runtime_allocator);\n", .{ indent, reg_id });
+                            if (self.isAllocaReg(reg_id)) try writer.print("{s}reg_{d}.*.release(runtime.runtime_allocator);\n", .{ indent, reg_id }) else try writer.print("{s}reg_{d}.release(runtime.runtime_allocator);\n", .{ indent, reg_id });
                         }
                     }
                     if (ret_val) |reg| {
@@ -7160,7 +8169,9 @@ pub const NativeLinker = struct {
             }
         }
 
-        try writer.print("{s}    continue :{s};\n", .{ indent, label_name });
+        if (!self.return_generated) {
+            try writer.print("{s}    continue :{s};\n", .{ indent, label_name });
+        }
         try writer.print("{s}}}\n", .{indent});
 
         // 生成 exit 块
@@ -7177,7 +8188,7 @@ pub const NativeLinker = struct {
                     if (cleanup_regs.len > 0) {
                         try writer.print("{s}// Cleanup\n", .{indent});
                         for (cleanup_regs) |reg_id| {
-                            try writer.print("{s}reg_{d}.release(runtime.runtime_allocator);\n", .{ indent, reg_id });
+                            if (self.isAllocaReg(reg_id)) try writer.print("{s}reg_{d}.*.release(runtime.runtime_allocator);\n", .{ indent, reg_id }) else try writer.print("{s}reg_{d}.release(runtime.runtime_allocator);\n", .{ indent, reg_id });
                         }
                     }
                     if (ret_val) |reg| {
