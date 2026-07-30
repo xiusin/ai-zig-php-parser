@@ -7147,6 +7147,10 @@ pub const NativeLinker = struct {
                     const then_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{if_indent});
                     defer self.allocator.free(then_indent);
 
+                    // 保存 return_generated：then/else 内的 return 不应阻止循环回边生成
+                    const saved_cond_br_rg = self.return_generated;
+                    self.return_generated = false;
+
                     // 处理 then 块
                     var then_is_be = false;
                     var then_is_logical_merge = false;
@@ -7387,6 +7391,9 @@ pub const NativeLinker = struct {
                             }
                         }
                     }
+
+                    // 恢复 return_generated：then/else 内的 return 不应阻止循环回边生成
+                    self.return_generated = saved_cond_br_rg;
 
                     // 预标记 loop 自身块为已处理
                     if (increment_idx) |inc_idx| try processed.put(inc_idx, {});
@@ -7975,6 +7982,10 @@ pub const NativeLinker = struct {
                     const then_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{if_indent});
                     defer self.allocator.free(then_indent);
 
+                    // 保存 return_generated：then/else 内的 return 不应阻止循环回边生成
+                    const saved_cond_br_rg = self.return_generated;
+                    self.return_generated = false;
+
                     var then_is_be = false;
                     var logical_merge_to_process: ?usize = null;
                     if (then_bi) |ti| {
@@ -8176,6 +8187,9 @@ pub const NativeLinker = struct {
                         }
                     }
 
+                    // 恢复 return_generated：then/else 内的 return 不应阻止循环回边生成
+                    self.return_generated = saved_cond_br_rg;
+
                     // 预标记 loop/exit 块，防止 logical_merge_ 的 cond_br 误处理
                     try processed.put(exit_idx, {});
                     if (loop_idx != body_idx) try processed.put(loop_idx, {});
@@ -8241,8 +8255,36 @@ pub const NativeLinker = struct {
                             std.mem.eql(u8, incoming.block.label, func.blocks.items[loop_idx].label);
                         const is_from_body = incoming.block == func.blocks.items[body_idx] or
                             std.mem.eql(u8, incoming.block.label, func.blocks.items[body_idx].label);
-                        if (is_from_loop or is_from_body) {
-                            if (self.isAllocaReg(incoming.value.id)) try writer.print("{s}    reg_{d} = reg_{d}.*;\n", .{ indent, result.id, incoming.value.id }) else if (self.isAllocaReg(result.id)) try writer.print("{s}    reg_{d}.* = reg_{d};\n", .{ indent, result.id, incoming.value.id }) else try writer.print("{s}    reg_{d} = reg_{d};\n", .{ indent, result.id, incoming.value.id });
+                        // 也检查是否来自回边块（br 到 cond 或 loop 的块，如嵌套循环退出块 for_exit_）
+                        const is_from_back_edge = blk: {
+                            if (is_from_loop or is_from_body) break :blk true;
+                            // 查找 incoming.block 的索引，排除 cond_idx 之前的块（循环入口）
+                            var incoming_blk_idx: ?usize = null;
+                            for (0..func.blocks.items.len) |idx| {
+                                if (func.blocks.items[idx] == incoming.block) {
+                                    incoming_blk_idx = idx;
+                                    break;
+                                }
+                            }
+                            if (incoming_blk_idx) |idx| {
+                                if (idx <= cond_idx) break :blk false; // 循环入口，不是回边
+                            }
+                            const cond_ptr = func.blocks.items[cond_idx];
+                            const loop_ptr = func.blocks.items[loop_idx];
+                            // 检查 incoming.block 是否有 br 到 cond 或 loop
+                            if (incoming.block.terminator) |bt| {
+                                if (bt == .br) {
+                                    if (bt.br == cond_ptr or bt.br == loop_ptr) break :blk true;
+                                }
+                                if (bt == .cond_br) {
+                                    if (bt.cond_br.then_block == cond_ptr or bt.cond_br.then_block == loop_ptr or
+                                        bt.cond_br.else_block == cond_ptr or bt.cond_br.else_block == loop_ptr) break :blk true;
+                                }
+                            }
+                            break :blk false;
+                        };
+                        if (is_from_back_edge) {
+                            try self.writePtrAwareAssign(writer, body_indent, result.id, incoming.value.id);
                             break;
                         }
                     }
