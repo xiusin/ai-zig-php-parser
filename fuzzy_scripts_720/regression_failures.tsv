@@ -1,0 +1,67 @@
+SKIP|f004_oop_deep_inheritance_magic.php|PHP_error_exit=255
+FAIL_DIFF|f006_oop_observer_event_dispatcher.php|PHP:=== f006: Observer + Event Dispatcher + Priority + Exception Isolation ===|--- Event: user.login (normal) ---|[SECURITY] Checking IP: 192.168.1.1||AOT:=== f006: Observer + Event Dispatcher + Priority + Exception Isolation ===|--- Event: user.login (normal) ---|[SECURITY] Checking IP: 192.168.1.1|
+FAIL_RUNTIME|f007_string_encoding_crypto_hash.php|exit=142|djb2('Hello, World!'): 2531426958 fnv1a('Hello, World!'): 1525479220 xorHash('Hello, World!'): 8873  --- Cipher --- 
+FAIL_DIFF|f009_oop_decorator_chain_command.php|PHP:=== f009: Decorator Chain + Command Pattern + Middleware ===|After create: created=true|After update: value=new_value||AOT:=== f009: Decorator Chain + Command Pattern + Middleware ===|After create: created=true|After update: value=new_value|
+FAIL_RUNTIME|f010_oop_singleton_registry_di.php|exit=139|=== f010: Singleton + Registry + DI Container === 
+FAIL_DIFF|f012_json_tree_recursive_traverse.php|PHP:=== f012: JSON Tree + Recursive Traverse + Path Find ===|Tree structure:|root ({"type":"dir"})||AOT:=== f012: JSON Tree + Recursive Traverse + Path Find ===|Tree structure:|root ({"type":"dir"})|
+FAIL_DIFF|f016_hash_bloom_consistent.php|PHP:=== f016: Hash Table + Bloom Filter + Consistent Hash ===|--- Hash Table ---|name: Alice||AOT:=== f016: Hash Table + Bloom Filter + Consistent Hash ===|--- Hash Table ---|name: Alice|
+FAIL_RUNTIME|f024_rbac_role_inheritance_policy.php|exit=142|=== f024: RBAC + Role Inheritance + Policy === --- Permission Matrix ---                     read    write   edit    delete   Alice (admin)/article:Alice (admin)/article:Alice (admin)/article:Alice (a
+FAIL_RUNTIME|f025_coding_hamming_rle_lzw_crc.php|exit=142|Round-trip OK: false After error at pos 5, decoded: '' Error corrected: false  --- RLE --- 
+PASS|f026_linkedlist_stack_queue_deque.php
+FAIL_RUNTIME|f027_number_theory_primes_modular.php|exit=139| --- Primes --- PHP Warning:  Undefined variable $primes in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f027_number_theory_primes_modular.php on line 37  Warning: Undefined variable $pri
+FAIL_RUNTIME|f028_dp_knapsack_lcs_lis.php|exit=142| Warning: Trying to access array offset on null in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f028_dp_knapsack_lcs_lis.php on line 13 PHP Warning:  Trying to access array offset on null
+FAIL_DIFF|f031_builder_fluent_immutable.php|PHP:=== f031: Builder + Fluent + Immutable + Freeze ===|POST https://api.example.com/v1/users?page=1&limit=20 [timeout=15s ssl=false]|Headers: {"Content-Type":"application\/json","Authorization":"Bearer token123"}||AOT:=== f031: Builder + Fluent + Immutable + Freeze ===|POST https://api.example.com/v1/users?page=1&limit=20 [timeout=15s ssl=false]|Headers: {"Content-Type":"application\/json","Authorization":"Bearer token123"}|
+PASS|f032_chain_responsibility_middleware.php
+FAIL_DIFF|f033_state_pattern_order_machine.php|PHP:=== f033: State Pattern + Order State Machine ===|Initial: pending|--- Paid (amount=100) ---||AOT:=== f033: State Pattern + Order State Machine ===|Initial: pending|--- Paid (amount=100) ---|
+FAIL_DIFF|f034_template_method_pipeline.php|PHP:=== f034: Template Method + Algorithm Skeleton + Hooks ===|--- JSON Processor ---|{"result":{"id":"123","name":"ALICE","extra":"data","processed_at":"2025-01-01","hash":"87afc418","metadata":{"source":"json","version":"1.0"}},"type":"json"}||AOT:=== f034: Template Method + Algorithm Skeleton + Hooks ===|--- JSON Processor ---|{"result":{"id":"123","name":"ALICE","extra":"data","processed_at":"2025-01-01","hash":"87afc418","metadata":{"source":"json","version":"1.0"}},"type":"json"}|
+PASS|f036_strategy_dynamic_pricing.php
+FAIL_RUNTIME|f037_adapter_unified_cache.php|exit=255| Fatal error: Uncaught RuntimeException: Unknown cache:  in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f037_adapter_unified_cache.php:90 Stack trace: #0 {main}   thrown in /Users/wangji
+FAIL_RUNTIME|f038_composite_filesystem_tree.php|exit=142|      📄 autoload.php (256B)       📄 composer.php (384B)   📄 README.md (128B)  Total size: 5120B 
+PASS|f039_bridge_shape_renderer.php
+PASS|f040_flyweight_forest_pool.php
+PASS|f042_array_functions_full.php
+PASS|f043_math_functions_full.php
+FAIL_DIFF|f044_json_deepops_merge_diff.php|PHP:=== f044: JSON Deep Ops + Merge + Diff + Schema ===|deepGet(user.name): Alice|deepGet(user.roles.0): admin||AOT:=== f044: JSON Deep Ops + Merge + Diff + Schema ===|deepGet(user.name): Alice|deepGet(user.roles.0): admin|
+PASS|f045_datetime_calendar_format.php
+PASS|f047_closures_curry_compose.php
+PASS|f048_match_pattern_dispatch.php
+FAIL_RUNTIME|f051_validator_rule_chain_batch.php|exit=139|=== f051: Validator + Rule Chain + Batch === --- Form Validation --- 
+FAIL_DIFF|f056_crdt_gcounter_lww_orset.php|PHP:=== f056: CRDT + GCounter + LWW + ORSet ===|--- G-Counter ---|nodeA: 5 counts={"nodeA":5}||AOT:=== f056: CRDT + GCounter + LWW + ORSet ===|--- G-Counter ---|nodeA: 5 counts={"nodeA":5}|
+PASS|f057_workflow_engine_rollback.php
+FAIL_RUNTIME|f061_graph_dijkstra_bellmanford_floyd.php|exit=142|  A→E =   --- Bellman-Ford from A ---  --- Floyd-Warshall --- 
+FAIL_RUNTIME|f065_crypto_rc4_sha1_base64_crc.php|exit=142|  CRC32('PHP') = ffffff00 (PHP: c036635b) match=false   CRC32('AOT Compiler') = ffffffff (PHP: 919b743e) match=false   CRC32('') = 00000000 (PHP: 00000000) match=true  --- SHA1 --- 
+FAIL_DIFF|f066_hamming_code_parity_checksum.php|PHP:=== f066: Hamming Code + Parity + Error Correction ===|--- Hamming (7,4) ---|Data [0000] → Encoded [0000000]||AOT:=== f066: Hamming Code + Parity + Error Correction ===|--- Hamming (7,4) ---|Data [0000] → Encoded [0000000]|
+FAIL_RUNTIME|f067_json_parser_schema_path_diff.php|exit=142| --- JSON Diff ---  --- Parse Numbers ---   '42' → NULL (type: NULL) 
+FAIL_DIFF|f070_event_sourcing_cqrs_snapshot.php|PHP:=== f070: Event Sourcing + Snapshot + CQRS ===|--- Event Sourcing: Bank Account ---|Initial balances: acc1=0 acc2=0||AOT:=== f070: Event Sourcing + Snapshot + CQRS ===|--- Event Sourcing: Bank Account ---|Initial balances: acc1=0 acc2=0|
+FAIL_DIFF|f072_type_inference_hindley_milner.php|PHP:=== f072: Type Inference + Hindley-Milner ===|--- Literal Inference ---|42 → int||AOT:=== f072: Type Inference + Hindley-Milner ===|--- Literal Inference ---|→ int|
+FAIL_DIFF|f080_db_transaction_mvcc_deadlock.php|PHP:=== f080: DB Transaction + Isolation + MVCC + Deadlock ===|--- Basic Transaction ---|Read user:1: {"name":"Alice","balance":100}||AOT:=== f080: DB Transaction + Isolation + MVCC + Deadlock ===|--- Basic Transaction ---|PHP Warning:  Trying to access array offset on null in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f080_db_transaction_mvcc_deadlock.php on line 48|
+FAIL_RUNTIME|f081_bplustree_index_range_query.php|exit=142|=== f081: B+Tree Index + Range Query + Pages === --- B+Tree Insert & Search --- 
+FAIL_RUNTIME|f085_geo_rtree_knn_geocoder.php|exit=255| Fatal error: Uncaught TypeError: BoundingBox::contains(): Argument #1 ($p) must be of type Point, null given in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f085_geo_rtree_knn_geocoder.p
+FAIL_COMPILE|f087_rbac_abac_policy_inheritance.php|[1m<unknown>[0m: [31merror[0m: Zig compiler failed with exit code 1 [1mf087_rbac_abac_policy_inheritance.php[0m: [31merror[0m: executable generation failed: CompilationFailed  [31m2 error(s)
+PASS|f090_promise_future_async_concurrent.php
+FAIL_RUNTIME|f095_compiler_opt_constfold_dce_cse.php|exit=142|  c3 = const(10)   t4 = const(7)   ret t2  --- Dead Code Elimination --- 
+FAIL_DIFF|f097_search_engine_inverted_index_tfidf.php|PHP:=== f097: Search Engine + InvertedIndex + TF-IDF ===|--- Build Index ---|Documents: 6||AOT:=== f097: Search Engine + InvertedIndex + TF-IDF ===|--- Build Index ---|Documents: 6|
+FAIL_RUNTIME|f102_memory_gc_marksweep_refcount_gen.php|exit=142|--- Cycle Detection --- Cycle detection: 0 cycles found  --- Generational GC --- Total objects: 15 
+FAIL_RUNTIME|f104_game_engine_ecs_collision_render.php|exit=142| --- Entity States ---    Entity 1: pos=(150,300) hp=100/100 sprite=   Entity 2: pos=(370,310) hp=50/50 sprite= 
+FAIL_DIFF|f105_db_index_btree_hash_queryplan.php|PHP:=== f105: DB Index + BTree + HashIndex + QueryPlan ===|--- B-Tree Index ---|Inserted: 10, 20, 5, 6, 12, 30, 7, 17, 25, 31, 3, 1, 40, 50, 15, 8, 45, 35, 28, 22||AOT:=== f105: DB Index + BTree + HashIndex + QueryPlan ===|--- B-Tree Index ---|Inserted: 10, 20, 5, 6, 12, 30, 7, 17, 25, 31, 3, 1, 40, 50, 15, 8, 45, 35, 28, 22|
+FAIL_RUNTIME|f110_os_sim_process_memory_filesystem.php|exit=139|home/user:  Readme:  Config: key=value After delete readme, home/user:  === f110 Done === 
+FAIL_DIFF|f113_distributed_consistenthash_vectorclock_quorum.php|PHP:=== f113: Distributed + ConsistentHash + VectorClock + Quorum ===|--- Consistent Hashing ---|Distribution (1000 keys):||AOT:=== f113: Distributed + ConsistentHash + VectorClock + Quorum ===|--- Consistent Hashing ---|Distribution (1000 keys):|
+FAIL_DIFF|f117_search_engine_inverted_tfidf_bm25.php|PHP:=== f117: Search Engine + InvertedIndex + TF-IDF + BM25 ===|--- Build Index ---|Index stats: {"documents":7,"terms":20,"avg_doc_length":5.7}||AOT:=== f117: Search Engine + InvertedIndex + TF-IDF + BM25 ===|--- Build Index ---|Index stats: {"documents":7,"terms":7,"avg_doc_length":5.7}|
+FAIL_DIFF|f119_logging_structured_levels_rotation.php|PHP:=== f119: Logging + Structured + Levels + Rotation ===|--- Basic Logging ---|[info] app: User logged in {"user":"alice","ip":"192.168.1.1"}||AOT:=== f119: Logging + Structured + Levels + Rotation ===|--- Basic Logging ---|[info] app: User logged in {"user":"alice","ip":"192.168.1.1"}|
+FAIL_RUNTIME|f124_container_orchestrator_pod_service_autoscale.php|exit=139|  node-1 (10.0.0.1): CPU=22.5% Mem=9.4% Pods=3   node-2 (10.0.0.2): CPU=0.0% Mem=0.0% Pods=0   node-3 (10.0.0.3): CPU=0.0% Mem=0.0% Pods=0  --- Create Service --- 
+PASS|f134_event_sourcing_snapshot_cqrs_projection.php
+FAIL_RUNTIME|f135_math_number_theory_crt_miller_rabin.php|exit=142|modInverse(3, 11) = 4 (expected 4) modInverse(7, 26) = 15 (expected 15) Verify: 3*4 mod 11 = 1  --- Modular Exponentiation --- 
+FAIL_DIFF|f151_type_system_generics_variance.php|PHP:=== f151: Type System + Generics + Variance + Inference ===|--- Covariant Return ---|Dog shelter: Woof||AOT:=== f151: Type System + Generics + Variance + Inference ===|--- Covariant Return ---|Dog shelter: Woof|
+PASS|f152_closure_arrow_higher_order.php
+FAIL_DIFF|f160_virtual_fs_path_traversal.php|PHP:=== f160: Virtual FS + Path Ops + Directory Traversal ===|--- Virtual File System ---|Directory structure:||AOT:=== f160: Virtual FS + Path Ops + Directory Traversal ===|--- Virtual File System ---|Directory structure:|
+FAIL_RUNTIME|f161_json_xml_csv_parsing.php|exit=142|    Bob: 25   By city:     0: Alice, Bob, Charlie, Diana    Generated CSV: 
+FAIL_DIFF|f163_event_driven_dispatch_bus.php|PHP:=== f163: Event-Driven + PubSub + EventSourcing ===|--- Event Bus Pub/Sub ---|[Email Service] Welcome email sent to Alice||AOT:=== f163: Event-Driven + PubSub + EventSourcing ===|--- Event Bus Pub/Sub ---|[Email Service] Welcome email sent to Alice|
+FAIL_DIFF|f164_plugin_hook_system.php|PHP:=== f164: Plugin System + Hooks + Lifecycle ===|--- Register Plugins ---|Registered: seo, cache, analytics||AOT:=== f164: Plugin System + Hooks + Lifecycle ===|--- Register Plugins ---|Registered: seo, cache, analytics|
+FAIL_DIFF|f171_state_machine_dfa.php|PHP:=== f171: State Machine + DFA + NFA ===|--- Order State Machine ---|Initial: pending||AOT:=== f171: State Machine + DFA + NFA ===|--- Order State Machine ---|Initial: pending|
+FAIL_DIFF|f173_concurrency_primitives_sim.php|PHP:=== f173: Concurrency Primitives Simulation ===|--- Mutex ---|Lock by thread 1: OK||AOT:=== f173: Concurrency Primitives Simulation ===|--- Mutex ---|Lock by thread 1: OK|
+PASS|f174_command_undo_redo_macro.php
+FAIL_RUNTIME|f175_decorator_strategy_template.php|exit=142| --- Strategy: Sorting ---   Original: 64, 34, 25, 12, 22, 11, 90, 1, 45, 33   BubbleSort: 1, 11, 12, 22, 25, 33, 34, 45, 64, 90   QuickSort: 1, 11, 12, 22, 25, 33, 34, 45, 64, 90 
+FAIL_DIFF|f176_specification_chain_rules.php|PHP:=== f176: Specification Pattern + Rule Chain ===|--- Specification: User Validation ---|User evaluation:||AOT:=== f176: Specification Pattern + Rule Chain ===|--- Specification: User Validation ---|User evaluation:|
+FAIL_RUNTIME|f177_graph_traversal_dfs_bfs.php|exit=139|=== f177: Graph Algorithms + DFS/BFS/ShortestPath === --- Undirected Graph: DFS/BFS ---   Vertices: A, B, C, D, E, F, G 
+FAIL_DIFF|f178_numeric_precision_matrix.php|PHP:=== f178: Numeric + Matrix + Linear Algebra ===|--- Matrix Operations ---|Matrix A:||AOT:=== f178: Numeric + Matrix + Linear Algebra ===|--- Matrix Operations ---|Matrix A:|
+PASS|f179_visitor_composite_ast.php
