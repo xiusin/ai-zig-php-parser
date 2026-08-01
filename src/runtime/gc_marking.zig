@@ -128,7 +128,7 @@ pub const GCMarker = struct {
         const typed_obj: *TypedGCObject = @ptrCast(@alignCast(type_obj_ptr));
 
         // 验证类型标签是否有效
-        const type_tag_value = @intFromEnum(typed_obj.type_tag);
+        const type_tag_value = @backingInt(typed_obj.type_tag);
         if (type_tag_value > 9 and type_tag_value != 255) {
             return null; // 无效的类型标签
         }
@@ -204,7 +204,7 @@ pub const GCMarker = struct {
         // 3. 检查标记状态
         const mark_ptr: *volatile @TypeOf(obj.mark) = @ptrCast(&obj.mark);
         const mark = mark_ptr.*;
-        const mark_value = @intFromEnum(mark);
+        const mark_value = @backingInt(mark);
         if (mark_value > 2) {
             return false;
         }
@@ -212,7 +212,7 @@ pub const GCMarker = struct {
         // 4. 检查代
         const gen_ptr: *volatile @TypeOf(obj.generation) = @ptrCast(&obj.generation);
         const gen = gen_ptr.*;
-        const gen_value = @intFromEnum(gen);
+        const gen_value = @backingInt(gen);
         if (gen_value > 3) {
             return false;
         }

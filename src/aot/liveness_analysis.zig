@@ -366,15 +366,12 @@ pub const LivenessAnalysis = struct {
     ) void {
         switch (inst.op) {
             // === BinaryOp (lhs, rhs) ===
-            .add, .sub, .mul, .div, .mod, .pow, .concat, .eq, .ne, .lt, .le, .gt, .ge,
-            .bit_and, .bit_or, .bit_xor, .shl, .shr,
-            .identical, .not_identical, .spaceship, .and_, .or_ => |bin| {
+            .add, .sub, .mul, .div, .mod, .pow, .concat, .eq, .ne, .lt, .le, .gt, .ge, .bit_and, .bit_or, .bit_xor, .shl, .shr, .identical, .not_identical, .spaceship, .and_, .or_ => |bin| {
                 callback(ctx, bin.lhs.id);
                 callback(ctx, bin.rhs.id);
             },
             // === UnaryOp (operand) ===
-            .neg, .not, .bit_not, .move, .get_type, .clone, .retain, .release,
-            .unset_var, .strlen, .array_count, .channel_close, .await_, .debug_print, .yield_from => |un| {
+            .neg, .not, .bit_not, .move, .get_type, .clone, .retain, .release, .unset_var, .strlen, .array_count, .channel_close, .await_, .debug_print, .yield_from => |un| {
                 callback(ctx, un.operand.id);
             },
             // === CastOp (value) ===

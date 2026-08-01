@@ -330,7 +330,7 @@ pub const Compiler = struct {
 
         // OSR Dispatch logic
         // x3 is boolean (non-zero means jump to OSR target)
-        try asm_.cmp(.x3, @enumFromInt(31)); // cmp x3, 0
+        try asm_.cmp(.x3, @fromBackingInt(@intCast(31))); // cmp x3, 0
         try asm_.b_cond(.EQ, 4); // Skip jump if 0
 
         const osr_jump_idx = asm_.code.items.len;
@@ -366,7 +366,7 @@ pub const Compiler = struct {
 
             const op_byte = code[ip];
             ip += 1;
-            const op: OpCode = @enumFromInt(op_byte);
+            const op: OpCode = @fromBackingInt(@intCast(op_byte));
 
             switch (op) {
                 .push_0 => {

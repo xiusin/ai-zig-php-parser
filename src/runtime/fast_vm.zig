@@ -336,7 +336,7 @@ pub const FastVM = struct {
             }
 
             const op_byte = code[frame.ip];
-            const op: OpCode = @enumFromInt(op_byte);
+            const op: OpCode = @fromBackingInt(@intCast(op_byte));
             frame.ip += 1;
             // std.debug.print("Op: {s} stack: {d}\n", .{@tagName(op), self.stack.top});
             std.debug.print("Op: {s} stack: {d}\n", .{ @tagName(op), self.stack.top });
@@ -810,9 +810,9 @@ test "FastVM simple" {
 
     // 测试: 10 + 20 = 30
     const code = [_]u8{
-        @intFromEnum(OpCode.push_int), 10,                        0, 0, 0,
-        @intFromEnum(OpCode.push_int), 20,                        0, 0, 0,
-        @intFromEnum(OpCode.add_i),    @intFromEnum(OpCode.halt),
+        @backingInt(OpCode.push_int), 10,                       0, 0, 0,
+        @backingInt(OpCode.push_int), 20,                       0, 0, 0,
+        @backingInt(OpCode.add_i),    @backingInt(OpCode.halt),
     };
 
     const func = CompiledFunc{
@@ -836,41 +836,41 @@ test "FastVM loop" {
     // 局部变量: 0=sum, 1=i
     const code = [_]u8{
         // sum = 0
-        @intFromEnum(OpCode.push_0),
-        @intFromEnum(OpCode.store_local),
+        @backingInt(OpCode.push_0),
+        @backingInt(OpCode.store_local),
         0,
         // i = 1
-        @intFromEnum(OpCode.push_1),
-        @intFromEnum(OpCode.store_local),
+        @backingInt(OpCode.push_1),
+        @backingInt(OpCode.store_local),
         1,
         // loop:
         // sum = sum + i
-        @intFromEnum(OpCode.push_local),
+        @backingInt(OpCode.push_local),
         0,
-        @intFromEnum(OpCode.push_local),
+        @backingInt(OpCode.push_local),
         1,
-        @intFromEnum(OpCode.add_i),
-        @intFromEnum(OpCode.store_local),
+        @backingInt(OpCode.add_i),
+        @backingInt(OpCode.store_local),
         0,
         // i++
-        @intFromEnum(OpCode.load_inc_store),
+        @backingInt(OpCode.load_inc_store),
         1,
         // if i <= 10 goto loop
-        @intFromEnum(OpCode.push_local),
+        @backingInt(OpCode.push_local),
         1,
-        @intFromEnum(OpCode.push_int),
+        @backingInt(OpCode.push_int),
         10,
         0,
         0,
         0,
-        @intFromEnum(OpCode.le),
-        @intFromEnum(OpCode.jnz),
+        @backingInt(OpCode.le),
+        @backingInt(OpCode.jnz),
         @as(u8, @bitCast(@as(i8, -18))),
         0xFF,
         // return sum
-        @intFromEnum(OpCode.push_local),
+        @backingInt(OpCode.push_local),
         0,
-        @intFromEnum(OpCode.halt),
+        @backingInt(OpCode.halt),
     };
 
     const func = CompiledFunc{

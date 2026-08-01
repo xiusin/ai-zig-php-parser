@@ -66,8 +66,8 @@ pub const Assembler = struct {
         // 0x91000000
         const base: u32 = 0x91000000;
         const imm_val = @as(u32, imm) << 10;
-        const rn_val = @as(u32, @intFromEnum(rn)) << 5;
-        const rd_val = @as(u32, @intFromEnum(rd));
+        const rn_val = @as(u32, @backingInt(rn)) << 5;
+        const rd_val = @as(u32, @backingInt(rd));
 
         try self.emit(base | imm_val | rn_val | rd_val);
     }
@@ -79,8 +79,8 @@ pub const Assembler = struct {
         // 0xD1000000
         const base: u32 = 0xD1000000;
         const imm_val = @as(u32, imm) << 10;
-        const rn_val = @as(u32, @intFromEnum(rn)) << 5;
-        const rd_val = @as(u32, @intFromEnum(rd));
+        const rn_val = @as(u32, @backingInt(rn)) << 5;
+        const rd_val = @as(u32, @backingInt(rd));
 
         try self.emit(base | imm_val | rn_val | rd_val);
     }
@@ -91,10 +91,10 @@ pub const Assembler = struct {
         const sf: u32 = 1 << 31;
         const op: u32 = 0b0001011 << 24;
         const shift: u32 = 0 << 22;
-        const rm_val = @as(u32, @intFromEnum(rm)) << 16;
+        const rm_val = @as(u32, @backingInt(rm)) << 16;
         const imm6: u32 = 0 << 10;
-        const rn_val = @as(u32, @intFromEnum(rn)) << 5;
-        const rd_val = @as(u32, @intFromEnum(rd));
+        const rn_val = @as(u32, @backingInt(rn)) << 5;
+        const rd_val = @as(u32, @backingInt(rd));
 
         try self.emit(sf | op | shift | rm_val | imm6 | rn_val | rd_val);
     }
@@ -105,10 +105,10 @@ pub const Assembler = struct {
         const sf: u32 = 1 << 31;
         const op: u32 = 0b1001011 << 24; // Bit 30 is 1 for SUB (10)
         const shift: u32 = 0 << 22;
-        const rm_val = @as(u32, @intFromEnum(rm)) << 16;
+        const rm_val = @as(u32, @backingInt(rm)) << 16;
         const imm6: u32 = 0 << 10;
-        const rn_val = @as(u32, @intFromEnum(rn)) << 5;
-        const rd_val = @as(u32, @intFromEnum(rd));
+        const rn_val = @as(u32, @backingInt(rn)) << 5;
+        const rd_val = @as(u32, @backingInt(rd));
 
         try self.emit(sf | op | shift | rm_val | imm6 | rn_val | rd_val);
     }
@@ -119,10 +119,10 @@ pub const Assembler = struct {
         const sf: u32 = 1 << 31;
         const op: u32 = 0b1101011 << 24; // Bit 30,29 is 11 for SUBS
         const shift: u32 = 0 << 22;
-        const rm_val = @as(u32, @intFromEnum(rm)) << 16;
+        const rm_val = @as(u32, @backingInt(rm)) << 16;
         const imm6: u32 = 0 << 10;
-        const rn_val = @as(u32, @intFromEnum(rn)) << 5;
-        const rd_val = @as(u32, @intFromEnum(rd));
+        const rn_val = @as(u32, @backingInt(rn)) << 5;
+        const rd_val = @as(u32, @backingInt(rd));
 
         try self.emit(sf | op | shift | rm_val | imm6 | rn_val | rd_val);
     }
@@ -130,7 +130,7 @@ pub const Assembler = struct {
     /// CMP (shifted register) - alias for SUBS xzr, xn, xm
     pub fn cmp(self: *Assembler, rn: Register, rm: Register) !void {
         // xzr is 31
-        try self.subs(@enumFromInt(31), rn, rm);
+        try self.subs(@fromBackingInt(@intCast(31)), rn, rm);
     }
 
     /// B.cond (Conditional Branch)
@@ -158,7 +158,7 @@ pub const Assembler = struct {
         const base: u32 = 0x54000000;
         // imm19 is instruction offset (divide by 4)
         const imm = @as(u32, @bitCast(@as(i32, offset_bytes >> 2))) & 0x0007FFFF;
-        const cond_val = @as(u32, @intFromEnum(cond));
+        const cond_val = @as(u32, @backingInt(cond));
         try self.emit(base | (imm << 5) | cond_val);
     }
 
@@ -168,9 +168,9 @@ pub const Assembler = struct {
         // sf=1, op=0, S=0, 1010, shift=00, 0, Rm, imm6=0, Rn=XZR(31), Rd
         const sf: u32 = 1 << 31;
         const op: u32 = 0b00101010 << 24;
-        const rm_val = @as(u32, @intFromEnum(rm)) << 16;
+        const rm_val = @as(u32, @backingInt(rm)) << 16;
         const rn_val = 31 << 5; // XZR
-        const rd_val = @as(u32, @intFromEnum(rd));
+        const rd_val = @as(u32, @backingInt(rd));
 
         try self.emit(sf | op | rm_val | rn_val | rd_val);
     }
@@ -183,7 +183,7 @@ pub const Assembler = struct {
         const op: u32 = 0b111100101 << 23;
         const hw: u32 = @as(u32, shift_val) << 21;
         const imm16: u32 = @as(u32, imm) << 5;
-        const rd_val = @as(u32, @intFromEnum(rd));
+        const rd_val = @as(u32, @backingInt(rd));
 
         try self.emit(sf | op | hw | imm16 | rd_val);
     }
@@ -196,7 +196,7 @@ pub const Assembler = struct {
         const op: u32 = 0b110100101 << 23;
         const hw: u32 = @as(u32, shift_val) << 21;
         const imm16: u32 = @as(u32, imm) << 5;
-        const rd_val = @as(u32, @intFromEnum(rd));
+        const rd_val = @as(u32, @backingInt(rd));
 
         try self.emit(sf | op | hw | imm16 | rd_val);
     }
@@ -216,9 +216,9 @@ pub const Assembler = struct {
         // 0xF8607800 | (Rm << 16) | (Rn << 5) | Rt
         // Bit 21=1, Bit 12=1 for scaled offset
         const base: u32 = 0xF8607800;
-        const rm_val = @as(u32, @intFromEnum(rm)) << 16;
-        const rn_val = @as(u32, @intFromEnum(rn)) << 5;
-        const rt_val = @as(u32, @intFromEnum(rt));
+        const rm_val = @as(u32, @backingInt(rm)) << 16;
+        const rn_val = @as(u32, @backingInt(rn)) << 5;
+        const rt_val = @as(u32, @backingInt(rt));
 
         try self.emit(base | rm_val | rn_val | rt_val);
     }
@@ -229,9 +229,9 @@ pub const Assembler = struct {
         // size=11, 111, 000, 00, V=0, Rm, option=011, S=1, 10, Rn, Rt
         // 0xF8207800
         const base: u32 = 0xF8207800;
-        const rm_val = @as(u32, @intFromEnum(rm)) << 16;
-        const rn_val = @as(u32, @intFromEnum(rn)) << 5;
-        const rt_val = @as(u32, @intFromEnum(rt));
+        const rm_val = @as(u32, @backingInt(rm)) << 16;
+        const rn_val = @as(u32, @backingInt(rn)) << 5;
+        const rt_val = @as(u32, @backingInt(rt));
 
         try self.emit(base | rm_val | rn_val | rt_val);
     }
@@ -251,8 +251,8 @@ pub const Assembler = struct {
         const shift_val = @as(u32, shift);
         const immr = ((64 - shift_val) & 63) << 16;
         const imms = (63 - shift_val) << 10;
-        const rn_val = @as(u32, @intFromEnum(rn)) << 5;
-        const rd_val = @as(u32, @intFromEnum(rd));
+        const rn_val = @as(u32, @backingInt(rn)) << 5;
+        const rd_val = @as(u32, @backingInt(rd));
 
         try self.emit(sf | opc | n | immr | imms | rn_val | rd_val);
     }
@@ -265,8 +265,8 @@ pub const Assembler = struct {
         // 0xF9000000
         const base: u32 = 0xF9000000;
         const imm = @as(u32, imm_offset) << 10;
-        const rn_val = @as(u32, @intFromEnum(rn)) << 5;
-        const rt_val = @as(u32, @intFromEnum(rt));
+        const rn_val = @as(u32, @backingInt(rn)) << 5;
+        const rt_val = @as(u32, @backingInt(rt));
         try self.emit(base | imm | rn_val | rt_val);
     }
 
@@ -278,8 +278,8 @@ pub const Assembler = struct {
         // 0xF9400000
         const base: u32 = 0xF9400000;
         const imm = @as(u32, imm_offset) << 10;
-        const rn_val = @as(u32, @intFromEnum(rn)) << 5;
-        const rt_val = @as(u32, @intFromEnum(rt));
+        const rn_val = @as(u32, @backingInt(rn)) << 5;
+        const rt_val = @as(u32, @backingInt(rt));
         try self.emit(base | imm | rn_val | rt_val);
     }
 
@@ -309,7 +309,7 @@ pub const Assembler = struct {
         // 1101 0110 0001 1111 0000 00 Rn 00000
         // 0xD61F0000
         const base: u32 = 0xD61F0000;
-        const rn_val = @as(u32, @intFromEnum(rn)) << 5;
+        const rn_val = @as(u32, @backingInt(rn)) << 5;
         try self.emit(base | rn_val);
     }
 
@@ -318,7 +318,7 @@ pub const Assembler = struct {
         // 1101 0110 0011 1111 0000 00 Rn 00000
         // 0xD63F0000
         const base: u32 = 0xD63F0000;
-        const rn_val = @as(u32, @intFromEnum(rn)) << 5;
+        const rn_val = @as(u32, @backingInt(rn)) << 5;
         try self.emit(base | rn_val);
     }
 
@@ -332,8 +332,8 @@ pub const Assembler = struct {
         const n: u32 = 1 << 22; // N=1 for 64-bit
         const immr = @as(u32, lsb) << 16;
         const imms = @as(u32, lsb + width - 1) << 10;
-        const rn_val = @as(u32, @intFromEnum(rn)) << 5;
-        const rd_val = @as(u32, @intFromEnum(rd));
+        const rn_val = @as(u32, @backingInt(rn)) << 5;
+        const rd_val = @as(u32, @backingInt(rd));
 
         try self.emit(sf | opc | n | immr | imms | rn_val | rd_val);
     }
@@ -344,9 +344,9 @@ pub const Assembler = struct {
         // sf=1, op=0, S=0, 1010, shift=00, 0, Rm, imm6=0, Rn, Rd
         // 0xAA000000
         const base: u32 = 0xAA000000;
-        const rm_val = @as(u32, @intFromEnum(rm)) << 16;
-        const rn_val = @as(u32, @intFromEnum(rn)) << 5;
-        const rd_val = @as(u32, @intFromEnum(rd));
+        const rm_val = @as(u32, @backingInt(rm)) << 16;
+        const rn_val = @as(u32, @backingInt(rn)) << 5;
+        const rd_val = @as(u32, @backingInt(rd));
         try self.emit(base | rm_val | rn_val | rd_val);
     }
 
@@ -356,10 +356,10 @@ pub const Assembler = struct {
         // sf=1, op=0, S=0, 11010, 1, Rm, cond, 0, Rn, Rd
         // 0x9A800000
         const base: u32 = 0x9A800000;
-        const rm_val = @as(u32, @intFromEnum(rm)) << 16;
-        const cond_val = @as(u32, @intFromEnum(cond)) << 12;
-        const rn_val = @as(u32, @intFromEnum(rn)) << 5;
-        const rd_val = @as(u32, @intFromEnum(rd));
+        const rm_val = @as(u32, @backingInt(rm)) << 16;
+        const cond_val = @as(u32, @backingInt(cond)) << 12;
+        const rn_val = @as(u32, @backingInt(rn)) << 5;
+        const rd_val = @as(u32, @backingInt(rd));
 
         try self.emit(base | rm_val | cond_val | rn_val | rd_val);
     }
@@ -375,7 +375,7 @@ pub const Assembler = struct {
         const imm = @as(u32, @bitCast(@as(i32, offset)));
         const immlo = imm & 3;
         const immhi = (imm >> 2) & 0x7FFFF;
-        const rd_val = @as(u32, @intFromEnum(rd));
+        const rd_val = @as(u32, @backingInt(rd));
 
         try self.emit(base | (immlo << 29) | (immhi << 5) | rd_val);
     }

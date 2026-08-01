@@ -2885,27 +2885,27 @@ pub const PHPClosure = struct {
 
     pub fn release(self: *PHPClosure, allocator: Allocator) void {
         if (self.ref_count == 0) return;
-self.ref_count -= 1;
-if (self.ref_count == 0) {
-if (self.gc_info.buffered) {
-if (!gc_in_progress) {
-gcBufferClosure(self);
-}
-// GC 进行中时不释放，由 GC 收集阶段统一处理
-} else {
-for (self.captures) |c| {
-c.release(allocator);
-}
-self.bound_this.release(allocator);
-allocator.free(self.captures);
-if (alloc_counters.php_closure_live_objects > 0) {
-alloc_counters.php_closure_live_objects -= 1;
-}
-destroyPHPClosure(self, allocator);
-}
-} else if (!gc_in_progress) {
-gcBufferClosure(self);
-}
+        self.ref_count -= 1;
+        if (self.ref_count == 0) {
+            if (self.gc_info.buffered) {
+                if (!gc_in_progress) {
+                    gcBufferClosure(self);
+                }
+                // GC 进行中时不释放，由 GC 收集阶段统一处理
+            } else {
+                for (self.captures) |c| {
+                    c.release(allocator);
+                }
+                self.bound_this.release(allocator);
+                allocator.free(self.captures);
+                if (alloc_counters.php_closure_live_objects > 0) {
+                    alloc_counters.php_closure_live_objects -= 1;
+                }
+                destroyPHPClosure(self, allocator);
+            }
+        } else if (!gc_in_progress) {
+            gcBufferClosure(self);
+        }
     }
 };
 
@@ -3341,25 +3341,29 @@ fn php_object_unset_impl(obj_val: Value, obj: *PHPObject, name: []const u8) !Val
 }
 
 fn wrapBuiltin_str_starts_with(ctx: Value, args: []const Value, allocator: Allocator) !Value {
-    _ = ctx; _ = allocator;
+    _ = ctx;
+    _ = allocator;
     if (args.len < 2) return error.InvalidArgumentCount;
     return php_str_starts_with(args[0], args[1]);
 }
 
 fn wrapBuiltin_str_ends_with(ctx: Value, args: []const Value, allocator: Allocator) !Value {
-    _ = ctx; _ = allocator;
+    _ = ctx;
+    _ = allocator;
     if (args.len < 2) return error.InvalidArgumentCount;
     return php_str_ends_with(args[0], args[1]);
 }
 
 fn wrapBuiltin_str_contains(ctx: Value, args: []const Value, allocator: Allocator) !Value {
-    _ = ctx; _ = allocator;
+    _ = ctx;
+    _ = allocator;
     if (args.len < 2) return error.InvalidArgumentCount;
     return php_str_contains(args[0], args[1]);
 }
 
 fn wrapBuiltin_spl_object_id(ctx: Value, args: []const Value, allocator: Allocator) !Value {
-    _ = ctx; _ = allocator;
+    _ = ctx;
+    _ = allocator;
     if (args.len < 1) return error.InvalidArgumentCount;
     return php_spl_object_id(args[0]);
 }
@@ -17380,7 +17384,7 @@ pub const ClassMeta = struct {
                     try this.setProperty(
                         "__state",
                         Value.initInt(
-                            @intFromEnum(FiberState.created),
+                            @backingInt(FiberState.created),
                         ),
                     );
                     // 创建 FiberContext
@@ -17697,13 +17701,13 @@ pub const ClassMeta = struct {
         const this = Value_asObject(ctx);
         const sv = this.getPropertyDirect("__state") orelse
             return .created;
-        return @enumFromInt(@as(u8, @intCast(sv.toInt())));
+        return @fromBackingInt(@intCast(@as(u8, @intCast(sv.toInt()))));
     }
 
     fn setFiberState(obj: *PHPObject, state: FiberState) void {
         obj.setProperty(
             "__state",
-            Value.initInt(@intFromEnum(state)),
+            Value.initInt(@backingInt(state)),
         ) catch {};
     }
 
@@ -18267,19 +18271,19 @@ pub const PHPObject = struct {
         if (self.ref_count == 0) {
             return;
         }
-self.ref_count -= 1;
-if (self.ref_count == 0) {
-if (self.gc_info.buffered) {
-if (!gc_in_progress) {
-gcBufferObject(self);
-}
-// GC 进行中时不释放，由 GC 收集阶段统一处理
-} else {
-self.deinit();
-}
-} else if (!gc_in_progress) {
-gcBufferObject(self);
-}
+        self.ref_count -= 1;
+        if (self.ref_count == 0) {
+            if (self.gc_info.buffered) {
+                if (!gc_in_progress) {
+                    gcBufferObject(self);
+                }
+                // GC 进行中时不释放，由 GC 收集阶段统一处理
+            } else {
+                self.deinit();
+            }
+        } else if (!gc_in_progress) {
+            gcBufferObject(self);
+        }
     }
 
     /// 释放对象
@@ -18395,19 +18399,19 @@ gcBufferObject(self);
                     // PHP 语义：__set 仅对未声明的属性触发
                     if (findPropertyDeclaringClass(meta, name) == null) {
                         if (meta.findMethodLookup("__set")) |lookup| {
-                        in_magic_method = true;
-                        defer in_magic_method = false;
+                            in_magic_method = true;
+                            defer in_magic_method = false;
 
-                        const this_val = Value_initObject(self);
-                        const name_str = try PHPString.init(self.allocator, name);
-                        const name_val = Value.initString(name_str);
-                        defer name_val.release(self.allocator);
-                        const args = [_]Value{ name_val, value };
-                        const guard = ClassContext.init(meta, lookup.owner);
-                        defer guard.deinit();
-                        _ = try lookup.method.func(this_val, &args, self.allocator);
-                        return;
-                    }
+                            const this_val = Value_initObject(self);
+                            const name_str = try PHPString.init(self.allocator, name);
+                            const name_val = Value.initString(name_str);
+                            defer name_val.release(self.allocator);
+                            const args = [_]Value{ name_val, value };
+                            const guard = ClassContext.init(meta, lookup.owner);
+                            defer guard.deinit();
+                            _ = try lookup.method.func(this_val, &args, self.allocator);
+                            return;
+                        }
                     }
                 }
             }
@@ -20201,22 +20205,22 @@ pub fn php_call_static_with_ctx(ctx: Value, class_name: []const u8, method_name:
 
 /// 获取静态属性
 pub fn php_get_static_property(class_name: []const u8, property_name: []const u8) !Value {
-const meta = blk: {
-if (std.mem.eql(u8, class_name, "self")) {
-// trait 中 self:: 静态属性应解析为使用类（called class），而非 trait 自身
-if (getCurrentScopeClass()) |scope| {
-if (scope.is_trait) {
-if (getCurrentCalledClass()) |called| break :blk called;
-}
-break :blk scope;
-}
-// 如果没有作用域，尝试从调用类获取
-if (getCurrentCalledClass()) |called| {
-break :blk called;
-}
-std.debug.print("ERROR: getCurrentScopeClass() returned null for 'self'\n", .{});
-return error.ClassNotFound;
-}
+    const meta = blk: {
+        if (std.mem.eql(u8, class_name, "self")) {
+            // trait 中 self:: 静态属性应解析为使用类（called class），而非 trait 自身
+            if (getCurrentScopeClass()) |scope| {
+                if (scope.is_trait) {
+                    if (getCurrentCalledClass()) |called| break :blk called;
+                }
+                break :blk scope;
+            }
+            // 如果没有作用域，尝试从调用类获取
+            if (getCurrentCalledClass()) |called| {
+                break :blk called;
+            }
+            std.debug.print("ERROR: getCurrentScopeClass() returned null for 'self'\n", .{});
+            return error.ClassNotFound;
+        }
         if (std.mem.eql(u8, class_name, "parent")) {
             const scope = getCurrentScopeClass() orelse return error.ClassNotFound;
             break :blk scope.parent orelse return error.ClassNotFound;
@@ -20252,17 +20256,17 @@ return error.ClassNotFound;
 
 /// 设置静态属性
 pub fn php_set_static_property(class_name: []const u8, property_name: []const u8, value: Value) !Value {
-var meta = blk: {
-if (std.mem.eql(u8, class_name, "self")) {
-// trait 中 self:: 静态属性应解析为使用类（called class），而非 trait 自身
-if (getCurrentScopeClass()) |scope| {
-if (scope.is_trait) {
-if (getCurrentCalledClass()) |called| break :blk @constCast(called);
-}
-break :blk @constCast(scope);
-}
-break :blk @constCast(getCurrentCalledClass() orelse return error.ClassNotFound);
-}
+    var meta = blk: {
+        if (std.mem.eql(u8, class_name, "self")) {
+            // trait 中 self:: 静态属性应解析为使用类（called class），而非 trait 自身
+            if (getCurrentScopeClass()) |scope| {
+                if (scope.is_trait) {
+                    if (getCurrentCalledClass()) |called| break :blk @constCast(called);
+                }
+                break :blk @constCast(scope);
+            }
+            break :blk @constCast(getCurrentCalledClass() orelse return error.ClassNotFound);
+        }
         if (std.mem.eql(u8, class_name, "parent")) {
             const scope = getCurrentScopeClass() orelse return error.ClassNotFound;
             break :blk @constCast(scope.parent orelse return error.ClassNotFound);
@@ -20755,7 +20759,7 @@ pub fn php_getdate(ts_val: Value, allocator: Allocator) !Value {
     const month_day = year_day.calculateMonthDay();
 
     const year = year_day.year;
-    const month: i64 = @intCast(@intFromEnum(month_day.month));
+    const month: i64 = @intCast(@backingInt(month_day.month));
     const day: i64 = @intCast(month_day.day_index + 1);
     const hours: i64 = @intCast(day_seconds.getHoursIntoDay());
     const minutes: i64 = @intCast(day_seconds.getMinutesIntoHour());
@@ -20800,7 +20804,7 @@ pub fn php_idate(format_val: Value, ts_val: Value, allocator: Allocator) !Value 
     const minutes: i64 = @intCast(day_seconds.getMinutesIntoHour());
     const secs: i64 = @intCast(day_seconds.getSecondsIntoMinute());
     const day: i64 = @intCast(month_day.day_index + 1);
-    const month: i64 = @intCast(@intFromEnum(month_day.month));
+    const month: i64 = @intCast(@backingInt(month_day.month));
     const year: i64 = @intCast(@as(i32, year_day.year));
     const days_since_epoch: i64 = @intCast(epoch_day.day);
     const wday: i64 = @mod(days_since_epoch + 4, 7);
@@ -22890,7 +22894,7 @@ pub fn php_gethostbyname(hostname: Value, allocator: Allocator) !Value {
 
     var result_ptr: ?*std.posix.addrinfo = null;
     const rc = std.c.getaddrinfo(c_name.ptr, null, &hints, &result_ptr);
-    if (@intFromEnum(rc) != 0 or result_ptr == null) {
+    if (@backingInt(rc) != 0 or result_ptr == null) {
         return hostname;
     }
     defer std.c.freeaddrinfo(result_ptr.?);
@@ -27578,12 +27582,12 @@ pub fn php_hash_pbkdf2(algo: Value, password: Value, salt: Value, iterations: Va
 
 /// crc32 - 计算字符串的CRC32校验值
 pub fn php_crc32(str: Value) !Value {
-if (!str.isString()) return error.InvalidArgument;
+    if (!str.isString()) return error.InvalidArgument;
 
-const input = str.asString().data;
-const crc = std.hash.Crc32.hash(input);
-// PHP 64-bit: crc32() 返回无符号32位整数（0 to 4294967295）
-return Value.initInt(@intCast(crc));
+    const input = str.asString().data;
+    const crc = std.hash.Crc32.hash(input);
+    // PHP 64-bit: crc32() 返回无符号32位整数（0 to 4294967295）
+    return Value.initInt(@intCast(crc));
 }
 
 /// hash_algos - 返回支持的哈希算法列表

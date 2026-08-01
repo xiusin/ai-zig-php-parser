@@ -25,12 +25,12 @@ pub const Register = enum(u8) {
 
     /// 获取寄存器编号（用于编码）
     pub fn code(self: Register) u8 {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 
     /// 是否需要 REX 前缀
     pub fn needsRex(self: Register) bool {
-        return @intFromEnum(self) >= 8;
+        return @backingInt(self) >= 8;
     }
 };
 
@@ -54,7 +54,7 @@ pub const Condition = enum(u8) {
     G = 0xF, // Greater (signed >)
 
     pub fn code(self: Condition) u8 {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 };
 

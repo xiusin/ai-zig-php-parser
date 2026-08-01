@@ -24,7 +24,7 @@ const WireType = enum(u3) {
 };
 
 fn writeKey(writer: anytype, field_number: u32, wire: WireType) !void {
-    const key: u64 = (@as(u64, field_number) << 3) | @as(u64, @intFromEnum(wire));
+    const key: u64 = (@as(u64, field_number) << 3) | @as(u64, @backingInt(wire));
     try writeVarint(writer, key);
 }
 

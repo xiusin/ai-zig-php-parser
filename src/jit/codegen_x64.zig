@@ -266,7 +266,7 @@ pub const CodeGenX64 = struct {
 
             const op_byte = code[ip];
             ip += 1;
-            const op: OpCode = @enumFromInt(op_byte);
+            const op: OpCode = @fromBackingInt(@intCast(op_byte));
 
             switch (op) {
                 .push_0 => {

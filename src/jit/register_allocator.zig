@@ -236,7 +236,7 @@ pub const RegisterAllocator = struct {
             const color = entry.value_ptr.*;
 
             if (color < self.num_registers) {
-                const preg = @as(PhysicalReg, @enumFromInt(color));
+                const preg = @as(PhysicalReg, @fromBackingInt(@intCast(color)));
                 try allocation.put(vreg, preg);
             }
             // 溢出的寄存器不分配物理寄存器

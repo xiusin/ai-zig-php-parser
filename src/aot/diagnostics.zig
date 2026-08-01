@@ -106,7 +106,7 @@ pub const CWE = enum(u32) {
 
     pub fn getUrl(self: CWE) []const u8 {
         var buf: [100]u8 = undefined;
-        const url = std.fmt.bufPrint(&buf, "https://cwe.mitre.org/data/definitions/{d}.html", .{@intFromEnum(self)}) catch return "";
+        const url = std.fmt.bufPrint(&buf, "https://cwe.mitre.org/data/definitions/{d}.html", .{@backingInt(self)}) catch return "";
         return url;
     }
 };
@@ -568,9 +568,9 @@ pub const DiagnosticEngine = struct {
 
         // Print CWE URL if available
         if (diag.cwe) |cwe| {
-            if (@intFromEnum(cwe) > 0) {
+            if (@backingInt(cwe) > 0) {
                 const url_color = if (self.use_colors) "\x1b[34m" else "";
-                try writer.print("    {s}info{s}: https://cwe.mitre.org/data/definitions/{d}.html\n", .{ url_color, reset, @intFromEnum(cwe) });
+                try writer.print("    {s}info{s}: https://cwe.mitre.org/data/definitions/{d}.html\n", .{ url_color, reset, @backingInt(cwe) });
             }
         }
 
@@ -706,9 +706,9 @@ pub const DiagnosticEngine = struct {
 
         // Print CWE URL if available
         if (diag.cwe) |cwe| {
-            if (@intFromEnum(cwe) > 0) {
+            if (@backingInt(cwe) > 0) {
                 const url_color = if (self.use_colors) "\x1b[34m" else "";
-                std.debug.print("    {s}info{s}: https://cwe.mitre.org/data/definitions/{d}.html\n", .{ url_color, reset, @intFromEnum(cwe) });
+                std.debug.print("    {s}info{s}: https://cwe.mitre.org/data/definitions/{d}.html\n", .{ url_color, reset, @backingInt(cwe) });
             }
         }
 

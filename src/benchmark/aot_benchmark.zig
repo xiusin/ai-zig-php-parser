@@ -195,11 +195,10 @@ pub const ExecutableSizeStats = struct {
         if (std.mem.eql(u8, header_buf[0..4], "\x7fELF")) {
             // ELF 格式（Linux）
             return try parseELF(file, stat.size);
-        } else if (
-            (std.mem.eql(u8, header_buf[0..4], "\xfe\xed\xfa\xce") or
-                std.mem.eql(u8, header_buf[0..4], "\xce\xfa\xed\xfe") or
-                std.mem.eql(u8, header_buf[0..4], "\xfe\xed\xfa\xcf") or
-                std.mem.eql(u8, header_buf[0..4], "\xcf\xfa\xed\xfe")))
+        } else if ((std.mem.eql(u8, header_buf[0..4], "\xfe\xed\xfa\xce") or
+            std.mem.eql(u8, header_buf[0..4], "\xce\xfa\xed\xfe") or
+            std.mem.eql(u8, header_buf[0..4], "\xfe\xed\xfa\xcf") or
+            std.mem.eql(u8, header_buf[0..4], "\xcf\xfa\xed\xfe")))
         {
             // Mach-O 格式（macOS）
             return try parseMachO(file, stat.size);

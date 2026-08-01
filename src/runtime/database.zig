@@ -180,7 +180,7 @@ pub const PDO = struct {
         // 处理特殊属性
         if (std.mem.eql(u8, attribute, "ATTR_ERRMODE")) {
             if (value.tag == .integer) {
-                self.error_mode = @enumFromInt(@as(u2, @intCast(value.data.integer)));
+                self.error_mode = @fromBackingInt(@intCast(@as(u2, @intCast(value.data.integer))));
             }
         }
     }

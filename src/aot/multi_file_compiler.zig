@@ -377,7 +377,7 @@ pub const MultiFileCompiler = struct {
                                     const str_val = merged.string_table.items[str_idx];
                                     if (rename_map.get(str_val)) |new_name| {
                                         if (self.options.verbose) {
-                                            std.debug.print("    Updated const_string in func '{s}': '{s}' -> '{s}'\n", .{func.name, str_val, new_name});
+                                            std.debug.print("    Updated const_string in func '{s}': '{s}' -> '{s}'\n", .{ func.name, str_val, new_name });
                                         }
                                         const new_name_id = try merged.internString(new_name);
                                         inst.*.op = .{ .const_string = new_name_id };
@@ -421,13 +421,13 @@ pub const MultiFileCompiler = struct {
 
         // 转换 Target 类型
         const target = Target{
-            .arch = @enumFromInt(@intFromEnum(self.options.target.arch)),
-            .os = @enumFromInt(@intFromEnum(self.options.target.os)),
-            .abi = @enumFromInt(@intFromEnum(self.options.target.abi)),
+            .arch = @fromBackingInt(@intCast(@backingInt(self.options.target.arch))),
+            .os = @fromBackingInt(@intCast(@backingInt(self.options.target.os))),
+            .abi = @fromBackingInt(@intCast(@backingInt(self.options.target.abi))),
         };
 
         // 转换 OptimizeLevel 类型
-        const optimize_level = @as(OptimizeLevel, @enumFromInt(@intFromEnum(self.options.optimize_level)));
+        const optimize_level = @as(OptimizeLevel, @fromBackingInt(@intCast(@backingInt(self.options.optimize_level))));
 
         // 使用 NativeLinker 生成可执行文件
         var linker = try NativeLinker.init(

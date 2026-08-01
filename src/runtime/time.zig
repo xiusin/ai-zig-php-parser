@@ -331,7 +331,7 @@ pub const Time = struct {
         // 计算月份贡献的天数
         const month_days = [_]u8{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
         var m: u4 = 1;
-        while (m < @intFromEnum(mon)) : (m += 1) {
+        while (m < @backingInt(mon)) : (m += 1) {
             days += month_days[m - 1];
             if (m == 2 and isLeapYear(yr)) {
                 days += 1;
@@ -419,7 +419,7 @@ pub const Time = struct {
     pub fn month(self: Time) Month {
         const days = @divFloor(self.sec + self.loc.offset, 86400);
         const m = monthFromDays(days);
-        return @enumFromInt(m);
+        return @fromBackingInt(@intCast(m));
     }
 
     fn monthFromDays(days: i64) u4 {
@@ -524,13 +524,13 @@ pub const Time = struct {
         const days = @divFloor(self.sec + self.loc.offset, 86400);
         // 1970年1月1日是星期四
         const wd = @mod(days + 4, 7);
-        return @enumFromInt(@as(u3, @intCast(if (wd < 0) wd + 7 else wd)));
+        return @fromBackingInt(@intCast(@as(u3, @intCast(if (wd < 0) wd + 7 else wd))));
     }
 
     /// 获取一年中的第几天 (1-366)
     pub fn yearDay(self: Time) u16 {
         const y = self.year();
-        const m = @intFromEnum(self.month());
+        const m = @backingInt(self.month());
         const d = self.day();
 
         const month_days = [_]u16{ 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
@@ -545,7 +545,7 @@ pub const Time = struct {
     pub fn isoWeek(self: Time) struct { year: i32, week: u8 } {
         const y = self.year();
         const yday = self.yearDay();
-        const wday = @intFromEnum(self.weekday());
+        const wday = @backingInt(self.weekday());
 
         // ISO周从周一开始
         const mon_yday = @as(i32, yday) - @as(i32, if (wday == 0) 6 else wday - 1);
@@ -588,7 +588,7 @@ pub const Time = struct {
     /// 添加日期
     pub fn addDate(self: Time, years: i32, months: i32, days_to_add: i32) Time {
         var y = self.year() + years;
-        var m = @as(i32, @intFromEnum(self.month())) + months;
+        var m = @as(i32, @backingInt(self.month())) + months;
 
         // 规范化月份
         while (m < 1) {
@@ -636,7 +636,7 @@ pub const Time = struct {
             d += max_day;
         }
 
-        return date(y, @enumFromInt(@as(u4, @intCast(m))), @intCast(d), self.hour(), self.minute(), self.second(), self.nsec, self.loc);
+        return date(y, @fromBackingInt(@intCast(@as(u4, @intCast(m)))), @intCast(d), self.hour(), self.minute(), self.second(), self.nsec, self.loc);
     }
 
     /// 比较时间
@@ -739,7 +739,7 @@ pub const Time = struct {
                 try writer.print("{d:0>2}", .{@as(u32, @intCast(@mod(self.year(), 100)))});
                 i += 2;
             } else if (i + 2 <= layout.len and std.mem.eql(u8, layout[i .. i + 2], "01")) {
-                try writer.print("{d:0>2}", .{@intFromEnum(self.month())});
+                try writer.print("{d:0>2}", .{@backingInt(self.month())});
                 i += 2;
             } else if (i + 2 <= layout.len and std.mem.eql(u8, layout[i .. i + 2], "02")) {
                 try writer.print("{d:0>2}", .{self.day()});
@@ -770,7 +770,7 @@ pub const Time = struct {
                 try writer.print("{}", .{self.second()});
                 i += 1;
             } else if (i + 1 <= layout.len and layout[i] == '1') {
-                try writer.print("{}", .{@intFromEnum(self.month())});
+                try writer.print("{}", .{@backingInt(self.month())});
                 i += 1;
             } else if (i + 1 <= layout.len and layout[i] == '2') {
                 try writer.print("{}", .{self.day()});
@@ -926,8 +926,8 @@ pub fn phpDate(format: []const u8, timestamp: ?i64, allocator: std.mem.Allocator
                 const yr = @mod(t.year(), 100);
                 try writer.print("{d:0>2}", .{@as(u32, @intCast(if (yr < 0) -yr else yr))});
             },
-            'm' => try writer.print("{d:0>2}", .{@intFromEnum(t.month())}),
-            'n' => try writer.print("{}", .{@intFromEnum(t.month())}),
+            'm' => try writer.print("{d:0>2}", .{@backingInt(t.month())}),
+            'n' => try writer.print("{}", .{@backingInt(t.month())}),
             'd' => try writer.print("{d:0>2}", .{t.day()}),
             'j' => try writer.print("{}", .{t.day()}),
             'H' => try writer.print("{d:0>2}", .{t.hour()}),
@@ -940,9 +940,9 @@ pub fn phpDate(format: []const u8, timestamp: ?i64, allocator: std.mem.Allocator
             'F' => try writer.writeAll(t.month().string()),
             'A' => try writer.writeAll(if (t.hour() >= 12) "PM" else "AM"),
             'a' => try writer.writeAll(if (t.hour() >= 12) "pm" else "am"),
-            'w' => try writer.print("{}", .{@intFromEnum(t.weekday())}),
+            'w' => try writer.print("{}", .{@backingInt(t.weekday())}),
             'N' => {
-                const wd = @intFromEnum(t.weekday());
+                const wd = @backingInt(t.weekday());
                 try writer.print("{}", .{if (wd == 0) 7 else wd});
             },
             'z' => try writer.print("{}", .{t.yearDay() - 1}),
@@ -960,7 +960,7 @@ pub fn phpDate(format: []const u8, timestamp: ?i64, allocator: std.mem.Allocator
 
 /// PHP mktime() - 从日期时间创建时间戳
 pub fn phpMktime(hour: u8, minute: u8, second: u8, month: u4, day: u8, year: i32) i64 {
-    const t = Time.date(year, @enumFromInt(month), day, hour, minute, second, 0, Location.UTC);
+    const t = Time.date(year, @fromBackingInt(@intCast(month)), day, hour, minute, second, 0, Location.UTC);
     return t.getUnix();
 }
 
