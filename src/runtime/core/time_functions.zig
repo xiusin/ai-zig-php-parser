@@ -67,7 +67,7 @@ pub fn getTimeComponents(timestamp: i64) TimeComponents {
 
     return .{
         .year = year_day.year,
-        .month = @backingInt(month_day.month),
+        .month = @intFromEnum(month_day.month),
         .day = month_day.day_index + 1,
         .hour = day_seconds.getHoursIntoDay(),
         .minute = day_seconds.getMinutesIntoHour(),
@@ -167,7 +167,7 @@ pub fn mktime(hour: i32, minute: i32, second: i32, month: i32, day: i32, year: i
     const m: u8 = @intCast(@mod(@max(1, @min(12, month)) - 1, 12) + 1);
     const y: i32 = if (year < 70) year + 2000 else if (year < 100) year + 1900 else year;
 
-    const month_enum: std.time.epoch.Month = @fromBackingInt(@intCast(m));
+    const month_enum: std.time.epoch.Month = @enumFromInt(@as(u4, @intCast(m)));
     const year_day = std.time.epoch.YearAndDay{
         .year = y,
         .day = @intCast(@max(0, @min(365, day - 1))),

@@ -6640,13 +6640,16 @@ pub const IRGenerator = struct {
         var args: []Register = &[_]Register{};
 
         // 记录需要写回的全局变量（用于引用参数）
-        const RefWriteback = struct {
-            var_name: []const u8,
-            temp_reg: Register,
-            // 数组元素写回信息：当参数是 $arr[$key] 时使用
-            array_base: ?[]const u8 = null,
-            array_key: ?Register = null,
-        };
+const RefWriteback = struct {
+var_name: []const u8,
+temp_reg: Register,
+// 数组元素写回信息：当参数是 $arr[$key] 时使用
+array_base: ?[]const u8 = null,
+array_key: ?Register = null,
+// 对象属性写回信息：当参数是 $obj->prop 时使用
+prop_obj: ?Register = null,
+prop_name: ?[]const u8 = null,
+};
         var ref_writebacks = std.ArrayListUnmanaged(RefWriteback){ .items = &.{}, .capacity = 0 };
         defer ref_writebacks.deinit(self.allocator);
 
@@ -6929,6 +6932,38 @@ pub const IRGenerator = struct {
                             try ref_writebacks.append(self.allocator, .{ .var_name = var_name, .temp_reg = temp_reg });
                             continue;
                         }
+                    }
+
+                    // 对象属性引用参数：array_splice($obj->prop, ...)
+                    // 创建临时 alloca 存储当前值，调用后写回
+                    if (expr_node != null and (expr_node.?.tag == .property_access or expr_node.?.tag == .safe_property_access)) {
+                        const pa = expr_node.?.data.property_access;
+                        const obj_reg = try self.generateExpression(pa.target);
+                        const prop_name = self.getString(pa.property_name);
+                        const func = self.current_function orelse return error.NoCurrentFunction;
+                        const alloca_type = Type.php_value;
+                        const type_ptr = try self.allocator.create(Type);
+                        type_ptr.* = alloca_type;
+                        const ptr_type = Type{ .ptr = type_ptr };
+                        const temp_reg = func.newRegister(ptr_type);
+                        const alloca_inst = try self.allocator.create(Instruction);
+                        alloca_inst.* = .{
+                            .result = temp_reg,
+                            .op = .{ .alloca = .{ .type_ = alloca_type, .count = 1, .no_optimize = true } },
+                            .location = self.current_location,
+                        };
+                        try self.entry_allocas.append(self.allocator, alloca_inst);
+                        const current_val = try self.generateExpression(expr_idx);
+                        _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = current_val } }, null);
+                        const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = temp_reg } }, .php_value);
+                        args[i] = ref_reg;
+                        try ref_writebacks.append(self.allocator, .{
+                            .var_name = "",
+                            .temp_reg = temp_reg,
+                            .prop_obj = obj_reg,
+                            .prop_name = prop_name,
+                        });
+                        continue;
                     }
 
                     // 数组元素引用参数：modifyContainer($arr['key'], ...)
@@ -7464,6 +7499,13 @@ pub const IRGenerator = struct {
                         _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = base_arr } }, null);
                     }
                 }
+            } else if (wb.prop_obj != null and wb.prop_name != null) {
+                // 对象属性写回：$obj->prop = new_val
+                _ = try self.emit(.{ .property_set = .{
+                    .object = wb.prop_obj.?,
+                    .property_name = wb.prop_name.?,
+                    .value = new_val,
+                } }, null);
             } else if (self.getVarRegister(wb.var_name) != null) {
                 // 局部变量：更新var_registers映射
                 try self.putVarRegister(wb.var_name, new_val);

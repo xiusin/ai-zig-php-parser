@@ -308,7 +308,7 @@ const IRGenerator = struct {
 
     /// 计算表达式哈希值
     fn computeExprHash(inst: IRInstruction) u64 {
-        var hash: u64 = @backingInt(inst.opcode);
+        var hash: u64 = @intFromEnum(inst.opcode);
         hash = hash *% 31 +% inst.operands[1];
         hash = hash *% 31 +% inst.operands[2];
         return hash;

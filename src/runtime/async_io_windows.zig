@@ -127,7 +127,7 @@ pub const IOCPMultiplexer = struct {
                 .fd = overlapped.fd,
                 .type = overlapped.operation_type,
                 .bytes_transferred = entry.dwNumberOfBytesTransferred,
-                .error_code = if (entry.Internal == 0) null else @as(windows.Win32Error, @fromBackingInt(@intCast(entry.Internal))),
+                .error_code = if (entry.Internal == 0) null else @as(windows.Win32Error, @enumFromInt(@as(u32, @intCast(entry.Internal)))),
             };
 
             try events.append(event);

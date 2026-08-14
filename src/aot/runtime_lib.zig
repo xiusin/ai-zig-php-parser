@@ -795,7 +795,7 @@ pub fn php_value_create_object(class_name: []const u8) *PHPValue {
 
 /// Get the type tag of a value
 pub fn php_value_get_type(val: *const PHPValue) u8 {
-    return @backingInt(val.tag);
+    return @intFromEnum(val.tag);
 }
 
 /// Get the type name of a value

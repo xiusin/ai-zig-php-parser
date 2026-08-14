@@ -528,7 +528,7 @@ pub const JITBenchmark = struct {
         // 执行字节码
         var ip: usize = 0;
         while (ip < func.code.len) {
-            const opcode = @as(OpCode, @fromBackingInt(@intCast(func.code[ip])));
+            const opcode = @as(OpCode, @enumFromInt(@intCast(func.code[ip])));
             ip += 1;
 
             switch (opcode) {
@@ -669,11 +669,11 @@ pub const JITBenchmark = struct {
         // 简单的加法函数: return 1 + 2;
         var code = std.ArrayList(u8).init(self.allocator);
 
-        try code.append(@backingInt(OpCode.push_1));
-        try code.append(@backingInt(OpCode.push_int));
+        try code.append(@intFromEnum(OpCode.push_1));
+        try code.append(@intFromEnum(OpCode.push_int));
         try code.appendSlice(&std.mem.toBytes(@as(i32, 2)));
-        try code.append(@backingInt(OpCode.add));
-        try code.append(@backingInt(OpCode.ret));
+        try code.append(@intFromEnum(OpCode.add));
+        try code.append(@intFromEnum(OpCode.ret));
 
         return code.toOwnedSlice();
     }
@@ -684,47 +684,47 @@ pub const JITBenchmark = struct {
         var code = std.ArrayList(u8).init(self.allocator);
 
         // sum = 0
-        try code.append(@backingInt(OpCode.push_0));
-        try code.append(@backingInt(OpCode.store_local));
+        try code.append(@intFromEnum(OpCode.push_0));
+        try code.append(@intFromEnum(OpCode.store_local));
         try code.append(0); // local[0] = sum
 
         // i = 0
-        try code.append(@backingInt(OpCode.push_0));
-        try code.append(@backingInt(OpCode.store_local));
+        try code.append(@intFromEnum(OpCode.push_0));
+        try code.append(@intFromEnum(OpCode.store_local));
         try code.append(1); // local[1] = i
 
         // loop start
         const loop_start = code.items.len;
 
         // if (i >= loop_count) goto end
-        try code.append(@backingInt(OpCode.push_local));
+        try code.append(@intFromEnum(OpCode.push_local));
         try code.append(1); // i
-        try code.append(@backingInt(OpCode.push_int));
+        try code.append(@intFromEnum(OpCode.push_int));
         try code.appendSlice(&std.mem.toBytes(@as(i32, @intCast(loop_count))));
-        try code.append(@backingInt(OpCode.lt));
-        try code.append(@backingInt(OpCode.jz));
+        try code.append(@intFromEnum(OpCode.lt));
+        try code.append(@intFromEnum(OpCode.jz));
         const jz_offset_pos = code.items.len;
         try code.appendSlice(&std.mem.toBytes(@as(i16, 0))); // 占位符
 
         // sum += i
-        try code.append(@backingInt(OpCode.push_local));
+        try code.append(@intFromEnum(OpCode.push_local));
         try code.append(0); // sum
-        try code.append(@backingInt(OpCode.push_local));
+        try code.append(@intFromEnum(OpCode.push_local));
         try code.append(1); // i
-        try code.append(@backingInt(OpCode.add));
-        try code.append(@backingInt(OpCode.store_local));
+        try code.append(@intFromEnum(OpCode.add));
+        try code.append(@intFromEnum(OpCode.store_local));
         try code.append(0); // sum
 
         // i++
-        try code.append(@backingInt(OpCode.push_local));
+        try code.append(@intFromEnum(OpCode.push_local));
         try code.append(1); // i
-        try code.append(@backingInt(OpCode.push_1));
-        try code.append(@backingInt(OpCode.add));
-        try code.append(@backingInt(OpCode.store_local));
+        try code.append(@intFromEnum(OpCode.push_1));
+        try code.append(@intFromEnum(OpCode.add));
+        try code.append(@intFromEnum(OpCode.store_local));
         try code.append(1); // i
 
         // goto loop_start
-        try code.append(@backingInt(OpCode.jmp));
+        try code.append(@intFromEnum(OpCode.jmp));
         const jmp_offset = @as(i16, @intCast(@as(i32, @intCast(loop_start)) - @as(i32, @intCast(code.items.len))));
         try code.appendSlice(&std.mem.toBytes(jmp_offset));
 
@@ -736,9 +736,9 @@ pub const JITBenchmark = struct {
         std.mem.writeInt(i16, code.items[jz_offset_pos..][0..2], jz_offset, .little);
 
         // return sum
-        try code.append(@backingInt(OpCode.push_local));
+        try code.append(@intFromEnum(OpCode.push_local));
         try code.append(0); // sum
-        try code.append(@backingInt(OpCode.ret));
+        try code.append(@intFromEnum(OpCode.ret));
 
         return code.toOwnedSlice();
     }
@@ -749,33 +749,33 @@ pub const JITBenchmark = struct {
         var code = std.ArrayList(u8).init(self.allocator);
 
         // a = 10, b = 20
-        try code.append(@backingInt(OpCode.push_int));
+        try code.append(@intFromEnum(OpCode.push_int));
         try code.appendSlice(&std.mem.toBytes(@as(i32, 10)));
-        try code.append(@backingInt(OpCode.push_int));
+        try code.append(@intFromEnum(OpCode.push_int));
         try code.appendSlice(&std.mem.toBytes(@as(i32, 20)));
-        try code.append(@backingInt(OpCode.mul));
+        try code.append(@intFromEnum(OpCode.mul));
 
         // c = 30, d = 40
-        try code.append(@backingInt(OpCode.push_int));
+        try code.append(@intFromEnum(OpCode.push_int));
         try code.appendSlice(&std.mem.toBytes(@as(i32, 30)));
-        try code.append(@backingInt(OpCode.push_int));
+        try code.append(@intFromEnum(OpCode.push_int));
         try code.appendSlice(&std.mem.toBytes(@as(i32, 40)));
-        try code.append(@backingInt(OpCode.mul));
+        try code.append(@intFromEnum(OpCode.mul));
 
         // (a*b) + (c*d)
-        try code.append(@backingInt(OpCode.add));
+        try code.append(@intFromEnum(OpCode.add));
 
         // e = 100, f = 5
-        try code.append(@backingInt(OpCode.push_int));
+        try code.append(@intFromEnum(OpCode.push_int));
         try code.appendSlice(&std.mem.toBytes(@as(i32, 100)));
-        try code.append(@backingInt(OpCode.push_int));
+        try code.append(@intFromEnum(OpCode.push_int));
         try code.appendSlice(&std.mem.toBytes(@as(i32, 5)));
-        try code.append(@backingInt(OpCode.div));
+        try code.append(@intFromEnum(OpCode.div));
 
         // result - (e/f)
-        try code.append(@backingInt(OpCode.sub));
+        try code.append(@intFromEnum(OpCode.sub));
 
-        try code.append(@backingInt(OpCode.ret));
+        try code.append(@intFromEnum(OpCode.ret));
 
         return code.toOwnedSlice();
     }
@@ -786,48 +786,48 @@ pub const JITBenchmark = struct {
         var code = std.ArrayList(u8).init(self.allocator);
 
         // x = 50
-        try code.append(@backingInt(OpCode.push_int));
+        try code.append(@intFromEnum(OpCode.push_int));
         try code.appendSlice(&std.mem.toBytes(@as(i32, 50)));
-        try code.append(@backingInt(OpCode.store_local));
+        try code.append(@intFromEnum(OpCode.store_local));
         try code.append(0);
 
         // if (x < 30) result = 1
-        try code.append(@backingInt(OpCode.push_local));
+        try code.append(@intFromEnum(OpCode.push_local));
         try code.append(0);
-        try code.append(@backingInt(OpCode.push_int));
+        try code.append(@intFromEnum(OpCode.push_int));
         try code.appendSlice(&std.mem.toBytes(@as(i32, 30)));
-        try code.append(@backingInt(OpCode.lt));
-        try code.append(@backingInt(OpCode.jz));
+        try code.append(@intFromEnum(OpCode.lt));
+        try code.append(@intFromEnum(OpCode.jz));
         const jz1_pos = code.items.len;
         try code.appendSlice(&std.mem.toBytes(@as(i16, 0)));
 
-        try code.append(@backingInt(OpCode.push_1));
-        try code.append(@backingInt(OpCode.ret));
+        try code.append(@intFromEnum(OpCode.push_1));
+        try code.append(@intFromEnum(OpCode.ret));
 
         const after_if1 = code.items.len;
         std.mem.writeInt(i16, code.items[jz1_pos..][0..2], @as(i16, @intCast(@as(i32, @intCast(after_if1)) - @as(i32, @intCast(jz1_pos - 2)))), .little);
 
         // else if (x < 70) result = 2
-        try code.append(@backingInt(OpCode.push_local));
+        try code.append(@intFromEnum(OpCode.push_local));
         try code.append(0);
-        try code.append(@backingInt(OpCode.push_int));
+        try code.append(@intFromEnum(OpCode.push_int));
         try code.appendSlice(&std.mem.toBytes(@as(i32, 70)));
-        try code.append(@backingInt(OpCode.lt));
-        try code.append(@backingInt(OpCode.jz));
+        try code.append(@intFromEnum(OpCode.lt));
+        try code.append(@intFromEnum(OpCode.jz));
         const jz2_pos = code.items.len;
         try code.appendSlice(&std.mem.toBytes(@as(i16, 0)));
 
-        try code.append(@backingInt(OpCode.push_int));
+        try code.append(@intFromEnum(OpCode.push_int));
         try code.appendSlice(&std.mem.toBytes(@as(i32, 2)));
-        try code.append(@backingInt(OpCode.ret));
+        try code.append(@intFromEnum(OpCode.ret));
 
         const after_if2 = code.items.len;
         std.mem.writeInt(i16, code.items[jz2_pos..][0..2], @as(i16, @intCast(@as(i32, @intCast(after_if2)) - @as(i32, @intCast(jz2_pos - 2)))), .little);
 
         // else result = 3
-        try code.append(@backingInt(OpCode.push_int));
+        try code.append(@intFromEnum(OpCode.push_int));
         try code.appendSlice(&std.mem.toBytes(@as(i32, 3)));
-        try code.append(@backingInt(OpCode.ret));
+        try code.append(@intFromEnum(OpCode.ret));
 
         return code.toOwnedSlice();
     }
@@ -838,9 +838,9 @@ pub const JITBenchmark = struct {
         var code = std.ArrayList(u8).init(self.allocator);
 
         // 简单的递归调用模拟
-        try code.append(@backingInt(OpCode.push_int));
+        try code.append(@intFromEnum(OpCode.push_int));
         try code.appendSlice(&std.mem.toBytes(@as(i32, 10)));
-        try code.append(@backingInt(OpCode.ret));
+        try code.append(@intFromEnum(OpCode.ret));
 
         return code.toOwnedSlice();
     }

@@ -438,7 +438,7 @@ pub fn lookupBuiltin(name: []const u8) ?[]const u8 {
 
 /// 直接分发调用
 pub fn dispatch(id: BuiltinId, vm: anytype, args: []const Value) !Value {
-    const meta = BUILTIN_DISPATCH_TABLE[@backingInt(id)] orelse return error.UnknownBuiltin;
+    const meta = BUILTIN_DISPATCH_TABLE[@intFromEnum(id)] orelse return error.UnknownBuiltin;
 
     // 参数数量检查
     if (args.len < meta.min_args or args.len > meta.max_args) {
@@ -526,9 +526,9 @@ test "BuiltinId enum" {
     const testing = std.testing;
 
     // 测试枚举值
-    try testing.expect(@backingInt(BuiltinId.array_map) == 0);
-    try testing.expect(@backingInt(BuiltinId.echo) == 50);
-    try testing.expect(@backingInt(BuiltinId.abs) == 150);
+    try testing.expect(@intFromEnum(BuiltinId.array_map) == 0);
+    try testing.expect(@intFromEnum(BuiltinId.echo) == 50);
+    try testing.expect(@intFromEnum(BuiltinId.abs) == 150);
 
     // 测试名称
     try testing.expectEqualStrings("strlen", BuiltinId.strlen.name());

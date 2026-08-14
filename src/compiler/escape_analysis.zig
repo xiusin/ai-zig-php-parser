@@ -20,7 +20,7 @@ pub const EscapeState = enum(u8) {
 
     /// 合并两个逃逸状态，取更高的逃逸级别
     pub fn merge(self: EscapeState, other: EscapeState) EscapeState {
-        return @fromBackingInt(@intCast(@max(@backingInt(self), @backingInt(other))));
+        return @enumFromInt(@max(@intFromEnum(self), @intFromEnum(other)));
     }
 
     /// 检查是否可以栈分配
@@ -1349,7 +1349,7 @@ pub const EscapeAnalyzer = struct {
                 }
 
                 // 如果状态改变，更新并将相关节点加入工作列表
-                if (@backingInt(new_state) > @backingInt(node.escape_state)) {
+                if (@intFromEnum(new_state) > @intFromEnum(node.escape_state)) {
                     node.escape_state = new_state;
 
                     // 更新逃逸信息

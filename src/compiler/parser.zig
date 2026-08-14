@@ -381,7 +381,7 @@ pub const Parser = struct {
         if (self.syntax_hooks) |hooks| {
             if (hooks.parse_statement) |parse_stmt_hook| {
                 // Pass current token tag as u32 to the hook
-                const token_tag: u32 = @backingInt(self.curr.tag);
+                const token_tag: u32 = @intFromEnum(self.curr.tag);
                 const hook_result = parse_stmt_hook(@ptrCast(self), token_tag) catch null;
                 if (hook_result) |result| {
                     // Hook handled the statement, return the result
@@ -398,7 +398,7 @@ pub const Parser = struct {
                 // Custom keyword found, try syntax hook
                 if (self.syntax_hooks) |hooks| {
                     if (hooks.parse_statement) |parse_stmt_hook| {
-                        const token_tag: u32 = @backingInt(self.curr.tag);
+                        const token_tag: u32 = @intFromEnum(self.curr.tag);
                         const hook_result = parse_stmt_hook(@ptrCast(self), token_tag) catch null;
                         if (hook_result) |result| {
                             return result;

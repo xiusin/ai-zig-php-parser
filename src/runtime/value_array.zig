@@ -233,7 +233,7 @@ pub const MixedValueArray = struct {
     pub fn deinit(self: *MixedValueArray) void {
         // 释放所有值和字符串键
         for (self.entries.items) |entry| {
-            if (entry.hash == 0 and entry.next == INVALID_INDEX and @backingInt(entry.value.val) == 0) {
+            if (entry.hash == 0 and entry.next == INVALID_INDEX and @intFromEnum(entry.value.val) == 0) {
                 // Skip deleted/dummy entries if any (though we usually compact)
                 continue;
             }
@@ -283,7 +283,7 @@ pub const MixedValueArray = struct {
             for (self.entries.items) |entry| {
                 // 检查条目是否有效（非删除标记）
                 // 删除的条目通常用特殊值标记，这里我们检查 hash 是否为 0
-                if (entry.hash != 0 or entry.next != INVALID_INDEX or @backingInt(entry.value.val) != 0) {
+                if (entry.hash != 0 or entry.next != INVALID_INDEX or @intFromEnum(entry.value.val) != 0) {
                     try new_entries.append(entry);
                 }
             }

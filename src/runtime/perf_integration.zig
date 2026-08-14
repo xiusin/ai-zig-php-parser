@@ -99,7 +99,7 @@ pub const PerfEventAttr = extern struct {
 
     pub fn init(event_type: PerfEventType, config: u64) PerfEventAttr {
         return .{
-            .type = @backingInt(event_type),
+            .type = @intFromEnum(event_type),
             .size = @sizeOf(PerfEventAttr),
             .config = config,
             .sample_period_or_freq = 0,
@@ -206,12 +206,12 @@ pub const PerfIntegration = struct {
         return PerfIntegration{
             .allocator = allocator,
             .profiler = profiler,
-            .cycles_counter = try PerfEventCounter.init(.hardware, @backingInt(HardwareEvent.cpu_cycles)),
-            .instructions_counter = try PerfEventCounter.init(.hardware, @backingInt(HardwareEvent.instructions)),
-            .cache_misses_counter = try PerfEventCounter.init(.hardware, @backingInt(HardwareEvent.cache_misses)),
-            .branch_misses_counter = try PerfEventCounter.init(.hardware, @backingInt(HardwareEvent.branch_misses)),
-            .page_faults_counter = try PerfEventCounter.init(.software, @backingInt(SoftwareEvent.page_faults)),
-            .context_switches_counter = try PerfEventCounter.init(.software, @backingInt(SoftwareEvent.context_switches)),
+            .cycles_counter = try PerfEventCounter.init(.hardware, @intFromEnum(HardwareEvent.cpu_cycles)),
+            .instructions_counter = try PerfEventCounter.init(.hardware, @intFromEnum(HardwareEvent.instructions)),
+            .cache_misses_counter = try PerfEventCounter.init(.hardware, @intFromEnum(HardwareEvent.cache_misses)),
+            .branch_misses_counter = try PerfEventCounter.init(.hardware, @intFromEnum(HardwareEvent.branch_misses)),
+            .page_faults_counter = try PerfEventCounter.init(.software, @intFromEnum(SoftwareEvent.page_faults)),
+            .context_switches_counter = try PerfEventCounter.init(.software, @intFromEnum(SoftwareEvent.context_switches)),
             .sampling_enabled = false,
             .sampling_frequency = 1000, // 1000 Hz
         };
@@ -363,7 +363,7 @@ pub const PerfCounters = struct {
 test "PerfEventCounter 基本功能" {
     if (builtin.os.tag != .linux) return error.SkipZigTest;
 
-    var counter = try PerfEventCounter.init(.hardware, @backingInt(HardwareEvent.cpu_cycles));
+    var counter = try PerfEventCounter.init(.hardware, @intFromEnum(HardwareEvent.cpu_cycles));
     defer counter.deinit();
 
     try counter.enable();

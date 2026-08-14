@@ -884,7 +884,7 @@ pub const PriorityQueue = struct {
 
     /// 入队
     pub fn enqueue(self: *PriorityQueue, co: *Coroutine) !void {
-        const idx = @backingInt(co.priority);
+        const idx = @intFromEnum(co.priority);
         try self.queues[idx].append(self.allocator, co);
         self.total_count += 1;
     }
@@ -944,12 +944,12 @@ pub const PriorityQueue = struct {
 
     /// 获取指定优先级的队列长度
     pub fn lenAt(self: *PriorityQueue, priority: Priority) usize {
-        return self.queues[@backingInt(priority)].items.len;
+        return self.queues[@intFromEnum(priority)].items.len;
     }
 
     /// 移除指定协程
     pub fn remove(self: *PriorityQueue, co: *Coroutine) bool {
-        const idx = @backingInt(co.priority);
+        const idx = @intFromEnum(co.priority);
         for (self.queues[idx].items, 0..) |item, i| {
             if (item == co) {
                 _ = self.queues[idx].orderedRemove(i);
@@ -962,9 +962,9 @@ pub const PriorityQueue = struct {
 
     /// 提升协程优先级（用于防止饥饿）
     pub fn boostPriority(self: *PriorityQueue, co: *Coroutine) void {
-        if (@backingInt(co.priority) > 0) {
+        if (@intFromEnum(co.priority) > 0) {
             if (self.remove(co)) {
-                co.priority = @fromBackingInt(@intCast(@backingInt(co.priority) - 1));
+                co.priority = @enumFromInt(@intFromEnum(co.priority) - 1);
                 self.enqueue(co) catch {};
             }
         }
@@ -2990,11 +2990,11 @@ test "async io helper functions" {
 
 test "io event type enum" {
     // 验证IO事件类型枚举值
-    try std.testing.expectEqual(@as(u8, 0), @backingInt(IOEventType.read));
-    try std.testing.expectEqual(@as(u8, 1), @backingInt(IOEventType.write));
-    try std.testing.expectEqual(@as(u8, 2), @backingInt(IOEventType.err));
-    try std.testing.expectEqual(@as(u8, 3), @backingInt(IOEventType.hup));
-    try std.testing.expectEqual(@as(u8, 4), @backingInt(IOEventType.timer));
+    try std.testing.expectEqual(@as(u8, 0), @intFromEnum(IOEventType.read));
+    try std.testing.expectEqual(@as(u8, 1), @intFromEnum(IOEventType.write));
+    try std.testing.expectEqual(@as(u8, 2), @intFromEnum(IOEventType.err));
+    try std.testing.expectEqual(@as(u8, 3), @intFromEnum(IOEventType.hup));
+    try std.testing.expectEqual(@as(u8, 4), @intFromEnum(IOEventType.timer));
 }
 
 test "io wait entry structure" {

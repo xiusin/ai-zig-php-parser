@@ -316,7 +316,7 @@ pub const ErrorHandler = struct {
 
     pub fn handleError(self: *ErrorHandler, error_type: ErrorType, message: []const u8, file: []const u8, line: u32) !void {
         // Check if this error type should be reported
-        const error_bit = @as(u32, 1) << @backingInt(error_type);
+        const error_bit = @as(u32, 1) << @intFromEnum(error_type);
         if ((self.error_reporting & error_bit) == 0) {
             return; // Error reporting is disabled for this type
         }

@@ -2109,7 +2109,7 @@ fn statInternal(vm: *VM, args: []const Value, lstat_mode: bool) !Value {
     // 1 - inode
     try stat_result.set(vm.allocator, ArrayKey{ .integer = 1 }, Value.initInt(@intCast(info.inode)));
     // 2 - mode (file type + permissions)
-    try stat_result.set(vm.allocator, ArrayKey{ .integer = 2 }, Value.initInt(@intCast(@backingInt(info.permissions))));
+    try stat_result.set(vm.allocator, ArrayKey{ .integer = 2 }, Value.initInt(@intCast(@intFromEnum(info.permissions))));
     // 3 - number of hard links
     try stat_result.set(vm.allocator, ArrayKey{ .integer = 3 }, Value.initInt(@intCast(info.nlink)));
     // 4 - user id (not available, use 0)

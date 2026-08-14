@@ -34,7 +34,7 @@ pub const TracyColor = enum(u32) {
     pink = 0xFFC0CB,
 
     pub fn toU32(self: TracyColor) u32 {
-        return @backingInt(self);
+        return @intFromEnum(self);
     }
 };
 

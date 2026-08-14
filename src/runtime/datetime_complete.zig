@@ -89,7 +89,7 @@ pub const DateTimeFunctions = struct {
                 'l' => try result.appendSlice(getFullWeekdayName(weekday)),
                 'N' => try result.writer().print("{d}", .{getIsoWeekday(weekday)}),
                 'S' => try result.appendSlice(getDaySuffix(year_day.day)),
-                'w' => try result.writer().print("{d}", .{@backingInt(weekday)}),
+                'w' => try result.writer().print("{d}", .{@intFromEnum(weekday)}),
                 'z' => try result.writer().print("{d}", .{getDayOfYear(year_day)}),
 
                 // 周
@@ -331,7 +331,7 @@ fn calculateTimestamp(year: i32, month: i32, day: i32, hour: i32, minute: i32, s
     // 计算当年已过月份的天数
     var m: i32 = 1;
     while (m < norm_month) : (m += 1) {
-        days += getDaysInMonth(norm_year, @fromBackingInt(@intCast(m)));
+        days += getDaysInMonth(norm_year, @enumFromInt(@intCast(m)));
     }
 
     // 加上当月天数
@@ -514,7 +514,7 @@ fn getDayOfYear(year_day: std.time.epoch.YearAndDay) u16 {
     var days: u16 = year_day.day;
     var m: u8 = 1;
     while (m < year_day.month.numeric()) : (m += 1) {
-        days += getDaysInMonth(year_day.year, @fromBackingInt(@intCast(m)));
+        days += getDaysInMonth(year_day.year, @enumFromInt(@intCast(m)));
     }
     return days;
 }

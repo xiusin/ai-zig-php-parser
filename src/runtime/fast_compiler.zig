@@ -404,7 +404,7 @@ pub const FastCompiler = struct {
     // ========== 辅助函数 ==========
 
     fn emitOp(self: *FastCompiler, op: OpCode) CompileError!void {
-        self.code.append(self.allocator, @backingInt(op)) catch return CompileError.OutOfMemory;
+        self.code.append(self.allocator, @intFromEnum(op)) catch return CompileError.OutOfMemory;
     }
 
     fn emitByte(self: *FastCompiler, byte: u8) CompileError!void {

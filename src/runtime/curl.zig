@@ -590,7 +590,7 @@ pub fn curlSetoptArray(handle: *CurlHandle, options: *PHPArray) !void {
         // 根据key设置选项
         switch (key) {
             .integer => |opt_id| {
-                const option: CurlOption = @fromBackingInt(@intCast(@as(u8, @intCast(opt_id))));
+                const option: CurlOption = @enumFromInt(@intCast(@as(u8, @intCast(opt_id))));
                 switch (value.tag) {
                     .string => try handle.setopt(option, value.data.string.data.data),
                     .boolean => try handle.setopt(option, value.data.boolean),

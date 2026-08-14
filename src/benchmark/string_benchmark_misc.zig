@@ -36,7 +36,7 @@ pub const StringCompareTests = struct {
         var i: u32 = 0;
         while (i < self.iterations) : (i += 1) {
             const cmp = std.mem.order(u8, str1, str2);
-            total += @backingInt(cmp);
+            total += @intFromEnum(cmp);
         }
 
         const end = std.time.nanoTimestamp();
@@ -107,7 +107,7 @@ pub const StringCompareTests = struct {
         var i: u32 = 0;
         while (i < self.iterations) : (i += 1) {
             const cmp = std.mem.order(u8, str1[0..n], str2[0..n]);
-            total += @backingInt(cmp);
+            total += @intFromEnum(cmp);
         }
 
         const end = std.time.nanoTimestamp();

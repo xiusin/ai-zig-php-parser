@@ -980,7 +980,7 @@ pub const BytecodeVM = struct {
 
         // 哈希参数类型
         for (args) |arg| {
-            const type_tag = @backingInt(arg.getTypeTag());
+            const type_tag = @intFromEnum(arg.getTypeTag());
             hasher.update(std.mem.asBytes(&type_tag));
         }
 
@@ -1111,7 +1111,7 @@ pub const BytecodeVM = struct {
             frame.ip += 1;
 
             // 使用计算跳转表分发指令
-            const handler = dispatch_table[@backingInt(inst.opcode)];
+            const handler = dispatch_table[@intFromEnum(inst.opcode)];
             const result = try handler(self, frame, inst);
 
             switch (result) {
@@ -1192,7 +1192,7 @@ pub const BytecodeVM = struct {
             frame.ip += 1;
 
             // 使用计算跳转表分发指令
-            const handler = dispatch_table[@backingInt(inst.opcode)];
+            const handler = dispatch_table[@intFromEnum(inst.opcode)];
             const result = handler(self, frame, inst) catch |err| {
                 return err;
             };
@@ -5375,7 +5375,7 @@ fn executeFunctionWithArgs(vm: *BytecodeVM, func: *CompiledFunction, call_args: 
         }
         const inst = frame.function.bytecode[frame.ip];
         frame.ip += 1;
-        const handler = BytecodeVM.dispatch_table[@backingInt(inst.opcode)];
+        const handler = BytecodeVM.dispatch_table[@intFromEnum(inst.opcode)];
         const dispatch_result = handler(vm, frame, inst) catch {
             vm.stack_top = saved_stack_top;
             vm.frame_count = saved_frame_count;
@@ -5997,162 +5997,162 @@ fn initDispatchTable() [256]DispatchFn {
     }
 
     // 栈操作
-    table[@backingInt(OpCode.nop)] = handleNop;
-    table[@backingInt(OpCode.push_const)] = handlePushConst;
-    table[@backingInt(OpCode.push_local)] = handlePushLocal;
-    table[@backingInt(OpCode.push_global)] = handlePushGlobal;
-    table[@backingInt(OpCode.pop)] = handlePop;
-    table[@backingInt(OpCode.dup)] = handleDup;
-    table[@backingInt(OpCode.swap)] = handleSwap;
-    table[@backingInt(OpCode.push_null)] = handlePushNull;
-    table[@backingInt(OpCode.push_true)] = handlePushTrue;
-    table[@backingInt(OpCode.push_false)] = handlePushFalse;
-    table[@backingInt(OpCode.push_int_0)] = handlePushInt0;
-    table[@backingInt(OpCode.push_int_1)] = handlePushInt1;
-    table[@backingInt(OpCode.store_local)] = handleStoreLocal;
-    table[@backingInt(OpCode.store_global)] = handleStoreGlobal;
+    table[@intFromEnum(OpCode.nop)] = handleNop;
+    table[@intFromEnum(OpCode.push_const)] = handlePushConst;
+    table[@intFromEnum(OpCode.push_local)] = handlePushLocal;
+    table[@intFromEnum(OpCode.push_global)] = handlePushGlobal;
+    table[@intFromEnum(OpCode.pop)] = handlePop;
+    table[@intFromEnum(OpCode.dup)] = handleDup;
+    table[@intFromEnum(OpCode.swap)] = handleSwap;
+    table[@intFromEnum(OpCode.push_null)] = handlePushNull;
+    table[@intFromEnum(OpCode.push_true)] = handlePushTrue;
+    table[@intFromEnum(OpCode.push_false)] = handlePushFalse;
+    table[@intFromEnum(OpCode.push_int_0)] = handlePushInt0;
+    table[@intFromEnum(OpCode.push_int_1)] = handlePushInt1;
+    table[@intFromEnum(OpCode.store_local)] = handleStoreLocal;
+    table[@intFromEnum(OpCode.store_global)] = handleStoreGlobal;
 
     // 整数算术
-    table[@backingInt(OpCode.add_int)] = handleAddInt;
-    table[@backingInt(OpCode.sub_int)] = handleSubInt;
-    table[@backingInt(OpCode.mul_int)] = handleMulInt;
-    table[@backingInt(OpCode.div_int)] = handleDivInt;
-    table[@backingInt(OpCode.mod_int)] = handleModInt;
-    table[@backingInt(OpCode.neg_int)] = handleNegInt;
-    table[@backingInt(OpCode.inc_int)] = handleIncInt;
-    table[@backingInt(OpCode.dec_int)] = handleDecInt;
-    table[@backingInt(OpCode.inc_global)] = handleIncGlobal;
-    table[@backingInt(OpCode.dec_global)] = handleDecGlobal;
-    table[@backingInt(OpCode.pow_int)] = handlePowInt;
-    table[@backingInt(OpCode.bit_and)] = handleBitAnd;
-    table[@backingInt(OpCode.bit_or)] = handleBitOr;
-    table[@backingInt(OpCode.bit_xor)] = handleBitXor;
-    table[@backingInt(OpCode.bit_not)] = handleBitNot;
-    table[@backingInt(OpCode.shl)] = handleShl;
-    table[@backingInt(OpCode.shr)] = handleShr;
+    table[@intFromEnum(OpCode.add_int)] = handleAddInt;
+    table[@intFromEnum(OpCode.sub_int)] = handleSubInt;
+    table[@intFromEnum(OpCode.mul_int)] = handleMulInt;
+    table[@intFromEnum(OpCode.div_int)] = handleDivInt;
+    table[@intFromEnum(OpCode.mod_int)] = handleModInt;
+    table[@intFromEnum(OpCode.neg_int)] = handleNegInt;
+    table[@intFromEnum(OpCode.inc_int)] = handleIncInt;
+    table[@intFromEnum(OpCode.dec_int)] = handleDecInt;
+    table[@intFromEnum(OpCode.inc_global)] = handleIncGlobal;
+    table[@intFromEnum(OpCode.dec_global)] = handleDecGlobal;
+    table[@intFromEnum(OpCode.pow_int)] = handlePowInt;
+    table[@intFromEnum(OpCode.bit_and)] = handleBitAnd;
+    table[@intFromEnum(OpCode.bit_or)] = handleBitOr;
+    table[@intFromEnum(OpCode.bit_xor)] = handleBitXor;
+    table[@intFromEnum(OpCode.bit_not)] = handleBitNot;
+    table[@intFromEnum(OpCode.shl)] = handleShl;
+    table[@intFromEnum(OpCode.shr)] = handleShr;
 
     // 浮点算术
-    table[@backingInt(OpCode.add_float)] = handleAddFloat;
-    table[@backingInt(OpCode.sub_float)] = handleSubFloat;
-    table[@backingInt(OpCode.mul_float)] = handleMulFloat;
-    table[@backingInt(OpCode.div_float)] = handleDivFloat;
-    table[@backingInt(OpCode.neg_float)] = handleNegFloat;
-    table[@backingInt(OpCode.sqrt)] = handleSqrt;
+    table[@intFromEnum(OpCode.add_float)] = handleAddFloat;
+    table[@intFromEnum(OpCode.sub_float)] = handleSubFloat;
+    table[@intFromEnum(OpCode.mul_float)] = handleMulFloat;
+    table[@intFromEnum(OpCode.div_float)] = handleDivFloat;
+    table[@intFromEnum(OpCode.neg_float)] = handleNegFloat;
+    table[@intFromEnum(OpCode.sqrt)] = handleSqrt;
 
     // 比较操作
-    table[@backingInt(OpCode.eq)] = handleEq;
-    table[@backingInt(OpCode.neq)] = handleNeq;
-    table[@backingInt(OpCode.identical)] = handleIdentical;
-    table[@backingInt(OpCode.not_identical)] = handleNotIdentical;
-    table[@backingInt(OpCode.lt)] = handleLt;
-    table[@backingInt(OpCode.gt)] = handleGt;
-    table[@backingInt(OpCode.le)] = handleLe;
-    table[@backingInt(OpCode.ge)] = handleGe;
-    table[@backingInt(OpCode.spaceship)] = handleSpaceship;
-    table[@backingInt(OpCode.lt_int)] = handleLtInt;
-    table[@backingInt(OpCode.gt_int)] = handleGtInt;
-    table[@backingInt(OpCode.lt_float)] = handleLtFloat;
-    table[@backingInt(OpCode.gt_float)] = handleGtFloat;
+    table[@intFromEnum(OpCode.eq)] = handleEq;
+    table[@intFromEnum(OpCode.neq)] = handleNeq;
+    table[@intFromEnum(OpCode.identical)] = handleIdentical;
+    table[@intFromEnum(OpCode.not_identical)] = handleNotIdentical;
+    table[@intFromEnum(OpCode.lt)] = handleLt;
+    table[@intFromEnum(OpCode.gt)] = handleGt;
+    table[@intFromEnum(OpCode.le)] = handleLe;
+    table[@intFromEnum(OpCode.ge)] = handleGe;
+    table[@intFromEnum(OpCode.spaceship)] = handleSpaceship;
+    table[@intFromEnum(OpCode.lt_int)] = handleLtInt;
+    table[@intFromEnum(OpCode.gt_int)] = handleGtInt;
+    table[@intFromEnum(OpCode.lt_float)] = handleLtFloat;
+    table[@intFromEnum(OpCode.gt_float)] = handleGtFloat;
 
     // 逻辑操作
-    table[@backingInt(OpCode.logic_and)] = handleLogicAnd;
-    table[@backingInt(OpCode.logic_or)] = handleLogicOr;
-    table[@backingInt(OpCode.logic_not)] = handleLogicNot;
-    table[@backingInt(OpCode.coalesce)] = handleCoalesce;
+    table[@intFromEnum(OpCode.logic_and)] = handleLogicAnd;
+    table[@intFromEnum(OpCode.logic_or)] = handleLogicOr;
+    table[@intFromEnum(OpCode.logic_not)] = handleLogicNot;
+    table[@intFromEnum(OpCode.coalesce)] = handleCoalesce;
 
     // 控制流
-    table[@backingInt(OpCode.jmp)] = handleJmp;
-    table[@backingInt(OpCode.jz)] = handleJz;
-    table[@backingInt(OpCode.jnz)] = handleJnz;
-    table[@backingInt(OpCode.call)] = handleCall;
-    table[@backingInt(OpCode.call_method)] = handleCallMethod;
-    table[@backingInt(OpCode.call_static)] = handleCallStatic;
-    table[@backingInt(OpCode.call_builtin)] = handleCallBuiltin;
-    table[@backingInt(OpCode.ret)] = handleRet;
-    table[@backingInt(OpCode.ret_void)] = handleRetVoid;
-    table[@backingInt(OpCode.loop_start)] = handleLoopStart;
-    table[@backingInt(OpCode.loop_end)] = handleLoopEnd;
-    table[@backingInt(OpCode.halt)] = handleHalt;
+    table[@intFromEnum(OpCode.jmp)] = handleJmp;
+    table[@intFromEnum(OpCode.jz)] = handleJz;
+    table[@intFromEnum(OpCode.jnz)] = handleJnz;
+    table[@intFromEnum(OpCode.call)] = handleCall;
+    table[@intFromEnum(OpCode.call_method)] = handleCallMethod;
+    table[@intFromEnum(OpCode.call_static)] = handleCallStatic;
+    table[@intFromEnum(OpCode.call_builtin)] = handleCallBuiltin;
+    table[@intFromEnum(OpCode.ret)] = handleRet;
+    table[@intFromEnum(OpCode.ret_void)] = handleRetVoid;
+    table[@intFromEnum(OpCode.loop_start)] = handleLoopStart;
+    table[@intFromEnum(OpCode.loop_end)] = handleLoopEnd;
+    table[@intFromEnum(OpCode.halt)] = handleHalt;
 
     // 类型守卫
-    table[@backingInt(OpCode.guard_int)] = handleGuardInt;
-    table[@backingInt(OpCode.guard_float)] = handleGuardFloat;
-    table[@backingInt(OpCode.guard_string)] = handleGuardString;
-    table[@backingInt(OpCode.guard_array)] = handleGuardArray;
-    table[@backingInt(OpCode.guard_object)] = handleGuardObject;
-    table[@backingInt(OpCode.deoptimize)] = handleDeoptimize;
+    table[@intFromEnum(OpCode.guard_int)] = handleGuardInt;
+    table[@intFromEnum(OpCode.guard_float)] = handleGuardFloat;
+    table[@intFromEnum(OpCode.guard_string)] = handleGuardString;
+    table[@intFromEnum(OpCode.guard_array)] = handleGuardArray;
+    table[@intFromEnum(OpCode.guard_object)] = handleGuardObject;
+    table[@intFromEnum(OpCode.deoptimize)] = handleDeoptimize;
 
     // 调试
-    table[@backingInt(OpCode.debug_break)] = handleDebugBreak;
-    table[@backingInt(OpCode.line_number)] = handleLineNumber;
-    table[@backingInt(OpCode.gc_safepoint)] = handleGcSafepoint;
+    table[@intFromEnum(OpCode.debug_break)] = handleDebugBreak;
+    table[@intFromEnum(OpCode.line_number)] = handleLineNumber;
+    table[@intFromEnum(OpCode.gc_safepoint)] = handleGcSafepoint;
 
     // 数组操作
-    table[@backingInt(OpCode.new_array)] = handleNewArray;
-    table[@backingInt(OpCode.array_get)] = handleArrayGet;
-    table[@backingInt(OpCode.array_set)] = handleArraySet;
-    table[@backingInt(OpCode.array_push)] = handleArrayPush;
-    table[@backingInt(OpCode.array_pop)] = handleArrayPop;
-    table[@backingInt(OpCode.array_len)] = handleArrayLen;
-    table[@backingInt(OpCode.array_exists)] = handleArrayExists;
-    table[@backingInt(OpCode.array_unset)] = handleArrayUnset;
-    table[@backingInt(OpCode.foreach_init)] = handleForeachInit;
-    table[@backingInt(OpCode.foreach_next)] = handleForeachNext;
+    table[@intFromEnum(OpCode.new_array)] = handleNewArray;
+    table[@intFromEnum(OpCode.array_get)] = handleArrayGet;
+    table[@intFromEnum(OpCode.array_set)] = handleArraySet;
+    table[@intFromEnum(OpCode.array_push)] = handleArrayPush;
+    table[@intFromEnum(OpCode.array_pop)] = handleArrayPop;
+    table[@intFromEnum(OpCode.array_len)] = handleArrayLen;
+    table[@intFromEnum(OpCode.array_exists)] = handleArrayExists;
+    table[@intFromEnum(OpCode.array_unset)] = handleArrayUnset;
+    table[@intFromEnum(OpCode.foreach_init)] = handleForeachInit;
+    table[@intFromEnum(OpCode.foreach_next)] = handleForeachNext;
 
     // 对象操作
-    table[@backingInt(OpCode.new_object)] = handleNewObject;
-    table[@backingInt(OpCode.get_prop)] = handleGetProp;
-    table[@backingInt(OpCode.set_prop)] = handleSetProp;
-    table[@backingInt(OpCode.instanceof)] = handleInstanceof;
-    table[@backingInt(OpCode.clone)] = handleClone;
+    table[@intFromEnum(OpCode.new_object)] = handleNewObject;
+    table[@intFromEnum(OpCode.get_prop)] = handleGetProp;
+    table[@intFromEnum(OpCode.set_prop)] = handleSetProp;
+    table[@intFromEnum(OpCode.instanceof)] = handleInstanceof;
+    table[@intFromEnum(OpCode.clone)] = handleClone;
 
     // 结构体操作
-    table[@backingInt(OpCode.new_struct)] = handleNewStruct;
-    table[@backingInt(OpCode.struct_get)] = handleStructGet;
-    table[@backingInt(OpCode.struct_set)] = handleStructSet;
+    table[@intFromEnum(OpCode.new_struct)] = handleNewStruct;
+    table[@intFromEnum(OpCode.struct_get)] = handleStructGet;
+    table[@intFromEnum(OpCode.struct_set)] = handleStructSet;
 
     // 参数传递优化
-    table[@backingInt(OpCode.pass_by_value)] = handlePassByValue;
-    table[@backingInt(OpCode.pass_by_ref)] = handlePassByRef;
-    table[@backingInt(OpCode.pass_by_cow)] = handlePassByCow;
-    table[@backingInt(OpCode.pass_by_move)] = handlePassByMove;
-    table[@backingInt(OpCode.cow_check)] = handleCowCheck;
-    table[@backingInt(OpCode.cow_copy)] = handleCowCopy;
-    table[@backingInt(OpCode.ret_move)] = handleRetMove;
-    table[@backingInt(OpCode.ret_cow)] = handleRetCow;
+    table[@intFromEnum(OpCode.pass_by_value)] = handlePassByValue;
+    table[@intFromEnum(OpCode.pass_by_ref)] = handlePassByRef;
+    table[@intFromEnum(OpCode.pass_by_cow)] = handlePassByCow;
+    table[@intFromEnum(OpCode.pass_by_move)] = handlePassByMove;
+    table[@intFromEnum(OpCode.cow_check)] = handleCowCheck;
+    table[@intFromEnum(OpCode.cow_copy)] = handleCowCopy;
+    table[@intFromEnum(OpCode.ret_move)] = handleRetMove;
+    table[@intFromEnum(OpCode.ret_cow)] = handleRetCow;
 
     // 类型转换
-    table[@backingInt(OpCode.to_int)] = handleToInt;
-    table[@backingInt(OpCode.to_float)] = handleToFloat;
-    table[@backingInt(OpCode.to_bool)] = handleToBool;
-    table[@backingInt(OpCode.to_string)] = handleToString;
-    table[@backingInt(OpCode.to_array)] = handleToArray;
-    table[@backingInt(OpCode.to_object)] = handleToObject;
+    table[@intFromEnum(OpCode.to_int)] = handleToInt;
+    table[@intFromEnum(OpCode.to_float)] = handleToFloat;
+    table[@intFromEnum(OpCode.to_bool)] = handleToBool;
+    table[@intFromEnum(OpCode.to_string)] = handleToString;
+    table[@intFromEnum(OpCode.to_array)] = handleToArray;
+    table[@intFromEnum(OpCode.to_object)] = handleToObject;
 
     // 闭包操作
-    table[@backingInt(OpCode.make_closure)] = handleMakeClosure;
-    table[@backingInt(OpCode.closure_call)] = handleClosureCall;
-    table[@backingInt(OpCode.capture_var)] = handleCaptureVar;
-    table[@backingInt(OpCode.arrow_fn)] = handleArrowFn;
+    table[@intFromEnum(OpCode.make_closure)] = handleMakeClosure;
+    table[@intFromEnum(OpCode.closure_call)] = handleClosureCall;
+    table[@intFromEnum(OpCode.capture_var)] = handleCaptureVar;
+    table[@intFromEnum(OpCode.arrow_fn)] = handleArrowFn;
 
     // 类型检查
-    table[@backingInt(OpCode.is_null)] = handleIsNull;
-    table[@backingInt(OpCode.is_int)] = handleIsInt;
-    table[@backingInt(OpCode.is_float)] = handleIsFloat;
-    table[@backingInt(OpCode.is_string)] = handleIsString;
-    table[@backingInt(OpCode.is_array)] = handleIsArray;
-    table[@backingInt(OpCode.is_object)] = handleIsObject;
+    table[@intFromEnum(OpCode.is_null)] = handleIsNull;
+    table[@intFromEnum(OpCode.is_int)] = handleIsInt;
+    table[@intFromEnum(OpCode.is_float)] = handleIsFloat;
+    table[@intFromEnum(OpCode.is_string)] = handleIsString;
+    table[@intFromEnum(OpCode.is_array)] = handleIsArray;
+    table[@intFromEnum(OpCode.is_object)] = handleIsObject;
 
     // 字符串操作
-    table[@backingInt(OpCode.concat)] = handleConcat;
-    table[@backingInt(OpCode.strlen)] = handleStrlen;
+    table[@intFromEnum(OpCode.concat)] = handleConcat;
+    table[@intFromEnum(OpCode.strlen)] = handleStrlen;
 
     // 异常处理
-    table[@backingInt(OpCode.try_begin)] = handleTryBegin;
-    table[@backingInt(OpCode.try_end)] = handleTryEnd;
-    table[@backingInt(OpCode.catch_begin)] = handleCatchBegin;
-    table[@backingInt(OpCode.catch_end)] = handleCatchEnd;
-    table[@backingInt(OpCode.throw)] = handleThrow;
+    table[@intFromEnum(OpCode.try_begin)] = handleTryBegin;
+    table[@intFromEnum(OpCode.try_end)] = handleTryEnd;
+    table[@intFromEnum(OpCode.catch_begin)] = handleCatchBegin;
+    table[@intFromEnum(OpCode.catch_end)] = handleCatchEnd;
+    table[@intFromEnum(OpCode.throw)] = handleThrow;
 
     return table;
 }
@@ -6160,7 +6160,7 @@ fn initDispatchTable() [256]DispatchFn {
 /// 无效操作码处理
 fn handleInvalidOpcode(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) BytecodeVM.VMError!DispatchResult {
     const ip: usize = if (frame.ip == 0) 0 else frame.ip - 1;
-    const opcode_u8: u8 = @backingInt(inst.opcode);
+    const opcode_u8: u8 = @intFromEnum(inst.opcode);
 
     std.debug.print(
         "InvalidOpcode: func='{s}' ip={d} opcode=0x{x:0>2}({s}) op1={d} op2={d} hint={d} tail={any} gc={any} stack_top={d} base={d}\n",
@@ -6171,7 +6171,7 @@ fn handleInvalidOpcode(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) By
             @tagName(inst.opcode),
             inst.operand1,
             inst.operand2,
-            @backingInt(inst.flags.type_hint),
+            @intFromEnum(inst.flags.type_hint),
             inst.flags.is_tail_call,
             inst.flags.needs_gc_check,
             vm.stack_top,
@@ -6188,11 +6188,11 @@ fn handleInvalidOpcode(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) By
             "  [{d}] 0x{x:0>2}({s}) op1={d} op2={d} hint={d}\n",
             .{
                 idx,
-                @as(u8, @backingInt(winst.opcode)),
+                @as(u8, @intFromEnum(winst.opcode)),
                 @tagName(winst.opcode),
                 winst.operand1,
                 winst.operand2,
-                @backingInt(winst.flags.type_hint),
+                @intFromEnum(winst.flags.type_hint),
             },
         );
     }

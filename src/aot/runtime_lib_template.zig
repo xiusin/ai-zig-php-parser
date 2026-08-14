@@ -17384,7 +17384,7 @@ pub const ClassMeta = struct {
                     try this.setProperty(
                         "__state",
                         Value.initInt(
-                            @backingInt(FiberState.created),
+                            @intFromEnum(FiberState.created),
                         ),
                     );
                     // 创建 FiberContext
@@ -17701,13 +17701,13 @@ pub const ClassMeta = struct {
         const this = Value_asObject(ctx);
         const sv = this.getPropertyDirect("__state") orelse
             return .created;
-        return @fromBackingInt(@intCast(@as(u8, @intCast(sv.toInt()))));
+        return @enumFromInt(@as(u8, @intCast(sv.toInt())));
     }
 
     fn setFiberState(obj: *PHPObject, state: FiberState) void {
         obj.setProperty(
             "__state",
-            Value.initInt(@backingInt(state)),
+            Value.initInt(@intFromEnum(state)),
         ) catch {};
     }
 
@@ -20759,7 +20759,7 @@ pub fn php_getdate(ts_val: Value, allocator: Allocator) !Value {
     const month_day = year_day.calculateMonthDay();
 
     const year = year_day.year;
-    const month: i64 = @intCast(@backingInt(month_day.month));
+    const month: i64 = @intCast(@intFromEnum(month_day.month));
     const day: i64 = @intCast(month_day.day_index + 1);
     const hours: i64 = @intCast(day_seconds.getHoursIntoDay());
     const minutes: i64 = @intCast(day_seconds.getMinutesIntoHour());
@@ -20804,7 +20804,7 @@ pub fn php_idate(format_val: Value, ts_val: Value, allocator: Allocator) !Value 
     const minutes: i64 = @intCast(day_seconds.getMinutesIntoHour());
     const secs: i64 = @intCast(day_seconds.getSecondsIntoMinute());
     const day: i64 = @intCast(month_day.day_index + 1);
-    const month: i64 = @intCast(@backingInt(month_day.month));
+    const month: i64 = @intCast(@intFromEnum(month_day.month));
     const year: i64 = @intCast(@as(i32, year_day.year));
     const days_since_epoch: i64 = @intCast(epoch_day.day);
     const wday: i64 = @mod(days_since_epoch + 4, 7);
@@ -22035,8 +22035,13 @@ pub fn php_array_intersect_key(arrays: []const Value, allocator: Allocator) !Val
 }
 
 pub fn php_array_splice(arr: Value, offset: Value, length: Value, replacement: Value, allocator: Allocator) !Value {
-    if (!arr.isArray()) return Value.initNull();
-    const php_arr = arr.asArray();
+    // 解引用 Ref：by-ref 参数通过 make_ref 传递，arr 可能是 Ref(cell)
+    const derefed = if (arr.isRef()) blk: {
+        const cell = arr.asRef();
+        break :blk cell.*;
+    } else arr;
+    if (!derefed.isArray()) return Value.initNull();
+    const php_arr = derefed.asArray();
     const n = php_arr.count();
 
     const off_i = offset.toInt();
@@ -22894,7 +22899,7 @@ pub fn php_gethostbyname(hostname: Value, allocator: Allocator) !Value {
 
     var result_ptr: ?*std.posix.addrinfo = null;
     const rc = std.c.getaddrinfo(c_name.ptr, null, &hints, &result_ptr);
-    if (@backingInt(rc) != 0 or result_ptr == null) {
+    if (@intFromEnum(rc) != 0 or result_ptr == null) {
         return hostname;
     }
     defer std.c.freeaddrinfo(result_ptr.?);

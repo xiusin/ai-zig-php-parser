@@ -421,13 +421,13 @@ pub const MultiFileCompiler = struct {
 
         // 转换 Target 类型
         const target = Target{
-            .arch = @fromBackingInt(@intCast(@backingInt(self.options.target.arch))),
-            .os = @fromBackingInt(@intCast(@backingInt(self.options.target.os))),
-            .abi = @fromBackingInt(@intCast(@backingInt(self.options.target.abi))),
+            .arch = @enumFromInt(@intFromEnum(self.options.target.arch)),
+            .os = @enumFromInt(@intFromEnum(self.options.target.os)),
+            .abi = @enumFromInt(@intFromEnum(self.options.target.abi)),
         };
 
         // 转换 OptimizeLevel 类型
-        const optimize_level = @as(OptimizeLevel, @fromBackingInt(@intCast(@backingInt(self.options.optimize_level))));
+        const optimize_level = @as(OptimizeLevel, @enumFromInt(@intFromEnum(self.options.optimize_level)));
 
         // 使用 NativeLinker 生成可执行文件
         var linker = try NativeLinker.init(
