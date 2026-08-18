@@ -6190,17 +6190,72 @@ pub const NativeLinker = struct {
                         if (cleanup_idx) |ci| try self.generateExitPHIAssignments(writer, func, current_idx, ci, indent);
                         try writer.print("{s}    break :{s};\n", .{ indent, label_name });
                         try writer.print("{s}}}\n", .{indent});
-                        // 跟随 then_block (rhs)
-                        var next: ?usize = null;
+                        // 处理 rhs 块指令，然后跟随 .br → merge 块生成 cond_br 的 break 条件
+                        var rhs_idx: ?usize = null;
                         for (0..func.blocks.items.len) |i| {
                             if (func.blocks.items[i] == cb.then_block) {
-                                next = i;
+                                rhs_idx = i;
                                 break;
                             }
                         }
-                        if (next) |ni| {
-                            current_idx = ni;
-                            continue;
+                        if (rhs_idx) |ri| {
+                            const rhs_blk = func.blocks.items[ri];
+                            if (!processed.contains(ri)) {
+                                try processed.put(ri, {});
+                                for (rhs_blk.instructions.items) |inst| {
+                                    try writer.writeAll(indent);
+                                    try self.generateInstructionSimple(writer.list, inst);
+                                }
+                            }
+                            // 跟随 rhs 的终止符到 merge 块
+                            if (rhs_blk.terminator) |rhs_term| {
+                                if (rhs_term == .br) {
+                                    const merge_target = rhs_term.br;
+                                    for (0..func.blocks.items.len) |mi| {
+                                        if (func.blocks.items[mi] == merge_target) {
+                                            const merge_block = func.blocks.items[mi];
+                                            if (!processed.contains(mi)) {
+                                                try processed.put(mi, {});
+                                                // 消解 merge 块的 PHI（使用来自 rhs 的 incoming）
+                                                for (merge_block.instructions.items) |inst| {
+                                                    if (inst.op == .phi) {
+                                                        if (inst.result) |result| {
+                                                            for (inst.op.phi.incoming) |incoming| {
+                                                                if (incoming.block == rhs_blk) {
+                                                                    try self.writePtrAwareAssign(writer, indent, result.id, incoming.value.id);
+                                                                    break;
+                                                                }
+                                                            }
+                                                        }
+                                                    } else {
+                                                        try writer.writeAll(indent);
+                                                        try self.generateInstructionSimple(writer.list, inst);
+                                                    }
+                                                }
+                                            }
+                                            // 生成 merge 块的 cond_br 检查
+                                            if (merge_block.terminator) |mt| {
+                                                if (mt == .cond_br) {
+                                                    const mcb = mt.cond_br;
+                                                    try writer.print("{s}if (!(", .{indent});
+                                                    try self.writeConditionExpr(writer, mcb.cond.id, mcb.cond.type_);
+                                                    try writer.print(")) {{\n", .{});
+                                                    if (cleanup_idx) |ci| try self.generateExitPHIAssignments(writer, func, mi, ci, indent);
+                                                    try writer.print("{s}    break :{s};\n", .{ indent, label_name });
+                                                    try writer.print("{s}}}\n", .{indent});
+                                                }
+                                            }
+                                            break;
+                                        }
+                                    }
+                                } else if (rhs_term == .cond_br) {
+                                    // rhs 终止符是 cond_br（如 ?? 运算符的 identical 检查），
+                                    // 不是 .br：将 current_idx 设为 rhs 块索引，continue 主循环
+                                    // 让主循环的 cond_br 分支处理 ?? 模式或"其他模式"。
+                                    current_idx = ri;
+                                    continue;
+                                }
+                            }
                         }
                         return current_idx;
                     } else if (then_is_merge and else_is_rhs) {
@@ -6283,30 +6338,96 @@ pub const NativeLinker = struct {
                         if ((then_is_coalesce_rhs and else_is_coalesce_merge) or
                             (then_is_coalesce_merge and else_is_coalesce_rhs))
                         {
-                            // ?? 模式：处理 coalesce_rhs 块（获取默认值），然后跟随到 coalesce_merge
+                            // ?? 模式：$a ?? $b
+                            // cond_br: if (identical($a, null)) → coalesce_rhs ($b) else → coalesce_merge (use $a)
+                            // 生成: if (cond) { coalesce_rhs 块指令 }
+                            // 在 coalesce_merge 块中用条件赋值消解 PHI:
+                            //   result = if (cond) rhs_value else non_rhs_value
                             const rhs_block_ptr = if (then_is_coalesce_rhs) cb.then_block else cb.else_block;
                             const merge_block_ptr = if (then_is_coalesce_merge) cb.then_block else cb.else_block;
-                            // 处理 coalesce_rhs 块
-            rhs_blk_search: for (0..func.blocks.items.len) |i| {
-                                if (func.blocks.items[i] == rhs_block_ptr) {
-                                    if (!processed.contains(i)) {
-                                        try processed.put(i, {});
-                                        for (func.blocks.items[i].instructions.items) |inst| {
+                            const cond_id = cb.cond.id;
+
+                            // 找到 coalesce_rhs 和 coalesce_merge 块索引
+                            var rhs_bi: ?usize = null;
+                            var merge_bi: ?usize = null;
+                            for (0..func.blocks.items.len) |i| {
+                                if (func.blocks.items[i] == rhs_block_ptr) rhs_bi = i;
+                                if (func.blocks.items[i] == merge_block_ptr) merge_bi = i;
+                            }
+
+                            // 生成 if (cond) { coalesce_rhs 指令 }
+                            try writer.print("{s}if (", .{indent});
+                            try self.writeConditionExpr(writer, cb.cond.id, cb.cond.type_);
+                            try writer.print(") {{\n", .{});
+                            const inner_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{indent});
+                            defer self.allocator.free(inner_indent);
+                            if (rhs_bi) |ri| {
+                                const rhs_blk = func.blocks.items[ri];
+                                if (!processed.contains(ri)) {
+                                    try processed.put(ri, {});
+                                    for (rhs_blk.instructions.items) |inst| {
+                                        try writer.writeAll(inner_indent);
+                                        try self.generateInstructionSimple(writer.list, inst);
+                                    }
+                                }
+                            }
+                            try writer.print("{s}}}\n", .{indent});
+
+                            // 处理 coalesce_merge 块
+                            if (merge_bi) |mi| {
+                                const merge_blk = func.blocks.items[mi];
+                                if (!processed.contains(mi)) {
+                                    try processed.put(mi, {});
+                                    for (merge_blk.instructions.items) |inst| {
+                                        if (inst.op == .phi) {
+                                            // 条件赋值消解 PHI: result = if (cond) rhs_value else non_rhs_value
+                                            if (inst.result) |result| {
+                                                const rhs_blk_ptr = if (rhs_bi) |ri| func.blocks.items[ri] else null;
+                                                var rhs_value_id: ?usize = null;
+                                                var non_rhs_value_id: ?usize = null;
+                                                for (inst.op.phi.incoming) |incoming| {
+                                                    if (rhs_blk_ptr != null and incoming.block == rhs_blk_ptr.?) {
+                                                        rhs_value_id = incoming.value.id;
+                                                    } else {
+                                                        non_rhs_value_id = incoming.value.id;
+                                                    }
+                                                }
+                                                if (rhs_value_id != null and non_rhs_value_id != null) {
+                                                    try writer.print("{s}if (", .{indent});
+                                                    try self.writeConditionExpr(writer, cond_id, cb.cond.type_);
+                                                    try writer.print(") {{\n", .{});
+                                                    try self.writePtrAwareAssign(writer, inner_indent, result.id, rhs_value_id.?);
+                                                    try writer.print("{s}}} else {{\n", .{indent});
+                                                    try self.writePtrAwareAssign(writer, inner_indent, result.id, non_rhs_value_id.?);
+                                                    try writer.print("{s}}}\n", .{indent});
+                                                } else if (non_rhs_value_id != null) {
+                                                    try self.writePtrAwareAssign(writer, indent, result.id, non_rhs_value_id.?);
+                                                }
+                                            }
+                                        } else {
                                             try writer.writeAll(indent);
                                             try self.generateInstructionSimple(writer.list, inst);
                                         }
                                     }
-                                    break :rhs_blk_search;
+                                }
+                                // 跟随 coalesce_merge 的 .br 到下一个块
+                                if (merge_blk.terminator) |mt| {
+                                    if (mt == .br) {
+                                        const br_target = mt.br;
+                                        if (br_target == body_ptr or br_target == exit_ptr or br_target == func.blocks.items[cond_idx]) {
+                                            return current_idx;
+                                        }
+                                        for (0..func.blocks.items.len) |i| {
+                                            if (func.blocks.items[i] == br_target) {
+                                                current_idx = i;
+                                                break;
+                                            }
+                                        }
+                                        continue;
+                                    }
                                 }
                             }
-                            // 跟随到 coalesce_merge 块
-                            for (0..func.blocks.items.len) |i| {
-                                if (func.blocks.items[i] == merge_block_ptr) {
-                                    current_idx = i;
-                                    break;
-                                }
-                            }
-                            continue;
+                            return current_idx;
                         }
                         // 其他模式：保持原有逻辑
                         var next_idx: ?usize = null;
@@ -6424,12 +6545,35 @@ pub const NativeLinker = struct {
                 continue;
             }
 
-            // 检查是否是 if 语句（需要有对应的 if_merge_ 块）
-            if (std.mem.startsWith(u8, label, "if_then_") and
-                self.findBlockByLabelPrefix(func, i + 1, end_idx, "if_merge_") != null)
-            {
-                i = try self.generateIfFromLabels(writer, func, i, end_idx, cleanup_regs, processed, loop_label_counter, indent);
+            // while_body_ 作为 while(true) 循环入口（无 while_cond_ 块）
+            // IR 生成器在 while(true) 时可能省略 while_cond_，直接用 while_body_ 作为入口
+            if (std.mem.startsWith(u8, label, "while_body_")) {
+                i = try self.generateWhileFromLabels(writer, func, i, end_idx, cleanup_regs, processed, loop_label_counter, indent);
                 continue;
+            }
+
+            // 检查是否是 if 语句
+            // 正常情况：有对应的 if_merge_ 块
+            // 特殊情况：无 if_merge_ 块（else 分支直接跳到循环增量/退出块），
+            // 此时 then 块的 br 目标是循环回边块
+            if (std.mem.startsWith(u8, label, "if_then_")) {
+                const has_merge = self.findBlockByLabelPrefix(func, i + 1, end_idx, "if_merge_") != null;
+                const has_br_to_loop = blk: {
+                    if (block.terminator) |term| {
+                        if (term == .br) {
+                            // br 目标是已处理的循环块（如 foreach_increment_）
+                            for (0..func.blocks.items.len) |bidx| {
+                                if (func.blocks.items[bidx] == term.br and processed.contains(bidx)) break :blk true;
+                            }
+                        }
+                    }
+                    break :blk false;
+                };
+                std.debug.print("[DEBUG] GLDR if_then_: i={d} label={s} has_merge={} has_br_to_loop={} processed={} end_idx={d} ret={} brk={}\n", .{ i, label, has_merge, has_br_to_loop, processed.contains(i), end_idx, self.return_generated, self.break_generated });
+                if (has_merge or has_br_to_loop) {
+                    i = try self.generateIfFromLabels(writer, func, i, end_idx, cleanup_regs, processed, loop_label_counter, indent);
+                    continue;
+                }
             }
 
             // 检查是否是 if_merge_ 块且有 cond_br 终止符（嵌套 if 在 else 路径中）
@@ -6437,6 +6581,7 @@ pub const NativeLinker = struct {
             if (std.mem.startsWith(u8, label, "if_merge_") and
                 block.terminator != null and block.terminator.? == .cond_br)
             {
+                std.debug.print("[DEBUG] GLDR if_merge_+cond_br: i={d} label={s} cond_id={d}\n", .{ i, label, block.terminator.?.cond_br.cond.id });
                 // 生成 if_merge_ 块的非 PHI 指令
                 try processed.put(i, {});
                 for (block.instructions.items) |inst| {
@@ -6468,6 +6613,9 @@ pub const NativeLinker = struct {
                         break;
                     }
                 }
+                // 提升到外层作用域，用于 else 块处理后的 AND 合并
+                var then_returned = false;
+                var then_breaked = false;
                 if (nested_then_idx) |nti| {
                     if (!processed.contains(nti)) {
                         const saved_rg = self.return_generated;
@@ -6498,6 +6646,9 @@ pub const NativeLinker = struct {
                                 }
                             }
                         }
+                        // 保存 then 分支的返回状态（用于 AND 合并）
+                        then_returned = self.return_generated;
+                        then_breaked = self.break_generated;
                         if (!self.return_generated) self.return_generated = saved_rg;
                         if (!self.break_generated) self.break_generated = saved_brk;
                     }
@@ -6527,13 +6678,21 @@ pub const NativeLinker = struct {
                 // 在 if/else 之后处理 else 块（logical_merge_）的非 PHI 指令和 cond_br
                 if (nested_else_idx) |nei| {
                     if (!processed.contains(nei)) {
-                        const saved_rg = self.return_generated;
-                        const saved_brk = self.break_generated;
                         self.return_generated = false;
                         self.break_generated = false;
                         try self.generateLabelDrivenBlockRange(writer, func, nei, end_idx, cleanup_regs, processed, loop_label_counter, indent);
-                        if (!self.return_generated) self.return_generated = saved_rg;
-                        if (!self.break_generated) self.break_generated = saved_brk;
+                        // 保存 else 块处理后的 return 状态
+                        const else_returned = self.return_generated;
+                        // AND 合并：只有 then 和 else 都返回/中断，才标记为返回/中断
+                        // 但如果 merge 块有 ret，则所有路径最终都会 return，保持 return_generated=true
+                        self.return_generated = (then_returned and else_returned) or else_returned;
+                        // break_generated：保持 else 的值不变。
+                        // break_generated 在此上下文可能表示 continue(回边)已生成，
+                        // 不应被 then 的 false AND 清除（then 可能未回边但 else 回边了）。
+                    } else {
+                        // else 块已处理（如被 then 路径消解 PHI 时标记），使用 then 状态
+                        self.return_generated = then_returned;
+                        self.break_generated = then_breaked;
                     }
                 }
                 i += 1;
@@ -6637,8 +6796,14 @@ pub const NativeLinker = struct {
                                                     }
                                                 }
                                             }
-                                            try writer.print("{s}continue :{s};\n", .{ indent, self.current_loop_label.? });
-                                            self.break_generated = true;
+                                            // 当回边目标是增量块（非 cond 块本身）时，不生成 continue，
+                                            // 因为增量块的非 PHI 指令需要由 generateForFromLabels 在 continue 之前生成。
+                                            // 仅当回边直接到 cond 块时才生成 continue。
+                                            const is_to_increment = if (self.current_loop_cond_block) |ci| be_idx != ci else false;
+                                            if (!is_to_increment) {
+                                                try writer.print("{s}continue :{s};\n", .{ indent, self.current_loop_label.? });
+                                                self.break_generated = true;
+                                            }
                                         }
                                     }
                                     break;
@@ -6764,9 +6929,46 @@ pub const NativeLinker = struct {
                                             for (0..func.blocks.items.len) |blk_i| {
                                                 if (func.blocks.items[blk_i] == t.br) {
                                                     const target_label = func.blocks.items[blk_i].label;
-                                                    // 如果目标是控制结构（循环/if/ternary/coalesce），
-                                                    // 在 then 分支内递归处理
-                                                    if (std.mem.startsWith(u8, target_label, "for_cond_") or
+                                                    // 检查是否是当前循环的回边（continue）
+                                                    var is_back_edge = false;
+                                                    if (self.current_loop_cond_block) |cond_blk_idx| {
+                                                        if (blk_i == cond_blk_idx) {
+                                                            is_back_edge = true;
+                                                        } else {
+                                                            // 检查目标是否是增量块（br 到 cond 块的块，如 for_loop_/foreach_increment_）
+                                                            const target_blk = func.blocks.items[blk_i];
+                                                            if (target_blk.terminator) |tb| {
+                                                                if (tb == .br and cond_blk_idx < func.blocks.items.len and tb.br == func.blocks.items[cond_blk_idx]) {
+                                                                    is_back_edge = true;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    if (is_back_edge and self.current_loop_label != null) {
+                                                        // 循环回边：消解 cond 块 PHI + 生成 continue
+                                                        const cond_blk = func.blocks.items[blk_i];
+                                                        for (cond_blk.instructions.items) |phi_inst| {
+                                                            if (phi_inst.op == .phi) {
+                                                                if (phi_inst.result) |result| {
+                                                                    for (phi_inst.op.phi.incoming) |incoming| {
+                                                                        if (incoming.block == then_blk or
+                                                                            std.mem.eql(u8, incoming.block.label, then_blk.label))
+                                                                        {
+                                                                            try self.writePtrAwareAssign(writer, body_indent, result.id, incoming.value.id);
+                                                                            break;
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        // 当回边目标是增量块（非 cond 块本身）时，不生成 continue，
+                                                        // 因为增量块的非 PHI 指令需要由循环生成器在 continue 之前生成。
+                                                        const is_to_inc = if (self.current_loop_cond_block) |ci| blk_i != ci else false;
+                                                        if (!is_to_inc) {
+                                                            try writer.print("{s}continue :{s};\n", .{ body_indent, self.current_loop_label.? });
+                                                            self.break_generated = true;
+                                                        }
+                                                    } else if (std.mem.startsWith(u8, target_label, "for_cond_") or
                                                         std.mem.startsWith(u8, target_label, "while_cond_") or
                                                         std.mem.startsWith(u8, target_label, "foreach_cond_") or
                                                         (std.mem.startsWith(u8, target_label, "if_then_") and
@@ -7018,8 +7220,6 @@ pub const NativeLinker = struct {
                                 }
                                 break :blk false;
                             };
-                            try writer.print("// [DBG-COALESCE] else_label={s} merge_bi={any} ei={d} is_coalesce={any}\n", .{ func.blocks.items[ei].label, merge_bi, ei, else_is_coalesce_merge });
-
                             if (else_is_coalesce_merge) {
                                 // else 分支直接跳到 merge（无 body），仅需消解 PHI：
                                 // 使用来自 entry 块（当前 cond_br 所在块）的 incoming 值
@@ -7069,8 +7269,46 @@ pub const NativeLinker = struct {
                                             for (0..func.blocks.items.len) |blk_i| {
                                                 if (func.blocks.items[blk_i] == t.br) {
                                                     const target_label = func.blocks.items[blk_i].label;
-                                                    // 如果目标是控制结构，在 else 分支内递归处理
-                                                    if (std.mem.startsWith(u8, target_label, "for_cond_") or
+                                                    // 检查是否是当前循环的回边（continue）
+                                                    var is_back_edge = false;
+                                                    if (self.current_loop_cond_block) |cond_blk_idx| {
+                                                        if (blk_i == cond_blk_idx) {
+                                                            is_back_edge = true;
+                                                        } else {
+                                                            // 检查目标是否是增量块（br 到 cond 块的块，如 for_loop_/foreach_increment_）
+                                                            const target_blk = func.blocks.items[blk_i];
+                                                            if (target_blk.terminator) |tb| {
+                                                                if (tb == .br and cond_blk_idx < func.blocks.items.len and tb.br == func.blocks.items[cond_blk_idx]) {
+                                                                    is_back_edge = true;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    if (is_back_edge and self.current_loop_label != null) {
+                                                        // 循环回边：消解 cond 块 PHI + 生成 continue
+                                                        const cond_blk = func.blocks.items[blk_i];
+                                                        for (cond_blk.instructions.items) |phi_inst| {
+                                                            if (phi_inst.op == .phi) {
+                                                                if (phi_inst.result) |result| {
+                                                                    for (phi_inst.op.phi.incoming) |incoming| {
+                                                                        if (incoming.block == else_blk or
+                                                                            std.mem.eql(u8, incoming.block.label, else_blk.label))
+                                                                        {
+                                                                            try self.writePtrAwareAssign(writer, body_indent, result.id, incoming.value.id);
+                                                                            break;
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        // 当回边目标是增量块（非 cond 块本身）时，不生成 continue，
+                                                        // 因为增量块的非 PHI 指令需要由循环生成器在 continue 之前生成。
+                                                        const is_to_inc = if (self.current_loop_cond_block) |ci| blk_i != ci else false;
+                                                        if (!is_to_inc) {
+                                                            try writer.print("{s}continue :{s};\n", .{ body_indent, self.current_loop_label.? });
+                                                            self.break_generated = true;
+                                                        }
+                                                    } else if (std.mem.startsWith(u8, target_label, "for_cond_") or
                                                         std.mem.startsWith(u8, target_label, "while_cond_") or
                                                         std.mem.startsWith(u8, target_label, "foreach_cond_") or
                                                         (std.mem.startsWith(u8, target_label, "if_then_") and
@@ -7900,7 +8138,9 @@ pub const NativeLinker = struct {
 
                     // 修复：当 then 块有嵌套 cond_br 且 else 目标是 merge 块时，
                     // 设置 merge_bi 以正确处理 PHI 消解和后续代码生成
-                    if (merge_bi == null and else_bi != null) {
+                    // 但当 then 块已 return/throw/unreachable（不会到达 merge 块）时，
+                    // 不应将 else 块设置为 merge 块，否则 else_is_coalesce 误判为 true。
+                    if (merge_bi == null and else_bi != null and !self.return_generated) {
                         const else_lbl = func.blocks.items[else_bi.?].label;
                         if (std.mem.startsWith(u8, else_lbl, "if_merge_") or
                             std.mem.startsWith(u8, else_lbl, "ternary_merge_") or
@@ -8295,9 +8535,11 @@ pub const NativeLinker = struct {
                     // 合并 then/else 返回状态：仅当两个分支都返回/break 时才标记为已返回
                     // Coalesce 模式下，break_generated 来自 merge 块（if/else 之后），
                     // 不应与 then 分支 AND 合并，否则回边 continue 被错误清除。
+                    // then_is_be 时同理：then 分支是回边(continue)不是 break，
+                    // else 分支的 break_generated（表示 continue 已生成）应保持。
                     self.return_generated = loop_cond_br_then_returned and self.return_generated;
-                    if (else_is_coalesce) {
-                        // break_generated 保持不变（来自 merge 块的回边检测）
+                    if (else_is_coalesce or then_is_be) {
+                        // break_generated 保持不变（来自 merge 块/else 分支的回边检测）
                     } else {
                         self.break_generated = loop_cond_br_then_breaked and self.break_generated;
                     }
@@ -8755,7 +8997,7 @@ pub const NativeLinker = struct {
         const cond_block = func.blocks.items[cond_idx];
 
         // 查找 for_body_ 块（可能不存在——IR 生成器在 body 为单语句时可能省略 for_body_ 块）
-        const body_by_label = self.findBlockByLabelPrefix(func, cond_idx + 1, end_idx, "for_body_");
+        const body_by_label = self.findBlockByLabelPrefix(func, cond_idx + 1, func.blocks.items.len, "for_body_");
 
         var body_idx: usize = undefined;
         var loop_idx: usize = undefined;
@@ -8873,8 +9115,53 @@ pub const NativeLinker = struct {
         const for_exit_ptr = func.blocks.items[exit_idx];
         _ = try self.generateLoopConditionChain(writer, func, cond_idx, end_idx, for_body_ptr, for_exit_ptr, processed, label_name, body_indent, null);
 
-        // 生成 body 块指令
+        // 检测 body 是否是内层 while 循环（while_cond_ 块）
+        // 如果是，委托给 generateWhileFromLabels 处理，不直接生成 body 指令
         const body_block = func.blocks.items[body_idx];
+        if (std.mem.startsWith(u8, body_block.label, "while_cond_")) {
+            // 委托给 while 循环处理
+            // while 循环的 exit 块可能就是 for 循环的 loop 块（for_loop_3）
+            _ = try self.generateWhileFromLabels(writer, func, body_idx, end_idx, cleanup_regs, processed, loop_label_counter, body_indent);
+            // while 循环处理后，exit 块（可能是 for_loop_3）已被标记为 processed
+            // 但 for_loop_3 的增量指令（如 $i++）还未生成，需要在此生成
+            if (loop_idx != body_idx) {
+                // 移除 processed 标记以允许生成指令
+                _ = processed.remove(loop_idx);
+                try processed.put(loop_idx, {});
+                const loop_blk = func.blocks.items[loop_idx];
+                for (loop_blk.instructions.items) |inst| {
+                    try writer.writeAll(body_indent);
+                    try self.generateInstructionSimple(writer.list, inst);
+                }
+            }
+            // PHI 消解：在 for 循环回边处添加 PHI 赋值（来自 loop/body 块的 incoming 值）
+            if (!self.return_generated and !self.break_generated) {
+                for (cond_block.instructions.items) |phi_inst| {
+                    if (phi_inst.op == .phi) {
+                        if (phi_inst.result) |result| {
+                            for (phi_inst.op.phi.incoming) |incoming| {
+                                const is_from_loop = incoming.block == func.blocks.items[loop_idx] or
+                                    std.mem.eql(u8, incoming.block.label, func.blocks.items[loop_idx].label);
+                                if (is_from_loop) {
+                                    try self.writePtrAwareAssign(writer, body_indent, result.id, incoming.value.id);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // 生成回边到 for_cond
+            if (!self.return_generated and !self.break_generated) {
+                try writer.print("{s}    continue :{s};\n", .{ body_indent, label_name });
+            }
+            // 生成 for 循环闭合花括号
+            try writer.print("{s}}}\n", .{indent});
+            // 不预标记 exit 块，让 generateLabelDrivenBlockRange 在 for 循环之后处理
+            return exit_idx;
+        }
+
+        // 生成 body 块指令
         try processed.put(body_idx, {});
         for (body_block.instructions.items) |inst| {
             try writer.writeAll(body_indent);
@@ -9183,7 +9470,9 @@ pub const NativeLinker = struct {
 
                     // 修复：当 then 块有嵌套 cond_br 且 else 目标是 merge 块时，
                     // 设置 merge_bi 以正确处理 PHI 消解和后续代码生成
-                    if (merge_bi == null and else_bi != null) {
+                    // 但当 then 块已 return/throw/unreachable（不会到达 merge 块）时，
+                    // 不应将 else 块设置为 merge 块，否则 else_is_coalesce 误判为 true。
+                    if (merge_bi == null and else_bi != null and !self.return_generated) {
                         const else_lbl = func.blocks.items[else_bi.?].label;
                         if (std.mem.startsWith(u8, else_lbl, "if_merge_") or
                             std.mem.startsWith(u8, else_lbl, "ternary_merge_") or
@@ -9515,9 +9804,11 @@ pub const NativeLinker = struct {
                     // 合并 then/else 返回状态：仅当两个分支都返回/break 时才标记为已返回
                     // Coalesce 模式下，break_generated 来自 merge 块（if/else 之后），
                     // 不应与 then 分支 AND 合并，否则回边 continue 被错误清除。
+                    // then_is_be 时同理：then 分支是回边(continue)不是 break，
+                    // else 分支的 break_generated（表示 continue 已生成）应保持。
                     self.return_generated = loop_cond_br_then_returned and self.return_generated;
-                    if (else_is_coalesce) {
-                        // break_generated 保持不变（来自 merge 块的回边检测）
+                    if (else_is_coalesce or then_is_be) {
+                        // break_generated 保持不变（来自 merge 块/else 分支的回边检测）
                     } else {
                         self.break_generated = loop_cond_br_then_breaked and self.break_generated;
                     }
@@ -9694,7 +9985,10 @@ pub const NativeLinker = struct {
         const cond_block = func.blocks.items[cond_idx];
 
         // 查找 while_body_ 块（可能不存在——IR 生成器在 body 为单语句时可能省略 while_body_ 块）
-        const body_by_label = self.findBlockByLabelPrefix(func, cond_idx + 1, end_idx, "while_body_");
+        // 使用 func.blocks.items.len 而非 end_idx，因为 end_idx 可能被上层递归调用的
+        // 嵌套 merge 范围限制（如 if_merge_3 的 br while_cond_4 传了 merge_idx+1 作为 end_idx），
+        // 导致 while_body_ / while_exit_ 块在搜索范围外。
+        const body_by_label = self.findBlockByLabelPrefix(func, cond_idx + 1, func.blocks.items.len, "while_body_");
 
         var body_idx: usize = undefined;
         var exit_idx: usize = undefined;
@@ -9702,7 +9996,7 @@ pub const NativeLinker = struct {
         if (body_by_label) |found_bi| {
             // 正常路径：while_body_ 存在，顺序搜索 exit
             body_idx = found_bi;
-            exit_idx = self.findBlockByLabelPrefix(func, body_idx + 1, end_idx, "while_exit_") orelse blk: {
+            exit_idx = self.findBlockByLabelPrefix(func, body_idx + 1, func.blocks.items.len, "while_exit_") orelse blk: {
                 // while_exit_ 未找到：从 cond_br 的非 body 目标推导 exit
                 if (cond_block.terminator) |term| {
                     if (term == .cond_br) {
@@ -9725,7 +10019,7 @@ pub const NativeLinker = struct {
         } else {
             // while_body_ 不存在：IR 生成器将 body 直接作为 cond_br 的目标
             // 策略：先找 while_exit_，再从 cond_br 的非 exit 目标推导出 body
-            const exit_by_label = self.findBlockByLabelPrefix(func, cond_idx + 1, end_idx, "while_exit_");
+            const exit_by_label = self.findBlockByLabelPrefix(func, cond_idx + 1, func.blocks.items.len, "while_exit_");
             if (exit_by_label) |ei| {
                 exit_idx = ei;
                 body_idx = blk: {
@@ -9911,6 +10205,10 @@ pub const NativeLinker = struct {
                     //   - while_cond 块（循环回边，继续循环）
                     const body_cond_br = term.cond_br;
                     const cond_block_ptr = func.blocks.items[cond_idx];
+                    // [DBG-WHILE] body cond_br: body_idx={d} cond_idx={d} body_label={s} cond_label={s}
+                    //   then_block={s} else_block={s}
+                    std.debug.print("[DBG-WHILE] body_idx={d} cond_idx={d} body_label={s} cond_label={s}\n", .{ body_idx, cond_idx, body_block.label, cond_block.label });
+                    std.debug.print("[DBG-WHILE] then_block={s} else_block={s}\n", .{ body_cond_br.then_block.label, body_cond_br.else_block.label });
 
                     // 预计算循环最后回边位置，限制 cond_br 内部递归调用范围
                     var loop_last_be: usize = body_idx;
@@ -9929,7 +10227,10 @@ pub const NativeLinker = struct {
                             }
                         }
                     }
-                    const loop_end = @min(end_idx, loop_last_be + 1);
+                    // 当 body_idx == cond_idx（while(true) 无 while_body_ 和 while_exit_），
+                    // 循环内的所有块直到 end_idx 都在循环内部（包括回边块之后的 if-else 链），
+                    // 因此 loop_end = end_idx。
+                    const loop_end = if (body_idx == cond_idx) end_idx else @min(end_idx, loop_last_be + 1);
 
                     // 查找 then/else 块索引
                     var then_bi: ?usize = null;
@@ -9968,6 +10269,7 @@ pub const NativeLinker = struct {
                     var while_logical_merge_to_process: ?usize = null;
                     var merge_bi: ?usize = null;
                     if (then_bi) |ti| {
+                        std.debug.print("[DBG-WHILE-THEN] then_bi={d} label={s} cond_ptr_match={} processed={}\n", .{ ti, func.blocks.items[ti].label, func.blocks.items[ti] == cond_block_ptr, processed.contains(ti) });
                         if (func.blocks.items[ti] == cond_block_ptr) {
                             then_is_back_edge = true;
                         } else if (std.mem.startsWith(u8, func.blocks.items[ti].label, "logical_merge_")) {
@@ -9990,6 +10292,20 @@ pub const NativeLinker = struct {
                         } else if (!processed.contains(ti)) {
                             try processed.put(ti, {});
                             const then_blk = func.blocks.items[ti];
+                            std.debug.print("[DBG-WHILE-THEN-PROC] then_bi={d} label={s} term=", .{ ti, then_blk.label });
+                            if (then_blk.terminator) |tt2| {
+                                switch (tt2) {
+                                    .br => |br_t| {
+                                        const is_cond = br_t == cond_block_ptr;
+                                        std.debug.print("br is_cond={}\n", .{is_cond});
+                                    },
+                                    .cond_br => std.debug.print("cond_br\n", .{}),
+                                    .ret => std.debug.print("ret\n", .{}),
+                                    .throw => std.debug.print("throw\n", .{}),
+                                    .switch_ => std.debug.print("switch_\n", .{}),
+                                    .unreachable_ => std.debug.print("unreachable_\n", .{}),
+                                }
+                            } else std.debug.print("none\n", .{});
                             for (then_blk.instructions.items) |inst| {
                                 try writer.writeAll(then_indent);
                                 try self.generateInstructionSimple(writer.list, inst);
@@ -10071,6 +10387,11 @@ pub const NativeLinker = struct {
                                                 }
                                             }
                                             try writer.print("{s}    break :{s};\n", .{ then_indent, label_name });
+                                            self.break_generated = true;
+                                        } else if (br_target == cond_block_ptr) {
+                                            // br 到 cond 块：循环回边，生成 continue
+                                            try writer.print("{s}    continue :{s};\n", .{ then_indent, label_name });
+                                            self.break_generated = true;
                                         } else if (br_target != cond_block_ptr) {
                                             // br 到非 exit/cond 块：跟踪 merge 块
                                             for (0..func.blocks.items.len) |blk_i| {
@@ -10081,6 +10402,14 @@ pub const NativeLinker = struct {
                                             }
                                         }
                                     },
+                                    .throw => |ex_reg| {
+                                        try self.writeThrowTerminator(writer, ex_reg, cleanup_regs, then_indent);
+                                        self.return_generated = true;
+                                    },
+                                    .unreachable_ => {
+                                        try writer.print("{s}    unreachable;\n", .{then_indent});
+                                        self.return_generated = true;
+                                    },
                                     else => {},
                                 }
                             }
@@ -10089,7 +10418,9 @@ pub const NativeLinker = struct {
 
                     // 修复：当 then 块有嵌套 cond_br 且 else 目标是 merge 块时，
                     // 设置 merge_bi 以正确处理 PHI 消解和后续代码生成
-                    if (merge_bi == null and else_bi != null) {
+                    // 但当 then 块已 return/throw/unreachable（不会到达 merge 块）时，
+                    // 不应将 else 块设置为 merge 块，否则 else_is_coalesce 误判为 true。
+                    if (merge_bi == null and else_bi != null and !self.return_generated) {
                         const else_lbl = func.blocks.items[else_bi.?].label;
                         if (std.mem.startsWith(u8, else_lbl, "if_merge_") or
                             std.mem.startsWith(u8, else_lbl, "ternary_merge_") or
@@ -10138,6 +10469,7 @@ pub const NativeLinker = struct {
                             else_is_back_edge = true;
                         }
                     }
+                    std.debug.print("[DBG-WHILE-ELSE-CHECK] else_bi={?d} merge_bi={?d} else_is_coalesce={} else_is_back_edge={}\n", .{ else_bi, merge_bi, else_is_coalesce, else_is_back_edge });
 
                     if (else_is_coalesce) {
                         if (else_bi) |ei| {
@@ -10158,14 +10490,19 @@ pub const NativeLinker = struct {
                                     }
                                 }
                             }
+                            // 生成 merge 块的非 PHI 指令（如 add、array.set 等）
+                            for (merge_blk_phi.instructions.items) |inst| {
+                                if (inst.op != .phi) {
+                                    try writer.writeAll(then_indent);
+                                    try self.generateInstructionSimple(writer.list, inst);
+                                }
+                            }
+                            try processed.put(ei, {});
                             try writer.print("{s}}}\n", .{if_indent});
                         } else {
                             try writer.print("{s}}}\n", .{if_indent});
                         }
                     } else if (else_is_back_edge) {
-                        // else 是回边（继续循环），不生成 else 块
-                        try writer.print("{s}}}\n", .{if_indent});
-                    } else if (then_is_back_edge) {
                         // then 是回边，else 有实际代码 → 反转条件
                         if (else_bi) |ei| {
                             if (!processed.contains(ei)) {
@@ -10263,6 +10600,16 @@ pub const NativeLinker = struct {
                     } else {
                         // 两个目标都有实际代码
                         if (else_bi) |ei| {
+                            std.debug.print("[DBG-WHILE-ELSE] else_bi={d} label={s} processed={} term=", .{ ei, func.blocks.items[ei].label, processed.contains(ei) });
+                            if (func.blocks.items[ei].terminator) |ett| {
+                                switch (ett) {
+                                    .br => std.debug.print("br\n", .{}),
+                                    .cond_br => std.debug.print("cond_br\n", .{}),
+                                    .ret => std.debug.print("ret\n", .{}),
+                                    .throw => std.debug.print("throw\n", .{}),
+                                    else => std.debug.print("other\n", .{}),
+                                }
+                            } else std.debug.print("none\n", .{});
                             if (!processed.contains(ei)) {
                                 try writer.print("{s}}} else {{\n", .{if_indent});
                                 try processed.put(ei, {});
@@ -10344,6 +10691,14 @@ pub const NativeLinker = struct {
                                         },
                                         .br => |br_target| {
                                             try self.writeBrInLoopContext(writer, func, br_target, else_blk, end_idx, cleanup_regs, processed, loop_label_counter, then_indent);
+                                        },
+                                        .throw => |ex_reg| {
+                                            try self.writeThrowTerminator(writer, ex_reg, cleanup_regs, then_indent);
+                                            self.return_generated = true;
+                                        },
+                                        .unreachable_ => {
+                                            try writer.print("{s}    unreachable;\n", .{then_indent});
+                                            self.return_generated = true;
                                         },
                                         else => {},
                                     }
@@ -10429,7 +10784,7 @@ pub const NativeLinker = struct {
                             }
                         }
                     }
-                    extended_end = @min(last_back_edge + 1, end_idx);
+                    extended_end = if (body_idx == cond_idx) end_idx else @min(last_back_edge + 1, end_idx);
                     // 包含 then/else 块索引
                     if (then_bi) |ti| {
                         if (ti + 1 > extended_end) extended_end = ti + 1;
@@ -10480,6 +10835,7 @@ pub const NativeLinker = struct {
             }
         }
 
+        std.debug.print("DEBUG while_true: return_generated={}, break_generated={}, body_idx={}, cond_idx={}, exit_idx={}, end_idx={}, label={s}\n", .{ self.return_generated, self.break_generated, body_idx, cond_idx, exit_idx, end_idx, label_name });
         if (!self.return_generated and !self.break_generated) {
             try writer.print("{s}    continue :{s};\n", .{ indent, label_name });
         }
@@ -10563,6 +10919,18 @@ pub const NativeLinker = struct {
         indent: []const u8,
     ) anyerror!usize {
         const then_block = func.blocks.items[then_idx];
+        std.debug.print("[DEBUG] generateIfFromLabels: then_idx={d} label={s} term=", .{ then_idx, then_block.label });
+        if (then_block.terminator) |t| {
+            switch (t) {
+                .br => std.debug.print("br\n", .{}),
+                .cond_br => std.debug.print("cond_br\n", .{}),
+                .ret => std.debug.print("ret\n", .{}),
+                .throw => std.debug.print("throw\n", .{}),
+                else => std.debug.print("other\n", .{}),
+            }
+        } else {
+            std.debug.print("none\n", .{});
+        }
 
         // 查找 else 和 merge 块（根据 then 块类型选择对应前缀）
         // 修复：之前 if_then_ 会错误匹配到后续 ternary_else_ 块，
@@ -10574,8 +10942,10 @@ pub const NativeLinker = struct {
             self.findBlockByLabelPrefix(func, then_idx + 1, end_idx, "ternary_else_")
         else
             null; // coalesce_rhs_ 无 else 块
+        // 对于 if_then_ 块，merge 可能不存在（else 直接跳到循环回边），
+        // 此时 then 块的 br 目标是循环增量/退出块，无需 merge 消解 PHI
         const merge_idx = if (std.mem.startsWith(u8, then_label, "if_then_"))
-            self.findBlockByLabelPrefix(func, then_idx + 1, end_idx, "if_merge_") orelse return end_idx
+            self.findBlockByLabelPrefix(func, then_idx + 1, end_idx, "if_merge_")
         else if (std.mem.startsWith(u8, then_label, "ternary_then_"))
             self.findBlockByLabelPrefix(func, then_idx + 1, end_idx, "ternary_merge_") orelse return end_idx
         else if (std.mem.startsWith(u8, then_label, "coalesce_rhs_"))
@@ -10623,7 +10993,13 @@ pub const NativeLinker = struct {
                     const then_block_ptr = func.blocks.items[then_idx];
                     if (term.cond_br.then_block == then_block_ptr or term.cond_br.else_block == then_block_ptr) {
                         prev_is_cond_br_source = true;
-                        cond_reg = term.cond_br.cond;
+                        std.debug.print("[DEBUG] genIf Step1 prev: then_idx={d} prev_idx={d} prev_label={s} prev_processed={} cond_id={d}\n", .{ then_idx, prev_idx, prev_block.label, processed.contains(prev_idx), term.cond_br.cond.id });
+                        // 仅当 prev 块未被 processed 时才设置 cond_reg。
+                        // 当 prev 已 processed（如 while/foreach 的 else cond_br case
+                        // 已生成 if (cond)），不设置 cond_reg 以避免重复生成条件。
+                        if (!processed.contains(prev_idx)) {
+                            cond_reg = term.cond_br.cond;
+                        }
                     }
                 }
             }
@@ -10640,10 +11016,14 @@ pub const NativeLinker = struct {
 
         // 如果前一个块没有 cond_br，搜索所有块找到分支到 then_block 的 cond_br
         // （IR 块数组顺序可能不匹配逻辑嵌套顺序：if_then 可能在 while_exit 之后）
+        // 跳过已 processed 的块：当 then 块在 while/foreach 的 else cond_br case 中
+        // 被递归调用 generateLabelDrivenBlockRange 处理时，条件块（如 if_merge_）
+        // 已被外层 processed 标记。若不跳过，会重复生成 if (cond) 导致双重嵌套。
         if (cond_reg == null) {
             const then_block_ptr = func.blocks.items[then_idx];
             for (0..func.blocks.items.len) |i| {
                 if (i == then_idx) continue;
+                if (processed.contains(i)) continue;
                 const block = func.blocks.items[i];
                 if (block.terminator) |term| {
                     if (term == .cond_br) {
@@ -10658,11 +11038,13 @@ pub const NativeLinker = struct {
 
         // Step 2: 生成 if 语句
         if (cond_reg) |cr| {
+            std.debug.print("[DEBUG] genIf Step2: then_idx={d} cond_reg=({d}) → if (cond)\n", .{ then_idx, cr.id });
             try writer.print("{s}if (", .{indent});
             try self.writeConditionExpr(writer, cr.id, cr.type_);
             try writer.print(") {{\n", .{});
         } else {
-            try writer.print("{s}if (true) {{\n", .{indent});
+            std.debug.print("[DEBUG] genIf Step2: then_idx={d} cond_reg=null → if (true)\n", .{then_idx});
+            try writer.print("{s}if (true) {{ // MARKER genIf true then_idx={d}\n", .{ indent, then_idx });
         }
 
         const then_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{indent});
@@ -10685,7 +11067,7 @@ pub const NativeLinker = struct {
         if (then_block.terminator) |term| {
             switch (term) {
                 .br => |br_target| {
-                    if (br_target == func.blocks.items[merge_idx]) {
+                    if (merge_idx != null and br_target == func.blocks.items[merge_idx.?]) {
                         // br 到 merge，正常流程
                     } else if (self.current_loop_exit_block) |loop_exit_idx| {
                         // br 到循环 exit 块 → 生成 break
@@ -10707,6 +11089,27 @@ pub const NativeLinker = struct {
                             }
                             if (self.current_loop_label) |lbl| {
                                 try writer.print("{s}    break :{s};\n", .{ then_indent, lbl });
+                                self.break_generated = true;
+                            }
+                        }
+                    } else if (self.current_loop_cond_block) |cond_blk_idx| {
+                        // br 到循环 cond 块 → 生成 continue（回边）
+                        if (cond_blk_idx < func.blocks.items.len and br_target == func.blocks.items[cond_blk_idx]) {
+                            const cond_blk = func.blocks.items[cond_blk_idx];
+                            for (cond_blk.instructions.items) |phi_inst| {
+                                if (phi_inst.op == .phi) {
+                                    if (phi_inst.result) |result| {
+                                        for (phi_inst.op.phi.incoming) |incoming| {
+                                            if (incoming.block == then_block) {
+                                                try self.writePtrAwareAssign(writer, then_indent, result.id, incoming.value.id);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if (self.current_loop_label) |lbl| {
+                                try writer.print("{s}    continue :{s};\n", .{ then_indent, lbl });
                                 self.break_generated = true;
                             }
                         }
@@ -10733,8 +11136,73 @@ pub const NativeLinker = struct {
                 .throw => |ex_reg| {
                     try self.writeThrowTerminator(writer, ex_reg, cleanup_regs, then_indent);
                 },
-                .cond_br => {
-                    // then 块内有嵌套 if，递归处理
+                .cond_br => |cb| {
+                    // then 块内有嵌套 if：直接生成 if (cond) { 嵌套 then 指令 } 结构
+                    // 不依赖 Step 6 的 generateLabelDrivenBlockRange（它会错误匹配 if_then_ 块标签）
+                    std.debug.print("[DEBUG] Step5 cond_br: then_idx={d} cond_id={d} then_label={s} else_label={s}\n", .{ then_idx, cb.cond.id, cb.then_block.label, cb.else_block.label });
+                    try writer.print("{s}if (", .{then_indent});
+                    try self.writeConditionExpr(writer, cb.cond.id, cb.cond.type_);
+                    try writer.print(") {{\n", .{});
+                    const nested_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{then_indent});
+                    defer self.allocator.free(nested_indent);
+                    // 处理嵌套 then 块指令
+                    for (0..func.blocks.items.len) |blk_i| {
+                        if (func.blocks.items[blk_i] == cb.then_block) {
+                            const nested_then_blk = func.blocks.items[blk_i];
+                            if (!processed.contains(blk_i)) {
+                                try processed.put(blk_i, {});
+                                for (nested_then_blk.instructions.items) |inst| {
+                                    try writer.writeAll(nested_indent);
+                                    try self.generateInstructionSimple(writer.list, inst);
+                                }
+                            }
+                            // 处理嵌套 then 块终止符
+                            if (nested_then_blk.terminator) |nt| {
+                                switch (nt) {
+                                    .ret => |ret_val| {
+                                        if (cleanup_regs.len > 0) {
+                                            try writer.print("{s}    // Cleanup\n", .{nested_indent});
+                                            for (cleanup_regs) |reg_id| {
+                                                const is_return_reg = if (ret_val) |reg| reg.id == reg_id else false;
+                                                if (is_return_reg) continue;
+                                                if (self.isRefParamAlloca(reg_id)) continue;
+                                                if (self.isAllocaReg(reg_id)) try writer.print("{s}    reg_{d}.*.release(runtime.runtime_allocator);\n", .{ nested_indent, reg_id }) else try writer.print("{s}    reg_{d}.release(runtime.runtime_allocator);\n", .{ nested_indent, reg_id });
+                                            }
+                                        }
+                                        if (ret_val) |reg| {
+                                            const is_alloca = self.isAllocaReg(reg.id);
+                                            try self.writeReturnStmt(writer, reg.id, is_alloca, nested_indent);
+                                        } else {
+                                            try writer.print("{s}    return runtime.Value.initNull();\n", .{nested_indent});
+                                        }
+                                    },
+                                    .throw => |ex_reg| {
+                                        try self.writeThrowTerminator(writer, ex_reg, cleanup_regs, nested_indent);
+                                    },
+                                    .br => {
+                                        // br 到 merge 块，正常流程（不需要额外代码）
+                                    },
+                                    else => {},
+                                }
+                            }
+                            break;
+                        }
+                    }
+                    try writer.print("{s}}}\n", .{then_indent});
+                    // 标记嵌套 else 块为已处理（else 是 cb.else_block）
+                    // 当 else 块是外层 if_merge_（如 if_then_0 的 cond_br else = if_merge_1），
+                    // 不标记为已处理，让后续流程正常处理。
+                    // 仅当 else 块不是 merge 块时才标记。
+                    if (merge_idx == null or cb.else_block != func.blocks.items[merge_idx.?]) {
+                        for (0..func.blocks.items.len) |blk_i| {
+                            if (func.blocks.items[blk_i] == cb.else_block) {
+                                if (!processed.contains(blk_i)) {
+                                    try processed.put(blk_i, {});
+                                }
+                                break;
+                            }
+                        }
+                    }
                 },
                 else => {},
             }
@@ -10780,7 +11248,7 @@ pub const NativeLinker = struct {
                     }
                 }
             }
-            break :blk else_idx orelse merge_idx;
+            break :blk if (else_idx) |ei| ei else if (merge_idx) |mi| mi else then_idx + 1;
         };
         try self.generateLabelDrivenBlockRange(writer, func, search_start, search_end, cleanup_regs, processed, loop_label_counter, then_indent);
 
@@ -10789,8 +11257,9 @@ pub const NativeLinker = struct {
         const then_breaked = self.break_generated;
 
         // PHI 消解：在 then 分支末尾添加 PHI 赋值
-        if (!self.return_generated and !self.break_generated) {
-            const merge_blk_phi = func.blocks.items[merge_idx];
+        // 仅当 merge 块存在时才需要消解 PHI
+        if (!self.return_generated and !self.break_generated and merge_idx != null) {
+            const merge_blk_phi = func.blocks.items[merge_idx.?];
             // 当 then 块有嵌套 cond_br 时，PHI incoming 来自嵌套 merge 块而非 then 块本身。
             // 查找嵌套 merge 块以正确消解 PHI。
             var nested_merge_for_phi: ?usize = null;
@@ -10858,6 +11327,30 @@ pub const NativeLinker = struct {
             // 处理 else 块终止符
             if (else_block.terminator) |term| {
                 switch (term) {
+                    .br => |br_target| {
+                        // 检查是否是循环回边（continue）
+                        if (self.current_loop_cond_block) |cond_blk_idx| {
+                            if (cond_blk_idx < func.blocks.items.len and br_target == func.blocks.items[cond_blk_idx]) {
+                                const cond_blk = func.blocks.items[cond_blk_idx];
+                                for (cond_blk.instructions.items) |phi_inst| {
+                                    if (phi_inst.op == .phi) {
+                                        if (phi_inst.result) |result| {
+                                            for (phi_inst.op.phi.incoming) |incoming| {
+                                                if (incoming.block == else_block) {
+                                                    try self.writePtrAwareAssign(writer, then_indent, result.id, incoming.value.id);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if (self.current_loop_label) |lbl| {
+                                    try writer.print("{s}    continue :{s};\n", .{ then_indent, lbl });
+                                    self.break_generated = true;
+                                }
+                            }
+                        }
+                    },
                     .ret => |ret_val| {
                         if (cleanup_regs.len > 0) {
                             try writer.print("{s}    // Cleanup\n", .{then_indent});
@@ -10880,20 +11373,20 @@ pub const NativeLinker = struct {
                         // else 块内有嵌套 if，递归处理（从 else 块开始，因为它可能嵌套更多 cond_br）
                         // 临时移除 else_idx 标记，使递归能处理该块
                         _ = processed.remove(ei);
-                        try self.generateLabelDrivenBlockRange(writer, func, ei, merge_idx, cleanup_regs, processed, loop_label_counter, then_indent);
+                        try self.generateLabelDrivenBlockRange(writer, func, ei, if (merge_idx) |mi| mi else end_idx, cleanup_regs, processed, loop_label_counter, then_indent);
                     },
                     else => {},
                 }
             }
 
             // 递归处理 else 块之后的嵌套控制流
-            try self.generateLabelDrivenBlockRange(writer, func, ei + 1, merge_idx, cleanup_regs, processed, loop_label_counter, then_indent);
+            try self.generateLabelDrivenBlockRange(writer, func, ei + 1, if (merge_idx) |mi| mi else end_idx, cleanup_regs, processed, loop_label_counter, then_indent);
 
             // PHI 消解：在 else 分支末尾添加 PHI 赋值
             // 当 else 块有嵌套 if（if/elseif）时，PHI 的 incoming
             // 可能来自嵌套 if 的 merge 块而非 else 块本身
-            if (!self.return_generated and !self.break_generated) {
-                const merge_blk_phi2 = func.blocks.items[merge_idx];
+            if (!self.return_generated and !self.break_generated and merge_idx != null) {
+                const merge_blk_phi2 = func.blocks.items[merge_idx.?];
                 for (merge_blk_phi2.instructions.items) |phi_inst2| {
                     if (phi_inst2.op == .phi) {
                         if (phi_inst2.result) |result2| {
@@ -10916,8 +11409,9 @@ pub const NativeLinker = struct {
         // Step 7b: 隐式 else PHI 消解
         // 当没有显式 else 块时（如 coalesce ??），else 路径直接跳到 merge，
         // 需要为 merge 块的 PHI 添加来自 cond_br 源块的赋值
-        if (else_idx == null and !self.return_generated and !self.break_generated) {
-            const merge_blk_phi = func.blocks.items[merge_idx];
+        // 仅当 merge 块存在时才需要消解 PHI
+        if (else_idx == null and !self.return_generated and !self.break_generated and merge_idx != null) {
+            const merge_blk_phi = func.blocks.items[merge_idx.?];
             var has_implicit_phi = false;
             for (merge_blk_phi.instructions.items) |phi_inst| {
                 if (phi_inst.op == .phi and phi_inst.result != null) {
@@ -10962,19 +11456,26 @@ pub const NativeLinker = struct {
         if (!self.break_generated) self.break_generated = saved_break;
 
         // Step 10: 生成 merge 块
-        const merge_block = func.blocks.items[merge_idx];
+        // 无 merge 块时（else 直接跳到循环回边），then 块的 br 已处理循环回边
+        if (merge_idx == null) {
+            // 恢复 return/break 标志
+            if (!self.return_generated) self.return_generated = saved_return;
+            if (!self.break_generated) self.break_generated = saved_break;
+            return then_idx + 1;
+        }
+        const merge_block = func.blocks.items[merge_idx.?];
 
         // 如果 merge 块有 cond_br 终止符，不在此处处理。
         // 让主循环的 cond_br case 处理（处理 ||/&& PHI 消解、嵌套 if 等）。
         // 否则 cond_br 不会被处理，导致 ||/&& 的 PHI 未消解。
         if (merge_block.terminator) |term| {
             if (term == .cond_br) {
-                return merge_idx;
+                return merge_idx.?;
             }
         }
 
-        if (processed.contains(merge_idx)) return merge_idx;
-        try processed.put(merge_idx, {});
+        if (processed.contains(merge_idx.?)) return merge_idx.?;
+        try processed.put(merge_idx.?, {});
         for (merge_block.instructions.items) |inst| {
             try writer.writeAll(indent);
             try self.generateInstructionSimple(writer.list, inst);
@@ -10997,7 +11498,7 @@ pub const NativeLinker = struct {
             }
         }
 
-        return merge_idx + 1;
+        return if (merge_idx) |mi| mi + 1 else then_idx + 1;
     }
 
     /// 从标签生成 do-while 循环
@@ -18377,7 +18878,6 @@ pub const NativeLinker = struct {
         // 提前计算 then/else 索引（用于汇聚点检测和 PHI 赋值）
         const then_idx = @as(usize, cb.then_block.index);
         const else_idx = @as(usize, cb.else_block.index);
-        try writer.print("// [DBG-CONDBR] then={s} else={s}\n", .{ func.blocks.items[then_idx].label, func.blocks.items[else_idx].label });
 
         // 检测嵌套循环：then 块的 br 目标是当前循环头的回边
         // 注意：仅检查 processed.contains 是不够的，因为 if 语句的 then 块
@@ -18868,8 +19368,6 @@ pub const NativeLinker = struct {
         if (!is_nested_loop) {
             const merge_to_process = merge_idx_from_then orelse merge_idx_from_else;
             if (merge_to_process) |merge_idx| {
-                std.debug.print("[DBG-MERGE-BR] merge_idx={d} label={s} processed={any} then_from={any} else_from={any}\n", .{ merge_idx, func.blocks.items[merge_idx].label, processed.contains(merge_idx), merge_idx_from_then, merge_idx_from_else });
-                try writer.print("// [DBG-MERGE-BR] merge={s} processed={any}\n", .{ func.blocks.items[merge_idx].label, processed.contains(merge_idx) });
                 if (!processed.contains(merge_idx)) {
                     const merge_blk = func.blocks.items[merge_idx];
                     // 生成非 PHI 指令
@@ -20335,7 +20833,6 @@ pub const NativeLinker = struct {
     /// 生成结构化 for 循环（新版本）
     fn generateForLoopStructuredNew(self: *Self, writer: anytype, func: *const IR.Function, loop: LoopInfo, cleanup_regs: []const usize) !void {
         _ = cleanup_regs;
-        try writer.print("// [DBG-FORLOOP] header={s} body_start={s} is_for_loop={any}\n", .{ func.blocks.items[loop.header].label, func.blocks.items[loop.body_start].label, loop.is_for_loop });
         const prev_in_while = self.in_while_loop;
         self.in_while_loop = true;
         defer self.in_while_loop = prev_in_while;
@@ -20878,7 +21375,6 @@ pub const NativeLinker = struct {
             ) anyerror!void {
                 if (visited.contains(block_idx)) return;
                 try visited.put(block_idx, {});
-                try writer_.print("// [DBG-GO] block={s} depth={d} visited_count={d}\n", .{ func_.blocks.items[block_idx].label, depth, visited.count() });
 
                 const block = func_.blocks.items[block_idx];
 
