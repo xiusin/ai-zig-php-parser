@@ -6881,7 +6881,6 @@ pub const NativeLinker = struct {
                 return;
             }
             if (processed.contains(i)) {
-                std.debug.print("[DBG-SKIP] i={d} label={s}\n", .{ i, func.blocks.items[i].label });
                 i += 1;
                 continue;
             }
@@ -6889,13 +6888,8 @@ pub const NativeLinker = struct {
             const block = func.blocks.items[i];
             const label = block.label;
 
-            // TEMP-DEBUG block walk mark
-            try writer.print("{s}/* WALK i={d} label={s} */\n", .{ indent, i, label });
-            std.debug.print("[DBG-WALK] i={d} label={s} start={d} end={d}\n", .{ i, label, start_idx, end_idx });
-
             // 检查是否是 foreach 循环
             if (std.mem.startsWith(u8, label, "foreach_cond_")) {
-                std.debug.print("[DBG-DISPATCH] foreach i={d}\n", .{i});
                 i = try self.generateForeachFromLabels(writer, func, i, end_idx, cleanup_regs, processed, loop_label_counter, indent);
                 continue;
             }
@@ -8482,7 +8476,6 @@ pub const NativeLinker = struct {
         loop_label_counter: *u32,
         indent: []const u8,
     ) anyerror!usize {
-        std.debug.print("[DBG-FOREACH-ENTRY] cond_idx={d} end={d}\n", .{ cond_idx, end_idx });
         // 查找 foreach 的各个块
         const cond_block = func.blocks.items[cond_idx];
 
@@ -8788,9 +8781,6 @@ pub const NativeLinker = struct {
                     try writer.print("{s}if (", .{if_indent});
                     try self.writeConditionExpr(writer, body_cond_br.cond.id, body_cond_br.cond.type_);
                     try writer.print(") {{\n", .{});
-
-                    // TEMP-DBG body-handler-A (foreach)
-                    try writer.print("{s}/* DBA cond={d} */\n", .{ if_indent, @as(usize, body_cond_br.cond.id) });
 
                     const then_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{if_indent});
                     defer self.allocator.free(then_indent);
@@ -9713,28 +9703,6 @@ pub const NativeLinker = struct {
         // 标记 merge 块为已处理，防止上层调用者再次处理该块的 cond_br。
         // 非 PHI 指令由调用者在 if/else 后的正确的缩进级别生成。
         try processed.put(merge_idx, {});
-
-        // TEMP-DEBUG generateBrToMergeCondBr
-        {
-            const t_lbl = cb.then_block.label;
-            const e_lbl = cb.else_block.label;
-            var then_done = false;
-            var else_done = false;
-            for (0..func.blocks.items.len) |bi2| {
-                if (func.blocks.items[bi2] == cb.then_block) then_done = processed.contains(bi2);
-                if (func.blocks.items[bi2] == cb.else_block) else_done = processed.contains(bi2);
-            }
-            try writer.print("{s}// DBG-BTM merge={s}({d}) cond={d} then={s}(proc={}) else={s}(proc={})\n", .{
-                indent,
-                br_target.label,
-                merge_idx,
-                @as(usize, cb.cond.id),
-                t_lbl,
-                then_done,
-                e_lbl,
-                else_done,
-            });
-        }
 
         // 保存 return_generated/break_generated：then/else 内的 return/break 不应泄漏到调用者
         const saved_btmcb_rg = self.return_generated;
@@ -10958,7 +10926,6 @@ pub const NativeLinker = struct {
         loop_label_counter: *u32,
         indent: []const u8,
     ) anyerror!usize {
-        std.debug.print("[DBG-WHILE-ENTRY] cond_idx={d} end={d}\n", .{ cond_idx, end_idx });
         const cond_block = func.blocks.items[cond_idx];
 
         var body_idx: usize = undefined;
@@ -11267,8 +11234,6 @@ pub const NativeLinker = struct {
                     //   - while_cond 块（循环回边，继续循环）
                     const body_cond_br = term.cond_br;
                     const cond_block_ptr = func.blocks.items[cond_idx];
-                    // [DBG-WHILE] body cond_br: body_idx={d} cond_idx={d} body_label={s} cond_label={s}
-                    //   then_block={s} else_block={s}
                     // 预计算循环最后回边位置，限制 cond_br 内部递归调用范围
                     var loop_last_be: usize = body_idx;
                     for (body_idx + 1..func.blocks.items.len) |blk_i| {
@@ -20230,22 +20195,6 @@ pub const NativeLinker = struct {
             try writer.print("{s}if (reg_{d}.*.toBool()) {{\n", .{ indent, cb.cond.id });
         } else {
             try writer.print("{s}if (reg_{d}.toBool()) {{\n", .{ indent, cb.cond.id });
-        }
-
-        // TEMP-DEBUG nested foreach
-        {
-            const t_lbl = func.blocks.items[then_idx].label;
-            const e_lbl = func.blocks.items[else_idx].label;
-            try writer.print("{s}// DBG-CB cond={d} then={s}(proc={}) else={s}(proc={}) in_while={} exit={d}\n", .{
-                indent,
-                @as(usize, cb.cond.id),
-                t_lbl,
-                processed.contains(then_idx),
-                e_lbl,
-                processed.contains(else_idx),
-                self.in_while_loop,
-                self.current_loop_exit_block orelse 9999,
-            });
         }
 
         // 生成 then 块
