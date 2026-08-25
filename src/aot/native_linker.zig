@@ -9567,6 +9567,75 @@ pub const NativeLinker = struct {
                         if (self.current_loop_label != null and !self.in_cond_br_branch) self.loop_body_return_generated = true;
                     }
                 },
+                .cond_br => {
+                    // 跨循环条件回边：cleanup 块终止符是指向外层循环 exit/cond 的 cond_br。
+                    // 典型场景：while(true){ $i++; foreach(...){...} if($i>=3) break; } —— IR
+                    // 把嵌套 foreach 的 cleanup 块作为外层 while 的条件回边落点，其 cond_br
+                    // 的 then→外层 exit、else→外层 cond。若按本地循环处理会丢失 break 判定
+                    //（生成空 if/else），condbr 决策被丢弃 → while 尾部无条件 continue → 死循环。
+                    // 正确做法：委托外层循环——生成 if(cond){ 物化外层 exit PHI; break :外层 }，
+                    // false 侧自然落入外层 while 尾部的回边 writeback + continue（else=cond）。
+                    const cb = term.cond_br;
+                    // 用标签识别跨循环条件回边：cleanup 的 cond_br 两个目标都是外层循环的
+                    // 出口/条件块（while_exit_/for_exit_ 等，非本 foreach 自己的 foreach_ 块）。
+                    // 不依赖 saved_exit_block/saved_cond_block：外层 while 的 current_loop_cond_block
+                    // 可能被边界映射误解析为嵌套 foreach 的 cond（实测 = 3，即 foreach_cond_3）。
+                    const is_loop_exit_label = struct {
+                        fn f(l: []const u8) bool {
+                            return std.mem.startsWith(u8, l, "while_exit_") or
+                                std.mem.startsWith(u8, l, "for_exit_") or
+                                std.mem.startsWith(u8, l, "foreach_exit_") or
+                                std.mem.startsWith(u8, l, "do_while_exit_");
+                        }
+                    }.f;
+                    const is_loop_backedge_label = struct {
+                        fn f(l: []const u8) bool {
+                            return std.mem.startsWith(u8, l, "while_cond_") or
+                                std.mem.startsWith(u8, l, "while_body_") or
+                                std.mem.startsWith(u8, l, "while_increment_") or
+                                std.mem.startsWith(u8, l, "for_cond_") or
+                                std.mem.startsWith(u8, l, "for_loop_") or
+                                std.mem.startsWith(u8, l, "for_increment_") or
+                                std.mem.startsWith(u8, l, "do_while_cond_") or
+                                std.mem.startsWith(u8, l, "do_while_body_");
+                        }
+                    }.f;
+                    const t_lbl = cb.then_block.label;
+                    const e_lbl = cb.else_block.label;
+                    const fwd = is_loop_exit_label(t_lbl) and is_loop_backedge_label(e_lbl);
+                    const rev = is_loop_backedge_label(t_lbl) and is_loop_exit_label(e_lbl);
+                    const exit_is_then = is_loop_exit_label(t_lbl);
+                    if ((fwd or rev) and saved_loop_label != null) {
+                        const outer_lbl = saved_loop_label.?;
+                        // 正向布局：then→外层 exit、else→外层 cond → 条件为真时 break；
+                        // 反向布局：then→外层 cond、else→外层 exit → 条件为假时 break。
+                        const negate = !exit_is_then;
+                        try writer.print("{s}if (", .{indent});
+                        if (negate) try writer.print("!(", .{});
+                        try self.writeConditionExpr(writer, cb.cond.id, cb.cond.type_);
+                        if (negate) try writer.print(")", .{});
+                        try writer.print(") {{\n", .{});
+                        const oi = try std.fmt.allocPrint(self.allocator, "{s}    ", .{indent});
+                        defer self.allocator.free(oi);
+                        // 物化外层 exit 的循环携带变量：源块为本 cleanup（外层 while exit 边的
+                        // 真正来源）。用标签匹配外层 exit 块索引，绕过被误解析的 saved 索引。
+                        const outer_exit_ptr = if (exit_is_then) cb.then_block else cb.else_block;
+                        var outer_exit_idx: ?usize = null;
+                        for (0..func.blocks.items.len) |ox| {
+                            if (func.blocks.items[ox] == outer_exit_ptr) {
+                                outer_exit_idx = ox;
+                                break;
+                            }
+                        }
+                        if (outer_exit_idx) |oe| {
+                            if (oe != cond_idx) {
+                                try self.materializeExitPHIOnThenBreak(writer, func, oe, cleanup_idx, oi);
+                            }
+                        }
+                        try writer.print("{s}    break :{s};\n", .{ oi, outer_lbl });
+                        try writer.print("{s}}}\n", .{indent});
+                    }
+                },
                 else => {},
             }
         }
