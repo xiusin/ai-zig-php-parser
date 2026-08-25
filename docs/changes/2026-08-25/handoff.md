@@ -89,3 +89,34 @@ rm -rf "$T"
 
 - 跨循环委托人前覆盖 while/for/foreach/do_while 前缀；`switch` 内嵌于 while(true) 的 break 交界未验证（见上 P1）。
 - `f177` 真实脚本还叠加其他复杂度（dijkstra/DFS/BFS 多算法），复测通过后应更新其状态评估。
+
+---
+
+# 补充轮（commit `6245443`）：f177 完全跑通
+
+> 变更标识：`nested_loop_condbr_f177` | 详情文档：`docs/changes/2026-08-25/nested_loop_condbr_f177_6245443.md`
+> 编译状态：✅ `zig build` 通过 | 全量回归：✅ 零新增
+
+## TL;DR
+
+缺陷 B 修复后 `f177` 虽不再 OOM，但仍死循环/超时。本轮定位并修复 `generateLabelDrivenBlockRange` 共享终符处理器中 **4 类相互交织的缺陷**，使 `f177_graph_traversal_dfs_bfs.php`（dijkstra / 有向+无向环检测 / 拓扑排序）**完全 PASS，输出与 PHP 解释器逐字符一致**。
+
+**4 类修复**：
+1. **循环 increment/PHI/continue 门控误判（5 处统一）**：移除 `!self.return_generated`，仅留 `!self.break_generated and !self.lastLineIsReturn(writer)`。原逻辑在"条件性 return"（如 `elseif ($neighbor !== $parent) return true;`）后误跳 foreach 迭代器 `php_array_iter_next` → 无向图环检测挂死（`repro_und_edge` A↔B）。
+2. **嵌套 cond_br 范围倒置吞块（foreach/do-while 2 处）**：then 尾部 `if(cond) return` 且 else 为循环延续块时，原用 else 的 `.br` 循环回边（如 `foreach_increment_2 br foreach_cond_0`）推导 `nested_end`，回边索引 < start → 范围空 → 递归返回分支被吞（dfs 环检测返回 N）。改为内联 `if(cond){ then }`。
+3. **if 无 else 直落 merge 的 else 边 PHI 未物化**：`then_br_to_else` 分支补发 `} else {` + else 边 merge PHI 物化，消除跨迭代陈值污染（`repro_wd` 中 `$minVertex` 残留 → dijkstra 死循环）。
+4. **then_end 乱序退化（5 处对称副本）**：else 块索引在 then 之前时 `range(nti, nei)` 为空吞掉 then 分支（`return`/副作用），退化为 `nti+1` 仅处理 then 块本身。
+
+## 验证
+
+| 用例 | 结果 |
+|------|------|
+| `repro_wd.php`（dijkstra 最小复现） | AOT 输出与 PHP 一致 |
+| `repro_und_edge.php`（无向 A↔B 环检测） | `u1=N visited1_keys=A,B` 与 PHP 一致 |
+| `repro_cycle_pure.php` / `repro_dfs_acyclic.php` | 环检测/无环链返回与 PHP 一致 |
+| `f177_graph_traversal_dfs_bfs.php` | 从 exit=137/124 → **PASS** |
+| 全量 114 pass 脚本回归 | **零新增回归**；f177 移出失败集 |
+
+## 本轮遗留
+
+- **f032**：基线失败集内（`FAIL_DIFF`）→ 本轮 `AOT_FAIL`（同一 OOP 方法链分发缺陷不同表现），仍在基线 108 失败集内，**非新增回归**，纳入后续 AOT 缺陷跟踪（详见详情文档 §7）。
