@@ -6881,6 +6881,7 @@ pub const NativeLinker = struct {
                 return;
             }
             if (processed.contains(i)) {
+                std.debug.print("[DBG-SKIP] i={d} label={s}\n", .{ i, func.blocks.items[i].label });
                 i += 1;
                 continue;
             }
@@ -6890,9 +6891,11 @@ pub const NativeLinker = struct {
 
             // TEMP-DEBUG block walk mark
             try writer.print("{s}/* WALK i={d} label={s} */\n", .{ indent, i, label });
+            std.debug.print("[DBG-WALK] i={d} label={s} start={d} end={d}\n", .{ i, label, start_idx, end_idx });
 
             // 检查是否是 foreach 循环
             if (std.mem.startsWith(u8, label, "foreach_cond_")) {
+                std.debug.print("[DBG-DISPATCH] foreach i={d}\n", .{i});
                 i = try self.generateForeachFromLabels(writer, func, i, end_idx, cleanup_regs, processed, loop_label_counter, indent);
                 continue;
             }
@@ -8479,6 +8482,7 @@ pub const NativeLinker = struct {
         loop_label_counter: *u32,
         indent: []const u8,
     ) anyerror!usize {
+        std.debug.print("[DBG-FOREACH-ENTRY] cond_idx={d} end={d}\n", .{ cond_idx, end_idx });
         // 查找 foreach 的各个块
         const cond_block = func.blocks.items[cond_idx];
 
@@ -10885,6 +10889,7 @@ pub const NativeLinker = struct {
         loop_label_counter: *u32,
         indent: []const u8,
     ) anyerror!usize {
+        std.debug.print("[DBG-WHILE-ENTRY] cond_idx={d} end={d}\n", .{ cond_idx, end_idx });
         const cond_block = func.blocks.items[cond_idx];
 
         var body_idx: usize = undefined;
@@ -10970,6 +10975,27 @@ pub const NativeLinker = struct {
                                 }
                             }
                             if (term == .br) {
+                                // br 目标是嵌套循环头（foreach_cond_/for_cond_/while_cond_/等）时，
+                                // 循体从本 while(true) 的 cond/body 块直接流入嵌套循环。若把 body_idx
+                                // 决解为嵌套循环的 cond 块，外层 while 会把这嵌套循环的 cond_br 当作
+                                // 自身 body 终止符用通用逻辑内联（绕过 generateForeachFromLabels），
+                                // 嵌套循环的 cleanup 终止符（cond_br 指向外层 exit/cond）被展平成空
+                                // if/else，外层 break 丢失 → 死循环。正确做法：body_idx 保持 cond_idx
+                                // （body==cond），嵌套循环交由 L11841 递归 dispatch 生成真正的
+                                // generateForeachFromLabels / generateForFromLabels。
+                                const is_nested_loop_header = nlblk: {
+                                    const tb = term.br;
+                                    const tlb = tb.label;
+                                    break :nlblk std.mem.startsWith(u8, tlb, "foreach_cond_") or
+                                        std.mem.startsWith(u8, tlb, "for_cond_") or
+                                        std.mem.startsWith(u8, tlb, "while_cond_") or
+                                        std.mem.startsWith(u8, tlb, "while_body_") or
+                                        std.mem.startsWith(u8, tlb, "do_while_body_");
+                                };
+                                if (is_nested_loop_header) {
+                                    body_idx = cond_idx;
+                                    break :blk body_idx;
+                                }
                                 for (0..func.blocks.items.len) |idx| {
                                     if (func.blocks.items[idx] == term.br) break :blk idx;
                                 }
@@ -11088,60 +11114,8 @@ pub const NativeLinker = struct {
 
         // 生成 body 块指令
         const body_block = func.blocks.items[body_idx];
-
-        // body 是嵌套循环头（如 while(true) 体内第一条语句为 foreach/for/do-while/
-        // 嵌套 while）时，不能把嵌套循环"展平"成 if/else（其 cond_br 目标指向本
-        // while 的 exit/cond，展平会走空分支导致死循环）。改为委托给
-        // generateLabelDrivenBlockRange 的 header-dispatch（会调用 generateForeach
-        // FromLabels / generateForFromLabels / generateWhileFromLabels）生成真正的
-        // 嵌套循环，本循环随后复用统一尾部（回边 PHI / continue / exit 块）闭合。
-        const body_is_nested_loop_header = blk: {
-            const lb = body_block.label;
-            break :blk std.mem.startsWith(u8, lb, "foreach_cond_") or
-                std.mem.startsWith(u8, lb, "for_cond_") or
-                std.mem.startsWith(u8, lb, "while_cond_") or
-                std.mem.startsWith(u8, lb, "while_body_") or
-                std.mem.startsWith(u8, lb, "do_while_body_");
-        };
-        // extended_end 提升到 body 处理块外层：委托路径与展平路径共用（回边 PHI/continue）
-        var extended_end = exit_idx;
-        delegate_body_blk: {
-            if (body_is_nested_loop_header) {
-                // 搜索本 while 的最后回边（终止符 br/cond_br 指向本 while 的 cond 块）
-                var dl_end = body_idx + 1;
-                if (body_idx + 1 < end_idx) {
-                    for (body_idx + 1..end_idx) |dl_bi| {
-                        const dl_b = func.blocks.items[dl_bi];
-                        if (dl_b.terminator) |dl_t| {
-                            if (dl_t == .br and dl_t.br == func.blocks.items[cond_idx]) {
-                                dl_end = dl_bi + 1;
-                            } else if (dl_t == .cond_br and
-                                (dl_t.cond_br.then_block == func.blocks.items[cond_idx] or
-                                    dl_t.cond_br.else_block == func.blocks.items[cond_idx]))
-                            {
-                                dl_end = dl_bi + 1;
-                            }
-                        }
-                    }
-                }
-                extended_end = dl_end;
-                if (exit_idx < func.blocks.items.len) {
-                    try processed.put(exit_idx, {});
-                }
-                const dl_saved_rg = self.return_generated;
-                const dl_saved_bk = self.break_generated;
-                const dl_saved_pm = self.pending_merge_non_phi;
-                self.return_generated = false;
-                self.break_generated = false;
-                self.pending_merge_non_phi = null;
-                try self.generateLabelDrivenBlockRange(writer, func, body_idx, dl_end, cleanup_regs, processed, loop_label_counter, body_indent);
-                self.pending_merge_non_phi = dl_saved_pm;
-                if (!self.return_generated) self.return_generated = dl_saved_rg;
-                if (!self.break_generated) self.break_generated = dl_saved_bk;
-                break :delegate_body_blk;
-            }
-            try processed.put(body_idx, {});
-            for (body_block.instructions.items) |inst| {
+        try processed.put(body_idx, {});
+        for (body_block.instructions.items) |inst| {
             // 当 body_idx == cond_idx，跳过 PHI 指令（循环变量 PHI 已在循环前消解）
             if (body_idx == cond_idx and inst.op == .phi) continue;
             try writer.writeAll(body_indent);
@@ -11159,6 +11133,7 @@ pub const NativeLinker = struct {
         // 处理 body 块终止符
         // 检查 body 是否有 cond_br（嵌套 if），if 块可能在 exit 块之后
         // 原因：IR 生成器先创建 while_cond/body/exit 块，再处理 body 内嵌套的 if
+        var extended_end = exit_idx;
         if (body_block.terminator) |term| {
             switch (term) {
                 .br => |br_target| {
@@ -11885,7 +11860,6 @@ pub const NativeLinker = struct {
                 else => {},
             }
         }
-        } // delegate_body_blk
 
         // 递归处理 body 之后到 extended_end 之间的块（可能包含 exit 之后的 if 块）
         // 仅在未 return/break 时递归——避免 return 后生成 unreachable code
