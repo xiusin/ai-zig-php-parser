@@ -1,67 +1,108 @@
 SKIP|f004_oop_deep_inheritance_magic.php|PHP_error_exit=255
-FAIL_DIFF|f006_oop_observer_event_dispatcher.php|PHP:=== f006: Observer + Event Dispatcher + Priority + Exception Isolation ===|--- Event: user.login (normal) ---|[SECURITY] Checking IP: 192.168.1.1||AOT:=== f006: Observer + Event Dispatcher + Priority + Exception Isolation ===|--- Event: user.login (normal) ---|[SECURITY] Checking IP: 192.168.1.1|
-FAIL_DIFF|f007_string_encoding_crypto_hash.php|PHP:=== f007: String Ops + Hash + Crypto + Format ===|--- String Utils ---|reverse('hello'): olleh||AOT:=== f007: String Ops + Hash + Crypto + Format ===|--- String Utils ---|reverse('hello'): olleh|
-FAIL_DIFF|f009_oop_decorator_chain_command.php|PHP:=== f009: Decorator Chain + Command Pattern + Middleware ===|After create: created=true|After update: value=new_value||AOT:=== f009: Decorator Chain + Command Pattern + Middleware ===|After create: created=true|After update: value=new_value|
-PASS|f010_oop_singleton_registry_di.php
-PASS|f012_json_tree_recursive_traverse.php
+FAIL_DIFF|f006_oop_observer_event_dispatcher.php|PHP:=== f006: Observer + Event Dispatcher + Priority + Exception Isolation ===|--- Event: user.login (normal) ---|[SECURITY] Checking IP: 192.168.1.1||AOT:=== f006: Observer + Event Dispatcher + Priority + Exception Isolation ===|--- Event: user.login (normal) ---|[SECURITY] Checking IP:|
+FAIL_RUNTIME|f007_string_encoding_crypto_hash.php|exit=142|kebabCase('HelloWorldFooBar'): hello-world-foo-bar truncate('Hello World', 8): Hello... pad('42', 5, '0', STR_PAD_LEFT): 00042 pad('42', 5, '0', STR_PAD_BOTH): 04200 wordCount top 3: {"the":1,"quick":
+FAIL_DIFF|f009_oop_decorator_chain_command.php|PHP:=== f009: Decorator Chain + Command Pattern + Middleware ===|After create: created=true|After update: value=new_value||AOT:=== f009: Decorator Chain + Command Pattern + Middleware ===|After create: created=true|After update: value=|
+FAIL_RUNTIME|f010_oop_singleton_registry_di.php|exit=255| Fatal error: Uncaught RuntimeException: Cannot resolve: UserService in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f010_oop_singleton_registry_di.php:64 Stack trace: #0 {main}   thrown 
+FAIL_DIFF|f012_json_tree_recursive_traverse.php|PHP:=== f012: JSON Tree + Recursive Traverse + Path Find ===|Tree structure:|root ({"type":"dir"})||AOT:=== f012: JSON Tree + Recursive Traverse + Path Find ===|Tree structure:|root ({"type":"dir"})|
 PASS|f016_hash_bloom_consistent.php
-PASS|f024_rbac_role_inheritance_policy.php
-FAIL_RUNTIME|f025_coding_hamming_rle_lzw_crc.php|exit=142|Verify wrong: false  --- LZW --- Original: 'abababababababababababababababab' (32 bytes) Compressed: [97,98,256,258,257,260,259,262,261,264]... (11 codes) 
-PASS|f026_linkedlist_stack_queue_deque.php
-FAIL_COMPILE|f027_number_theory_primes_modular.php|Error: Compilation failed with 1 errors, 0 warnings [1mf027_number_theory_primes_modular.php[0m: [31merror[0m: Zig code generation failed: AstDirectGenerationFailed  [31m1 error(s)[0m generated.
-FAIL_RUNTIME|f028_dp_knapsack_lcs_lis.php|exit=142|
+FAIL_DIFF|f024_rbac_role_inheritance_policy.php|PHP:=== f024: RBAC + Role Inheritance + Policy ===|--- Permission Matrix ---|read    write   edit    delete||AOT:=== f024: RBAC + Role Inheritance + Policy ===|--- Permission Matrix ---|read    write   edit    delete|
+FAIL_RUNTIME|f025_coding_hamming_rle_lzw_crc.php|exit=142|=== f025: Hamming + RLE + LZW + CRC === --- Hamming (Repetition Code) --- Original: 'Hi' (2 bytes) Encoded: 000111000000111000000000000111111000111000000111 (48 bits) 
+FAIL_DIFF|f026_linkedlist_stack_queue_deque.php|PHP:=== f026: LinkedList + Stack + Queue + Deque + RingBuffer ===|--- LinkedList ---|List: 1 -> 2 -> 3 -> 4 -> 5||AOT:=== f026: LinkedList + Stack + Queue + Deque + RingBuffer ===|--- LinkedList ---|List: 1 -> 2 -> 3 -> 4 -> 5|
+PASS|f027_number_theory_primes_modular.php
+FAIL_RUNTIME|f028_dp_knapsack_lcs_lis.php|exit=142|--- 0/1 Knapsack --- Weights: 2,3,4,5 Values: 3,4,5,6 Cap: 8 Max value: 10, Items: 1,3  --- LCS --- 
 FAIL_DIFF|f031_builder_fluent_immutable.php|PHP:=== f031: Builder + Fluent + Immutable + Freeze ===|POST https://api.example.com/v1/users?page=1&limit=20 [timeout=15s ssl=false]|Headers: {"Content-Type":"application\/json","Authorization":"Bearer token123"}||AOT:=== f031: Builder + Fluent + Immutable + Freeze ===|POST https://api.example.com/v1/users?page=1&limit=20 [timeout=15s ssl=false]|Headers: {"Content-Type":"application\/json","Authorization":"Bearer token123"}|
-PASS|f032_chain_responsibility_middleware.php
+FAIL_DIFF|f032_chain_responsibility_middleware.php|PHP:=== f032: Chain of Responsibility + Middleware Pipeline ===|--- Test 1: Normal request ---|{"token":"abc123","ip":"192.168.1.1","url":"\/api\/users","data":{"email":"test@test.com"},"user":"authenticated_user","rate_limit_remaining":2,"logged_at":"TIMESTAMPZ"}||AOT:=== f032: Chain of Responsibility + Middleware Pipeline ===|--- Test 1: Normal request ---|{"token":"abc123","ip":"192.168.1.1","url":"\/api\/users","data":{"email":"test@test.com"},"errors":["Authentication required"]}|
 FAIL_DIFF|f033_state_pattern_order_machine.php|PHP:=== f033: State Pattern + Order State Machine ===|Initial: pending|--- Paid (amount=100) ---||AOT:=== f033: State Pattern + Order State Machine ===|Initial: pending|--- Paid (amount=100) ---|
 FAIL_DIFF|f034_template_method_pipeline.php|PHP:=== f034: Template Method + Algorithm Skeleton + Hooks ===|--- JSON Processor ---|{"result":{"id":"123","name":"ALICE","extra":"data","processed_at":"2025-01-01","hash":"87afc418","metadata":{"source":"json","version":"1.0"}},"type":"json"}||AOT:=== f034: Template Method + Algorithm Skeleton + Hooks ===|--- JSON Processor ---|{"result":{"id":"123","name":"ALICE","extra":"data","processed_at":"2025-01-01","hash":"87afc418","metadata":{"source":"json","version":"1.0"}},"type":"json"}|
-PASS|f036_strategy_dynamic_pricing.php
+FAIL_DIFF|f036_strategy_dynamic_pricing.php|PHP:=== f036: Strategy + Dynamic Switch + Closure Strategies ===|--- Regular ---|Widget: $10 × 5 = $50.00||AOT:=== f036: Strategy + Dynamic Switch + Closure Strategies ===|--- Regular ---|Widget: $10 × 5 = $50.00|
 FAIL_RUNTIME|f037_adapter_unified_cache.php|exit=255| Fatal error: Uncaught RuntimeException: Unknown cache:  in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f037_adapter_unified_cache.php:90 Stack trace: #0 {main}   thrown in /Users/wangji
-FAIL_RUNTIME|f038_composite_filesystem_tree.php|exit=142|      📄 autoload.php (256B)       📄 composer.php (384B)   📄 README.md (128B)  Total size: 5120B 
+FAIL_RUNTIME|f038_composite_filesystem_tree.php|exit=142|Total size: 5120B Total leaves: 1 Max depth: 3  --- Find --- 
 PASS|f039_bridge_shape_renderer.php
 PASS|f040_flyweight_forest_pool.php
 PASS|f042_array_functions_full.php
 PASS|f043_math_functions_full.php
-FAIL_DIFF|f044_json_deepops_merge_diff.php|PHP:=== f044: JSON Deep Ops + Merge + Diff + Schema ===|deepGet(user.name): Alice|deepGet(user.roles.0): admin||AOT:=== f044: JSON Deep Ops + Merge + Diff + Schema ===|deepGet(user.name): Alice|deepGet(user.roles.0): admin|
-PASS|f045_datetime_calendar_format.php
+FAIL_RUNTIME|f044_json_deepops_merge_diff.php|exit=255| Fatal error: Uncaught TypeError: JsonTools::deepMerge(): Argument #1 ($base) must be of type array, null given in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f044_json_deepops_merge_dif
+FAIL_DIFF|f045_datetime_calendar_format.php|PHP:=== f045: DateTime + Calendar + Interval + Format ===|isLeapYear(2000): true|isLeapYear(1900): false||AOT:=== f045: DateTime + Calendar + Interval + Format ===|isLeapYear(2000): true|isLeapYear(1900): false|
 PASS|f047_closures_curry_compose.php
 PASS|f048_match_pattern_dispatch.php
 FAIL_DIFF|f051_validator_rule_chain_batch.php|PHP:=== f051: Validator + Rule Chain + Batch ===|--- Form Validation ---|Valid: false||AOT:=== f051: Validator + Rule Chain + Batch ===|--- Form Validation ---|Valid: false|
-PASS|f056_crdt_gcounter_lww_orset.php
-PASS|f057_workflow_engine_rollback.php
+FAIL_DIFF|f056_crdt_gcounter_lww_orset.php|PHP:=== f056: CRDT + GCounter + LWW + ORSet ===|--- G-Counter ---|nodeA: 5 counts={"nodeA":5}||AOT:=== f056: CRDT + GCounter + LWW + ORSet ===|--- G-Counter ---|nodeA: 2 counts={"nodeA":2}|
+FAIL_DIFF|f057_workflow_engine_rollback.php|PHP:=== f057: Workflow Engine + Transitions + Rollback ===|--- Run 1: Success Path ---|Visited: start → fetch → validate → process → notify → end → reject||AOT:=== f057: Workflow Engine + Transitions + Rollback ===|--- Run 1: Success Path ---|Visited: start → fetch → validate|
 FAIL_DIFF|f061_graph_dijkstra_bellmanford_floyd.php|PHP:=== f061: Graph + Dijkstra + BellmanFord + FloydWarshall ===|--- Dijkstra from A ---|A→A = 0||AOT:=== f061: Graph + Dijkstra + BellmanFord + FloydWarshall ===|--- Dijkstra from A ---|A→A = 0|
 FAIL_DIFF|f065_crypto_rc4_sha1_base64_crc.php|PHP:=== f065: Crypto + RC4 + Base64 + CRC32 + SHA1 ===|--- RC4 ---|Plaintext: Hello World!||AOT:=== f065: Crypto + RC4 + Base64 + CRC32 + SHA1 ===|--- RC4 ---|Plaintext: Hello World!|
-FAIL_COMPILE|f066_hamming_code_parity_checksum.php|Error: Compilation failed with 1 errors, 0 warnings [1mf066_hamming_code_parity_checksum.php[0m: [31merror[0m: Zig code generation failed: AstDirectGenerationFailed  [31m1 error(s)[0m generated.
-FAIL_RUNTIME|f067_json_parser_schema_path_diff.php|exit=142| Warning: foreach() argument must be of type array|object, null given in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f067_json_parser_schema_path_diff.php on line 209  --- Parse Numbers 
-FAIL_DIFF|f070_event_sourcing_cqrs_snapshot.php|PHP:=== f070: Event Sourcing + Snapshot + CQRS ===|--- Event Sourcing: Bank Account ---|Initial balances: acc1=0 acc2=0||AOT:=== f070: Event Sourcing + Snapshot + CQRS ===|--- Event Sourcing: Bank Account ---|Initial balances: acc1=0 acc2=0|
+PASS|f066_hamming_code_parity_checksum.php
+PASS|f067_ctype_test.php
+PASS|f067_debug_char.php
+PASS|f067_debug_char2.php
+PASS|f067_debug_char3.php
+SKIP|f067_debug_char4.php|PHP_error_exit=255
+SKIP|f067_debug_char5.php|PHP_error_exit=255
+PASS|f067_debug_coalesce.php
+FAIL_RUNTIME|f067_debug_full_parser.php|exit=255| Fatal error: Uncaught RuntimeException: Expected '"' at pos 38 char=8 in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f067_debug_full_parser.php:68 Stack trace: #0 {main}   thrown in /Us
+PASS|f067_debug_full_parser2.php
+PASS|f067_debug_identical.php
+PASS|f067_debug_match.php
+PASS|f067_debug_pos.php
+PASS|f067_debug_pos2.php
+PASS|f067_debug_route.php
+PASS|f067_debug_route2.php
+FAIL_RUNTIME|f067_debug_single.php|exit=255| Fatal error: Uncaught RuntimeException: Expected end '"' in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f067_debug_single.php:35 Stack trace: #0 {main}   thrown in /Users/wangjianjun/pr
+PASS|f067_debug_while.php
+FAIL_RUNTIME|f067_json_parser_schema_path_diff.php|exit=255| Fatal error: Uncaught RuntimeException: Expected '"' in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f067_json_parser_schema_path_diff.php:74 Stack trace: #0 {main}   thrown in /Users/wa
+PASS|f067_match_test.php
+PASS|f067_min_match.php
+PASS|f067_min_match2.php
+PASS|f067_min_match3.php
+PASS|f067_min_match3a.php
+PASS|f067_min_match3b.php
+PASS|f067_min_match3c.php
+PASS|f067_min_match3d.php
+PASS|f067_min_match3e.php
+PASS|f067_min_match3f.php
+PASS|f067_min_match3g.php
+PASS|f067_min_match4.php
+SKIP|f067_min_repro.php|PHP_error_exit=255
+PASS|f067_min_repro2.php
+PASS|f067_min_repro3.php
+PASS|f067_minimal.php
+PASS|f067_minimal2.php
+PASS|f067_minimal3.php
+PASS|f067_minimal4.php
+PASS|f067_minimal4a.php
+PASS|f067_test_ctype.php
+PASS|f067_test_ctype2.php
+PASS|f067_test_ctype3.php
+PASS|f067_test_simple_json.php
+FAIL_RUNTIME|f070_event_sourcing_cqrs_snapshot.php|exit=255| Fatal error: Uncaught TypeError: Cannot assign null to property BankAccount::$state of type array in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f070_event_sourcing_cqrs_snapshot.php:69
 FAIL_DIFF|f072_type_inference_hindley_milner.php|PHP:=== f072: Type Inference + Hindley-Milner ===|--- Literal Inference ---|42 → int||AOT:=== f072: Type Inference + Hindley-Milner ===|--- Literal Inference ---|42 → int|
 FAIL_DIFF|f080_db_transaction_mvcc_deadlock.php|PHP:=== f080: DB Transaction + Isolation + MVCC + Deadlock ===|--- Basic Transaction ---|Read user:1: {"name":"Alice","balance":100}||AOT:=== f080: DB Transaction + Isolation + MVCC + Deadlock ===|--- Basic Transaction ---|Read user:1: {"name":"Alice","balance":100}|
-FAIL_RUNTIME|f081_bplustree_index_range_query.php|exit=142|=== f081: B+Tree Index + Range Query + Pages === --- B+Tree Insert & Search --- 
+PASS|f081_bplustree_index_range_query.php
 FAIL_RUNTIME|f085_geo_rtree_knn_geocoder.php|exit=255| Fatal error: Uncaught TypeError: BoundingBox::contains(): Argument #1 ($p) must be of type Point, null given in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f085_geo_rtree_knn_geocoder.p
-FAIL_RUNTIME|f087_rbac_abac_policy_inheritance.php|exit=142|Carol can article:read = false Carol can article:write = false Bob can comment:read (inherited) = false  --- ABAC --- 
-PASS|f090_promise_future_async_concurrent.php
-FAIL_RUNTIME|f095_compiler_opt_constfold_dce_cse.php|exit=142|  c3 = const(10)   t4 = const(7)   ret t2  --- Dead Code Elimination --- 
-PASS|f097_search_engine_inverted_index_tfidf.php
-FAIL_RUNTIME|f102_memory_gc_marksweep_refcount_gen.php|exit=142|--- Cycle Detection --- Cycle detection: 2 cycles found  --- Generational GC --- Total objects: 15 
-FAIL_RUNTIME|f104_game_engine_ecs_collision_render.php|exit=142|  {"type":"moved","entity":3,"from":[400,175],"to":[396,174.5]}   {"type":"death","entity":2} Entities remaining: 3  --- Entity States --- 
+FAIL_DIFF|f087_rbac_abac_policy_inheritance.php|PHP:=== f087: RBAC + ABAC + Policy + Inheritance ===|--- RBAC ---|Alice can article:write = true||AOT:=== f087: RBAC + ABAC + Policy + Inheritance ===|--- RBAC ---|Alice can article:write = false|
+FAIL_DIFF|f090_promise_future_async_concurrent.php|PHP:=== f090: Promise + Future + Async + Concurrent ===|--- Basic Promise ---|Chained: 43||AOT:=== f090: Promise + Future + Async + Concurrent ===|--- Basic Promise ---|Chained:|
+FAIL_RUNTIME|f095_compiler_opt_constfold_dce_cse.php|exit=142|  c3 = const(10)   t4 = const(7)   ret   --- Dead Code Elimination --- 
+FAIL_RUNTIME|f097_search_engine_inverted_index_tfidf.php|exit=255| Fatal error: Uncaught DivisionByZeroError: Division by zero in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f097_search_engine_inverted_index_tfidf.php:40 Stack trace: #0 {main}   thrown
+FAIL_DIFF|f102_memory_gc_marksweep_refcount_gen.php|PHP:=== f102: Memory Mgmt + MarkSweep + RefCount + Generational ===|--- Mark-Sweep GC ---|Heap: 5 objects, 544 bytes||AOT:=== f102: Memory Mgmt + MarkSweep + RefCount + Generational ===|--- Mark-Sweep GC ---|Heap: 5 objects, 544 bytes|
+FAIL_DIFF|f104_game_engine_ecs_collision_render.php|PHP:=== f104: Game Engine + ECS + Collision + Render ===|--- Setup Game World ---|Entities: 4||AOT:=== f104: Game Engine + ECS + Collision + Render ===|--- Setup Game World ---|Entities: 4|
 FAIL_DIFF|f105_db_index_btree_hash_queryplan.php|PHP:=== f105: DB Index + BTree + HashIndex + QueryPlan ===|--- B-Tree Index ---|Inserted: 10, 20, 5, 6, 12, 30, 7, 17, 25, 31, 3, 1, 40, 50, 15, 8, 45, 35, 28, 22||AOT:=== f105: DB Index + BTree + HashIndex + QueryPlan ===|--- B-Tree Index ---|Inserted: 10, 20, 5, 6, 12, 30, 7, 17, 25, 31, 3, 1, 40, 50, 15, 8, 45, 35, 28, 22|
-PASS|f110_os_sim_process_memory_filesystem.php
+FAIL_DIFF|f110_os_sim_process_memory_filesystem.php|PHP:=== f110: OS Sim + Process + Memory + FileSystem ===|--- CPU Scheduling ---|FCFS:||AOT:=== f110: OS Sim + Process + Memory + FileSystem ===|--- CPU Scheduling ---|FCFS:|
 FAIL_RUNTIME|f113_distributed_consistenthash_vectorclock_quorum.php|exit=133|--- Consistent Hashing --- Distribution (1000 keys):   node3: 302 ##############################   node1: 438 ###########################################   node2: 260 ########################## 
-FAIL_RUNTIME|f117_search_engine_inverted_tfidf_bm25.php|exit=142| --- BM25 Search --- Query: 'quick fox'  --- Compare TF-IDF vs BM25 --- 
-PASS|f119_logging_structured_levels_rotation.php
-FAIL_RUNTIME|f124_container_orchestrator_pod_service_autoscale.php|exit=139|  node-1 (10.0.0.1): CPU=22.5% Mem=9.4% Pods=3   node-2 (10.0.0.2): CPU=0.0% Mem=0.0% Pods=0   node-3 (10.0.0.3): CPU=0.0% Mem=0.0% Pods=0  --- Create Service --- 
-PASS|f134_event_sourcing_snapshot_cqrs_projection.php
-FAIL_COMPILE|f135_math_number_theory_crt_miller_rabin.php|Error: Compilation failed with 1 errors, 0 warnings [1mf135_math_number_theory_crt_miller_rabin.php[0m: [31merror[0m: Zig code generation failed: AstDirectGenerationFailed  [31m1 error(s)[0m gen
+FAIL_DIFF|f117_search_engine_inverted_tfidf_bm25.php|PHP:=== f117: Search Engine + InvertedIndex + TF-IDF + BM25 ===|--- Build Index ---|Index stats: {"documents":7,"terms":20,"avg_doc_length":5.7}||AOT:=== f117: Search Engine + InvertedIndex + TF-IDF + BM25 ===|--- Build Index ---|Index stats: {"documents":7,"terms":4,"avg_doc_length":5.7}|
+FAIL_DIFF|f119_logging_structured_levels_rotation.php|PHP:=== f119: Logging + Structured + Levels + Rotation ===|--- Basic Logging ---|[info] app: User logged in {"user":"alice","ip":"192.168.1.1"}||AOT:=== f119: Logging + Structured + Levels + Rotation ===|--- Basic Logging ---|Memory handler records: 5|
+FAIL_DIFF|f124_container_orchestrator_pod_service_autoscale.php|PHP:=== f124: Container Orchestrator + Pod + ServiceDiscovery + Autoscale ===|--- Setup Cluster ---|Nodes: 3||AOT:=== f124: Container Orchestrator + Pod + ServiceDiscovery + Autoscale ===|--- Setup Cluster ---|Nodes: 3|
+FAIL_RUNTIME|f134_event_sourcing_snapshot_cqrs_projection.php|exit=1|=== f134: EventSourcing + Snapshot + CQRS + Projection === --- Event Sourcing: Order Lifecycle --- error: InvalidArgument 
+FAIL_RUNTIME|f135_math_number_theory_crt_miller_rabin.php|exit=133|--- Primality Testing --- Deterministic: ✓✓✓✓✓✓✓✓✓✓ primes ✓✓✓✓✓✓✓✓✓✓ composites Miller-Rabin (large primes): 
 FAIL_DIFF|f151_type_system_generics_variance.php|PHP:=== f151: Type System + Generics + Variance + Inference ===|--- Covariant Return ---|Dog shelter: Woof||AOT:=== f151: Type System + Generics + Variance + Inference ===|--- Covariant Return ---|Dog shelter: Woof|
 PASS|f152_closure_arrow_higher_order.php
 FAIL_DIFF|f160_virtual_fs_path_traversal.php|PHP:=== f160: Virtual FS + Path Ops + Directory Traversal ===|--- Virtual File System ---|Directory structure:||AOT:=== f160: Virtual FS + Path Ops + Directory Traversal ===|--- Virtual File System ---|Directory structure:|
-FAIL_RUNTIME|f161_json_xml_csv_parsing.php|exit=139|   --- XML Parsing --- PHP Warning:  Undefined variable $children in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f161_json_xml_csv_parsing.php on line 191  Warning: Undefined variable $c
-FAIL_DIFF|f163_event_driven_dispatch_bus.php|PHP:=== f163: Event-Driven + PubSub + EventSourcing ===|--- Event Bus Pub/Sub ---|[Email Service] Welcome email sent to Alice||AOT:=== f163: Event-Driven + PubSub + EventSourcing ===|--- Event Bus Pub/Sub ---|[Email Service] Welcome email sent to Alice|
-PASS|f164_plugin_hook_system.php
+FAIL_RUNTIME|f161_json_xml_csv_parsing.php|exit=1|  ,   ,    --- XML Parsing --- error: RuntimeError 
+FAIL_DIFF|f163_event_driven_dispatch_bus.php|PHP:=== f163: Event-Driven + PubSub + EventSourcing ===|--- Event Bus Pub/Sub ---|[Email Service] Welcome email sent to Alice||AOT:=== f163: Event-Driven + PubSub + EventSourcing ===|--- Event Bus Pub/Sub ---|PHP Warning:  foreach() argument must be of type array|object, null given in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f163_event_driven_dispatch_bus.php on line 43|
+FAIL_DIFF|f164_plugin_hook_system.php|PHP:=== f164: Plugin System + Hooks + Lifecycle ===|--- Register Plugins ---|Registered: seo, cache, analytics||AOT:=== f164: Plugin System + Hooks + Lifecycle ===|--- Register Plugins ---|Registered: seo, cache, analytics|
 FAIL_DIFF|f171_state_machine_dfa.php|PHP:=== f171: State Machine + DFA + NFA ===|--- Order State Machine ---|Initial: pending||AOT:=== f171: State Machine + DFA + NFA ===|--- Order State Machine ---|Initial: pending|
-FAIL_DIFF|f173_concurrency_primitives_sim.php|PHP:=== f173: Concurrency Primitives Simulation ===|--- Mutex ---|Lock by thread 1: OK||AOT:=== f173: Concurrency Primitives Simulation ===|--- Mutex ---|Lock by thread 1: OK|
+PASS|f173_concurrency_primitives_sim.php
 PASS|f174_command_undo_redo_macro.php
 FAIL_DIFF|f175_decorator_strategy_template.php|PHP:=== f175: Decorator + Strategy + Template Method ===|--- Decorator: Logger Formatting ---|Base: [INFO] Hello||AOT:=== f175: Decorator + Strategy + Template Method ===|--- Decorator: Logger Formatting ---|Base: [INFO] Hello|
 FAIL_DIFF|f176_specification_chain_rules.php|PHP:=== f176: Specification Pattern + Rule Chain ===|--- Specification: User Validation ---|User evaluation:||AOT:=== f176: Specification Pattern + Rule Chain ===|--- Specification: User Validation ---|User evaluation:|
-FAIL_RUNTIME|f177_graph_traversal_dfs_bfs.php|exit=139|  Vertices: A, B, C, D, E, F, G   DFS from A: A → B → D → G → E → F → C   BFS from A: A  --- Shortest Path (Dijkstra) --- 
-FAIL_DIFF|f178_numeric_precision_matrix.php|PHP:=== f178: Numeric + Matrix + Linear Algebra ===|--- Matrix Operations ---|Matrix A:||AOT:=== f178: Numeric + Matrix + Linear Algebra ===|--- Matrix Operations ---|Matrix A:|
-PASS|f179_visitor_composite_ast.php
+FAIL_RUNTIME|f177_graph_traversal_dfs_bfs.php|exit=142|  Vertices: A, B, C, D, E, F, G   DFS from A: A → B → D → G → E → F → C   BFS from A: A → B → C → D → E → F → G  --- Shortest Path (Dijkstra) --- 
+FAIL_RUNTIME|f178_numeric_precision_matrix.php|exit=142|   A - B:   [   -8.00,    -6.00,    -4.00]   [   -2.00,     0.00,     2.00]   [    4.00,     6.00,     8.00] 
+FAIL_DIFF|f179_visitor_composite_ast.php|PHP:=== f179: Visitor + Composite + AST Walk ===|--- AST Construction ---|--- Print Visitor (AST Structure) ---||AOT:=== f179: Visitor + Composite + AST Walk ===|--- AST Construction ---|--- Print Visitor (AST Structure) ---|
