@@ -6888,6 +6888,9 @@ pub const NativeLinker = struct {
             const block = func.blocks.items[i];
             const label = block.label;
 
+            // TEMP-DEBUG block walk mark
+            try writer.print("{s}/* WALK i={d} label={s} */\n", .{ indent, i, label });
+
             // 检查是否是 foreach 循环
             if (std.mem.startsWith(u8, label, "foreach_cond_")) {
                 i = try self.generateForeachFromLabels(writer, func, i, end_idx, cleanup_regs, processed, loop_label_counter, indent);
@@ -8782,6 +8785,9 @@ pub const NativeLinker = struct {
                     try self.writeConditionExpr(writer, body_cond_br.cond.id, body_cond_br.cond.type_);
                     try writer.print(") {{\n", .{});
 
+                    // TEMP-DBG body-handler-A (foreach)
+                    try writer.print("{s}/* DBA cond={d} */\n", .{ if_indent, @as(usize, body_cond_br.cond.id) });
+
                     const then_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{if_indent});
                     defer self.allocator.free(then_indent);
 
@@ -9634,6 +9640,28 @@ pub const NativeLinker = struct {
         // 标记 merge 块为已处理，防止上层调用者再次处理该块的 cond_br。
         // 非 PHI 指令由调用者在 if/else 后的正确的缩进级别生成。
         try processed.put(merge_idx, {});
+
+        // TEMP-DEBUG generateBrToMergeCondBr
+        {
+            const t_lbl = cb.then_block.label;
+            const e_lbl = cb.else_block.label;
+            var then_done = false;
+            var else_done = false;
+            for (0..func.blocks.items.len) |bi2| {
+                if (func.blocks.items[bi2] == cb.then_block) then_done = processed.contains(bi2);
+                if (func.blocks.items[bi2] == cb.else_block) else_done = processed.contains(bi2);
+            }
+            try writer.print("{s}// DBG-BTM merge={s}({d}) cond={d} then={s}(proc={}) else={s}(proc={})\n", .{
+                indent,
+                br_target.label,
+                merge_idx,
+                @as(usize, cb.cond.id),
+                t_lbl,
+                then_done,
+                e_lbl,
+                else_done,
+            });
+        }
 
         // 保存 return_generated/break_generated：then/else 内的 return/break 不应泄漏到调用者
         const saved_btmcb_rg = self.return_generated;
