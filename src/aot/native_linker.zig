@@ -20109,6 +20109,22 @@ pub const NativeLinker = struct {
             try writer.print("{s}if (reg_{d}.toBool()) {{\n", .{ indent, cb.cond.id });
         }
 
+        // TEMP-DEBUG nested foreach
+        {
+            const t_lbl = func.blocks.items[then_idx].label;
+            const e_lbl = func.blocks.items[else_idx].label;
+            try writer.print("{s}// DBG-CB cond={d} then={s}(proc={}) else={s}(proc={}) in_while={} exit={d}\n", .{
+                indent,
+                @as(usize, cb.cond.id),
+                t_lbl,
+                processed.contains(then_idx),
+                e_lbl,
+                processed.contains(else_idx),
+                self.in_while_loop,
+                self.current_loop_exit_block orelse 9999,
+            });
+        }
+
         // 生成 then 块
         if (processed.contains(then_idx)) {
             // 块已处理：检查是否为循环退出块（break）或回边块（continue）
