@@ -7856,6 +7856,48 @@ pub const NativeLinker = struct {
                             // 不生成 } else {，让后续代码在 if 块外处理 else(merge) 块
                             if (else_bi) |ei| {
                                 merge_bi = ei;
+                                // 仅当 then 块以普通 .br 直达 merge（if 无 else 的直落形态）
+                                // 时，else 路径直接从 cond_br 源的 false 边落入 merge 延续，
+                                // 该路径未在任何分支中物化 merge 的 else 边 PHI。若缺失，
+                                // merge 延续会读取到 then 分支遗留/其他迭代的陈旧值（跨迭代污染，
+                                // 如 repro_wd 中 $minVertex 残留上次外层循环的 best 顶点 → 死循环）。
+                                // 此处补发 else 边的 merge PHI 物化（incoming 来自 cond_br 源块）。
+                                const then_ends_br_to_merge = blk: {
+                                    if (then_bi) |ti| {
+                                        if (func.blocks.items[ti].terminator) |tt| {
+                                            if (tt == .br) break :blk func.blocks.items[else_bi.?] == tt.br;
+                                        }
+                                    }
+                                    break :blk false;
+                                };
+                                if (then_ends_br_to_merge) {
+                                    const merge_blk_phi3 = func.blocks.items[ei];
+                                    var merge_has_phi = false;
+                                    for (merge_blk_phi3.instructions.items) |pi| {
+                                        if (pi.op == .phi) {
+                                            merge_has_phi = true;
+                                            break;
+                                        }
+                                    }
+                                    if (merge_has_phi) {
+                                        try writer.print("{s}}} else {{\n", .{indent});
+                                        for (merge_blk_phi3.instructions.items) |pi| {
+                                            if (pi.op == .phi) {
+                                                if (pi.result) |r| {
+                                                    for (pi.op.phi.incoming) |inc| {
+                                                        if (inc.block == block or
+                                                            std.mem.eql(u8, inc.block.label, block.label))
+                                                        {
+                                                            try self.writePtrAwareAssign(writer, body_indent, r.id, inc.value.id);
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        // 由 line 8221 的 {s}}} 闭合该 else
+                                    }
+                                }
                             }
                         } else if (else_bi) |ei| {
                             try writer.print("{s}}} else {{\n", .{indent});
@@ -8858,43 +8900,106 @@ pub const NativeLinker = struct {
                                         }
                                     },
                                     .cond_br => {
-                                        // 修复：当 then 块有嵌套 cond_br（如 ?? 运算符），
-                                        // 限制递归范围仅覆盖嵌套控制流块，
-                                        // 不应包含 if_merge 块及后续语句的块。
+                                        // then 块尾部有嵌套 cond_br（如 `if (...) return;` / ?? 运算符）。
                                         const nested_cb = tt.cond_br;
-                                        var nested_start = ti + 1;
-                                        var nested_end = loop_end;
+                                        var nested_ti: ?usize = null;
+                                        var nested_ei: ?usize = null;
                                         for (0..func.blocks.items.len) |blk_i| {
                                             if (func.blocks.items[blk_i] == nested_cb.then_block) {
-                                                nested_start = blk_i;
+                                                nested_ti = blk_i;
                                                 break;
                                             }
                                         }
                                         for (0..func.blocks.items.len) |blk_i| {
-                                            if (func.blocks.items[blk_i] == nested_cb.then_block or
-                                                func.blocks.items[blk_i] == nested_cb.else_block)
-                                            {
-                                                const nb = func.blocks.items[blk_i];
-                                                if (nb.terminator) |nt| {
-                                                    if (nt == .br) {
-                                                        for (0..func.blocks.items.len) |mi| {
-                                                            if (func.blocks.items[mi] == nt.br) {
-                                                                nested_end = mi + 1;
-                                                                break;
+                                            if (func.blocks.items[blk_i] == nested_cb.else_block) {
+                                                nested_ei = blk_i;
+                                                break;
+                                            }
+                                        }
+                                        // 嵌套 else 是已预标记的循环延续块（foreach_increment_/cleanup/exit），
+                                        // 且嵌套 then 以 ret/throw 终止：false 分支直接回落循环延续，属
+                                        // "then 尾部 if(cond) return" 结构。此时无法用范围递归表达——原实现用
+                                        // 嵌套 else 块的 .br 终止符推导 nested_end，但该 .br 是循环回边（如
+                                        // foreach_increment_2 br foreach_cond_0），回边目标索引 < nested_start
+                                        // 导致范围倒置为空，嵌套 if 被整体吞掉（如 dfs 中 reg_32 递归返回值
+                                        // 的 `if (reg_32.toBool()) return true;` 丢失 → 环检测返回 N）。
+                                        // 镜像 elseif 分支（line 9114）的正确处理：内联生成 if(cond){ then }。
+                                        const then_terminates = blk: {
+                                            if (nested_ti) |nti| {
+                                                if (func.blocks.items[nti].terminator) |ntt| {
+                                                    if (ntt == .ret or ntt == .throw) break :blk true;
+                                                }
+                                            }
+                                            break :blk false;
+                                        };
+                                        const else_is_loop_continuation = blk: {
+                                            if (nested_ei) |nei| {
+                                                const elbl = func.blocks.items[nei].label;
+                                                if (std.mem.startsWith(u8, elbl, "foreach_increment_") or
+                                                    std.mem.startsWith(u8, elbl, "foreach_cleanup_") or
+                                                    std.mem.startsWith(u8, elbl, "foreach_exit_") or
+                                                    std.mem.startsWith(u8, elbl, "for_increment_") or
+                                                    std.mem.startsWith(u8, elbl, "while_cond_") or
+                                                    std.mem.startsWith(u8, elbl, "while_body_"))
+                                                {
+                                                    break :blk true;
+                                                }
+                                                if (processed.contains(nei)) break :blk true;
+                                            }
+                                            break :blk false;
+                                        };
+                                        if (nested_ti != null and then_terminates and else_is_loop_continuation) {
+                                            const nti = nested_ti.?;
+                                            if (!processed.contains(nti)) {
+                                                try writer.print("{s}if (", .{then_indent});
+                                                try self.writeConditionExpr(writer, nested_cb.cond.id, nested_cb.cond.type_);
+                                                try writer.print(") {{\n", .{});
+                                                const saved_rg2 = self.return_generated;
+                                                const saved_brk2 = self.break_generated;
+                                                self.return_generated = false;
+                                                self.break_generated = false;
+                                                try self.generateLabelDrivenBlockRange(writer, func, nti, nti + 1, cleanup_regs, processed, loop_label_counter, then_indent);
+                                                if (!self.return_generated) self.return_generated = saved_rg2;
+                                                if (!self.break_generated) self.break_generated = saved_brk2;
+                                                try writer.print("{s}}}\n", .{then_indent});
+                                            }
+                                        } else {
+                                            // 其余嵌套 cond_br（如 ?? 运算符 / 完整嵌套 if/else）：
+                                            // 限制递归范围仅覆盖嵌套控制流块，不应包含 if_merge 及后续语句块。
+                                            var nested_start = ti + 1;
+                                            var nested_end = loop_end;
+                                            for (0..func.blocks.items.len) |blk_i| {
+                                                if (func.blocks.items[blk_i] == nested_cb.then_block) {
+                                                    nested_start = blk_i;
+                                                    break;
+                                                }
+                                            }
+                                            for (0..func.blocks.items.len) |blk_i| {
+                                                if (func.blocks.items[blk_i] == nested_cb.then_block or
+                                                    func.blocks.items[blk_i] == nested_cb.else_block)
+                                                {
+                                                    const nb = func.blocks.items[blk_i];
+                                                    if (nb.terminator) |nt| {
+                                                        if (nt == .br) {
+                                                            for (0..func.blocks.items.len) |mi| {
+                                                                if (func.blocks.items[mi] == nt.br) {
+                                                                    nested_end = mi + 1;
+                                                                    break;
+                                                                }
                                                             }
                                                         }
                                                     }
+                                                    if (nested_end != loop_end) break;
                                                 }
-                                                if (nested_end != loop_end) break;
                                             }
+                                            const saved_rg = self.return_generated;
+                                            const saved_brk = self.break_generated;
+                                            self.return_generated = false;
+                                            self.break_generated = false;
+                                            try self.generateLabelDrivenBlockRange(writer, func, nested_start, nested_end, cleanup_regs, processed, loop_label_counter, then_indent);
+                                            if (!self.return_generated) self.return_generated = saved_rg;
+                                            if (!self.break_generated) self.break_generated = saved_brk;
                                         }
-                                        const saved_rg = self.return_generated;
-                                        const saved_brk = self.break_generated;
-                                        self.return_generated = false;
-                                        self.break_generated = false;
-                                        try self.generateLabelDrivenBlockRange(writer, func, nested_start, nested_end, cleanup_regs, processed, loop_label_counter, then_indent);
-                                        if (!self.return_generated) self.return_generated = saved_rg;
-                                        if (!self.break_generated) self.break_generated = saved_brk;
                                     },
                                     .br => |br_target| {
                                         // br 到 cleanup/exit → break :label
@@ -9095,7 +9200,20 @@ pub const NativeLinker = struct {
                                             defer self.allocator.free(nested_indent);
                                             // 处理 then 块
                                             // 限制范围到 else 块之前，防止 then 块处理时吞掉 else 块的内容
-                                            const then_end = nested_else_idx orelse nested_end;
+                                            const then_end = blk: {
+                                                if (nested_else_idx) |nei| {
+                                                    if (nested_then_idx) |nti_v| {
+                                                        if (nei > nti_v) break :blk nei;
+                                                        // 乱序：else 块索引位于 then 块之前（如 else=foreach_increment_、
+                                                        // if_merge_ 在 then 之前），generateLabelDrivenBlockRange(nti, nei)
+                                                        // 范围为空会吞掉 then 分支（其中的 return/副作用全部丢失）。
+                                                        // 退化为仅处理 then 块本身（含终止符，如 ret/throw），
+                                                        break :blk nti_v + 1;
+                                                    }
+                                                    break :blk nei;
+                                                }
+                                                break :blk nested_end;
+                                            };
                                             if (nested_then_idx) |nti| {
                                                 if (!processed.contains(nti)) {
                                                     const saved_rg = self.return_generated;
@@ -9211,7 +9329,20 @@ pub const NativeLinker = struct {
                                             defer self.allocator.free(nested_indent);
                                             // 处理 then 块
                                             // 限制范围到 else 块之前，防止 then 块处理时吞掉 else 块的内容
-                                            const then_end = nested_else_idx orelse nested_end;
+                                            const then_end = blk: {
+                                                if (nested_else_idx) |nei| {
+                                                    if (nested_then_idx) |nti_v| {
+                                                        if (nei > nti_v) break :blk nei;
+                                                        // 乱序：else 块索引位于 then 块之前（如 else=foreach_increment_、
+                                                        // if_merge_ 在 then 之前），generateLabelDrivenBlockRange(nti, nei)
+                                                        // 范围为空会吞掉 then 分支（其中的 return/副作用全部丢失）。
+                                                        // 退化为仅处理 then 块本身（含终止符，如 ret/throw），
+                                                        break :blk nti_v + 1;
+                                                    }
+                                                    break :blk nei;
+                                                }
+                                                break :blk nested_end;
+                                            };
                                             if (nested_then_idx) |nti| {
                                                 if (!processed.contains(nti)) {
                                                     const saved_rg = self.return_generated;
@@ -9408,7 +9539,7 @@ pub const NativeLinker = struct {
         // 但最后生成的行是 return 语句时，increment 不可达
         if (increment_idx) |inc_idx| {
             try processed.put(inc_idx, {});
-            if (!self.return_generated and !self.break_generated and !self.lastLineIsReturn(writer)) {
+            if (!self.break_generated and !self.lastLineIsReturn(writer)) {
                 const inc_block = func.blocks.items[inc_idx];
                 for (inc_block.instructions.items) |inst| {
                     try writer.writeAll(body_indent);
@@ -9418,7 +9549,7 @@ pub const NativeLinker = struct {
         }
 
         // PHI 消解：在 increment 块后添加循环回边 PHI 赋值
-        if (!self.return_generated and !self.break_generated and !self.lastLineIsReturn(writer)) {
+        if (!self.break_generated and !self.lastLineIsReturn(writer)) {
             for (cond_block.instructions.items) |phi_inst| {
                 if (phi_inst.op == .phi) {
                     if (phi_inst.result) |result| {
@@ -9470,7 +9601,7 @@ pub const NativeLinker = struct {
         }
 
         // 生成 continue
-        if (!self.return_generated and !self.break_generated and !self.lastLineIsReturn(writer)) {
+        if (!self.break_generated and !self.lastLineIsReturn(writer)) {
             try writer.print("{s}    continue :{s};\n", .{ indent, label_name });
         }
         try writer.print("{s}}}\n", .{indent});
@@ -9578,24 +9709,16 @@ pub const NativeLinker = struct {
                                 std.mem.startsWith(u8, l, "do_while_exit_");
                         }
                     }.f;
-                    const is_loop_backedge_label = struct {
-                        fn f(l: []const u8) bool {
-                            return std.mem.startsWith(u8, l, "while_cond_") or
-                                std.mem.startsWith(u8, l, "while_body_") or
-                                std.mem.startsWith(u8, l, "while_increment_") or
-                                std.mem.startsWith(u8, l, "for_cond_") or
-                                std.mem.startsWith(u8, l, "for_loop_") or
-                                std.mem.startsWith(u8, l, "for_increment_") or
-                                std.mem.startsWith(u8, l, "do_while_cond_") or
-                                std.mem.startsWith(u8, l, "do_while_body_");
-                        }
-                    }.f;
                     const t_lbl = cb.then_block.label;
                     const e_lbl = cb.else_block.label;
-                    const fwd = is_loop_exit_label(t_lbl) and is_loop_backedge_label(e_lbl);
-                    const rev = is_loop_backedge_label(t_lbl) and is_loop_exit_label(e_lbl);
+                    // 该处理器位于"foreach 无自身 exit 块"路径：cleanup 的 cond_br 若指向
+                    // 某个 *_exit_ 标签，必属于外层循环（自身无 exit 则内部无本地 break）。
+                    // 泛化判定：只需一端是外层 exit，另一端无论回边、下一条体内顺序块，都要
+                    // 委托外层 break——否则 (exit, if_merge) 这种「exit vs 体内 continuation」
+                    // 形态会漏判（dijkstra: br 58, while_exit_7, if_merge_18 → 死循环）。
                     const exit_is_then = is_loop_exit_label(t_lbl);
-                    if ((fwd or rev) and saved_loop_label != null) {
+                    const exit_is_else = is_loop_exit_label(e_lbl);
+                    if ((exit_is_then or exit_is_else) and saved_loop_label != null) {
                         const outer_lbl = saved_loop_label.?;
                         // 正向布局：then→外层 exit、else→外层 cond → 条件为真时 break；
                         // 反向布局：then→外层 cond、else→外层 exit → 条件为假时 break。
@@ -10290,43 +10413,106 @@ pub const NativeLinker = struct {
                                         }
                                     },
                                     .cond_br => {
-                                        // 修复：当 then 块有嵌套 cond_br（如 ?? 运算符），
-                                        // 限制递归范围仅覆盖嵌套控制流块，
-                                        // 不应包含 if_merge 块及后续语句的块。
+                                        // then 块尾部有嵌套 cond_br（如 `if (...) return;` / ?? 运算符）。
                                         const nested_cb = tt.cond_br;
-                                        var nested_start = ti + 1;
-                                        var nested_end = loop_end;
+                                        var nested_ti: ?usize = null;
+                                        var nested_ei: ?usize = null;
                                         for (0..func.blocks.items.len) |blk_i| {
                                             if (func.blocks.items[blk_i] == nested_cb.then_block) {
-                                                nested_start = blk_i;
+                                                nested_ti = blk_i;
                                                 break;
                                             }
                                         }
                                         for (0..func.blocks.items.len) |blk_i| {
-                                            if (func.blocks.items[blk_i] == nested_cb.then_block or
-                                                func.blocks.items[blk_i] == nested_cb.else_block)
-                                            {
-                                                const nb = func.blocks.items[blk_i];
-                                                if (nb.terminator) |nt| {
-                                                    if (nt == .br) {
-                                                        for (0..func.blocks.items.len) |mi| {
-                                                            if (func.blocks.items[mi] == nt.br) {
-                                                                nested_end = mi + 1;
-                                                                break;
+                                            if (func.blocks.items[blk_i] == nested_cb.else_block) {
+                                                nested_ei = blk_i;
+                                                break;
+                                            }
+                                        }
+                                        // 嵌套 else 是已预标记的循环延续块（foreach_increment_/cleanup/exit），
+                                        // 且嵌套 then 以 ret/throw 终止：false 分支直接回落循环延续，属
+                                        // "then 尾部 if(cond) return" 结构。此时无法用范围递归表达——原实现用
+                                        // 嵌套 else 块的 .br 终止符推导 nested_end，但该 .br 是循环回边（如
+                                        // foreach_increment_2 br foreach_cond_0），回边目标索引 < nested_start
+                                        // 导致范围倒置为空，嵌套 if 被整体吞掉（如 dfs 中 reg_32 递归返回值
+                                        // 的 `if (reg_32.toBool()) return true;` 丢失 → 环检测返回 N）。
+                                        // 镜像 elseif 分支（line 9114）的正确处理：内联生成 if(cond){ then }。
+                                        const then_terminates = blk: {
+                                            if (nested_ti) |nti| {
+                                                if (func.blocks.items[nti].terminator) |ntt| {
+                                                    if (ntt == .ret or ntt == .throw) break :blk true;
+                                                }
+                                            }
+                                            break :blk false;
+                                        };
+                                        const else_is_loop_continuation = blk: {
+                                            if (nested_ei) |nei| {
+                                                const elbl = func.blocks.items[nei].label;
+                                                if (std.mem.startsWith(u8, elbl, "foreach_increment_") or
+                                                    std.mem.startsWith(u8, elbl, "foreach_cleanup_") or
+                                                    std.mem.startsWith(u8, elbl, "foreach_exit_") or
+                                                    std.mem.startsWith(u8, elbl, "for_increment_") or
+                                                    std.mem.startsWith(u8, elbl, "while_cond_") or
+                                                    std.mem.startsWith(u8, elbl, "while_body_"))
+                                                {
+                                                    break :blk true;
+                                                }
+                                                if (processed.contains(nei)) break :blk true;
+                                            }
+                                            break :blk false;
+                                        };
+                                        if (nested_ti != null and then_terminates and else_is_loop_continuation) {
+                                            const nti = nested_ti.?;
+                                            if (!processed.contains(nti)) {
+                                                try writer.print("{s}if (", .{then_indent});
+                                                try self.writeConditionExpr(writer, nested_cb.cond.id, nested_cb.cond.type_);
+                                                try writer.print(") {{\n", .{});
+                                                const saved_rg2 = self.return_generated;
+                                                const saved_brk2 = self.break_generated;
+                                                self.return_generated = false;
+                                                self.break_generated = false;
+                                                try self.generateLabelDrivenBlockRange(writer, func, nti, nti + 1, cleanup_regs, processed, loop_label_counter, then_indent);
+                                                if (!self.return_generated) self.return_generated = saved_rg2;
+                                                if (!self.break_generated) self.break_generated = saved_brk2;
+                                                try writer.print("{s}}}\n", .{then_indent});
+                                            }
+                                        } else {
+                                            // 其余嵌套 cond_br（如 ?? 运算符 / 完整嵌套 if/else）：
+                                            // 限制递归范围仅覆盖嵌套控制流块，不应包含 if_merge 及后续语句块。
+                                            var nested_start = ti + 1;
+                                            var nested_end = loop_end;
+                                            for (0..func.blocks.items.len) |blk_i| {
+                                                if (func.blocks.items[blk_i] == nested_cb.then_block) {
+                                                    nested_start = blk_i;
+                                                    break;
+                                                }
+                                            }
+                                            for (0..func.blocks.items.len) |blk_i| {
+                                                if (func.blocks.items[blk_i] == nested_cb.then_block or
+                                                    func.blocks.items[blk_i] == nested_cb.else_block)
+                                                {
+                                                    const nb = func.blocks.items[blk_i];
+                                                    if (nb.terminator) |nt| {
+                                                        if (nt == .br) {
+                                                            for (0..func.blocks.items.len) |mi| {
+                                                                if (func.blocks.items[mi] == nt.br) {
+                                                                    nested_end = mi + 1;
+                                                                    break;
+                                                                }
                                                             }
                                                         }
                                                     }
+                                                    if (nested_end != loop_end) break;
                                                 }
-                                                if (nested_end != loop_end) break;
                                             }
+                                            const saved_rg = self.return_generated;
+                                            const saved_brk = self.break_generated;
+                                            self.return_generated = false;
+                                            self.break_generated = false;
+                                            try self.generateLabelDrivenBlockRange(writer, func, nested_start, nested_end, cleanup_regs, processed, loop_label_counter, then_indent);
+                                            if (!self.return_generated) self.return_generated = saved_rg;
+                                            if (!self.break_generated) self.break_generated = saved_brk;
                                         }
-                                        const saved_rg = self.return_generated;
-                                        const saved_brk = self.break_generated;
-                                        self.return_generated = false;
-                                        self.break_generated = false;
-                                        try self.generateLabelDrivenBlockRange(writer, func, nested_start, nested_end, cleanup_regs, processed, loop_label_counter, then_indent);
-                                        if (!self.return_generated) self.return_generated = saved_rg;
-                                        if (!self.break_generated) self.break_generated = saved_brk;
                                     },
                                     .br => |br_target| {
                                         // br 到 exit 块 → 生成 break
@@ -10551,7 +10737,20 @@ pub const NativeLinker = struct {
                                             defer self.allocator.free(nested_indent);
                                             // 处理 then 块
                                             // 限制范围到 else 块之前，防止 then 块处理时吞掉 else 块的内容
-                                            const then_end = nested_else_idx orelse nested_end;
+                                            const then_end = blk: {
+                                                if (nested_else_idx) |nei| {
+                                                    if (nested_then_idx) |nti_v| {
+                                                        if (nei > nti_v) break :blk nei;
+                                                        // 乱序：else 块索引位于 then 块之前（如 else=foreach_increment_、
+                                                        // if_merge_ 在 then 之前），generateLabelDrivenBlockRange(nti, nei)
+                                                        // 范围为空会吞掉 then 分支（其中的 return/副作用全部丢失）。
+                                                        // 退化为仅处理 then 块本身（含终止符，如 ret/throw），
+                                                        break :blk nti_v + 1;
+                                                    }
+                                                    break :blk nei;
+                                                }
+                                                break :blk nested_end;
+                                            };
                                             if (nested_then_idx) |nti| {
                                                 if (!processed.contains(nti)) {
                                                     const saved_rg = self.return_generated;
@@ -10667,7 +10866,20 @@ pub const NativeLinker = struct {
                                             defer self.allocator.free(nested_indent);
                                             // 处理 then 块
                                             // 限制范围到 else 块之前，防止 then 块处理时吞掉 else 块的内容
-                                            const then_end = nested_else_idx orelse nested_end;
+                                            const then_end = blk: {
+                                                if (nested_else_idx) |nei| {
+                                                    if (nested_then_idx) |nti_v| {
+                                                        if (nei > nti_v) break :blk nei;
+                                                        // 乱序：else 块索引位于 then 块之前（如 else=foreach_increment_、
+                                                        // if_merge_ 在 then 之前），generateLabelDrivenBlockRange(nti, nei)
+                                                        // 范围为空会吞掉 then 分支（其中的 return/副作用全部丢失）。
+                                                        // 退化为仅处理 then 块本身（含终止符，如 ret/throw），
+                                                        break :blk nti_v + 1;
+                                                    }
+                                                    break :blk nei;
+                                                }
+                                                break :blk nested_end;
+                                            };
                                             if (nested_then_idx) |nti| {
                                                 if (!processed.contains(nti)) {
                                                     const saved_rg = self.return_generated;
@@ -10809,7 +11021,7 @@ pub const NativeLinker = struct {
         }
 
         // PHI 消解：在 for 循环回边处添加 PHI 赋值（来自 loop/body 块的 incoming 值）
-        if (!self.return_generated and !self.break_generated and !self.lastLineIsReturn(writer)) {
+        if (!self.break_generated and !self.lastLineIsReturn(writer)) {
             for (cond_block.instructions.items) |phi_inst| {
                 if (phi_inst.op == .phi) {
                     if (phi_inst.result) |result| {
@@ -11608,7 +11820,20 @@ pub const NativeLinker = struct {
                                             defer self.allocator.free(nested_indent);
                                             // 处理 then 块
                                             // 限制范围到 else 块之前，防止 then 块处理时吞掉 else 块的内容
-                                            const then_end = nested_else_idx orelse nested_end;
+                                            const then_end = blk: {
+                                                if (nested_else_idx) |nei| {
+                                                    if (nested_then_idx) |nti_v| {
+                                                        if (nei > nti_v) break :blk nei;
+                                                        // 乱序：else 块索引位于 then 块之前（如 else=foreach_increment_、
+                                                        // if_merge_ 在 then 之前），generateLabelDrivenBlockRange(nti, nei)
+                                                        // 范围为空会吞掉 then 分支（其中的 return/副作用全部丢失）。
+                                                        // 退化为仅处理 then 块本身（含终止符，如 ret/throw），
+                                                        break :blk nti_v + 1;
+                                                    }
+                                                    break :blk nei;
+                                                }
+                                                break :blk nested_end;
+                                            };
                                             if (nested_then_idx) |nti| {
                                                 if (!processed.contains(nti)) {
                                                     const saved_rg = self.return_generated;
@@ -11705,7 +11930,20 @@ pub const NativeLinker = struct {
                                             defer self.allocator.free(nested_indent);
                                             // 处理 then 块
                                             // 限制范围到 else 块之前，防止 then 块处理时吞掉 else 块的内容
-                                            const then_end = nested_else_idx orelse nested_end;
+                                            const then_end = blk: {
+                                                if (nested_else_idx) |nei| {
+                                                    if (nested_then_idx) |nti_v| {
+                                                        if (nei > nti_v) break :blk nei;
+                                                        // 乱序：else 块索引位于 then 块之前（如 else=foreach_increment_、
+                                                        // if_merge_ 在 then 之前），generateLabelDrivenBlockRange(nti, nei)
+                                                        // 范围为空会吞掉 then 分支（其中的 return/副作用全部丢失）。
+                                                        // 退化为仅处理 then 块本身（含终止符，如 ret/throw），
+                                                        break :blk nti_v + 1;
+                                                    }
+                                                    break :blk nei;
+                                                }
+                                                break :blk nested_end;
+                                            };
                                             if (nested_then_idx) |nti| {
                                                 if (!processed.contains(nti)) {
                                                     // 预标记为已处理，防止 generateLabelDrivenBlockRange
@@ -11903,7 +12141,7 @@ pub const NativeLinker = struct {
 
         // PHI 消解：在循环回边处添加 PHI 赋值（来自循环内部的 incoming 值）
         // 回边可能来自 body 块或其他循环内部块（如 if_merge_）
-        if (!self.return_generated and !self.break_generated and !self.lastLineIsReturn(writer)) {
+        if (!self.break_generated and !self.lastLineIsReturn(writer)) {
             for (cond_block.instructions.items) |phi_inst| {
                 if (phi_inst.op == .phi) {
                     if (phi_inst.result) |result| {
