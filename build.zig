@@ -88,6 +88,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("shared", shared_mod);
     exe.root_module.link_libc = true;
     exe.root_module.linkSystemLibrary("pcre2-8", .{});
+    exe.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
 
     b.installArtifact(exe);
 

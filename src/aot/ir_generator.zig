@@ -2647,8 +2647,6 @@ pub const IRGenerator = struct {
         else
             null;
         const merge_block = try self.createBlock("if_merge");
-
-        // Conditional branch
         self.setTerminator(.{ .cond_br = .{
             .cond = cond_reg,
             .then_block = then_block,

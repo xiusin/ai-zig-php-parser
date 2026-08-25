@@ -275,6 +275,15 @@ pub const MultiFileCompiler = struct {
         var seen_func_names = std.StringHashMap(void).init(self.allocator);
         defer seen_func_names.deinit();
 
+        // 多文件下每个文件的顶层代码都会各自生成 __main__，需要去重。
+        // 编译顺序为依赖优先（被 require 文件先）、根文件最后。
+        // 根文件仅含 require 时其 __main__ 为空（require 在编译期处理），应跳过空副本。
+        // 若空副本在前、非空版本在后则用非空版本覆盖，保证入口为真实逻辑。
+        var main_slot: ?usize = null;  // 已合并 __main__ 在 merged.functions 中的索引
+        var main_is_empty = false;     // 已合并 __main__ 是否为空（0 指令）
+        var main_skip = false;         // 本函数是否为被跳过的重复 __main__
+        var main_replace_slot: ?usize = null; // 需覆盖的旧空 __main__ 索引
+
         // 合并所有文件的 IR
         var file_idx: usize = 0;
         var it = self.compiled_files.iterator();
@@ -313,6 +322,27 @@ pub const MultiFileCompiler = struct {
             // 合并函数并更新字符串索引（转移所有权）
             for (source_module.functions.items) |func| {
                 var new_func = func;
+
+                // 去重 __main__：多文件下每个文件的顶层代码都会各自生成 __main__，
+                // 但程序只需一个入口。空 __main__（仅 require，编译期已处理）直接跳过；
+                // 若已合并的入口为空而当前版本非空，则用当前版本覆盖之。
+                main_skip = false;
+                main_replace_slot = null;
+                if (std.mem.eql(u8, new_func.name, "__main__")) {
+                    var n_instrs: usize = 0;
+                    for (new_func.blocks.items) |b| n_instrs += b.*.instructions.items.len;
+                    const is_empty = n_instrs == 0;
+                    if (main_slot == null) {
+                        main_slot = merged.functions.items.len;
+                        main_is_empty = is_empty;
+                    } else if (main_is_empty and !is_empty) {
+                        main_replace_slot = main_slot;
+                        main_is_empty = false;
+                        main_skip = true;
+                    } else {
+                        main_skip = true;
+                    }
+                }
 
                 // 检测多文件间函数名冲突：对 __arrow_ 和 __closure_ 前缀的函数
                 // 追加文件索引后缀以确保全局唯一
@@ -358,7 +388,11 @@ pub const MultiFileCompiler = struct {
                         }
                     }
                 }
-                try merged.functions.append(self.allocator, new_func);
+                if (main_replace_slot) |slot| {
+                    merged.functions.items[slot] = new_func;
+                } else if (!main_skip) {
+                    try merged.functions.append(self.allocator, new_func);
+                }
             }
 
             // 回溯更新 const_string 中的箭头函数/闭包名引用
@@ -461,6 +495,13 @@ pub const MultiFileCompiler = struct {
             return err;
         };
         defer self.allocator.free(zig_code);
+
+        // [DBG-MF] 写出合并 zig 供观察
+        if (self.options.dump_zig_path) |dbg| {
+            const f = try self.cwd.createFile(self.io, dbg, .{});
+            defer f.close(self.io);
+            try f.writeStreamingAll(self.io, zig_code);
+        }
 
         // 编译到可执行文件
         try linker.compileToExecutable(zig_code, output_path);

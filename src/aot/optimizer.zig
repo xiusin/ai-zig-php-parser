@@ -959,11 +959,16 @@ pub const IROptimizer = struct {
             else => {},
         }
 
-        // load：如果地址循环不变且循环内无 store 到该地址，可提升
-        // 简化：如果地址循环不变，假设可提升（保守但实用）
+        // load：仅当地址循环不变且循环内无 store/可能写内存的调用时才可提升。
+        // 修复：此前只检查地址循环不变，忽略了循环内对同一地址的写（含 byref 内置函数
+        // array_pop/array_shift 等通过指针就地改写 alloca 的调用），导致循环体外提升的
+        // 陈旧值被条件恒读 → while(count($q)>0){$v=array_pop($q);...} 死循环。
+        // 与 areOperandsInvariant 的 .load 分支保持一致，复用 hasStoreInLoop 判定。
         if (inst.op == .load) {
             const op = inst.op.load;
-            return self.isInvariant(op.ptr, loop);
+            if (!self.isInvariant(op.ptr, loop)) return false;
+            if (self.hasStoreInLoop(loop)) return false;
+            return true;
         }
 
         // concat 虽有分配副作用，但操作数为循环不变量时可安全提升
@@ -1061,10 +1066,11 @@ pub const IROptimizer = struct {
             for (block.instructions.items) |inst| {
                 if (inst.result) |res| {
                     if (res.id == reg.id) {
-                        // 如果是 load，检查 load 的地址是否循环不变
+                        // 如果是 load，检查 load 的地址是否循环不变，且循环内不修改该地址
                         if (inst.op == .load) {
                             const load_op = inst.op.load;
-                            return self.isInvariant(load_op.ptr, loop);
+                            if (!self.isInvariant(load_op.ptr, loop)) return false;
+                            if (self.hasStoreInLoop(loop)) return false;
                         }
                         // 其他指令在循环内定义，不是不变量
                         return false;
