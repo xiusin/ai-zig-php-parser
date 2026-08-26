@@ -6871,6 +6871,7 @@ pub const NativeLinker = struct {
         indent: []const u8,
     ) anyerror!void {
         var i = start_idx;
+        std.debug.print("[[LDR call start={d} end={d}]]\n", .{ start_idx, end_idx });
         while (i < end_idx) {
             // 如果已生成 return 或 break，后续代码不可达，停止生成
             // 标记剩余块为已处理，避免 tryGenerateFromLabels 报告未处理块
@@ -6887,6 +6888,7 @@ pub const NativeLinker = struct {
 
             const block = func.blocks.items[i];
             const label = block.label;
+            if (std.mem.startsWith(u8, label, "if_merge_")) std.debug.print("[[LDR walk hit i={d} label={s} nInstr={d}]]\n", .{ i, label, block.instructions.items.len });
 
             // 检查是否是 foreach 循环
             if (std.mem.startsWith(u8, label, "foreach_cond_")) {
@@ -6941,6 +6943,7 @@ pub const NativeLinker = struct {
             if (std.mem.startsWith(u8, label, "if_merge_") and
                 block.terminator != null and block.terminator.? == .cond_br)
             {
+                std.debug.print("[[6941 FIRE i={d} label={s} nInstr={d}]]\n", .{ i, label, block.instructions.items.len });
                 // 生成 if_merge_ 块的非 PHI 指令
                 try processed.put(i, {});
                 for (block.instructions.items) |inst| {
