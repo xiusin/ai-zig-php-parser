@@ -12365,6 +12365,20 @@ pub const NativeLinker = struct {
                 return end_idx;
         }
 
+        // 当 if 无显式 else（cond_br 的 false 边直接落到共享 merge 块）时，
+        // cfb 编码为 else_idx=<merge> 且 merge_idx=null（如 min_c3 外层 if：
+        // else=if_merge_3 含 reg26 PHI + 尾随 ret）。此时必须将 merge_idx 提升
+        // 为 else_idx，使既有 "else==merge" 路径生效：
+        //   - Step 7 不把 merge 块作为独立 else 内联（否则其尾随 ret 被吞进 else，
+        //     共享 return 丢失，函数尾部退化为 return initNull）
+        //   - then 边 merge PHI（Step 12784）与 else 边 merge PHI（Step 7b）
+        //     均被物化，两侧路径读到正确值
+        //   - merge 块的尾随 ret 由 Step 10 在 if/else 之后作为共享 return 生成
+        // 判定依据：else 块是多前驱汇聚点（false 边 + then 路径 br 都指向它）。
+        if (merge_idx == null and else_idx != null and self.countPredecessors(func, else_idx.?) > 1) {
+            merge_idx = else_idx;
+        }
+
         // Step 1: 查找并生成条件块（紧邻 then_idx 之前的块）
         // 条件块的 cond_br 终止符包含 if 条件
         // 如果前驱块是 logical_merge_（||/&& 结果），需要先处理 ||/&& 的
@@ -12561,6 +12575,30 @@ pub const NativeLinker = struct {
                     try writer.print(") {{\n", .{});
                     const nested_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{then_indent});
                     defer self.allocator.free(nested_indent);
+                    // 判断嵌套 if 的 else 块是否就是本 if（外层）的 merge 块。
+                    // 若是（如 if_then_0 的 cond_br else = if_merge_1，else 即 merge），
+                    // 不做 else 就地生成，merge 由外层流程统一处理，避免双重生成。
+                    const nested_else_is_outer_merge = merge_idx != null and
+                        (cb.else_block == func.blocks.items[merge_idx.?] or
+                            std.mem.eql(u8, cb.else_block.label, func.blocks.items[merge_idx.?].label));
+                    // 嵌套 if/else 的公共 merge 块（嵌套 then/else 的 br 目标），
+                    // 用于在各分支末尾物化 merge PHI，使分支合并后读到正确值。
+                    // 当嵌套 else 不是外层 merge 时才需要（否则 merge 即外层 merge，由外层处理）。
+                    const nested_merge_idx = if (nested_else_is_outer_merge) null else blk: {
+                        for (0..func.blocks.items.len) |blk_i| {
+                            if (func.blocks.items[blk_i] == cb.then_block) {
+                                if (func.blocks.items[blk_i].terminator) |tt| {
+                                    if (tt == .br) {
+                                        for (0..func.blocks.items.len) |mi| {
+                                            if (func.blocks.items[mi] == tt.br) break :blk mi;
+                                        }
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                        break :blk null;
+                    };
                     // 处理嵌套 then 块指令
                     for (0..func.blocks.items.len) |blk_i| {
                         if (func.blocks.items[blk_i] == cb.then_block) {
@@ -12596,28 +12634,144 @@ pub const NativeLinker = struct {
                                         try self.writeThrowTerminator(writer, ex_reg, cleanup_regs, nested_indent);
                                     },
                                     .br => {
-                                        // br 到 merge 块，正常流程（不需要额外代码）
+                                        // br 到 merge 块；merge PHI 在下文物化
                                     },
                                     else => {},
+                                }
+                            }
+                            // 物化嵌套 merge 的 PHI（incoming 来自嵌套 then 块）
+                            if (nested_merge_idx) |nmi| {
+                                if (!processed.contains(nmi)) {
+                                    const nm = func.blocks.items[nmi];
+                                    for (nm.instructions.items) |phi_inst| {
+                                        if (phi_inst.op == .phi) {
+                                            if (phi_inst.result) |result| {
+                                                for (phi_inst.op.phi.incoming) |incoming| {
+                                                    if (incoming.block == nested_then_blk or
+                                                        std.mem.eql(u8, incoming.block.label, nested_then_blk.label))
+                                                    {
+                                                        try self.writePtrAwareAssign(writer, nested_indent, result.id, incoming.value.id);
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             break;
                         }
                     }
-                    try writer.print("{s}}}\n", .{then_indent});
-                    // 标记嵌套 else 块为已处理（else 是 cb.else_block）
-                    // 当 else 块是外层 if_merge_（如 if_then_0 的 cond_br else = if_merge_1），
-                    // 不标记为已处理，让后续流程正常处理。
-                    // 仅当 else 块不是 merge 块时才标记。
-                    if (merge_idx == null or cb.else_block != func.blocks.items[merge_idx.?]) {
+                    if (!nested_else_is_outer_merge) {
+                        // 嵌套 if 的 else 块是否就是内部 merge（如 coalesce 的
+                        // coalesce_merge_ 块：条件 false 边直接落到 merge 自身）。
+                        // 若是，不能把 merge 体（含后续非 PHI 指令）内联进 else 分支——
+                        // merge 体应在 if/else 之后作为共享汇聚执行，且 else 分支仅需
+                        // 物化来自 cond 源块（本 if 的 then_block）的 merge PHI。
+                        const nested_else_is_nested_merge = nested_merge_idx != null and
+                            cb.else_block == func.blocks.items[nested_merge_idx.?];
+                        try writer.print("{s}}} else {{\n", .{then_indent});
+                        if (nested_else_is_nested_merge) {
+                            // else == 内部 merge：仅物化 merge PHI（incoming 来自 cond_br
+                            // 源块 = then_block，如 coalesce 的 else 边 result=原始值），
+                            // 不内联 merge 体；merge 体在 if/else 闭合后共享生成。
+                            const nmi = nested_merge_idx.?;
+                            const nm = func.blocks.items[nmi];
+                            for (nm.instructions.items) |phi_inst| {
+                                if (phi_inst.op == .phi and phi_inst.result != null) {
+                                    for (phi_inst.op.phi.incoming) |incoming| {
+                                        if (incoming.block == func.blocks.items[then_idx] or
+                                            std.mem.eql(u8, incoming.block.label, func.blocks.items[then_idx].label))
+                                        {
+                                            try self.writePtrAwareAssign(writer, nested_indent, phi_inst.result.?.id, incoming.value.id);
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            try writer.print("{s}}}\n", .{then_indent});
+                            if (!processed.contains(nmi)) {
+                                try processed.put(nmi, {});
+                                for (nm.instructions.items) |inst| {
+                                    if (inst.op == .phi) continue;
+                                    try writer.writeAll(then_indent);
+                                    try self.generateInstructionSimple(writer.list, inst);
+                                }
+                            }
+                        } else {
+                        // 嵌套 else 是真实独立分支：就地生成其指令。
+                        // 修复：之前仅将 else 块标记 processed 而不生成，导致嵌套
+                        // if/else 的 else 分支整体被吞（如 min_c3 的 $req['b']=2 丢失）。
                         for (0..func.blocks.items.len) |blk_i| {
                             if (func.blocks.items[blk_i] == cb.else_block) {
+                                const nested_else_blk = func.blocks.items[blk_i];
                                 if (!processed.contains(blk_i)) {
                                     try processed.put(blk_i, {});
+                                    for (nested_else_blk.instructions.items) |inst| {
+                                        try writer.writeAll(nested_indent);
+                                        try self.generateInstructionSimple(writer.list, inst);
+                                    }
+                                    // 处理嵌套 else 块终止符
+                                    if (nested_else_blk.terminator) |net| {
+                                        switch (net) {
+                                            .ret => |ret_val| {
+                                                if (cleanup_regs.len > 0) {
+                                                    try writer.print("{s}    // Cleanup\n", .{nested_indent});
+                                                    for (cleanup_regs) |reg_id| {
+                                                        const is_return_reg = if (ret_val) |reg| reg.id == reg_id else false;
+                                                        if (is_return_reg) continue;
+                                                        if (self.isRefParamAlloca(reg_id)) continue;
+                                                        if (self.isAllocaReg(reg_id)) try writer.print("{s}    reg_{d}.*.release(runtime.runtime_allocator);\n", .{ nested_indent, reg_id }) else try writer.print("{s}    reg_{d}.release(runtime.runtime_allocator);\n", .{ nested_indent, reg_id });
+                                                    }
+                                                }
+                                                if (ret_val) |reg| {
+                                                    const is_alloca = self.isAllocaReg(reg.id);
+                                                    try self.writeReturnStmt(writer, reg.id, is_alloca, nested_indent);
+                                                } else {
+                                                    try writer.print("{s}    return runtime.Value.initNull();\n", .{nested_indent});
+                                                }
+                                            },
+                                            .throw => |ex_reg| {
+                                                try self.writeThrowTerminator(writer, ex_reg, cleanup_regs, nested_indent);
+                                            },
+                                            .br => {},
+                                            else => {},
+                                        }
+                                    }
+                                    // 物化嵌套 merge 的 PHI（incoming 来自嵌套 else 块）
+                                    if (nested_merge_idx) |nmi| {
+                                        if (!processed.contains(nmi)) {
+                                            const nm = func.blocks.items[nmi];
+                                            for (nm.instructions.items) |phi_inst| {
+                                                if (phi_inst.op == .phi) {
+                                                    if (phi_inst.result) |result| {
+                                                        for (phi_inst.op.phi.incoming) |incoming| {
+                                                            if (incoming.block == nested_else_blk or
+                                                                std.mem.eql(u8, incoming.block.label, nested_else_blk.label))
+                                                            {
+                                                                try self.writePtrAwareAssign(writer, nested_indent, result.id, incoming.value.id);
+                                                                break;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // 嵌套 merge 的 PHI 已在本 if 的两分支内物化，
+                                    // 标记为已处理，避免 Step 6 范围再次处理。
+                                    if (nested_merge_idx) |nmi| {
+                                        try processed.put(nmi, {});
+                                    }
                                 }
                                 break;
                             }
                         }
+                        try writer.print("{s}}}\n", .{then_indent});
+                        }
+                    } else {
+                        // 嵌套 else == 外层 merge：仅闭合 if，merge 由外层流程统一处理。
+                        try writer.print("{s}}}\n", .{then_indent});
                     }
                 },
                 else => {},
@@ -12830,7 +12984,11 @@ pub const NativeLinker = struct {
         // 当没有显式 else 块时（如 coalesce ??），else 路径直接跳到 merge，
         // 需要为 merge 块的 PHI 添加来自 cond_br 源块的赋值
         // 仅当 merge 块存在时才需要消解 PHI
-        if (else_idx == null and !self.return_generated and !self.break_generated and merge_idx != null) {
+        // 扩展：else_idx == merge_idx 时同理（if 无 else 直落，或 elseif 的 false 边
+        // 直接落 merge，如 f032/f177 Validation if(empty){}elseif(!isset){} 的第三条路径）——
+        // merge PHI 在 false 边未物化 → 后续读 null。
+        const is_else_is_merge = else_idx != null and merge_idx != null and else_idx.? == merge_idx.?;
+        if ((else_idx == null or is_else_is_merge) and !self.return_generated and !self.break_generated and merge_idx != null) {
             const merge_blk_phi = func.blocks.items[merge_idx.?];
             var has_implicit_phi = false;
             for (merge_blk_phi.instructions.items) |phi_inst| {
