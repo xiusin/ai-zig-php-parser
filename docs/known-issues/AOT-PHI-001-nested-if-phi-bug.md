@@ -2,7 +2,7 @@
 
 **问题 ID**: AOT-PHI-001  
 **优先级**: P0（高）  
-**状态**: 已识别，待修复  
+**状态**: ✅ 已修复（2026-08-26）  
 **发现日期**: 2026-02-27
 
 ---
@@ -175,3 +175,10 @@ EOF
 
 **更新日志**:
 - 2026-02-27: 初始创建，问题识别和分析
+- 2026-08-26: ✅ 已修复。根因并非 SSA 构造算法，而是代码生成器 `writeBrInLoopContext` 将 if_merge_ 块错误内联。修复方案见 `src/aot/native_linker.zig`：
+
+  **根因**：循环内多个顺序 if（第二个 if 与前一 if 的 merge 复用同一块）时，前一个 if 的 else 分支末尾 `.br` 目标 `if_merge_` 块带 `cond_br` 终止符，被 `writeBrInLoopContext` 通过 `generateBrToMergeCondBr` 内联进当前分支。它从不发射该块的【非 PHI 指令】（第二个 if 的比较运算被丢弃）→ 条件寄存器和决策块读到 null，分支永不执行 → 逗号拼接丢失。
+
+  **修复**：在 `writeBrInLoopContext` 的 else 分支添加守卫 `target_is_if_merge_cond_br`——当 br 目标是 `if_merge_` 块且带 `cond_br` 终止符时，跳过 `generateBrToMergeCondBr` 内联，保持该块未 processed，交由 `generateLabelDrivenBlockRange` 主循环的 if_merge_-cond_br 处理器原生包装（发射非 PHI 指令 + if/else 结构）。仅 `logical_merge_` 等短路 merge 仍走原内联路径。
+
+  **验证**：`repro_phi001.php` AOT 输出 `even,odd,even,odd,even` 与 PHP 逐字节一致；变体 B `repro_phi001b.php` 输出 `zeroE.otherO.otherE.otherO` 一致；`repro_seq_if.php` 无回归；pass 目录 108 例全量回归无新增失败。

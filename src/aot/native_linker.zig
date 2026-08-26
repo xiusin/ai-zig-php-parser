@@ -913,7 +913,23 @@ pub const NativeLinker = struct {
             }
             try writer.print("{s}    break :{s};\n", .{ indent, self.current_loop_label.? });
         } else {
-            try self.generateBrToMergeCondBr(writer, func, br_target, source_blk, end_idx, cleanup_regs, processed, loop_label_counter, indent);
+            // AOT-PHI-001 守卫：br 目标是 if_merge_ 块且带 cond_br 终止符时，该块是
+            // 【顺序下一个 if 的条件头】（前一个 if 的 merge 与下一个 if 的 cond 复用同一块），
+            // 而非 ||/&& 短路 merge。禁止 generateBrToMergeCondBr 内联——它会把该 if 嵌套进
+            // 当前分支（缩进/depth 错误），且从不发射该块的【非 PHI 指令】（第二个 if 的比较
+            // 运算被整体丢弃 → 条件寄存器和决策块读到未初始化的 null，分支永不执行）。
+            // 改为保持该块未被 processed，交由 generateLabelDrivenBlockRange 主循环的
+            // if_merge_-cond_br 处理器原生包装（发射非 PHI 指令 + if/else 结构）。
+            // 仅放行 logical_merge_ 等短路 merge（generateBrToMergeCondBr 的设计场景）。
+            const target_is_if_merge_cond_br = blk: {
+                if (br_target.terminator) |t| {
+                    if (t == .cond_br and std.mem.startsWith(u8, br_target.label, "if_merge_")) break :blk true;
+                }
+                break :blk false;
+            };
+            if (!target_is_if_merge_cond_br) {
+                try self.generateBrToMergeCondBr(writer, func, br_target, source_blk, end_idx, cleanup_regs, processed, loop_label_counter, indent);
+            }
             // PHI 消解：从源块到 merge 块的 PHI 赋值
             if (!self.return_generated and !self.break_generated) {
                 for (br_target.instructions.items) |phi_inst| {
@@ -6871,7 +6887,6 @@ pub const NativeLinker = struct {
         indent: []const u8,
     ) anyerror!void {
         var i = start_idx;
-        std.debug.print("[[LDR call start={d} end={d}]]\n", .{ start_idx, end_idx });
         while (i < end_idx) {
             // 如果已生成 return 或 break，后续代码不可达，停止生成
             // 标记剩余块为已处理，避免 tryGenerateFromLabels 报告未处理块
@@ -6888,7 +6903,6 @@ pub const NativeLinker = struct {
 
             const block = func.blocks.items[i];
             const label = block.label;
-            if (std.mem.startsWith(u8, label, "if_merge_")) std.debug.print("[[LDR walk hit i={d} label={s} nInstr={d}]]\n", .{ i, label, block.instructions.items.len });
 
             // 检查是否是 foreach 循环
             if (std.mem.startsWith(u8, label, "foreach_cond_")) {
@@ -6943,7 +6957,6 @@ pub const NativeLinker = struct {
             if (std.mem.startsWith(u8, label, "if_merge_") and
                 block.terminator != null and block.terminator.? == .cond_br)
             {
-                std.debug.print("[[6941 FIRE i={d} label={s} nInstr={d}]]\n", .{ i, label, block.instructions.items.len });
                 // 生成 if_merge_ 块的非 PHI 指令
                 try processed.put(i, {});
                 for (block.instructions.items) |inst| {
