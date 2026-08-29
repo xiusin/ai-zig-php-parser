@@ -7284,6 +7284,8 @@ pub const NativeLinker = struct {
                             try writer.writeAll(indent);
                             try self.generateInstructionSimple(writer.list, inst);
                         }
+                        // 记录 br 是否被当作循环回边处理（决定了是否还需消解目标 merge 的 PHI）。
+                        var br_was_backedge = false;
                         // 检测循环回边：br 目标已被处理且是当前循环的 cond/increment 块
                         if (self.current_loop_label != null and !self.return_generated and !self.break_generated) {
                             for (0..func.blocks.items.len) |be_idx| {
@@ -7305,6 +7307,7 @@ pub const NativeLinker = struct {
                                             }
                                         }
                                         if (is_back_edge) {
+                                            br_was_backedge = true;
                                             // 循环回边：生成 PHI 和 continue
                                             const cond_blk = func.blocks.items[be_idx];
                                             for (cond_blk.instructions.items) |phi_inst| {
@@ -7334,6 +7337,16 @@ pub const NativeLinker = struct {
                                     break;
                                 }
                             }
+                        }
+                        // 非回边 br：消解 br 目标 merge 块的 PHI（incoming 来自本块）。
+                        // 典型缺口：while 体嵌套 if/elseif 的 else 分支（if_else_ 汇入 if_merge_）
+                        // 以及其 if_merge_ 再汇入外层 merge 时，二者在「普通线性块」路径生成指令
+                        // 但 br 目标（if_merge_）未处理，循环携带 PHI 未物化 → merge 读旧值/null
+                        // → 循环退出变量（如 f028 lcs 回溯的 $j--）永不推进 → 死循环。THEN 侧由
+                        // generateIfFromLabels 负责物化，此处补充 ELSE 侧的不对称缺口。
+                        // 回边场景（上方 7316-7329 已物化 cond 块 PHI）跳过，避免重复赋值。
+                        if (!br_was_backedge) {
+                            try self.materializeBrTargetMergePhis(writer, block, term.br, indent);
                         }
                     },
                     .cond_br => {
@@ -8511,6 +8524,49 @@ pub const NativeLinker = struct {
                 }
                 if (chosen_opt) |cid| {
                     try self.writePtrAwareAssign(writer, indent, result.id, cid);
+                }
+            }
+        }
+    }
+
+    /// 非回边 br 目标 merge 块 PHI 物化：当「普通线性块」以 br 直落汇聚块
+    /// （if_merge_ 等）时，消解「source_block → br_target」这条
+    /// 边的 PHI，否则该汇聚块后续读取此边时会落到未初始化的 null/陈值。
+    /// 典型缺口：while 体嵌套 if/elseif 的 else 分支（if_else_ 汇入 if_merge_）、
+    /// 以及 if_merge_ 再汇入外层 merge，二者在「普通线性块」路径生成指令但 br
+    /// 目标未处理，循环携带变量（如 f028 的 $j）新值未写回 → 死循环。
+    /// 仅对含 phi 的目标生效；目标已处理/无匹配 incoming 时不产生任何指令。
+    /// 排除 logical_ 前缀目标：&&/|| 短路链汇聚块当前由线性直排路径发射，
+    /// cond_br 假边本身不物化（既有缺口），若在此补物化真边会把短路合并值
+    /// 污染为单一操作数（f044 flatten 条件退化为 !empty → TypeError），
+    /// 待短路链分支发射修复后再放开。
+    fn materializeBrTargetMergePhis(
+        self: *Self,
+        writer: anytype,
+        source_block: *const IR.BasicBlock,
+        br_target: *const IR.BasicBlock,
+        indent: []const u8,
+    ) !void {
+        if (std.mem.startsWith(u8, br_target.label, "logical_")) return;
+        var target_has_phi = false;
+        for (br_target.instructions.items) |inst| {
+            if (inst.op == .phi) {
+                target_has_phi = true;
+                break;
+            }
+        }
+        if (!target_has_phi) return;
+        for (br_target.instructions.items) |phi_inst| {
+            if (phi_inst.op == .phi) {
+                if (phi_inst.result) |result| {
+                    for (phi_inst.op.phi.incoming) |incoming| {
+                        if (incoming.block == source_block or
+                            std.mem.eql(u8, incoming.block.label, source_block.label))
+                        {
+                            try self.writePtrAwareAssign(writer, indent, result.id, incoming.value.id);
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -11463,18 +11519,68 @@ pub const NativeLinker = struct {
                     const body_cond_br = term.cond_br;
                     const cond_block_ptr = func.blocks.items[cond_idx];
                     // 预计算循环最后回边位置，限制 cond_br 内部递归调用范围
+                    // 修复：迭代扩展 loop_last_be，以包含通过 br 链间接回流到循环体的
+                    // 嵌套控制结构。IR 生成器会把 while body 内的嵌套 if/elseif 子块
+                    // （if_then_/if_else_/if_merge_）后置到直接回边块（如 if_merge_，
+                    // 其 cond_br 指向 cond）之后。单次扫描只能定位直接回边块；而嵌套
+                    // else 分支（如 f028 lcs 回溯中的 $j--）处于该直接回边块之后，若不
+                    // 扩展 loop_last_be，loop_end 过小会把该嵌套 else 分支整块吞掉，
+                    // 循环退出变量永不推进 → 死循环。与 generateForFromLabels 的迭代
+                    // 扩展模式一致。
                     var loop_last_be: usize = body_idx;
-                    for (body_idx + 1..func.blocks.items.len) |blk_i| {
-                        const blk = func.blocks.items[blk_i];
-                        if (blk.terminator) |t| {
-                            if (t == .br and t.br == cond_block_ptr) {
-                                loop_last_be = blk_i;
-                            }
-                            if (t == .cond_br) {
-                                if (t.cond_br.then_block == cond_block_ptr or
-                                    t.cond_br.else_block == cond_block_ptr)
+                    var ble_changed = true;
+                    while (ble_changed) {
+                        ble_changed = false;
+                        for (body_idx + 1..func.blocks.items.len) |blk_i| {
+                            if (blk_i <= loop_last_be) continue;
+                            const blk = func.blocks.items[blk_i];
+                            if (blk.terminator) |t| {
+                                // 直接回边：br/cond_br 目标 == cond 块
+                                var is_back_edge = false;
+                                if (t == .br and t.br == cond_block_ptr) {
+                                    is_back_edge = true;
+                                }
+                                if (t == .cond_br and
+                                    (t.cond_br.then_block == cond_block_ptr or
+                                        t.cond_br.else_block == cond_block_ptr))
                                 {
+                                    is_back_edge = true;
+                                }
+                                if (!is_back_edge) {
+                                    // 间接回边：br/cond_br 任一目标落在当前循环范围
+                                    // [body_idx, loop_last_be] 内的块（嵌套 if 的 merge/
+                                    // then/else 链回流到已确定的循环体块）。
+                                    if (t == .br) {
+                                        for (0..func.blocks.items.len) |bj| {
+                                            if (func.blocks.items[bj] == t.br) {
+                                                if (bj >= body_idx and bj <= loop_last_be) {
+                                                    is_back_edge = true;
+                                                }
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if (t == .cond_br) {
+                                        const cb = t.cond_br;
+                                        for (0..func.blocks.items.len) |bj| {
+                                            if (func.blocks.items[bj] == cb.then_block) {
+                                                if (bj >= body_idx and bj <= loop_last_be) is_back_edge = true;
+                                                break;
+                                            }
+                                        }
+                                        if (!is_back_edge) {
+                                            for (0..func.blocks.items.len) |bj| {
+                                                if (func.blocks.items[bj] == cb.else_block) {
+                                                    if (bj >= body_idx and bj <= loop_last_be) is_back_edge = true;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if (is_back_edge) {
                                     loop_last_be = blk_i;
+                                    ble_changed = true;
                                 }
                             }
                         }
@@ -11986,6 +12092,20 @@ pub const NativeLinker = struct {
                                                                     self.break_generated = true;
                                                                 } else {
                                                                     try self.writeBrInLoopContext(writer, func, br_t, nested_then_blk, end_idx, cleanup_regs, processed, loop_label_counter, nested_indent);
+                                                                    // 修复 f028：嵌套 then（elseif 的真分支）br 到嵌套 merge（如 if_merge_22），
+                                                                    // 该嵌套 merge 再 br 到外层 merge（merge_bi，如 if_merge_19）。外层 merge 的
+                                                                    // 循环携带变量 PHI 也必须在嵌套 then 分支内物化（与嵌套 else 分支经
+                                                                    // materializeBrTargetMergePhis 的物化对称），否则 elseif 真分支（$i--）读
+                                                                    // 外层循环携带 PHI 为陈旧值，循环退出变量永不推进 → 死循环。
+                                                                    if (merge_bi) |mbi| {
+                                                                        if (br_t != func.blocks.items[mbi]) {
+                                                                            if (br_t.terminator) |bt2| {
+                                                                                if (bt2 == .br and bt2.br == func.blocks.items[mbi]) {
+                                                                                    try self.materializeBrTargetMergePhis(writer, br_t, func.blocks.items[mbi], nested_indent);
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
                                                                 }
                                                             },
                                                             .ret => |ret_val| {
