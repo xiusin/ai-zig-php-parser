@@ -9205,7 +9205,7 @@ pub const NativeLinker = struct {
                     // 设置 merge_bi 以正确处理 PHI 消解和后续代码生成
                     // 但当 then 块已 return/throw/unreachable（不会到达 merge 块）时，
                     // 不应将 else 块设置为 merge 块，否则 else_is_coalesce 误判为 true。
-                    if (merge_bi == null and else_bi != null and !self.return_generated) {
+                    if (merge_bi == null and else_bi != null and !self.return_generated and !then_is_be and !(then_bi != null and (then_bi.? == cleanup_idx or (exit_idx != null and then_bi.? == exit_idx.?)))) {
                         const else_lbl = func.blocks.items[else_bi.?].label;
                         if (std.mem.startsWith(u8, else_lbl, "if_merge_") or
                             std.mem.startsWith(u8, else_lbl, "ternary_merge_") or
@@ -9277,7 +9277,21 @@ pub const NativeLinker = struct {
                         } else {
                             try writer.print("{s}}}\n", .{if_indent});
                         }
-                    } else if (else_is_be) {
+} else if (else_is_be) {
+                        // else 是回边（continue），then 是 break 目标（cleanup/exit）时
+                        // 生成 if (cond) break; （单语句 if-break，repro_sc_break_single）
+                        const then_is_break = blk: {
+                            if (then_bi) |ti| {
+                                if (ti == cleanup_idx) break :blk true;
+                                if (exit_idx) |ei| if (ti == ei) break :blk true;
+                            }
+                            break :blk false;
+                        };
+                        if (then_is_break) {
+                            try self.generateExitPHIAssignments(writer, func, body_idx, cleanup_idx, then_indent, false);
+                            try writer.print("{s}    break :{s};\n", .{ then_indent, label_name });
+                            self.break_generated = true;
+                        }
                         try writer.print("{s}}}\n", .{if_indent});
                     } else if (then_is_be) {
                         if (else_bi) |ei| {
@@ -10887,7 +10901,7 @@ pub const NativeLinker = struct {
                     // 设置 merge_bi 以正确处理 PHI 消解和后续代码生成
                     // 但当 then 块已 return/throw/unreachable（不会到达 merge 块）时，
                     // 不应将 else 块设置为 merge 块，否则 else_is_coalesce 误判为 true。
-                    if (merge_bi == null and else_bi != null and !self.return_generated) {
+                    if (merge_bi == null and else_bi != null and !self.return_generated and !then_is_be and !(then_bi != null and then_bi.? == exit_idx)) {
                         const else_lbl = func.blocks.items[else_bi.?].label;
                         if (std.mem.startsWith(u8, else_lbl, "if_merge_") or
                             std.mem.startsWith(u8, else_lbl, "ternary_merge_") or
@@ -10960,6 +10974,19 @@ pub const NativeLinker = struct {
                             try writer.print("{s}}}\n", .{if_indent});
                         }
                     } else if (else_is_be) {
+                        // else 是回边（continue），then 是 break 目标（exit）时
+                        // 生成 if (cond) break; （单语句 if-break）
+                        const then_is_break = blk: {
+                            if (then_bi) |ti| {
+                                if (ti == exit_idx) break :blk true;
+                            }
+                            break :blk false;
+                        };
+                        if (then_is_break) {
+                            try self.generateExitPHIAssignments(writer, func, body_idx, exit_idx, then_indent, false);
+                            try writer.print("{s}    break :{s};\n", .{ then_indent, label_name });
+                            self.break_generated = true;
+                        }
                         try writer.print("{s}}}\n", .{if_indent});
                     } else if (then_is_be) {
                         if (else_bi) |ei| {
@@ -12172,7 +12199,7 @@ pub const NativeLinker = struct {
                     // 设置 merge_bi 以正确处理 PHI 消解和后续代码生成
                     // 但当 then 块已 return/throw/unreachable（不会到达 merge 块）时，
                     // 不应将 else 块设置为 merge 块，否则 else_is_coalesce 误判为 true。
-                    if (merge_bi == null and else_bi != null and !self.return_generated) {
+                    if (merge_bi == null and else_bi != null and !self.return_generated and !then_is_back_edge and !(then_bi != null and then_bi.? == exit_idx)) {
                         const else_lbl = func.blocks.items[else_bi.?].label;
                         if (std.mem.startsWith(u8, else_lbl, "if_merge_") or
                             std.mem.startsWith(u8, else_lbl, "ternary_merge_") or
