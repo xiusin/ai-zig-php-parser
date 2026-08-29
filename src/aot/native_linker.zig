@@ -6994,6 +6994,15 @@ pub const NativeLinker = struct {
                     if (nested_else_idx) |nei| {
                         const eb = func.blocks.items[nei];
                         if (std.mem.startsWith(u8, eb.label, "logical_merge_")) break :blk false;
+                        // if-without-else：then 块 br 直落 else 块（共享延续块，如循环
+                        // 增量/回边块、函数延续块）。else 不是真实分支体，若内联会使
+                        // 循环增量等共享逻辑只在条件假路径执行 → 死循环（repro_sc_twoif）。
+                        if (nested_then_idx) |nti_c| {
+                            const tb_c = func.blocks.items[nti_c];
+                            if (tb_c.terminator) |tt_c| {
+                                if (tt_c == .br and tt_c.br == eb) break :blk false;
+                            }
+                        }
                         for (eb.instructions.items) |inst| {
                             if (inst.op != .phi) break :blk true;
                         }
@@ -8107,7 +8116,86 @@ pub const NativeLinker = struct {
                                             const saved_break = self.break_generated;
                                             self.return_generated = false;
                                             self.break_generated = false;
-                                            if (nested_then_idx) |nti| {
+                                            // &&/|| 短路链检测：嵌套 cond_br 的某一侧目标是
+                                            // logical_merge_（真边或假边直落 merge）。旧代码对
+                                            // [nti, nmi+1) 做线性范围发射，吞掉本 cond_br 的分支
+                                            // 结构：rhs 指令无条件执行、假边 PHI 不物化，短路条件
+                                            // 退化为单一操作数（f044 deepDiff：elseif 条件
+                                            // !inA && inB 恒等于 inB）。此处生成真实 if/else 并
+                                            // 在两侧物化 merge PHI。
+                                            const sc_is_and = std.mem.startsWith(u8, nested_cb.else_block.label, "logical_merge_");
+                                            const sc_is_or = std.mem.startsWith(u8, nested_cb.then_block.label, "logical_merge_");
+                                            if ((sc_is_and or sc_is_or) and nested_merge_idx != null) {
+                                                const nmi = nested_merge_idx.?;
+                                                const sc_merge_blk = func.blocks.items[nmi];
+                                                try writer.print("{s}if (", .{body_indent});
+                                                try self.writeConditionExpr(writer, nested_cb.cond.id, nested_cb.cond.type_);
+                                                try writer.print(") {{\n", .{});
+                                                const sc_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{body_indent});
+                                                defer self.allocator.free(sc_indent);
+                                                if (sc_is_and) {
+                                                    // &&：真边求值 rhs（其 br 由线性块路径物化
+                                                    // merge 的真边 PHI）
+                                                    if (nested_then_idx) |nti| {
+                                                        if (!processed.contains(nti)) {
+                                                            try self.generateLabelDrivenBlockRange(writer, func, nti, nmi, cleanup_regs, processed, loop_label_counter, sc_indent);
+                                                        }
+                                                    }
+                                                    try writer.print("{s}}} else {{\n", .{body_indent});
+                                                    // 假边：物化来自当前块（短路假值）的 PHI
+                                                    for (sc_merge_blk.instructions.items) |phi_inst| {
+                                                        if (phi_inst.op == .phi) {
+                                                            if (phi_inst.result) |result| {
+                                                                for (phi_inst.op.phi.incoming) |incoming| {
+                                                                    if (incoming.block == else_blk or
+                                                                        std.mem.eql(u8, incoming.block.label, else_blk.label))
+                                                                    {
+                                                                        try self.writePtrAwareAssign(writer, sc_indent, result.id, incoming.value.id);
+                                                                        break;
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                } else {
+                                                    // ||：真边直落 merge，物化来自当前块的
+                                                    // 短路真值 PHI
+                                                    for (sc_merge_blk.instructions.items) |phi_inst| {
+                                                        if (phi_inst.op == .phi) {
+                                                            if (phi_inst.result) |result| {
+                                                                for (phi_inst.op.phi.incoming) |incoming| {
+                                                                    if (incoming.block == else_blk or
+                                                                        std.mem.eql(u8, incoming.block.label, else_blk.label))
+                                                                    {
+                                                                        try self.writePtrAwareAssign(writer, sc_indent, result.id, incoming.value.id);
+                                                                        break;
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    try writer.print("{s}}} else {{\n", .{body_indent});
+                                                    // 假边：求值 rhs
+                                                    var sc_rhs_idx: ?usize = null;
+                                                    for (0..func.blocks.items.len) |blk_i| {
+                                                        if (func.blocks.items[blk_i] == nested_cb.else_block) {
+                                                            sc_rhs_idx = blk_i;
+                                                            break;
+                                                        }
+                                                    }
+                                                    if (sc_rhs_idx) |ri| {
+                                                        if (!processed.contains(ri)) {
+                                                            try self.generateLabelDrivenBlockRange(writer, func, ri, nmi, cleanup_regs, processed, loop_label_counter, sc_indent);
+                                                        }
+                                                    }
+                                                }
+                                                try writer.print("{s}}}\n", .{body_indent});
+                                                // merge 块经主循环路径发射（PHI 注释 + 其
+                                                // cond_br 的分支结构）
+                                                if (!processed.contains(nmi)) {
+                                                    try self.generateLabelDrivenBlockRange(writer, func, nmi, nmi + 1, cleanup_regs, processed, loop_label_counter, body_indent);
+                                                }
+                                            } else if (nested_then_idx) |nti| {
                                                 if (!processed.contains(nti)) {
                                                     if (nested_merge_idx) |nmi| {
                                                         if (nmi >= nti) {
@@ -8530,16 +8618,12 @@ pub const NativeLinker = struct {
     }
 
     /// 非回边 br 目标 merge 块 PHI 物化：当「普通线性块」以 br 直落汇聚块
-    /// （if_merge_ 等）时，消解「source_block → br_target」这条
+    /// （if_merge_/logical_merge_ 等）时，消解「source_block → br_target」这条
     /// 边的 PHI，否则该汇聚块后续读取此边时会落到未初始化的 null/陈值。
     /// 典型缺口：while 体嵌套 if/elseif 的 else 分支（if_else_ 汇入 if_merge_）、
     /// 以及 if_merge_ 再汇入外层 merge，二者在「普通线性块」路径生成指令但 br
     /// 目标未处理，循环携带变量（如 f028 的 $j）新值未写回 → 死循环。
     /// 仅对含 phi 的目标生效；目标已处理/无匹配 incoming 时不产生任何指令。
-    /// 排除 logical_ 前缀目标：&&/|| 短路链汇聚块当前由线性直排路径发射，
-    /// cond_br 假边本身不物化（既有缺口），若在此补物化真边会把短路合并值
-    /// 污染为单一操作数（f044 flatten 条件退化为 !empty → TypeError），
-    /// 待短路链分支发射修复后再放开。
     fn materializeBrTargetMergePhis(
         self: *Self,
         writer: anytype,
@@ -8547,7 +8631,6 @@ pub const NativeLinker = struct {
         br_target: *const IR.BasicBlock,
         indent: []const u8,
     ) !void {
-        if (std.mem.startsWith(u8, br_target.label, "logical_")) return;
         var target_has_phi = false;
         for (br_target.instructions.items) |inst| {
             if (inst.op == .phi) {
@@ -9265,52 +9348,124 @@ pub const NativeLinker = struct {
                                                     break;
                                                 }
                                             }
-                                            try writer.print("{s}if (", .{then_indent});
-                                            try self.writeConditionExpr(writer, nested_cb.cond.id, nested_cb.cond.type_);
-                                            try writer.print(") {{\n", .{});
-                                            const nested_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{then_indent});
-                                            defer self.allocator.free(nested_indent);
-                                            // 处理 then 块
-                                            // 限制范围到 else 块之前，防止 then 块处理时吞掉 else 块的内容
-                                            const then_end = blk: {
-                                                if (nested_else_idx) |nei| {
-                                                    if (nested_then_idx) |nti_v| {
-                                                        if (nei > nti_v) break :blk nei;
-                                                        // 乱序：else 块索引位于 then 块之前（如 else=foreach_increment_、
-                                                        // if_merge_ 在 then 之前），generateLabelDrivenBlockRange(nti, nei)
-                                                        // 范围为空会吞掉 then 分支（其中的 return/副作用全部丢失）。
-                                                        // 退化为仅处理 then 块本身（含终止符，如 ret/throw），
-                                                        break :blk nti_v + 1;
+                                            // if-without-else 检测：then 块 br 目标即 else 块（典型为
+                                            // if_merge_ —— 外层共享延续块，如 foreach 的增量/回边
+                                            // 块）。此类结构中 else 块不是 else 分支体，而是 if 之后
+                                            // 两条路径共享的延续代码；若内联进 else 分支，循环增量等
+                                            // 共享逻辑只在条件为假时执行 → 死循环（repro_sc_twoif）。
+                                            // 发射 if(cond){then}，else 块在 if 闭合后作为共享延续发射。
+                                            const nested_then_br_to_else = blk: {
+                                                if (nested_then_idx) |nti_v| {
+                                                    const nt_blk_v = func.blocks.items[nti_v];
+                                                    if (nt_blk_v.terminator) |ntt| {
+                                                        if (ntt == .br and ntt.br == nested_cb.else_block) break :blk true;
                                                     }
-                                                    break :blk nei;
                                                 }
-                                                break :blk nested_end;
+                                                break :blk false;
                                             };
-                                            if (nested_then_idx) |nti| {
-                                                if (!processed.contains(nti)) {
-                                                    const saved_rg = self.return_generated;
-                                                    const saved_brk = self.break_generated;
-                                                    self.return_generated = false;
-                                                    self.break_generated = false;
-                                                    try self.generateLabelDrivenBlockRange(writer, func, nti, then_end, cleanup_regs, processed, loop_label_counter, nested_indent);
-                                                    if (!self.return_generated) self.return_generated = saved_rg;
-                                                    if (!self.break_generated) self.break_generated = saved_brk;
+                                            if (nested_then_br_to_else) {
+                                                try writer.print("{s}if (", .{then_indent});
+                                                try self.writeConditionExpr(writer, nested_cb.cond.id, nested_cb.cond.type_);
+                                                try writer.print(") {{\n", .{});
+                                                const ntbe_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{then_indent});
+                                                defer self.allocator.free(ntbe_indent);
+                                                if (nested_then_idx) |nti| {
+                                                    if (!processed.contains(nti)) {
+                                                        const saved_rg = self.return_generated;
+                                                        const saved_brk = self.break_generated;
+                                                        self.return_generated = false;
+                                                        self.break_generated = false;
+                                                        // 预标记并内联 then 指令（避免范围发射经
+                                                        // if_then_ 标签重入 generateIfFromLabels）
+                                                        try processed.put(nti, {});
+                                                        const nt_blk = func.blocks.items[nti];
+                                                        for (nt_blk.instructions.items) |inst| {
+                                                            try writer.writeAll(ntbe_indent);
+                                                            try self.generateInstructionSimple(writer.list, inst);
+                                                        }
+                                                        // 物化 merge 块来自 then 边的 PHI（如有）
+                                                        if (nested_else_idx) |nei_m| {
+                                                            const m_blk = func.blocks.items[nei_m];
+                                                            for (m_blk.instructions.items) |phi_inst| {
+                                                                if (phi_inst.op == .phi) {
+                                                                    if (phi_inst.result) |result| {
+                                                                        for (phi_inst.op.phi.incoming) |incoming| {
+                                                                            if (incoming.block == nt_blk or
+                                                                                std.mem.eql(u8, incoming.block.label, nt_blk.label))
+                                                                            {
+                                                                                try self.writePtrAwareAssign(writer, ntbe_indent, result.id, incoming.value.id);
+                                                                                break;
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        if (!self.return_generated) self.return_generated = saved_rg;
+                                                        if (!self.break_generated) self.break_generated = saved_brk;
+                                                    }
                                                 }
-                                            }
-                                            try writer.print("{s}}} else {{\n", .{then_indent});
-                                            // 处理 else 块
-                                            if (nested_else_idx) |nei2| {
-                                                if (!processed.contains(nei2)) {
-                                                    const saved_rg = self.return_generated;
-                                                    const saved_brk = self.break_generated;
-                                                    self.return_generated = false;
-                                                    self.break_generated = false;
-                                                    try self.generateLabelDrivenBlockRange(writer, func, nei2, nested_end, cleanup_regs, processed, loop_label_counter, nested_indent);
-                                                    if (!self.return_generated) self.return_generated = saved_rg;
-                                                    if (!self.break_generated) self.break_generated = saved_brk;
+                                                try writer.print("{s}}}\n", .{then_indent});
+                                                // else(merge) 块：共享延续内容，在 if 闭合后统一发射
+                                                if (nested_else_idx) |nei3| {
+                                                    if (!processed.contains(nei3)) {
+                                                        const saved_rg = self.return_generated;
+                                                        const saved_brk = self.break_generated;
+                                                        self.return_generated = false;
+                                                        self.break_generated = false;
+                                                        try self.generateLabelDrivenBlockRange(writer, func, nei3, nested_end, cleanup_regs, processed, loop_label_counter, then_indent);
+                                                        if (!self.return_generated) self.return_generated = saved_rg;
+                                                        if (!self.break_generated) self.break_generated = saved_brk;
+                                                    }
                                                 }
+                                            } else {
+                                                try writer.print("{s}if (", .{then_indent});
+                                                try self.writeConditionExpr(writer, nested_cb.cond.id, nested_cb.cond.type_);
+                                                try writer.print(") {{\n", .{});
+                                                const nested_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{then_indent});
+                                                defer self.allocator.free(nested_indent);
+                                                // 处理 then 块
+                                                // 限制范围到 else 块之前，防止 then 块处理时吞掉 else 块的内容
+                                                const then_end = blk: {
+                                                    if (nested_else_idx) |nei| {
+                                                        if (nested_then_idx) |nti_v| {
+                                                            if (nei > nti_v) break :blk nei;
+                                                            // 乱序：else 块索引位于 then 块之前（如 else=foreach_increment_、
+                                                            // if_merge_ 在 then 之前），generateLabelDrivenBlockRange(nti, nei)
+                                                            // 范围为空会吞掉 then 分支（其中的 return/副作用全部丢失）。
+                                                            // 退化为仅处理 then 块本身（含终止符，如 ret/throw），
+                                                            break :blk nti_v + 1;
+                                                        }
+                                                        break :blk nei;
+                                                    }
+                                                    break :blk nested_end;
+                                                };
+                                                if (nested_then_idx) |nti| {
+                                                    if (!processed.contains(nti)) {
+                                                        const saved_rg = self.return_generated;
+                                                        const saved_brk = self.break_generated;
+                                                        self.return_generated = false;
+                                                        self.break_generated = false;
+                                                        try self.generateLabelDrivenBlockRange(writer, func, nti, then_end, cleanup_regs, processed, loop_label_counter, nested_indent);
+                                                        if (!self.return_generated) self.return_generated = saved_rg;
+                                                        if (!self.break_generated) self.break_generated = saved_brk;
+                                                    }
+                                                }
+                                                try writer.print("{s}}} else {{\n", .{then_indent});
+                                                // 处理 else 块
+                                                if (nested_else_idx) |nei2| {
+                                                    if (!processed.contains(nei2)) {
+                                                        const saved_rg = self.return_generated;
+                                                        const saved_brk = self.break_generated;
+                                                        self.return_generated = false;
+                                                        self.break_generated = false;
+                                                        try self.generateLabelDrivenBlockRange(writer, func, nei2, nested_end, cleanup_regs, processed, loop_label_counter, nested_indent);
+                                                        if (!self.return_generated) self.return_generated = saved_rg;
+                                                        if (!self.break_generated) self.break_generated = saved_brk;
+                                                    }
+                                                }
+                                                try writer.print("{s}}}\n", .{then_indent});
                                             }
-                                            try writer.print("{s}}}\n", .{then_indent});
                                         },
                                         .br => |br_target| {
                                             try self.writeBrInLoopContext(writer, func, br_target, else_blk, end_idx, cleanup_regs, processed, loop_label_counter, then_indent);
@@ -9394,52 +9549,124 @@ pub const NativeLinker = struct {
                                                     break;
                                                 }
                                             }
-                                            try writer.print("{s}if (", .{then_indent});
-                                            try self.writeConditionExpr(writer, nested_cb.cond.id, nested_cb.cond.type_);
-                                            try writer.print(") {{\n", .{});
-                                            const nested_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{then_indent});
-                                            defer self.allocator.free(nested_indent);
-                                            // 处理 then 块
-                                            // 限制范围到 else 块之前，防止 then 块处理时吞掉 else 块的内容
-                                            const then_end = blk: {
-                                                if (nested_else_idx) |nei| {
-                                                    if (nested_then_idx) |nti_v| {
-                                                        if (nei > nti_v) break :blk nei;
-                                                        // 乱序：else 块索引位于 then 块之前（如 else=foreach_increment_、
-                                                        // if_merge_ 在 then 之前），generateLabelDrivenBlockRange(nti, nei)
-                                                        // 范围为空会吞掉 then 分支（其中的 return/副作用全部丢失）。
-                                                        // 退化为仅处理 then 块本身（含终止符，如 ret/throw），
-                                                        break :blk nti_v + 1;
+                                            // if-without-else 检测：then 块 br 目标即 else 块（典型为
+                                            // if_merge_ —— 外层共享延续块，如 foreach 的增量/回边
+                                            // 块）。此类结构中 else 块不是 else 分支体，而是 if 之后
+                                            // 两条路径共享的延续代码；若内联进 else 分支，循环增量等
+                                            // 共享逻辑只在条件为假时执行 → 死循环（repro_sc_twoif）。
+                                            // 发射 if(cond){then}，else 块在 if 闭合后作为共享延续发射。
+                                            const nested_then_br_to_else = blk: {
+                                                if (nested_then_idx) |nti_v| {
+                                                    const nt_blk_v = func.blocks.items[nti_v];
+                                                    if (nt_blk_v.terminator) |ntt| {
+                                                        if (ntt == .br and ntt.br == nested_cb.else_block) break :blk true;
                                                     }
-                                                    break :blk nei;
                                                 }
-                                                break :blk nested_end;
+                                                break :blk false;
                                             };
-                                            if (nested_then_idx) |nti| {
-                                                if (!processed.contains(nti)) {
-                                                    const saved_rg = self.return_generated;
-                                                    const saved_brk = self.break_generated;
-                                                    self.return_generated = false;
-                                                    self.break_generated = false;
-                                                    try self.generateLabelDrivenBlockRange(writer, func, nti, then_end, cleanup_regs, processed, loop_label_counter, nested_indent);
-                                                    if (!self.return_generated) self.return_generated = saved_rg;
-                                                    if (!self.break_generated) self.break_generated = saved_brk;
+                                            if (nested_then_br_to_else) {
+                                                try writer.print("{s}if (", .{then_indent});
+                                                try self.writeConditionExpr(writer, nested_cb.cond.id, nested_cb.cond.type_);
+                                                try writer.print(") {{\n", .{});
+                                                const ntbe_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{then_indent});
+                                                defer self.allocator.free(ntbe_indent);
+                                                if (nested_then_idx) |nti| {
+                                                    if (!processed.contains(nti)) {
+                                                        const saved_rg = self.return_generated;
+                                                        const saved_brk = self.break_generated;
+                                                        self.return_generated = false;
+                                                        self.break_generated = false;
+                                                        // 预标记并内联 then 指令（避免范围发射经
+                                                        // if_then_ 标签重入 generateIfFromLabels）
+                                                        try processed.put(nti, {});
+                                                        const nt_blk = func.blocks.items[nti];
+                                                        for (nt_blk.instructions.items) |inst| {
+                                                            try writer.writeAll(ntbe_indent);
+                                                            try self.generateInstructionSimple(writer.list, inst);
+                                                        }
+                                                        // 物化 merge 块来自 then 边的 PHI（如有）
+                                                        if (nested_else_idx) |nei_m| {
+                                                            const m_blk = func.blocks.items[nei_m];
+                                                            for (m_blk.instructions.items) |phi_inst| {
+                                                                if (phi_inst.op == .phi) {
+                                                                    if (phi_inst.result) |result| {
+                                                                        for (phi_inst.op.phi.incoming) |incoming| {
+                                                                            if (incoming.block == nt_blk or
+                                                                                std.mem.eql(u8, incoming.block.label, nt_blk.label))
+                                                                            {
+                                                                                try self.writePtrAwareAssign(writer, ntbe_indent, result.id, incoming.value.id);
+                                                                                break;
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        if (!self.return_generated) self.return_generated = saved_rg;
+                                                        if (!self.break_generated) self.break_generated = saved_brk;
+                                                    }
                                                 }
-                                            }
-                                            try writer.print("{s}}} else {{\n", .{then_indent});
-                                            // 处理 else 块
-                                            if (nested_else_idx) |nei2| {
-                                                if (!processed.contains(nei2)) {
-                                                    const saved_rg = self.return_generated;
-                                                    const saved_brk = self.break_generated;
-                                                    self.return_generated = false;
-                                                    self.break_generated = false;
-                                                    try self.generateLabelDrivenBlockRange(writer, func, nei2, nested_end, cleanup_regs, processed, loop_label_counter, nested_indent);
-                                                    if (!self.return_generated) self.return_generated = saved_rg;
-                                                    if (!self.break_generated) self.break_generated = saved_brk;
+                                                try writer.print("{s}}}\n", .{then_indent});
+                                                // else(merge) 块：共享延续内容，在 if 闭合后统一发射
+                                                if (nested_else_idx) |nei3| {
+                                                    if (!processed.contains(nei3)) {
+                                                        const saved_rg = self.return_generated;
+                                                        const saved_brk = self.break_generated;
+                                                        self.return_generated = false;
+                                                        self.break_generated = false;
+                                                        try self.generateLabelDrivenBlockRange(writer, func, nei3, nested_end, cleanup_regs, processed, loop_label_counter, then_indent);
+                                                        if (!self.return_generated) self.return_generated = saved_rg;
+                                                        if (!self.break_generated) self.break_generated = saved_brk;
+                                                    }
                                                 }
+                                            } else {
+                                                try writer.print("{s}if (", .{then_indent});
+                                                try self.writeConditionExpr(writer, nested_cb.cond.id, nested_cb.cond.type_);
+                                                try writer.print(") {{\n", .{});
+                                                const nested_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{then_indent});
+                                                defer self.allocator.free(nested_indent);
+                                                // 处理 then 块
+                                                // 限制范围到 else 块之前，防止 then 块处理时吞掉 else 块的内容
+                                                const then_end = blk: {
+                                                    if (nested_else_idx) |nei| {
+                                                        if (nested_then_idx) |nti_v| {
+                                                            if (nei > nti_v) break :blk nei;
+                                                            // 乱序：else 块索引位于 then 块之前（如 else=foreach_increment_、
+                                                            // if_merge_ 在 then 之前），generateLabelDrivenBlockRange(nti, nei)
+                                                            // 范围为空会吞掉 then 分支（其中的 return/副作用全部丢失）。
+                                                            // 退化为仅处理 then 块本身（含终止符，如 ret/throw），
+                                                            break :blk nti_v + 1;
+                                                        }
+                                                        break :blk nei;
+                                                    }
+                                                    break :blk nested_end;
+                                                };
+                                                if (nested_then_idx) |nti| {
+                                                    if (!processed.contains(nti)) {
+                                                        const saved_rg = self.return_generated;
+                                                        const saved_brk = self.break_generated;
+                                                        self.return_generated = false;
+                                                        self.break_generated = false;
+                                                        try self.generateLabelDrivenBlockRange(writer, func, nti, then_end, cleanup_regs, processed, loop_label_counter, nested_indent);
+                                                        if (!self.return_generated) self.return_generated = saved_rg;
+                                                        if (!self.break_generated) self.break_generated = saved_brk;
+                                                    }
+                                                }
+                                                try writer.print("{s}}} else {{\n", .{then_indent});
+                                                // 处理 else 块
+                                                if (nested_else_idx) |nei2| {
+                                                    if (!processed.contains(nei2)) {
+                                                        const saved_rg = self.return_generated;
+                                                        const saved_brk = self.break_generated;
+                                                        self.return_generated = false;
+                                                        self.break_generated = false;
+                                                        try self.generateLabelDrivenBlockRange(writer, func, nei2, nested_end, cleanup_regs, processed, loop_label_counter, nested_indent);
+                                                        if (!self.return_generated) self.return_generated = saved_rg;
+                                                        if (!self.break_generated) self.break_generated = saved_brk;
+                                                    }
+                                                }
+                                                try writer.print("{s}}}\n", .{then_indent});
                                             }
-                                            try writer.print("{s}}}\n", .{then_indent});
                                         },
                                         .br => |br_target| {
                                             // 修复：else 块 br 到 merge 块（有 cond_br 终止符）时，不内联 cond_br。
@@ -9508,36 +9735,37 @@ pub const NativeLinker = struct {
 
                     // generateBrToMergeCondBr 处理的 merge 块：在 if/else 后生成非 PHI 指令
                     if (self.pending_merge_non_phi) |mtg| {
-                        // 生成非 PHI 指令
-                        for (mtg.instructions.items) |inst| {
-                            if (inst.op != .phi) {
-                                try writer.writeAll(body_indent);
-                                try self.generateInstructionSimple(writer.list, inst);
-                            }
-                        }
-                        // 如果 merge 块有 cond_br 终止符，递归处理（生成内层 if/else）
-                        // 确保 merge 块 cond_br 的 then/else 块在 if/else 之外正确生成，
-                        // 避免 merge 块 cond_br 的 else 分支非 PHI 指令被困在内层 else 块
-                        if (mtg.terminator) |m_term| {
-                            if (m_term == .cond_br) {
-                                var merge_idx: ?usize = null;
-                                for (0..func.blocks.items.len) |idx| {
-                                    if (func.blocks.items[idx] == mtg) {
-                                        merge_idx = idx;
-                                        break;
-                                    }
+                        if (mtg.terminator != null and mtg.terminator.? == .cond_br) {
+                            // merge 块以 cond_br 结尾（典型：&&/|| 短路链的第一个守卫块，
+                            // 如 ternary_merge_ 后接 is_array 短路分支）。旧实现在此预发射
+                            // 非 PHI 指令并标记 processed 后从 mi+1 递归，cond_br 被整体吞掉，
+                            // 短路守卫退化为线性直排（f044：flatten 条件恒假/退化，非数组值
+                            // 误入递归分支）。整体移交主循环：线性块路径发射指令，cond_br
+                            // case 生成 if/else 并在 then/else 两侧物化目标 merge 的 PHI。
+                            var merge_idx: ?usize = null;
+                            for (0..func.blocks.items.len) |idx| {
+                                if (func.blocks.items[idx] == mtg) {
+                                    merge_idx = idx;
+                                    break;
                                 }
-                                if (merge_idx) |mi| {
-                                    if (!processed.contains(mi)) {
-                                        try processed.put(mi, {});
-                                        const saved_rg_pm = self.return_generated;
-                                        const saved_brk_pm = self.break_generated;
-                                        self.return_generated = false;
-                                        self.break_generated = false;
-                                        try self.generateLabelDrivenBlockRange(writer, func, mi, loop_end, cleanup_regs, processed, loop_label_counter, body_indent);
-                                        if (!self.return_generated) self.return_generated = saved_rg_pm;
-                                        if (!self.break_generated) self.break_generated = saved_brk_pm;
-                                    }
+                            }
+                            if (merge_idx) |mi| {
+                                if (!processed.contains(mi)) {
+                                    const saved_rg_pm = self.return_generated;
+                                    const saved_brk_pm = self.break_generated;
+                                    self.return_generated = false;
+                                    self.break_generated = false;
+                                    try self.generateLabelDrivenBlockRange(writer, func, mi, loop_end, cleanup_regs, processed, loop_label_counter, body_indent);
+                                    if (!self.return_generated) self.return_generated = saved_rg_pm;
+                                    if (!self.break_generated) self.break_generated = saved_brk_pm;
+                                }
+                            }
+                        } else {
+                            // 生成非 PHI 指令
+                            for (mtg.instructions.items) |inst| {
+                                if (inst.op != .phi) {
+                                    try writer.writeAll(body_indent);
+                                    try self.generateInstructionSimple(writer.list, inst);
                                 }
                             }
                         }
@@ -10802,52 +11030,124 @@ pub const NativeLinker = struct {
                                                     break;
                                                 }
                                             }
-                                            try writer.print("{s}if (", .{then_indent});
-                                            try self.writeConditionExpr(writer, nested_cb.cond.id, nested_cb.cond.type_);
-                                            try writer.print(") {{\n", .{});
-                                            const nested_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{then_indent});
-                                            defer self.allocator.free(nested_indent);
-                                            // 处理 then 块
-                                            // 限制范围到 else 块之前，防止 then 块处理时吞掉 else 块的内容
-                                            const then_end = blk: {
-                                                if (nested_else_idx) |nei| {
-                                                    if (nested_then_idx) |nti_v| {
-                                                        if (nei > nti_v) break :blk nei;
-                                                        // 乱序：else 块索引位于 then 块之前（如 else=foreach_increment_、
-                                                        // if_merge_ 在 then 之前），generateLabelDrivenBlockRange(nti, nei)
-                                                        // 范围为空会吞掉 then 分支（其中的 return/副作用全部丢失）。
-                                                        // 退化为仅处理 then 块本身（含终止符，如 ret/throw），
-                                                        break :blk nti_v + 1;
+                                            // if-without-else 检测：then 块 br 目标即 else 块（典型为
+                                            // if_merge_ —— 外层共享延续块，如 foreach 的增量/回边
+                                            // 块）。此类结构中 else 块不是 else 分支体，而是 if 之后
+                                            // 两条路径共享的延续代码；若内联进 else 分支，循环增量等
+                                            // 共享逻辑只在条件为假时执行 → 死循环（repro_sc_twoif）。
+                                            // 发射 if(cond){then}，else 块在 if 闭合后作为共享延续发射。
+                                            const nested_then_br_to_else = blk: {
+                                                if (nested_then_idx) |nti_v| {
+                                                    const nt_blk_v = func.blocks.items[nti_v];
+                                                    if (nt_blk_v.terminator) |ntt| {
+                                                        if (ntt == .br and ntt.br == nested_cb.else_block) break :blk true;
                                                     }
-                                                    break :blk nei;
                                                 }
-                                                break :blk nested_end;
+                                                break :blk false;
                                             };
-                                            if (nested_then_idx) |nti| {
-                                                if (!processed.contains(nti)) {
-                                                    const saved_rg = self.return_generated;
-                                                    const saved_brk = self.break_generated;
-                                                    self.return_generated = false;
-                                                    self.break_generated = false;
-                                                    try self.generateLabelDrivenBlockRange(writer, func, nti, then_end, cleanup_regs, processed, loop_label_counter, nested_indent);
-                                                    if (!self.return_generated) self.return_generated = saved_rg;
-                                                    if (!self.break_generated) self.break_generated = saved_brk;
+                                            if (nested_then_br_to_else) {
+                                                try writer.print("{s}if (", .{then_indent});
+                                                try self.writeConditionExpr(writer, nested_cb.cond.id, nested_cb.cond.type_);
+                                                try writer.print(") {{\n", .{});
+                                                const ntbe_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{then_indent});
+                                                defer self.allocator.free(ntbe_indent);
+                                                if (nested_then_idx) |nti| {
+                                                    if (!processed.contains(nti)) {
+                                                        const saved_rg = self.return_generated;
+                                                        const saved_brk = self.break_generated;
+                                                        self.return_generated = false;
+                                                        self.break_generated = false;
+                                                        // 预标记并内联 then 指令（避免范围发射经
+                                                        // if_then_ 标签重入 generateIfFromLabels）
+                                                        try processed.put(nti, {});
+                                                        const nt_blk = func.blocks.items[nti];
+                                                        for (nt_blk.instructions.items) |inst| {
+                                                            try writer.writeAll(ntbe_indent);
+                                                            try self.generateInstructionSimple(writer.list, inst);
+                                                        }
+                                                        // 物化 merge 块来自 then 边的 PHI（如有）
+                                                        if (nested_else_idx) |nei_m| {
+                                                            const m_blk = func.blocks.items[nei_m];
+                                                            for (m_blk.instructions.items) |phi_inst| {
+                                                                if (phi_inst.op == .phi) {
+                                                                    if (phi_inst.result) |result| {
+                                                                        for (phi_inst.op.phi.incoming) |incoming| {
+                                                                            if (incoming.block == nt_blk or
+                                                                                std.mem.eql(u8, incoming.block.label, nt_blk.label))
+                                                                            {
+                                                                                try self.writePtrAwareAssign(writer, ntbe_indent, result.id, incoming.value.id);
+                                                                                break;
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        if (!self.return_generated) self.return_generated = saved_rg;
+                                                        if (!self.break_generated) self.break_generated = saved_brk;
+                                                    }
                                                 }
-                                            }
-                                            try writer.print("{s}}} else {{\n", .{then_indent});
-                                            // 处理 else 块
-                                            if (nested_else_idx) |nei2| {
-                                                if (!processed.contains(nei2)) {
-                                                    const saved_rg = self.return_generated;
-                                                    const saved_brk = self.break_generated;
-                                                    self.return_generated = false;
-                                                    self.break_generated = false;
-                                                    try self.generateLabelDrivenBlockRange(writer, func, nei2, nested_end, cleanup_regs, processed, loop_label_counter, nested_indent);
-                                                    if (!self.return_generated) self.return_generated = saved_rg;
-                                                    if (!self.break_generated) self.break_generated = saved_brk;
+                                                try writer.print("{s}}}\n", .{then_indent});
+                                                // else(merge) 块：共享延续内容，在 if 闭合后统一发射
+                                                if (nested_else_idx) |nei3| {
+                                                    if (!processed.contains(nei3)) {
+                                                        const saved_rg = self.return_generated;
+                                                        const saved_brk = self.break_generated;
+                                                        self.return_generated = false;
+                                                        self.break_generated = false;
+                                                        try self.generateLabelDrivenBlockRange(writer, func, nei3, nested_end, cleanup_regs, processed, loop_label_counter, then_indent);
+                                                        if (!self.return_generated) self.return_generated = saved_rg;
+                                                        if (!self.break_generated) self.break_generated = saved_brk;
+                                                    }
                                                 }
+                                            } else {
+                                                try writer.print("{s}if (", .{then_indent});
+                                                try self.writeConditionExpr(writer, nested_cb.cond.id, nested_cb.cond.type_);
+                                                try writer.print(") {{\n", .{});
+                                                const nested_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{then_indent});
+                                                defer self.allocator.free(nested_indent);
+                                                // 处理 then 块
+                                                // 限制范围到 else 块之前，防止 then 块处理时吞掉 else 块的内容
+                                                const then_end = blk: {
+                                                    if (nested_else_idx) |nei| {
+                                                        if (nested_then_idx) |nti_v| {
+                                                            if (nei > nti_v) break :blk nei;
+                                                            // 乱序：else 块索引位于 then 块之前（如 else=foreach_increment_、
+                                                            // if_merge_ 在 then 之前），generateLabelDrivenBlockRange(nti, nei)
+                                                            // 范围为空会吞掉 then 分支（其中的 return/副作用全部丢失）。
+                                                            // 退化为仅处理 then 块本身（含终止符，如 ret/throw），
+                                                            break :blk nti_v + 1;
+                                                        }
+                                                        break :blk nei;
+                                                    }
+                                                    break :blk nested_end;
+                                                };
+                                                if (nested_then_idx) |nti| {
+                                                    if (!processed.contains(nti)) {
+                                                        const saved_rg = self.return_generated;
+                                                        const saved_brk = self.break_generated;
+                                                        self.return_generated = false;
+                                                        self.break_generated = false;
+                                                        try self.generateLabelDrivenBlockRange(writer, func, nti, then_end, cleanup_regs, processed, loop_label_counter, nested_indent);
+                                                        if (!self.return_generated) self.return_generated = saved_rg;
+                                                        if (!self.break_generated) self.break_generated = saved_brk;
+                                                    }
+                                                }
+                                                try writer.print("{s}}} else {{\n", .{then_indent});
+                                                // 处理 else 块
+                                                if (nested_else_idx) |nei2| {
+                                                    if (!processed.contains(nei2)) {
+                                                        const saved_rg = self.return_generated;
+                                                        const saved_brk = self.break_generated;
+                                                        self.return_generated = false;
+                                                        self.break_generated = false;
+                                                        try self.generateLabelDrivenBlockRange(writer, func, nei2, nested_end, cleanup_regs, processed, loop_label_counter, nested_indent);
+                                                        if (!self.return_generated) self.return_generated = saved_rg;
+                                                        if (!self.break_generated) self.break_generated = saved_brk;
+                                                    }
+                                                }
+                                                try writer.print("{s}}}\n", .{then_indent});
                                             }
-                                            try writer.print("{s}}}\n", .{then_indent});
                                         },
                                         .br => |br_target| {
                                             try self.writeBrInLoopContext(writer, func, br_target, else_blk, end_idx, cleanup_regs, processed, loop_label_counter, then_indent);
@@ -10931,52 +11231,124 @@ pub const NativeLinker = struct {
                                                     break;
                                                 }
                                             }
-                                            try writer.print("{s}if (", .{then_indent});
-                                            try self.writeConditionExpr(writer, nested_cb.cond.id, nested_cb.cond.type_);
-                                            try writer.print(") {{\n", .{});
-                                            const nested_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{then_indent});
-                                            defer self.allocator.free(nested_indent);
-                                            // 处理 then 块
-                                            // 限制范围到 else 块之前，防止 then 块处理时吞掉 else 块的内容
-                                            const then_end = blk: {
-                                                if (nested_else_idx) |nei| {
-                                                    if (nested_then_idx) |nti_v| {
-                                                        if (nei > nti_v) break :blk nei;
-                                                        // 乱序：else 块索引位于 then 块之前（如 else=foreach_increment_、
-                                                        // if_merge_ 在 then 之前），generateLabelDrivenBlockRange(nti, nei)
-                                                        // 范围为空会吞掉 then 分支（其中的 return/副作用全部丢失）。
-                                                        // 退化为仅处理 then 块本身（含终止符，如 ret/throw），
-                                                        break :blk nti_v + 1;
+                                            // if-without-else 检测：then 块 br 目标即 else 块（典型为
+                                            // if_merge_ —— 外层共享延续块，如 foreach 的增量/回边
+                                            // 块）。此类结构中 else 块不是 else 分支体，而是 if 之后
+                                            // 两条路径共享的延续代码；若内联进 else 分支，循环增量等
+                                            // 共享逻辑只在条件为假时执行 → 死循环（repro_sc_twoif）。
+                                            // 发射 if(cond){then}，else 块在 if 闭合后作为共享延续发射。
+                                            const nested_then_br_to_else = blk: {
+                                                if (nested_then_idx) |nti_v| {
+                                                    const nt_blk_v = func.blocks.items[nti_v];
+                                                    if (nt_blk_v.terminator) |ntt| {
+                                                        if (ntt == .br and ntt.br == nested_cb.else_block) break :blk true;
                                                     }
-                                                    break :blk nei;
                                                 }
-                                                break :blk nested_end;
+                                                break :blk false;
                                             };
-                                            if (nested_then_idx) |nti| {
-                                                if (!processed.contains(nti)) {
-                                                    const saved_rg = self.return_generated;
-                                                    const saved_brk = self.break_generated;
-                                                    self.return_generated = false;
-                                                    self.break_generated = false;
-                                                    try self.generateLabelDrivenBlockRange(writer, func, nti, then_end, cleanup_regs, processed, loop_label_counter, nested_indent);
-                                                    if (!self.return_generated) self.return_generated = saved_rg;
-                                                    if (!self.break_generated) self.break_generated = saved_brk;
+                                            if (nested_then_br_to_else) {
+                                                try writer.print("{s}if (", .{then_indent});
+                                                try self.writeConditionExpr(writer, nested_cb.cond.id, nested_cb.cond.type_);
+                                                try writer.print(") {{\n", .{});
+                                                const ntbe_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{then_indent});
+                                                defer self.allocator.free(ntbe_indent);
+                                                if (nested_then_idx) |nti| {
+                                                    if (!processed.contains(nti)) {
+                                                        const saved_rg = self.return_generated;
+                                                        const saved_brk = self.break_generated;
+                                                        self.return_generated = false;
+                                                        self.break_generated = false;
+                                                        // 预标记并内联 then 指令（避免范围发射经
+                                                        // if_then_ 标签重入 generateIfFromLabels）
+                                                        try processed.put(nti, {});
+                                                        const nt_blk = func.blocks.items[nti];
+                                                        for (nt_blk.instructions.items) |inst| {
+                                                            try writer.writeAll(ntbe_indent);
+                                                            try self.generateInstructionSimple(writer.list, inst);
+                                                        }
+                                                        // 物化 merge 块来自 then 边的 PHI（如有）
+                                                        if (nested_else_idx) |nei_m| {
+                                                            const m_blk = func.blocks.items[nei_m];
+                                                            for (m_blk.instructions.items) |phi_inst| {
+                                                                if (phi_inst.op == .phi) {
+                                                                    if (phi_inst.result) |result| {
+                                                                        for (phi_inst.op.phi.incoming) |incoming| {
+                                                                            if (incoming.block == nt_blk or
+                                                                                std.mem.eql(u8, incoming.block.label, nt_blk.label))
+                                                                            {
+                                                                                try self.writePtrAwareAssign(writer, ntbe_indent, result.id, incoming.value.id);
+                                                                                break;
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        if (!self.return_generated) self.return_generated = saved_rg;
+                                                        if (!self.break_generated) self.break_generated = saved_brk;
+                                                    }
                                                 }
-                                            }
-                                            try writer.print("{s}}} else {{\n", .{then_indent});
-                                            // 处理 else 块
-                                            if (nested_else_idx) |nei2| {
-                                                if (!processed.contains(nei2)) {
-                                                    const saved_rg = self.return_generated;
-                                                    const saved_brk = self.break_generated;
-                                                    self.return_generated = false;
-                                                    self.break_generated = false;
-                                                    try self.generateLabelDrivenBlockRange(writer, func, nei2, nested_end, cleanup_regs, processed, loop_label_counter, nested_indent);
-                                                    if (!self.return_generated) self.return_generated = saved_rg;
-                                                    if (!self.break_generated) self.break_generated = saved_brk;
+                                                try writer.print("{s}}}\n", .{then_indent});
+                                                // else(merge) 块：共享延续内容，在 if 闭合后统一发射
+                                                if (nested_else_idx) |nei3| {
+                                                    if (!processed.contains(nei3)) {
+                                                        const saved_rg = self.return_generated;
+                                                        const saved_brk = self.break_generated;
+                                                        self.return_generated = false;
+                                                        self.break_generated = false;
+                                                        try self.generateLabelDrivenBlockRange(writer, func, nei3, nested_end, cleanup_regs, processed, loop_label_counter, then_indent);
+                                                        if (!self.return_generated) self.return_generated = saved_rg;
+                                                        if (!self.break_generated) self.break_generated = saved_brk;
+                                                    }
                                                 }
+                                            } else {
+                                                try writer.print("{s}if (", .{then_indent});
+                                                try self.writeConditionExpr(writer, nested_cb.cond.id, nested_cb.cond.type_);
+                                                try writer.print(") {{\n", .{});
+                                                const nested_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{then_indent});
+                                                defer self.allocator.free(nested_indent);
+                                                // 处理 then 块
+                                                // 限制范围到 else 块之前，防止 then 块处理时吞掉 else 块的内容
+                                                const then_end = blk: {
+                                                    if (nested_else_idx) |nei| {
+                                                        if (nested_then_idx) |nti_v| {
+                                                            if (nei > nti_v) break :blk nei;
+                                                            // 乱序：else 块索引位于 then 块之前（如 else=foreach_increment_、
+                                                            // if_merge_ 在 then 之前），generateLabelDrivenBlockRange(nti, nei)
+                                                            // 范围为空会吞掉 then 分支（其中的 return/副作用全部丢失）。
+                                                            // 退化为仅处理 then 块本身（含终止符，如 ret/throw），
+                                                            break :blk nti_v + 1;
+                                                        }
+                                                        break :blk nei;
+                                                    }
+                                                    break :blk nested_end;
+                                                };
+                                                if (nested_then_idx) |nti| {
+                                                    if (!processed.contains(nti)) {
+                                                        const saved_rg = self.return_generated;
+                                                        const saved_brk = self.break_generated;
+                                                        self.return_generated = false;
+                                                        self.break_generated = false;
+                                                        try self.generateLabelDrivenBlockRange(writer, func, nti, then_end, cleanup_regs, processed, loop_label_counter, nested_indent);
+                                                        if (!self.return_generated) self.return_generated = saved_rg;
+                                                        if (!self.break_generated) self.break_generated = saved_brk;
+                                                    }
+                                                }
+                                                try writer.print("{s}}} else {{\n", .{then_indent});
+                                                // 处理 else 块
+                                                if (nested_else_idx) |nei2| {
+                                                    if (!processed.contains(nei2)) {
+                                                        const saved_rg = self.return_generated;
+                                                        const saved_brk = self.break_generated;
+                                                        self.return_generated = false;
+                                                        self.break_generated = false;
+                                                        try self.generateLabelDrivenBlockRange(writer, func, nei2, nested_end, cleanup_regs, processed, loop_label_counter, nested_indent);
+                                                        if (!self.return_generated) self.return_generated = saved_rg;
+                                                        if (!self.break_generated) self.break_generated = saved_brk;
+                                                    }
+                                                }
+                                                try writer.print("{s}}}\n", .{then_indent});
                                             }
-                                            try writer.print("{s}}}\n", .{then_indent});
                                         },
                                         .br => |br_target| {
                                             try self.writeBrInLoopContext(writer, func, br_target, else_blk, end_idx, cleanup_regs, processed, loop_label_counter, then_indent);
@@ -11935,52 +12307,124 @@ pub const NativeLinker = struct {
                                                     break;
                                                 }
                                             }
-                                            try writer.print("{s}if (", .{then_indent});
-                                            try self.writeConditionExpr(writer, nested_cb.cond.id, nested_cb.cond.type_);
-                                            try writer.print(") {{\n", .{});
-                                            const nested_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{then_indent});
-                                            defer self.allocator.free(nested_indent);
-                                            // 处理 then 块
-                                            // 限制范围到 else 块之前，防止 then 块处理时吞掉 else 块的内容
-                                            const then_end = blk: {
-                                                if (nested_else_idx) |nei| {
-                                                    if (nested_then_idx) |nti_v| {
-                                                        if (nei > nti_v) break :blk nei;
-                                                        // 乱序：else 块索引位于 then 块之前（如 else=foreach_increment_、
-                                                        // if_merge_ 在 then 之前），generateLabelDrivenBlockRange(nti, nei)
-                                                        // 范围为空会吞掉 then 分支（其中的 return/副作用全部丢失）。
-                                                        // 退化为仅处理 then 块本身（含终止符，如 ret/throw），
-                                                        break :blk nti_v + 1;
+                                            // if-without-else 检测：then 块 br 目标即 else 块（典型为
+                                            // if_merge_ —— 外层共享延续块，如 foreach 的增量/回边
+                                            // 块）。此类结构中 else 块不是 else 分支体，而是 if 之后
+                                            // 两条路径共享的延续代码；若内联进 else 分支，循环增量等
+                                            // 共享逻辑只在条件为假时执行 → 死循环（repro_sc_twoif）。
+                                            // 发射 if(cond){then}，else 块在 if 闭合后作为共享延续发射。
+                                            const nested_then_br_to_else = blk: {
+                                                if (nested_then_idx) |nti_v| {
+                                                    const nt_blk_v = func.blocks.items[nti_v];
+                                                    if (nt_blk_v.terminator) |ntt| {
+                                                        if (ntt == .br and ntt.br == nested_cb.else_block) break :blk true;
                                                     }
-                                                    break :blk nei;
                                                 }
-                                                break :blk nested_end;
+                                                break :blk false;
                                             };
-                                            if (nested_then_idx) |nti| {
-                                                if (!processed.contains(nti)) {
-                                                    const saved_rg = self.return_generated;
-                                                    const saved_brk = self.break_generated;
-                                                    self.return_generated = false;
-                                                    self.break_generated = false;
-                                                    try self.generateLabelDrivenBlockRange(writer, func, nti, then_end, cleanup_regs, processed, loop_label_counter, nested_indent);
-                                                    if (!self.return_generated) self.return_generated = saved_rg;
-                                                    if (!self.break_generated) self.break_generated = saved_brk;
+                                            if (nested_then_br_to_else) {
+                                                try writer.print("{s}if (", .{then_indent});
+                                                try self.writeConditionExpr(writer, nested_cb.cond.id, nested_cb.cond.type_);
+                                                try writer.print(") {{\n", .{});
+                                                const ntbe_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{then_indent});
+                                                defer self.allocator.free(ntbe_indent);
+                                                if (nested_then_idx) |nti| {
+                                                    if (!processed.contains(nti)) {
+                                                        const saved_rg = self.return_generated;
+                                                        const saved_brk = self.break_generated;
+                                                        self.return_generated = false;
+                                                        self.break_generated = false;
+                                                        // 预标记并内联 then 指令（避免范围发射经
+                                                        // if_then_ 标签重入 generateIfFromLabels）
+                                                        try processed.put(nti, {});
+                                                        const nt_blk = func.blocks.items[nti];
+                                                        for (nt_blk.instructions.items) |inst| {
+                                                            try writer.writeAll(ntbe_indent);
+                                                            try self.generateInstructionSimple(writer.list, inst);
+                                                        }
+                                                        // 物化 merge 块来自 then 边的 PHI（如有）
+                                                        if (nested_else_idx) |nei_m| {
+                                                            const m_blk = func.blocks.items[nei_m];
+                                                            for (m_blk.instructions.items) |phi_inst| {
+                                                                if (phi_inst.op == .phi) {
+                                                                    if (phi_inst.result) |result| {
+                                                                        for (phi_inst.op.phi.incoming) |incoming| {
+                                                                            if (incoming.block == nt_blk or
+                                                                                std.mem.eql(u8, incoming.block.label, nt_blk.label))
+                                                                            {
+                                                                                try self.writePtrAwareAssign(writer, ntbe_indent, result.id, incoming.value.id);
+                                                                                break;
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        if (!self.return_generated) self.return_generated = saved_rg;
+                                                        if (!self.break_generated) self.break_generated = saved_brk;
+                                                    }
                                                 }
-                                            }
-                                            try writer.print("{s}}} else {{\n", .{then_indent});
-                                            // 处理 else 块
-                                            if (nested_else_idx) |nei2| {
-                                                if (!processed.contains(nei2)) {
-                                                    const saved_rg = self.return_generated;
-                                                    const saved_brk = self.break_generated;
-                                                    self.return_generated = false;
-                                                    self.break_generated = false;
-                                                    try self.generateLabelDrivenBlockRange(writer, func, nei2, nested_end, cleanup_regs, processed, loop_label_counter, nested_indent);
-                                                    if (!self.return_generated) self.return_generated = saved_rg;
-                                                    if (!self.break_generated) self.break_generated = saved_brk;
+                                                try writer.print("{s}}}\n", .{then_indent});
+                                                // else(merge) 块：共享延续内容，在 if 闭合后统一发射
+                                                if (nested_else_idx) |nei3| {
+                                                    if (!processed.contains(nei3)) {
+                                                        const saved_rg = self.return_generated;
+                                                        const saved_brk = self.break_generated;
+                                                        self.return_generated = false;
+                                                        self.break_generated = false;
+                                                        try self.generateLabelDrivenBlockRange(writer, func, nei3, nested_end, cleanup_regs, processed, loop_label_counter, then_indent);
+                                                        if (!self.return_generated) self.return_generated = saved_rg;
+                                                        if (!self.break_generated) self.break_generated = saved_brk;
+                                                    }
                                                 }
+                                            } else {
+                                                try writer.print("{s}if (", .{then_indent});
+                                                try self.writeConditionExpr(writer, nested_cb.cond.id, nested_cb.cond.type_);
+                                                try writer.print(") {{\n", .{});
+                                                const nested_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{then_indent});
+                                                defer self.allocator.free(nested_indent);
+                                                // 处理 then 块
+                                                // 限制范围到 else 块之前，防止 then 块处理时吞掉 else 块的内容
+                                                const then_end = blk: {
+                                                    if (nested_else_idx) |nei| {
+                                                        if (nested_then_idx) |nti_v| {
+                                                            if (nei > nti_v) break :blk nei;
+                                                            // 乱序：else 块索引位于 then 块之前（如 else=foreach_increment_、
+                                                            // if_merge_ 在 then 之前），generateLabelDrivenBlockRange(nti, nei)
+                                                            // 范围为空会吞掉 then 分支（其中的 return/副作用全部丢失）。
+                                                            // 退化为仅处理 then 块本身（含终止符，如 ret/throw），
+                                                            break :blk nti_v + 1;
+                                                        }
+                                                        break :blk nei;
+                                                    }
+                                                    break :blk nested_end;
+                                                };
+                                                if (nested_then_idx) |nti| {
+                                                    if (!processed.contains(nti)) {
+                                                        const saved_rg = self.return_generated;
+                                                        const saved_brk = self.break_generated;
+                                                        self.return_generated = false;
+                                                        self.break_generated = false;
+                                                        try self.generateLabelDrivenBlockRange(writer, func, nti, then_end, cleanup_regs, processed, loop_label_counter, nested_indent);
+                                                        if (!self.return_generated) self.return_generated = saved_rg;
+                                                        if (!self.break_generated) self.break_generated = saved_brk;
+                                                    }
+                                                }
+                                                try writer.print("{s}}} else {{\n", .{then_indent});
+                                                // 处理 else 块
+                                                if (nested_else_idx) |nei2| {
+                                                    if (!processed.contains(nei2)) {
+                                                        const saved_rg = self.return_generated;
+                                                        const saved_brk = self.break_generated;
+                                                        self.return_generated = false;
+                                                        self.break_generated = false;
+                                                        try self.generateLabelDrivenBlockRange(writer, func, nei2, nested_end, cleanup_regs, processed, loop_label_counter, nested_indent);
+                                                        if (!self.return_generated) self.return_generated = saved_rg;
+                                                        if (!self.break_generated) self.break_generated = saved_brk;
+                                                    }
+                                                }
+                                                try writer.print("{s}}}\n", .{then_indent});
                                             }
-                                            try writer.print("{s}}}\n", .{then_indent});
                                         },
                                         .br => |br_target| {
                                             try self.writeWhileBodyElseBr(writer, func, br_target, else_blk, merge_bi, end_idx, cleanup_regs, processed, loop_label_counter, then_indent);
@@ -12045,119 +12489,191 @@ pub const NativeLinker = struct {
                                                     break;
                                                 }
                                             }
-                                            try writer.print("{s}if (", .{then_indent});
-                                            try self.writeConditionExpr(writer, nested_cb.cond.id, nested_cb.cond.type_);
-                                            try writer.print(") {{\n", .{});
-                                            const nested_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{then_indent});
-                                            defer self.allocator.free(nested_indent);
-                                            // 处理 then 块
-                                            // 限制范围到 else 块之前，防止 then 块处理时吞掉 else 块的内容
-                                            const then_end = blk: {
-                                                if (nested_else_idx) |nei| {
-                                                    if (nested_then_idx) |nti_v| {
-                                                        if (nei > nti_v) break :blk nei;
-                                                        // 乱序：else 块索引位于 then 块之前（如 else=foreach_increment_、
-                                                        // if_merge_ 在 then 之前），generateLabelDrivenBlockRange(nti, nei)
-                                                        // 范围为空会吞掉 then 分支（其中的 return/副作用全部丢失）。
-                                                        // 退化为仅处理 then 块本身（含终止符，如 ret/throw），
-                                                        break :blk nti_v + 1;
+                                            // if-without-else 检测：then 块 br 目标即 else 块（典型为
+                                            // if_merge_ —— 外层共享延续块，如 foreach 的增量/回边
+                                            // 块）。此类结构中 else 块不是 else 分支体，而是 if 之后
+                                            // 两条路径共享的延续代码；若内联进 else 分支，循环增量等
+                                            // 共享逻辑只在条件为假时执行 → 死循环（repro_sc_twoif）。
+                                            // 发射 if(cond){then}，else 块在 if 闭合后作为共享延续发射。
+                                            const nested_then_br_to_else = blk: {
+                                                if (nested_then_idx) |nti_v| {
+                                                    const nt_blk_v = func.blocks.items[nti_v];
+                                                    if (nt_blk_v.terminator) |ntt| {
+                                                        if (ntt == .br and ntt.br == nested_cb.else_block) break :blk true;
                                                     }
-                                                    break :blk nei;
                                                 }
-                                                break :blk nested_end;
+                                                break :blk false;
                                             };
-                                            if (nested_then_idx) |nti| {
-                                                if (!processed.contains(nti)) {
-                                                    // 预标记为已处理，防止 generateLabelDrivenBlockRange
-                                                    // 因 if_then_ 标签再次调用 generateIfFromLabels 导致重复生成 if 结构
-                                                    try processed.put(nti, {});
-                                                    const nested_then_blk = func.blocks.items[nti];
-                                                    for (nested_then_blk.instructions.items) |inst| {
-                                                        try writer.writeAll(nested_indent);
-                                                        try self.generateInstructionSimple(writer.list, inst);
-                                                    }
-                                                    const saved_rg = self.return_generated;
-                                                    const saved_brk = self.break_generated;
-                                                    self.return_generated = false;
-                                                    self.break_generated = false;
-                                                    self.in_cond_br_branch = true;
-                                                    if (nested_then_blk.terminator) |nt| {
-                                                        switch (nt) {
-                                                            .br => |br_t| {
-                                                                if (br_t == cond_block_ptr) {
-                                                                    try writer.print("{s}    continue :{s};\n", .{ nested_indent, label_name });
-                                                                    self.break_generated = true;
-                                                                } else if (exit_idx < func.blocks.items.len and br_t == exit_ptr) {
-                                                                    try writer.print("{s}    break :{s};\n", .{ nested_indent, label_name });
-                                                                    self.break_generated = true;
-                                                                } else {
-                                                                    try self.writeBrInLoopContext(writer, func, br_t, nested_then_blk, end_idx, cleanup_regs, processed, loop_label_counter, nested_indent);
-                                                                    // 修复 f028：嵌套 then（elseif 的真分支）br 到嵌套 merge（如 if_merge_22），
-                                                                    // 该嵌套 merge 再 br 到外层 merge（merge_bi，如 if_merge_19）。外层 merge 的
-                                                                    // 循环携带变量 PHI 也必须在嵌套 then 分支内物化（与嵌套 else 分支经
-                                                                    // materializeBrTargetMergePhis 的物化对称），否则 elseif 真分支（$i--）读
-                                                                    // 外层循环携带 PHI 为陈旧值，循环退出变量永不推进 → 死循环。
-                                                                    if (merge_bi) |mbi| {
-                                                                        if (br_t != func.blocks.items[mbi]) {
-                                                                            if (br_t.terminator) |bt2| {
-                                                                                if (bt2 == .br and bt2.br == func.blocks.items[mbi]) {
-                                                                                    try self.materializeBrTargetMergePhis(writer, br_t, func.blocks.items[mbi], nested_indent);
-                                                                                }
+                                            if (nested_then_br_to_else) {
+                                                try writer.print("{s}if (", .{then_indent});
+                                                try self.writeConditionExpr(writer, nested_cb.cond.id, nested_cb.cond.type_);
+                                                try writer.print(") {{\n", .{});
+                                                const ntbe_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{then_indent});
+                                                defer self.allocator.free(ntbe_indent);
+                                                if (nested_then_idx) |nti| {
+                                                    if (!processed.contains(nti)) {
+                                                        const saved_rg = self.return_generated;
+                                                        const saved_brk = self.break_generated;
+                                                        self.return_generated = false;
+                                                        self.break_generated = false;
+                                                        // 预标记并内联 then 指令（避免范围发射经
+                                                        // if_then_ 标签重入 generateIfFromLabels）
+                                                        try processed.put(nti, {});
+                                                        const nt_blk = func.blocks.items[nti];
+                                                        for (nt_blk.instructions.items) |inst| {
+                                                            try writer.writeAll(ntbe_indent);
+                                                            try self.generateInstructionSimple(writer.list, inst);
+                                                        }
+                                                        // 物化 merge 块来自 then 边的 PHI（如有）
+                                                        if (nested_else_idx) |nei_m| {
+                                                            const m_blk = func.blocks.items[nei_m];
+                                                            for (m_blk.instructions.items) |phi_inst| {
+                                                                if (phi_inst.op == .phi) {
+                                                                    if (phi_inst.result) |result| {
+                                                                        for (phi_inst.op.phi.incoming) |incoming| {
+                                                                            if (incoming.block == nt_blk or
+                                                                                std.mem.eql(u8, incoming.block.label, nt_blk.label))
+                                                                            {
+                                                                                try self.writePtrAwareAssign(writer, ntbe_indent, result.id, incoming.value.id);
+                                                                                break;
                                                                             }
                                                                         }
                                                                     }
                                                                 }
-                                                            },
-                                                            .ret => |ret_val| {
-                                                                if (cleanup_regs.len > 0) {
-                                                                    try writer.print("{s}    // Cleanup\n", .{nested_indent});
-                                                                    for (cleanup_regs) |reg_id| {
-                                                                        const is_return_reg = if (ret_val) |reg| reg.id == reg_id else false;
-                                                                        if (is_return_reg) continue;
-                                                                        if (self.isRefParamAlloca(reg_id)) continue;
-                                                                        if (self.isAllocaReg(reg_id)) try writer.print("{s}    reg_{d}.*.release(runtime.runtime_allocator);\n", .{ nested_indent, reg_id }) else try writer.print("{s}    reg_{d}.release(runtime.runtime_allocator);\n", .{ nested_indent, reg_id });
-                                                                    }
-                                                                }
-                                                                if (ret_val) |reg| {
-                                                                    const is_alloca = self.isAllocaReg(reg.id);
-                                                                    try self.writeReturnStmt(writer, reg.id, is_alloca, nested_indent);
-                                                                } else {
-                                                                    try writer.print("{s}    return runtime.Value.initNull();\n", .{nested_indent});
-                                                                }
-                                                            },
-                                                            .throw => |ex_reg| {
-                                                                try self.writeThrowTerminator(writer, ex_reg, cleanup_regs, nested_indent);
-                                                                self.return_generated = true;
-                                                            },
-                                                            .cond_br => {
-                                                                try self.generateLabelDrivenBlockRange(writer, func, nti + 1, then_end, cleanup_regs, processed, loop_label_counter, nested_indent);
-                                                            },
-                                                            .unreachable_ => {
-                                                                try writer.print("{s}    unreachable;\n", .{nested_indent});
-                                                                self.return_generated = true;
-                                                            },
-                                                            else => {},
+                                                            }
                                                         }
+                                                        if (!self.return_generated) self.return_generated = saved_rg;
+                                                        if (!self.break_generated) self.break_generated = saved_brk;
                                                     }
-                                                    self.in_cond_br_branch = false;
-                                                    if (!self.return_generated) self.return_generated = saved_rg;
-                                                    if (!self.break_generated) self.break_generated = saved_brk;
                                                 }
-                                            }
-                                            try writer.print("{s}}} else {{\n", .{then_indent});
-                                            // 处理 else 块
-                                            if (nested_else_idx) |nei2| {
-                                                if (!processed.contains(nei2)) {
-                                                    const saved_rg = self.return_generated;
-                                                    const saved_brk = self.break_generated;
-                                                    self.return_generated = false;
-                                                    self.break_generated = false;
-                                                    try self.generateLabelDrivenBlockRange(writer, func, nei2, nested_end, cleanup_regs, processed, loop_label_counter, nested_indent);
-                                                    if (!self.return_generated) self.return_generated = saved_rg;
-                                                    if (!self.break_generated) self.break_generated = saved_brk;
+                                                try writer.print("{s}}}\n", .{then_indent});
+                                                // else(merge) 块：共享延续内容，在 if 闭合后统一发射
+                                                if (nested_else_idx) |nei3| {
+                                                    if (!processed.contains(nei3)) {
+                                                        const saved_rg = self.return_generated;
+                                                        const saved_brk = self.break_generated;
+                                                        self.return_generated = false;
+                                                        self.break_generated = false;
+                                                        try self.generateLabelDrivenBlockRange(writer, func, nei3, nested_end, cleanup_regs, processed, loop_label_counter, then_indent);
+                                                        if (!self.return_generated) self.return_generated = saved_rg;
+                                                        if (!self.break_generated) self.break_generated = saved_brk;
+                                                    }
                                                 }
+                                            } else {
+                                                try writer.print("{s}if (", .{then_indent});
+                                                try self.writeConditionExpr(writer, nested_cb.cond.id, nested_cb.cond.type_);
+                                                try writer.print(") {{\n", .{});
+                                                const nested_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{then_indent});
+                                                defer self.allocator.free(nested_indent);
+                                                // 处理 then 块
+                                                // 限制范围到 else 块之前，防止 then 块处理时吞掉 else 块的内容
+                                                const then_end = blk: {
+                                                    if (nested_else_idx) |nei| {
+                                                        if (nested_then_idx) |nti_v| {
+                                                            if (nei > nti_v) break :blk nei;
+                                                            // 乱序：else 块索引位于 then 块之前（如 else=foreach_increment_、
+                                                            // if_merge_ 在 then 之前），generateLabelDrivenBlockRange(nti, nei)
+                                                            // 范围为空会吞掉 then 分支（其中的 return/副作用全部丢失）。
+                                                            // 退化为仅处理 then 块本身（含终止符，如 ret/throw），
+                                                            break :blk nti_v + 1;
+                                                        }
+                                                        break :blk nei;
+                                                    }
+                                                    break :blk nested_end;
+                                                };
+                                                if (nested_then_idx) |nti| {
+                                                    if (!processed.contains(nti)) {
+                                                        // 预标记为已处理，防止 generateLabelDrivenBlockRange
+                                                        // 因 if_then_ 标签再次调用 generateIfFromLabels 导致重复生成 if 结构
+                                                        try processed.put(nti, {});
+                                                        const nested_then_blk = func.blocks.items[nti];
+                                                        for (nested_then_blk.instructions.items) |inst| {
+                                                            try writer.writeAll(nested_indent);
+                                                            try self.generateInstructionSimple(writer.list, inst);
+                                                        }
+                                                        const saved_rg = self.return_generated;
+                                                        const saved_brk = self.break_generated;
+                                                        self.return_generated = false;
+                                                        self.break_generated = false;
+                                                        self.in_cond_br_branch = true;
+                                                        if (nested_then_blk.terminator) |nt| {
+                                                            switch (nt) {
+                                                                .br => |br_t| {
+                                                                    if (br_t == cond_block_ptr) {
+                                                                        try writer.print("{s}    continue :{s};\n", .{ nested_indent, label_name });
+                                                                        self.break_generated = true;
+                                                                    } else if (exit_idx < func.blocks.items.len and br_t == exit_ptr) {
+                                                                        try writer.print("{s}    break :{s};\n", .{ nested_indent, label_name });
+                                                                        self.break_generated = true;
+                                                                    } else {
+                                                                        try self.writeBrInLoopContext(writer, func, br_t, nested_then_blk, end_idx, cleanup_regs, processed, loop_label_counter, nested_indent);
+                                                                        // 修复 f028：嵌套 then（elseif 的真分支）br 到嵌套 merge（如 if_merge_22），
+                                                                        // 该嵌套 merge 再 br 到外层 merge（merge_bi，如 if_merge_19）。外层 merge 的
+                                                                        // 循环携带变量 PHI 也必须在嵌套 then 分支内物化（与嵌套 else 分支经
+                                                                        // materializeBrTargetMergePhis 的物化对称），否则 elseif 真分支（$i--）读
+                                                                        // 外层循环携带 PHI 为陈旧值，循环退出变量永不推进 → 死循环。
+                                                                        if (merge_bi) |mbi| {
+                                                                            if (br_t != func.blocks.items[mbi]) {
+                                                                                if (br_t.terminator) |bt2| {
+                                                                                    if (bt2 == .br and bt2.br == func.blocks.items[mbi]) {
+                                                                                        try self.materializeBrTargetMergePhis(writer, br_t, func.blocks.items[mbi], nested_indent);
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                },
+                                                                .ret => |ret_val| {
+                                                                    if (cleanup_regs.len > 0) {
+                                                                        try writer.print("{s}    // Cleanup\n", .{nested_indent});
+                                                                        for (cleanup_regs) |reg_id| {
+                                                                            const is_return_reg = if (ret_val) |reg| reg.id == reg_id else false;
+                                                                            if (is_return_reg) continue;
+                                                                            if (self.isRefParamAlloca(reg_id)) continue;
+                                                                            if (self.isAllocaReg(reg_id)) try writer.print("{s}    reg_{d}.*.release(runtime.runtime_allocator);\n", .{ nested_indent, reg_id }) else try writer.print("{s}    reg_{d}.release(runtime.runtime_allocator);\n", .{ nested_indent, reg_id });
+                                                                        }
+                                                                    }
+                                                                    if (ret_val) |reg| {
+                                                                        const is_alloca = self.isAllocaReg(reg.id);
+                                                                        try self.writeReturnStmt(writer, reg.id, is_alloca, nested_indent);
+                                                                    } else {
+                                                                        try writer.print("{s}    return runtime.Value.initNull();\n", .{nested_indent});
+                                                                    }
+                                                                },
+                                                                .throw => |ex_reg| {
+                                                                    try self.writeThrowTerminator(writer, ex_reg, cleanup_regs, nested_indent);
+                                                                    self.return_generated = true;
+                                                                },
+                                                                .cond_br => {
+                                                                    try self.generateLabelDrivenBlockRange(writer, func, nti + 1, then_end, cleanup_regs, processed, loop_label_counter, nested_indent);
+                                                                },
+                                                                .unreachable_ => {
+                                                                    try writer.print("{s}    unreachable;\n", .{nested_indent});
+                                                                    self.return_generated = true;
+                                                                },
+                                                                else => {},
+                                                            }
+                                                        }
+                                                        self.in_cond_br_branch = false;
+                                                        if (!self.return_generated) self.return_generated = saved_rg;
+                                                        if (!self.break_generated) self.break_generated = saved_brk;
+                                                    }
+                                                }
+                                                try writer.print("{s}}} else {{\n", .{then_indent});
+                                                // 处理 else 块
+                                                if (nested_else_idx) |nei2| {
+                                                    if (!processed.contains(nei2)) {
+                                                        const saved_rg = self.return_generated;
+                                                        const saved_brk = self.break_generated;
+                                                        self.return_generated = false;
+                                                        self.break_generated = false;
+                                                        try self.generateLabelDrivenBlockRange(writer, func, nei2, nested_end, cleanup_regs, processed, loop_label_counter, nested_indent);
+                                                        if (!self.return_generated) self.return_generated = saved_rg;
+                                                        if (!self.break_generated) self.break_generated = saved_brk;
+                                                    }
+                                                }
+                                                try writer.print("{s}}}\n", .{then_indent});
                                             }
-                                            try writer.print("{s}}}\n", .{then_indent});
                                         },
                                         .br => |br_target| {
                                             try self.writeWhileBodyElseBr(writer, func, br_target, else_blk, merge_bi, end_idx, cleanup_regs, processed, loop_label_counter, then_indent);
@@ -15415,7 +15931,15 @@ pub const NativeLinker = struct {
                     } else if (value_is_alloca) {
                         try writer.print("    reg_{d} = reg_{d}.*;\n", .{ reg.id, op.value.id });
                     } else {
+                        // 所有者语义（与 cast 一致）：目标寄存器是独立所有者。
+                        // 裸别名会使 cleanup 对同一值双重释放（源寄存器 + 目标寄存器），
+                        // 过度释放导致悬空（f044：递归 foreach 三元路径字符串键帧末被
+                        // 释放，结果数组末位键悬空变空串）。
+                        if (self.shouldReleaseReg(reg.id) and self.regMayHeap(reg.id)) {
+                            try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
+                        }
                         try writer.print("    reg_{d} = reg_{d};\n", .{ reg.id, op.value.id });
+                        try writer.print("    _ = reg_{d}.retain();\n", .{reg.id});
                     }
                 }
             },
