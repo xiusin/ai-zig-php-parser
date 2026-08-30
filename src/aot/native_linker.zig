@@ -7158,6 +7158,32 @@ pub const NativeLinker = struct {
                                 try writer.writeAll(then_indent);
                                 try self.generateInstructionSimple(writer.list, inst);
                             }
+                            // else 块以 ret/throw 终止时，终止符必须在此处生成
+                            if (eb.terminator) |eb_term| {
+                                switch (eb_term) {
+                                    .ret => |ret_val| {
+                                        if (cleanup_regs.len > 0) {
+                                            for (cleanup_regs) |reg_id| {
+                                                const is_return_reg = if (ret_val) |reg| reg.id == reg_id else false;
+                                                if (is_return_reg) continue;
+                                                if (self.isRefParamAlloca(reg_id)) continue;
+                                                if (self.isAllocaReg(reg_id)) try writer.print("{s}reg_{d}.*.release(runtime.runtime_allocator);\n", .{ then_indent, reg_id }) else try writer.print("{s}reg_{d}.release(runtime.runtime_allocator);\n", .{ then_indent, reg_id });
+                                            }
+                                        }
+                                        if (ret_val) |reg| {
+                                            const is_alloca = self.isAllocaReg(reg.id);
+                                            try self.writeReturnStmt(writer, reg.id, is_alloca, then_indent);
+                                        } else {
+                                            try writer.print("{s}return runtime.Value.initNull();\n", .{then_indent});
+                                            self.return_generated = true;
+                                        }
+                                    },
+                                    .throw => |ex_reg| {
+                                        try self.writeThrowTerminator(writer, ex_reg, cleanup_regs, then_indent);
+                                    },
+                                    else => {},
+                                }
+                            }
                             // 消解 real merge 的 PHI（incoming 来自 else 块）
                             // || 短路：t_real_merge_idx 可能是 logical_merge_（被 nested_then
                             // 标记为 processed），此时 else(rhs) 分支仍需消解其来自 rhs 的 incoming
@@ -7208,6 +7234,13 @@ pub const NativeLinker = struct {
                     }
                 }
                 try writer.print("{s}}}\n", .{if_indent});
+                // else_has_real_body 场景：else 块以 ret/throw 终止时 return_generated=true，
+                // 但 then 块可能未 ret（如 br 到 foreach），后续代码仍可达。
+                // 合并：then_returned AND else_returned（两条路径都 ret 时后续才不可达）。
+                if (else_has_real_body) {
+                    const else_returned = self.return_generated;
+                    self.return_generated = then_returned and else_returned;
+                }
                 // 三元场景：else 块已就地生成，real merge 块交由主循环处理（含 ret）。
                 // 短路场景：在 if/else 之后处理 else 块（logical_merge_）的非 PHI 指令和 cond_br
                 if (!else_has_real_body) if (nested_else_idx) |nei| {
@@ -10064,6 +10097,42 @@ pub const NativeLinker = struct {
                     }
                 },
                 else => {},
+            }
+        }
+
+        // 当 exit_idx 为 null 时，cleanup 块之后的延续块（如 ret 块）可能不以
+        // foreach_exit_ 为标签。从 cleanup 块的 br 终止符推导 exit 块，
+        // 移除其 processed 标记，用 generateLabelDrivenBlockRange 处理。
+        if (exit_idx == null) {
+            const cleanup_blk2 = func.blocks.items[cleanup_idx];
+            if (cleanup_blk2.terminator) |ct2| {
+                if (ct2 == .br) {
+                    var next_idx: ?usize = null;
+                    for (0..func.blocks.items.len) |di| {
+                        if (func.blocks.items[di] == ct2.br) {
+                            next_idx = di;
+                            break;
+                        }
+                    }
+                    if (next_idx) |ni| {
+                        if (ni != cleanup_idx and ni < end_idx) {
+                            const exit_label = func.blocks.items[ni].label;
+                            if (!std.mem.startsWith(u8, exit_label, "for_loop_") and
+                                !std.mem.startsWith(u8, exit_label, "foreach_increment_") and
+                                !std.mem.startsWith(u8, exit_label, "foreach_cond_"))
+                            {
+                                _ = processed.remove(ni);
+                                const saved_rg = self.return_generated;
+                                const saved_brk = self.break_generated;
+                                self.return_generated = false;
+                                self.break_generated = false;
+                                try self.generateLabelDrivenBlockRange(writer, func, ni, end_idx, cleanup_regs, processed, loop_label_counter, indent);
+                                if (!self.return_generated) self.return_generated = saved_rg;
+                                if (!self.break_generated) self.break_generated = saved_brk;
+                            }
+                        }
+                    }
+                }
             }
         }
 
