@@ -424,7 +424,19 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 .go => .go,
             };
 
-            try runAOTCompilation(aot_alloc, io, cwd_dir, aot_options);
+            var aot_thread_ctx = AotThreadContext{
+                .allocator = aot_alloc,
+                .io = io,
+                .cwd_dir = cwd_dir,
+                .options = aot_options,
+            };
+            const aot_thread = try std.Thread.spawn(
+                .{ .stack_size = aot_worker_stack_size },
+                runAOTCompilationInThread,
+                .{ &aot_thread_ctx },
+            );
+            aot_thread.join();
+            try aot_thread_ctx.result;
         } else {
             std.debug.print("Error: No input file specified for compilation.\n", .{});
             printUsage();
@@ -548,6 +560,24 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // Note: Only call this in interpreter mode, not in AOT compilation mode
     // (AOT compiled binaries handle their own cleanup)
     aot_runtime.deinitRuntime();
+}
+
+/// #22 AOT-CODEGEN-004 止血：native_linker 的 generateLabelDrivenBlockRange 对
+/// sibling if/else 链按链长深度递归（实测 4300+ 帧 × ~3.8KB 即溢出默认主线程栈，
+/// 编译进程段错误）。AOT 编译管线为单线程，改在显式大栈工作线程上执行，
+/// 栈为虚拟内存惰性提交，不增加常驻内存。
+const aot_worker_stack_size: usize = 512 * 1024 * 1024;
+
+const AotThreadContext = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    cwd_dir: std.Io.Dir,
+    options: aot.CompileOptions,
+    result: anyerror!void = {},
+};
+
+fn runAOTCompilationInThread(ctx: *AotThreadContext) void {
+    ctx.result = runAOTCompilation(ctx.allocator, ctx.io, ctx.cwd_dir, ctx.options);
 }
 
 /// Run AOT compilation

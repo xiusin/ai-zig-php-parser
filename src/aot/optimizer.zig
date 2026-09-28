@@ -406,14 +406,6 @@ pub const IROptimizer = struct {
         self.stats.reset();
     }
 
-    /// 跨平台纳秒时间戳（替代 std.os.linux.clock_gettime，macOS 兼容）
-    inline fn nanoTimestamp(self: *const Self) i128 {
-        _ = self;
-        var ts: std.posix.timespec = undefined;
-        _ = std.posix.system.clock_gettime(.MONOTONIC, &ts);
-        return @as(i128, @intCast(ts.sec)) * std.time.ns_per_s + @as(i128, @intCast(ts.nsec));
-    }
-
     // ========================================================================
     // Main Optimization Entry Point
     // ========================================================================
@@ -1806,18 +1798,16 @@ pub const IROptimizer = struct {
 
     /// Promote memory to registers in a single function
     fn promoteMemoryToRegisters(self: *Self, func: *Function) !bool {
-
-        // 超时保护：最多 5 秒（使用跨平台时钟 API）
-        const start_ns = self.nanoTimestamp();
-        const timeout_ns: i128 = 5 * std.time.ns_per_s;
+        // 确定性防护：指令数超过阈值即跳过 mem2reg 提升（函数保留 allocas，发射端照常处理），
+        // 替代原 5 秒墙钟检查点。墙钟早退与机器负载相关，同一输入在不同负载下会产生不同
+        // 优化产物（编译不可复现）；指令数预算保证同一输入分支判定唯一。
+        const inst_count = self.countFunctionInstructions(func);
+        if (inst_count > self.config.max_instructions_per_function) {
+            return false;
+        }
 
         // 0. Rebuild CFG (ensure predecessors/successors are up to date)
         try Analysis.rebuildCFG(func);
-
-        // Check timeout
-        if (self.nanoTimestamp() - start_ns > timeout_ns) {
-            return false;
-        }
 
         // 1. Compute Dominators
         var dt = try Analysis.computeDominators(self.allocator, func);
@@ -1900,11 +1890,6 @@ pub const IROptimizer = struct {
             }
         }
 
-        // Check timeout
-        if (self.nanoTimestamp() - start_ns > timeout_ns) {
-            return false;
-        }
-
         // 3. Collect Defs
         for (func.blocks.items) |block| {
             for (block.instructions.items) |inst| {
@@ -1926,11 +1911,6 @@ pub const IROptimizer = struct {
                     else => {},
                 }
             }
-        }
-
-        // Check timeout
-        if (self.nanoTimestamp() - start_ns > timeout_ns) {
-            return false;
         }
 
         // 4. Insert Phi Nodes
@@ -1973,11 +1953,6 @@ pub const IROptimizer = struct {
                 }
                 try phis_in_block.?.put(alloca, phi_inst);
             }
-        }
-
-        // Check timeout
-        if (self.nanoTimestamp() - start_ns > timeout_ns) {
-            return false;
         }
 
         // 5. Rename Variables
@@ -2024,11 +1999,6 @@ pub const IROptimizer = struct {
                     }
                 }
             }
-        }
-
-        // Check timeout
-        if (self.nanoTimestamp() - start_ns > timeout_ns) {
-            return false;
         }
 
         // 5.5. 类型特化：根据 incoming 值推断 phi 节点的类型
@@ -2138,6 +2108,10 @@ pub const IROptimizer = struct {
         defer worklist.deinit(self.allocator);
 
         // 初始化：所有特化的 phi 节点
+        // 注意：phis 以指令指针为键，迭代顺序随进程地址（ASLR）漂移，而传播按工作列表
+        // 先入为主写类型，必须按寄存器 id 升序播种才能保证跨进程确定性。
+        var seed_ids = std.ArrayList(usize).initCapacity(self.allocator, 0) catch unreachable;
+        defer seed_ids.deinit(self.allocator);
         var it = phis.iterator();
         while (it.next()) |entry| {
             const phi_inst = entry.key_ptr.*;
@@ -2145,11 +2119,13 @@ pub const IROptimizer = struct {
                 const result_tag = @as(std.meta.Tag(IR.Type), result.type_);
                 // 只传播原生类型（i64/f64/bool）
                 if (result_tag == .i64 or result_tag == .f64 or result_tag == .bool) {
-                    try worklist.append(self.allocator, result.id);
+                    try seed_ids.append(self.allocator, result.id);
                     // std.debug.print("  Starting propagation from phi reg_{d} ({any})\n", .{ result.id, result_tag });
                 }
             }
         }
+        std.mem.sort(usize, seed_ids.items, {}, std.sort.asc(usize));
+        for (seed_ids.items) |sid| try worklist.append(self.allocator, sid);
 
         // 传播循环
         var processed = std.AutoHashMap(usize, void).init(self.allocator);
@@ -2472,12 +2448,28 @@ pub const IROptimizer = struct {
 
         // 3. Update Successors' Phis BEFORE recursion (standard mem2reg order)
         // 统一处理所有后继的 phi incoming（不区分 forward/back-edge）
+        // 注意：succ_phis 以 alloca 指令指针为键，AutoHashMap 迭代顺序随进程地址（ASLR）漂移；
+        // 而空栈分支会按遍历顺序 newRegister 分配 undef 寄存器编号，必须按 phi 结果寄存器
+        // 升序稳定遍历，否则同一输入跨进程产生不同寄存器编号（编译不可复现）。
+        const SuccPhiEntry = struct { alloca: *Instruction, phi_inst: *Instruction, rid: u32 };
         for (block.successors.items) |succ| {
             if (new_phis.getPtr(succ)) |succ_phis| {
+                var succ_entries = std.ArrayList(SuccPhiEntry).initCapacity(self.allocator, succ_phis.count()) catch unreachable;
+                defer succ_entries.deinit(self.allocator);
                 var it = succ_phis.iterator();
                 while (it.next()) |entry| {
-                    const alloca = entry.key_ptr.*;
                     const phi_inst = entry.value_ptr.*;
+                    const rid: u32 = if (phi_inst.result) |res| @intCast(res.id) else 0xFFFFFFFF;
+                    try succ_entries.append(self.allocator, .{ .alloca = entry.key_ptr.*, .phi_inst = phi_inst, .rid = rid });
+                }
+                std.mem.sort(SuccPhiEntry, succ_entries.items, {}, struct {
+                    fn lt(_: void, a: SuccPhiEntry, b: SuccPhiEntry) bool {
+                        return a.rid < b.rid;
+                    }
+                }.lt);
+                for (succ_entries.items) |sentry| {
+                    const alloca = sentry.alloca;
+                    const phi_inst = sentry.phi_inst;
 
                     // Get current value for this alloca (top of stack)
                     // If stack is empty, create an undef register (null value)

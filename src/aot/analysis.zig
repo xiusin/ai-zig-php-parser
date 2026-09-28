@@ -446,6 +446,15 @@ pub fn computeLoops(allocator: Allocator, func: *const Function, dt: *const Domi
         try all_loops.append(allocator, entry.value_ptr.*);
     }
 
+    // loop_map 以块指针为键，迭代顺序随进程地址（ASLR）漂移；父循环择选与
+    // info.loops / sub_loops 的排列会被 LICM/展开器用于寄存器分配，必须按
+    // header 块索引升序稳定化，才能保证跨进程确定性。
+    std.mem.sort(*Loop, all_loops.items, {}, struct {
+        fn lt(_: void, a: *Loop, b: *Loop) bool {
+            return a.header.index < b.header.index;
+        }
+    }.lt);
+
     // Sort loops by size (number of blocks) - usually inner loops are smaller?
     // Or just strictly check containment.
 

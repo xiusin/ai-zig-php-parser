@@ -2768,9 +2768,12 @@ pub const Parser = struct {
             .plus_plus, .minus_minus => {
                 const token = self.curr;
                 self.nextToken();
-                // 使用parseExpression(0)解析操作数，允许解析所有运算符
-                // 这样可以正确解析self::$prop等复杂表达式
-                const expr = try self.parseExpression(0);
+                // 与 !/minus 不同：PHP 文法要求前缀 ++/-- 操作数是变量（访问链 ≥100），
+                // 连 ** 都不吸收：实测 `++$p ** 2` = (++$p)**2 → 9（$p=3），
+                // 而 ++($p**2) 会得 5。70 截断同时保证
+                // `++$g > 500` 解析为 `(++$g) > 500` 而非 `++($g > 500)`
+                // （后者把自增副作用打到临时值上、丢失 $g 写回）。
+                const expr = try self.parseExpression(70);
                 return self.createNode(.{ .tag = .unary_expr, .main_token = token, .data = .{ .unary_expr = .{ .op = tag, .expr = expr } } });
             },
             .k_clone => return self.parseCloneExpression(),
