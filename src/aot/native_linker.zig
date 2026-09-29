@@ -7160,6 +7160,9 @@ pub const NativeLinker = struct {
         loop_label_counter: *u32,
         indent: []const u8,
     ) anyerror!void {
+        // Plan B（B-lite）：8075 纯尾委托同帧迭代化需要在续走时把行走起点改写为
+        // 子区间起点（defer 回跳与 latch 判定两处读取），参数 const 不可改写此影子副本。
+        var range_start = start_idx;
         var i = start_idx;
         while (i < end_idx) {
             // 如果已生成 return 或 break，后续代码不可达，停止生成
@@ -7188,7 +7191,7 @@ pub const NativeLinker = struct {
                 // 剩余块（else 臂独有链，如 elseif 体）留在 processed 之外交还外层 if 发射。
                 if (self.defer_loop_fallthrough) {
                     if (self.last_loop_fallthrough_idx) |lfi_w| {
-                        if (lfi_w < loop_head_idx or lfi_w < start_idx) {
+                        if (lfi_w < loop_head_idx or lfi_w < range_start) {
                             break;
                         }
                     }
@@ -8072,6 +8075,27 @@ pub const NativeLinker = struct {
                     if (!processed.contains(nei)) {
                         self.return_generated = false;
                         self.break_generated = false;
+                        // Plan B（B-lite）纯尾委托同帧迭代化：此调用以同一 indent/end_idx
+                        // 走完后区间 [nei, end_idx)，呼叫后的合并
+                        // `(then_returned and else_returned) or else_returned` 布尔恒等于
+                        // else_returned——子帧终态原样透传，父帧随后 i+=1 起零 emission
+                        // （纯跳过已处理块）。故当缺口区间 [i+1, nei) 已全部标记 processed 时，
+                        // 直接把本循环起点改写为 nei 续走即与深递归逐字节等价，sibling
+                        // if/elseif 链不再按链长累加栈帧（AOT-CODEGEN-004 主崩溃路径）。
+                        // 缺口未全处理（乱序布局等理论形态）时保留原递归，保证语义不变。
+                        var gap_open = false;
+                        var k_gap = i + 1;
+                        while (k_gap < nei) : (k_gap += 1) {
+                            if (!processed.contains(k_gap)) {
+                                gap_open = true;
+                                break;
+                            }
+                        }
+                        if (!gap_open) {
+                            range_start = nei;
+                            i = nei;
+                            continue;
+                        }
                         try self.generateLabelDrivenBlockRange(writer, func, nei, end_idx, cleanup_regs, processed, loop_label_counter, indent);
                         // 保存 else 块处理后的 return 状态
                         const else_returned = self.return_generated;
@@ -10330,7 +10354,7 @@ pub const NativeLinker = struct {
                                 // 不标记 processed，交由外层行走到达 mi 时在正确深度发射，
                                 // 使 if/else 两臂都无条件落入循环体末尾的 latch。
                                 const latch_trapped_in_arm = blk: {
-                                    if (mi >= start_idx) break :blk false;
+                                    if (mi >= range_start) break :blk false;
                                     const ci_l = self.current_loop_cond_block orelse break :blk false;
                                     if (merge_blk.terminator) |mt_l| {
                                         if (mt_l == .br) {
