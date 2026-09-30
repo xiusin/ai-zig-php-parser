@@ -162,7 +162,9 @@ pub const RegressionDetector = struct {
         threshold_percent: f64,
         mem_threshold_percent: f64,
     ) !RegressionDetector {
-        getCwd().createDirPath(getIo(), baseline_dir) catch {};
+        // 目录建不出来就立刻报错：旧写法 `catch {}` 吞掉失败，直到 saveBaseline /
+        // generateReport 写文件才炸出 FileNotFound，错误现场离根因隔了几层调用。
+        try getCwd().createDirPath(getIo(), baseline_dir);
 
         return RegressionDetector{
             .allocator = allocator,
@@ -810,12 +812,21 @@ pub const RegressionDetector = struct {
     }
 };
 
+/// 测试专用：把进程号拼进临时目录名（写入调用方栈缓冲区，零堆分配故无泄漏检查负担）。
+/// 缘由：`zig build test` 并发运行多个测试二进制，本文件的用例会被不止一个二进制带进去；
+/// 固定相对目录名下，先跑完的兄弟进程 `defer deleteTree` 会把目录删掉，
+/// 留下本进程后续写入随机拿到 FileNotFound（跨进程测试目录串扰，非产品逻辑缺陷）。
+fn testScratchDir(buf: []u8, prefix: []const u8) ![]const u8 {
+    return std.fmt.bufPrint(buf, "{s}_{d}", .{ prefix, std.c.getpid() });
+}
+
 // 测试
 test "RegressionDetector - basic functionality" {
     const allocator = std.testing.allocator;
 
     // 创建临时目录
-    const test_dir = "test_baselines";
+    var dir_buf: [64]u8 = undefined;
+    const test_dir = try testScratchDir(&dir_buf, "test_baselines");
     defer getCwd().deleteTree(getIo(), test_dir) catch {};
 
     var detector = try RegressionDetector.init(allocator, test_dir, 5.0, 1.0);
@@ -869,7 +880,8 @@ test "RegressionDetector - basic functionality" {
 test "RegressionDetector - batch detection" {
     const allocator = std.testing.allocator;
 
-    const test_dir = "test_baselines_batch";
+    var dir_buf: [64]u8 = undefined;
+    const test_dir = try testScratchDir(&dir_buf, "test_baselines_batch");
     defer getCwd().deleteTree(getIo(), test_dir) catch {};
 
     var detector = try RegressionDetector.init(allocator, test_dir, 5.0, 1.0);

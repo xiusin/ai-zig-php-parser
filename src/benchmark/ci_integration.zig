@@ -59,7 +59,9 @@ pub const CIRunner = struct {
             config.mem_threshold_percent,
         );
 
-        getCwd().createDirPath(getIo(), config.report_dir) catch {};
+        // 报告目录缺失要在 init 就失败：原先 `catch {}` 静默吞错，直到 runAndCheck
+        // 写 perf_report_*.md 时才以 FileNotFound 暴雷，现场与根因分离。
+        try getCwd().createDirPath(getIo(), config.report_dir);
 
         return CIRunner{
             .allocator = allocator,
