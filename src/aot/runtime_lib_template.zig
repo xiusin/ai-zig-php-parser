@@ -7981,7 +7981,11 @@ pub fn php_array_iter_value_ref(iter_val: Value) !Value {
         // 从mixed模式获取指针
         if (iter.array.elements.mixed) |*m| {
             if (m.getPtr(entry.key_ptr.*)) |value_ptr| {
-                return Value.initRef(value_ptr);
+                // AOT-REF-002 R-1a：引用装槽（与 php_array_get_ref 同口径）。
+                // 直接返回 Value.initRef(容器槽地址) 会在数组扩容搬迁桶数组后悬垂——
+                // 写入落在已释放内存（UAF）且写不回容器；make_ref 建稳定堆单元并把
+                // 元素槽自身重定向为 Ref，扩容只搬迁该 Ref 值，单元地址恒不变。
+                return try make_ref(value_ptr, runtime_allocator);
             }
         }
 
@@ -25559,7 +25563,10 @@ pub fn php_array_walk(arr: Value, callback: Value, userdata: Value, allocator: A
         // 直接用 entry.value_ptr 构造 Ref，使回调内对 $value 的赋值写回数组槽位
         // iterator 返回 *const Value，此处需要可写指针以实现引用语义
         var args_buf: [3]Value = undefined;
-        args_buf[0] = Value.initRef(@constCast(entry.value_ptr));
+        // AOT-REF-002 R-1b：引用装槽（make_ref）而非直接锚住迭代期容器槽地址——
+        // 回调内扩容会搬迁桶数组，槽地址随之悬垂；装槽后容器槽自身存 Ref，
+        // 单元地址恒不变，回调写回经该单元落到容器。
+        args_buf[0] = try make_ref(@constCast(entry.value_ptr), allocator);
         args_buf[1] = key_val;
         const arg_count: usize = if (userdata.isNull()) 2 else blk: {
             args_buf[2] = userdata;

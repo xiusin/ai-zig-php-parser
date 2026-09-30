@@ -15209,7 +15209,83 @@ pub const NativeLinker = struct {
                                             // br 到非 exit/cond 块：跟踪 merge 块
                                             for (0..func.blocks.items.len) |blk_i| {
                                                 if (func.blocks.items[blk_i] == br_target) {
-                                                    merge_bi = blk_i;
+                                                    // AOT-CODEGEN-005 RC-3：then 臂尾 br 指向【嵌套循环头】时
+                                                    // 旧口径与「br → 普通 merge 块」同路（仅 merge_bi = blk_i），
+                                                    // 于是内层 for/foreach/while 的本体从未派发 ⇒ while 体内
+                                                    // `if (c) { for … }` 整块静默丢失（探针 N/P/Q count=0）。
+                                                    // 补 generateForeachFromLabels(RC-2 :11502) /
+                                                    // generateForFromLabels(:13622) 已有的同形派发：命中循环头标签
+                                                    // 前缀即在 then 缩进内交范围行走 [blk_i, loop_end) 生成真正的
+                                                    // 嵌套循环；若内层 for 的出口复用本 if 的 merge 块
+                                                    // （else_bi 为 if_merge_ 且 for 的 cond_br 单边落在其上），
+                                                    // 范围行走会把该 merge 体（后置兄弟语句）内联进 then 臂 ⇒ 臂②
+                                                    // 只在本臂条件成立时执行（探针 N 实测 hits 跑满 20）。此形态
+                                                    // 改交自包含的 generateForFromLabels 用外层 end_idx 生成，
+                                                    // 并卸载其预标记的共享 merge 块，交还外层 if 的 merge 流程
+                                                    // 在正确缩进发射。
+                                                    const target_label = func.blocks.items[blk_i].label;
+                                                    const is_nested_loop_head = std.mem.startsWith(u8, target_label, "for_cond_") or
+                                                        std.mem.startsWith(u8, target_label, "while_cond_") or
+                                                        std.mem.startsWith(u8, target_label, "foreach_cond_") or
+                                                        std.mem.startsWith(u8, target_label, "do_while_body_");
+                                                    if (!is_nested_loop_head) {
+                                                        merge_bi = blk_i;
+                                                        break;
+                                                    }
+                                                    const saved_rg_lw = self.return_generated;
+                                                    const saved_brk_lw = self.break_generated;
+                                                    self.return_generated = false;
+                                                    self.break_generated = false;
+                                                    // 臂内联上下文：内层循环若无 exit，其 cleanup 回落目标是外层
+                                                    // 共享 merge，禁止循环收尾抢先消费（f124 修复 12 同款保护）。
+                                                    const saved_defer_lw = self.defer_loop_fallthrough;
+                                                    self.defer_loop_fallthrough = true;
+                                                    self.last_loop_fallthrough_idx = null;
+                                                    self.last_loop_fallthrough_src_idx = null;
+                                                    var for_exit_is_outer_merge_lw = false;
+                                                    if (std.mem.startsWith(u8, target_label, "for_cond_")) {
+                                                        if (else_bi) |ei_lw| {
+                                                            const inner_cond_blk = func.blocks.items[blk_i];
+                                                            const else_ptr_lw = func.blocks.items[ei_lw];
+                                                            if (std.mem.startsWith(u8, else_ptr_lw.label, "if_merge_")) {
+                                                                if (inner_cond_blk.terminator) |iterm| {
+                                                                    if (iterm == .cond_br) {
+                                                                        const icb_lw = iterm.cond_br;
+                                                                        if (icb_lw.then_block == else_ptr_lw or icb_lw.else_block == else_ptr_lw) {
+                                                                            for_exit_is_outer_merge_lw = true;
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    if (for_exit_is_outer_merge_lw) {
+                                                        _ = try self.generateForFromLabels(writer, func, blk_i, end_idx, cleanup_regs, processed, loop_label_counter, then_indent);
+                                                        if (else_bi) |ei_lw| _ = processed.remove(ei_lw);
+                                                    } else {
+                                                        try self.generateLabelDrivenBlockRange(writer, func, blk_i, loop_end, cleanup_regs, processed, loop_label_counter, then_indent);
+                                                    }
+                                                    self.defer_loop_fallthrough = saved_defer_lw;
+                                                    // 内层循环出口正是本 if 的共享延续块：臂尾物化来源边 PHI，
+                                                    // 否则 then 路径闭合后读到陈旧 merge 寄存器。
+                                                    if (else_bi) |nei_lw| {
+                                                        if (self.last_loop_fallthrough_idx == nei_lw) {
+                                                            if (self.last_loop_fallthrough_src_idx) |lsrc_lw| {
+                                                                if (lsrc_lw < func.blocks.items.len) {
+                                                                    try self.materializeBrTargetMergePhis(
+                                                                        writer,
+                                                                        func.blocks.items[lsrc_lw],
+                                                                        func.blocks.items[nei_lw],
+                                                                        then_indent,
+                                                                    );
+                                                                }
+                                                            }
+                                                            self.last_loop_fallthrough_idx = null;
+                                                            self.last_loop_fallthrough_src_idx = null;
+                                                        }
+                                                    }
+                                                    if (!self.return_generated) self.return_generated = saved_rg_lw;
+                                                    if (!self.break_generated) self.break_generated = saved_brk_lw;
                                                     break;
                                                 }
                                             }
