@@ -1422,6 +1422,11 @@ fn gcDestroyObject(o: *PHPObject) void {
         }
     }
 
+    var kit = o.properties.iterator();
+    while (kit.next()) |entry| {
+        // StringHashMap.deinit 只回收底层桶数组，键缓冲区归调用方管理
+        o.allocator.free(entry.key_ptr.*);
+    }
     o.properties.deinit();
     o.allocator.free(o.class_name);
     o.allocator.destroy(o);
@@ -1535,7 +1540,9 @@ pub const PHPString = struct {
 
     /// 减少引用计数，必要时释放
     pub fn release(self: *PHPString, allocator: Allocator) void {
-        if (self.is_static) return;
+        if (self.is_static) {
+            return;
+        }
 
         // std.debug.print("PHPString.release: data={s} ref_count={d}\n", .{self.data, self.ref_count});
 
@@ -1566,11 +1573,14 @@ pub const PHPString = struct {
             self.data = &[_]u8{};
             self.length = 0;
             self.ref_count = 0;
-            self.is_static = true; // Mark as freed to prevent double release / use-after-free.
-            // Note: PHPString object itself is intentionally NOT destroyed (destroyPHPString not called)
-            // because the same Value may be released multiple times in AOT cleanup code.
-            // Destroying the object would cause use-after-free. The object is leaked (minor memory cost)
-            // but its data is properly freed.
+            self.is_static = true; // 标记为已释放，兜住归还前任何重入
+            // 头归还池（2026-09-29 取证后开启）：
+            //   1. release() 的僵尸头计数器在 400k 字符串探针（3,600,045 个头）与 68 脚本语料
+            //      全程均为 0，实锤「同一 Value 被 AOT cleanup 多次释放」并不存在；
+            //   2. 原先三处绕过池的头分配（php_strrchr / php_stristr / php_interpolate）
+            //      已收敛到 allocPHPString，分配与归还的所有器对称。
+            // destroy 必须是最后一步：MemoryPool 会覆写槽位起始字节作为空闲链指针。
+            destroyPHPString(self, allocator);
         }
     }
 
@@ -2109,8 +2119,11 @@ pub const PHPArray = struct {
     /// 获取元素
     pub fn get(self: *PHPArray, key: ArrayKey) ?Value {
         if (self.elements.get(key)) |v| {
-            _ = v.retain();
-            return v;
+            // 元素槽可能装着 php_array_get_ref 装进槽的引用：读出即解引用，
+            // 令引用对 PHP 侧的值消费路径透明（所有权仍属槽，这里 retain 的是实际值）。
+            const actual = derefVal(v);
+            _ = actual.retain();
+            return actual;
         }
         return null;
     }
@@ -2134,14 +2147,26 @@ pub const PHPArray = struct {
     /// PHP 值语义：存储的数组值若被共享（ref_count > 1），执行浅拷贝（COW）
     /// 引用类型（Ref）在存储前解引用，确保数组元素持有值而非引用
     pub fn set(self: *PHPArray, allocator: Allocator, key: ArrayKey, value: Value) !void {
-        // 释放旧值
-        if (self.elements.get(key)) |old_value| {
-            old_value.release(allocator);
-        }
-
         // 解引用：PHP 值语义要求数组元素持有值而非引用
         var resolved = value;
         while (resolved.isRef()) resolved = resolved.asRef().*;
+
+        // 目标槽已装着引用（$r = &$a[$k] 取过引用）：写穿引用单元，保持别名关系。
+        // 覆盖槽内容会切断 $r 与 $a[$k] 的绑定，其他持有者将看不到本次写入。
+        if (self.elements.getPtr(key)) |slot| {
+            if (slot.*.isRef()) {
+                const cell = val_deref(slot);
+                cell.release(allocator);
+                _ = resolved.retain();
+                val_assign(cell, resolved);
+                if (key == .integer and key.integer >= self.next_index) {
+                    self.next_index = key.integer + 1;
+                }
+                return;
+            }
+            // 释放旧值
+            slot.*.release(allocator);
+        }
 
         // COW：若值是被共享的数组，浅拷贝后再存储（PHP 值语义）
         var val_to_store: Value = undefined;
@@ -2417,6 +2442,8 @@ pub const Value = struct {
     // ========================================================================
 
     pub fn isNull(self: Value) bool {
+        // Ref 透明：类型判断针对被引用的实际值（等价 Zend ZVAL_DEREF）
+        if (self.isRef()) return derefVal(self).isNull();
         return self.val == (QNAN | TAG_NIL);
     }
 
@@ -2425,10 +2452,12 @@ pub const Value = struct {
     }
 
     pub fn isBool(self: Value) bool {
+        if (self.isRef()) return derefVal(self).isBool();
         return self.val == (QNAN | TAG_FALSE) or self.val == (QNAN | TAG_TRUE);
     }
 
     pub fn isInt(self: Value) bool {
+        if (self.isRef()) return derefVal(self).isInt();
         if ((self.val & (SIGN_BIT | QNAN)) == TAG_INT_MARKER) return true;
         // 检查堆装箱大整数
         if ((self.val & (SIGN_BIT | QNAN)) == QNAN) {
@@ -2438,15 +2467,18 @@ pub const Value = struct {
     }
 
     pub fn isBigInt(self: Value) bool {
+        if (self.isRef()) return derefVal(self).isBigInt();
         return (self.val & (SIGN_BIT | QNAN)) == QNAN and (self.val & TYPE_MASK) == TYPE_BIGINT;
     }
 
     pub fn isFloat(self: Value) bool {
+        if (self.isRef()) return derefVal(self).isFloat();
         if ((self.val & QNAN) != QNAN) return true;
         return false;
     }
 
     pub fn isString(self: Value) bool {
+        if (self.isRef()) return derefVal(self).isString();
         // 首先检查是否是指针类型（QNAN位设置，但SIGN_BIT未设置）
         if ((self.val & (SIGN_BIT | QNAN)) != QNAN) return false;
         // 然后检查类型标签
@@ -2454,6 +2486,7 @@ pub const Value = struct {
     }
 
     pub fn isArray(self: Value) bool {
+        if (self.isRef()) return derefVal(self).isArray();
         // 首先检查是否是指针类型（QNAN位设置，但SIGN_BIT未设置）
         if ((self.val & (SIGN_BIT | QNAN)) != QNAN) return false;
         // 然后检查类型标签
@@ -2461,6 +2494,7 @@ pub const Value = struct {
     }
 
     pub fn isFunction(self: Value) bool {
+        if (self.isRef()) return derefVal(self).isFunction();
         // 首先检查是否是指针类型（QNAN位设置，但SIGN_BIT未设置）
         if ((self.val & (SIGN_BIT | QNAN)) != QNAN) return false;
         // 然后检查类型标签
@@ -2475,6 +2509,7 @@ pub const Value = struct {
     }
 
     pub fn isResource(self: Value) bool {
+        if (self.isRef()) return derefVal(self).isResource();
         if ((self.val & (SIGN_BIT | QNAN)) != QNAN) return false;
         if ((self.val & TYPE_MASK) != TYPE_RESOURCE) return false;
         return !self.asResource().closed;
@@ -2485,10 +2520,13 @@ pub const Value = struct {
     // ========================================================================
 
     pub fn asBool(self: Value) bool {
+        if (self.isRef()) return derefVal(self).asBool();
         return (self.val & 0x1) == 1;
     }
 
     pub fn asInt(self: Value) i64 {
+        // Ref 自动解引用（与 asArray/toString 同惯例）
+        if (self.isRef()) return self.asRef().*.asInt();
         if ((self.val & (SIGN_BIT | QNAN)) == TAG_INT_MARKER) {
             const raw: u64 = self.val & INT48_MASK;
             // 符号扩展
@@ -2515,10 +2553,15 @@ pub const Value = struct {
     }
 
     pub fn asFloat(self: Value) f64 {
+        // Ref 自动解引用：否则会把引用载荷地址当 f64 位模式解释
+        if (self.isRef()) return self.asRef().*.asFloat();
         return @bitCast(self.val);
     }
 
     pub fn asString(self: Value) *PHPString {
+        // Ref 自动解引用：本函数会把载荷当作 *PHPString 并读取 str.length，
+        // 引用值流入时那是一次野读，必须先解引用再解释。
+        if (self.isRef()) return self.asRef().*.asString();
         const ptr = nanbox_abi.decodePtr(self.val);
         const str: *PHPString = @ptrFromInt(ptr);
 
@@ -2543,11 +2586,13 @@ pub const Value = struct {
     }
 
     pub fn asFunction(self: Value) *PHPClosure {
+        if (self.isRef()) return derefVal(self).asFunction();
         const ptr_val = nanbox_abi.decodePtr(self.val);
         return @ptrFromInt(ptr_val);
     }
 
     pub fn asResource(self: Value) *PHPResource {
+        if (self.isRef()) return derefVal(self).asResource();
         const ptr_val = nanbox_abi.decodePtr(self.val);
         return @ptrFromInt(ptr_val);
     }
@@ -2577,6 +2622,9 @@ pub const Value = struct {
     // ========================================================================
 
     pub fn retain(self: Value) Value {
+        // Ref 不参与引用计数（与 release 的 Ref no-op 对称）：
+        // 类型谓词已对 Ref 透明，若不在此早退，retain 会给被引用对象加计数而 release 不减。
+        if (self.isRef()) return self;
         if (self.isString()) {
             self.asString().retain();
         } else if (self.isArray()) {
@@ -2632,6 +2680,8 @@ pub const Value = struct {
 
     /// 转换为布尔值（PHP语义）
     pub fn toBool(self: Value) bool {
+        // Ref 自动解引用：否则会落到本函数末尾的兜底分支，无论被引用值是 0 还是 "" 都恒返回 true
+        if (self.isRef()) return self.asRef().*.toBool();
         if (self.isNull()) return false;
         if (self.isBool()) return self.asBool();
         if (self.isInt()) return self.asInt() != 0;
@@ -2647,6 +2697,8 @@ pub const Value = struct {
 
     /// 转换为整数（PHP语义）
     pub fn toInt(self: Value) i64 {
+        // Ref 自动解引用：否则会落到兜底分支得到 0
+        if (self.isRef()) return self.asRef().*.toInt();
         if (self.isInt()) return self.asInt();
         if (self.isFloat()) {
             const f = self.asFloat();
@@ -2727,6 +2779,8 @@ pub const Value = struct {
     /// 转换为浮点数（PHP语义）
     extern fn strtod(nptr: [*:0]const u8, endptr: ?*[*:0]u8) f64;
     pub fn toFloat(self: Value) f64 {
+        // Ref 自动解引用：否则会落到兜底分支得到错误数值
+        if (self.isRef()) return self.asRef().*.toFloat();
         if (self.isFloat()) return self.asFloat();
         if (self.isInt()) return @floatFromInt(self.asInt());
         if (self.isBool()) return if (self.asBool()) 1.0 else 0.0;
@@ -2981,6 +3035,19 @@ pub fn val_deref(val: *Value) *Value {
     var current = val;
     while (current.isRef()) {
         current = current.asRef();
+    }
+    return current;
+}
+
+/// 值形态解引用（跟随完整引用链）：容器元素槽可能装着 make_ref 装进去的引用，
+/// 读出给 PHP 侧消费前必须先取实际值。不 retain 也不 release——
+/// 所有权仍属来源槽，调用方需要持有时自行 retain。
+pub fn derefVal(val: Value) Value {
+    var current = val;
+    // 上限防护：异常自引用环不得变成无限递归
+    var hops: u8 = 0;
+    while (current.isRef() and hops < 64) : (hops += 1) {
+        current = current.asRef().*;
     }
     return current;
 }
@@ -4033,8 +4100,9 @@ pub fn php_fgets(handle: Value) !Value {
 
     if (pos == 0) return Value.initBool(false);
 
-    // 需要allocator但函数签名没有，使用全局allocator
-    const global_alloc = std.heap.page_allocator;
+    // 该字符串会进入 Value 生命周期，必须由 runtime 唯一所有者分配，
+    // 否则后续 runtime_allocator.free 构成跨分配器 free
+    const global_alloc = runtime_allocator;
     const output = try PHPString.init(global_alloc, try global_alloc.dupe(u8, buf[0..pos]));
     return Value.initString(output);
 }
@@ -4780,27 +4848,29 @@ pub fn php_array_isset(arr_val: Value, key_val: Value) !Value {
 
 /// 获取数组元素的引用（用于引用返回）
 /// 参数：array, key
-/// 返回：Value.initRef(指向数组元素的指针)
+/// 返回：指向「已装进元素槽的引用单元」的 Ref（值形态为 Value.initRef(堆 cell)）
 pub fn php_array_get_ref(arr_val: Value, key_val: Value, allocator: Allocator) !Value {
-    // 解引用：如果值是引用类型，先解引用获取实际值
+    // 解引用：跟随完整引用链，取到实际数组
     var arr_resolved = arr_val;
     if (arr_resolved.isRef()) {
-        arr_resolved = arr_resolved.asRef().*;
+        arr_resolved = derefVal(arr_resolved);
     }
     if (!arr_resolved.isArray()) return error.InvalidArgument;
     const arr = arr_resolved.asArray();
 
     const key = normalizeArrayKeyFromValue(key_val);
 
-    // 获取或创建数组元素
-    const entry_ptr = arr.getPtr(key) orelse blk: {
-        // 元素不存在，创建一个 null 值
+    // 获取或创建数组元素槽
+    const slot = arr.getPtr(key) orelse blk: {
         try arr.set(allocator, key, Value.initNull());
         break :blk arr.getPtr(key).?;
     };
 
-    // 返回指向数组元素的引用
-    return Value.initRef(entry_ptr);
+    // 引用装槽（复用 make_ref）：返回的 Ref 指向**稳定堆单元**而非容器槽地址。
+    // 直接把 slot 指针交给调用方会在数组扩容搬迁桶数组后悬垂——写入落在已释放内存（UAF），
+    // 且写不回容器。装槽后容器槽自身存 Ref，扩容只搬迁这个 Ref 值，单元地址永不变，
+    // 因此也无需 has_active_refs / convertToMixed 那套「锚住槽地址」的补救。
+    return make_ref(slot, allocator);
 }
 
 fn php_get_class_methods(class_name_val: Value, allocator: Allocator) !Value {
@@ -7951,7 +8021,14 @@ pub fn php_ref_assign_ptr(ref_ptr: *Value, new_val: Value) !Value {
         ptr.release(runtime_allocator);
         _ = new_val.retain();
         val_assign(ptr, new_val);
+        return Value.initNull();
     }
+    // 目标槽并非 Ref（降低阶段把属性/静态属性引用退化成了普通值）时，写入必须落到变量本身。
+    // 不可静默丢弃：发射侧已把该变量标记为引用变量，赋值只会走到这里，
+    // 忽略即等于整条赋值语句凭空消失（语义错误，非降级为值拷贝）。
+    ref_ptr.release(runtime_allocator);
+    _ = new_val.retain();
+    val_assign(ref_ptr, new_val);
     return Value.initNull();
 }
 
@@ -8117,10 +8194,10 @@ fn arrayIterator_construct(ctx: Value, args: []const Value, allocator: Allocator
 
     // 存储数组到_array属性
     _ = array_val.retain();
-    try obj.properties.put("_array", array_val);
+    try obj.putProperty("_array", array_val);
 
     // 初始化位置为0
-    try obj.properties.put("_position", Value.initInt(0));
+    try obj.putProperty("_position", Value.initInt(0));
 
     return Value.initNull();
 }
@@ -8130,7 +8207,7 @@ fn arrayIterator_rewind(ctx: Value, args: []const Value, allocator: Allocator) !
     _ = args;
     _ = allocator;
     const obj = Value_asObject(ctx);
-    try obj.properties.put("_position", Value.initInt(0));
+    try obj.putProperty("_position", Value.initInt(0));
     return Value.initNull();
 }
 
@@ -8212,7 +8289,7 @@ fn arrayIterator_next(ctx: Value, args: []const Value, allocator: Allocator) !Va
 
     const position = obj.properties.get("_position") orelse return Value.initNull();
     const pos = position.asInt();
-    try obj.properties.put("_position", Value.initInt(pos + 1));
+    try obj.putProperty("_position", Value.initInt(pos + 1));
 
     return Value.initNull();
 }
@@ -8293,9 +8370,9 @@ fn splFixedArray_construct(ctx: Value, args: []const Value, allocator: Allocator
     }
 
     const array_val = Value.initArray(array);
-    try obj.properties.put("_array", array_val);
-    try obj.properties.put("_size", Value.initInt(size));
-    try obj.properties.put("_position", Value.initInt(0));
+    try obj.putProperty("_array", array_val);
+    try obj.putProperty("_size", Value.initInt(size));
+    try obj.putProperty("_position", Value.initInt(0));
 
     return Value.initNull();
 }
@@ -8335,7 +8412,7 @@ fn splFixedArray_setSize(ctx: Value, args: []const Value, allocator: Allocator) 
         }
     }
 
-    try obj.properties.put("_size", Value.initInt(new_size));
+    try obj.putProperty("_size", Value.initInt(new_size));
     return Value.initNull();
 }
 
@@ -8435,7 +8512,7 @@ fn splFixedArray_rewind(ctx: Value, args: []const Value, allocator: Allocator) !
     _ = args;
     _ = allocator;
     const obj = Value_asObject(ctx);
-    try obj.properties.put("_position", Value.initInt(0));
+    try obj.putProperty("_position", Value.initInt(0));
     return Value.initNull();
 }
 
@@ -8481,7 +8558,7 @@ fn splFixedArray_next(ctx: Value, args: []const Value, allocator: Allocator) !Va
     const obj = Value_asObject(ctx);
 
     const position = (obj.properties.get("_position") orelse Value.initInt(0)).asInt();
-    try obj.properties.put("_position", Value.initInt(position + 1));
+    try obj.putProperty("_position", Value.initInt(position + 1));
 
     return Value.initNull();
 }
@@ -9023,7 +9100,7 @@ fn splStack_construct(ctx: Value, args: []const Value, allocator: Allocator) !Va
     // 创建内部数组
     const array = try PHPArray.init(runtime_allocator);
     const array_val = Value.initArray(array);
-    try obj.properties.put("_data", array_val);
+    try obj.putProperty("_data", array_val);
 
     return Value.initNull();
 }
@@ -9119,7 +9196,7 @@ fn splQueue_construct(ctx: Value, args: []const Value, allocator: Allocator) !Va
     // 创建内部数组
     const array = try PHPArray.init(runtime_allocator);
     const array_val = Value.initArray(array);
-    try obj.properties.put("_data", array_val);
+    try obj.putProperty("_data", array_val);
 
     return Value.initNull();
 }
@@ -9888,8 +9965,9 @@ pub fn php_strrchr(haystack: Value, needle: Value, allocator: Allocator) !Value 
     const result_len = h.length - pos;
     const buffer = try allocator.alloc(u8, result_len);
     @memcpy(buffer, h.data[pos..h.length]);
+    errdefer allocator.free(buffer);
 
-    const result = try allocator.create(PHPString);
+    const result = try allocPHPString(allocator);
     result.* = .{ .data = buffer, .length = result_len, .ref_count = 1, .is_static = false };
     return Value.initString(result);
 }
@@ -9918,7 +9996,8 @@ pub fn php_stristr(haystack: Value, needle: Value, allocator: Allocator) !Value 
             const result_len = h.length - i;
             const buffer = try allocator.alloc(u8, result_len);
             @memcpy(buffer, h.data[i..h.length]);
-            const result = try allocator.create(PHPString);
+            errdefer allocator.free(buffer);
+            const result = try allocPHPString(allocator);
             result.* = .{ .data = buffer, .length = result_len, .ref_count = 1, .is_static = false };
             return Value.initString(result);
         }
@@ -12476,7 +12555,7 @@ pub fn php_is_callable(val: Value) !Value {
             if (reg.contains(name)) return Value.initBool(true);
         }
         if (aot_callable_hook) |hook| {
-            _ = hook(name, &[_]Value{}, std.heap.page_allocator) catch return Value.initBool(false);
+            _ = hook(name, &[_]Value{}, runtime_allocator) catch return Value.initBool(false);
             return Value.initBool(true);
         }
         return Value.initBool(false);
@@ -12617,9 +12696,9 @@ pub fn php_clone(val: Value, allocator: Allocator) !Value {
         if (value.isArray()) {
             // 数组是值类型，clone 时应复制一份（浅拷贝）
             const cloned_arr = try value.asArray().cloneShallow(allocator);
-            try new_obj.properties.put(key, Value.initArray(cloned_arr));
+            try new_obj.putProperty(key, Value.initArray(cloned_arr));
         } else {
-            try new_obj.properties.put(key, value.retain());
+            try new_obj.putProperty(key, value.retain());
         }
     }
 
@@ -12732,8 +12811,8 @@ pub fn php_interpolate(parts: []const Value, allocator: Allocator) !Value {
     }
 
     // 创建结果字符串
-    const result = try allocator.create(PHPString);
-    errdefer allocator.destroy(result);
+    const result = try allocPHPString(allocator);
+    errdefer destroyPHPString(result, allocator);
 
     result.data = result_data;
     result.length = total_length;
@@ -16242,8 +16321,8 @@ pub const ClassMeta = struct {
                             }
                         }
                         // 回退到 function_meta_registry
-                        const full_name_buf = std.fmt.allocPrint(std.heap.page_allocator, "{s}::{s}", .{ cname_val.asString().data, mname_val.asString().data }) catch return Value.initInt(0);
-                        defer std.heap.page_allocator.free(full_name_buf);
+                        const full_name_buf = std.fmt.allocPrint(runtime_allocator, "{s}::{s}", .{ cname_val.asString().data, mname_val.asString().data }) catch return Value.initInt(0);
+                        defer runtime_allocator.free(full_name_buf);
                         if (function_meta_registry) |meta_reg| {
                             if (meta_reg.get(full_name_buf)) |meta| {
                                 return Value.initInt(@intCast(meta.param_count));
@@ -16271,8 +16350,8 @@ pub const ClassMeta = struct {
                             }
                         }
                         // 回退到 function_meta_registry
-                        const full_name_buf = std.fmt.allocPrint(std.heap.page_allocator, "{s}::{s}", .{ cname_val.asString().data, mname_val.asString().data }) catch return Value.initInt(0);
-                        defer std.heap.page_allocator.free(full_name_buf);
+                        const full_name_buf = std.fmt.allocPrint(runtime_allocator, "{s}::{s}", .{ cname_val.asString().data, mname_val.asString().data }) catch return Value.initInt(0);
+                        defer runtime_allocator.free(full_name_buf);
                         if (function_meta_registry) |meta_reg| {
                             if (meta_reg.get(full_name_buf)) |meta| {
                                 return Value.initInt(@intCast(meta.required_params));
@@ -16344,8 +16423,8 @@ pub const ClassMeta = struct {
                         }
                     }
                     // 回退到 function_meta_registry
-                    const full_name_buf = std.fmt.allocPrint(std.heap.page_allocator, "{s}::{s}", .{ cname_val.asString().data, mname_val.asString().data }) catch return Value.initArray(arr);
-                    defer std.heap.page_allocator.free(full_name_buf);
+                    const full_name_buf = std.fmt.allocPrint(runtime_allocator, "{s}::{s}", .{ cname_val.asString().data, mname_val.asString().data }) catch return Value.initArray(arr);
+                    defer runtime_allocator.free(full_name_buf);
                     if (function_meta_registry) |meta_reg| {
                         if (meta_reg.get(full_name_buf)) |meta| {
                             var i: usize = 0;
@@ -18236,16 +18315,15 @@ pub const PHPObject = struct {
                         if (m != meta and meta.properties.get(prop_name) != null) continue;
                         if (obj.properties.get(prop_name) == null) {
                             if (prop_def.default_value) |default| {
-                                const key_copy = try allocator.dupe(u8, prop_name);
                                 if (default.isInt() and default.asInt() == -1) {
                                     const new_array = try PHPArray.init(allocator);
-                                    try obj.properties.put(key_copy, Value.initArray(new_array));
+                                    try obj.putProperty(prop_name, Value.initArray(new_array));
                                 } else if (default.isArray()) {
                                     const cloned_array = try default.asArray().cloneDeep(allocator);
-                                    try obj.properties.put(key_copy, Value.initArray(cloned_array));
+                                    try obj.putProperty(prop_name, Value.initArray(cloned_array));
                                 } else {
                                     _ = default.retain();
-                                    try obj.properties.put(key_copy, default);
+                                    try obj.putProperty(prop_name, default);
                                 }
                             }
                         }
@@ -18344,6 +18422,27 @@ pub const PHPObject = struct {
         self.allocator.destroy(self);
     }
 
+    /// 属性写入的唯一入口：保证 properties 的键始终归本对象所有。
+    ///
+    /// 契约：
+    ///   - 值语义与 std.StringHashMap.put 完全一致（不 retain 新值、不释放被覆盖的旧值），
+    ///     调用方保留自身那份引用，行为与改造前逐位相同；
+    ///   - 键语义：命中已有键则复用原自有键指针（不重复 dupe，避免每次写属性泄漏一份键），
+    ///     新键 dupe 一份，由 deinit / gcDestroyObject / unsetProperty 三处统一回收。
+    ///
+    /// 只有全部写入走本入口，deinit 中对 key 的 allocator.free 才对任意属性都成立；
+    /// 历史上 SPL 内部属性用字符串字面量直接 put、clone 与源对象共享键指针，
+    /// 会让那两处释放变成 free 静态只读指针与 double free。
+    pub fn putProperty(self: *PHPObject, name: []const u8, value: Value) !void {
+        if (self.properties.getPtr(name)) |existing| {
+            existing.* = value;
+            return;
+        }
+        const key_copy = try self.allocator.dupe(u8, name);
+        errdefer self.allocator.free(key_copy);
+        try self.properties.put(key_copy, value);
+    }
+
     /// 获取属性（支持 __get 魔法函数）
     // 防止magic method递归调用的标志
     threadlocal var in_magic_method: bool = false;
@@ -18425,12 +18524,8 @@ pub const PHPObject = struct {
         // 保留新值
         _ = value.retain();
 
-        // 存储属性（新键时复制键字符串，避免动态属性名被释放后悬垂指针）
-        const gop = try self.properties.getOrPut(name);
-        if (!gop.found_existing) {
-            gop.key_ptr.* = try self.allocator.dupe(u8, name);
-        }
-        gop.value_ptr.* = value;
+        // 存储属性（键所有权由 putProperty 统一负责）
+        try self.putProperty(name, value);
     }
 
     /// 调用方法（支持 __call 魔法函数和继承）
@@ -18482,8 +18577,11 @@ pub const PHPObject = struct {
 
     pub fn unsetProperty(self: *PHPObject, name: []const u8) !bool {
         if (self.properties.get(name)) |old_value| {
+            // remove 只丢弃条目，自有键缓冲区必须显式回收
+            const stored_key = self.properties.getKey(name).?;
             if (self.properties.remove(name)) {
                 old_value.release(self.allocator);
+                self.allocator.free(stored_key);
                 return true;
             }
         }
@@ -19067,6 +19165,9 @@ pub fn php_object_get(obj_val: Value, property_name: []const u8) !Value {
 }
 
 pub fn php_object_get_ref(obj_val: Value, prop_name_val: Value, allocator: Allocator) !Value {
+    // 键缓冲区必须与对象自身的分配器配对（deinit/gcDestroyObject 用 self.allocator 释放），
+    // 故不使用调用方传入的 allocator
+    _ = allocator;
     if (!Value_isObject(obj_val)) return error.InvalidArgument;
     if (!prop_name_val.isString()) return error.InvalidArgument;
 
@@ -19088,7 +19189,7 @@ pub fn php_object_get_ref(obj_val: Value, prop_name_val: Value, allocator: Alloc
     // 获取属性值指针
     const entry_ptr = obj.properties.getPtr(name) orelse blk: {
         // 属性不存在，创建一个 null 值
-        try obj.properties.put(try allocator.dupe(u8, name), Value.initNull());
+        try obj.putProperty(name, Value.initNull());
         break :blk obj.properties.getPtr(name).?;
     };
 
@@ -19304,10 +19405,8 @@ pub fn php_cast_object(val: Value) !Value {
                 },
                 .integer => |idx| {
                     const key_str = try std.fmt.allocPrint(runtime_allocator, "{d}", .{idx});
-                    errdefer runtime_allocator.free(key_str);
-                    const key_copy = try runtime_allocator.dupe(u8, key_str);
-                    runtime_allocator.free(key_str);
-                    try obj.properties.put(key_copy, entry.value_ptr.*.retain());
+                    defer runtime_allocator.free(key_str);
+                    try obj.putProperty(key_str, entry.value_ptr.*.retain());
                 },
             }
         }

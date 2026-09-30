@@ -917,6 +917,20 @@ pub const NativeLinker = struct {
         return false;
     }
 
+    /// 检查目标块是否是【当前循环】的回边（continue）：块本身即循环条件块，
+    /// 或它以 br 落回循环条件块（典型为 foreach_increment_/for_increment_ 增量块）。
+    /// 与 isLoopBreakTarget 成对使用，用于识别「cond_br 双边都落在本层循环控制边上」
+    /// 的结构（AOT-CODEGEN-005 RC-1）。
+    fn isLoopContinueTarget(self: *Self, func: *const IR.Function, tgt: *const IR.BasicBlock) bool {
+        const cond_idx = self.current_loop_cond_block orelse return false;
+        if (cond_idx >= func.blocks.items.len) return false;
+        if (func.blocks.items[cond_idx] == tgt) return true;
+        if (tgt.terminator) |t| {
+            if (t == .br and t.br == func.blocks.items[cond_idx]) return true;
+        }
+        return false;
+    }
+
     /// 在嵌套 if 的 then/else 块中处理 br 终止符：如果是循环退出块则生成 break，否则交给 generateBrToMergeCondBr
     fn writeBrInLoopContext(self: *Self, writer: anytype, func: *const IR.Function, br_target: *const IR.BasicBlock, source_blk: *const IR.BasicBlock, end_idx: usize, cleanup_regs: []const usize, processed: *std.AutoHashMap(usize, void), loop_label_counter: *u32, indent: []const u8) !void {
         if (self.current_loop_label != null and self.isLoopBreakTarget(func, br_target)) {
@@ -1860,7 +1874,10 @@ pub const NativeLinker = struct {
             \\}
             \\
             \\pub fn main(init_arg: std.process.Init.Minimal) !void {
-            \\    const allocator = std.heap.page_allocator;
+            \\    // 运行时底账分配器：必须用带尺寸分级缓存的分配器。
+            \\    // page_allocator 会让每个短字符串缓冲与每个 MemoryPool 块各自 mmap/munmap，
+            \\    // 实测 40 万次字符串迭代 sys 时间 7.1s（占墙钟绝大部分）。
+            \\    const allocator = std.heap.smp_allocator;
             \\
             \\    try runtime.initRuntime(allocator);
             \\    defer runtime.deinitRuntime();
@@ -1892,6 +1909,11 @@ pub const NativeLinker = struct {
             \\            }
             \\            arg_idx += 1;
             \\        }
+            \\        // PHP CLI 语义：$argv/$argc 是全局变量，仅放入 $_SERVER 副本不足够。
+            \\        // 先由 global_vars 取得 argv_arr 的首份所有权，
+            \\        // 随后 $_SERVER 写入时按值语义自行 retain，避免 ref_count>1 触发 COW 浅拷贝。
+            \\        try global_vars.put(try allocator.dupe(u8, "$argv"), runtime.Value.initArray(argv_arr));
+            \\        try global_vars.put(try allocator.dupe(u8, "$argc"), runtime.Value.initInt(@intCast(arg_idx)));
             \\        const argc_str = try runtime.PHPString.init(allocator, "argc");
             \\        try server_arr.setByValue(allocator, runtime.Value.initString(argc_str), runtime.Value.initInt(@intCast(arg_idx)));
             \\        const argv_str = try runtime.PHPString.init(allocator, "argv");
@@ -7263,12 +7285,9 @@ pub const NativeLinker = struct {
                 // 使用 cond_br 的条件直接生成 if/else 结构
                 const nested_cb = block.terminator.?.cond_br;
                 const if_indent = indent;
-                try writer.print("{s}if (", .{if_indent});
-                try self.writeConditionExpr(writer, nested_cb.cond.id, nested_cb.cond.type_);
-                try writer.print(") {{\n", .{});
-                const then_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{if_indent});
-                defer self.allocator.free(then_indent);
-                // 处理 then 块
+                // 目标块索引查找无副作用，提前到条件发射之前：AOT-CODEGEN-005 RC-1 的
+                // 「双边都落在本层循环控制边」判定须在发射 `if (cond) {` 之前完成，
+                // 才能按 break 边所在侧决定条件是否取反。其余形态发射序列与此前一致。
                 var nested_then_idx: ?usize = null;
                 for (0..func.blocks.items.len) |blk_i| {
                     if (func.blocks.items[blk_i] == nested_cb.then_block) {
@@ -7283,6 +7302,52 @@ pub const NativeLinker = struct {
                         break;
                     }
                 }
+
+                // AOT-CODEGEN-005 RC-1：本层循环体内，merge 块的 cond_br 两条边分别落在
+                // 「本循环的 break 目标（cleanup/exit）」与「本循环的 continue 回边」上时
+                //（典型：foreach 体内前置无 else 的 if，其 merge 同时承载后置单语句
+                // `if (..) break;` 的决策），下方通用 then/else 行走会因两侧早已被循环收尾
+                // 预标记 processed 而双双落空——只发射条件计算与空 if/else 骨架，break 与
+                // exit PHI 整体静默丢失。此处就地发射本地 break；另一侧（回边）自然直落
+                // 循环尾部的增量与 continue，故不得置 break_generated（否则增量被抑制）。
+                if (self.current_loop_label) |loop_lbl_rc1| {
+                    const brk_on_then = self.isLoopBreakTarget(func, nested_cb.then_block) and
+                        self.isLoopContinueTarget(func, nested_cb.else_block) and
+                        !self.isLoopBreakTarget(func, nested_cb.else_block);
+                    const brk_on_else = self.isLoopBreakTarget(func, nested_cb.else_block) and
+                        self.isLoopContinueTarget(func, nested_cb.then_block) and
+                        !self.isLoopBreakTarget(func, nested_cb.then_block);
+                    if (brk_on_then or brk_on_else) {
+                        const brk_tgt = if (brk_on_then) nested_cb.then_block else nested_cb.else_block;
+                        var brk_idx: ?usize = null;
+                        for (0..func.blocks.items.len) |bi_b| {
+                            if (func.blocks.items[bi_b] == brk_tgt) {
+                                brk_idx = bi_b;
+                                break;
+                            }
+                        }
+                        if (brk_idx) |bi_rc1| {
+                            try writer.print("{s}if (", .{if_indent});
+                            if (!brk_on_then) try writer.print("!(", .{});
+                            try self.writeConditionExpr(writer, nested_cb.cond.id, nested_cb.cond.type_);
+                            if (!brk_on_then) try writer.print(")", .{});
+                            try writer.print(") {{\n", .{});
+                            const rc1_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{if_indent});
+                            defer self.allocator.free(rc1_indent);
+                            try self.generateExitPHIAssignments(writer, func, i, bi_rc1, rc1_indent, false);
+                            try writer.print("{s}break :{s};\n", .{ rc1_indent, loop_lbl_rc1 });
+                            try writer.print("{s}}}\n", .{if_indent});
+                            i += 1;
+                            continue;
+                        }
+                    }
+                }
+
+                try writer.print("{s}if (", .{if_indent});
+                try self.writeConditionExpr(writer, nested_cb.cond.id, nested_cb.cond.type_);
+                try writer.print(") {{\n", .{});
+                const then_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{if_indent});
+                defer self.allocator.free(then_indent);
                 // 三元/coalesce 场景：else 块有真实 body（非短路 merge）。
                 // 判断 else 块是否仅由 PHI 组成（短路 merge），否则需要生成 else body。
                 const else_has_real_body = blk: {
@@ -11460,7 +11525,43 @@ pub const NativeLinker = struct {
                                                         self.defer_loop_fallthrough = true;
                                                         self.last_loop_fallthrough_idx = null;
                                                         self.last_loop_fallthrough_src_idx = null;
-                                                        try self.generateLabelDrivenBlockRange(writer, func, blk_i, loop_end, cleanup_regs, processed, loop_label_counter, then_indent);
+                                                        // AOT-CODEGEN-005 RC-2：then 臂尾的内层 for 以本 if 的 merge
+                                                        // 块（else_bi）作为循环出口，且该 for 的块在索引上排在 merge
+                                                        // 之后（乱序）。此时外层 loop_end 由 merge 之前的回边算出，
+                                                        // generateLabelDrivenBlockRange(blk_i, loop_end) 因起点 >= 终点
+                                                        // 而生成为空——内层 for 整块静默丢失。补全 generateLabelDrivenBlockRange
+                                                        // 的 loop_exit_is_outer_merge（仅 while/do-while）在 foreach 侧 for
+                                                        // 路径上的对称处理，口径与 for 侧同形分支一致：交自包含的
+                                                        // generateForFromLabels 用外层 end_idx 生成，并卸载其预标记的
+                                                        // 共享 merge 块，交由外层 if 的 merge 流程在正确缩进生成。
+                                                        // 严格限定两个前提，确保只在【区间已被截空】时救援：
+                                                        //   ① blk_i >= loop_end（原路径必发空区间，正常布局零影响）；
+                                                        //   ② 延续块确为 `if_merge_`（探针 H 的 else_bi 是
+                                                        //      foreach_increment_，内层 for 的 exit 同样落在其上，
+                                                        //      若不排除会把 increment 误卸载标记 → 增量重复发射）。
+                                                        var for_exit_is_outer_merge_lh = false;
+                                                        if (blk_i >= loop_end and std.mem.startsWith(u8, target_label, "for_cond_")) {
+                                                            if (else_bi) |ei_lh| {
+                                                                const inner_cond_blk = func.blocks.items[blk_i];
+                                                                const else_ptr = func.blocks.items[ei_lh];
+                                                                if (std.mem.startsWith(u8, else_ptr.label, "if_merge_")) {
+                                                                    if (inner_cond_blk.terminator) |iterm| {
+                                                                        if (iterm == .cond_br) {
+                                                                            const icb = iterm.cond_br;
+                                                                            if (icb.then_block == else_ptr or icb.else_block == else_ptr) {
+                                                                                for_exit_is_outer_merge_lh = true;
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        if (for_exit_is_outer_merge_lh) {
+                                                            _ = try self.generateForFromLabels(writer, func, blk_i, end_idx, cleanup_regs, processed, loop_label_counter, then_indent);
+                                                            if (else_bi) |ei_lh| _ = processed.remove(ei_lh);
+                                                        } else {
+                                                            try self.generateLabelDrivenBlockRange(writer, func, blk_i, loop_end, cleanup_regs, processed, loop_label_counter, then_indent);
+                                                        }
                                                         self.defer_loop_fallthrough = saved_defer_lh;
                                                         // 循环出口正是本 if 的 else 共享延续块：臂尾物化来源边
                                                         // PHI，否则 then 路径闭合后读到陈旧 merge 寄存器。
