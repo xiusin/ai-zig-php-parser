@@ -931,6 +931,20 @@ pub const NativeLinker = struct {
         return false;
     }
 
+    /// 臂尾 br 目标的循环头类别。口径与 generateLabelDrivenBlockRange 的
+    /// ah_is_foreach / ah_is_for / ah_is_while 完全一致，供三处循环生成器的
+    /// 臂尾派发点共用（AOT-CODEGEN-005 RC-4），避免同一前缀判断多处漂移。
+    const LoopHeadKind = enum { none, foreach, for_head, while_head };
+
+    fn loopHeadKind(label: []const u8) LoopHeadKind {
+        if (std.mem.startsWith(u8, label, "foreach_cond_")) return .foreach;
+        if (std.mem.startsWith(u8, label, "for_cond_")) return .for_head;
+        if (std.mem.startsWith(u8, label, "while_cond_") or
+            std.mem.startsWith(u8, label, "while_body_") or
+            std.mem.startsWith(u8, label, "do_while_body_")) return .while_head;
+        return .none;
+    }
+
     /// 在嵌套 if 的 then/else 块中处理 br 终止符：如果是循环退出块则生成 break，否则交给 generateBrToMergeCondBr
     fn writeBrInLoopContext(self: *Self, writer: anytype, func: *const IR.Function, br_target: *const IR.BasicBlock, source_blk: *const IR.BasicBlock, end_idx: usize, cleanup_regs: []const usize, processed: *std.AutoHashMap(usize, void), loop_label_counter: *u32, indent: []const u8) !void {
         if (self.current_loop_label != null and self.isLoopBreakTarget(func, br_target)) {
@@ -11559,6 +11573,64 @@ pub const NativeLinker = struct {
                                                         if (for_exit_is_outer_merge_lh) {
                                                             _ = try self.generateForFromLabels(writer, func, blk_i, end_idx, cleanup_regs, processed, loop_label_counter, then_indent);
                                                             if (else_bi) |ei_lh| _ = processed.remove(ei_lh);
+                                                        } else if (blk_i >= loop_end and
+                                                            Self.loopHeadKind(target_label) != .none and
+                                                            br_target != cond_block_ptr and
+                                                            br_target != inc_block_ptr and
+                                                            !processed.contains(blk_i))
+                                                        {
+                                                            // AOT-CODEGEN-005 RC-4 步骤①：把救援门控从「内层出口
+                                                            // 复用本 if 的 if_merge_」（RC-2 子集）放宽到「区间已截空
+                                                            // + 目标是任意循环头」。臂尾的裸 break/continue 在 IR 中
+                                                            // 没有自己的块——它被折进【内层循环的出口边】，而该出口
+                                                            // 落在外层循环自身的 cleanup/increment 上（本 if 没有 else
+                                                            // 块，false 边就是外层的延续块）。旧门控的 ②（else_bi 须为
+                                                            // if_merge_）判据落空 ⇒ 回退的范围行走起点 >= 终点 ⇒ 空区间
+                                                            // 零发射、零 processed 标记 ⇒ 内层循环整块静默丢失（症状
+                                                            // S1：count_x=0），且未标记的块随后被外层行走当兄弟块在循环
+                                                            // 外重发（症状 S2：尾部回声两份 + 副作用二次执行）。口径与
+                                                            // 公共处理器 generateLabelDrivenBlockRange 的臂内派发
+                                                            // （ah_* + is_outer_back_edge）一致。
+                                                            switch (Self.loopHeadKind(target_label)) {
+                                                                .foreach => _ = try self.generateForeachFromLabels(writer, func, blk_i, end_idx, cleanup_regs, processed, loop_label_counter, then_indent),
+                                                                .for_head => _ = try self.generateForFromLabels(writer, func, blk_i, end_idx, cleanup_regs, processed, loop_label_counter, then_indent),
+                                                                .while_head => _ = try self.generateWhileFromLabels(writer, func, blk_i, end_idx, cleanup_regs, processed, loop_label_counter, then_indent),
+                                                                .none => {},
+                                                            }
+                                                            // 循环头已在臂缩进发射：补记 processed，外层行走不得
+                                                            // 再在顶层重发它（各生成器只标记 body/exit/loop 块）。
+                                                            try processed.put(blk_i, {});
+                                                            // 内层出口落在外层循环自身的控制块时，自包含生成器的乱序
+                                                            // 回落分支（defer_loop_fallthrough）已卸载其标记；这些块
+                                                            // 由本层收尾统一发射（increment/cleanup/exit），必须恢复
+                                                            // 标记。延续块（else_bi）为共享 merge 的情形交给下方既有
+                                                            // 物化流程，不在此恢复——探针 H 教训：误卸载 foreach_increment_
+                                                            // 标记 ⇒ 外层增量重复发射。
+                                                            if (self.last_loop_fallthrough_idx) |lft_lh| {
+                                                                const lft_is_own_control = lft_lh == cleanup_idx or
+                                                                    (if (increment_idx) |ii_lh| lft_lh == ii_lh else false) or
+                                                                    (if (exit_idx) |ee_lh| lft_lh == ee_lh else false);
+                                                                if (lft_is_own_control) try processed.put(lft_lh, {});
+                                                                // AOT-CODEGEN-005 RC-4 步骤②：步骤①只把内层循环请回
+                                                                // 臂内（探针实测 count_x 复原、回声消失，但 visited
+                                                                // 仍为 5）——臂尾那条裸 break 在 IR 中没有自己的块，
+                                                                // 它的真实落点是【内层循环的出口边】，该边指向外层
+                                                                // foreach 的 cleanup/exit。此处按该边消解出口 PHI
+                                                                // 并补 break；落点为外层回边（increment，即裸
+                                                                // continue）时不发任何语句：foreach 的 continue
+                                                                // 在 latch 处会跳过 iter_next，直落到本层增量即可
+                                                                // （与 generic .br 回边处理同口径）。
+                                                                const lft_is_break_lh = lft_lh == cleanup_idx or
+                                                                    (if (exit_idx) |ee2_lh| lft_lh == ee2_lh else false);
+                                                                if (lft_is_break_lh) {
+                                                                    const phi_src_lh = self.last_loop_fallthrough_src_idx orelse blk_i;
+                                                                    try self.generateExitPHIAssignments(writer, func, phi_src_lh, lft_lh, then_indent, false);
+                                                                    try writer.print("{s}    break :{s};\n", .{ then_indent, label_name });
+                                                                    self.break_generated = true;
+                                                                    self.last_loop_fallthrough_idx = null;
+                                                                    self.last_loop_fallthrough_src_idx = null;
+                                                                }
+                                                            }
                                                         } else {
                                                             try self.generateLabelDrivenBlockRange(writer, func, blk_i, loop_end, cleanup_regs, processed, loop_label_counter, then_indent);
                                                         }
@@ -13660,6 +13732,45 @@ pub const NativeLinker = struct {
                                                         if (for_loop_exit_is_outer_merge) {
                                                             _ = try self.generateForFromLabels(writer, func, blk_i, end_idx, cleanup_regs, processed, loop_label_counter, then_indent);
                                                             if (else_bi) |ei| _ = processed.remove(ei);
+                                                        } else if (blk_i >= loop_end and
+                                                            Self.loopHeadKind(target_label) != .none and
+                                                            br_target != cond_block_ptr and
+                                                            br_target != loop_block_ptr and
+                                                            !processed.contains(blk_i))
+                                                        {
+                                                            // AOT-CODEGEN-005 RC-4 步骤①（for 侧同口径，见
+                                                            // generateForeachFromLabels 臂尾同名分支的成因说明）：
+                                                            // 区间截空 + 目标是循环头即交自包含生成器，不再回退到
+                                                            // 起点 >= 终点的空范围行走。
+                                                            const saved_defer_lf = self.defer_loop_fallthrough;
+                                                            self.defer_loop_fallthrough = true;
+                                                            self.last_loop_fallthrough_idx = null;
+                                                            self.last_loop_fallthrough_src_idx = null;
+                                                            switch (Self.loopHeadKind(target_label)) {
+                                                                .foreach => _ = try self.generateForeachFromLabels(writer, func, blk_i, end_idx, cleanup_regs, processed, loop_label_counter, then_indent),
+                                                                .for_head => _ = try self.generateForFromLabels(writer, func, blk_i, end_idx, cleanup_regs, processed, loop_label_counter, then_indent),
+                                                                .while_head => _ = try self.generateWhileFromLabels(writer, func, blk_i, end_idx, cleanup_regs, processed, loop_label_counter, then_indent),
+                                                                .none => {},
+                                                            }
+                                                            self.defer_loop_fallthrough = saved_defer_lf;
+                                                            try processed.put(blk_i, {});
+                                                            if (self.last_loop_fallthrough_idx) |lft_lf| {
+                                                                const lft_is_own_control = lft_lf == exit_idx or
+                                                                    lft_lf == loop_idx or lft_lf == cond_idx;
+                                                                if (lft_is_own_control) try processed.put(lft_lf, {});
+                                                                // AOT-CODEGEN-005 RC-4 步骤②（for 侧，成因说明见
+                                                                // generateForeachFromLabels 臂尾同名分支）：内层循环
+                                                                // 出口边落在本层 exit ⇒ 补 break；落在本层回边
+                                                                // （loop/cond，即裸 continue）⇒ 不发语句。
+                                                                if (lft_lf == exit_idx) {
+                                                                    const phi_src_lf = self.last_loop_fallthrough_src_idx orelse blk_i;
+                                                                    try self.generateExitPHIAssignments(writer, func, phi_src_lf, exit_idx, then_indent, false);
+                                                                    try writer.print("{s}    break :{s};\n", .{ then_indent, label_name });
+                                                                    self.break_generated = true;
+                                                                    self.last_loop_fallthrough_idx = null;
+                                                                    self.last_loop_fallthrough_src_idx = null;
+                                                                }
+                                                            }
                                                         } else {
                                                             try self.generateLabelDrivenBlockRange(writer, func, blk_i, loop_end, cleanup_regs, processed, loop_label_counter, then_indent);
                                                         }
@@ -15262,6 +15373,40 @@ pub const NativeLinker = struct {
                                                     if (for_exit_is_outer_merge_lw) {
                                                         _ = try self.generateForFromLabels(writer, func, blk_i, end_idx, cleanup_regs, processed, loop_label_counter, then_indent);
                                                         if (else_bi) |ei_lw| _ = processed.remove(ei_lw);
+                                                    } else if (blk_i >= loop_end and
+                                                        Self.loopHeadKind(target_label) != .none and
+                                                        !processed.contains(blk_i))
+                                                    {
+                                                        // AOT-CODEGEN-005 RC-4 步骤①（while 侧同口径，成因说明见
+                                                        // generateForeachFromLabels 臂尾同名分支）：区间截空 + 目标
+                                                        // 是循环头即交自包含生成器；旧门控只认「内层出口复用本 if 的
+                                                        // if_merge_」，漏掉「臂尾裸 break/continue 被折进内层循环出口
+                                                        // 边、该边落在本层 while 的 cond/exit 上」形。
+                                                        switch (Self.loopHeadKind(target_label)) {
+                                                            .foreach => _ = try self.generateForeachFromLabels(writer, func, blk_i, end_idx, cleanup_regs, processed, loop_label_counter, then_indent),
+                                                            .for_head => _ = try self.generateForFromLabels(writer, func, blk_i, end_idx, cleanup_regs, processed, loop_label_counter, then_indent),
+                                                            .while_head => _ = try self.generateWhileFromLabels(writer, func, blk_i, end_idx, cleanup_regs, processed, loop_label_counter, then_indent),
+                                                            .none => {},
+                                                        }
+                                                        try processed.put(blk_i, {});
+                                                        if (self.last_loop_fallthrough_idx) |lft_lw| {
+                                                            const lft_is_own_control = lft_lw == cond_idx or
+                                                                (lft_lw == exit_idx and exit_idx < func.blocks.items.len);
+                                                            if (lft_is_own_control) try processed.put(lft_lw, {});
+                                                            // AOT-CODEGEN-005 RC-4 步骤②（while 侧，成因说明见
+                                                            // generateForeachFromLabels 臂尾同名分支）。while(true)
+                                                            // 无正式 exit 块时 exit_idx 越界或等于 end_idx，此时
+                                                            // 裸 break 的落点由 isLoopBreakTarget 在上方处理，本支
+                                                            // 不重复发 break。
+                                                            if (lft_lw == exit_idx and exit_idx < func.blocks.items.len) {
+                                                                const phi_src_lw = self.last_loop_fallthrough_src_idx orelse blk_i;
+                                                                try self.generateExitPHIAssignments(writer, func, phi_src_lw, exit_idx, then_indent, false);
+                                                                try writer.print("{s}    break :{s};\n", .{ then_indent, label_name });
+                                                                self.break_generated = true;
+                                                                self.last_loop_fallthrough_idx = null;
+                                                                self.last_loop_fallthrough_src_idx = null;
+                                                            }
+                                                        }
                                                     } else {
                                                         try self.generateLabelDrivenBlockRange(writer, func, blk_i, loop_end, cleanup_regs, processed, loop_label_counter, then_indent);
                                                     }
