@@ -1,6 +1,6 @@
 # AOT 臂尾裸 `break`/`continue` 出口边语义 —— AOT-CODEGEN-005 RC-4（①+②）
 
-> 批次日期：2026-10-01 ｜ 代码态：**工作区未提交**（`src/aot/native_linker.zig` git blob `4b569afd`）｜ 基线提交：`b21cdfd`（RC-1/RC-2/RC-3）
+> 批次日期：2026-10-01 ｜ 代码态：**已提交 `0ff09cf`**（2026-10-03，`src/aot/native_linker.zig` +145/−0，内容 git blob `4b569afd`）｜ 基线提交：`b21cdfd`（RC-1/RC-2/RC-3）
 > 工单：[AOT-CODEGEN-005 §4 RC-4](../../known-issues/AOT-CODEGEN-005-foreach-body-if-arms-lost.md)
 
 ---
@@ -33,7 +33,7 @@
 | 语料影响 | 68 脚本 **零漂移**（`total=68 ok=68 diff=0 notemp=0 norow=0`）⇒ 未重冻结 `baseline_main_zig_md5.tsv` |
 | 是否破坏式 | **否**（纯新增分支；未删除、未改写任何既有行） |
 | 性能影响 | 无运行期成本；发射期新增判据仅在「区间将被截空」这一异常形态触发，正常布局走原路径 |
-| 未覆盖 | RC-5 两 facet（延续块丢失 / 臂尾 `continue` 未翻译）、REF-003 W3 段错误 —— 均**未修** |
+| 未覆盖 | RC-5 两 facet（延续块丢失 / 臂尾 `continue` 未翻译）、REF-003 W3 段错误 —— 均**未修**。**【2026-10-03 回填】** 前者已由 CODEGEN-005 方案 B 关闭（facet-1）；后者（facet-2）的「`continue` 未翻译」为**当时口径、已被同日晚些的只读静态取证否证**（IR 层出口边折边正确，缺的是发射侧臂尾 `continue :<外层标签>`），本行保留为历史记录 |
 
 ---
 
@@ -209,7 +209,7 @@ sequenceDiagram
 | 静默失效族 | 空区间「零发射零标记」与 #18 金丝雀同源。建议配套发射期断言（`.br → 循环头` 派发后目标仍不在 `processed` ⇒ 打 `[AOT-CANARY]`），**是否与修复同批待裁决** |
 | 三写重复 | ① 分支在 foreach/for/while 各写一遍（+58/+39/+34）⇒ DRY 未收口，已列 P2 单独成批，禁止夹带 |
 | 未修的已知红点 | RC-5 两 facet + REF-003 W3。等值门**结构上看不到** RC-5 facet-1（正对照 F-A 的延续块就是 increment，落在被吞区间之前 ⇒ 零丢失），只能靠新增的 RC-5 诊断门盯住 |
-| 提交态风险 | 代码 + 工单文档目前**未提交**；若批次期间他人 `zig build` 会基于未审阅的发射侧改动 ⇒ 建议尽快按 §3 口径单独成批提交 |
+| 提交态风险 | 代码 + 工单文档目前**未提交**；若批次期间他人 `zig build` 会基于未审阅的发射侧改动 ⇒ 建议尽快按 §3 口径单独成批提交。**（2026-10-03 更新：本项风险已闭合 —— 单独成批提交为 `0ff09cf`。提交组成经 `git show --numstat 0ff09cf` 核对：`src/aot/native_linker.zig` +145/−0、本变更文档与工单 `AOT-CODEGEN-005-…md`（两份文档为**首次入库**）、以及全部永久探针与诊断门脚本（含 RC-5 的 `c005_rc5_merge_loss_tmp.php` / `c005_rc5_probe_run_tmp.sh`、REF-002 隔离探针、`ref003_crash_attr_tmp.php`、`c005_full_drift_tmp.sh`）。**未夹带**的是代码侧后续批次：RC-5 的发射侧改动、REF-003 的运行时模板改动、① 三写重复的 DRY 收口、`scripts/batch_test_aot.sh` 的 gtimeout 改动）** |
 | 归因风险 | 见 §5.3「归因折中」——② 未单独过全门，合并态若出红点需按预案注释三处 `if (lft_is_break_*)` 二分 |
 
 ---
@@ -218,7 +218,7 @@ sequenceDiagram
 
 | ID | 问题 | 状态 |
 |---|---|---|
-| RC-5 facet-1 | 臂尾 `continue` + if 有真实延续块 ⇒ 延续块被 mark-rest 扫描（:7206–7211）吞进 `processed` ⇒ 后置兄弟语句任一路径不发射（F-B/F-D/F-E）。**原候选归属「`else_is_coalesce` 判据过宽」已被 F-D 否证** | ⏳ 待裁决（**一行代码未改**）；修法 P0 方案 A / P2 方案 B |
+| RC-5 facet-1 | 臂尾 `continue` + if 有真实延续块 ⇒ 延续块被 mark-rest 扫描（:7206–7211）吞进 `processed` ⇒ 后置兄弟语句任一路径不发射（F-B/F-D/F-E）。**原候选归属「`else_is_coalesce` 判据过宽」已被 F-D 否证** | ✅ **2026-10-03 关闭**：用户裁决走**方案 B**（mark-rest 改按 CFG 可达性，新增 `markReachableRestBlocks`），+54/−3 落地在**工作区未提交**，F-B/F-D/F-E 与 Y6MIN 转逐字节等值 ⇒ 实施与全门记录见 [CODEGEN-005](../../known-issues/AOT-CODEGEN-005-foreach-body-if-arms-lost.md) §7 行 12；方案 A 未采纳，保留为对照记录 |
 | RC-5 facet-2 | while 内层（F-F）与 for 外层（F-H）的臂尾裸 `continue` **未进入**出口边翻译机制（无 `[RC5T7]`、`brk=0`、`lft=null`）⇒ `continue` 丢失、then 路径过执行 | ⏳ 待裁决（P1，需先定位「为何 `last_loop_fallthrough_idx` 为空」） |
 | REF-003 P0 | `php_array_iter_next` 在迭代期数组增长后**段错误**（`rc=139`），W3 单形。本批三点序列把崩溃点定位到「搬迁后的下一次 `next()` 推进」而非槽读取 | ⏳ 待裁决后才动 `runtime_lib_template.zig` |
 | CODEGEN-005 行 3 | 金丝雀扩展 + 把 F/J 形状纳入语料生成模板（代价：基线重冻结一次） | ⏳ 待裁决 |

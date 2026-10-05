@@ -2,6 +2,14 @@
 # AOT 批量测试脚本：编译并运行 fail_runtime 目录下所有 PHP 脚本
 # 对比 AOT 输出与标准 PHP 输出
 #
+# 超时命令探测：GNU coreutils 环境为 gtimeout，Linux/已链接环境为 timeout，
+# 本脚本不绑定具体包名，探测失败即退出（禁止无超时执行，防挂死）。
+TIMEOUT_BIN=$(command -v timeout || command -v gtimeout || true)
+if [ -z "$TIMEOUT_BIN" ]; then
+    echo "ERROR: neither 'timeout' nor 'gtimeout' found; install coreutils" >&2
+    exit 1
+fi
+#
 # 规范化规则（以下差异不算错误）：
 #   1. 文件路径和行号差异（AOT 栈追踪缺少文件路径/行号）
 #   2. 栈追踪深度/调用链差异（AOT 限制：仅显示 #0 {main}）
@@ -70,7 +78,7 @@ for php_file in "$DIR"/*.php; do
     output_bin="$DIR/aot_compile_$base"
 
     # 编译（带超时）
-    compile_output=$(timeout 60 $INTERPRETER --compile --no-debug-info "$php_file" 2>&1)
+    compile_output=$("$TIMEOUT_BIN" 60 $INTERPRETER --compile --no-debug-info "$php_file" 2>&1)
     compile_rc=$?
 
     if [ $compile_rc -ne 0 ]; then
@@ -80,11 +88,11 @@ for php_file in "$DIR"/*.php; do
     fi
 
     # 运行 AOT
-    run_output=$(timeout 10 "$output_bin" 2>&1)
+    run_output=$("$TIMEOUT_BIN" 10 "$output_bin" 2>&1)
     run_rc=$?
 
     # 运行标准 PHP
-    php_output=$(timeout 10 php "$php_file" 2>&1)
+    php_output=$("$TIMEOUT_BIN" 10 php "$php_file" 2>&1)
     php_rc=$?
 
     if [ $run_rc -eq 124 ]; then

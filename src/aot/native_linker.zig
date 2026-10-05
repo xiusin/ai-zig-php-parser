@@ -945,6 +945,249 @@ pub const NativeLinker = struct {
         return .none;
     }
 
+    /// 块是否属于【外层循环的 latch/回边】（foreach 的 increment、for 的 loop 块）。
+    /// 内层循环出口落在该块时，迭代推进归外层所有，内层生成器不得抢先消费成自己的
+    /// 收尾（AOT-CODEGEN-005 RC-5 facet-2：交还与否决定臂尾能否续进到 latch）。
+    fn isOuterLoopLatch(label: []const u8) bool {
+        return std.mem.startsWith(u8, label, "for_loop_") or
+            std.mem.startsWith(u8, label, "foreach_increment_");
+    }
+
+    /// 在循环候选块中找到真正 br/cbr 到 exit 块的那条边的来源块索引，供外层在臂尾
+    /// 物化该边的 merge PHI；找不到则回退 fallback_idx。口径取自
+    /// generateForFromLabels 乱序回落分支的原内联计算（AOT-CODEGEN-005 RC-5 facet-2 抽出共用）。
+    fn findExitEdgeSourceIdx(
+        func: *const IR.Function,
+        cands: []const usize,
+        exit_idx: usize,
+        exit_block: *const IR.BasicBlock,
+        fallback_idx: usize,
+    ) usize {
+        for (cands) |ci| {
+            if (ci >= func.blocks.items.len or ci == exit_idx) continue;
+            if (func.blocks.items[ci].terminator) |ct| {
+                switch (ct) {
+                    .br => |t| {
+                        if (t == exit_block) return ci;
+                    },
+                    .cond_br => |cb| {
+                        if (cb.then_block == exit_block or cb.else_block == exit_block) return ci;
+                    },
+                    else => {},
+                }
+            }
+        }
+        return fallback_idx;
+    }
+
+    /// 臂尾 `.br` 的目标若是【窄口径循环头】，本臂末就不是汇合点而是循环入口：按 else 臂
+    /// 的三段模板派发整段循环，而不是只物化边 PHI（AOT-CODEGEN-006 A 类：if/elseif 链的
+    /// 臂内含 for 时，末臂在四处臂尾站点被静默丢弃）。
+    /// 返回 true = 已派发，调用方不得再物化该边 PHI；false = 维持原状（merge/回边/非循环头）。
+    /// 谓词按 R4 影子实测收窄到四个前缀：宽口径 `isLoopHeadLabel` 会把 `foreach_increment_*`
+    /// 也算进来，实测命中 f044/f067/f160 三个已通过脚本（该类 latch 归 CODEGEN-005 RC-4/RC-5
+    /// 所有，本单禁止再动）；模板 ② 的 if_then_/ternary_then_/coalesce_rhs_ 三条例外形态
+    /// 在 114 脚本上读数为 0，故不纳入本谓词（未实测即不写）。
+    fn dispatchArmTailBrIntoLoop(
+        self: *Self,
+        writer: anytype,
+        func: *const IR.Function,
+        target: *const IR.BasicBlock,
+        end_idx: usize,
+        cleanup_regs: []const usize,
+        processed: *std.AutoHashMap(usize, void),
+        loop_label_counter: *u32,
+        indent: []const u8,
+    ) anyerror!bool {
+        const ti = self.tryFindBlockIndex(func, target) orelse return false;
+        const label = func.blocks.items[ti].label;
+        const is_narrow_loop_head = std.mem.startsWith(u8, label, "for_cond_") or
+            std.mem.startsWith(u8, label, "while_cond_") or
+            std.mem.startsWith(u8, label, "foreach_cond_") or
+            std.mem.startsWith(u8, label, "do_while_body_");
+        if (!is_narrow_loop_head) return false;
+        // 回边（continue）与增量块形态不改：目标即本循环 cond 块，或目标自身 br 回 cond 块。
+        if (self.current_loop_cond_block) |ci| {
+            if (ci < func.blocks.items.len) {
+                if (ti == ci) return false;
+                if (func.blocks.items[ti].terminator) |tb| {
+                    if (tb == .br and tb.br == func.blocks.items[ci]) return false;
+                }
+            }
+        }
+        const saved_rg = self.return_generated;
+        const saved_break = self.break_generated;
+        self.return_generated = false;
+        self.break_generated = false;
+        try self.generateLabelDrivenBlockRange(writer, func, ti, end_idx, cleanup_regs, processed, loop_label_counter, indent);
+        if (!self.return_generated) self.return_generated = saved_rg;
+        if (!self.break_generated) self.break_generated = saved_break;
+        return true;
+    }
+
+    /// AOT-CODEGEN-006 D 类：elseif 链逐层展开时，若 then 臂非守卫形态（臂尾 `br` 未回落本层
+    /// else 目标）且 else 目标又不是本循环回边，原实现在 `chain_unwind` 处以裸 `break` 把整层
+    /// 两臂一起丢弃（形 8 三级链末臂含 for ⇒ 该臂连同循环全部静默消失，输出为空）。
+    /// 正确形态是双臂：`if (cond) { then 臂 } else { else 臂 }`，其中 then 臂区间以兄弟 else 臂
+    /// 块为界（[then_idx, else_idx)），否则同一帧会线性吞并兄弟臂（即 CODEGEN-006 C 类同因）；
+    /// else 臂区间沿用外层 `end_idx`，由区间行走正常派发其中的循环/退出块。
+    /// 返回 true = 已发射双臂；false = 形态不符（else 目标缺失、乱序或已处理），调用方维持原 break。
+    fn emitChainUnwindArmPair(
+        self: *Self,
+        writer: anytype,
+        func: *const IR.Function,
+        cond: IR.Register,
+        else_block: *const IR.BasicBlock,
+        then_idx: usize,
+        end_idx: usize,
+        cleanup_regs: []const usize,
+        processed: *std.AutoHashMap(usize, void),
+        loop_label_counter: *u32,
+        indent: []const u8,
+    ) anyerror!bool {
+        const ei = self.tryFindBlockIndex(func, else_block) orelse return false;
+        if (ei <= then_idx) return false;
+        if (processed.contains(ei)) return false;
+        try writer.print("{s}if (", .{indent});
+        try self.writeConditionExpr(writer, cond.id, cond.type_);
+        try writer.print(") {{\n", .{});
+        const arm_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{indent});
+        defer self.allocator.free(arm_indent);
+        const saved_rg = self.return_generated;
+        const saved_brk = self.break_generated;
+        // 两臂臂尾各自回落链共享 merge ⇒ if/else 之后恒可达 ⇒ 臂后无条件恢复标志
+        self.return_generated = false;
+        self.break_generated = false;
+        _ = try self.generateLabelDrivenBlockRange(writer, func, then_idx, ei, cleanup_regs, processed, loop_label_counter, arm_indent);
+        self.return_generated = saved_rg;
+        self.break_generated = saved_brk;
+        try writer.print("{s}}} else {{\n", .{indent});
+        self.return_generated = false;
+        self.break_generated = false;
+        _ = try self.generateLabelDrivenBlockRange(writer, func, ei, end_idx, cleanup_regs, processed, loop_label_counter, arm_indent);
+        self.return_generated = saved_rg;
+        self.break_generated = saved_brk;
+        try writer.print("{s}}}\n", .{indent});
+        return true;
+    }
+
+    /// 求链节点 node_idx 的直接后支配块（IPD）：从该节点出发的【全部】路径必经的第一个块，
+    /// 即 if/elseif 链语义上的共享 merge（AOT-CODEGEN-006 结构口径）。虚拟出口 V = blocks.len，
+    /// 所有无后继块（ret/throw/unreachable）汇入 V；IPD 落在 V 表示「仅函数出口后支配」
+    /// （守卫子句/单臂直接返回）⇒ 无 merge ⇒ null。
+    /// 算法 = Cooper-Harvey-Kennedy 定点跑在【反向】CFG（与 analysis.computeDominators 同族）；
+    /// 反向图后序 DFS 用显式栈，规避 AOT-CODEGEN-004 的递归深度风险。只读，不改 IR。
+    fn findChainMergeByPostDom(self: *Self, func: *const IR.Function, node_idx: usize) !?usize {
+        const n = func.blocks.items.len;
+        if (node_idx >= n) return null;
+        const V = n;
+        const NONE = std.math.maxInt(usize);
+        const MAXR = std.math.maxInt(u32);
+
+        var cfg = ControlFlowAnalysis.init(self.allocator);
+        defer cfg.deinit();
+        try self.buildCFG(func, &cfg);
+
+        // 反向 CFG（root=V）显式栈后序 DFS：children(V)=出口块，children(b)=preds_G(b)
+        var visited = std.AutoHashMap(usize, void).init(self.allocator);
+        defer visited.deinit();
+        var post = std.ArrayList(usize).empty;
+        defer post.deinit(self.allocator);
+        const DfsFrame = struct { node: usize, expanded: bool };
+        var stack = std.ArrayList(DfsFrame).empty;
+        defer stack.deinit(self.allocator);
+        _ = try visited.put(V, {});
+        try stack.append(self.allocator, .{ .node = V, .expanded = false });
+        while (stack.pop()) |frame| {
+            if (frame.expanded) {
+                try post.append(self.allocator, frame.node);
+                continue;
+            }
+            try stack.append(self.allocator, .{ .node = frame.node, .expanded = true });
+            if (frame.node == V) {
+                for (0..n) |b| {
+                    if (cfg.successors.get(b).?.items.len == 0 and !visited.contains(b)) {
+                        _ = try visited.put(b, {});
+                        try stack.append(self.allocator, .{ .node = b, .expanded = false });
+                    }
+                }
+            } else if (cfg.predecessors.get(frame.node)) |preds| {
+                for (preds.items) |p| {
+                    if (!visited.contains(p)) {
+                        _ = try visited.put(p, {});
+                        try stack.append(self.allocator, .{ .node = p, .expanded = false });
+                    }
+                }
+            }
+        }
+
+        // 反向图 RPO 编号（post 逆序）
+        const rpo_num = try self.allocator.alloc(u32, n + 1);
+        defer self.allocator.free(rpo_num);
+        const ipd = try self.allocator.alloc(usize, n + 1);
+        defer self.allocator.free(ipd);
+        for (0..n + 1) |k| {
+            rpo_num[k] = MAXR;
+            ipd[k] = NONE;
+        }
+        var num: u32 = 0;
+        var pi = post.items.len;
+        while (pi > 0) {
+            pi -= 1;
+            rpo_num[post.items[pi]] = num;
+            num += 1;
+        }
+        ipd[V] = V;
+
+        // CK 定点：preds_{rev}(b) = succ_G(b)，且 b 为出口块时额外含 V
+        const Intersect = struct {
+            fn run(a: usize, b: usize, ipd_arr: []const usize, num_arr: []const u32) usize {
+                var f1 = a;
+                var f2 = b;
+                while (f1 != f2) {
+                    if (f1 == NONE or f2 == NONE) return NONE;
+                    const n1 = num_arr[f1];
+                    const n2 = num_arr[f2];
+                    if (n1 == MAXR or n2 == MAXR) return NONE;
+                    if (n1 > n2) {
+                        f1 = ipd_arr[f1];
+                    } else if (n2 > n1) {
+                        f2 = ipd_arr[f2];
+                    } else {
+                        return NONE;
+                    }
+                }
+                return f1;
+            }
+        };
+        var changed = true;
+        while (changed) {
+            changed = false;
+            var it = post.items.len;
+            while (it > 0) {
+                it -= 1;
+                const b = post.items[it];
+                if (b == V) continue;
+                const succ = cfg.successors.get(b).?;
+                var cur: usize = if (succ.items.len == 0) V else NONE;
+                for (succ.items) |s| {
+                    // CK：候选是【后继本身】（V 已置 ipd[V]=V），仅在 intersect 走链时读 ipd；
+                    // 后继尚未算出（NONE）则跳过，等下一轮定点。
+                    if (s != V and ipd[s] == NONE) continue;
+                    cur = if (cur == NONE) s else Intersect.run(cur, s, ipd, rpo_num);
+                }
+                if (cur != NONE and cur != ipd[b]) {
+                    ipd[b] = cur;
+                    changed = true;
+                }
+            }
+        }
+
+        const m = ipd[node_idx];
+        if (m == NONE or m == V or m == node_idx) return null;
+        return m;
+    }
+
     /// 在嵌套 if 的 then/else 块中处理 br 终止符：如果是循环退出块则生成 break，否则交给 generateBrToMergeCondBr
     fn writeBrInLoopContext(self: *Self, writer: anytype, func: *const IR.Function, br_target: *const IR.BasicBlock, source_blk: *const IR.BasicBlock, end_idx: usize, cleanup_regs: []const usize, processed: *std.AutoHashMap(usize, void), loop_label_counter: *u32, indent: []const u8) !void {
         if (self.current_loop_label != null and self.isLoopBreakTarget(func, br_target)) {
@@ -7204,9 +7447,9 @@ pub const NativeLinker = struct {
             // 如果已生成 return 或 break，后续代码不可达，停止生成
             // 标记剩余块为已处理，避免 tryGenerateFromLabels 报告未处理块
             if (self.return_generated or self.break_generated) {
-                for (i..end_idx) |j| {
-                    try processed.put(j, {});
-                }
+                // RC-5 方案 B：不再整段吞标 —— 仍能从已发射前缀到达的块（典型为该 if 的
+                // if_merge_/显式 else 延续块）必须留在 processed 之外，交还下游发射。
+                try self.markReachableRestBlocks(func, i, end_idx, processed);
                 return;
             }
             if (processed.contains(i)) {
@@ -9021,7 +9264,11 @@ pub const NativeLinker = struct {
                                                                     .br => |br_t0| {
                                                                         // f067 query：then 臂 .br 回落 merge → merge 可达
                                                                         ooo_arm_has_br = true;
-                                                                        try self.materializeEdgePhi(writer, br_t0, nt_blk, nested_indent);
+                                                                        // AOT-CODEGEN-006 A 类：臂尾落循环头 ⇒ 派发整段循环，
+                                                                        // 只物化 PHI 会让末臂的循环静默消失。
+                                                                        if (!try self.dispatchArmTailBrIntoLoop(writer, func, br_t0, end_idx, cleanup_regs, processed, loop_label_counter, nested_indent)) {
+                                                                            try self.materializeEdgePhi(writer, br_t0, nt_blk, nested_indent);
+                                                                        }
                                                                     },
                                                                     else => {},
                                                                 }
@@ -9062,7 +9309,11 @@ pub const NativeLinker = struct {
                                                                             .br => |br_t| {
                                                                                 // f067 query：臂尾 .br 回落 merge → merge 可达
                                                                                 ooo_arm_has_br = true;
-                                                                                try self.materializeEdgePhi(writer, br_t, ne_blk, nested_indent);
+                                                                                // AOT-CODEGEN-006 A 类：臂尾落循环头 ⇒ 派发整段循环，
+                                                                                // 只物化 PHI 会让末臂的循环静默消失。
+                                                                                if (!try self.dispatchArmTailBrIntoLoop(writer, func, br_t, end_idx, cleanup_regs, processed, loop_label_counter, nested_indent)) {
+                                                                                    try self.materializeEdgePhi(writer, br_t, ne_blk, nested_indent);
+                                                                                }
                                                                             },
                                                                             .cond_br => |ncb2| {
                                                                                 // f113：else 臂终止符又是 cond_br（elseif 链尾）。
@@ -9105,7 +9356,12 @@ pub const NativeLinker = struct {
                                                                                             }
                                                                                             break :blk_be false;
                                                                                         };
-                                                                                        if (!else_is_back_edge) break :chain_unwind;
+                                                                                        if (!else_is_back_edge) {
+                                                                                            // AOT-CODEGEN-006 D 类：else 目标为链内真实臂块 ⇒ 发双臂
+                                                                                            // `if(c){then}else{else}`；形态不符则维持原 break（不发）。
+                                                                                            _ = try self.emitChainUnwindArmPair(writer, func, chain_cb.cond, chain_cb.else_block, cti, end_idx, cleanup_regs, processed, loop_label_counter, nested_indent);
+                                                                                            break :chain_unwind;
+                                                                                        }
                                                                                         try writer.print("{s}if (", .{nested_indent});
                                                                                         try self.writeConditionExpr(writer, chain_cb.cond.id, chain_cb.cond.type_);
                                                                                         try writer.print(") {{\n", .{});
@@ -9921,7 +10177,23 @@ pub const NativeLinker = struct {
                                                 try writer.print("{s}}}\n", .{body_indent});
                                             } else if (nested_then_idx) |nti| {
                                                 if (!processed.contains(nti)) {
-                                                    if (nested_merge_idx) |nmi| {
+                                                    if (nested_merge_idx) |nmi_raw| {
+                                                        // AOT-CODEGEN-006 结构 merge（IPD）：块序口径的 nmi 只向后扫
+                                                        // 臂尾 br 目标，链的共享 merge 排在臂之前（反向 merge）时会误取
+                                                        // 臂的后继（形 4：nmi=for_cond_7 而真 merge=if_merge_2），于是走
+                                                        // 线性范围发射、把臂内整段循环吞掉。链节点（= 本 else 块 ei）
+                                                        // 的 IPD（该节点出发的全部路径必经首块）才是语义 merge：它存在、
+                                                        // 落在本帧 [start_idx, end_idx) 且早于臂起点 nti ⇒ 改判 merge，
+                                                        // 交下方乱序双臂模板（与 nmi < nti 的既有正确形态同源）。
+                                                        // 判据只在 nmi_raw >= nti 时求值，乱序形态与共享 merge 路径零额外开销。
+                                                        const nmi: usize = blk_p9: {
+                                                            if (nmi_raw >= nti) {
+                                                                if (try self.findChainMergeByPostDom(func, ei)) |m| {
+                                                                    if (m >= start_idx and m < end_idx and m < nti) break :blk_p9 m;
+                                                                }
+                                                            }
+                                                            break :blk_p9 nmi_raw;
+                                                        };
                                                         if (nmi >= nti) {
                                                             // 缺陷（f161 xp5）：nmi 指向循环头块（无 else 的
                                                             // 嵌套 if 的 merge 直落其后继 while/for）时，
@@ -9975,7 +10247,11 @@ pub const NativeLinker = struct {
                                                                     .br => |br_t0b| {
                                                                         // f067 query：then 臂 .br 回落 merge → merge 可达
                                                                         ooo_arm_has_br = true;
-                                                                        try self.materializeEdgePhi(writer, br_t0b, nt_blk, nested_indent);
+                                                                        // AOT-CODEGEN-006 A 类：臂尾落循环头 ⇒ 派发整段循环，
+                                                                        // 只物化 PHI 会让末臂的循环静默消失。
+                                                                        if (!try self.dispatchArmTailBrIntoLoop(writer, func, br_t0b, end_idx, cleanup_regs, processed, loop_label_counter, nested_indent)) {
+                                                                            try self.materializeEdgePhi(writer, br_t0b, nt_blk, nested_indent);
+                                                                        }
                                                                     },
                                                                     else => {},
                                                                 }
@@ -10015,7 +10291,11 @@ pub const NativeLinker = struct {
                                                                             .br => |br_t| {
                                                                                 // f067 query：臂尾 .br 回落 merge → merge 可达
                                                                                 ooo_arm_has_br = true;
-                                                                                try self.materializeEdgePhi(writer, br_t, ne_blk, nested_indent);
+                                                                                // AOT-CODEGEN-006 A 类：臂尾落循环头 ⇒ 派发整段循环，
+                                                                                // 只物化 PHI 会让末臂的循环静默消失。
+                                                                                if (!try self.dispatchArmTailBrIntoLoop(writer, func, br_t, end_idx, cleanup_regs, processed, loop_label_counter, nested_indent)) {
+                                                                                    try self.materializeEdgePhi(writer, br_t, ne_blk, nested_indent);
+                                                                                }
                                                                             },
                                                                             .cond_br => |ncb2| {
                                                                                 // f113：else 臂终止符又是 cond_br（elseif 链尾）。
@@ -10058,7 +10338,12 @@ pub const NativeLinker = struct {
                                                                                             }
                                                                                             break :blk_be false;
                                                                                         };
-                                                                                        if (!else_is_back_edge) break :chain_unwind;
+                                                                                        if (!else_is_back_edge) {
+                                                                                            // AOT-CODEGEN-006 D 类：else 目标为链内真实臂块 ⇒ 发双臂
+                                                                                            // `if(c){then}else{else}`；形态不符则维持原 break（不发）。
+                                                                                            _ = try self.emitChainUnwindArmPair(writer, func, chain_cb.cond, chain_cb.else_block, cti, end_idx, cleanup_regs, processed, loop_label_counter, nested_indent);
+                                                                                            break :chain_unwind;
+                                                                                        }
                                                                                         try writer.print("{s}if (", .{nested_indent});
                                                                                         try self.writeConditionExpr(writer, chain_cb.cond.id, chain_cb.cond.type_);
                                                                                         try writer.print(") {{\n", .{});
@@ -14640,24 +14925,13 @@ pub const NativeLinker = struct {
             self.last_loop_fallthrough_idx = exit_idx;
             // 回落边来源：循环诸块（cond/body/increment）中真正 br/cbr 到 exit 的块，
             // 供外层在臂尾物化该边 merge PHI（与 foreach 侧约定一致）。
-            self.last_loop_fallthrough_src_idx = blk_src: {
-                const cand_idx = [3]usize{ cond_idx, body_idx, loop_idx };
-                for (cand_idx) |ci| {
-                    if (ci >= func.blocks.items.len or ci == exit_idx) continue;
-                    if (func.blocks.items[ci].terminator) |ct| {
-                        switch (ct) {
-                            .br => |t| {
-                                if (t == exit_block) break :blk_src ci;
-                            },
-                            .cond_br => |cb| {
-                                if (cb.then_block == exit_block or cb.else_block == exit_block) break :blk_src ci;
-                            },
-                            else => {},
-                        }
-                    }
-                }
-                break :blk_src cond_idx;
-            };
+            self.last_loop_fallthrough_src_idx = findExitEdgeSourceIdx(
+                func,
+                &[_]usize{ cond_idx, body_idx, loop_idx },
+                exit_idx,
+                exit_block,
+                cond_idx,
+            );
             return exit_idx;
         }
 
@@ -14677,6 +14951,25 @@ pub const NativeLinker = struct {
         if (std.mem.startsWith(u8, exit_block.label, "for_loop_") or
             std.mem.startsWith(u8, exit_block.label, "foreach_increment_"))
         {
+            // AOT-CODEGEN-005 RC-5 facet-2 站点②：本循环派发在 if 臂内（in_cond_br_branch）
+            // 时，臂尾那条裸 continue 在 IR 里没有自己的块——它被折进本循环的出口边，而该边
+            // 落在【外层 latch】上。此处若消费掉该块，臂尾就只剩「直落」，merge 之后的兄弟
+            // 语句被真臂一并执行（F-H：hit=3 vs 真值 1）。口径复制等值正控制 F-B：记录出口边
+            // 并从 exit_idx 交还，让外层臂 range 在臂缩进续走该块 ⇒ 内联发射 latch + continue。
+            // 线性体派发（in_branch=false）必须维持「标记 + 跳过」：latch 由外层自身体尾发一次，
+            // 交还会让外层增量重复执行（$i 跳号，原分支注释所述的既有反例）。
+            if (self.in_cond_br_branch) {
+                _ = processed.remove(exit_idx);
+                self.last_loop_fallthrough_idx = exit_idx;
+                self.last_loop_fallthrough_src_idx = findExitEdgeSourceIdx(
+                    func,
+                    &[_]usize{ cond_idx, body_idx, loop_idx },
+                    exit_idx,
+                    exit_block,
+                    cond_idx,
+                );
+                return exit_idx;
+            }
             try processed.put(exit_idx, {});
             return exit_idx + 1;
         }
@@ -15324,8 +15617,8 @@ pub const NativeLinker = struct {
                                                     // 旧口径与「br → 普通 merge 块」同路（仅 merge_bi = blk_i），
                                                     // 于是内层 for/foreach/while 的本体从未派发 ⇒ while 体内
                                                     // `if (c) { for … }` 整块静默丢失（探针 N/P/Q count=0）。
-                                                    // 补 generateForeachFromLabels(RC-2 :11502) /
-                                                    // generateForFromLabels(:13622) 已有的同形派发：命中循环头标签
+                                                    // 补 generateForeachFromLabels 已有的同形派发（派发表 :11516–:11525，
+                                                    // 其 RC-2 判据 :11556–:11573）与 generateForFromLabels（派发表 :13694–:13703，判据 :13717–:13732）：命中循环头标签
                                                     // 前缀即在 then 缩进内交范围行走 [blk_i, loop_end) 生成真正的
                                                     // 嵌套循环；若内层 for 的出口复用本 if 的 merge 块
                                                     // （else_bi 为 if_merge_ 且 for 的 cond_br 单边落在其上），
@@ -16247,6 +16540,17 @@ pub const NativeLinker = struct {
                 }
             }
             _ = processed.remove(exit_idx);
+            // AOT-CODEGEN-005 RC-5 facet-2 站点①：出口块是【外层循环 latch】且本 while 在
+            // if 臂内派发时，交还该块（记录出口边 + 从 exit_idx 续走），让外层臂 range 在臂缩进
+            // 内联发射 latch + continue —— 与等值正控制 F-B 同几何。原口径一律 resume 到
+            // extended_end/end_idx，臂 range（start>exit_idx）永远走不到该 latch，臂尾只剩直落
+            // ⇒ merge 之后的兄弟语句被真臂过执行（F-F：hit=4 vs 真值 2）。
+            // 线性体派发（in_branch=false）保持原消费：latch 只应由外层体尾发一次。
+            if (isOuterLoopLatch(shared_merge_blk.label) and self.in_cond_br_branch) {
+                self.last_loop_fallthrough_idx = exit_idx;
+                self.last_loop_fallthrough_src_idx = exit_src_idx orelse cond_idx;
+                return exit_idx;
+            }
             if (extended_end < cond_idx) {
                 // 乱序 exit（exit_idx < cond_idx）时，extended_end 常被错误计算为等于
                 // exit_idx（如返回 19，而循环 cond 在 25），导致调用者回溯到 exit 块
@@ -25278,6 +25582,57 @@ pub const NativeLinker = struct {
             }
         }
         return false;
+    }
+
+    /// mark-rest 扫描的可达性口径（CODEGEN-005 RC-5 方案 B）：`return`/`break` 已生成后，
+    /// 区间 [sweep_start, end_idx) 中**只有确证不可达**的块才标记 processed，其余交还下游发射。
+    ///
+    /// 种子 = 存在位置 `src < sweep_start` 的前驱。该前驱已由本层或外层行走发出，它的边在生成码中真实
+    /// 存在 ⇒ 目标块仍可达（典型为该 if 的 `if_merge_`/显式 `else` 延续块：旧口径把它整段吞标，
+    /// 使下游 coalesce 延后发射与普通 else 臂的 `!processed.contains(...)` 判据双双落空 ⇒ 臂尾
+    /// 裸 `continue` 之后的兄弟语句在任一路径都不发射）。
+    ///
+    /// 口径边界（由实测划定，禁止凭推测扩大）：
+    /// - **只认直接前驱，不做区间内前向闭包**：闭包版实测把「保留块的后继中没有发射消费者的块」
+    ///   留在 processed 之外，命中顶层 `!all_processed` 兜底（:6497–:6514，判定 :6505、`return false` :6513；
+    ///   顶层行走调用 :6494）⇒ `AstDirectGenerationFailed` 编译失败（f007 实测）。
+    /// - **只走 `.br`/`.cond_br` 边，不看 `.switch_`**：与本轮影子扫描口径逐字一致；影子实测差异面
+    ///   为「68 语料 0 处、4 个探针共 6 处收尾站点、每处从区间 5 块中放行 1 块」，本批唯一被验证过的即此范围。
+    /// - **只省略新增标记，从不撤销既有标记** ⇒ foreach 预标记的 increment/cleanup/exit 不受影响
+    ///   （探针 H 教训：误卸载这些标记 ⇒ 外层增量重复发射）。
+    /// 复杂度 O(sweep_start + 区间长度)（前缀单次扫描，块序即位置序）。
+    fn markReachableRestBlocks(
+        self: *const Self,
+        func: *const IR.Function,
+        sweep_start: usize,
+        end_idx: usize,
+        processed: *std.AutoHashMap(usize, void),
+    ) !void {
+        var keep = std.AutoHashMap(usize, void).init(self.allocator);
+        defer keep.deinit();
+
+        const prefix_end = @min(sweep_start, func.blocks.items.len);
+        for (func.blocks.items[0..prefix_end]) |blk| {
+            const term = blk.terminator orelse continue;
+            switch (term) {
+                .br => |t| {
+                    const dst: usize = @as(usize, t.index);
+                    if (dst >= sweep_start and dst < end_idx) try keep.put(dst, {});
+                },
+                .cond_br => |cb| {
+                    const dst_then: usize = @as(usize, cb.then_block.index);
+                    const dst_else: usize = @as(usize, cb.else_block.index);
+                    if (dst_then >= sweep_start and dst_then < end_idx) try keep.put(dst_then, {});
+                    if (dst_else >= sweep_start and dst_else < end_idx) try keep.put(dst_else, {});
+                },
+                else => {},
+            }
+        }
+
+        for (sweep_start..end_idx) |j| {
+            if (keep.contains(j)) continue;
+            try processed.put(j, {});
+        }
     }
 
     /// 块标签是否为循环头（回边目标）：汇聚点判定须排除循环头，否则会把外层循环
