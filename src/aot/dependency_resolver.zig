@@ -365,10 +365,12 @@ pub const DependencyResolver = struct {
     }
 
     /// Check if source starts with a keyword (followed by non-alphanumeric)
+    /// R-2（AOT-CODEGEN-010 第四面孔）：匹配必须大小写不敏感 —— `Include "x.php";` 等
+    /// 合法拼写若被漏检，依赖图缺边 ⇒ include 语句在编译期无人处理而静默丢失。
     fn matchKeyword(self: *Self, source: []const u8, keyword: []const u8) bool {
         _ = self;
         if (source.len < keyword.len) return false;
-        if (!std.mem.eql(u8, source[0..keyword.len], keyword)) return false;
+        if (!std.ascii.eqlIgnoreCase(source[0..keyword.len], keyword)) return false;
         if (source.len > keyword.len) {
             const next = source[keyword.len];
             if (std.ascii.isAlphanumeric(next) or next == '_') return false;

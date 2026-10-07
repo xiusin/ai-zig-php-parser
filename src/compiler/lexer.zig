@@ -11,6 +11,10 @@ pub const Lexer = struct {
     heredoc_label: ?[]const u8 = null,
     interp_nesting_level: u32 = 0,
     syntax_mode: SyntaxMode = .php,
+    /// R-2（AOT-CODEGEN-010）：关键字查表忽略大小写。仅 AOT 编译入口（main.zig 单文件/多文件
+    /// 编译路径）置 true；解释器/字节码等 VM 路径保持默认 false ⇒ token 流逐字节不变（宪法 §五
+    /// 分叉边界）。token 文本始终交原始切片，名位语义不受折形影响。
+    case_insensitive_keywords: bool = false,
 
     pub const State = enum {
         initial,
@@ -385,15 +389,24 @@ pub const Lexer = struct {
         while (self.pos < self.buffer.len and (std.ascii.isAlphanumeric(self.buffer[self.pos]) or self.buffer[self.pos] == '_' or self.buffer[self.pos] == '\\')) self.pos += 1;
         const text = self.buffer[start..self.pos];
 
-        // 使用高性能关键词查找（完美哈希表，O(1)复杂度）
-        // 短关键词（2-5字符）使用超快速路径，长关键词使用哈希表
-        if (text.len <= 5) {
-            if (keyword_lookup.lookupFast(text)) |tag| {
+        // R-2：旗标开启（仅 AOT 编译）⇒ 大小写不敏感查表，覆盖原敏感路径的全部命中
+        //（小写关键字与魔术常量、及其任意大小写变体）。
+        if (self.case_insensitive_keywords) {
+            if (keyword_lookup.lookupIgnoreCase(text)) |tag| {
                 return .{ .tag = tag, .loc = .{ .start = start, .end = self.pos } };
             }
-        } else if (text.len <= 15) {
-            if (keyword_lookup.lookup(text)) |tag| {
-                return .{ .tag = tag, .loc = .{ .start = start, .end = self.pos } };
+        } else {
+            // 使用高性能关键词查找（完美哈希表，O(1)复杂度）
+            // 短关键词（2-5字符）使用超快速路径，长关键词使用哈希表
+            if (text.len <= 5) {
+                if (keyword_lookup.lookupFast(text)) |tag| {
+                    return .{ .tag = tag, .loc = .{ .start = start, .end = self.pos } };
+                }
+            } else if (text.len <= keyword_lookup.max_key_len) {
+                // R-4：上限按表内最长键计算（原硬编码 15；表内最长键 13 ⇒ 判定行为等价）
+                if (keyword_lookup.lookup(text)) |tag| {
+                    return .{ .tag = tag, .loc = .{ .start = start, .end = self.pos } };
+                }
             }
         }
 

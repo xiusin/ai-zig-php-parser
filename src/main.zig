@@ -615,14 +615,21 @@ fn runAOTCompilation(allocator: std.mem.Allocator, io: std.Io, cwd_dir: std.Io.D
     // 检测是否需要多文件编译
     const needs_multi_file = blk: {
         // 检测 require/include 关键字（排除字符串内的误匹配）
+        // R-2（AOT-CODEGEN-010 第四面孔）：检测必须大小写不敏感 —— `Include`/`REQUIRE` 等
+        // 合法拼写若被漏检会误走单文件编译器，而单文件 IR 层无人消费 include_stmt ⇒ 整句静默
+        //（门 H k_include/k_require 四形残面根因）。折形副本只用于本检测：字母大小写折叠
+        // 不改变前后缀/注释启发式所依赖的字符类。
+        const folded_source = try allocator.dupe(u8, source);
+        defer allocator.free(folded_source);
+        for (folded_source) |*c| c.* = std.ascii.toLower(c.*);
         const keywords = [_][]const u8{ "require_once", "include_once", "require", "include" };
         for (keywords) |kw| {
             var pos: usize = 0;
-            while (std.mem.indexOfPos(u8, source, pos, kw)) |idx| {
+            while (std.mem.indexOfPos(u8, folded_source, pos, kw)) |idx| {
                 // 关键字后必须跟非字母数字下划线字符
                 const after = idx + kw.len;
-                if (after < source.len) {
-                    const ch = source[after];
+                if (after < folded_source.len) {
+                    const ch = folded_source[after];
                     if (std.ascii.isAlphanumeric(ch) or ch == '_') {
                         pos = after;
                         continue;
@@ -630,7 +637,7 @@ fn runAOTCompilation(allocator: std.mem.Allocator, io: std.Io, cwd_dir: std.Io.D
                 }
                 // 关键字前必须是行首、空白、分号或PHP标签
                 if (idx > 0) {
-                    const prev = source[idx - 1];
+                    const prev = folded_source[idx - 1];
                     if (std.ascii.isAlphanumeric(prev) or prev == '_' or prev == '$' or prev == '\'' or prev == '"' or prev == '/' or prev == '*') {
                         pos = idx + kw.len;
                         continue;
@@ -641,8 +648,8 @@ fn runAOTCompilation(allocator: std.mem.Allocator, io: std.Io, cwd_dir: std.Io.D
                 if (idx >= 2) {
                     var scan = idx - 1;
                     while (scan > 0) : (scan -= 1) {
-                        if (source[scan] == '\n') break;
-                        if (scan + 1 < source.len and source[scan] == '/' and source[scan + 1] == '/') {
+                        if (folded_source[scan] == '\n') break;
+                        if (scan + 1 < folded_source.len and folded_source[scan] == '/' and folded_source[scan + 1] == '/') {
                             in_comment = true;
                             break;
                         }
@@ -715,7 +722,8 @@ fn runAOTCompilation(allocator: std.mem.Allocator, io: std.Io, cwd_dir: std.Io.D
         .go => SyntaxMode.go,
     };
 
-    var p = try parser.Parser.initWithMode(allocator, &context, source, syntax_mode);
+    // R-2（AOT-CODEGEN-010）：AOT 编译路径启用关键字大小写不敏感查表（解释器/字节码路径不启用）
+    var p = try parser.Parser.initWithModeInsensitive(allocator, &context, source, syntax_mode);
     defer p.deinit();
 
     // 解析源码

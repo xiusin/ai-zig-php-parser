@@ -7724,6 +7724,26 @@ pub fn php_constant_get(name_val: Value, allocator: Allocator) !Value {
         return val;
     }
 
+    // R-2b（AOT-CODEGEN-010 §3.3）：仅 true/false/null 三枚关键字常量名忽略大小写 ——
+    // PHP 对这三个关键字常量本就不区分拼写；php_int_max 等非关键字内置常量与用户常量
+    // 必须保持大小写敏感（门 G 守卫臂判据：全局忽略大小写会把已等值面改成回归）。
+    if (name.len <= 5) {
+        const canonical: ?[]const u8 = if (std.ascii.eqlIgnoreCase(name, "true"))
+            "TRUE"
+        else if (std.ascii.eqlIgnoreCase(name, "false"))
+            "FALSE"
+        else if (std.ascii.eqlIgnoreCase(name, "null"))
+            "NULL"
+        else
+            null;
+        if (canonical) |canonical_name| {
+            if (constants.get(canonical_name)) |val| {
+                _ = val.retain();
+                return val;
+            }
+        }
+    }
+
     // 未定义常量
     std.debug.print("Fatal error: Uncaught Error: Undefined constant \"{s}\"\n", .{name});
     std.process.exit(255);

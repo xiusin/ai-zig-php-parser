@@ -199,7 +199,8 @@ pub const MultiFileCompiler = struct {
             .go => SyntaxMode.go,
         };
 
-        var p = try Parser.initWithMode(self.allocator, &context, source_z, syntax_mode);
+        // R-2（AOT-CODEGEN-010）：多文件 AOT 编译路径同样启用关键字大小写不敏感查表
+        var p = try Parser.initWithModeInsensitive(self.allocator, &context, source_z, syntax_mode);
         defer p.deinit();
 
         const root_index = p.parse() catch |err| {

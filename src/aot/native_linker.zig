@@ -15617,8 +15617,9 @@ pub const NativeLinker = struct {
                                                     // 旧口径与「br → 普通 merge 块」同路（仅 merge_bi = blk_i），
                                                     // 于是内层 for/foreach/while 的本体从未派发 ⇒ while 体内
                                                     // `if (c) { for … }` 整块静默丢失（探针 N/P/Q count=0）。
-                                                    // 补 generateForeachFromLabels 已有的同形派发（派发表 :11516–:11525，
-                                                    // 其 RC-2 判据 :11556–:11573）与 generateForFromLabels（派发表 :13694–:13703，判据 :13717–:13732）：命中循环头标签
+                                                    // 补 generateForeachFromLabels 已有的同形派发（代次 `0e38b018`/32796 行实测：
+                                                    // 派发表 :11801–:11810，其 RC-2 判据 :11841–:11857）与 generateForFromLabels
+                                                    // （派发表 :13979–:13988，判据 :14002–:14016）：命中循环头标签
                                                     // 前缀即在 then 缩进内交范围行走 [blk_i, loop_end) 生成真正的
                                                     // 嵌套循环；若内层 for 的出口复用本 if 的 merge 块
                                                     // （else_bi 为 if_merge_ 且 for 的 cond_br 单边落在其上），
@@ -25594,8 +25595,8 @@ pub const NativeLinker = struct {
     ///
     /// 口径边界（由实测划定，禁止凭推测扩大）：
     /// - **只认直接前驱，不做区间内前向闭包**：闭包版实测把「保留块的后继中没有发射消费者的块」
-    ///   留在 processed 之外，命中顶层 `!all_processed` 兜底（:6497–:6514，判定 :6505、`return false` :6513；
-    ///   顶层行走调用 :6494）⇒ `AstDirectGenerationFailed` 编译失败（f007 实测）。
+    ///   留在 processed 之外，命中顶层 `!all_processed` 兜底（代次 `0e38b018`/32796 行实测
+    ///   :6740–:6757，判定 :6748、`return false` :6756；顶层行走调用 :6737）⇒ `AstDirectGenerationFailed` 编译失败（f007 实测）。
     /// - **只走 `.br`/`.cond_br` 边，不看 `.switch_`**：与本轮影子扫描口径逐字一致；影子实测差异面
     ///   为「68 语料 0 处、4 个探针共 6 处收尾站点、每处从区间 5 块中放行 1 块」，本批唯一被验证过的即此范围。
     /// - **只省略新增标记，从不撤销既有标记** ⇒ foreach 预标记的 increment/cleanup/exit 不受影响

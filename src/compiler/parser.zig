@@ -27,51 +27,16 @@ pub const Parser = struct {
     /// Track namespace declaration style: 0=none, 1=unbracketed, 2=bracketed
     namespace_style: u8 = 0,
 
-    pub fn init(allocator: std.mem.Allocator, context: *PHPContext, source: [:0]const u8) anyerror!Parser {
-        var lexer = Lexer.init(source);
-        const curr = lexer.next();
-        const peek = lexer.next();
+    /// 公共预取逻辑：取 curr/peek 并装配 Parser（各构造函数共享，DRY）
+    fn initFromLexer(allocator: std.mem.Allocator, context: *PHPContext, lexer: Lexer, mode: SyntaxMode, hooks: ?*const SyntaxHooks) anyerror!Parser {
+        var lex = lexer;
+        const curr = lex.next();
+        const peek = lex.next();
         var all_tokens = try std.ArrayList(Token).initCapacity(allocator, 100);
         try all_tokens.append(allocator, curr);
         try all_tokens.append(allocator, peek);
         return Parser{
-            .lexer = lexer,
-            .allocator = allocator,
-            .context = context,
-            .curr = curr,
-            .peek = peek,
-            .all_tokens = all_tokens,
-        };
-    }
-
-    pub fn initWithMode(allocator: std.mem.Allocator, context: *PHPContext, source: [:0]const u8, mode: SyntaxMode) anyerror!Parser {
-        var lexer = Lexer.initWithMode(source, mode);
-        const curr = lexer.next();
-        const peek = lexer.next();
-        var all_tokens = try std.ArrayList(Token).initCapacity(allocator, 100);
-        try all_tokens.append(allocator, curr);
-        try all_tokens.append(allocator, peek);
-        return Parser{
-            .lexer = lexer,
-            .allocator = allocator,
-            .context = context,
-            .curr = curr,
-            .peek = peek,
-            .syntax_mode = mode,
-            .all_tokens = all_tokens,
-        };
-    }
-
-    /// Initialize parser with syntax mode and syntax hooks
-    pub fn initWithModeAndHooks(allocator: std.mem.Allocator, context: *PHPContext, source: [:0]const u8, mode: SyntaxMode, hooks: ?*const SyntaxHooks) anyerror!Parser {
-        var lexer = Lexer.initWithMode(source, mode);
-        const curr = lexer.next();
-        const peek = lexer.next();
-        var all_tokens = try std.ArrayList(Token).initCapacity(allocator, 100);
-        try all_tokens.append(allocator, curr);
-        try all_tokens.append(allocator, peek);
-        return Parser{
-            .lexer = lexer,
+            .lexer = lex,
             .allocator = allocator,
             .context = context,
             .curr = curr,
@@ -80,6 +45,28 @@ pub const Parser = struct {
             .syntax_hooks = hooks,
             .all_tokens = all_tokens,
         };
+    }
+
+    pub fn init(allocator: std.mem.Allocator, context: *PHPContext, source: [:0]const u8) anyerror!Parser {
+        return initFromLexer(allocator, context, Lexer.init(source), .php, null);
+    }
+
+    pub fn initWithMode(allocator: std.mem.Allocator, context: *PHPContext, source: [:0]const u8, mode: SyntaxMode) anyerror!Parser {
+        return initFromLexer(allocator, context, Lexer.initWithMode(source, mode), mode, null);
+    }
+
+    /// Initialize parser with syntax mode and syntax hooks
+    pub fn initWithModeAndHooks(allocator: std.mem.Allocator, context: *PHPContext, source: [:0]const u8, mode: SyntaxMode, hooks: ?*const SyntaxHooks) anyerror!Parser {
+        return initFromLexer(allocator, context, Lexer.initWithMode(source, mode), mode, hooks);
+    }
+
+    /// R-2（AOT-CODEGEN-010）：AOT 编译专用构造 —— 关键字查表忽略大小写。
+    /// 旗标必须在预取 curr/peek 之前写入 Lexer（Lexer 按值内嵌，构造后补设会漏掉首两枚 token）。
+    /// 仅限 AOT 编译入口调用；解释器/字节码构造点必须使用 init/initWithMode（旗标缺省 false）。
+    pub fn initWithModeInsensitive(allocator: std.mem.Allocator, context: *PHPContext, source: [:0]const u8, mode: SyntaxMode) anyerror!Parser {
+        var lexer = Lexer.initWithMode(source, mode);
+        lexer.case_insensitive_keywords = true;
+        return initFromLexer(allocator, context, lexer, mode, null);
     }
 
     /// Set syntax hooks after initialization
@@ -696,10 +683,11 @@ pub const Parser = struct {
         const token = self.curr;
         self.nextToken();
         // In Go mode, class names can be t_go_identifier
+        // R-2（甲批）：类名位旗标门控容忍支（带修饰符容器，与 parseContainer 同文法位）
         const name_tok = if (self.syntax_mode == .go and self.curr.tag == .t_go_identifier)
             try self.eat(.t_go_identifier)
         else
-            try self.eat(.t_string);
+            try self.eatNameIdentifier();
         const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
         var extends: ?ast.Node.Index = null;
         if (self.curr.tag == .k_extends) {
@@ -1137,7 +1125,8 @@ pub const Parser = struct {
             return self.createNode(.{ .tag = .namespace_stmt, .main_token = token, .data = .{ .namespace_stmt = .{ .name = empty_name, .body = body } } });
         }
 
-        const name_tok = try self.eat(.t_string);
+        // R-2（甲批扩展）：namespace 名位旗标门控容忍支（`namespace Get;` 今日绿不得转红）
+        const name_tok = try self.eatNameIdentifier();
         const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
         self.context.current_namespace = name_id;
 
@@ -1172,7 +1161,8 @@ pub const Parser = struct {
             use_type = 2;
             self.nextToken();
         }
-        const name_tok = try self.eat(.t_string);
+        // R-2（甲批扩展）：use 导入名位旗标门控容忍支（`use Get;` 今日绿不得转红）
+        const name_tok = try self.eatNameIdentifier();
         const name_text = self.lexer.buffer[name_tok.loc.start..name_tok.loc.end];
         const name_id = try self.context.intern(name_text);
 
@@ -1191,7 +1181,7 @@ pub const Parser = struct {
         var alias_id: ?u32 = null;
         if (self.curr.tag == .k_as) {
             self.nextToken();
-            const alias_tok = try self.eat(.t_string);
+            const alias_tok = try self.eatNameIdentifier();
             alias_id = try self.context.intern(self.lexer.buffer[alias_tok.loc.start..alias_tok.loc.end]);
             try self.context.imports.put(self.allocator, alias_id.?, name_id);
         } else {
@@ -1217,7 +1207,8 @@ pub const Parser = struct {
                 self.nextToken();
             }
 
-            const member_tok = try self.eat(.t_string);
+            // R-2（甲批扩展）：分组 use 成员名位旗标门控容忍支
+            const member_tok = try self.eatNameIdentifier();
             const member_text = self.lexer.buffer[member_tok.loc.start..member_tok.loc.end];
 
             // Build full name: prefix + \\ + member
@@ -1233,7 +1224,7 @@ pub const Parser = struct {
             var alias_id: ?u32 = null;
             if (self.curr.tag == .k_as) {
                 self.nextToken();
-                const alias_tok = try self.eat(.t_string);
+                const alias_tok = try self.eatNameIdentifier();
                 alias_id = try self.context.intern(self.lexer.buffer[alias_tok.loc.start..alias_tok.loc.end]);
                 try self.context.imports.put(self.allocator, alias_id.?, full_id);
             } else {
@@ -1288,7 +1279,8 @@ pub const Parser = struct {
         while (self.curr.tag == .t_attribute_start) {
             self.nextToken();
             while (self.curr.tag != .r_bracket and self.curr.tag != .eof) {
-                const name_tok = try self.eat(.t_string);
+                // R-2（甲批扩展）：属性名位旗标门控容忍支（`#[Get]` 今日绿不得转红）
+                const name_tok = try self.eatNameIdentifier();
                 const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
 
                 var args = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
@@ -1315,10 +1307,11 @@ pub const Parser = struct {
         const token = self.curr;
         self.nextToken();
         // In Go mode, class names can be t_go_identifier
+        // R-2（甲批）：类名位旗标门控容忍支（工单锚点 :1319-1321 的现坐标）
         const name_tok = if (self.syntax_mode == .go and self.curr.tag == .t_go_identifier)
             try self.eat(.t_go_identifier)
         else
-            try self.eat(.t_string);
+            try self.eatNameIdentifier();
         const raw_name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
         const name_id = try self.context.resolveName(raw_name_id);
 
@@ -1375,7 +1368,8 @@ pub const Parser = struct {
     /// Parse an enum case declaration: case Name; or case Name = value;
     fn parseEnumCase(self: *Parser) anyerror!ast.Node.Index {
         const case_token = try self.eat(.k_case);
-        const name_tok = try self.eat(.t_string);
+        // R-2（甲批扩展）：enum case 名位旗标门控容忍支（`case Get;` 今日绿不得转红）
+        const name_tok = try self.eatNameIdentifier();
         const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
         var value: ?ast.Node.Index = null;
         if (self.curr.tag == .equal) {
@@ -1403,7 +1397,8 @@ pub const Parser = struct {
             break :blk true;
         } else false;
 
-        const name_tok = try self.eat(.t_string);
+        // R-2（甲批）：顶层函数名位补旗标门控容忍支（原为硬 eat(.t_string)，先例 :762/:946 方法名位）
+        const name_tok = try self.eatNameIdentifier();
         const raw_name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
         const name_id = try self.context.resolveName(raw_name_id);
         _ = try self.eat(.l_paren);
@@ -1694,7 +1689,9 @@ pub const Parser = struct {
             var exception_type: ?ast.Node.Index = null;
             var variable: ?ast.Node.Index = null;
 
-            if (self.curr.tag == .t_string) {
+            // R-2（甲批扩展）：catch 异常类型位旗标门控容忍支（`catch (Get $e)` 今日绿不得转红，
+            // 且不得静默丢类型 —— 走 parseType 的旗标 catch-all）
+            if (self.isToleratedNameTag()) {
                 exception_type = try self.parseType();
             }
 
@@ -1877,7 +1874,8 @@ pub const Parser = struct {
         if (is_typed) {
             _ = try self.parseType();
         }
-        const name_tok = try self.eat(.t_string);
+        // R-2（甲批扩展）：const 常量名位旗标门控容忍支（`const Get = 1;` 今日绿不得转红）
+        const name_tok = try self.eatNameIdentifier();
         const raw_name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
         const name_id = try self.context.resolveName(raw_name_id);
         _ = try self.eat(.equal);
@@ -1941,7 +1939,8 @@ pub const Parser = struct {
     fn parseGoto(self: *Parser) anyerror!ast.Node.Index {
         const token = try self.eat(.k_goto);
         // goto label;
-        if (self.curr.tag != .t_string) {
+        // R-2（甲批扩展）：标签名位旗标门控容忍支（`goto Get;` 今日绿不得转红）
+        if (!self.isToleratedNameTag()) {
             self.reportError("expected label name after goto");
             return error.ParseError;
         }
@@ -2703,8 +2702,13 @@ pub const Parser = struct {
             } else if (tag == .k_instanceof) {
                 // For instanceof, the right operand should be a class name (identifier or variable)
                 // If it's a simple identifier, create a class name literal
+                // R-2（甲批扩展）：instanceof 类名位补旗标门控容忍支（守卫 p2：`instanceof With`）；
+                // t_string/k_self/k_parent/k_static_ref 原路径不变
                 var right: ast.Node.Index = undefined;
-                if (self.curr.tag == .t_string or self.curr.tag == .k_self or self.curr.tag == .k_parent or self.curr.tag == .k_static_ref) {
+                if (self.curr.tag == .t_string or self.curr.tag == .k_self or self.curr.tag == .k_parent or self.curr.tag == .k_static_ref or
+                    (self.lexer.case_insensitive_keywords and
+                        (isKeywordIdentifierTag(self.curr.tag) or isAotExtendedKeywordIdentifierTag(self.curr.tag))))
+                {
                     // Class name is an identifier - create a string literal node
                     const name_tok = self.curr;
                     const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
@@ -3267,6 +3271,17 @@ pub const Parser = struct {
                 return expr;
             },
             else => {
+                // R-2（甲批扩展）：旗标开启时容忍清单内关键字 tag 在表达式主位按标识符接受
+                //（守卫 p1/p4：`echo Get();` 调用位今日绿不得转红；节点形态镜像 .t_string 臂
+                // 的 intern+resolveName ⇒ 下游发射逐位一致）
+                if (self.lexer.case_insensitive_keywords) {
+                    if (self.eatKeywordAsIdentifier()) |tok| {
+                        const raw_name = self.lexer.buffer[tok.loc.start..tok.loc.end];
+                        const name_id = try self.context.intern(raw_name);
+                        const resolved_id = try self.context.resolveName(name_id);
+                        return self.createNode(.{ .tag = .variable, .main_token = tok, .data = .{ .variable = .{ .name = resolved_id } } });
+                    }
+                }
                 self.reportError("Unexpected token in expression");
                 return error.InvalidExpression;
             },
@@ -3347,8 +3362,9 @@ pub const Parser = struct {
                 .t_dollar_open_curly_brace => {
                     self.nextToken(); // Consume ${
                     // ${name} 语法：name 应作为变量名处理，需加上 $ 前缀
-                    if (self.curr.tag == .t_string) {
-                        const t = try self.eat(.t_string);
+                    // R-2（甲批扩展）：变量名位旗标门控容忍支
+                    if (self.isToleratedNameTag()) {
+                        const t = try self.eatNameIdentifier();
                         const raw_name = self.lexer.buffer[t.loc.start..t.loc.end];
                         // 添加 $ 前缀作为变量名
                         const var_name = try std.fmt.allocPrint(self.allocator, "${s}", .{raw_name});
@@ -3839,14 +3855,54 @@ pub const Parser = struct {
         };
     }
 
+    /// R-2（甲批）：名位可接受 token 判定 —— t_string 恒可；旗标开启（仅 AOT 编译）时
+    /// 容忍清单（74 枚基础 + 6 枚扩展，合计全部 80 枚 k_ tag）内的关键字 tag 亦可作名位标识符；
+    /// m_* 魔术常量 tag 不在此列（PHP 拒绝其作标识符名）。
+    fn isToleratedNameTag(self: *Parser) bool {
+        if (self.curr.tag == .t_string) return true;
+        return self.lexer.case_insensitive_keywords and
+            (isKeywordIdentifierTag(self.curr.tag) or isAotExtendedKeywordIdentifierTag(self.curr.tag));
+    }
+
+    /// R-2（甲批）：硬名位（顶层函数名/类名/namespace/use/枚举 case/const/属性名等）的
+    /// 旗标门控容忍支。旗标关闭时与原 `eat(.t_string)` 逐字节等价（含错误路径）；
+    /// 旗标开启（仅 AOT 编译）时关键字 token 可作名位标识符 —— token 文本仍取原文切片
+    ///（intern 侧不变，先例 :3857）。
+    fn eatNameIdentifier(self: *Parser) anyerror!Token {
+        if (self.isToleratedNameTag()) {
+            const tok = self.curr;
+            self.nextToken();
+            return tok;
+        }
+        return self.eat(.t_string);
+    }
+
     /// Try to eat the current token as a keyword-used-as-identifier, returning it as if it were t_string
     fn eatKeywordAsIdentifier(self: *Parser) ?Token {
-        if (isKeywordIdentifierTag(self.curr.tag)) {
+        if (isKeywordIdentifierTag(self.curr.tag) or
+            (self.lexer.case_insensitive_keywords and isAotExtendedKeywordIdentifierTag(self.curr.tag)))
+        {
             const tok = self.curr;
             self.nextToken();
             return tok;
         }
         return null;
+    }
+
+    /// R-2（甲批）：仅 AOT 编译旗标下并入名位容忍清单的 6 枚 tag —— isKeywordIdentifierTag
+    /// 原清单实测 74 枚，漏 5 枚 end* 替代语法终止符与 .k_struct（门 H 反例组 invm_struct
+    /// 即由漏项直接致红）；旗标关闭时本清单不参与判定 ⇒ 解释器/字节码行为不变。
+    fn isAotExtendedKeywordIdentifierTag(tag: Token.Tag) bool {
+        return switch (tag) {
+            .k_endfor,
+            .k_endforeach,
+            .k_endif,
+            .k_endswitch,
+            .k_endwhile,
+            .k_struct,
+            => true,
+            else => false,
+        };
     }
 
     /// Parse a single call argument, supporting named args (name: value) and keyword-as-name (type: value)
@@ -4115,13 +4171,34 @@ pub const Parser = struct {
             self.curr.tag == .k_void or self.curr.tag == .k_mixed or
             self.curr.tag == .k_never or self.curr.tag == .k_object or
             self.curr.tag == .k_iterable or self.curr.tag == .k_null or
-            self.curr.tag == .k_true or self.curr.tag == .k_false)
+            self.curr.tag == .k_true or self.curr.tag == .k_false or
+            (self.lexer.case_insensitive_keywords and
+                (isKeywordIdentifierTag(self.curr.tag) or isAotExtendedKeywordIdentifierTag(self.curr.tag))))
         {
             // Handle built-in type keywords and user-defined types
             // In Go mode, both t_string and t_go_identifier can be type names
+            // R-2（甲批扩展）：旗标开启时容忍清单内关键字 tag 亦可作类型名（守卫：`function f(Get $x)`）
             const type_name_tok = self.curr;
             self.nextToken();
-            const type_name_id = try self.context.intern(self.lexer.buffer[type_name_tok.loc.start..type_name_tok.loc.end]);
+            // R-2（甲批扩展）：内置类型名按规范小写拼写 intern —— PHP 类型名大小写不敏感，
+            // 原文切片会让 `Callable` 与运行期 `callable` 错配成类类型（门 H k_callable 残面根因）。
+            // 小写输入下规范名 == 原文 ⇒ 旗标关闭路径行为不变。
+            const type_name_id = switch (type_name_tok.tag) {
+                .k_array => try self.context.intern("array"),
+                .k_callable => try self.context.intern("callable"),
+                .k_static => try self.context.intern("static"),
+                .k_self => try self.context.intern("self"),
+                .k_parent => try self.context.intern("parent"),
+                .k_void => try self.context.intern("void"),
+                .k_mixed => try self.context.intern("mixed"),
+                .k_never => try self.context.intern("never"),
+                .k_object => try self.context.intern("object"),
+                .k_iterable => try self.context.intern("iterable"),
+                .k_null => try self.context.intern("null"),
+                .k_true => try self.context.intern("true"),
+                .k_false => try self.context.intern("false"),
+                else => try self.context.intern(self.lexer.buffer[type_name_tok.loc.start..type_name_tok.loc.end]),
+            };
             return self.createNode(.{ .tag = .named_type, .main_token = type_name_tok, .data = .{ .named_type = .{ .name = type_name_id } } });
         } else {
             self.reportError("Expected type name");
