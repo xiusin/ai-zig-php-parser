@@ -1,0 +1,56 @@
+# php_interpreter_md5=1f15e4ce9b5c9cdaaef7cabf5efb9c76
+# native_linker_md5=fbe6382a2e0904b6740d771b88c409c7
+# runtime_lib_template_md5=008b7b639f1069cb73e443064e115ed1
+# columns: name|lines|fallback_sites|make_ref_sites
+f042_array_functions_full               |lines=29420    fallback=9    make_ref=2   
+  FB @1563 in [pub fn @"ArrayTools::splice"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {] :     reg_7 = if (args.len > 0 and !args[0].isMissing() and args[0].isRef()) args[0].asRef() else &null_val;
+  FB @1591 in [pub fn @"ArrayTools::splice"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {] :     reg_11 = if (args.len > 0 and !args[0].isMissing() and args[0].isRef()) args[0].asRef() else &null_val;
+  FB @2081 in [pub fn @"ArrayTools::sort"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {] :     reg_3 = if (args.len > 0 and !args[0].isMissing() and args[0].isRef()) args[0].asRef() else &null_val;
+  FB @2091 in [pub fn @"ArrayTools::sort"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {] :     reg_5 = if (args.len > 0 and !args[0].isMissing() and args[0].isRef()) args[0].asRef() else &null_val;
+  FB @2225 in [pub fn @"ArrayTools::sortAssoc"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {] :     reg_3 = if (args.len > 0 and !args[0].isMissing() and args[0].isRef()) args[0].asRef() else &null_val;
+  FB @2235 in [pub fn @"ArrayTools::sortAssoc"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {] :     reg_5 = if (args.len > 0 and !args[0].isMissing() and args[0].isRef()) args[0].asRef() else &null_val;
+  FB @2369 in [pub fn @"ArrayTools::sortByKey"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {] :     reg_3 = if (args.len > 0 and !args[0].isMissing() and args[0].isRef()) args[0].asRef() else &null_val;
+  FB @2379 in [pub fn @"ArrayTools::sortByKey"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {] :     reg_5 = if (args.len > 0 and !args[0].isMissing() and args[0].isRef()) args[0].asRef() else &null_val;
+  FB @2494 in [pub fn @"ArrayTools::usort"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {] :     reg_2 = if (args.len > 0 and !args[0].isMissing() and args[0].isRef()) args[0].asRef() else &null_val;
+  MK 2872:    reg_5 = try runtime.make_ref(reg_3, runtime.runtime_allocator);
+  MK 10206:    reg_64 = try runtime.make_ref(reg_62, runtime.runtime_allocator);
+f044_json_deepops_merge_diff            |lines=28120    fallback=2    make_ref=3   
+  FB @1040 in [pub fn @"JsonTools::deepSet"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {] :     reg_5 = if (args.len > 0 and !args[0].isMissing() and args[0].isRef()) args[0].asRef() else &null_val;
+  FB @1072 in [pub fn @"JsonTools::deepSet"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {] :     reg_9 = if (args.len > 0 and !args[0].isMissing() and args[0].isRef()) args[0].asRef() else &null_val;
+  MK 1186:    reg_25 = try runtime.make_ref(reg_0.*, runtime.runtime_allocator);
+  MK 6261:    reg_14 = try runtime.make_ref(reg_3, runtime.runtime_allocator);
+  MK 15894:    reg_59 = try runtime.make_ref(reg_57, runtime.runtime_allocator);
+f057_workflow_engine_rollback           |lines=19408    fallback=4    make_ref=1   
+  FB @3588 in [pub fn @"WorkflowExecution::executeNode"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {] :     reg_5 = if (args.len > 1 and !args[1].isMissing() and args[1].isRef()) args[1].asRef() else &null_val;
+  FB @6400 in [pub fn @"WorkflowExecution::executeTask"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {] :     reg_5 = if (args.len > 1 and !args[1].isMissing() and args[1].isRef()) args[1].asRef() else &null_val;
+  FB @6774 in [pub fn @"WorkflowExecution::executeDecision"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {] :     reg_5 = if (args.len > 1 and !args[1].isMissing() and args[1].isRef()) args[1].asRef() else &null_val;
+  FB @6877 in [pub fn @"WorkflowExecution::executeParallel"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {] :     reg_5 = if (args.len > 1 and !args[1].isMissing() and args[1].isRef()) args[1].asRef() else &null_val;
+  MK 3144:    reg_41 = try runtime.make_ref(reg_2, runtime.runtime_allocator);
+f085_geo_rtree_knn_geocoder             |lines=48095    fallback=2    make_ref=2   
+  FB @10088 in [pub fn @"RTree::rangeSearchNode"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {] :     reg_7 = if (args.len > 2 and !args[2].isMissing() and args[2].isRef()) args[2].asRef() else &null_val;
+  FB @11990 in [pub fn @"RTree::collectPoints"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {] :     reg_5 = if (args.len > 1 and !args[1].isMissing() and args[1].isRef()) args[1].asRef() else &null_val;
+  MK 9900:    reg_10 = try runtime.make_ref(reg_5, runtime.runtime_allocator);
+  MK 11362:    reg_11 = try runtime.make_ref(reg_7, runtime.runtime_allocator);
+f102_memory_gc_marksweep_refcount_gen   |lines=42195    fallback=3    make_ref=4   
+  FB @9330 in [pub fn @"RefCountGC::findCycle"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {] :     reg_8 = if (args.len > 2 and !args[2].isMissing() and args[2].isRef()) args[2].asRef() else &null_val;
+  FB @9336 in [pub fn @"RefCountGC::findCycle"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {] :     reg_9 = if (args.len > 3 and !args[3].isMissing() and args[3].isRef()) args[3].asRef() else &null_val;
+  FB @16943 in [pub fn @"GenerationalGC::markGen"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {] :     reg_6 = if (args.len > 1 and !args[1].isMissing() and args[1].isRef()) args[1].asRef() else &null_val;
+  MK 9029:    reg_20 = try runtime.make_ref(reg_14, runtime.runtime_allocator);
+  MK 9032:    reg_21 = try runtime.make_ref(reg_3, runtime.runtime_allocator);
+  MK 11866:    reg_26 = try runtime.make_ref(reg_15, runtime.runtime_allocator);
+f105_db_index_btree_hash_queryplan      |lines=40343    fallback=2    make_ref=7   
+  FB @10564 in [pub fn @"BTree::rangeSearch"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {] :     reg_9 = if (args.len > 3 and !args[3].isMissing() and args[3].isRef()) args[3].asRef() else &null_val;
+  FB @12145 in [pub fn @"BTree::inorderTraverse"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {] :     reg_5 = if (args.len > 1 and !args[1].isMissing() and args[1].isRef()) args[1].asRef() else &null_val;
+  MK 2361:    reg_35 = try runtime.make_ref(reg_32, runtime.runtime_allocator);
+  MK 2746:    reg_46 = try runtime.make_ref(reg_43, runtime.runtime_allocator);
+  MK 8132:    reg_79 = try runtime.make_ref(reg_76, runtime.runtime_allocator);
+f177_graph_traversal_dfs_bfs            |lines=50310    fallback=5    make_ref=7   
+  FB @1298 in [pub fn @"Graph::dfsHelper"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {] :     reg_6 = if (args.len > 1 and !args[1].isMissing() and args[1].isRef()) args[1].asRef() else &null_val;
+  FB @1304 in [pub fn @"Graph::dfsHelper"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {] :     reg_7 = if (args.len > 2 and !args[2].isMissing() and args[2].isRef()) args[2].asRef() else &null_val;
+  FB @19458 in [pub fn @"Graph::hasCycleDFS"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {] :     reg_6 = if (args.len > 1 and !args[1].isMissing() and args[1].isRef()) args[1].asRef() else &null_val;
+  FB @19464 in [pub fn @"Graph::hasCycleDFS"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {] :     reg_7 = if (args.len > 2 and !args[2].isMissing() and args[2].isRef()) args[2].asRef() else &null_val;
+  FB @20139 in [pub fn @"Graph::hasCycleUndirected"(ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {] :     reg_6 = if (args.len > 1 and !args[1].isMissing() and args[1].isRef()) args[1].asRef() else &null_val;
+  MK 1140:    reg_10 = try runtime.make_ref(reg_5, runtime.runtime_allocator);
+  MK 1143:    reg_11 = try runtime.make_ref(reg_7, runtime.runtime_allocator);
+  MK 17060:    reg_29 = try runtime.make_ref(reg_7, runtime.runtime_allocator);
+HFACE_DONE

@@ -1,0 +1,21 @@
+# opt001 canary sweep 2026-10-06 14:28:48 bin=1f15e4ce9b5c9cdaaef7cabf5efb9c76 optimizer=252234ef48cb47a42e6f39d1bc3e845b flags=--compile --no-debug-info --no-link
+f016_hash_bloom_consistent|CHAIN_HIT|C1=0/2(d=2)|C2=0/2(d=2)|C6=0/2(d=2)|C9=0/0(d=0)|EMIT_HIT
+f024_rbac_role_inheritance_policy|NO_HIT|C1=0/0(d=0)|C2=2/0(d=-2)|C6=0/0(d=0)|C9=0/0(d=0)|EMIT_BLIND
+f025_coding_hamming_rle_lzw_crc|NO_HIT|C1=0/0(d=0)|C2=21/21(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|EMIT_BLIND
+f044_json_deepops_merge_diff|CHAIN_HIT|C1=0/1(d=1)|C2=21/24(d=3)|C6=0/0(d=0)|C9=3/0(d=-3)|EMIT_BLIND
+f051_validator_rule_chain_batch|NO_HIT|C1=0/0(d=0)|C2=5/5(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|EMIT_BLIND
+f061_graph_dijkstra_bellmanford_floyd|NO_HIT|C1=0/0(d=0)|C2=23/23(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|EMIT_BLIND
+f072_type_inference_hindley_milner|NO_HIT|C1=0/0(d=0)|C2=5/5(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|EMIT_BLIND
+f104_game_engine_ecs_collision_render|CHAIN_HIT|C1=0/1(d=1)|C2=20/19(d=-1)|C6=0/0(d=0)|C9=0/0(d=0)|EMIT_BLIND
+f113_distributed_consistenthash_vectorclock_quorum|CHAIN_HIT|C1=0/3(d=3)|C2=11/8(d=-3)|C6=0/2(d=2)|C9=0/0(d=0)|EMIT_HIT
+f117_search_engine_inverted_tfidf_bm25|CHAIN_HIT|C1=0/4(d=4)|C2=23/25(d=2)|C6=0/2(d=2)|C9=0/0(d=0)|EMIT_HIT
+f124_container_orchestrator_pod_service_autoscale|CHAIN_HIT|C1=0/1(d=1)|C2=56/47(d=-9)|C6=0/1(d=1)|C9=3/3(d=0)|EMIT_HIT
+f134_event_sourcing_snapshot_cqrs_projection|CHAIN_HIT|C1=0/1(d=1)|C2=20/20(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|EMIT_BLIND
+f135_math_number_theory_crt_miller_rabin|NO_HIT|C1=0/0(d=0)|C2=40/39(d=-1)|C6=3/2(d=-1)|C9=1/0(d=-1)|EMIT_BLIND
+f152_closure_arrow_higher_order|NO_HIT|C1=0/0(d=0)|C2=67/67(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|EMIT_BLIND
+f160_virtual_fs_path_traversal|NO_HIT|C1=0/0(d=0)|C2=28/28(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|EMIT_BLIND
+f161_json_xml_csv_parsing|CHAIN_HIT|C1=0/2(d=2)|C2=30/32(d=2)|C6=0/2(d=2)|C9=1/1(d=0)|EMIT_HIT
+f171_state_machine_dfa|NO_HIT|C1=0/0(d=0)|C2=9/9(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|EMIT_BLIND
+f176_specification_chain_rules|NO_HIT|C1=0/0(d=0)|C2=5/5(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|EMIT_BLIND
+f177_graph_traversal_dfs_bfs|CHAIN_HIT|C1=0/1(d=1)|C2=14/12(d=-2)|C6=0/1(d=1)|C9=0/0(d=0)|EMIT_HIT
+CANARY_SWEEP_DONE total=19 chain_hit=9 no_hit=10 compile_fail=0 emit_hit=6

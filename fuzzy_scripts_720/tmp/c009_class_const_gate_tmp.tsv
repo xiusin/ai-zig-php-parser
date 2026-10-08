@@ -1,0 +1,11 @@
+# compiler_md5=1f15e4ce9b5c9cdaaef7cabf5efb9c76
+# native_linker_md5=fbe6382a2e0904b6740d771b88c409c7
+# ir_generator_md5=cb53c2da7d4fe2e1f62b728511f7c3ea
+# runtime_lib_template_md5=008b7b639f1069cb73e443064e115ed1
+# columns: probe|php_rc|aot_rc|verdict|php_norm||aot_norm
+c009_a_parent_class_tmp|php_rc=0|aot_rc=0|DIFF|root=self=GRoot static=GRoot lit=GRoot|mid=self=GRoot static=GMid lit=GRoot|leaf=self=GRoot static=GLeaf lit=GRoot|midup=parent=GRoot|leafup=parent=GMid|DONE|||aot=root=self=GRoot static=GRoot lit=GRoot|mid=self=GRoot static=GMid lit=GRoot|leaf=self=GRoot static=GLeaf lit=GRoot|midup=parent=parent|leafup=parent=parent|DONE|
+c009_b_no_parent_tmp|php_rc=255|aot_rc=0|DIFF|PHP Fatal error:  Cannot use "parent" when current class scope has no parent in FILE:LINE|||aot=p=parent=parent|DONE|
+c009_c_var_class_tmp|php_rc=0|aot_rc=0|DIFF|obj=VBravo|lit=VBravo|dyn=VBravo|DONE|||aot=obj=|lit=VBravo|dyn=VBravo|DONE|
+c009_d_str_class_tmp|php_rc=255|aot_rc=0|DIFF|PHP Fatal error:  Uncaught TypeError: Cannot use "::class" on string in FILE:LINE|||aot=str=DAlpha|DONE|
+ELAPSED=16s
+C009_DONE probes=4 same=0 diff=4 compile_fail=0

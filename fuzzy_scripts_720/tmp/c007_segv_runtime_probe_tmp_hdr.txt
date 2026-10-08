@@ -1,0 +1,8 @@
+# c007 §7.5 SIGSEGV runtime-side attribution 2026-10-06 21:35:42
+bin_md5=1f15e4ce9b5c9cdaaef7cabf5efb9c76
+arm=--compile --no-debug-info --aot-enable-pass=inline --aot-inline-threshold=<T> ; rebuild -ODebug on the /tmp copy
+header_cols=T|kind|field|value
+# c007 §7.5 SIGSEGV runtime-side attribution 2026-10-06 21:45:16
+bin_md5=1f15e4ce9b5c9cdaaef7cabf5efb9c76
+arm=--compile --no-debug-info --aot-enable-pass=inline --aot-inline-threshold=<T> ; rebuild -ODebug on the /tmp copy
+header_cols=T|kind|field|value

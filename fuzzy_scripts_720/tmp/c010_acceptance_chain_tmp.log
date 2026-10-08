@@ -1,0 +1,99 @@
+== [1/3] shadow start 2026-10-07 15:20:32
+== [1/3] shadow rc=124 2026-10-07 15:40:32
+== [2/3] gates start 2026-10-07 15:40:32
+gateE_rc=0
+gateF_rc=0
+gateG_rc=0
+gateH_rc=0
+gateH2_rc=0
+gateI_rc=0
+== [2/3] gates done 2026-10-07 15:56:14
+== [3/3] main regression start 2026-10-07 15:56:14
+regression_rc=0
+== [3/3] regression done 2026-10-07 16:10:18
+== 六门新读数 ==
+C010KW_DONE shapes=19 same=19 diff=0 silent_empty=0 aot_fatal=0 compile_fail=0
+C010MECH_DONE shapes=8 same=8 diff=0 zero_instr=0 compile_fail=0
+C010G_DONE shapes=7 same=7 diff=0 red_confirmed=0 guard_same=4 guard_red=0 compile_fail=0
+C010H_DONE shapes=79 arms=200 face=6 noface=68 confounded=5 bad_probe=0 ctrl_compile_fail=1 probe_compile_fail=0 probe_timeout=0 inverse_shapes=21 inverse_face=14 inverse_noface=7 inverse_confounded=0 repo_build_residue=1 SMOKE_ONLY=0
+C010H2_DONE shapes=15 over_accept=14 strict_same=1 aot_compile_fail=0 php_ok_aot_diff=0 repo_build_residue=1 SMOKE_ONLY=0
+C010I_DONE shapes=19 tree_same=7 tree_diff=12 bc_same=7 bc_diff=12 aot_same=19 aot_diff=0 aot_compile_fail=0 both_red=0 vm_only_red=12 aot_only_red=0 repo_build_residue=1 SMOKE_ONLY=0
+== 影子读数 ==
+f124_container_orchestrator_pod_service_autoscale	old	f1468155f612eccc6ff2b2535d016466
+== [1/3] shadow start 2026-10-07 16:26:50
+awk: syntax error at source line 9
+ context is
+	+miss), same, diff, miss, >>>  (END <<< -START)
+awk: illegal statement at source line 9
+f179_visitor_composite_ast	new	dbbd5449a407aaa17e5a9af135957e68
+== [1/3] shadow rc=0 2026-10-07 16:53:51
+== [2/3] gates start 2026-10-07 16:53:51
+gateE_rc=0
+gateF_rc=0
+gateG_rc=0
+gateH_rc=0
+gateH2_rc=0
+gateI_rc=0
+== [2/3] gates done 2026-10-07 17:10:17
+== [3/3] main regression start 2026-10-07 17:10:17
+regression_rc=0
+== [3/3] regression done 2026-10-07 17:24:11
+== 六门新读数 ==
+C010KW_DONE shapes=19 same=19 diff=0 silent_empty=0 aot_fatal=0 compile_fail=0
+C010MECH_DONE shapes=8 same=8 diff=0 zero_instr=0 compile_fail=0
+C010G_DONE shapes=7 same=7 diff=0 red_confirmed=0 guard_same=4 guard_red=0 compile_fail=0
+C010H_DONE shapes=79 arms=200 face=1 noface=73 confounded=5 bad_probe=0 ctrl_compile_fail=1 probe_compile_fail=0 probe_timeout=0 inverse_shapes=21 inverse_face=1 inverse_noface=20 inverse_confounded=0 repo_build_residue=0 SMOKE_ONLY=0
+C010H2_DONE shapes=15 over_accept=14 strict_same=1 aot_compile_fail=0 php_ok_aot_diff=0 repo_build_residue=0 SMOKE_ONLY=0
+C010I_DONE shapes=19 tree_same=7 tree_diff=12 bc_same=7 bc_diff=12 aot_same=19 aot_diff=0 aot_compile_fail=0 both_red=0 vm_only_red=12 aot_only_red=0 repo_build_residue=0 SMOKE_ONLY=0
+== 影子读数 ==
+C010_SHADOW_DONE total=68 same=68 diff=0 miss=0 ELAPSED=2400s(note: awk summary killed by timeout, rows complete)
+== [1/3] shadow start 2026-10-07 19:01:36
+awk: syntax error at source line 9
+ context is
+	+miss), same, diff, miss, >>>  (END <<< -START)
+awk: illegal statement at source line 9
+f179_visitor_composite_ast	new	dbbd5449a407aaa17e5a9af135957e68
+== [1/3] shadow rc=0 2026-10-07 19:26:42
+== [2/3] gates start 2026-10-07 19:26:42
+gateE_rc=0
+gateF_rc=0
+gateG_rc=0
+gateH_rc=0
+gateH2_rc=0
+gateI_rc=0
+== [2/3] gates done 2026-10-07 19:42:26
+== [3/3] main regression start 2026-10-07 19:42:26
+regression_rc=0
+== [3/3] regression done 2026-10-07 19:55:19
+== 六门新读数 ==
+C010KW_DONE shapes=19 same=19 diff=0 silent_empty=0 aot_fatal=0 compile_fail=0
+C010MECH_DONE shapes=8 same=8 diff=0 zero_instr=0 compile_fail=0
+C010G_DONE shapes=7 same=7 diff=0 red_confirmed=0 guard_same=4 guard_red=0 compile_fail=0
+C010H_DONE shapes=79 arms=200 face=1 noface=76 confounded=2 bad_probe=0 ctrl_compile_fail=0 probe_compile_fail=0 probe_timeout=0 inverse_shapes=21 inverse_face=1 inverse_noface=20 inverse_confounded=0 repo_build_residue=0 SMOKE_ONLY=0
+C010H2_DONE shapes=15 over_accept=14 strict_same=1 aot_compile_fail=0 php_ok_aot_diff=0 repo_build_residue=0 SMOKE_ONLY=0
+C010I_DONE shapes=19 tree_same=7 tree_diff=12 bc_same=7 bc_diff=12 aot_same=19 aot_diff=0 aot_compile_fail=0 both_red=0 vm_only_red=12 aot_only_red=0 repo_build_residue=0 SMOKE_ONLY=0
+== 影子读数 ==
+C010_SHADOW_DONE total=68 same=68 diff=0 miss=0 ELAPSED=1506s (summary awk fixed post-hoc; 136 data rows complete)
+== [1/3] shadow start 2026-10-07 20:21:17
+C010_SHADOW_DONE total=68 same=68 diff=0 miss=0 ELAPSED=1502s
+== [1/3] shadow rc=0 2026-10-07 20:46:19
+== [2/3] gates start 2026-10-07 20:46:19
+gateE_rc=0
+gateF_rc=0
+gateG_rc=0
+gateH_rc=0
+gateH2_rc=0
+gateI_rc=0
+== [2/3] gates done 2026-10-07 21:02:16
+== [3/3] main regression start 2026-10-07 21:02:16
+regression_rc=0
+== [3/3] regression done 2026-10-07 21:16:02
+== 六门新读数 ==
+C010KW_DONE shapes=19 same=19 diff=0 silent_empty=0 aot_fatal=0 compile_fail=0
+C010MECH_DONE shapes=8 same=8 diff=0 zero_instr=0 compile_fail=0
+C010G_DONE shapes=7 same=7 diff=0 red_confirmed=0 guard_same=4 guard_red=0 compile_fail=0
+C010H_DONE shapes=79 arms=200 face=0 noface=78 confounded=1 bad_probe=0 ctrl_compile_fail=0 probe_compile_fail=0 probe_timeout=0 inverse_shapes=21 inverse_face=0 inverse_noface=21 inverse_confounded=0 repo_build_residue=0 SMOKE_ONLY=0
+C010H2_DONE shapes=15 over_accept=14 strict_same=1 aot_compile_fail=0 php_ok_aot_diff=0 repo_build_residue=0 SMOKE_ONLY=0
+C010I_DONE shapes=19 tree_same=7 tree_diff=12 bc_same=7 bc_diff=12 aot_same=19 aot_diff=0 aot_compile_fail=0 both_red=0 vm_only_red=12 aot_only_red=0 repo_build_residue=0 SMOKE_ONLY=0
+== 影子读数 ==
+C010_SHADOW_DONE total=68 same=68 diff=0 miss=0 ELAPSED=1502s

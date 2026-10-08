@@ -1,0 +1,16 @@
+f152_closure_arrow_higher_order|0|BASE|PASS|46376|f4c41d87a3bfbb78c7ff42fff27c3d66|-OReleaseFast|
+f152_closure_arrow_higher_order|15|BASE_SAME|PASS|46376|f4c41d87a3bfbb78c7ff42fff27c3d66|-OReleaseFast|
+f152_closure_arrow_higher_order|20|BASE_SAME|PASS|46376|f4c41d87a3bfbb78c7ff42fff27c3d66|-OReleaseFast|
+f152_closure_arrow_higher_order|25|BASE_SAME|PASS|46376|f4c41d87a3bfbb78c7ff42fff27c3d66|-OReleaseFast|
+f152_closure_arrow_higher_order|30|BASE_SAME|PASS|46376|f4c41d87a3bfbb78c7ff42fff27c3d66|-OReleaseFast|
+f152_closure_arrow_higher_order|31|BASE_SAME|PASS|46376|f4c41d87a3bfbb78c7ff42fff27c3d66|-OReleaseFast|
+f152_closure_arrow_higher_order|32|BASE_SAME|PASS|46376|f4c41d87a3bfbb78c7ff42fff27c3d66|-OReleaseFast|
+f152_closure_arrow_higher_order|33|BASE_SAME|PASS|46376|f4c41d87a3bfbb78c7ff42fff27c3d66|-OReleaseFast|
+f152_closure_arrow_higher_order|34|BASE_SAME|PASS|46376|f4c41d87a3bfbb78c7ff42fff27c3d66|-OReleaseFast|
+f152_closure_arrow_higher_order|35|BASE_DRIFT|RUNTIME_FAIL|46798|8117a372cad3f09dfc955acb72195584|-OReleaseFast|exit=255 Stack trace: #0 {main}   thrown in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f152_closure_arrow_higher_order.php on line 128
+f152_closure_arrow_higher_order|40|BASE_DRIFT|RUNTIME_FAIL|46798|8117a372cad3f09dfc955acb72195584|-OReleaseFast|exit=255 Stack trace: #0 {main}   thrown in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f152_closure_arrow_higher_order.php on line 128
+f152_closure_arrow_higher_order|45|BASE_DRIFT|RUNTIME_FAIL|47101|1c59a2935865215911c8925ff933d1ae|-OReleaseFast|exit=139   partial(10,2)(3) = 16  --- Function Composition ---
+f152_closure_arrow_higher_order|50|BASE_DRIFT|RUNTIME_FAIL|47849|ed742689d9e44b7088c1bcdcbe340a01|-OReleaseFast|exit=139   memo(5) = 25 (calls: 2)  --- Partial Application ---
+THRESH_BISECT_MERGED thresholds=13 arms=14 rounds=2 green_T_max=34 red_T_min=35 base_md5=f4c41d87a3bfbb78c7ff42fff27c3d66 base_lines=46376
+ELAPSED_R1=114s arms_r1=9 thresholds_r1="0 15 20 25 30 35 40 45 50"
+ELAPSED_R2=63s arms_r2=5 thresholds_r2="0 31 32 33 34"

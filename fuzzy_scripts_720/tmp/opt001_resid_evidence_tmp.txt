@@ -1,0 +1,90 @@
+===== f117_search_engine_inverted_tfidf_bm25 arm=licm（该形最小红配置） =====
+C1=4 C4=0 C4h=0 C4b=6 C4bh=0 C7=22 H=51(base_id_matched=51 loop_found=51)
+C2=25 C6=2 C9=0
+  C6 regs: reg_39
+  C2 regs: reg_0 reg_12 reg_245 reg_266 reg_276 reg_3 reg_39 reg_49
+  [C4b entry->foreach_cond_0] .{ .id = 21, .type_ = .{ .php_value = void } } = property.get .{ .id = 0, .type_ = .{ .php_value = void } }.totalDocs
+  [C4b entry->foreach_cond_0] .{ .id = 25, .type_ = .{ .php_value = void } } = property.get .{ .id = 0, .type_ = .{ .php_value = void } }.docLengths
+  [C4b entry->foreach_cond_0] .{ .id = 28, .type_ = .{ .php_value = void } } = property.get .{ .id = 0, .type_ = .{ .php_value = void } }.totalDocs
+  [C7 if_then_7=>entry->foreach_cond_0] .{ .id = 62, .type_ = .{ .php_value = void } } = const.string $51
+  [C7 if_then_5=>entry->foreach_cond_0] .{ .id = 49, .type_ = .{ .php_value = void } } = const.string $51
+  [C1 coalesce_merge_13] .{ .id = 39, .type_ = .{ .i64 = void } } = phi [.{ .id = 35, .type_ = .{ .php_value = void } }, foreach_body_8], [.{ .id = 38, .type_ = .{ .i64 = void } }, foreach_body_8]
+  [C7 coalesce_merge_13=>entry->foreach_cond_0] .{ .id = 40, .type_ = .{ .php_value = void } } = cast .{ .id = 0, .type_ = .{ .php_object = { 73, 110, 118, 101, 114, 116, 101, 100, 73, 110, 100, 101, 120 } } } from .{ .php_object = { 73, 110, 118, 101, 114, 116, 101, 
+  [C7 foreach_body_8=>entry->foreach_cond_0] .{ .id = 36, .type_ = .{ .php_value = void } } = const.null
+  [C7 coalesce_rhs_12=>entry->foreach_cond_0] .{ .id = 38, .type_ = .{ .i64 = void } } = const.i64 0
+  [C1 coalesce_merge_13] .{ .id = 39, .type_ = .{ .i64 = void } } = phi [.{ .id = 35, .type_ = .{ .php_value = void } }, foreach_body_8], [.{ .id = 38, .type_ = .{ .i64 = void } }, foreach_body_8]
+  [C7 coalesce_merge_13=>entry->foreach_cond_0] .{ .id = 40, .type_ = .{ .php_value = void } } = cast .{ .id = 0, .type_ = .{ .php_object = { 73, 110, 118, 101, 114, 116, 101, 100, 73, 110, 100, 101, 120 } } } from .{ .php_object = { 73, 110, 118, 101, 114, 116, 101, 
+  [C7 foreach_body_8=>entry->foreach_cond_0] .{ .id = 36, .type_ = .{ .php_value = void } } = const.null
+===== f161_json_xml_csv_parsing arm=licm（该形最小红配置） =====
+C1=2 C4=0 C4h=0 C4b=5 C4bh=0 C7=24 H=33(base_id_matched=33 loop_found=33)
+C2=32 C6=2 C9=1
+  [C9 reg_56 空臂=then 标记行 :4001]
+  C6 regs: reg_22 reg_34
+  C2 regs: reg_0 reg_1 reg_100 reg_112 reg_12 reg_13 reg_141 reg_17
+  [C7 if_else_6=>entry->foreach_cond_0] .{ .id = 22, .type_ = .{ .bool = void } } = const.bool false
+  [C7 foreach_body_1=>entry->foreach_cond_0] .{ .id = 24, .type_ = .{ .bool = void } } = const.bool false
+  [C7 ternary_else_6=>entry->foreach_cond_0] .{ .id = 21, .type_ = .{ .php_string = void } } = const.string $32
+  [C7 foreach_body_1=>entry->foreach_cond_0] .{ .id = 16, .type_ = .{ .php_value = void } } = cast .{ .id = 3, .type_ = .{ .php_string = void } } from .{ .php_string = void } to .{ .php_value = void }
+  [C7 foreach_body_1=>entry->foreach_cond_0] .{ .id = 17, .type_ = .{ .php_string = void } } = const.string $37
+  [C7 foreach_body_1=>params_merge->foreach_cond_0] .{ .id = 37, .type_ = .{ .php_string = void } } = const.string $37
+  [C1 coalesce_merge_11] .{ .id = 34, .type_ = .{ .php_value = void } } = phi [.{ .id = 30, .type_ = .{ .php_value = void } }, foreach_body_6], [.{ .id = 33, .type_ = .{ .php_string = void } }, foreach_body_6]
+  [C7 if_then_16=>entry->foreach_cond_0] .{ .id = 56, .type_ = .{ .php_string = void } } = const.string $66
+  [C7 if_then_16=>entry->foreach_cond_0] .{ .id = 57, .type_ = .{ .php_string = void } } = const.string $66
+  [C7 if_then_16=>entry->foreach_cond_0] .{ .id = 58, .type_ = .{ .php_string = void } } = const.string $68
+  [C7 if_then_16=>entry->foreach_cond_0] .{ .id = 63, .type_ = .{ .php_string = void } } = const.string $66
+  [C7 coalesce_merge_11=>entry->foreach_cond_0] .{ .id = 38, .type_ = .{ .i64 = void } } = const.i64 0
+===== f051_validator_rule_chain_batch arm=li5（该形最小红配置） =====
+C1=1 C4=0 C4h=0 C4b=1 C4bh=0 C7=18 H=26(base_id_matched=26 loop_found=26)
+C2=6 C6=1 C9=0
+  C6 regs: reg_195
+  C2 regs: reg_195 reg_30 reg_74 reg_75 reg_76 reg_80
+  [C4b entry->foreach_cond_0] .{ .id = 5, .type_ = .{ .php_value = void } } = property.get .{ .id = 0, .type_ = .{ .php_value = void } }.rules
+  [C7 if_then_7=>entry->foreach_cond_0] .{ .id = 32, .type_ = .{ .php_value = void } } = const.string $61
+  [C7 foreach_body_1=>entry->foreach_cond_0] .{ .id = 18, .type_ = .{ .php_value = void } } = const.null
+  [C7 if_then_10=>foreach_body_1->foreach_cond_5] .{ .id = 44, .type_ = .{ .php_value = void } } = cast .{ .id = 13, .type_ = .{ .php_value = void } } from .{ .php_value = void } to .{ .php_value = void }
+  [C7 if_then_10=>entry->foreach_cond_0] .{ .id = 35, .type_ = .{ .i64 = void } } = const.i64 2
+  [C7 if_then_10=>entry->foreach_cond_0] .{ .id = 37, .type_ = .{ .i64 = void } } = const.i64 0
+  [C7 if_then_10=>entry->foreach_cond_0] .{ .id = 40, .type_ = .{ .i64 = void } } = const.i64 1
+  [C7 if_then_10=>entry->foreach_cond_0] .{ .id = 43, .type_ = .{ .php_value = void } } = cast .{ .id = 5, .type_ = .{ .php_object = { 86, 97, 108, 105, 100, 97, 116, 111, 114 } } } from .{ .php_object = { 86, 97, 108, 105, 100, 97, 116, 111, 114 } } to .{ .php
+  [C7 foreach_body_6=>entry->foreach_cond_0] .{ .id = 31, .type_ = .{ .php_string = void } } = const.string $79
+  [C1 foreach_body_18] .{ .id = 195, .type_ = .{ .php_value = void } } = phi [.{ .id = 192, .type_ = .{ .php_value = void } }, foreach_body_18], [.{ .id = 194, .type_ = .{ .php_value = void } }, foreach_body_18]
+  [C7 foreach_body_13=>if_merge_1->foreach_cond_7] .{ .id = 100, .type_ = .{ .php_string = void } } = const.string $104
+  [C7 foreach_body_13=>if_merge_1->foreach_cond_7] .{ .id = 103, .type_ = .{ .php_string = void } } = const.string $105
+===== f061_graph_dijkstra_bellmanford_floyd arm=li5（该形最小红配置） =====
+C1=0 C4=0 C4h=0 C4b=12 C4bh=0 C7=32 H=34(base_id_matched=34 loop_found=34)
+C2=23 C6=0 C9=5
+  [C9 reg_30 空臂=then 标记行 :14712]
+  [C9 reg_60 空臂=then 标记行 :26717]
+  [C9 reg_94 空臂=then 标记行 :29722]
+  [C9 reg_146 空臂=then 标记行 :34278]
+  [C9 reg_219 空臂=then 标记行 :40000]
+  C2 regs: reg_0 reg_1 reg_11 reg_124 reg_125 reg_128 reg_129 reg_13
+  [C4b entry->foreach_cond_0] .{ .id = 9, .type_ = .{ .php_value = void } } = property.get .{ .id = 0, .type_ = .{ .php_value = void } }.nodes
+  [C4b foreach_cleanup_13->while_cond_5] .{ .id = 107, .type_ = .{ .php_value = void } } = load .{ .php_value = void } from .{ .id = 69, .type_ = .{ .ptr = .{ .php_value = void } } }
+  [C7 while_body_6=>foreach_cleanup_3->while_cond_5] .{ .id = 37, .type_ = .{ .php_value = void } } = cast .{ .id = 0, .type_ = .{ .php_object = { 87, 101, 105, 103, 104, 116, 101, 100, 71, 114, 97, 112, 104 } } } from .{ .php_object = { 87, 101, 105, 103, 104, 116, 101, 1
+  [C7 while_body_6=>foreach_cleanup_3->while_cond_5] .{ .id = 42, .type_ = .{ .php_value = void } } = cast .{ .id = 109, .type_ = .{ .php_value = void } } from .{ .php_value = void } to .{ .php_value = void }
+  [C7 while_body_6=>foreach_cleanup_3->while_cond_5] .{ .id = 43, .type_ = .{ .php_value = void } } = cast .{ .id = 110, .type_ = .{ .php_value = void } } from .{ .php_value = void } to .{ .php_value = void }
+  [C7 while_body_6=>foreach_cleanup_3->while_cond_5] .{ .id = 46, .type_ = .{ .php_string = void } } = const.string $78
+  [C7 while_body_6=>foreach_cleanup_3->while_cond_5] .{ .id = 47, .type_ = .{ .bool = void } } = const.bool false
+  [C7 while_body_6=>foreach_cleanup_3->while_cond_5] .{ .id = 55, .type_ = .{ .i64 = void } } = const.i64 1
+  [C7 foreach_body_11=>foreach_cleanup_3->while_cond_5] .{ .id = 76, .type_ = .{ .php_string = void } } = const.string $18
+  [C7 foreach_body_11=>foreach_cleanup_3->while_cond_5] .{ .id = 80, .type_ = .{ .php_string = void } } = const.string $19
+  [C7 while_body_6=>foreach_cleanup_3->while_cond_5] .{ .id = 37, .type_ = .{ .php_value = void } } = cast .{ .id = 0, .type_ = .{ .php_object = { 87, 101, 105, 103, 104, 116, 101, 100, 71, 114, 97, 112, 104 } } } from .{ .php_object = { 87, 101, 105, 103, 104, 116, 101, 1
+  [C7 while_body_6=>foreach_cleanup_3->while_cond_5] .{ .id = 42, .type_ = .{ .php_value = void } } = cast .{ .id = 109, .type_ = .{ .php_value = void } } from .{ .php_value = void } to .{ .php_value = void }
+===== f135_math_number_theory_crt_miller_rabin arm=li5（该形最小红配置） =====
+C1=2 C4=0 C4h=0 C4b=19 C4bh=0 C7=13 H=28(base_id_matched=28 loop_found=28)
+C2=41 C6=4 C9=0
+  C6 regs: reg_103 reg_106 reg_161 reg_179
+  C2 regs: reg_0 reg_1 reg_10 reg_103 reg_104 reg_106 reg_11 reg_111
+  [C7 while_cond_0=>entry->while_cond_0] .{ .id = 12, .type_ = .{ .i64 = void } } = const.i64 0
+  [C7 if_then_22=>while_exit_8->for_cond_9] .{ .id = 87, .type_ = .{ .bool = void } } = const.bool false
+  [C7 for_cond_18=>while_exit_8->for_cond_9] .{ .id = 76, .type_ = .{ .php_value = void } } = sub .{ .id = 96, .type_ = .{ .php_value = void } }, .{ .id = 113, .type_ = .{ .i64 = void } }
+  [C7 for_body_10=>while_exit_8->for_cond_9] .{ .id = 50, .type_ = .{ .i64 = void } } = const.i64 3
+  [C7 for_body_10=>while_exit_8->for_cond_9] .{ .id = 51, .type_ = .{ .php_value = void } } = sub .{ .id = 10, .type_ = .{ .php_value = void } }, .{ .id = 50, .type_ = .{ .i64 = void } }
+  [C7 while_cond_5=>entry->for_cond_1] .{ .id = 14, .type_ = .{ .i64 = void } } = const.i64 0
+  [C7 coalesce_merge_9=>entry->for_cond_1] .{ .id = 23, .type_ = .{ .i64 = void } } = const.i64 1
+  [C7 while_body_6=>entry->for_cond_1] .{ .id = 19, .type_ = .{ .php_value = void } } = const.null
+  [C7 for_cond_6=>foreach_cleanup_3->for_cond_6] .{ .id = 26, .type_ = .{ .php_value = void } } = call @count(.{ .id = 2, .type_ = .{ .php_value = void } })
+  [C1 foreach_body_1] .{ .id = 161, .type_ = .{ .php_value = void } } = phi [.{ .id = 158, .type_ = .{ .php_value = void } }, foreach_body_1], [.{ .id = 160, .type_ = .{ .php_value = void } }, foreach_body_1]
+  [C1 foreach_body_9] .{ .id = 179, .type_ = .{ .php_value = void } } = phi [.{ .id = 160, .type_ = .{ .php_value = void } }, foreach_body_9], [.{ .id = 158, .type_ = .{ .php_value = void } }, foreach_body_9]
+  [C4b entry->foreach_cond_0] .{ .id = 28, .type_ = .{ .php_value = void } } = global.get $ext

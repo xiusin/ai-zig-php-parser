@@ -1,0 +1,113 @@
+# opt001 §5.8 逐轮点亮曲线 2026-10-06 15:44:47
+bin_md5=1f15e4ce9b5c9cdaaef7cabf5efb9c76
+optimizer=252234ef48cb47a42e6f39d1bc3e845b/6877
+native_linker=fbe6382a2e0904b6740d771b88c409c7/32797
+level=default(无 --optimize)  层A=--no-link 签名  层B=全编译输出面  唯一变量=--aot-max-iterations=N
+r5 来源=fuzzy_scripts_720/tmp/opt001_c9_face_tmp.tsv（#100 层A 签名 / 层B 输出，同代次，不重跑）
+LAYERA_HEADER|shape|arm|C1|C2|C6|C9|C4h|C4bh|C7|H|hm|hl|ir|zig
+f016_hash_bloom_consistent|r1|C1=0/2(d=2)|C2=0/2(d=2)|C6=0/2(d=2)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=19/H=44(hm=44,hl=44)|END_A_HIT|ir=1123|zig=46768
+f016_hash_bloom_consistent|r2|C1=0/2(d=2)|C2=0/2(d=2)|C6=0/2(d=2)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=15/H=36(hm=36,hl=36)|END_A_HIT|ir=1116|zig=45957
+f016_hash_bloom_consistent|r3|C1=0/2(d=2)|C2=0/2(d=2)|C6=0/2(d=2)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=15/H=36(hm=36,hl=36)|END_A_HIT|ir=1116|zig=45957
+f016_hash_bloom_consistent|r4|C1=0/2(d=2)|C2=0/2(d=2)|C6=0/2(d=2)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=15/H=36(hm=36,hl=36)|END_A_HIT|ir=1116|zig=45957
+f024_rbac_role_inheritance_policy|r1|C1=0/0(d=0)|C2=2/0(d=-2)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=14/H=15(hm=15,hl=15)|END_BLIND|ir=955|zig=42704
+f024_rbac_role_inheritance_policy|r2|C1=0/1(d=1)|C2=2/1(d=-1)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=11/H=12(hm=12,hl=12)|END_A_HIT|ir=951|zig=42546
+f024_rbac_role_inheritance_policy|r3|C1=0/1(d=1)|C2=2/1(d=-1)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=11/H=12(hm=12,hl=12)|END_A_HIT|ir=948|zig=42333
+f024_rbac_role_inheritance_policy|r4|C1=0/1(d=1)|C2=2/1(d=-1)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=11/H=12(hm=12,hl=12)|END_A_HIT|ir=948|zig=42333
+f025_coding_hamming_rle_lzw_crc|r1|C1=0/0(d=0)|C2=21/21(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=32/H=40(hm=40,hl=40)|END_BLIND|ir=1089|zig=30713
+f025_coding_hamming_rle_lzw_crc|r2|C1=0/1(d=1)|C2=21/22(d=1)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=35/H=43(hm=43,hl=43)|END_A_HIT|ir=1083|zig=30703
+f025_coding_hamming_rle_lzw_crc|r3|C1=0/1(d=1)|C2=21/22(d=1)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=35/H=43(hm=43,hl=43)|END_A_HIT|ir=1080|zig=30696
+f025_coding_hamming_rle_lzw_crc|r4|C1=0/1(d=1)|C2=21/22(d=1)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=35/H=43(hm=43,hl=43)|END_A_HIT|ir=1080|zig=30696
+f044_json_deepops_merge_diff|r1|C1=0/1(d=1)|C2=21/24(d=3)|C6=0/0(d=0)|C9=3/0(d=-3)|C4h=0|C4bh=0|C7=51/H=53(hm=53,hl=53)|END_BLIND|ir=1223|zig=27724
+f044_json_deepops_merge_diff|r2|C1=0/1(d=1)|C2=21/21(d=0)|C6=0/1(d=1)|C9=3/1(d=-2)|C4h=0|C4bh=0|C7=41/H=42(hm=42,hl=42)|END_A_HIT|ir=1220|zig=27947
+f044_json_deepops_merge_diff|r3|C1=0/1(d=1)|C2=21/21(d=0)|C6=0/1(d=1)|C9=3/1(d=-2)|C4h=0|C4bh=0|C7=41/H=42(hm=42,hl=42)|END_A_HIT|ir=1220|zig=27947
+f044_json_deepops_merge_diff|r4|C1=0/1(d=1)|C2=21/21(d=0)|C6=0/1(d=1)|C9=3/1(d=-2)|C4h=0|C4bh=0|C7=41/H=42(hm=42,hl=42)|END_A_HIT|ir=1220|zig=27947
+f051_validator_rule_chain_batch|r1|C1=0/0(d=0)|C2=5/5(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=18/H=26(hm=26,hl=26)|END_BLIND|ir=959|zig=25339
+f051_validator_rule_chain_batch|r2|C1=0/1(d=1)|C2=5/6(d=1)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=18/H=26(hm=26,hl=26)|END_A_HIT|ir=951|zig=25112
+f051_validator_rule_chain_batch|r3|C1=0/1(d=1)|C2=5/6(d=1)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=18/H=26(hm=26,hl=26)|END_A_HIT|ir=946|zig=24822
+f051_validator_rule_chain_batch|r4|C1=0/1(d=1)|C2=5/6(d=1)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=18/H=26(hm=26,hl=26)|END_A_HIT|ir=946|zig=24822
+f061_graph_dijkstra_bellmanford_floyd|r1|C1=0/0(d=0)|C2=23/23(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=39/H=44(hm=44,hl=44)|END_BLIND|ir=1070|zig=43099
+f061_graph_dijkstra_bellmanford_floyd|r2|C1=0/0(d=0)|C2=23/23(d=0)|C6=0/0(d=0)|C9=0/5(d=5)|C4h=0|C4bh=0|C7=35/H=37(hm=37,hl=37)|END_B_HIT|ir=1056|zig=42828
+f061_graph_dijkstra_bellmanford_floyd|r3|C1=0/0(d=0)|C2=23/23(d=0)|C6=0/0(d=0)|C9=0/5(d=5)|C4h=0|C4bh=0|C7=32/H=34(hm=34,hl=34)|END_B_HIT|ir=1056|zig=42432
+f061_graph_dijkstra_bellmanford_floyd|r4|C1=0/0(d=0)|C2=23/23(d=0)|C6=0/0(d=0)|C9=0/5(d=5)|C4h=0|C4bh=0|C7=32/H=34(hm=34,hl=34)|END_B_HIT|ir=1056|zig=42432
+f072_type_inference_hindley_milner|r1|C1=0/0(d=0)|C2=5/5(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=8/H=31(hm=31,hl=31)|END_BLIND|ir=1285|zig=37103
+f072_type_inference_hindley_milner|r2|C1=0/0(d=0)|C2=5/5(d=0)|C6=0/0(d=0)|C9=0/2(d=2)|C4h=0|C4bh=0|C7=9/H=18(hm=18,hl=18)|END_B_HIT|ir=1281|zig=37013
+f072_type_inference_hindley_milner|r3|C1=0/0(d=0)|C2=5/5(d=0)|C6=0/0(d=0)|C9=0/2(d=2)|C4h=0|C4bh=0|C7=9/H=18(hm=18,hl=18)|END_B_HIT|ir=1281|zig=37013
+f072_type_inference_hindley_milner|r4|C1=0/0(d=0)|C2=5/5(d=0)|C6=0/0(d=0)|C9=0/2(d=2)|C4h=0|C4bh=0|C7=9/H=18(hm=18,hl=18)|END_B_HIT|ir=1281|zig=37013
+f104_game_engine_ecs_collision_render|r1|C1=0/1(d=1)|C2=20/19(d=-1)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=52/H=56(hm=56,hl=56)|END_BLIND|ir=1259|zig=48573
+f104_game_engine_ecs_collision_render|r2|C1=0/1(d=1)|C2=20/20(d=0)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=40/H=43(hm=43,hl=43)|END_A_HIT|ir=1249|zig=47497
+f104_game_engine_ecs_collision_render|r3|C1=0/1(d=1)|C2=20/20(d=0)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=40/H=43(hm=43,hl=43)|END_A_HIT|ir=1249|zig=47497
+f104_game_engine_ecs_collision_render|r4|C1=0/1(d=1)|C2=20/20(d=0)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=40/H=43(hm=43,hl=43)|END_A_HIT|ir=1249|zig=47497
+f113_distributed_consistenthash_vectorclock_quorum|r1|C1=0/3(d=3)|C2=11/8(d=-3)|C6=0/2(d=2)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=37/H=68(hm=68,hl=68)|END_A_HIT|ir=1532|zig=104136
+f113_distributed_consistenthash_vectorclock_quorum|r2|C1=0/4(d=4)|C2=11/10(d=-1)|C6=0/4(d=4)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=27/H=52(hm=52,hl=52)|END_A_HIT|ir=1518|zig=103365
+f113_distributed_consistenthash_vectorclock_quorum|r3|C1=0/4(d=4)|C2=11/10(d=-1)|C6=0/4(d=4)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=27/H=52(hm=52,hl=52)|END_A_HIT|ir=1513|zig=102572
+f113_distributed_consistenthash_vectorclock_quorum|r4|C1=0/4(d=4)|C2=11/10(d=-1)|C6=0/4(d=4)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=27/H=52(hm=52,hl=52)|END_A_HIT|ir=1511|zig=102042
+f117_search_engine_inverted_tfidf_bm25|r1|C1=0/4(d=4)|C2=23/25(d=2)|C6=0/2(d=2)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=22/H=51(hm=51,hl=51)|END_A_HIT|ir=1220|zig=54498
+f117_search_engine_inverted_tfidf_bm25|r2|C1=0/5(d=5)|C2=23/32(d=9)|C6=0/5(d=5)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=13/H=32(hm=32,hl=32)|END_A_HIT|ir=1195|zig=52400
+f117_search_engine_inverted_tfidf_bm25|r3|C1=0/3(d=3)|C2=23/32(d=9)|C6=0/5(d=5)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=13/H=32(hm=32,hl=32)|END_A_HIT|ir=1190|zig=51852
+f117_search_engine_inverted_tfidf_bm25|r4|C1=0/3(d=3)|C2=23/32(d=9)|C6=0/5(d=5)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=13/H=32(hm=32,hl=32)|END_A_HIT|ir=1190|zig=51852
+f124_container_orchestrator_pod_service_autoscale|r1|C1=0/1(d=1)|C2=56/47(d=-9)|C6=0/1(d=1)|C9=3/3(d=0)|C4h=0|C4bh=0|C7=22/H=63(hm=63,hl=63)|END_A_HIT|ir=2098|zig=112601
+f124_container_orchestrator_pod_service_autoscale|r2|C1=0/2(d=2)|C2=56/48(d=-8)|C6=0/1(d=1)|C9=3/4(d=1)|C4h=0|C4bh=0|C7=17/H=48(hm=48,hl=48)|END_A+B_HIT|ir=2083|zig=110734
+f124_container_orchestrator_pod_service_autoscale|r3|C1=0/2(d=2)|C2=56/49(d=-7)|C6=0/2(d=2)|C9=3/4(d=1)|C4h=0|C4bh=0|C7=17/H=48(hm=48,hl=48)|END_A+B_HIT|ir=2081|zig=110732
+f124_container_orchestrator_pod_service_autoscale|r4|C1=0/2(d=2)|C2=56/49(d=-7)|C6=0/2(d=2)|C9=3/4(d=1)|C4h=0|C4bh=0|C7=17/H=48(hm=48,hl=48)|END_A+B_HIT|ir=2081|zig=110732
+f134_event_sourcing_snapshot_cqrs_projection|r1|C1=0/1(d=1)|C2=20/20(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=47/H=61(hm=61,hl=61)|END_BLIND|ir=1625|zig=77011
+f134_event_sourcing_snapshot_cqrs_projection|r2|C1=0/0(d=0)|C2=20/26(d=6)|C6=0/6(d=6)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=18/H=29(hm=29,hl=29)|END_A_HIT|ir=1607|zig=75366
+f134_event_sourcing_snapshot_cqrs_projection|r3|C1=0/0(d=0)|C2=20/26(d=6)|C6=0/6(d=6)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=18/H=29(hm=29,hl=29)|END_A_HIT|ir=1607|zig=75366
+f134_event_sourcing_snapshot_cqrs_projection|r4|C1=0/0(d=0)|C2=20/26(d=6)|C6=0/6(d=6)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=18/H=29(hm=29,hl=29)|END_A_HIT|ir=1607|zig=75366
+f135_math_number_theory_crt_miller_rabin|r1|C1=0/0(d=0)|C2=40/39(d=-1)|C6=3/2(d=-1)|C9=1/0(d=-1)|C4h=0|C4bh=0|C7=13/H=29(hm=29,hl=29)|END_BLIND|ir=1425|zig=58348
+f135_math_number_theory_crt_miller_rabin|r2|C1=0/2(d=2)|C2=40/41(d=1)|C6=3/4(d=1)|C9=1/0(d=-1)|C4h=0|C4bh=0|C7=15/H=30(hm=30,hl=30)|END_A_HIT|ir=1416|zig=58268
+f135_math_number_theory_crt_miller_rabin|r3|C1=0/2(d=2)|C2=40/41(d=1)|C6=3/4(d=1)|C9=1/0(d=-1)|C4h=0|C4bh=0|C7=13/H=28(hm=28,hl=28)|END_A_HIT|ir=1412|zig=57820
+f135_math_number_theory_crt_miller_rabin|r4|C1=0/2(d=2)|C2=40/41(d=1)|C6=3/4(d=1)|C9=1/0(d=-1)|C4h=0|C4bh=0|C7=13/H=28(hm=28,hl=28)|END_A_HIT|ir=1412|zig=57820
+f152_closure_arrow_higher_order|r1|C1=0/0(d=0)|C2=67/67(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=0/H=0(hm=0,hl=0)|END_BLIND|ir=1174|zig=46366
+f152_closure_arrow_higher_order|r2|C1=0/0(d=0)|C2=67/67(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=0/H=0(hm=0,hl=0)|END_BLIND|ir=1174|zig=46372
+f152_closure_arrow_higher_order|r3|C1=0/0(d=0)|C2=67/67(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=0/H=0(hm=0,hl=0)|END_BLIND|ir=1174|zig=46372
+f152_closure_arrow_higher_order|r4|C1=0/0(d=0)|C2=67/67(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=0/H=0(hm=0,hl=0)|END_BLIND|ir=1174|zig=46372
+f160_virtual_fs_path_traversal|r1|C1=0/0(d=0)|C2=28/28(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=9/H=21(hm=21,hl=21)|END_BLIND|ir=1376|zig=38080
+f160_virtual_fs_path_traversal|r2|C1=0/0(d=0)|C2=28/28(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=11/H=22(hm=22,hl=22)|END_BLIND|ir=1374|zig=38115
+f160_virtual_fs_path_traversal|r3|C1=0/0(d=0)|C2=28/28(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=11/H=22(hm=22,hl=22)|END_BLIND|ir=1374|zig=38115
+f160_virtual_fs_path_traversal|r4|C1=0/0(d=0)|C2=28/28(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=11/H=22(hm=22,hl=22)|END_BLIND|ir=1374|zig=38115
+f161_json_xml_csv_parsing|r1|C1=0/2(d=2)|C2=30/32(d=2)|C6=0/2(d=2)|C9=1/1(d=0)|C4h=0|C4bh=0|C7=24/H=33(hm=33,hl=33)|END_A_HIT|ir=1365|zig=48037
+f161_json_xml_csv_parsing|r2|C1=0/2(d=2)|C2=30/32(d=2)|C6=0/2(d=2)|C9=1/1(d=0)|C4h=0|C4bh=0|C7=20/H=26(hm=26,hl=26)|END_A_HIT|ir=1354|zig=47799
+f161_json_xml_csv_parsing|r3|C1=0/2(d=2)|C2=30/32(d=2)|C6=0/2(d=2)|C9=1/1(d=0)|C4h=0|C4bh=0|C7=20/H=26(hm=26,hl=26)|END_A_HIT|ir=1354|zig=47799
+f161_json_xml_csv_parsing|r4|C1=0/2(d=2)|C2=30/32(d=2)|C6=0/2(d=2)|C9=1/1(d=0)|C4h=0|C4bh=0|C7=20/H=26(hm=26,hl=26)|END_A_HIT|ir=1354|zig=47799
+f171_state_machine_dfa|r1|C1=0/0(d=0)|C2=9/9(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=15/H=20(hm=20,hl=20)|END_BLIND|ir=962|zig=32081
+f171_state_machine_dfa|r2|C1=0/3(d=3)|C2=9/11(d=2)|C6=0/2(d=2)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=19/H=24(hm=24,hl=24)|END_A_HIT|ir=950|zig=32105
+f171_state_machine_dfa|r3|C1=0/3(d=3)|C2=9/12(d=3)|C6=0/3(d=3)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=16/H=21(hm=21,hl=21)|END_A_HIT|ir=939|zig=30876
+f171_state_machine_dfa|r4|C1=0/3(d=3)|C2=9/12(d=3)|C6=0/3(d=3)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=15/H=20(hm=20,hl=20)|END_A_HIT|ir=937|zig=30716
+f176_specification_chain_rules|r1|C1=0/0(d=0)|C2=5/5(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=35/H=38(hm=38,hl=38)|END_BLIND|ir=982|zig=42076
+f176_specification_chain_rules|r2|C1=0/7(d=7)|C2=5/8(d=3)|C6=0/3(d=3)|C9=0/1(d=1)|C4h=0|C4bh=0|C7=38/H=38(hm=38,hl=38)|END_A+B_HIT|ir=952|zig=41973
+f176_specification_chain_rules|r3|C1=0/7(d=7)|C2=5/12(d=7)|C6=0/7(d=7)|C9=0/1(d=1)|C4h=0|C4bh=0|C7=28/H=28(hm=28,hl=28)|END_A+B_HIT|ir=937|zig=39698
+f176_specification_chain_rules|r4|C1=0/7(d=7)|C2=5/12(d=7)|C6=0/7(d=7)|C9=0/1(d=1)|C4h=0|C4bh=0|C7=28/H=28(hm=28,hl=28)|END_A+B_HIT|ir=937|zig=39698
+f177_graph_traversal_dfs_bfs|r1|C1=0/1(d=1)|C2=14/12(d=-2)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=17/H=23(hm=23,hl=23)|END_A_HIT|ir=1333|zig=50001
+f177_graph_traversal_dfs_bfs|r2|C1=0/1(d=1)|C2=14/11(d=-3)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=13/H=19(hm=19,hl=19)|END_A_HIT|ir=1323|zig=49523
+f177_graph_traversal_dfs_bfs|r3|C1=0/1(d=1)|C2=14/11(d=-3)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=13/H=19(hm=19,hl=19)|END_A_HIT|ir=1323|zig=49523
+f177_graph_traversal_dfs_bfs|r4|C1=0/1(d=1)|C2=14/11(d=-3)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=13/H=19(hm=19,hl=19)|END_A_HIT|ir=1323|zig=49523
+LAYERA_DONE total=19 arm_compile_fail=0 arm_rows=76
+LAYERB_DONE total=0
+arm r1: PASS=0 DIFF=0 RUNTIME_FAIL=0 TIMEOUT_10S=0 COMPILE_FAIL=0
+arm r2: PASS=0 DIFF=0 RUNTIME_FAIL=0 TIMEOUT_10S=0 COMPILE_FAIL=0
+arm r3: PASS=0 DIFF=0 RUNTIME_FAIL=0 TIMEOUT_10S=0 COMPILE_FAIL=0
+arm r4: PASS=0 DIFF=0 RUNTIME_FAIL=0 TIMEOUT_10S=0 COMPILE_FAIL=0
+CURVE_HEADER shape|sig_r1|r2|r3|r4|r5|sig_first|out_r1|r2|r3|r4|r5|out_first
+CURVE f016_hash_bloom_consistent|HIT|HIT|HIT|HIT|HIT|1|NA|NA|NA|NA|NA|GREEN
+CURVE f024_rbac_role_inheritance_policy|-|HIT|HIT|HIT|HIT|2|NA|NA|NA|NA|NA|GREEN
+CURVE f025_coding_hamming_rle_lzw_crc|-|HIT|HIT|HIT|HIT|2|NA|NA|NA|NA|NA|GREEN
+CURVE f044_json_deepops_merge_diff|HIT|HIT|HIT|HIT|HIT|1|NA|NA|NA|NA|NA|GREEN
+CURVE f051_validator_rule_chain_batch|-|HIT|HIT|HIT|HIT|2|NA|NA|NA|NA|NA|GREEN
+CURVE f061_graph_dijkstra_bellmanford_floyd|-|HIT|HIT|HIT|HIT|2|NA|NA|NA|NA|NA|GREEN
+CURVE f072_type_inference_hindley_milner|-|HIT|HIT|HIT|HIT|2|NA|NA|NA|NA|NA|GREEN
+CURVE f104_game_engine_ecs_collision_render|HIT|HIT|HIT|HIT|HIT|1|NA|NA|NA|NA|NA|GREEN
+CURVE f113_distributed_consistenthash_vectorclock_quorum|HIT|HIT|HIT|HIT|HIT|1|NA|NA|NA|NA|NA|GREEN
+CURVE f117_search_engine_inverted_tfidf_bm25|HIT|HIT|HIT|HIT|HIT|1|NA|NA|NA|NA|NA|GREEN
+CURVE f124_container_orchestrator_pod_service_autoscale|HIT|HIT|HIT|HIT|HIT|1|NA|NA|NA|NA|NA|GREEN
+CURVE f134_event_sourcing_snapshot_cqrs_projection|HIT|HIT|HIT|HIT|HIT|1|NA|NA|NA|NA|NA|GREEN
+CURVE f135_math_number_theory_crt_miller_rabin|-|HIT|HIT|HIT|HIT|2|NA|NA|NA|NA|NA|GREEN
+CURVE f152_closure_arrow_higher_order|-|-|-|-|-|BLIND|NA|NA|NA|NA|NA|GREEN
+CURVE f160_virtual_fs_path_traversal|-|-|-|-|-|BLIND|NA|NA|NA|NA|NA|GREEN
+CURVE f161_json_xml_csv_parsing|HIT|HIT|HIT|HIT|HIT|1|NA|NA|NA|NA|NA|GREEN
+CURVE f171_state_machine_dfa|-|HIT|HIT|HIT|HIT|2|NA|NA|NA|NA|NA|GREEN
+CURVE f176_specification_chain_rules|-|HIT|HIT|HIT|HIT|2|NA|NA|NA|NA|NA|GREEN
+CURVE f177_graph_traversal_dfs_bfs|HIT|HIT|HIT|HIT|HIT|1|NA|NA|NA|NA|NA|GREEN
+CURVE_SHAPES 19
+CURVE_SIG_FIRSTROUND 1=9 2=8 BLIND=2
+CURVE_OUT_FIRSTROUND GREEN=19
+CURVE_SIG_NONMONOTONIC NONE

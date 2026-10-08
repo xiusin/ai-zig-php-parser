@@ -1,0 +1,93 @@
+# opt001 §5.11-3 被 cfg_cleanup 丢弃块内 phi 计数 2026-10-06 18:18:36
+bin_md5=1f15e4ce9b5c9cdaaef7cabf5efb9c76
+optimizer=252234ef48cb47a42e6f39d1bc3e845b/6877
+native_linker=fbe6382a2e0904b6740d771b88c409c7/32797
+ir_generator=cb53c2da7d4fe2e1f62b728511f7c3ea
+analyzer=53803dd164a0ea00b76f0e0bb686a4e7 42b9658c89e30ae9e93914783c2d97e8
+level=default(无 --optimize)  轮=default  唯一变量=cfg_cleanup 开关  faces=corpus
+arm_flags=<空=真默认档 1 轮>  LICM=0
+HEADER|face|shape|COUNT|dropped|label_only|phi_in_D|refuse_all|refuse_tramp|causeless|on_c1|funcs|unmatched|err|rc
+corpus|f004_oop_deep_inheritance_magic|COUNT|0|0|0|0|0|0|0|18|0|OK|rc_on=0/rc_nc=0
+corpus|f006_oop_observer_event_dispatcher|COUNT|5|2|0|3|0|0|0|18|0|OK|rc_on=0/rc_nc=0
+corpus|f007_string_encoding_crypto_hash|COUNT|20|1|0|19|0|0|0|16|0|OK|rc_on=0/rc_nc=0
+corpus|f009_oop_decorator_chain_command|COUNT|4|0|0|0|0|0|0|17|0|OK|rc_on=0/rc_nc=0
+corpus|f010_oop_singleton_registry_di|COUNT|3|1|0|2|1|0|0|23|0|OK|rc_on=0/rc_nc=0
+corpus|f012_json_tree_recursive_traverse|COUNT|18|6|0|6|0|0|0|14|0|OK|rc_on=0/rc_nc=0
+corpus|f016_hash_bloom_consistent|COUNT|37|11|0|14|3|0|0|21|0|OK|rc_on=0/rc_nc=0
+corpus|f024_rbac_role_inheritance_policy|COUNT|16|5|0|1|0|0|0|21|0|OK|rc_on=0/rc_nc=0
+corpus|f025_coding_hamming_rle_lzw_crc|COUNT|29|1|0|34|0|0|0|16|0|OK|rc_on=0/rc_nc=0
+corpus|f026_linkedlist_stack_queue_deque|COUNT|10|0|0|2|0|0|0|37|0|OK|rc_on=0/rc_nc=0
+corpus|f027_number_theory_primes_modular|COUNT|20|5|0|15|3|0|0|13|0|OK|rc_on=0/rc_nc=0
+corpus|f028_dp_knapsack_lcs_lis|COUNT|24|6|0|33|0|0|0|7|0|OK|rc_on=0/rc_nc=0
+corpus|f031_builder_fluent_immutable|COUNT|1|0|0|0|0|0|0|12|0|OK|rc_on=0/rc_nc=0
+corpus|f032_chain_responsibility_middleware|COUNT|2|1|0|0|0|0|0|9|0|OK|rc_on=0/rc_nc=0
+corpus|f033_state_pattern_order_machine|COUNT|4|2|0|1|0|0|0|12|0|OK|rc_on=0/rc_nc=0
+corpus|f034_template_method_pipeline|COUNT|3|1|0|0|0|0|0|20|0|OK|rc_on=0/rc_nc=0
+corpus|f036_strategy_dynamic_pricing|COUNT|11|2|0|5|0|0|0|19|0|OK|rc_on=0/rc_nc=0
+corpus|f037_adapter_unified_cache|COUNT|6|3|0|3|2|0|0|33|0|OK|rc_on=0/rc_nc=0
+corpus|f038_composite_filesystem_tree|COUNT|9|4|0|6|1|0|0|20|0|OK|rc_on=0/rc_nc=0
+corpus|f039_bridge_shape_renderer|COUNT|4|0|0|1|0|0|0|27|0|OK|rc_on=0/rc_nc=0
+corpus|f040_flyweight_forest_pool|COUNT|2|1|0|1|0|0|0|15|0|OK|rc_on=0/rc_nc=0
+corpus|f042_array_functions_full|COUNT|8|1|0|4|0|0|0|37|0|OK|rc_on=0/rc_nc=0
+corpus|f043_math_functions_full|COUNT|5|1|0|5|0|0|0|42|0|OK|rc_on=0/rc_nc=0
+corpus|f044_json_deepops_merge_diff|COUNT|25|11|0|11|3|0|0|9|0|OK|rc_on=0/rc_nc=0
+corpus|f045_datetime_calendar_format|COUNT|4|1|0|2|0|0|0|13|0|OK|rc_on=0/rc_nc=0
+corpus|f047_closures_curry_compose|COUNT|6|0|0|1|0|0|0|31|0|OK|rc_on=0/rc_nc=0
+corpus|f048_match_pattern_dispatch|COUNT|18|0|1|5|0|0|0|6|0|OK|rc_on=0/rc_nc=0
+corpus|f051_validator_rule_chain_batch|COUNT|15|5|0|7|0|0|0|10|0|OK|rc_on=0/rc_nc=0
+corpus|f056_crdt_gcounter_lww_orset|COUNT|13|8|0|7|0|0|0|24|0|OK|rc_on=0/rc_nc=0
+corpus|f057_workflow_engine_rollback|COUNT|8|3|0|1|0|0|0|13|0|OK|rc_on=0/rc_nc=0
+corpus|f061_graph_dijkstra_bellmanford_floyd|COUNT|41|14|0|38|4|0|0|8|0|OK|rc_on=0/rc_nc=0
+corpus|f065_crypto_rc4_sha1_base64_crc|COUNT|27|1|0|41|3|0|0|9|0|OK|rc_on=0/rc_nc=0
+corpus|f066_hamming_code_parity_checksum|COUNT|16|2|0|13|0|0|0|11|0|OK|rc_on=0/rc_nc=0
+corpus|f067_json_parser_schema_path_diff|COUNT|28|15|0|9|3|0|0|13|0|OK|rc_on=0/rc_nc=0
+corpus|f067_min_repro|COUNT|3|1|0|1|1|0|0|5|0|OK|rc_on=0/rc_nc=0
+corpus|f070_event_sourcing_cqrs_snapshot|COUNT|10|2|0|6|1|0|0|20|0|OK|rc_on=0/rc_nc=0
+corpus|f072_type_inference_hindley_milner|COUNT|12|0|0|1|0|0|0|19|0|OK|rc_on=0/rc_nc=0
+corpus|f080_db_transaction_mvcc_deadlock|COUNT|10|5|0|3|0|0|0|18|0|OK|rc_on=0/rc_nc=0
+corpus|f081_bplustree_index_range_query|COUNT|8|1|0|2|0|0|0|14|0|OK|rc_on=0/rc_nc=0
+corpus|f085_geo_rtree_knn_geocoder|COUNT|23|6|0|7|1|0|0|29|0|OK|rc_on=0/rc_nc=1
+corpus|f087_rbac_abac_policy_inheritance|COUNT|13|5|0|3|0|0|0|18|0|OK|rc_on=0/rc_nc=0
+corpus|f090_promise_future_async_concurrent|COUNT|21|5|0|9|0|0|0|39|0|OK|rc_on=0/rc_nc=0
+corpus|f095_compiler_opt_constfold_dce_cse|COUNT|35|9|0|33|2|0|0|12|0|OK|rc_on=0/rc_nc=0
+corpus|f097_search_engine_inverted_index_tfidf|COUNT|28|5|0|26|8|0|0|11|0|OK|rc_on=0/rc_nc=0
+corpus|f102_memory_gc_marksweep_refcount_gen|COUNT|28|6|0|11|1|0|0|26|0|OK|rc_on=0/rc_nc=0
+corpus|f104_game_engine_ecs_collision_render|COUNT|23|8|0|10|0|0|0|25|0|OK|rc_on=0/rc_nc=0
+corpus|f105_db_index_btree_hash_queryplan|COUNT|24|6|0|9|2|0|0|21|0|OK|rc_on=0/rc_nc=0
+corpus|f110_os_sim_process_memory_filesystem|COUNT|48|5|0|24|0|0|0|26|0|OK|rc_on=0/rc_nc=0
+corpus|f113_distributed_consistenthash_vectorclock_quorum|COUNT|39|6|0|15|1|0|0|23|0|OK|rc_on=0/rc_nc=0
+corpus|f117_search_engine_inverted_tfidf_bm25|COUNT|32|8|0|19|4|0|0|17|0|OK|rc_on=0/rc_nc=0
+corpus|f119_logging_structured_levels_rotation|COUNT|12|4|0|3|0|0|0|32|0|OK|rc_on=0/rc_nc=0
+corpus|f124_container_orchestrator_pod_service_autoscale|COUNT|49|17|0|16|6|0|0|47|0|OK|rc_on=0/rc_nc=1
+corpus|f134_event_sourcing_snapshot_cqrs_projection|COUNT|20|3|0|4|0|0|0|40|0|OK|rc_on=0/rc_nc=1
+corpus|f135_math_number_theory_crt_miller_rabin|COUNT|40|9|0|28|6|0|0|19|0|OK|rc_on=0/rc_nc=0
+corpus|f151_type_system_generics_variance|COUNT|3|1|0|1|1|0|0|25|0|OK|rc_on=0/rc_nc=0
+corpus|f152_closure_arrow_higher_order|COUNT|4|0|0|2|0|0|0|39|0|OK|rc_on=0/rc_nc=0
+corpus|f160_virtual_fs_path_traversal|COUNT|13|5|0|3|1|0|0|29|0|OK|rc_on=0/rc_nc=0
+corpus|f161_json_xml_csv_parsing|COUNT|29|9|0|14|1|0|0|20|0|OK|rc_on=0/rc_nc=0
+corpus|f163_event_driven_dispatch_bus|COUNT|6|1|0|1|0|0|0|29|0|OK|rc_on=0/rc_nc=0
+corpus|f164_plugin_hook_system|COUNT|8|1|0|2|0|0|0|30|0|OK|rc_on=0/rc_nc=0
+corpus|f171_state_machine_dfa|COUNT|8|0|0|1|0|0|0|27|0|OK|rc_on=0/rc_nc=0
+corpus|f173_concurrency_primitives_sim|COUNT|5|1|0|0|0|0|0|26|0|OK|rc_on=0/rc_nc=0
+corpus|f174_command_undo_redo_macro|COUNT|6|1|0|2|0|0|0|30|0|OK|rc_on=0/rc_nc=0
+corpus|f175_decorator_strategy_template|COUNT|11|3|0|3|0|0|0|33|0|OK|rc_on=0/rc_nc=0
+corpus|f176_specification_chain_rules|COUNT|10|1|0|1|0|0|0|27|0|OK|rc_on=0/rc_nc=0
+corpus|f177_graph_traversal_dfs_bfs|COUNT|40|20|0|26|11|0|0|16|0|OK|rc_on=0/rc_nc=0
+corpus|f178_numeric_precision_matrix|COUNT|43|3|0|38|1|0|0|23|0|OK|rc_on=0/rc_nc=0
+corpus|f179_visitor_composite_ast|COUNT|15|1|0|7|0|0|0|48|0|OK|rc_on=0/rc_nc=0
+FACE_DONE|corpus|shapes=68|noir=0|analyze_fail=0
+DROPPEDPHI_DONE faces=1 round=default
+face corpus: rows=68 align_or_parse_fail=0 | dropped>0 形=67 | refuse_tramp>0 形=25/68 | 仅 all 命中(tramp=0)形=37 | Σdropped=1121 Σlabel_only=272 Σphi_in_D=1 Σrefuse_all=621 Σrefuse_tramp=71 Σcauseless=0 Σon_c1=0
+  top f177_graph_traversal_dfs_bfs                             tramp=11 all=26 dropped=40 phi_in_D=0 on_c1=0
+  top f097_search_engine_inverted_index_tfidf                  tramp=8 all=26 dropped=28 phi_in_D=0 on_c1=0
+  top f124_container_orchestrator_pod_service_autoscale        tramp=6 all=16 dropped=49 phi_in_D=0 on_c1=0
+  top f135_math_number_theory_crt_miller_rabin                 tramp=6 all=28 dropped=40 phi_in_D=0 on_c1=0
+  top f061_graph_dijkstra_bellmanford_floyd                    tramp=4 all=38 dropped=41 phi_in_D=0 on_c1=0
+  top f117_search_engine_inverted_tfidf_bm25                   tramp=4 all=19 dropped=32 phi_in_D=0 on_c1=0
+  noir corpus = 0
+RED_TRAMP_REFUSE_SHAPES = 
+RED_TRAMP_BLIND_SHAPES  = 
+RED_ALLONLY_SHAPES      = 
+RED_C1ZERO_BUT_TRAMP_HIT = 
+CORPUS_WITH_TRAMP_REFUSE = f010_oop_singleton_registry_di f016_hash_bloom_consistent f027_number_theory_primes_modular f037_adapter_unified_cache f038_composite_filesystem_tree f044_json_deepops_merge_diff f061_graph_dijkstra_bellmanford_floyd f065_crypto_rc4_sha1_base64_crc f067_json_parser_schema_path_diff f067_min_repro f070_event_sourcing_cqrs_snapshot f085_geo_rtree_knn_geocoder f095_compiler_opt_constfold_dce_cse f097_search_engine_inverted_index_tfidf f102_memory_gc_marksweep_refcount_gen f105_db_index_btree_hash_queryplan f113_distributed_consistenthash_vectorclock_quorum f117_search_engine_inverted_tfidf_bm25 f124_container_orchestrator_pod_service_autoscale f135_math_number_theory_crt_miller_rabin f151_type_system_generics_variance f160_virtual_fs_path_traversal f161_json_xml_csv_parsing f177_graph_traversal_dfs_bfs f178_numeric_precision_matrix 
+ELAPSED=3s

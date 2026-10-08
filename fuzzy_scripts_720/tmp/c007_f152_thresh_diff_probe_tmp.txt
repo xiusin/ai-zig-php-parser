@@ -1,0 +1,72 @@
+# c007 f152 threshold ladder generated-code probe evidence 2026-10-06 (task #105/#108, zero-instrumentation arm-pair diff)
+# bin_md5=1f15e4ce9b5c9cdaaef7cabf5efb9c76
+# method: compile at T and T+1 with ZIGPHP_AOT_KEEP_TEMP=1, diff main.zig, read the newly inlined body
+
+## [1] T=34 -> T=35 : newly inlined callee = collect() (f152:127-129)
+# pre-inline call site (t34 main.zig:32272), callee still a real call:
+    reg_275 = try @"collect"(runtime.Value.initNull(), &[_]runtime.Value{reg_264}, runtime.runtime_allocator);
+# t35 md5=8117a372cad3f09dfc955acb72195584 lines=46798 ; t34 md5=f4c41d87a3bfbb78c7ff42fff27c3d66 lines=46376
+# ctor-call count: t34=3 t35=4 => exactly +1 inlined copy at t35:32581
+--- t35 main.zig:32559-32582 (the inlined body verbatim) ---
+    // /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f152_closure_arrow_higher_order.php:127
+    runtime.setSourceLocation("/Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f152_closure_arrow_higher_order.php", 127);
+    {
+        const __pv = if (args.len > 0 and !args[0].isMissing()) args[0] else runtime.Value.initNull();
+        if (__pv.isArray() and !__pv.isRef() and __pv.asArray().ref_count > 1) {
+            const __cloned = try __pv.asArray().cloneShallow(runtime.runtime_allocator);
+            reg_367 = runtime.Value.initArray(__cloned);
+        } else {
+            _ = __pv.retain();
+            reg_367 = __pv;
+        }
+    }
+    // /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f152_closure_arrow_higher_order.php:127
+    runtime.setSourceLocation("/Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f152_closure_arrow_higher_order.php", 127);
+    // /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f152_closure_arrow_higher_order.php:128
+    runtime.setSourceLocation("/Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f152_closure_arrow_higher_order.php", 128);
+    reg_368.release(runtime.runtime_allocator);
+    reg_368 = reg_1.*;
+    _ = reg_368.retain();
+    // /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f152_closure_arrow_higher_order.php:128
+    runtime.setSourceLocation("/Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f152_closure_arrow_higher_order.php", 128);
+    reg_369.release(runtime.runtime_allocator);
+    reg_369 = try runtime.php_object_new_with_constructor("FuncCollection", &[_]runtime.Value{reg_368}, runtime.runtime_allocator);
+    if (runtime.hasException()) {
+
+## [2] def/use split: fresh DEF (reg_367) is dead; USE reads callee numeric id 1 which aliases caller's reg_1
+--- t35: every reg_367 occurrence = 声明 :3539 + 取址 :3540 + 写入 :32565/:32568，**全文无任何读取** ⇒ 实参绑定结果被丢弃 ---
+3539:    var reg_367: runtime.Value = runtime.Value.initNull();
+3540:    _ = &reg_367;
+32565:            reg_367 = runtime.Value.initArray(__cloned);
+32568:            reg_367 = __pv;
+--- t35 __main__'s own reg_1 declaration + its only write (a STRING static_strings[29]) ---
+    var reg_1_storage: runtime.Value = runtime.Value.initNull();
+    var reg_1: *runtime.Value = &reg_1_storage;
+    _ = &reg_1;
+    reg_1.*.release(runtime.runtime_allocator);
+    reg_1.* = runtime.Value.initString(static_strings[29]);
+    // /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f152_closure_arrow_higher_order.php:65
+    runtime.setSourceLocation("/Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f152_closure_arrow_higher_order.php", 65);
+    _ = try runtime.php_echo(reg_1.*);
+# static_strings[29] 解析（string_table 从 main.zig:8 起，索引 29 = 第 31 项）= 字面量 "--- Currying ---\n"
+# ⇒ 被错绑进 callee `$items` 的实际值 = 顶层 echo 过的那个字符串常量（与 TypeError "string given" 逐字相符）
+
+## [3] measured symptom at T=35 (binary run, full stderr tail)
+Fatal error: Uncaught TypeError: FuncCollection::__construct(): Argument #1 ($items) must be of type array, string given in .../f152_closure_arrow_higher_order.php:128
+# exit=255 ; T<=34 arms run to '=== f152 Done ==='
+
+## [4] T=40 -> T=45 : newly inlined callee(s) around f152:43-45/49-60 (compose/pipe family). alias signature:
+>     reg_370 = reg_1.*;
+>     reg_374 = try runtime.php_create_closure(reg_372, reg_371, reg_4, runtime.runtime_allocator);
+>     reg_374 = try runtime.php_create_closure(reg_372, reg_371, reg_4, runtime.runtime_allocator);
+# added source-location comment histogram (PHP line -> count): 60:5 49:5 55:2 54:2 44:2 43:2 56:1 45:1 108:1 100:1
+# md5 t40=8117a372cad3f09dfc955acb72195584 t45=1c59a2935865215911c8925ff933d1ae ; symptom exit=139 tail stops after '--- Function Composition ---'
+
+## [5] T=45 -> T=50 : newly inlined callee = partial() (f152:36-40). alias signature:
+>     reg_371 = reg_2.*;
+>     reg_372 = reg_3.*;
+>     reg_376 = try runtime.php_create_closure(reg_374, reg_4, reg_4, runtime.runtime_allocator);
+>     reg_376 = try runtime.php_create_closure(reg_374, reg_4, reg_4, runtime.runtime_allocator);
+# added source-location comment histogram: 38:12 37:8 36:8 93:1 91:1
+# md5 t50=ed742689d9e44b7088c1bcdcbe340a01 ; symptom exit=139 tail stops after '--- Partial Application ---'
+# cross-check vs #94: T=50 md5 ed742689d9e44b7088c1bcdcbe340a01/47849 == C arm; T=34 md5 == frozen baseline f4c41d87a3bfbb78c7ff42fff27c3d66/46376 == D arm

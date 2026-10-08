@@ -1,0 +1,21 @@
+# arm=iter5 flags=[--compile --no-debug-info --aot-max-iterations=5] bin=1f15e4ce9b5c9cdaaef7cabf5efb9c76 linker=fbe6382a2e0904b6740d771b88c409c7/32797 optimizer=252234ef48cb47a42e6f39d1bc3e845b
+f016_hash_bloom_consistent|GEN_SAME|PASS|46782|c8dc9660f4fe42f63af5d7ed2e8cd43f||
+f024_rbac_role_inheritance_policy|GEN_DRIFT|PASS|42704|f3c50d29ecc42f7eb1467bf580c14a9e||
+f025_coding_hamming_rle_lzw_crc|GEN_DRIFT|PASS|30710|a98b7624be902ff2b930d40b2579c7c8||
+f044_json_deepops_merge_diff|GEN_DRIFT|PASS|28065|39cb6d4fcdd2a584b4567df5f6c81eb1||
+f051_validator_rule_chain_batch|GEN_SAME|PASS|25339|61e7b43dd88ae257f853f7c1a99fb9c9||
+f061_graph_dijkstra_bellmanford_floyd|GEN_DRIFT|PASS|43164|1f5e8d769340aa9db629540c66937d56||
+f072_type_inference_hindley_milner|GEN_DRIFT|PASS|37102|b98c8bd15fc492368c75dd0f6caaaf52||
+f104_game_engine_ecs_collision_render|GEN_DRIFT|PASS|48579|1677e5c5542eefb0d5dfda0a6654b1d5||
+f113_distributed_consistenthash_vectorclock_quorum|GEN_DRIFT|PASS|104154|76570b99c5ac13b24774a9017a4065cf||
+f117_search_engine_inverted_tfidf_bm25|GEN_DRIFT|PASS|54526|0eb2fd7a090e792fea89bbbf701e42da||
+f124_container_orchestrator_pod_service_autoscale|GEN_DRIFT|PASS|112610|4e6063e8adff05d6f45fd41961758e14||
+f134_event_sourcing_snapshot_cqrs_projection|GEN_DRIFT|PASS|77133|511c75183959685e82c7bf7d0e0abd41||
+f135_math_number_theory_crt_miller_rabin|GEN_DRIFT|PASS|58314|8b73859836eea8d8c0cc5cf01b77a22e||
+f152_closure_arrow_higher_order|GEN_DRIFT|PASS|46372|9c028f855df234694093875d596e59ee||
+f160_virtual_fs_path_traversal|GEN_DRIFT|PASS|38121|006441f1c71873f5d1e5773d8f371825||
+f161_json_xml_csv_parsing|GEN_SAME|PASS|48051|94f5b0ca6d90b3d38315d45ddc3a9269||
+f171_state_machine_dfa|GEN_DRIFT|PASS|32132|60b027250df2d53c07a907332f437550||
+f176_specification_chain_rules|GEN_SAME|PASS|42076|9fe7b6e600b042ff85aa3205c96462e5||
+f177_graph_traversal_dfs_bfs|GEN_DRIFT|PASS|49814|b3934efd5f87ca019210109b5b1bf796||
+KNOB_DONE arm=iter5 total=19 gen_same=4 gen_drift=15 pass=19 diff=0 runtime_fail=0 compile_fail=0

@@ -1,0 +1,5 @@
+# c007 inline-only attribution arm 2026-10-06 10:55:26
+bin_md5=1f15e4ce9b5c9cdaaef7cabf5efb9c76
+native_linker=fbe6382a2e0904b6740d771b88c409c7/32797
+optimizer=252234ef48cb47a42e6f39d1bc3e845b
+flags=--compile --no-debug-info --aot-enable-pass=inline --aot-inline-threshold=50

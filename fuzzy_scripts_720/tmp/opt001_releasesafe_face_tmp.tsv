@@ -1,0 +1,206 @@
+f004_oop_deep_inheritance_magic|SKIP|EXCLUDED|SKIP||||php_exit=255
+f006_oop_observer_event_dispatcher|A|GEN_DRIFT|PASS|9761|b7b15b4b705a09ebdd72390188608d4c|-OReleaseSafe|
+f006_oop_observer_event_dispatcher|B|GEN_DRIFT|PASS|9761|b7b15b4b705a09ebdd72390188608d4c|-OReleaseFast|
+f006_oop_observer_event_dispatcher|AB|SAME|AB_SAME|GEN_DRIFT|b7b15b4b705a09ebdd72390188608d4c||
+f007_string_encoding_crypto_hash|A|GEN_DRIFT|PASS|15288|df2ae3e9bb17ea40e31f99793e252d2c|-OReleaseSafe|
+f007_string_encoding_crypto_hash|B|GEN_DRIFT|PASS|15288|df2ae3e9bb17ea40e31f99793e252d2c|-OReleaseFast|
+f007_string_encoding_crypto_hash|AB|SAME|AB_SAME|GEN_DRIFT|df2ae3e9bb17ea40e31f99793e252d2c||
+f009_oop_decorator_chain_command|A|GEN_DRIFT|PASS|13701|eb0f5974c9360c4929a15c5972fe72e0|-OReleaseSafe|
+f009_oop_decorator_chain_command|B|GEN_DRIFT|PASS|13701|eb0f5974c9360c4929a15c5972fe72e0|-OReleaseFast|
+f009_oop_decorator_chain_command|AB|SAME|AB_SAME|GEN_DRIFT|eb0f5974c9360c4929a15c5972fe72e0||
+f010_oop_singleton_registry_di|A|GEN_DRIFT|PASS|16123|36f66e9104b55e383293eeaaebf2974d|-OReleaseSafe|
+f010_oop_singleton_registry_di|B|GEN_DRIFT|PASS|16123|36f66e9104b55e383293eeaaebf2974d|-OReleaseFast|
+f010_oop_singleton_registry_di|AB|SAME|AB_SAME|GEN_DRIFT|36f66e9104b55e383293eeaaebf2974d||
+f012_json_tree_recursive_traverse|A|GEN_DRIFT|PASS|22426|d4a364c00e9acdd4868b8b552b5cc1b0|-OReleaseSafe|
+f012_json_tree_recursive_traverse|B|GEN_DRIFT|PASS|22426|d4a364c00e9acdd4868b8b552b5cc1b0|-OReleaseFast|
+f012_json_tree_recursive_traverse|AB|SAME|AB_SAME|GEN_DRIFT|d4a364c00e9acdd4868b8b552b5cc1b0||
+f016_hash_bloom_consistent|A|GEN_DRIFT|DIFF|45957|2cd2fe808161c7b911f1d5d293c6f0f6|-OReleaseSafe|32c32~< Distribution: {"ServerA":8}~---~> Distribution: {"ServerA":1}~43c43~< Distribution: {"ServerA":8}~---~> Distribution: {"ServerA":1}~
+f016_hash_bloom_consistent|B|GEN_DRIFT|DIFF|45957|2cd2fe808161c7b911f1d5d293c6f0f6|-OReleaseFast|32c32~< Distribution: {"ServerA":8}~---~> Distribution: {"ServerA":1}~43c43~< Distribution: {"ServerA":8}~---~> Distribution: {"ServerA":1}~
+f016_hash_bloom_consistent|AB|SAME|AB_SAME|GEN_DRIFT|2cd2fe808161c7b911f1d5d293c6f0f6||
+f024_rbac_role_inheritance_policy|A|GEN_DRIFT|DIFF|42333|9b8840bd17dedc309123b8d6c0c813b9|-OReleaseSafe|4,23c4,23~< Alice (admin)/article:YES     YES     YES     YES~< Alice (admin)/comment:YES     YES     YES     YES~< Alice (admin)/user: YES     YES     YES     YES~< Alice (admin)/system:YES     YES     YES     YES~< Bob (editor)/article:YES     YES     YES     no~< Bob (editor)/comment:YES     YES     no      YES~< Bob (editor)/user:  no      no      no      no~< Bob (editor)/system:no      no   
+f024_rbac_role_inheritance_policy|B|GEN_DRIFT|DIFF|42333|9b8840bd17dedc309123b8d6c0c813b9|-OReleaseFast|4,23c4,23~< Alice (admin)/article:YES     YES     YES     YES~< Alice (admin)/comment:YES     YES     YES     YES~< Alice (admin)/user: YES     YES     YES     YES~< Alice (admin)/system:YES     YES     YES     YES~< Bob (editor)/article:YES     YES     YES     no~< Bob (editor)/comment:YES     YES     no      YES~< Bob (editor)/user:  no      no      no      no~< Bob (editor)/system:no      no   
+f024_rbac_role_inheritance_policy|AB|SAME|AB_SAME|GEN_DRIFT|9b8840bd17dedc309123b8d6c0c813b9||
+f025_coding_hamming_rle_lzw_crc|A|GEN_DRIFT|DIFF|30696|c751306a66ac9f86641f7a015f5c85a8|-OReleaseSafe|26c26~< Binary: 11111111~---~> Binary:~30c30~< Binary → Decimal: 255~---~> Binary → Decimal: 0~
+f025_coding_hamming_rle_lzw_crc|B|GEN_DRIFT|DIFF|30696|c751306a66ac9f86641f7a015f5c85a8|-OReleaseFast|26c26~< Binary: 11111111~---~> Binary:~30c30~< Binary → Decimal: 255~---~> Binary → Decimal: 0~
+f025_coding_hamming_rle_lzw_crc|AB|SAME|AB_SAME|GEN_DRIFT|c751306a66ac9f86641f7a015f5c85a8||
+f026_linkedlist_stack_queue_deque|A|GEN_DRIFT|PASS|49506|04ff516d9063f273d6e72d377aaf891e|-OReleaseSafe|
+f026_linkedlist_stack_queue_deque|B|GEN_DRIFT|PASS|49506|04ff516d9063f273d6e72d377aaf891e|-OReleaseFast|
+f026_linkedlist_stack_queue_deque|AB|SAME|AB_SAME|GEN_DRIFT|04ff516d9063f273d6e72d377aaf891e||
+f027_number_theory_primes_modular|A|GEN_DRIFT|PASS|29502|5facfcab85e78d8dd2767bc1dd0e909f|-OReleaseSafe|
+f027_number_theory_primes_modular|B|GEN_DRIFT|PASS|29502|5facfcab85e78d8dd2767bc1dd0e909f|-OReleaseFast|
+f027_number_theory_primes_modular|AB|SAME|AB_SAME|GEN_DRIFT|5facfcab85e78d8dd2767bc1dd0e909f||
+f028_dp_knapsack_lcs_lis|A|GEN_DRIFT|PASS|24605|12866e060fe66e52fa5f392224fb9902|-OReleaseSafe|
+f028_dp_knapsack_lcs_lis|B|GEN_DRIFT|PASS|24605|12866e060fe66e52fa5f392224fb9902|-OReleaseFast|
+f028_dp_knapsack_lcs_lis|AB|SAME|AB_SAME|GEN_DRIFT|12866e060fe66e52fa5f392224fb9902||
+f031_builder_fluent_immutable|A|GEN_SAME|PASS|5838|06e6ec761e06a357c34eba022bd853f8|-OReleaseSafe|
+f031_builder_fluent_immutable|B|GEN_SAME|PASS|5838|06e6ec761e06a357c34eba022bd853f8|-OReleaseFast|
+f031_builder_fluent_immutable|AB|SAME|AB_SAME|GEN_SAME|06e6ec761e06a357c34eba022bd853f8||
+f032_chain_responsibility_middleware|A|GEN_DRIFT|PASS|6580|bff5265c338466efdcf2a3ab45ac46ac|-OReleaseSafe|
+f032_chain_responsibility_middleware|B|GEN_DRIFT|PASS|6580|bff5265c338466efdcf2a3ab45ac46ac|-OReleaseFast|
+f032_chain_responsibility_middleware|AB|SAME|AB_SAME|GEN_DRIFT|bff5265c338466efdcf2a3ab45ac46ac||
+f033_state_pattern_order_machine|A|GEN_DRIFT|PASS|16946|44054fed8e5ba929954ca6a4431a5531|-OReleaseSafe|
+f033_state_pattern_order_machine|B|GEN_DRIFT|PASS|16946|44054fed8e5ba929954ca6a4431a5531|-OReleaseFast|
+f033_state_pattern_order_machine|AB|SAME|AB_SAME|GEN_DRIFT|44054fed8e5ba929954ca6a4431a5531||
+f034_template_method_pipeline|A|GEN_DRIFT|PASS|5698|d3d5a1db19c502240826959243c7c509|-OReleaseSafe|
+f034_template_method_pipeline|B|GEN_DRIFT|PASS|5698|d3d5a1db19c502240826959243c7c509|-OReleaseFast|
+f034_template_method_pipeline|AB|SAME|AB_SAME|GEN_DRIFT|d3d5a1db19c502240826959243c7c509||
+f036_strategy_dynamic_pricing|A|GEN_DRIFT|PASS|23961|4c9e82a547ef3da240d9700a245564e9|-OReleaseSafe|
+f036_strategy_dynamic_pricing|B|GEN_DRIFT|PASS|23961|4c9e82a547ef3da240d9700a245564e9|-OReleaseFast|
+f036_strategy_dynamic_pricing|AB|SAME|AB_SAME|GEN_DRIFT|4c9e82a547ef3da240d9700a245564e9||
+f037_adapter_unified_cache|A|GEN_DRIFT|PASS|16455|4d27f18b00dfbf5257051254e69f6a78|-OReleaseSafe|
+f037_adapter_unified_cache|B|GEN_DRIFT|PASS|16455|4d27f18b00dfbf5257051254e69f6a78|-OReleaseFast|
+f037_adapter_unified_cache|AB|SAME|AB_SAME|GEN_DRIFT|4d27f18b00dfbf5257051254e69f6a78||
+f038_composite_filesystem_tree|A|GEN_DRIFT|PASS|16965|5655790103e06885bfa373c1cd14d652|-OReleaseSafe|
+f038_composite_filesystem_tree|B|GEN_DRIFT|PASS|16965|5655790103e06885bfa373c1cd14d652|-OReleaseFast|
+f038_composite_filesystem_tree|AB|SAME|AB_SAME|GEN_DRIFT|5655790103e06885bfa373c1cd14d652||
+f039_bridge_shape_renderer|A|GEN_DRIFT|PASS|7464|03637b79306203664711d12bf13377e5|-OReleaseSafe|
+f039_bridge_shape_renderer|B|GEN_DRIFT|PASS|7464|03637b79306203664711d12bf13377e5|-OReleaseFast|
+f039_bridge_shape_renderer|AB|SAME|AB_SAME|GEN_DRIFT|03637b79306203664711d12bf13377e5||
+f040_flyweight_forest_pool|A|GEN_DRIFT|PASS|5606|012510a3dfbe4ba513f419b1a469cab5|-OReleaseSafe|
+f040_flyweight_forest_pool|B|GEN_DRIFT|PASS|5606|012510a3dfbe4ba513f419b1a469cab5|-OReleaseFast|
+f040_flyweight_forest_pool|AB|SAME|AB_SAME|GEN_DRIFT|012510a3dfbe4ba513f419b1a469cab5||
+f042_array_functions_full|A|GEN_DRIFT|PASS|29338|4ce10b88a2c2680475772870bfbac3b3|-OReleaseSafe|
+f042_array_functions_full|B|GEN_DRIFT|PASS|29338|4ce10b88a2c2680475772870bfbac3b3|-OReleaseFast|
+f042_array_functions_full|AB|SAME|AB_SAME|GEN_DRIFT|4ce10b88a2c2680475772870bfbac3b3||
+f043_math_functions_full|A|GEN_DRIFT|PASS|21449|c7f90e5c7fdc9718fcc1014747c27176|-OReleaseSafe|
+f043_math_functions_full|B|GEN_DRIFT|PASS|21449|c7f90e5c7fdc9718fcc1014747c27176|-OReleaseFast|
+f043_math_functions_full|AB|SAME|AB_SAME|GEN_DRIFT|c7f90e5c7fdc9718fcc1014747c27176||
+f044_json_deepops_merge_diff|A|GEN_DRIFT|DIFF|27947|6ef0f7eed7158d411c2c95172dedcc1f|-OReleaseSafe|23c23~< Invalid data errors: Missing required field: age; Field 'email': does not match pattern /^[^@]+@[^@]+$/~---~> Invalid data errors: Missing required field: age~
+f044_json_deepops_merge_diff|B|GEN_DRIFT|DIFF|27947|6ef0f7eed7158d411c2c95172dedcc1f|-OReleaseFast|23c23~< Invalid data errors: Missing required field: age; Field 'email': does not match pattern /^[^@]+@[^@]+$/~---~> Invalid data errors: Missing required field: age~
+f044_json_deepops_merge_diff|AB|SAME|AB_SAME|GEN_DRIFT|6ef0f7eed7158d411c2c95172dedcc1f||
+f045_datetime_calendar_format|A|GEN_DRIFT|PASS|14593|731dd67ef0adfa88479d7f9d0737d03a|-OReleaseSafe|
+f045_datetime_calendar_format|B|GEN_DRIFT|PASS|14593|731dd67ef0adfa88479d7f9d0737d03a|-OReleaseFast|
+f045_datetime_calendar_format|AB|SAME|AB_SAME|GEN_DRIFT|731dd67ef0adfa88479d7f9d0737d03a||
+f047_closures_curry_compose|A|GEN_DRIFT|PASS|37549|d9b778f6dfb806d279981f75c1eb7394|-OReleaseSafe|
+f047_closures_curry_compose|B|GEN_DRIFT|PASS|37549|d9b778f6dfb806d279981f75c1eb7394|-OReleaseFast|
+f047_closures_curry_compose|AB|SAME|AB_SAME|GEN_DRIFT|d9b778f6dfb806d279981f75c1eb7394||
+f048_match_pattern_dispatch|A|GEN_DRIFT|PASS|21594|2d504d940d4f08f896338575039e86eb|-OReleaseSafe|
+f048_match_pattern_dispatch|B|GEN_DRIFT|PASS|21594|2d504d940d4f08f896338575039e86eb|-OReleaseFast|
+f048_match_pattern_dispatch|AB|SAME|AB_SAME|GEN_DRIFT|2d504d940d4f08f896338575039e86eb||
+f051_validator_rule_chain_batch|A|GEN_DRIFT|DIFF|24822|c7ed932361642eec303b9a76cc1d409c|-OReleaseSafe|15,27c15,27~< email('test@test.com'): true [OK]~< email('bad'): false [OK]~< url('https://x.com'): true [OK]~< url('not-url'): false [OK]~< uuid('550e8400-e29b-41d4-a716-446655440000'): true [OK]~< uuid('not-uuid'): false [OK]~< alpha('HelloWorld'): true [OK]~< alpha('Hello123'): false [OK]~< alnum('Hello123'): true [OK]~
+f051_validator_rule_chain_batch|B|GEN_DRIFT|DIFF|24822|c7ed932361642eec303b9a76cc1d409c|-OReleaseFast|15,27c15,27~< email('test@test.com'): true [OK]~< email('bad'): false [OK]~< url('https://x.com'): true [OK]~< url('not-url'): false [OK]~< uuid('550e8400-e29b-41d4-a716-446655440000'): true [OK]~< uuid('not-uuid'): false [OK]~< alpha('HelloWorld'): true [OK]~< alpha('Hello123'): false [OK]~< alnum('Hello123'): true [OK]~
+f051_validator_rule_chain_batch|AB|SAME|AB_SAME|GEN_DRIFT|c7ed932361642eec303b9a76cc1d409c||
+f056_crdt_gcounter_lww_orset|A|GEN_DRIFT|PASS|40218|a85c398d62f23ec68c3260e7a6b8fa19|-OReleaseSafe|
+f056_crdt_gcounter_lww_orset|B|GEN_DRIFT|PASS|40218|a85c398d62f23ec68c3260e7a6b8fa19|-OReleaseFast|
+f056_crdt_gcounter_lww_orset|AB|SAME|AB_SAME|GEN_DRIFT|a85c398d62f23ec68c3260e7a6b8fa19||
+f057_workflow_engine_rollback|A|GEN_DRIFT|PASS|19360|33782a9657983d033cee3d150335a1e6|-OReleaseSafe|
+f057_workflow_engine_rollback|B|GEN_DRIFT|PASS|19360|33782a9657983d033cee3d150335a1e6|-OReleaseFast|
+f057_workflow_engine_rollback|AB|SAME|AB_SAME|GEN_DRIFT|33782a9657983d033cee3d150335a1e6||
+f061_graph_dijkstra_bellmanford_floyd|A|GEN_DRIFT|DIFF|42432|ad9589aeaca77752fef396a51beb4357|-OReleaseSafe|16,20c16,20~< A	0	3	2	8	10~< B	3	0	1	5	7~< C	2	1	0	6	8~< D	8	5	6	0	2~< E	10	7	8	2	0~---~> A		3	2	8	10~> B	3	2	1	5	7~> C	2	1	2	6	8~
+f061_graph_dijkstra_bellmanford_floyd|B|GEN_DRIFT|DIFF|42432|ad9589aeaca77752fef396a51beb4357|-OReleaseFast|16,20c16,20~< A	0	3	2	8	10~< B	3	0	1	5	7~< C	2	1	0	6	8~< D	8	5	6	0	2~< E	10	7	8	2	0~---~> A		3	2	8	10~> B	3	2	1	5	7~> C	2	1	2	6	8~
+f061_graph_dijkstra_bellmanford_floyd|AB|SAME|AB_SAME|GEN_DRIFT|ad9589aeaca77752fef396a51beb4357||
+f065_crypto_rc4_sha1_base64_crc|A|GEN_DRIFT|PASS|25198|7bf80fbe1d3090743f63bdd95975769f|-OReleaseSafe|
+f065_crypto_rc4_sha1_base64_crc|B|GEN_DRIFT|PASS|25198|7bf80fbe1d3090743f63bdd95975769f|-OReleaseFast|
+f065_crypto_rc4_sha1_base64_crc|AB|SAME|AB_SAME|GEN_DRIFT|7bf80fbe1d3090743f63bdd95975769f||
+f066_hamming_code_parity_checksum|A|GEN_DRIFT|PASS|20146|f84e0672fffa8873fe9e3b74dcff2bde|-OReleaseSafe|
+f066_hamming_code_parity_checksum|B|GEN_DRIFT|PASS|20146|f84e0672fffa8873fe9e3b74dcff2bde|-OReleaseFast|
+f066_hamming_code_parity_checksum|AB|SAME|AB_SAME|GEN_DRIFT|f84e0672fffa8873fe9e3b74dcff2bde||
+f067_json_parser_schema_path_diff|A|GEN_DRIFT|PASS|47094|8a3c78ad9ce8526b95af3043e2f50f68|-OReleaseSafe|
+f067_json_parser_schema_path_diff|B|GEN_DRIFT|PASS|47094|8a3c78ad9ce8526b95af3043e2f50f68|-OReleaseFast|
+f067_json_parser_schema_path_diff|AB|SAME|AB_SAME|GEN_DRIFT|8a3c78ad9ce8526b95af3043e2f50f68||
+f067_min_repro|A|GEN_DRIFT|PASS|6702|624273228d4d191860add32b2941a845|-OReleaseSafe|
+f067_min_repro|B|GEN_DRIFT|PASS|6702|624273228d4d191860add32b2941a845|-OReleaseFast|
+f067_min_repro|AB|SAME|AB_SAME|GEN_DRIFT|624273228d4d191860add32b2941a845||
+f070_event_sourcing_cqrs_snapshot|A|GEN_DRIFT|PASS|27252|e69b0fa17521a123ed09d5ce205e542e|-OReleaseSafe|
+f070_event_sourcing_cqrs_snapshot|B|GEN_DRIFT|PASS|27252|e69b0fa17521a123ed09d5ce205e542e|-OReleaseFast|
+f070_event_sourcing_cqrs_snapshot|AB|SAME|AB_SAME|GEN_DRIFT|e69b0fa17521a123ed09d5ce205e542e||
+f072_type_inference_hindley_milner|A|GEN_DRIFT|DIFF|37013|824eb4e190413e59a963dd8c351f15d2|-OReleaseSafe|8c8~< array → array~---~> NULL → array~25c25~< [] → array~---~> [1, 'two', 3.0] → array~
+f072_type_inference_hindley_milner|B|GEN_DRIFT|DIFF|37013|824eb4e190413e59a963dd8c351f15d2|-OReleaseFast|8c8~< array → array~---~> NULL → array~25c25~< [] → array~---~> [1, 'two', 3.0] → array~
+f072_type_inference_hindley_milner|AB|SAME|AB_SAME|GEN_DRIFT|824eb4e190413e59a963dd8c351f15d2||
+f080_db_transaction_mvcc_deadlock|A|GEN_DRIFT|PASS|41160|cac28a63c773adca96bf13127f9a2bee|-OReleaseSafe|
+f080_db_transaction_mvcc_deadlock|B|GEN_DRIFT|PASS|41160|cac28a63c773adca96bf13127f9a2bee|-OReleaseFast|
+f080_db_transaction_mvcc_deadlock|AB|SAME|AB_SAME|GEN_DRIFT|cac28a63c773adca96bf13127f9a2bee||
+f081_bplustree_index_range_query|A|GEN_DRIFT|PASS|17651|9408c6cc75063f2d5635cf561d00c0a9|-OReleaseSafe|
+f081_bplustree_index_range_query|B|GEN_DRIFT|PASS|17651|9408c6cc75063f2d5635cf561d00c0a9|-OReleaseFast|
+f081_bplustree_index_range_query|AB|SAME|AB_SAME|GEN_DRIFT|9408c6cc75063f2d5635cf561d00c0a9||
+f085_geo_rtree_knn_geocoder|A|GEN_DRIFT|PASS|47405|77df6621e445584ea5c0a7eb61678f28|-OReleaseSafe|
+f085_geo_rtree_knn_geocoder|B|GEN_DRIFT|PASS|47405|77df6621e445584ea5c0a7eb61678f28|-OReleaseFast|
+f085_geo_rtree_knn_geocoder|AB|SAME|AB_SAME|GEN_DRIFT|77df6621e445584ea5c0a7eb61678f28||
+f087_rbac_abac_policy_inheritance|A|GEN_DRIFT|PASS|29923|c2272a65d55f9f76be4ad9b93a23f4c6|-OReleaseSafe|
+f087_rbac_abac_policy_inheritance|B|GEN_DRIFT|PASS|29923|c2272a65d55f9f76be4ad9b93a23f4c6|-OReleaseFast|
+f087_rbac_abac_policy_inheritance|AB|SAME|AB_SAME|GEN_DRIFT|c2272a65d55f9f76be4ad9b93a23f4c6||
+f090_promise_future_async_concurrent|A|GEN_DRIFT|PASS|30236|93c9c0db2e6dea193819e31d6d857fff|-OReleaseSafe|
+f090_promise_future_async_concurrent|B|GEN_DRIFT|PASS|30236|93c9c0db2e6dea193819e31d6d857fff|-OReleaseFast|
+f090_promise_future_async_concurrent|AB|SAME|AB_SAME|GEN_DRIFT|93c9c0db2e6dea193819e31d6d857fff||
+f095_compiler_opt_constfold_dce_cse|A|GEN_DRIFT|PASS|58826|848a80cad9ae3ff486697f65e7b95b99|-OReleaseSafe|
+f095_compiler_opt_constfold_dce_cse|B|GEN_DRIFT|PASS|58826|848a80cad9ae3ff486697f65e7b95b99|-OReleaseFast|
+f095_compiler_opt_constfold_dce_cse|AB|SAME|AB_SAME|GEN_DRIFT|848a80cad9ae3ff486697f65e7b95b99||
+f097_search_engine_inverted_index_tfidf|A|GEN_DRIFT|PASS|45469|11c4d074457c922ffe008106327fcb12|-OReleaseSafe|
+f097_search_engine_inverted_index_tfidf|B|GEN_DRIFT|PASS|45469|11c4d074457c922ffe008106327fcb12|-OReleaseFast|
+f097_search_engine_inverted_index_tfidf|AB|SAME|AB_SAME|GEN_DRIFT|11c4d074457c922ffe008106327fcb12||
+f102_memory_gc_marksweep_refcount_gen|A|GEN_DRIFT|PASS|41913|66a22dbb73f04fbc1779d38ab7f8b983|-OReleaseSafe|
+f102_memory_gc_marksweep_refcount_gen|B|GEN_DRIFT|PASS|41913|66a22dbb73f04fbc1779d38ab7f8b983|-OReleaseFast|
+f102_memory_gc_marksweep_refcount_gen|AB|SAME|AB_SAME|GEN_DRIFT|66a22dbb73f04fbc1779d38ab7f8b983||
+f104_game_engine_ecs_collision_render|A|GEN_DRIFT|DIFF|47497|aa57da47005920a1bb2fe2fe4a7fae30|-OReleaseSafe|59,61c59,61~< Entity 1: pos=(355,300) hp=100/100 sprite=Player~< Entity 3: pos=(396,174.5) hp=30/30 sprite=Enemy~< Entity 4: pos=(300,400) sprite=Wall~---~> Entity 1: pos=(355,300) hp=100/100 sprite=~> Entity 3: pos=(396,174.5) hp=30/30 sprite=~> Entity 4: pos=(300,400) sprite=~
+f104_game_engine_ecs_collision_render|B|GEN_DRIFT|DIFF|47497|aa57da47005920a1bb2fe2fe4a7fae30|-OReleaseFast|59,61c59,61~< Entity 1: pos=(355,300) hp=100/100 sprite=Player~< Entity 3: pos=(396,174.5) hp=30/30 sprite=Enemy~< Entity 4: pos=(300,400) sprite=Wall~---~> Entity 1: pos=(355,300) hp=100/100 sprite=~> Entity 3: pos=(396,174.5) hp=30/30 sprite=~> Entity 4: pos=(300,400) sprite=~
+f104_game_engine_ecs_collision_render|AB|SAME|AB_SAME|GEN_DRIFT|aa57da47005920a1bb2fe2fe4a7fae30||
+f105_db_index_btree_hash_queryplan|A|GEN_DRIFT|PASS|40193|a821e40f96b2a7e7e7f5325d7664b7cd|-OReleaseSafe|
+f105_db_index_btree_hash_queryplan|B|GEN_DRIFT|PASS|40193|a821e40f96b2a7e7e7f5325d7664b7cd|-OReleaseFast|
+f105_db_index_btree_hash_queryplan|AB|SAME|AB_SAME|GEN_DRIFT|a821e40f96b2a7e7e7f5325d7664b7cd||
+f110_os_sim_process_memory_filesystem|A|GEN_DRIFT|PASS|82197|f3f192f3659290dbbb80a6c02cf69c05|-OReleaseSafe|
+f110_os_sim_process_memory_filesystem|B|GEN_DRIFT|PASS|82197|f3f192f3659290dbbb80a6c02cf69c05|-OReleaseFast|
+f110_os_sim_process_memory_filesystem|AB|SAME|AB_SAME|GEN_DRIFT|f3f192f3659290dbbb80a6c02cf69c05||
+f113_distributed_consistenthash_vectorclock_quorum|A|GEN_DRIFT|DIFF|102572|b2932ac2cfc0dade770a4ade59a3dd17|-OReleaseSafe|18c18~< vc1 vs vc2: concurrent~---~> vc1 vs vc2: equal~20,21c20,21~< vc1 vs merged: before~< vc2 vs merged: before~---~> vc1 vs merged: equal~> vc2 vs merged: equal~
+f113_distributed_consistenthash_vectorclock_quorum|B|GEN_DRIFT|DIFF|102572|b2932ac2cfc0dade770a4ade59a3dd17|-OReleaseFast|18c18~< vc1 vs vc2: concurrent~---~> vc1 vs vc2: equal~20,21c20,21~< vc1 vs merged: before~< vc2 vs merged: before~---~> vc1 vs merged: equal~> vc2 vs merged: equal~
+f113_distributed_consistenthash_vectorclock_quorum|AB|SAME|AB_SAME|GEN_DRIFT|b2932ac2cfc0dade770a4ade59a3dd17||
+f117_search_engine_inverted_tfidf_bm25|A|GEN_DRIFT|DIFF|51852|880156f82873f51c09a130fdffd7e6d3|-OReleaseSafe|17,19c17,19~< Doc 2: score=4.6740 - "A quick brown dog outruns the quick fox"~< Doc 1: score=2.9808 - "The quick brown fox jumps over the lazy dog"~< Doc 5: score=2.9808 - "Quick thinking saves the day for the fox"~---~> Doc 1: score=1.2877 - "The quick brown fox jumps over the lazy dog"~> Doc 2: score=1.2877 - "A quick brown dog outruns the quick fox"~> Doc 5: score=1.2877 - "Quick thinking saves
+f117_search_engine_inverted_tfidf_bm25|B|GEN_DRIFT|DIFF|51852|880156f82873f51c09a130fdffd7e6d3|-OReleaseFast|17,19c17,19~< Doc 2: score=4.6740 - "A quick brown dog outruns the quick fox"~< Doc 1: score=2.9808 - "The quick brown fox jumps over the lazy dog"~< Doc 5: score=2.9808 - "Quick thinking saves the day for the fox"~---~> Doc 1: score=1.2877 - "The quick brown fox jumps over the lazy dog"~> Doc 2: score=1.2877 - "A quick brown dog outruns the quick fox"~> Doc 5: score=1.2877 - "Quick thinking saves
+f117_search_engine_inverted_tfidf_bm25|AB|SAME|AB_SAME|GEN_DRIFT|880156f82873f51c09a130fdffd7e6d3||
+f119_logging_structured_levels_rotation|A|GEN_DRIFT|PASS|44786|49e9b7b2e3e49ec57224137da6bf7cba|-OReleaseSafe|
+f119_logging_structured_levels_rotation|B|GEN_DRIFT|PASS|44786|49e9b7b2e3e49ec57224137da6bf7cba|-OReleaseFast|
+f119_logging_structured_levels_rotation|AB|SAME|AB_SAME|GEN_DRIFT|49e9b7b2e3e49ec57224137da6bf7cba||
+f124_container_orchestrator_pod_service_autoscale|A|GEN_DRIFT|DIFF|110732|09bb9ea610cdcee353edd129c8c1cde4|-OReleaseSafe|18,20c18,20~< web-0: healthy~< web-1: healthy~< web-2: healthy~---~> web-0:~> web-1:~> web-2:~23,25c23,25~< web-0: restarted~
+f124_container_orchestrator_pod_service_autoscale|B|GEN_DRIFT|DIFF|110732|09bb9ea610cdcee353edd129c8c1cde4|-OReleaseFast|18,20c18,20~< web-0: healthy~< web-1: healthy~< web-2: healthy~---~> web-0:~> web-1:~> web-2:~23,25c23,25~< web-0: restarted~
+f124_container_orchestrator_pod_service_autoscale|AB|SAME|AB_SAME|GEN_DRIFT|09bb9ea610cdcee353edd129c8c1cde4||
+f134_event_sourcing_snapshot_cqrs_projection|A|GEN_DRIFT|DIFF|75366|ff20aa2c0ec2730d7c8a6dcafabaf7d2|-OReleaseSafe|36c36~< paid: 3~---~> paid: 1~40c40~< customer-alice: 2~---~> customer-alice: 1~
+f134_event_sourcing_snapshot_cqrs_projection|B|GEN_DRIFT|DIFF|75366|ff20aa2c0ec2730d7c8a6dcafabaf7d2|-OReleaseFast|36c36~< paid: 3~---~> paid: 1~40c40~< customer-alice: 2~---~> customer-alice: 1~
+f134_event_sourcing_snapshot_cqrs_projection|AB|SAME|AB_SAME|GEN_DRIFT|ff20aa2c0ec2730d7c8a6dcafabaf7d2||
+f135_math_number_theory_crt_miller_rabin|A|GEN_DRIFT|DIFF|57820|9bbafbdaa5ecb84b43601738c9359b28|-OReleaseSafe|19,20c19,20~< ✓✓✓✓✓✓✓✓✓✓ primes~< ✓✓✓✓✓✓✓✓✓✓ composites~---~> primes~> composites~
+f135_math_number_theory_crt_miller_rabin|B|GEN_DRIFT|DIFF|57820|9bbafbdaa5ecb84b43601738c9359b28|-OReleaseFast|19,20c19,20~< ✓✓✓✓✓✓✓✓✓✓ primes~< ✓✓✓✓✓✓✓✓✓✓ composites~---~> primes~> composites~
+f135_math_number_theory_crt_miller_rabin|AB|SAME|AB_SAME|GEN_DRIFT|9bbafbdaa5ecb84b43601738c9359b28||
+f151_type_system_generics_variance|A|GEN_DRIFT|PASS|26395|69fc8c33ea7a1129e72f12c71b12326e|-OReleaseSafe|
+f151_type_system_generics_variance|B|GEN_DRIFT|PASS|26395|69fc8c33ea7a1129e72f12c71b12326e|-OReleaseFast|
+f151_type_system_generics_variance|AB|SAME|AB_SAME|GEN_DRIFT|69fc8c33ea7a1129e72f12c71b12326e||
+f152_closure_arrow_higher_order|A|GEN_DRIFT|PASS|46372|9c028f855df234694093875d596e59ee|-OReleaseSafe|
+f152_closure_arrow_higher_order|B|GEN_DRIFT|PASS|46372|9c028f855df234694093875d596e59ee|-OReleaseFast|
+f152_closure_arrow_higher_order|AB|SAME|AB_SAME|GEN_DRIFT|9c028f855df234694093875d596e59ee||
+f160_virtual_fs_path_traversal|A|GEN_DRIFT|RUNTIME_FAIL|38115|5fc09c20f5b417a986008a8bb479bf0c|-OReleaseSafe|exit=255 Stack trace: #0 {main}   thrown in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f160_virtual_fs_path_traversal.php on line 101 
+f160_virtual_fs_path_traversal|B|GEN_DRIFT|RUNTIME_FAIL|38115|5fc09c20f5b417a986008a8bb479bf0c|-OReleaseFast|exit=255 Stack trace: #0 {main}   thrown in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f160_virtual_fs_path_traversal.php on line 101 
+f160_virtual_fs_path_traversal|AB|SAME|AB_SAME|GEN_DRIFT|5fc09c20f5b417a986008a8bb479bf0c||
+f161_json_xml_csv_parsing|A|GEN_DRIFT|DIFF|47799|064f30153b1c436b63c5159c7aa92d35|-OReleaseSafe|36,37c36~< Beijing: Alice, Charlie~< Shanghai: Bob, Diana~---~> 0: Alice, Bob, Charlie, Diana~40,41c39,40~< Team A,95~< Team B,87~---~> ,~
+f161_json_xml_csv_parsing|B|GEN_DRIFT|DIFF|47799|064f30153b1c436b63c5159c7aa92d35|-OReleaseFast|36,37c36~< Beijing: Alice, Charlie~< Shanghai: Bob, Diana~---~> 0: Alice, Bob, Charlie, Diana~40,41c39,40~< Team A,95~< Team B,87~---~> ,~
+f161_json_xml_csv_parsing|AB|SAME|AB_SAME|GEN_DRIFT|064f30153b1c436b63c5159c7aa92d35||
+f163_event_driven_dispatch_bus|A|GEN_DRIFT|PASS|27467|793928b9124a04e841d558202ccc2149|-OReleaseSafe|
+f163_event_driven_dispatch_bus|B|GEN_DRIFT|PASS|27467|793928b9124a04e841d558202ccc2149|-OReleaseFast|
+f163_event_driven_dispatch_bus|AB|SAME|AB_SAME|GEN_DRIFT|793928b9124a04e841d558202ccc2149||
+f164_plugin_hook_system|A|GEN_DRIFT|PASS|20325|e2cd3380d1f3cfbaa9bc1ee80baaae75|-OReleaseSafe|
+f164_plugin_hook_system|B|GEN_DRIFT|PASS|20325|e2cd3380d1f3cfbaa9bc1ee80baaae75|-OReleaseFast|
+f164_plugin_hook_system|AB|SAME|AB_SAME|GEN_DRIFT|e2cd3380d1f3cfbaa9bc1ee80baaae75||
+f171_state_machine_dfa|A|GEN_DRIFT|DIFF|30876|4cc4306979da267aa741213b7f7a53c4|-OReleaseSafe|18,27c18,27~< 'ab': ACCEPT~< 'aab': ACCEPT~< 'bab': ACCEPT~< 'baab': ACCEPT~< 'aabb': REJECT~< 'abab': ACCEPT~< 'aaa': REJECT~< 'bba': REJECT~< 'ababab': ACCEPT~
+f171_state_machine_dfa|B|GEN_DRIFT|DIFF|30876|4cc4306979da267aa741213b7f7a53c4|-OReleaseFast|18,27c18,27~< 'ab': ACCEPT~< 'aab': ACCEPT~< 'bab': ACCEPT~< 'baab': ACCEPT~< 'aabb': REJECT~< 'abab': ACCEPT~< 'aaa': REJECT~< 'bba': REJECT~< 'ababab': ACCEPT~
+f171_state_machine_dfa|AB|SAME|AB_SAME|GEN_DRIFT|4cc4306979da267aa741213b7f7a53c4||
+f173_concurrency_primitives_sim|A|GEN_DRIFT|PASS|53395|77f88c2aa16ad045edcaf0fe99025f39|-OReleaseSafe|
+f173_concurrency_primitives_sim|B|GEN_DRIFT|PASS|53395|77f88c2aa16ad045edcaf0fe99025f39|-OReleaseFast|
+f173_concurrency_primitives_sim|AB|SAME|AB_SAME|GEN_DRIFT|77f88c2aa16ad045edcaf0fe99025f39||
+f174_command_undo_redo_macro|A|GEN_DRIFT|PASS|33745|f98fbe3ec63ff20fbb8404b84cb3560d|-OReleaseSafe|
+f174_command_undo_redo_macro|B|GEN_DRIFT|PASS|33745|f98fbe3ec63ff20fbb8404b84cb3560d|-OReleaseFast|
+f174_command_undo_redo_macro|AB|SAME|AB_SAME|GEN_DRIFT|f98fbe3ec63ff20fbb8404b84cb3560d||
+f175_decorator_strategy_template|A|GEN_DRIFT|PASS|21062|faa5a31efbf7881a7346f354beec0497|-OReleaseSafe|
+f175_decorator_strategy_template|B|GEN_DRIFT|PASS|21062|faa5a31efbf7881a7346f354beec0497|-OReleaseFast|
+f175_decorator_strategy_template|AB|SAME|AB_SAME|GEN_DRIFT|faa5a31efbf7881a7346f354beec0497||
+f176_specification_chain_rules|A|GEN_DRIFT|DIFF|39698|cddb349bf9e2862fc9652420e8d56d67|-OReleaseSafe|5,8c5,8~< Admin access: Y~< Can edit: Y~< Can delete: Y~< Young adult: Y~---~> Admin access:~> Can edit:~> Can delete:~> Young adult:~
+f176_specification_chain_rules|B|GEN_DRIFT|DIFF|39698|cddb349bf9e2862fc9652420e8d56d67|-OReleaseFast|5,8c5,8~< Admin access: Y~< Can edit: Y~< Can delete: Y~< Young adult: Y~---~> Admin access:~> Can edit:~> Can delete:~> Young adult:~
+f176_specification_chain_rules|AB|SAME|AB_SAME|GEN_DRIFT|cddb349bf9e2862fc9652420e8d56d67||
+f177_graph_traversal_dfs_bfs|A|GEN_DRIFT|DIFF|49523|4d034ea4ec78d25118107830e1e289fc|-OReleaseSafe|15c15~< Course order: CS101 → MATH101 → CS102 → CS201 → CS301 → CS302 → CS401~---~> Course order: CS101 → MATH101 → CS201 → CS102 → CS301 → CS302 → CS401~
+f177_graph_traversal_dfs_bfs|B|GEN_DRIFT|DIFF|49523|4d034ea4ec78d25118107830e1e289fc|-OReleaseFast|15c15~< Course order: CS101 → MATH101 → CS102 → CS201 → CS301 → CS302 → CS401~---~> Course order: CS101 → MATH101 → CS201 → CS102 → CS301 → CS302 → CS401~
+f177_graph_traversal_dfs_bfs|AB|SAME|AB_SAME|GEN_DRIFT|4d034ea4ec78d25118107830e1e289fc||
+f178_numeric_precision_matrix|A|GEN_DRIFT|PASS|28769|c04b360dc33a5e4766a22b3d45145099|-OReleaseSafe|
+f178_numeric_precision_matrix|B|GEN_DRIFT|PASS|28769|c04b360dc33a5e4766a22b3d45145099|-OReleaseFast|
+f178_numeric_precision_matrix|AB|SAME|AB_SAME|GEN_DRIFT|c04b360dc33a5e4766a22b3d45145099||
+f179_visitor_composite_ast|A|GEN_DRIFT|PASS|30821|67978762e025cbdb96f172668dc35141|-OReleaseSafe|
+f179_visitor_composite_ast|B|GEN_DRIFT|PASS|30821|67978762e025cbdb96f172668dc35141|-OReleaseFast|
+f179_visitor_composite_ast|AB|SAME|AB_SAME|GEN_DRIFT|67978762e025cbdb96f172668dc35141||
+SUMMARY_A|armA|gen_same=1|gen_drift=66|pass=49|diff=17|runtime_fail=1|compile_fail=0||
+SUMMARY_B|armB|gen_same=1|gen_drift=66|pass=49|diff=17|runtime_fail=1|compile_fail=0||
+SUMMARY_AB|ab_same=67|ab_diff=0|ab_na=1|total=68|skip=1|||
+ELAPSED=1475s

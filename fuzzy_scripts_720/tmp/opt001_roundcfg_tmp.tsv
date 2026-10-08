@@ -1,0 +1,86 @@
+# opt001 §5.10 逐轮 × cfg_cleanup 两维交互（签名侧） 2026-10-06 16:46:21
+bin_md5=1f15e4ce9b5c9cdaaef7cabf5efb9c76
+optimizer=252234ef48cb47a42e6f39d1bc3e845b/6877
+native_linker=fbe6382a2e0904b6740d771b88c409c7/32797
+ir_generator=cb53c2da7d4fe2e1f62b728511f7c3ea
+level=default(无 --optimize)  唯一变量=轮数 × cfg_cleanup 开关
+r5/r5nc 来源=fuzzy_scripts_720/tmp/opt001_c9_face_tmp.tsv（#100 同代次，不重跑）
+LAYERA_HEADER|shape|arm|C1|C2|C6|C9|C4h|C4bh|C7|H|hm|hl|ir|zig
+f016_hash_bloom_consistent|r2|C1=0/2(d=2)|C2=0/2(d=2)|C6=0/2(d=2)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=15/H=36(hm=36,hl=36)|END_A_HIT|ir=1116|zig=45957
+f016_hash_bloom_consistent|r2nc|C1=0/0(d=0)|C2=0/0(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=16/H=37(hm=37,hl=37)|END_BLIND|ir=1201|zig=46574
+f016_hash_bloom_consistent|r3|C1=0/2(d=2)|C2=0/2(d=2)|C6=0/2(d=2)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=15/H=36(hm=36,hl=36)|END_A_HIT|ir=1116|zig=45957
+f016_hash_bloom_consistent|r3nc|C1=0/0(d=0)|C2=0/0(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=16/H=37(hm=37,hl=37)|END_BLIND|ir=1201|zig=46574
+f024_rbac_role_inheritance_policy|r2|C1=0/1(d=1)|C2=2/1(d=-1)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=11/H=12(hm=12,hl=12)|END_A_HIT|ir=951|zig=42546
+f024_rbac_role_inheritance_policy|r2nc|C1=0/0(d=0)|C2=2/0(d=-2)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=11/H=12(hm=12,hl=12)|END_BLIND|ir=987|zig=42555
+f024_rbac_role_inheritance_policy|r3|C1=0/1(d=1)|C2=2/1(d=-1)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=11/H=12(hm=12,hl=12)|END_A_HIT|ir=948|zig=42333
+f024_rbac_role_inheritance_policy|r3nc|C1=0/0(d=0)|C2=2/0(d=-2)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=11/H=12(hm=12,hl=12)|END_BLIND|ir=987|zig=42555
+f025_coding_hamming_rle_lzw_crc|r2|C1=0/1(d=1)|C2=21/22(d=1)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=35/H=43(hm=43,hl=43)|END_A_HIT|ir=1083|zig=30703
+f025_coding_hamming_rle_lzw_crc|r2nc|C1=0/0(d=0)|C2=21/21(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=35/H=43(hm=43,hl=43)|END_BLIND|ir=1147|zig=30727
+f025_coding_hamming_rle_lzw_crc|r3|C1=0/1(d=1)|C2=21/22(d=1)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=35/H=43(hm=43,hl=43)|END_A_HIT|ir=1080|zig=30696
+f025_coding_hamming_rle_lzw_crc|r3nc|C1=0/0(d=0)|C2=21/21(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=35/H=43(hm=43,hl=43)|END_BLIND|ir=1147|zig=30727
+f044_json_deepops_merge_diff|r2|C1=0/1(d=1)|C2=21/21(d=0)|C6=0/1(d=1)|C9=3/1(d=-2)|C4h=0|C4bh=0|C7=41/H=42(hm=42,hl=42)|END_A_HIT|ir=1220|zig=27947
+f044_json_deepops_merge_diff|r2nc|C1=0/0(d=0)|C2=21/20(d=-1)|C6=0/0(d=0)|C9=3/0(d=-3)|C4h=0|C4bh=0|C7=41/H=42(hm=42,hl=42)|END_BLIND|ir=1275|zig=27937
+f044_json_deepops_merge_diff|r3|C1=0/1(d=1)|C2=21/21(d=0)|C6=0/1(d=1)|C9=3/1(d=-2)|C4h=0|C4bh=0|C7=41/H=42(hm=42,hl=42)|END_A_HIT|ir=1220|zig=27947
+f044_json_deepops_merge_diff|r3nc|C1=0/0(d=0)|C2=21/20(d=-1)|C6=0/0(d=0)|C9=3/0(d=-3)|C4h=0|C4bh=0|C7=41/H=42(hm=42,hl=42)|END_BLIND|ir=1275|zig=27937
+f051_validator_rule_chain_batch|r2|C1=0/1(d=1)|C2=5/6(d=1)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=18/H=26(hm=26,hl=26)|END_A_HIT|ir=951|zig=25112
+f051_validator_rule_chain_batch|r2nc|C1=0/0(d=0)|C2=5/5(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=18/H=26(hm=26,hl=26)|END_BLIND|ir=985|zig=25116
+f051_validator_rule_chain_batch|r3|C1=0/1(d=1)|C2=5/6(d=1)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=18/H=26(hm=26,hl=26)|END_A_HIT|ir=946|zig=24822
+f051_validator_rule_chain_batch|r3nc|C1=0/0(d=0)|C2=5/5(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=18/H=26(hm=26,hl=26)|END_BLIND|ir=985|zig=25116
+f061_graph_dijkstra_bellmanford_floyd|r2|C1=0/0(d=0)|C2=23/23(d=0)|C6=0/0(d=0)|C9=0/5(d=5)|C4h=0|C4bh=0|C7=35/H=37(hm=37,hl=37)|END_B_HIT|ir=1056|zig=42828
+f061_graph_dijkstra_bellmanford_floyd|r2nc|C1=0/0(d=0)|C2=23/47(d=24)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=35/H=37(hm=37,hl=37)|END_BLIND|ir=1148|zig=39716
+f061_graph_dijkstra_bellmanford_floyd|r3|C1=0/0(d=0)|C2=23/23(d=0)|C6=0/0(d=0)|C9=0/5(d=5)|C4h=0|C4bh=0|C7=32/H=34(hm=34,hl=34)|END_B_HIT|ir=1056|zig=42432
+f061_graph_dijkstra_bellmanford_floyd|r3nc|C1=0/0(d=0)|C2=23/47(d=24)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=32/H=34(hm=34,hl=34)|END_BLIND|ir=1148|zig=39380
+f072_type_inference_hindley_milner|r2|C1=0/0(d=0)|C2=5/5(d=0)|C6=0/0(d=0)|C9=0/2(d=2)|C4h=0|C4bh=0|C7=9/H=18(hm=18,hl=18)|END_B_HIT|ir=1281|zig=37013
+f072_type_inference_hindley_milner|r2nc|C1=0/0(d=0)|C2=5/5(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=9/H=18(hm=18,hl=18)|END_BLIND|ir=1309|zig=37025
+f072_type_inference_hindley_milner|r3|C1=0/0(d=0)|C2=5/5(d=0)|C6=0/0(d=0)|C9=0/2(d=2)|C4h=0|C4bh=0|C7=9/H=18(hm=18,hl=18)|END_B_HIT|ir=1281|zig=37013
+f072_type_inference_hindley_milner|r3nc|C1=0/0(d=0)|C2=5/5(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=9/H=18(hm=18,hl=18)|END_BLIND|ir=1309|zig=37025
+f104_game_engine_ecs_collision_render|r2|C1=0/1(d=1)|C2=20/20(d=0)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=40/H=43(hm=43,hl=43)|END_A_HIT|ir=1249|zig=47497
+f104_game_engine_ecs_collision_render|r2nc|C1=0/0(d=0)|C2=20/19(d=-1)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=41/H=44(hm=44,hl=44)|END_BLIND|ir=1307|zig=48525
+f104_game_engine_ecs_collision_render|r3|C1=0/1(d=1)|C2=20/20(d=0)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=40/H=43(hm=43,hl=43)|END_A_HIT|ir=1249|zig=47497
+f104_game_engine_ecs_collision_render|r3nc|C1=0/0(d=0)|C2=20/19(d=-1)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=41/H=44(hm=44,hl=44)|END_BLIND|ir=1307|zig=48525
+f113_distributed_consistenthash_vectorclock_quorum|r2|C1=0/4(d=4)|C2=11/10(d=-1)|C6=0/4(d=4)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=27/H=52(hm=52,hl=52)|END_A_HIT|ir=1518|zig=103365
+f113_distributed_consistenthash_vectorclock_quorum|r2nc|C1=0/0(d=0)|C2=11/6(d=-5)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=28/H=53(hm=53,hl=53)|END_BLIND|ir=1616|zig=103546
+f113_distributed_consistenthash_vectorclock_quorum|r3|C1=0/4(d=4)|C2=11/10(d=-1)|C6=0/4(d=4)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=27/H=52(hm=52,hl=52)|END_A_HIT|ir=1513|zig=102572
+f113_distributed_consistenthash_vectorclock_quorum|r3nc|C1=0/0(d=0)|C2=11/6(d=-5)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=28/H=53(hm=53,hl=53)|END_BLIND|ir=1616|zig=103546
+f117_search_engine_inverted_tfidf_bm25|r2|C1=0/5(d=5)|C2=23/32(d=9)|C6=0/5(d=5)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=13/H=32(hm=32,hl=32)|END_A_HIT|ir=1195|zig=52400
+f117_search_engine_inverted_tfidf_bm25|r2nc|C1=0/0(d=0)|C2=23/27(d=4)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=16/H=35(hm=35,hl=35)|END_BLIND|ir=1286|zig=53141
+f117_search_engine_inverted_tfidf_bm25|r3|C1=0/3(d=3)|C2=23/32(d=9)|C6=0/5(d=5)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=13/H=32(hm=32,hl=32)|END_A_HIT|ir=1190|zig=51852
+f117_search_engine_inverted_tfidf_bm25|r3nc|C1=0/0(d=0)|C2=23/27(d=4)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=16/H=35(hm=35,hl=35)|END_BLIND|ir=1286|zig=53141
+f124_container_orchestrator_pod_service_autoscale|r2nc|SIG_COMPILE_FAIL|rc=1|error: CompilationFailed 
+f124_container_orchestrator_pod_service_autoscale|r3nc|SIG_COMPILE_FAIL|rc=1|error: CompilationFailed 
+f124_container_orchestrator_pod_service_autoscale|r2|C1=0/2(d=2)|C2=56/48(d=-8)|C6=0/1(d=1)|C9=3/4(d=1)|C4h=0|C4bh=0|C7=17/H=48(hm=48,hl=48)|END_A+B_HIT|ir=2083|zig=110734
+f124_container_orchestrator_pod_service_autoscale|r3|C1=0/2(d=2)|C2=56/49(d=-7)|C6=0/2(d=2)|C9=3/4(d=1)|C4h=0|C4bh=0|C7=17/H=48(hm=48,hl=48)|END_A+B_HIT|ir=2081|zig=110732
+f134_event_sourcing_snapshot_cqrs_projection|r2nc|SIG_COMPILE_FAIL|rc=1|error: CompilationFailed 
+f134_event_sourcing_snapshot_cqrs_projection|r3nc|SIG_COMPILE_FAIL|rc=1|error: CompilationFailed 
+f134_event_sourcing_snapshot_cqrs_projection|r2|C1=0/0(d=0)|C2=20/26(d=6)|C6=0/6(d=6)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=18/H=29(hm=29,hl=29)|END_A_HIT|ir=1607|zig=75366
+f134_event_sourcing_snapshot_cqrs_projection|r3|C1=0/0(d=0)|C2=20/26(d=6)|C6=0/6(d=6)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=18/H=29(hm=29,hl=29)|END_A_HIT|ir=1607|zig=75366
+f135_math_number_theory_crt_miller_rabin|r2|C1=0/2(d=2)|C2=40/41(d=1)|C6=3/4(d=1)|C9=1/0(d=-1)|C4h=0|C4bh=0|C7=15/H=30(hm=30,hl=30)|END_A_HIT|ir=1416|zig=58268
+f135_math_number_theory_crt_miller_rabin|r2nc|C1=0/0(d=0)|C2=40/37(d=-3)|C6=3/0(d=-3)|C9=1/0(d=-1)|C4h=0|C4bh=0|C7=15/H=30(hm=30,hl=30)|END_BLIND|ir=1504|zig=58236
+f135_math_number_theory_crt_miller_rabin|r3|C1=0/2(d=2)|C2=40/41(d=1)|C6=3/4(d=1)|C9=1/0(d=-1)|C4h=0|C4bh=0|C7=13/H=28(hm=28,hl=28)|END_A_HIT|ir=1412|zig=57820
+f135_math_number_theory_crt_miller_rabin|r3nc|C1=0/0(d=0)|C2=40/37(d=-3)|C6=3/0(d=-3)|C9=1/0(d=-1)|C4h=0|C4bh=0|C7=13/H=28(hm=28,hl=28)|END_BLIND|ir=1504|zig=57788
+f152_closure_arrow_higher_order|r2|C1=0/0(d=0)|C2=67/67(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=0/H=0(hm=0,hl=0)|END_BLIND|ir=1174|zig=46372
+f152_closure_arrow_higher_order|r2nc|C1=0/0(d=0)|C2=67/67(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=0/H=0(hm=0,hl=0)|END_BLIND|ir=1182|zig=46372
+f152_closure_arrow_higher_order|r3|C1=0/0(d=0)|C2=67/67(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=0/H=0(hm=0,hl=0)|END_BLIND|ir=1174|zig=46372
+f152_closure_arrow_higher_order|r3nc|C1=0/0(d=0)|C2=67/67(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=0/H=0(hm=0,hl=0)|END_BLIND|ir=1182|zig=46372
+f160_virtual_fs_path_traversal|r2|C1=0/0(d=0)|C2=28/28(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=11/H=22(hm=22,hl=22)|END_BLIND|ir=1374|zig=38115
+f160_virtual_fs_path_traversal|r2nc|C1=0/0(d=0)|C2=28/28(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=11/H=22(hm=22,hl=22)|END_BLIND|ir=1402|zig=38117
+f160_virtual_fs_path_traversal|r3|C1=0/0(d=0)|C2=28/28(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=11/H=22(hm=22,hl=22)|END_BLIND|ir=1374|zig=38115
+f160_virtual_fs_path_traversal|r3nc|C1=0/0(d=0)|C2=28/28(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=11/H=22(hm=22,hl=22)|END_BLIND|ir=1402|zig=38117
+f161_json_xml_csv_parsing|r2|C1=0/2(d=2)|C2=30/32(d=2)|C6=0/2(d=2)|C9=1/1(d=0)|C4h=0|C4bh=0|C7=20/H=26(hm=26,hl=26)|END_A_HIT|ir=1354|zig=47799
+f161_json_xml_csv_parsing|r2nc|C1=0/0(d=0)|C2=30/30(d=0)|C6=0/0(d=0)|C9=1/0(d=-1)|C4h=0|C4bh=0|C7=21/H=27(hm=27,hl=27)|END_BLIND|ir=1423|zig=47875
+f161_json_xml_csv_parsing|r3|C1=0/2(d=2)|C2=30/32(d=2)|C6=0/2(d=2)|C9=1/1(d=0)|C4h=0|C4bh=0|C7=20/H=26(hm=26,hl=26)|END_A_HIT|ir=1354|zig=47799
+f161_json_xml_csv_parsing|r3nc|C1=0/0(d=0)|C2=30/30(d=0)|C6=0/0(d=0)|C9=1/0(d=-1)|C4h=0|C4bh=0|C7=21/H=27(hm=27,hl=27)|END_BLIND|ir=1423|zig=47875
+f171_state_machine_dfa|r2|C1=0/3(d=3)|C2=9/11(d=2)|C6=0/2(d=2)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=19/H=24(hm=24,hl=24)|END_A_HIT|ir=950|zig=32105
+f171_state_machine_dfa|r2nc|C1=0/0(d=0)|C2=9/9(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=19/H=24(hm=24,hl=24)|END_BLIND|ir=978|zig=32122
+f171_state_machine_dfa|r3|C1=0/3(d=3)|C2=9/12(d=3)|C6=0/3(d=3)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=16/H=21(hm=21,hl=21)|END_A_HIT|ir=939|zig=30876
+f171_state_machine_dfa|r3nc|C1=0/0(d=0)|C2=9/9(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=17/H=22(hm=22,hl=22)|END_BLIND|ir=978|zig=31810
+f176_specification_chain_rules|r2|C1=0/7(d=7)|C2=5/8(d=3)|C6=0/3(d=3)|C9=0/1(d=1)|C4h=0|C4bh=0|C7=38/H=38(hm=38,hl=38)|END_A+B_HIT|ir=952|zig=41973
+f176_specification_chain_rules|r2nc|C1=0/0(d=0)|C2=5/5(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=38/H=38(hm=38,hl=38)|END_BLIND|ir=1002|zig=42010
+f176_specification_chain_rules|r3|C1=0/7(d=7)|C2=5/12(d=7)|C6=0/7(d=7)|C9=0/1(d=1)|C4h=0|C4bh=0|C7=28/H=28(hm=28,hl=28)|END_A+B_HIT|ir=937|zig=39698
+f176_specification_chain_rules|r3nc|C1=0/0(d=0)|C2=5/5(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=28/H=28(hm=28,hl=28)|END_BLIND|ir=1002|zig=39950
+f177_graph_traversal_dfs_bfs|r2|C1=0/1(d=1)|C2=14/11(d=-3)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=13/H=19(hm=19,hl=19)|END_A_HIT|ir=1323|zig=49523
+f177_graph_traversal_dfs_bfs|r2nc|C1=0/0(d=0)|C2=14/12(d=-2)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=14/H=20(hm=20,hl=20)|END_BLIND|ir=1409|zig=49676
+f177_graph_traversal_dfs_bfs|r3|C1=0/1(d=1)|C2=14/11(d=-3)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=13/H=19(hm=19,hl=19)|END_A_HIT|ir=1323|zig=49523
+f177_graph_traversal_dfs_bfs|r3nc|C1=0/0(d=0)|C2=14/12(d=-2)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=14/H=20(hm=20,hl=20)|END_BLIND|ir=1409|zig=49676
+ROUND_CFG_DONE total=19 arm_compile_fail=4 arm_rows=72
+ELAPSED=14s

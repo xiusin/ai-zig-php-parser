@@ -1,0 +1,21 @@
+# arm=licm flags=[--compile --no-debug-info --aot-enable-pass=licm] bin=1f15e4ce9b5c9cdaaef7cabf5efb9c76 linker=fbe6382a2e0904b6740d771b88c409c7/32797 optimizer=252234ef48cb47a42e6f39d1bc3e845b
+f016_hash_bloom_consistent|GEN_DRIFT|DIFF|46768|285c35aa9585d101c944437b5771433a|32c32~< Distribution: {"ServerA":8}~---~> Distribution: {"ServerA":1}~43c43~< Distribution: {"ServerA":8}~---~> Distribution: {"ServerA":1}~
+f024_rbac_role_inheritance_policy|GEN_DRIFT|PASS|42704|08665e1a4d3451a0dff7a2b0c57c6b7d||
+f025_coding_hamming_rle_lzw_crc|GEN_DRIFT|PASS|30713|d4ecd8e93d23957d46af91113a51f63d||
+f044_json_deepops_merge_diff|GEN_DRIFT|DIFF|27724|5d8603d6b9943de2c7e6b609479fa664|23c23~< Invalid data errors: Missing required field: age; Field 'email': does not match pattern /^[^@]+@[^@]+$/~---~> Invalid data errors: Missing required field: age~
+f051_validator_rule_chain_batch|GEN_DRIFT|PASS|25339|36340f5cb0a78e7b12b10840ccca2a90||
+f061_graph_dijkstra_bellmanford_floyd|GEN_DRIFT|PASS|43099|bb090b472bcc8c926e9df5aa2b7af769||
+f072_type_inference_hindley_milner|GEN_DRIFT|PASS|37103|7d58573544754ea9c4e11bba1a6d740d||
+f104_game_engine_ecs_collision_render|GEN_DRIFT|PASS|48573|3039458f5d573e9e6c390aa3357590f5||
+f113_distributed_consistenthash_vectorclock_quorum|GEN_DRIFT|DIFF|104136|fa1d0cc5083ceeb69724aa01daf27a70|18c18~< vc1 vs vc2: concurrent~---~> vc1 vs vc2: before~24c24~< vc4 vs vc5: concurrent~---~> vc4 vs vc5: before~36,39c36,38~< Conflicts: 1~
+f117_search_engine_inverted_tfidf_bm25|GEN_DRIFT|DIFF|54498|694e5340312849eea2fa4d77a7c311e8|17,19c17,19~< Doc 2: score=4.6740 - "A quick brown dog outruns the quick fox"~< Doc 1: score=2.9808 - "The quick brown fox jumps over the lazy dog"~< Doc 5: score=2.9808 - "Quick thinking saves the day for the fox"~---~> Doc 1: score=1.2877 - "The quick brown fox jumps over the lazy dog"~> Doc 2: score=1.2877 - "A quick brown dog outruns the quick fox"~> Doc 5: score=1.2877 - "Quick thinking saves
+f124_container_orchestrator_pod_service_autoscale|GEN_DRIFT|DIFF|112601|67b9a3fb2ff217f74bf10906c46a5f90|30c30~< Desired replicas: 2~---~> Desired replicas: 9~32,33c32,33~< node-1: 2 pods, CPU=5.0%~< node-2: 0 pods, CPU=0.0%~---~> node-1: 8 pods, CPU=89.0%~> node-2: 1 pods, CPU=8.5%~
+f134_event_sourcing_snapshot_cqrs_projection|GEN_DRIFT|PASS|77011|374a117be048d15ab3ca8a4b81f1d3f9||
+f135_math_number_theory_crt_miller_rabin|GEN_DRIFT|PASS|58348|1d7bbaf8598a0cd130f24b76bc4ca150||
+f152_closure_arrow_higher_order|GEN_DRIFT|PASS|46366|f0dd5eeffcab2ab4c948584b985d93c6||
+f160_virtual_fs_path_traversal|GEN_DRIFT|PASS|38080|9437da71b11247e796772cb429ca1be1||
+f161_json_xml_csv_parsing|GEN_DRIFT|DIFF|48037|a2617fa037d7ea775f151f04d1ac9053|36,37c36~< Beijing: Alice, Charlie~< Shanghai: Bob, Diana~---~> 0: Alice, Bob, Charlie, Diana~40,41c39,40~< Team A,95~< Team B,87~---~> ,~
+f171_state_machine_dfa|GEN_DRIFT|PASS|32081|c260ea26600e91baed94d2adcefc0dcf||
+f176_specification_chain_rules|GEN_DRIFT|PASS|42076|2a8dcb722ce5f8ae189b52f1a26e94c0||
+f177_graph_traversal_dfs_bfs|GEN_DRIFT|DIFF|50001|40143a544874a4bbc8c1394d4b02bbb3|15c15~< Course order: CS101 → MATH101 → CS102 → CS201 → CS301 → CS302 → CS401~---~> Course order: CS101 → MATH101 → CS201 → CS102 → CS301 → CS302 → CS401~
+KNOB_DONE arm=licm total=19 gen_same=0 gen_drift=19 pass=12 diff=7 runtime_fail=0 compile_fail=0

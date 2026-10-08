@@ -1,0 +1,233 @@
+# opt001 §5.8 逐轮点亮曲线 2026-10-06 15:47:49
+bin_md5=1f15e4ce9b5c9cdaaef7cabf5efb9c76
+optimizer=252234ef48cb47a42e6f39d1bc3e845b/6877
+native_linker=fbe6382a2e0904b6740d771b88c409c7/32797
+level=default(无 --optimize)  层A=--no-link 签名  层B=全编译输出面  唯一变量=--aot-max-iterations=N
+r5 来源=fuzzy_scripts_720/tmp/opt001_c9_face_tmp.tsv（#100 层A 签名 / 层B 输出，同代次，不重跑）
+LAYERA_HEADER|shape|arm|C1|C2|C6|C9|C4h|C4bh|C7|H|hm|hl|ir|zig
+f016_hash_bloom_consistent|r1|C1=0/2(d=2)|C2=0/2(d=2)|C6=0/2(d=2)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=19/H=44(hm=44,hl=44)|END_A_HIT|ir=1123|zig=46768
+f016_hash_bloom_consistent|r2|C1=0/2(d=2)|C2=0/2(d=2)|C6=0/2(d=2)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=15/H=36(hm=36,hl=36)|END_A_HIT|ir=1116|zig=45957
+f016_hash_bloom_consistent|r3|C1=0/2(d=2)|C2=0/2(d=2)|C6=0/2(d=2)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=15/H=36(hm=36,hl=36)|END_A_HIT|ir=1116|zig=45957
+f016_hash_bloom_consistent|r4|C1=0/2(d=2)|C2=0/2(d=2)|C6=0/2(d=2)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=15/H=36(hm=36,hl=36)|END_A_HIT|ir=1116|zig=45957
+f024_rbac_role_inheritance_policy|r1|C1=0/0(d=0)|C2=2/0(d=-2)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=14/H=15(hm=15,hl=15)|END_BLIND|ir=955|zig=42704
+f024_rbac_role_inheritance_policy|r2|C1=0/1(d=1)|C2=2/1(d=-1)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=11/H=12(hm=12,hl=12)|END_A_HIT|ir=951|zig=42546
+f024_rbac_role_inheritance_policy|r3|C1=0/1(d=1)|C2=2/1(d=-1)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=11/H=12(hm=12,hl=12)|END_A_HIT|ir=948|zig=42333
+f024_rbac_role_inheritance_policy|r4|C1=0/1(d=1)|C2=2/1(d=-1)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=11/H=12(hm=12,hl=12)|END_A_HIT|ir=948|zig=42333
+f025_coding_hamming_rle_lzw_crc|r1|C1=0/0(d=0)|C2=21/21(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=32/H=40(hm=40,hl=40)|END_BLIND|ir=1089|zig=30713
+f025_coding_hamming_rle_lzw_crc|r2|C1=0/1(d=1)|C2=21/22(d=1)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=35/H=43(hm=43,hl=43)|END_A_HIT|ir=1083|zig=30703
+f025_coding_hamming_rle_lzw_crc|r3|C1=0/1(d=1)|C2=21/22(d=1)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=35/H=43(hm=43,hl=43)|END_A_HIT|ir=1080|zig=30696
+f025_coding_hamming_rle_lzw_crc|r4|C1=0/1(d=1)|C2=21/22(d=1)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=35/H=43(hm=43,hl=43)|END_A_HIT|ir=1080|zig=30696
+f044_json_deepops_merge_diff|r1|C1=0/1(d=1)|C2=21/24(d=3)|C6=0/0(d=0)|C9=3/0(d=-3)|C4h=0|C4bh=0|C7=51/H=53(hm=53,hl=53)|END_BLIND|ir=1223|zig=27724
+f044_json_deepops_merge_diff|r2|C1=0/1(d=1)|C2=21/21(d=0)|C6=0/1(d=1)|C9=3/1(d=-2)|C4h=0|C4bh=0|C7=41/H=42(hm=42,hl=42)|END_A_HIT|ir=1220|zig=27947
+f044_json_deepops_merge_diff|r3|C1=0/1(d=1)|C2=21/21(d=0)|C6=0/1(d=1)|C9=3/1(d=-2)|C4h=0|C4bh=0|C7=41/H=42(hm=42,hl=42)|END_A_HIT|ir=1220|zig=27947
+f044_json_deepops_merge_diff|r4|C1=0/1(d=1)|C2=21/21(d=0)|C6=0/1(d=1)|C9=3/1(d=-2)|C4h=0|C4bh=0|C7=41/H=42(hm=42,hl=42)|END_A_HIT|ir=1220|zig=27947
+f051_validator_rule_chain_batch|r1|C1=0/0(d=0)|C2=5/5(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=18/H=26(hm=26,hl=26)|END_BLIND|ir=959|zig=25339
+f051_validator_rule_chain_batch|r2|C1=0/1(d=1)|C2=5/6(d=1)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=18/H=26(hm=26,hl=26)|END_A_HIT|ir=951|zig=25112
+f051_validator_rule_chain_batch|r3|C1=0/1(d=1)|C2=5/6(d=1)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=18/H=26(hm=26,hl=26)|END_A_HIT|ir=946|zig=24822
+f051_validator_rule_chain_batch|r4|C1=0/1(d=1)|C2=5/6(d=1)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=18/H=26(hm=26,hl=26)|END_A_HIT|ir=946|zig=24822
+f061_graph_dijkstra_bellmanford_floyd|r1|C1=0/0(d=0)|C2=23/23(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=39/H=44(hm=44,hl=44)|END_BLIND|ir=1070|zig=43099
+f061_graph_dijkstra_bellmanford_floyd|r2|C1=0/0(d=0)|C2=23/23(d=0)|C6=0/0(d=0)|C9=0/5(d=5)|C4h=0|C4bh=0|C7=35/H=37(hm=37,hl=37)|END_B_HIT|ir=1056|zig=42828
+f061_graph_dijkstra_bellmanford_floyd|r3|C1=0/0(d=0)|C2=23/23(d=0)|C6=0/0(d=0)|C9=0/5(d=5)|C4h=0|C4bh=0|C7=32/H=34(hm=34,hl=34)|END_B_HIT|ir=1056|zig=42432
+f061_graph_dijkstra_bellmanford_floyd|r4|C1=0/0(d=0)|C2=23/23(d=0)|C6=0/0(d=0)|C9=0/5(d=5)|C4h=0|C4bh=0|C7=32/H=34(hm=34,hl=34)|END_B_HIT|ir=1056|zig=42432
+f072_type_inference_hindley_milner|r1|C1=0/0(d=0)|C2=5/5(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=8/H=31(hm=31,hl=31)|END_BLIND|ir=1285|zig=37103
+f072_type_inference_hindley_milner|r2|C1=0/0(d=0)|C2=5/5(d=0)|C6=0/0(d=0)|C9=0/2(d=2)|C4h=0|C4bh=0|C7=9/H=18(hm=18,hl=18)|END_B_HIT|ir=1281|zig=37013
+f072_type_inference_hindley_milner|r3|C1=0/0(d=0)|C2=5/5(d=0)|C6=0/0(d=0)|C9=0/2(d=2)|C4h=0|C4bh=0|C7=9/H=18(hm=18,hl=18)|END_B_HIT|ir=1281|zig=37013
+f072_type_inference_hindley_milner|r4|C1=0/0(d=0)|C2=5/5(d=0)|C6=0/0(d=0)|C9=0/2(d=2)|C4h=0|C4bh=0|C7=9/H=18(hm=18,hl=18)|END_B_HIT|ir=1281|zig=37013
+f104_game_engine_ecs_collision_render|r1|C1=0/1(d=1)|C2=20/19(d=-1)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=52/H=56(hm=56,hl=56)|END_BLIND|ir=1259|zig=48573
+f104_game_engine_ecs_collision_render|r2|C1=0/1(d=1)|C2=20/20(d=0)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=40/H=43(hm=43,hl=43)|END_A_HIT|ir=1249|zig=47497
+f104_game_engine_ecs_collision_render|r3|C1=0/1(d=1)|C2=20/20(d=0)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=40/H=43(hm=43,hl=43)|END_A_HIT|ir=1249|zig=47497
+f104_game_engine_ecs_collision_render|r4|C1=0/1(d=1)|C2=20/20(d=0)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=40/H=43(hm=43,hl=43)|END_A_HIT|ir=1249|zig=47497
+f113_distributed_consistenthash_vectorclock_quorum|r1|C1=0/3(d=3)|C2=11/8(d=-3)|C6=0/2(d=2)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=37/H=68(hm=68,hl=68)|END_A_HIT|ir=1532|zig=104136
+f113_distributed_consistenthash_vectorclock_quorum|r2|C1=0/4(d=4)|C2=11/10(d=-1)|C6=0/4(d=4)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=27/H=52(hm=52,hl=52)|END_A_HIT|ir=1518|zig=103365
+f113_distributed_consistenthash_vectorclock_quorum|r3|C1=0/4(d=4)|C2=11/10(d=-1)|C6=0/4(d=4)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=27/H=52(hm=52,hl=52)|END_A_HIT|ir=1513|zig=102572
+f113_distributed_consistenthash_vectorclock_quorum|r4|C1=0/4(d=4)|C2=11/10(d=-1)|C6=0/4(d=4)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=27/H=52(hm=52,hl=52)|END_A_HIT|ir=1511|zig=102042
+f117_search_engine_inverted_tfidf_bm25|r1|C1=0/4(d=4)|C2=23/25(d=2)|C6=0/2(d=2)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=22/H=51(hm=51,hl=51)|END_A_HIT|ir=1220|zig=54498
+f117_search_engine_inverted_tfidf_bm25|r2|C1=0/5(d=5)|C2=23/32(d=9)|C6=0/5(d=5)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=13/H=32(hm=32,hl=32)|END_A_HIT|ir=1195|zig=52400
+f117_search_engine_inverted_tfidf_bm25|r3|C1=0/3(d=3)|C2=23/32(d=9)|C6=0/5(d=5)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=13/H=32(hm=32,hl=32)|END_A_HIT|ir=1190|zig=51852
+f117_search_engine_inverted_tfidf_bm25|r4|C1=0/3(d=3)|C2=23/32(d=9)|C6=0/5(d=5)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=13/H=32(hm=32,hl=32)|END_A_HIT|ir=1190|zig=51852
+f124_container_orchestrator_pod_service_autoscale|r1|C1=0/1(d=1)|C2=56/47(d=-9)|C6=0/1(d=1)|C9=3/3(d=0)|C4h=0|C4bh=0|C7=22/H=63(hm=63,hl=63)|END_A_HIT|ir=2098|zig=112601
+f124_container_orchestrator_pod_service_autoscale|r2|C1=0/2(d=2)|C2=56/48(d=-8)|C6=0/1(d=1)|C9=3/4(d=1)|C4h=0|C4bh=0|C7=17/H=48(hm=48,hl=48)|END_A+B_HIT|ir=2083|zig=110734
+f124_container_orchestrator_pod_service_autoscale|r3|C1=0/2(d=2)|C2=56/49(d=-7)|C6=0/2(d=2)|C9=3/4(d=1)|C4h=0|C4bh=0|C7=17/H=48(hm=48,hl=48)|END_A+B_HIT|ir=2081|zig=110732
+f124_container_orchestrator_pod_service_autoscale|r4|C1=0/2(d=2)|C2=56/49(d=-7)|C6=0/2(d=2)|C9=3/4(d=1)|C4h=0|C4bh=0|C7=17/H=48(hm=48,hl=48)|END_A+B_HIT|ir=2081|zig=110732
+f134_event_sourcing_snapshot_cqrs_projection|r1|C1=0/1(d=1)|C2=20/20(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=47/H=61(hm=61,hl=61)|END_BLIND|ir=1625|zig=77011
+f134_event_sourcing_snapshot_cqrs_projection|r2|C1=0/0(d=0)|C2=20/26(d=6)|C6=0/6(d=6)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=18/H=29(hm=29,hl=29)|END_A_HIT|ir=1607|zig=75366
+f134_event_sourcing_snapshot_cqrs_projection|r3|C1=0/0(d=0)|C2=20/26(d=6)|C6=0/6(d=6)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=18/H=29(hm=29,hl=29)|END_A_HIT|ir=1607|zig=75366
+f134_event_sourcing_snapshot_cqrs_projection|r4|C1=0/0(d=0)|C2=20/26(d=6)|C6=0/6(d=6)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=18/H=29(hm=29,hl=29)|END_A_HIT|ir=1607|zig=75366
+f135_math_number_theory_crt_miller_rabin|r1|C1=0/0(d=0)|C2=40/39(d=-1)|C6=3/2(d=-1)|C9=1/0(d=-1)|C4h=0|C4bh=0|C7=13/H=29(hm=29,hl=29)|END_BLIND|ir=1425|zig=58348
+f135_math_number_theory_crt_miller_rabin|r2|C1=0/2(d=2)|C2=40/41(d=1)|C6=3/4(d=1)|C9=1/0(d=-1)|C4h=0|C4bh=0|C7=15/H=30(hm=30,hl=30)|END_A_HIT|ir=1416|zig=58268
+f135_math_number_theory_crt_miller_rabin|r3|C1=0/2(d=2)|C2=40/41(d=1)|C6=3/4(d=1)|C9=1/0(d=-1)|C4h=0|C4bh=0|C7=13/H=28(hm=28,hl=28)|END_A_HIT|ir=1412|zig=57820
+f135_math_number_theory_crt_miller_rabin|r4|C1=0/2(d=2)|C2=40/41(d=1)|C6=3/4(d=1)|C9=1/0(d=-1)|C4h=0|C4bh=0|C7=13/H=28(hm=28,hl=28)|END_A_HIT|ir=1412|zig=57820
+f152_closure_arrow_higher_order|r1|C1=0/0(d=0)|C2=67/67(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=0/H=0(hm=0,hl=0)|END_BLIND|ir=1174|zig=46366
+f152_closure_arrow_higher_order|r2|C1=0/0(d=0)|C2=67/67(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=0/H=0(hm=0,hl=0)|END_BLIND|ir=1174|zig=46372
+f152_closure_arrow_higher_order|r3|C1=0/0(d=0)|C2=67/67(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=0/H=0(hm=0,hl=0)|END_BLIND|ir=1174|zig=46372
+f152_closure_arrow_higher_order|r4|C1=0/0(d=0)|C2=67/67(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=0/H=0(hm=0,hl=0)|END_BLIND|ir=1174|zig=46372
+f160_virtual_fs_path_traversal|r1|C1=0/0(d=0)|C2=28/28(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=9/H=21(hm=21,hl=21)|END_BLIND|ir=1376|zig=38080
+f160_virtual_fs_path_traversal|r2|C1=0/0(d=0)|C2=28/28(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=11/H=22(hm=22,hl=22)|END_BLIND|ir=1374|zig=38115
+f160_virtual_fs_path_traversal|r3|C1=0/0(d=0)|C2=28/28(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=11/H=22(hm=22,hl=22)|END_BLIND|ir=1374|zig=38115
+f160_virtual_fs_path_traversal|r4|C1=0/0(d=0)|C2=28/28(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=11/H=22(hm=22,hl=22)|END_BLIND|ir=1374|zig=38115
+f161_json_xml_csv_parsing|r1|C1=0/2(d=2)|C2=30/32(d=2)|C6=0/2(d=2)|C9=1/1(d=0)|C4h=0|C4bh=0|C7=24/H=33(hm=33,hl=33)|END_A_HIT|ir=1365|zig=48037
+f161_json_xml_csv_parsing|r2|C1=0/2(d=2)|C2=30/32(d=2)|C6=0/2(d=2)|C9=1/1(d=0)|C4h=0|C4bh=0|C7=20/H=26(hm=26,hl=26)|END_A_HIT|ir=1354|zig=47799
+f161_json_xml_csv_parsing|r3|C1=0/2(d=2)|C2=30/32(d=2)|C6=0/2(d=2)|C9=1/1(d=0)|C4h=0|C4bh=0|C7=20/H=26(hm=26,hl=26)|END_A_HIT|ir=1354|zig=47799
+f161_json_xml_csv_parsing|r4|C1=0/2(d=2)|C2=30/32(d=2)|C6=0/2(d=2)|C9=1/1(d=0)|C4h=0|C4bh=0|C7=20/H=26(hm=26,hl=26)|END_A_HIT|ir=1354|zig=47799
+f171_state_machine_dfa|r1|C1=0/0(d=0)|C2=9/9(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=15/H=20(hm=20,hl=20)|END_BLIND|ir=962|zig=32081
+f171_state_machine_dfa|r2|C1=0/3(d=3)|C2=9/11(d=2)|C6=0/2(d=2)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=19/H=24(hm=24,hl=24)|END_A_HIT|ir=950|zig=32105
+f171_state_machine_dfa|r3|C1=0/3(d=3)|C2=9/12(d=3)|C6=0/3(d=3)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=16/H=21(hm=21,hl=21)|END_A_HIT|ir=939|zig=30876
+f171_state_machine_dfa|r4|C1=0/3(d=3)|C2=9/12(d=3)|C6=0/3(d=3)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=15/H=20(hm=20,hl=20)|END_A_HIT|ir=937|zig=30716
+f176_specification_chain_rules|r1|C1=0/0(d=0)|C2=5/5(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=35/H=38(hm=38,hl=38)|END_BLIND|ir=982|zig=42076
+f176_specification_chain_rules|r2|C1=0/7(d=7)|C2=5/8(d=3)|C6=0/3(d=3)|C9=0/1(d=1)|C4h=0|C4bh=0|C7=38/H=38(hm=38,hl=38)|END_A+B_HIT|ir=952|zig=41973
+f176_specification_chain_rules|r3|C1=0/7(d=7)|C2=5/12(d=7)|C6=0/7(d=7)|C9=0/1(d=1)|C4h=0|C4bh=0|C7=28/H=28(hm=28,hl=28)|END_A+B_HIT|ir=937|zig=39698
+f176_specification_chain_rules|r4|C1=0/7(d=7)|C2=5/12(d=7)|C6=0/7(d=7)|C9=0/1(d=1)|C4h=0|C4bh=0|C7=28/H=28(hm=28,hl=28)|END_A+B_HIT|ir=937|zig=39698
+f177_graph_traversal_dfs_bfs|r1|C1=0/1(d=1)|C2=14/12(d=-2)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=17/H=23(hm=23,hl=23)|END_A_HIT|ir=1333|zig=50001
+f177_graph_traversal_dfs_bfs|r2|C1=0/1(d=1)|C2=14/11(d=-3)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=13/H=19(hm=19,hl=19)|END_A_HIT|ir=1323|zig=49523
+f177_graph_traversal_dfs_bfs|r3|C1=0/1(d=1)|C2=14/11(d=-3)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=13/H=19(hm=19,hl=19)|END_A_HIT|ir=1323|zig=49523
+f177_graph_traversal_dfs_bfs|r4|C1=0/1(d=1)|C2=14/11(d=-3)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=13/H=19(hm=19,hl=19)|END_A_HIT|ir=1323|zig=49523
+LAYERA_DONE total=19 arm_compile_fail=0 arm_rows=76
+f016_hash_bloom_consistent|r1|DIFF|gen=46768/285c35aa9585d101c944437b5771433a|d=32c32~< Distribution: {"ServerA":8}~---~> Distribution: {"ServerA":1}~43c43~< Distribution: {"ServerA":8}~
+f016_hash_bloom_consistent|r2|DIFF|gen=45957/2cd2fe808161c7b911f1d5d293c6f0f6|d=32c32~< Distribution: {"ServerA":8}~---~> Distribution: {"ServerA":1}~43c43~< Distribution: {"ServerA":8}~
+f016_hash_bloom_consistent|r3|DIFF|gen=45957/2cd2fe808161c7b911f1d5d293c6f0f6|d=32c32~< Distribution: {"ServerA":8}~---~> Distribution: {"ServerA":1}~43c43~< Distribution: {"ServerA":8}~
+f016_hash_bloom_consistent|r4|DIFF|gen=45957/2cd2fe808161c7b911f1d5d293c6f0f6|d=32c32~< Distribution: {"ServerA":8}~---~> Distribution: {"ServerA":1}~43c43~< Distribution: {"ServerA":8}~
+f016_hash_bloom_consistent|curve_eff|EFFECTIVE|gens= r1={46768/285c35aa9585d101c944437b5771433a} r2={45957/2cd2fe808161c7b911f1d5d293c6f0f6} r3={45957/2cd2fe808161c7b911f1d5d293c6f0f6} r4={45957/2cd2fe808161c7b911f1d5d293c6f0f6}
+f024_rbac_role_inheritance_policy|r1|PASS|gen=42704/08665e1a4d3451a0dff7a2b0c57c6b7d
+f024_rbac_role_inheritance_policy|r2|DIFF|gen=42546/02f40c12b99351ebb6e3d2286d3b750a|d=4,23c4,23~< Alice (admin)/article:YES     YES     YES     YES~< Alice (admin)/comment:YES     YES     YES     YES~< Alice (admin)/user: YES     YES     YES     YES~< Alice (admin)/system:YES     YES     YES     YES~< Bob (editor)/article:YES     YES     YES     no~
+f024_rbac_role_inheritance_policy|r3|DIFF|gen=42333/9b8840bd17dedc309123b8d6c0c813b9|d=4,23c4,23~< Alice (admin)/article:YES     YES     YES     YES~< Alice (admin)/comment:YES     YES     YES     YES~< Alice (admin)/user: YES     YES     YES     YES~< Alice (admin)/system:YES     YES     YES     YES~< Bob (editor)/article:YES     YES     YES     no~
+f024_rbac_role_inheritance_policy|r4|DIFF|gen=42333/9b8840bd17dedc309123b8d6c0c813b9|d=4,23c4,23~< Alice (admin)/article:YES     YES     YES     YES~< Alice (admin)/comment:YES     YES     YES     YES~< Alice (admin)/user: YES     YES     YES     YES~< Alice (admin)/system:YES     YES     YES     YES~< Bob (editor)/article:YES     YES     YES     no~
+f024_rbac_role_inheritance_policy|curve_eff|EFFECTIVE|gens= r1={42704/08665e1a4d3451a0dff7a2b0c57c6b7d} r2={42546/02f40c12b99351ebb6e3d2286d3b750a} r3={42333/9b8840bd17dedc309123b8d6c0c813b9} r4={42333/9b8840bd17dedc309123b8d6c0c813b9}
+f025_coding_hamming_rle_lzw_crc|r1|PASS|gen=30713/d4ecd8e93d23957d46af91113a51f63d
+f025_coding_hamming_rle_lzw_crc|r2|DIFF|gen=30703/4fe88f835ba36d826c47d421f3491e25|d=26c26~< Binary: 11111111~---~> Binary:~30c30~< Binary → Decimal: 255~
+f025_coding_hamming_rle_lzw_crc|r3|DIFF|gen=30696/c751306a66ac9f86641f7a015f5c85a8|d=26c26~< Binary: 11111111~---~> Binary:~30c30~< Binary → Decimal: 255~
+f025_coding_hamming_rle_lzw_crc|r4|DIFF|gen=30696/c751306a66ac9f86641f7a015f5c85a8|d=26c26~< Binary: 11111111~---~> Binary:~30c30~< Binary → Decimal: 255~
+f025_coding_hamming_rle_lzw_crc|curve_eff|EFFECTIVE|gens= r1={30713/d4ecd8e93d23957d46af91113a51f63d} r2={30703/4fe88f835ba36d826c47d421f3491e25} r3={30696/c751306a66ac9f86641f7a015f5c85a8} r4={30696/c751306a66ac9f86641f7a015f5c85a8}
+f044_json_deepops_merge_diff|r1|DIFF|gen=27724/5d8603d6b9943de2c7e6b609479fa664|d=23c23~< Invalid data errors: Missing required field: age; Field 'email': does not match pattern /^[^@]+@[^@]+$/~---~> Invalid data errors: Missing required field: age~
+f044_json_deepops_merge_diff|r2|DIFF|gen=27947/6ef0f7eed7158d411c2c95172dedcc1f|d=23c23~< Invalid data errors: Missing required field: age; Field 'email': does not match pattern /^[^@]+@[^@]+$/~---~> Invalid data errors: Missing required field: age~
+f044_json_deepops_merge_diff|r3|DIFF|gen=27947/6ef0f7eed7158d411c2c95172dedcc1f|d=23c23~< Invalid data errors: Missing required field: age; Field 'email': does not match pattern /^[^@]+@[^@]+$/~---~> Invalid data errors: Missing required field: age~
+f044_json_deepops_merge_diff|r4|DIFF|gen=27947/6ef0f7eed7158d411c2c95172dedcc1f|d=23c23~< Invalid data errors: Missing required field: age; Field 'email': does not match pattern /^[^@]+@[^@]+$/~---~> Invalid data errors: Missing required field: age~
+f044_json_deepops_merge_diff|curve_eff|EFFECTIVE|gens= r1={27724/5d8603d6b9943de2c7e6b609479fa664} r2={27947/6ef0f7eed7158d411c2c95172dedcc1f} r3={27947/6ef0f7eed7158d411c2c95172dedcc1f} r4={27947/6ef0f7eed7158d411c2c95172dedcc1f}
+f051_validator_rule_chain_batch|r1|PASS|gen=25339/36340f5cb0a78e7b12b10840ccca2a90
+f051_validator_rule_chain_batch|r2|DIFF|gen=25112/dfbfc135ccbd98b424eff6030e3b6b6f|d=15,27c15,27~< email('test@test.com'): true [OK]~< email('bad'): false [OK]~< url('https://x.com'): true [OK]~< url('not-url'): false [OK]~< uuid('550e8400-e29b-41d4-a716-446655440000'): true [OK]~
+f051_validator_rule_chain_batch|r3|DIFF|gen=24822/c7ed932361642eec303b9a76cc1d409c|d=15,27c15,27~< email('test@test.com'): true [OK]~< email('bad'): false [OK]~< url('https://x.com'): true [OK]~< url('not-url'): false [OK]~< uuid('550e8400-e29b-41d4-a716-446655440000'): true [OK]~
+f051_validator_rule_chain_batch|r4|DIFF|gen=24822/c7ed932361642eec303b9a76cc1d409c|d=15,27c15,27~< email('test@test.com'): true [OK]~< email('bad'): false [OK]~< url('https://x.com'): true [OK]~< url('not-url'): false [OK]~< uuid('550e8400-e29b-41d4-a716-446655440000'): true [OK]~
+f051_validator_rule_chain_batch|curve_eff|EFFECTIVE|gens= r1={25339/36340f5cb0a78e7b12b10840ccca2a90} r2={25112/dfbfc135ccbd98b424eff6030e3b6b6f} r3={24822/c7ed932361642eec303b9a76cc1d409c} r4={24822/c7ed932361642eec303b9a76cc1d409c}
+f061_graph_dijkstra_bellmanford_floyd|r1|PASS|gen=43099/bb090b472bcc8c926e9df5aa2b7af769
+f061_graph_dijkstra_bellmanford_floyd|r2|DIFF|gen=42828/3854dd34f1664652e375d3544a8b1a96|d=16,20c16,20~< A	0	3	2	8	10~< B	3	0	1	5	7~< C	2	1	0	6	8~< D	8	5	6	0	2~< E	10	7	8	2	0~
+f061_graph_dijkstra_bellmanford_floyd|r3|DIFF|gen=42432/ad9589aeaca77752fef396a51beb4357|d=16,20c16,20~< A	0	3	2	8	10~< B	3	0	1	5	7~< C	2	1	0	6	8~< D	8	5	6	0	2~< E	10	7	8	2	0~
+f061_graph_dijkstra_bellmanford_floyd|r4|DIFF|gen=42432/ad9589aeaca77752fef396a51beb4357|d=16,20c16,20~< A	0	3	2	8	10~< B	3	0	1	5	7~< C	2	1	0	6	8~< D	8	5	6	0	2~< E	10	7	8	2	0~
+f061_graph_dijkstra_bellmanford_floyd|curve_eff|EFFECTIVE|gens= r1={43099/bb090b472bcc8c926e9df5aa2b7af769} r2={42828/3854dd34f1664652e375d3544a8b1a96} r3={42432/ad9589aeaca77752fef396a51beb4357} r4={42432/ad9589aeaca77752fef396a51beb4357}
+f072_type_inference_hindley_milner|r1|PASS|gen=37103/7d58573544754ea9c4e11bba1a6d740d
+f072_type_inference_hindley_milner|r2|DIFF|gen=37013/824eb4e190413e59a963dd8c351f15d2|d=8c8~< array → array~---~> NULL → array~25c25~< [] → array~
+f072_type_inference_hindley_milner|r3|DIFF|gen=37013/824eb4e190413e59a963dd8c351f15d2|d=8c8~< array → array~---~> NULL → array~25c25~< [] → array~
+f072_type_inference_hindley_milner|r4|DIFF|gen=37013/824eb4e190413e59a963dd8c351f15d2|d=8c8~< array → array~---~> NULL → array~25c25~< [] → array~
+f072_type_inference_hindley_milner|curve_eff|EFFECTIVE|gens= r1={37103/7d58573544754ea9c4e11bba1a6d740d} r2={37013/824eb4e190413e59a963dd8c351f15d2} r3={37013/824eb4e190413e59a963dd8c351f15d2} r4={37013/824eb4e190413e59a963dd8c351f15d2}
+f104_game_engine_ecs_collision_render|r1|PASS|gen=48573/3039458f5d573e9e6c390aa3357590f5
+f104_game_engine_ecs_collision_render|r2|DIFF|gen=47497/aa57da47005920a1bb2fe2fe4a7fae30|d=59,61c59,61~< Entity 1: pos=(355,300) hp=100/100 sprite=Player~< Entity 3: pos=(396,174.5) hp=30/30 sprite=Enemy~< Entity 4: pos=(300,400) sprite=Wall~---~> Entity 1: pos=(355,300) hp=100/100 sprite=~
+f104_game_engine_ecs_collision_render|r3|DIFF|gen=47497/aa57da47005920a1bb2fe2fe4a7fae30|d=59,61c59,61~< Entity 1: pos=(355,300) hp=100/100 sprite=Player~< Entity 3: pos=(396,174.5) hp=30/30 sprite=Enemy~< Entity 4: pos=(300,400) sprite=Wall~---~> Entity 1: pos=(355,300) hp=100/100 sprite=~
+f104_game_engine_ecs_collision_render|r4|DIFF|gen=47497/aa57da47005920a1bb2fe2fe4a7fae30|d=59,61c59,61~< Entity 1: pos=(355,300) hp=100/100 sprite=Player~< Entity 3: pos=(396,174.5) hp=30/30 sprite=Enemy~< Entity 4: pos=(300,400) sprite=Wall~---~> Entity 1: pos=(355,300) hp=100/100 sprite=~
+f104_game_engine_ecs_collision_render|curve_eff|EFFECTIVE|gens= r1={48573/3039458f5d573e9e6c390aa3357590f5} r2={47497/aa57da47005920a1bb2fe2fe4a7fae30} r3={47497/aa57da47005920a1bb2fe2fe4a7fae30} r4={47497/aa57da47005920a1bb2fe2fe4a7fae30}
+f113_distributed_consistenthash_vectorclock_quorum|r1|DIFF|gen=104136/fa1d0cc5083ceeb69724aa01daf27a70|d=18c18~< vc1 vs vc2: concurrent~---~> vc1 vs vc2: before~24c24~< vc4 vs vc5: concurrent~
+f113_distributed_consistenthash_vectorclock_quorum|r2|DIFF|gen=103365/7ad2ef2ce047ea415a7b8ce1201722f3|d=18c18~< vc1 vs vc2: concurrent~---~> vc1 vs vc2: equal~20,21c20,21~< vc1 vs merged: before~
+f113_distributed_consistenthash_vectorclock_quorum|r3|DIFF|gen=102572/b2932ac2cfc0dade770a4ade59a3dd17|d=18c18~< vc1 vs vc2: concurrent~---~> vc1 vs vc2: equal~20,21c20,21~< vc1 vs merged: before~
+f113_distributed_consistenthash_vectorclock_quorum|r4|DIFF|gen=102042/df4df0099c5e25167291aef9b2072e4e|d=18c18~< vc1 vs vc2: concurrent~---~> vc1 vs vc2: equal~20,21c20,21~< vc1 vs merged: before~
+f113_distributed_consistenthash_vectorclock_quorum|curve_eff|EFFECTIVE|gens= r1={104136/fa1d0cc5083ceeb69724aa01daf27a70} r2={103365/7ad2ef2ce047ea415a7b8ce1201722f3} r3={102572/b2932ac2cfc0dade770a4ade59a3dd17} r4={102042/df4df0099c5e25167291aef9b2072e4e}
+f117_search_engine_inverted_tfidf_bm25|r1|DIFF|gen=54498/694e5340312849eea2fa4d77a7c311e8|d=17,19c17,19~< Doc 2: score=4.6740 - "A quick brown dog outruns the quick fox"~< Doc 1: score=2.9808 - "The quick brown fox jumps over the lazy dog"~< Doc 5: score=2.9808 - "Quick thinking saves the day for the fox"~---~> Doc 1: score=1.2877 - "The quick brown fox jumps over the lazy dog"~
+f117_search_engine_inverted_tfidf_bm25|r2|DIFF|gen=52400/cf346d099d8743182e39dc7083f1fbea|d=17,19c17,19~< Doc 2: score=4.6740 - "A quick brown dog outruns the quick fox"~< Doc 1: score=2.9808 - "The quick brown fox jumps over the lazy dog"~< Doc 5: score=2.9808 - "Quick thinking saves the day for the fox"~---~> Doc 1: score=1.2877 - "The quick brown fox jumps over the lazy dog"~
+f117_search_engine_inverted_tfidf_bm25|r3|DIFF|gen=51852/880156f82873f51c09a130fdffd7e6d3|d=17,19c17,19~< Doc 2: score=4.6740 - "A quick brown dog outruns the quick fox"~< Doc 1: score=2.9808 - "The quick brown fox jumps over the lazy dog"~< Doc 5: score=2.9808 - "Quick thinking saves the day for the fox"~---~> Doc 1: score=1.2877 - "The quick brown fox jumps over the lazy dog"~
+f117_search_engine_inverted_tfidf_bm25|r4|DIFF|gen=51852/880156f82873f51c09a130fdffd7e6d3|d=17,19c17,19~< Doc 2: score=4.6740 - "A quick brown dog outruns the quick fox"~< Doc 1: score=2.9808 - "The quick brown fox jumps over the lazy dog"~< Doc 5: score=2.9808 - "Quick thinking saves the day for the fox"~---~> Doc 1: score=1.2877 - "The quick brown fox jumps over the lazy dog"~
+f117_search_engine_inverted_tfidf_bm25|curve_eff|EFFECTIVE|gens= r1={54498/694e5340312849eea2fa4d77a7c311e8} r2={52400/cf346d099d8743182e39dc7083f1fbea} r3={51852/880156f82873f51c09a130fdffd7e6d3} r4={51852/880156f82873f51c09a130fdffd7e6d3}
+f124_container_orchestrator_pod_service_autoscale|r1|DIFF|gen=112601/67b9a3fb2ff217f74bf10906c46a5f90|d=30c30~< Desired replicas: 2~---~> Desired replicas: 9~32,33c32,33~< node-1: 2 pods, CPU=5.0%~
+f124_container_orchestrator_pod_service_autoscale|r2|DIFF|gen=110734/fc04499e4a687af508cbacf6570a7fe9|d=23c23~< web-0: restarted~---~> web-0: healthy~30c30~< Desired replicas: 2~
+f124_container_orchestrator_pod_service_autoscale|r3|DIFF|gen=110732/09bb9ea610cdcee353edd129c8c1cde4|d=18,20c18,20~< web-0: healthy~< web-1: healthy~< web-2: healthy~---~> web-0:~
+f124_container_orchestrator_pod_service_autoscale|r4|DIFF|gen=110732/09bb9ea610cdcee353edd129c8c1cde4|d=18,20c18,20~< web-0: healthy~< web-1: healthy~< web-2: healthy~---~> web-0:~
+f124_container_orchestrator_pod_service_autoscale|curve_eff|EFFECTIVE|gens= r1={112601/67b9a3fb2ff217f74bf10906c46a5f90} r2={110734/fc04499e4a687af508cbacf6570a7fe9} r3={110732/09bb9ea610cdcee353edd129c8c1cde4} r4={110732/09bb9ea610cdcee353edd129c8c1cde4}
+f134_event_sourcing_snapshot_cqrs_projection|r1|PASS|gen=77011/374a117be048d15ab3ca8a4b81f1d3f9
+f134_event_sourcing_snapshot_cqrs_projection|r2|DIFF|gen=75366/ff20aa2c0ec2730d7c8a6dcafabaf7d2|d=36c36~< paid: 3~---~> paid: 1~40c40~< customer-alice: 2~
+f134_event_sourcing_snapshot_cqrs_projection|r3|DIFF|gen=75366/ff20aa2c0ec2730d7c8a6dcafabaf7d2|d=36c36~< paid: 3~---~> paid: 1~40c40~< customer-alice: 2~
+f134_event_sourcing_snapshot_cqrs_projection|r4|DIFF|gen=75366/ff20aa2c0ec2730d7c8a6dcafabaf7d2|d=36c36~< paid: 3~---~> paid: 1~40c40~< customer-alice: 2~
+f134_event_sourcing_snapshot_cqrs_projection|curve_eff|EFFECTIVE|gens= r1={77011/374a117be048d15ab3ca8a4b81f1d3f9} r2={75366/ff20aa2c0ec2730d7c8a6dcafabaf7d2} r3={75366/ff20aa2c0ec2730d7c8a6dcafabaf7d2} r4={75366/ff20aa2c0ec2730d7c8a6dcafabaf7d2}
+f135_math_number_theory_crt_miller_rabin|r1|PASS|gen=58348/1d7bbaf8598a0cd130f24b76bc4ca150
+f135_math_number_theory_crt_miller_rabin|r2|DIFF|gen=58268/e191a28feb34731917d6c126d39d7a00|d=19,20c19,20~< ✓✓✓✓✓✓✓✓✓✓ primes~< ✓✓✓✓✓✓✓✓✓✓ composites~---~> primes~> composites~
+f135_math_number_theory_crt_miller_rabin|r3|DIFF|gen=57820/9bbafbdaa5ecb84b43601738c9359b28|d=19,20c19,20~< ✓✓✓✓✓✓✓✓✓✓ primes~< ✓✓✓✓✓✓✓✓✓✓ composites~---~> primes~> composites~
+f135_math_number_theory_crt_miller_rabin|r4|DIFF|gen=57820/9bbafbdaa5ecb84b43601738c9359b28|d=19,20c19,20~< ✓✓✓✓✓✓✓✓✓✓ primes~< ✓✓✓✓✓✓✓✓✓✓ composites~---~> primes~> composites~
+f135_math_number_theory_crt_miller_rabin|curve_eff|EFFECTIVE|gens= r1={58348/1d7bbaf8598a0cd130f24b76bc4ca150} r2={58268/e191a28feb34731917d6c126d39d7a00} r3={57820/9bbafbdaa5ecb84b43601738c9359b28} r4={57820/9bbafbdaa5ecb84b43601738c9359b28}
+f152_closure_arrow_higher_order|r1|PASS|gen=46366/f0dd5eeffcab2ab4c948584b985d93c6
+f152_closure_arrow_higher_order|r2|PASS|gen=46372/9c028f855df234694093875d596e59ee
+f152_closure_arrow_higher_order|r3|PASS|gen=46372/9c028f855df234694093875d596e59ee
+f152_closure_arrow_higher_order|r4|PASS|gen=46372/9c028f855df234694093875d596e59ee
+f152_closure_arrow_higher_order|curve_eff|EFFECTIVE|gens= r1={46366/f0dd5eeffcab2ab4c948584b985d93c6} r2={46372/9c028f855df234694093875d596e59ee} r3={46372/9c028f855df234694093875d596e59ee} r4={46372/9c028f855df234694093875d596e59ee}
+f160_virtual_fs_path_traversal|r1|PASS|gen=38080/9437da71b11247e796772cb429ca1be1
+f160_virtual_fs_path_traversal|r2|RUNTIME_FAIL|gen=38115/5fc09c20f5b417a986008a8bb479bf0c|exit=255
+f160_virtual_fs_path_traversal|r3|RUNTIME_FAIL|gen=38115/5fc09c20f5b417a986008a8bb479bf0c|exit=255
+f160_virtual_fs_path_traversal|r4|RUNTIME_FAIL|gen=38115/5fc09c20f5b417a986008a8bb479bf0c|exit=255
+f160_virtual_fs_path_traversal|curve_eff|EFFECTIVE|gens= r1={38080/9437da71b11247e796772cb429ca1be1} r2={38115/5fc09c20f5b417a986008a8bb479bf0c} r3={38115/5fc09c20f5b417a986008a8bb479bf0c} r4={38115/5fc09c20f5b417a986008a8bb479bf0c}
+f161_json_xml_csv_parsing|r1|DIFF|gen=48037/a2617fa037d7ea775f151f04d1ac9053|d=36,37c36~< Beijing: Alice, Charlie~< Shanghai: Bob, Diana~---~> 0: Alice, Bob, Charlie, Diana~40,41c39,40~
+f161_json_xml_csv_parsing|r2|DIFF|gen=47799/064f30153b1c436b63c5159c7aa92d35|d=36,37c36~< Beijing: Alice, Charlie~< Shanghai: Bob, Diana~---~> 0: Alice, Bob, Charlie, Diana~40,41c39,40~
+f161_json_xml_csv_parsing|r3|DIFF|gen=47799/064f30153b1c436b63c5159c7aa92d35|d=36,37c36~< Beijing: Alice, Charlie~< Shanghai: Bob, Diana~---~> 0: Alice, Bob, Charlie, Diana~40,41c39,40~
+f161_json_xml_csv_parsing|r4|DIFF|gen=47799/064f30153b1c436b63c5159c7aa92d35|d=36,37c36~< Beijing: Alice, Charlie~< Shanghai: Bob, Diana~---~> 0: Alice, Bob, Charlie, Diana~40,41c39,40~
+f161_json_xml_csv_parsing|curve_eff|EFFECTIVE|gens= r1={48037/a2617fa037d7ea775f151f04d1ac9053} r2={47799/064f30153b1c436b63c5159c7aa92d35} r3={47799/064f30153b1c436b63c5159c7aa92d35} r4={47799/064f30153b1c436b63c5159c7aa92d35}
+f171_state_machine_dfa|r1|PASS|gen=32081/c260ea26600e91baed94d2adcefc0dcf
+f171_state_machine_dfa|r2|DIFF|gen=32105/87956a9b2e544367c8214804ce82b3fe|d=18,27c18,27~< 'ab': ACCEPT~< 'aab': ACCEPT~< 'bab': ACCEPT~< 'baab': ACCEPT~< 'aabb': REJECT~
+f171_state_machine_dfa|r3|DIFF|gen=30876/4cc4306979da267aa741213b7f7a53c4|d=18,27c18,27~< 'ab': ACCEPT~< 'aab': ACCEPT~< 'bab': ACCEPT~< 'baab': ACCEPT~< 'aabb': REJECT~
+f171_state_machine_dfa|r4|DIFF|gen=30716/61d94e939c0912492b22d89391eb9016|d=18,27c18,27~< 'ab': ACCEPT~< 'aab': ACCEPT~< 'bab': ACCEPT~< 'baab': ACCEPT~< 'aabb': REJECT~
+f171_state_machine_dfa|curve_eff|EFFECTIVE|gens= r1={32081/c260ea26600e91baed94d2adcefc0dcf} r2={32105/87956a9b2e544367c8214804ce82b3fe} r3={30876/4cc4306979da267aa741213b7f7a53c4} r4={30716/61d94e939c0912492b22d89391eb9016}
+f176_specification_chain_rules|r1|PASS|gen=42076/2a8dcb722ce5f8ae189b52f1a26e94c0
+f176_specification_chain_rules|r2|DIFF|gen=41973/3334721e840c9d528c806a94888b55ed|d=5c5~< Admin access: Y~---~> Admin access:~10,13c10,13~< Admin access: N~
+f176_specification_chain_rules|r3|DIFF|gen=39698/cddb349bf9e2862fc9652420e8d56d67|d=5,8c5,8~< Admin access: Y~< Can edit: Y~< Can delete: Y~< Young adult: Y~---~
+f176_specification_chain_rules|r4|DIFF|gen=39698/cddb349bf9e2862fc9652420e8d56d67|d=5,8c5,8~< Admin access: Y~< Can edit: Y~< Can delete: Y~< Young adult: Y~---~
+f176_specification_chain_rules|curve_eff|EFFECTIVE|gens= r1={42076/2a8dcb722ce5f8ae189b52f1a26e94c0} r2={41973/3334721e840c9d528c806a94888b55ed} r3={39698/cddb349bf9e2862fc9652420e8d56d67} r4={39698/cddb349bf9e2862fc9652420e8d56d67}
+f177_graph_traversal_dfs_bfs|r1|DIFF|gen=50001/40143a544874a4bbc8c1394d4b02bbb3|d=15c15~< Course order: CS101 → MATH101 → CS102 → CS201 → CS301 → CS302 → CS401~---~> Course order: CS101 → MATH101 → CS201 → CS102 → CS301 → CS302 → CS401~
+f177_graph_traversal_dfs_bfs|r2|DIFF|gen=49523/4d034ea4ec78d25118107830e1e289fc|d=15c15~< Course order: CS101 → MATH101 → CS102 → CS201 → CS301 → CS302 → CS401~---~> Course order: CS101 → MATH101 → CS201 → CS102 → CS301 → CS302 → CS401~
+f177_graph_traversal_dfs_bfs|r3|DIFF|gen=49523/4d034ea4ec78d25118107830e1e289fc|d=15c15~< Course order: CS101 → MATH101 → CS102 → CS201 → CS301 → CS302 → CS401~---~> Course order: CS101 → MATH101 → CS201 → CS102 → CS301 → CS302 → CS401~
+f177_graph_traversal_dfs_bfs|r4|DIFF|gen=49523/4d034ea4ec78d25118107830e1e289fc|d=15c15~< Course order: CS101 → MATH101 → CS102 → CS201 → CS301 → CS302 → CS401~---~> Course order: CS101 → MATH101 → CS201 → CS102 → CS301 → CS302 → CS401~
+f177_graph_traversal_dfs_bfs|curve_eff|EFFECTIVE|gens= r1={50001/40143a544874a4bbc8c1394d4b02bbb3} r2={49523/4d034ea4ec78d25118107830e1e289fc} r3={49523/4d034ea4ec78d25118107830e1e289fc} r4={49523/4d034ea4ec78d25118107830e1e289fc}
+LAYERB_DONE total=19
+arm r1: PASS=12 DIFF=7 RUNTIME_FAIL=0 TIMEOUT_10S=0 COMPILE_FAIL=0
+arm r2: PASS=1 DIFF=17 RUNTIME_FAIL=1 TIMEOUT_10S=0 COMPILE_FAIL=0
+arm r3: PASS=1 DIFF=17 RUNTIME_FAIL=1 TIMEOUT_10S=0 COMPILE_FAIL=0
+arm r4: PASS=1 DIFF=17 RUNTIME_FAIL=1 TIMEOUT_10S=0 COMPILE_FAIL=0
+CURVE_HEADER shape|sig_r1|r2|r3|r4|r5|sig_first|out_r1|r2|r3|r4|r5|out_first
+CURVE f016_hash_bloom_consistent|HIT|HIT|HIT|HIT|HIT|1|NA|NA|NA|NA|NA|GREEN
+CURVE f024_rbac_role_inheritance_policy|-|HIT|HIT|HIT|HIT|2|NA|NA|NA|NA|NA|GREEN
+CURVE f025_coding_hamming_rle_lzw_crc|-|HIT|HIT|HIT|HIT|2|NA|NA|NA|NA|NA|GREEN
+CURVE f044_json_deepops_merge_diff|HIT|HIT|HIT|HIT|HIT|1|NA|NA|NA|NA|NA|GREEN
+CURVE f051_validator_rule_chain_batch|-|HIT|HIT|HIT|HIT|2|NA|NA|NA|NA|NA|GREEN
+CURVE f061_graph_dijkstra_bellmanford_floyd|-|HIT|HIT|HIT|HIT|2|NA|NA|NA|NA|NA|GREEN
+CURVE f072_type_inference_hindley_milner|-|HIT|HIT|HIT|HIT|2|NA|NA|NA|NA|NA|GREEN
+CURVE f104_game_engine_ecs_collision_render|HIT|HIT|HIT|HIT|HIT|1|NA|NA|NA|NA|NA|GREEN
+CURVE f113_distributed_consistenthash_vectorclock_quorum|HIT|HIT|HIT|HIT|HIT|1|NA|NA|NA|NA|NA|GREEN
+CURVE f117_search_engine_inverted_tfidf_bm25|HIT|HIT|HIT|HIT|HIT|1|NA|NA|NA|NA|NA|GREEN
+CURVE f124_container_orchestrator_pod_service_autoscale|HIT|HIT|HIT|HIT|HIT|1|NA|NA|NA|NA|NA|GREEN
+CURVE f134_event_sourcing_snapshot_cqrs_projection|HIT|HIT|HIT|HIT|HIT|1|NA|NA|NA|NA|NA|GREEN
+CURVE f135_math_number_theory_crt_miller_rabin|-|HIT|HIT|HIT|HIT|2|NA|NA|NA|NA|NA|GREEN
+CURVE f152_closure_arrow_higher_order|-|-|-|-|-|BLIND|NA|NA|NA|NA|NA|GREEN
+CURVE f160_virtual_fs_path_traversal|-|-|-|-|-|BLIND|NA|NA|NA|NA|NA|GREEN
+CURVE f161_json_xml_csv_parsing|HIT|HIT|HIT|HIT|HIT|1|NA|NA|NA|NA|NA|GREEN
+CURVE f171_state_machine_dfa|-|HIT|HIT|HIT|HIT|2|NA|NA|NA|NA|NA|GREEN
+CURVE f176_specification_chain_rules|-|HIT|HIT|HIT|HIT|2|NA|NA|NA|NA|NA|GREEN
+CURVE f177_graph_traversal_dfs_bfs|HIT|HIT|HIT|HIT|HIT|1|NA|NA|NA|NA|NA|GREEN
+CURVE_SHAPES 19
+CURVE_SIG_FIRSTROUND 1=9 2=8 BLIND=2
+CURVE_OUT_FIRSTROUND GREEN=19
+CURVE_SIG_NONMONOTONIC NONE
+# CORRECTION 2026-10-06 16:12:18 · 上方 CURVE 块的输出面列（out_r1..out_r5 / CURVE_OUT_FIRSTROUND）为取数缺陷产物：opt001_round_curve_tmp.py 的 load() 用 len(p)<7 统一守卫把 4–5 列的层 B 判定行全部静默丢弃 ⇒ 误报 GREEN=19。已就地修复（长度门槛按行类分开）并重算 ⇒ 下方为唯一有效读数。签名面列不受影响（12 列行本就通过守卫）。
+# FIXED CURVE_HEADER shape|sig_r1|r2|r3|r4|r5|sig_first|out_r1|r2|r3|r4|r5|out_first
+# FIXED CURVE f016_hash_bloom_consistent|HIT|HIT|HIT|HIT|HIT|1|DIFF|DIFF|DIFF|DIFF|DIFF|1
+# FIXED CURVE f024_rbac_role_inheritance_policy|-|HIT|HIT|HIT|HIT|2|PASS|DIFF|DIFF|DIFF|DIFF|2
+# FIXED CURVE f025_coding_hamming_rle_lzw_crc|-|HIT|HIT|HIT|HIT|2|PASS|DIFF|DIFF|DIFF|DIFF|2
+# FIXED CURVE f044_json_deepops_merge_diff|HIT|HIT|HIT|HIT|HIT|1|DIFF|DIFF|DIFF|DIFF|DIFF|1
+# FIXED CURVE f051_validator_rule_chain_batch|-|HIT|HIT|HIT|HIT|2|PASS|DIFF|DIFF|DIFF|DIFF|2
+# FIXED CURVE f061_graph_dijkstra_bellmanford_floyd|-|HIT|HIT|HIT|HIT|2|PASS|DIFF|DIFF|DIFF|DIFF|2
+# FIXED CURVE f072_type_inference_hindley_milner|-|HIT|HIT|HIT|HIT|2|PASS|DIFF|DIFF|DIFF|DIFF|2
+# FIXED CURVE f104_game_engine_ecs_collision_render|HIT|HIT|HIT|HIT|HIT|1|PASS|DIFF|DIFF|DIFF|DIFF|2
+# FIXED CURVE f113_distributed_consistenthash_vectorclock_quorum|HIT|HIT|HIT|HIT|HIT|1|DIFF|DIFF|DIFF|DIFF|DIFF|1
+# FIXED CURVE f117_search_engine_inverted_tfidf_bm25|HIT|HIT|HIT|HIT|HIT|1|DIFF|DIFF|DIFF|DIFF|DIFF|1
+# FIXED CURVE f124_container_orchestrator_pod_service_autoscale|HIT|HIT|HIT|HIT|HIT|1|DIFF|DIFF|DIFF|DIFF|DIFF|1
+# FIXED CURVE f134_event_sourcing_snapshot_cqrs_projection|HIT|HIT|HIT|HIT|HIT|1|PASS|DIFF|DIFF|DIFF|DIFF|2
+# FIXED CURVE f135_math_number_theory_crt_miller_rabin|-|HIT|HIT|HIT|HIT|2|PASS|DIFF|DIFF|DIFF|DIFF|2
+# FIXED CURVE f152_closure_arrow_higher_order|-|-|-|-|-|BLIND|PASS|PASS|PASS|PASS|PASS|GREEN
+# FIXED CURVE f160_virtual_fs_path_traversal|-|-|-|-|-|BLIND|PASS|RUNTIME_FAIL|RUNTIME_FAIL|RUNTIME_FAIL|RUNTIME_FAIL|2
+# FIXED CURVE f161_json_xml_csv_parsing|HIT|HIT|HIT|HIT|HIT|1|DIFF|DIFF|DIFF|DIFF|DIFF|1
+# FIXED CURVE f171_state_machine_dfa|-|HIT|HIT|HIT|HIT|2|PASS|DIFF|DIFF|DIFF|DIFF|2
+# FIXED CURVE f176_specification_chain_rules|-|HIT|HIT|HIT|HIT|2|PASS|DIFF|DIFF|DIFF|DIFF|2
+# FIXED CURVE f177_graph_traversal_dfs_bfs|HIT|HIT|HIT|HIT|HIT|1|DIFF|DIFF|DIFF|DIFF|DIFF|1
+# FIXED CURVE_SHAPES 19
+# FIXED CURVE_SIG_FIRSTROUND 1=9 2=8 BLIND=2
+# FIXED CURVE_OUT_FIRSTROUND 1=7 2=11 GREEN=1
+# FIXED CURVE_SIG_NONMONOTONIC NONE

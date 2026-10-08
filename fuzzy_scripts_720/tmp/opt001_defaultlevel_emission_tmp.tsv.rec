@@ -1,0 +1,32 @@
+# opt001 §5.13 轮次#109 默认档 ON<->NC 生成码+运行面 2026-10-06 18:29:56
+bin_md5=1f15e4ce9b5c9cdaaef7cabf5efb9c76
+optimizer=252234ef48cb47a42e6f39d1bc3e845b/6877
+native_linker=fbe6382a2e0904b6740d771b88c409c7/32797
+ir_generator=cb53c2da7d4fe2e1f62b728511f7c3ea
+level=真默认档（无 --optimize、无 licm/迭代旗标 = release_small 预设 1 轮）  唯一变量=cfg_cleanup 开关
+arm_on=--compile --no-debug-info [--no-link]   arm_nc=同前 + --aot-disable-pass=cfg-cleanup
+baseline=fuzzy_scripts_720/baseline_main_zig_md5.tsv  dphi(#107 默认档)=opt001_droppedphi_face_tmp.tsv.r3-defaultlevel-stricttramp  red(#94)=c007_rf_face_tmp.tsv
+L1_HEADER|shape|L1|verdict|on=lines/md5|nc=lines/md5|dlines|frozen=lines/md5|base_ok|refuse_tramp|red
+L2_HEADER|shape|L2|verdict|nc_gen=lines/md5|l1eq_l2|rt=exit|php_rc|detail
+f067_min_repro|L1|DIFF|on=6768/bf2e16e6ff53672db07deca49662f96c|nc=6772/56bde4ab327e76dce899db76d4ef995f|dlines=4|frozen=6768/bf2e16e6ff53672db07deca49662f96c|base_ok=BASELINE_OK|refuse_tramp=1|red=0
+f067_min_repro|L2|RUNTIME_FAIL|nc_gen=NOART/NOART|l1eq_l2=NO_ART|rt=exit255|php_rc=0
+DEFLEM_DONE shapes=1 l1_same=0 l1_diff=1 l1_noart=0 base_ok=1 base_miss=0 base_absent=0 src_missing=0 php_exit=0
+LAYER2_DONE skip=0 pass=0 diff=0 runtime_fail=1 compile_fail=0 timeout=0 l1eq_ok=0 l1eq_neq=0
+--- 交叉表（P0 中性前提）---
+L1_DIFF_SHAPES        = f067_min_repro 
+L1_SAME_SHAPES_TOTAL  = 0
+P0_MAY_DRIFT (DIFF ∧ refuse_tramp>0) = f067_min_repro 
+P0_MAY_DRIFT_COUNT = 1
+DIFF_NOT_P0 (DIFF ∧ refuse_tramp==0) = 
+DIFF_NOT_P0_COUNT = 0
+P0_FREE (SAME ∧ refuse_tramp>0)      = 
+P0_FREE_COUNT = 0
+BASELINE_MISS_SHAPES = 
+BASELINE_ABSENT_SHAPES = 
+BASELINE_OK_COUNT = 1
+REFUSE_TRAMP_NOROW = 
+DLINES_SUM_over_DIFF = 4
+L2_FAIL_SHAPES = f067_min_repro(RUNTIME_FAIL) 
+L2_RED_NC_PASS = 0
+L2_RED_TOTAL = 0
+ELAPSED=8s

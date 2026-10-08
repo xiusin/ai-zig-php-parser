@@ -1,0 +1,22 @@
+# compiler_md5=1f15e4ce9b5c9cdaaef7cabf5efb9c76
+# runtime_lib_template_md5=008b7b639f1069cb73e443064e115ed1
+# ir_generator_md5=cb53c2da7d4fe2e1f62b728511f7c3ea
+# parser_md5=5995c1e75c55a2c5581e875406113f14
+# prelude_md5=c61a97dde0e72af554a0c41d6304cd94
+# columns: shape|php_rc|aot_rc|verdict||php_norm||aot_norm||emit
+dyn_read_lit|php_rc=0|aot_rc=0|SAME|read=5|DONE|||aot=read=5|DONE|||emit=php_get_static_property("DynA", "v")
+dyn_read_str|php_rc=0|aot_rc=0|SAME|read=5|DONE|||aot=read=5|DONE|||emit=php_get_static_property_dynamic(&[_]runtime.Value{reg_2, reg_3}, runtime.runtime_allocator)
+dyn_read_paren|php_rc=0|aot_rc=0|SAME|read=5|DONE|||aot=read=5|DONE|||emit=php_get_static_property_dynamic(&[_]runtime.Value{reg_2, reg_3}, runtime.runtime_allocator)
+dyn_read_obj|php_rc=0|aot_rc=1|DIFF|read=5|DONE|||aot=error: ClassNotFound|||emit=php_get_static_property_dynamic(&[_]runtime.Value{reg_2, reg_3}, runtime.runtime_allocator)
+dyn_write_lit|php_rc=0|aot_rc=0|SAME|via_lit=9|DONE|||aot=via_lit=9|DONE|||emit=php_set_static_property("DynI", "v", reg_0)
+php_get_static_property("DynI", "v")
+dyn_write_str|php_rc=0|aot_rc=1|DIFF|via_lit=9|DONE|||aot=error: ClassNotFound|||emit=php_set_static_property("$cls", "v", reg_1)
+php_get_static_property("DynC", "v")
+dyn_write_obj|php_rc=0|aot_rc=1|DIFF|via_lit=9|DONE|||aot=error: ClassNotFound|||emit=php_set_static_property("$o", "v", reg_1)
+php_get_static_property("DynD", "v")
+dyn_write_paren|php_rc=0|aot_rc=1|DIFF|via_lit=9|DONE|||aot=error: ClassNotFound|||emit=php_set_static_property("$cls", "v", reg_1)
+php_get_static_property("DynE", "v")
+dyn_ref_source|php_rc=0|aot_rc=1|DIFF|ref=5|via_lit=3|DONE|||aot=error: ClassNotFound|||emit=php_get_static_property("$cls", "v")
+php_get_static_property("DynF", "v")
+ELAPSED=35s
+DYNNAME_DONE shapes=9 same=4 diff=5 cnotfound_fatal=5 compile_fail=0

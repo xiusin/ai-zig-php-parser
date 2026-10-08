@@ -1,0 +1,28 @@
+# opt001 §5.10 输出侧 nc 面（轮 2/3）2026-10-06 18:03:40
+bin_md5=1f15e4ce9b5c9cdaaef7cabf5efb9c76
+optimizer=252234ef48cb47a42e6f39d1bc3e845b/6877
+native_linker=fbe6382a2e0904b6740d771b88c409c7/32797
+ir_generator=cb53c2da7d4fe2e1f62b728511f7c3ea
+level=default(无 --optimize)  唯一变量=轮数 × cfg_cleanup 开关
+控制面=fuzzy_scripts_720/tmp/opt001_round_curve_tmp.tsv（#101 层 B FIXED 块 + curve_eff 行，只读不重跑）
+OUT_HEADER|shape|arm|verdict|gen=|ctrl=|eff=|extra
+f016_hash_bloom_consistent|r2nc|PASS|gen=46574/4a282c0accf96d2e6598417e25ba97a2|ctrl=DIFF/45957/2cd2fe808161c7b911f1d5d293c6f0f6|eff=EFFECTIVE
+f016_hash_bloom_consistent|r3nc|PASS|gen=46574/4a282c0accf96d2e6598417e25ba97a2|ctrl=DIFF/45957/2cd2fe808161c7b911f1d5d293c6f0f6|eff=EFFECTIVE
+f124_container_orchestrator_pod_service_autoscale|r2nc|COMPILE_FAIL|gen=NOTEMP|ctrl=DIFF/110734/fc04499e4a687af508cbacf6570a7fe9|eff=NO_TEMP|rc=1|error: CompilationFailed 
+f124_container_orchestrator_pod_service_autoscale|r3nc|COMPILE_FAIL|gen=NOTEMP|ctrl=DIFF/110732/09bb9ea610cdcee353edd129c8c1cde4|eff=NO_TEMP|rc=1|error: CompilationFailed 
+ROUND_OUT_DONE total=2 compile_fail=2 php_exit=0 src_missing=0 rows=4
+arm r2nc: PASS=1 DIFF=0 RUNTIME_FAIL=0 TIMEOUT_10S=0 COMPILE_FAIL=1
+  eff r2nc: EFFECTIVE=1 NO_EFFECT=0 NO_TEMP=1
+  ctrl r2nc: DIFF=2 
+  GREEN_BY_CLOSING_CFG r2nc = 1
+  STILL_RED_AFTER_CLOSING r2nc = 
+  NEWLY_RED_vs_CTRL r2nc = 
+  COMPILE_FAIL_NAMES r2nc = f124_container_orchestrator_pod_service_autoscale 
+arm r3nc: PASS=1 DIFF=0 RUNTIME_FAIL=0 TIMEOUT_10S=0 COMPILE_FAIL=1
+  eff r3nc: EFFECTIVE=1 NO_EFFECT=0 NO_TEMP=1
+  ctrl r3nc: DIFF=2 
+  GREEN_BY_CLOSING_CFG r3nc = 1
+  STILL_RED_AFTER_CLOSING r3nc = 
+  NEWLY_RED_vs_CTRL r3nc = 
+  COMPILE_FAIL_NAMES r3nc = f124_container_orchestrator_pod_service_autoscale 
+ELAPSED=26s

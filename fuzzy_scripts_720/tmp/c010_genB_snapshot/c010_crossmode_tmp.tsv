@@ -1,0 +1,25 @@
+# compiler_md5=b416d3fbceed199b186676619043bcc5
+# lexer_md5=e3dd4191a1c3dfdf816b5873b4c60e5f
+# keyword_lookup_md5=ef70993a7caac6deb9b2e5a23bf7d143
+# columns: shape|kind|verdict|php_norm||mode_norm|raw_rc
+kw_echo_ctl|php|e=1|||tree=SAME(e=1|)|bc=SAME(e=1|)|aot=SAME(e=1|)|all_green
+kw_echo_title|php|e=1|||tree=DIFF(Uncaught UndefinedVariableError: Undefined variable: $Echo in FILE:LINE|)|bc=DIFF()|aot=SAME(e=1|)|vm_only_red
+kw_echo_upper|php|e=1|||tree=DIFF(Uncaught UndefinedVariableError: Undefined variable: $ECHO in FILE:LINE|)|bc=DIFF()|aot=SAME(e=1|)|vm_only_red
+kw_print_ctl|php|p=1|||tree=SAME(p=1|)|bc=SAME(p=1|)|aot=SAME(p=1|)|all_green
+kw_print_title|php|p=1|||tree=DIFF(Uncaught UndefinedVariableError: Undefined variable: $Print in FILE:LINE|)|bc=DIFF()|aot=SAME(p=1|)|vm_only_red
+kw_if_ctl|php|i=gt|||tree=SAME(i=gt|)|bc=SAME(i=gt|)|aot=SAME(i=gt|)|all_green
+kw_if_title|php|i=gt|||tree=DIFF(Uncaught UndefinedFunctionError: Call to undefined function If() in FILE:LINE|)|bc=DIFF(Uncaught UndefinedFunctionError: Call to undefined function If() in FILE:LINE|)|aot=SAME(i=gt|)|vm_only_red
+kw_else_upper|php|i=gt|||tree=DIFF(i=gt|Uncaught UndefinedVariableError: Undefined variable: $ELSE in FILE:LINE|)|bc=DIFF(i=gt|i=le|)|aot=SAME(i=gt|)|vm_only_red
+kw_return_ctl|php|r=3|||tree=SAME(r=3|)|bc=SAME(r=3|)|aot=SAME(r=3|)|all_green
+kw_return_upper|php|r=3|||tree=DIFF(r=Uncaught UndefinedVariableError: Undefined variable: $RETURN in FILE:LINE|)|bc=DIFF(r=|)|aot=SAME(r=3|)|vm_only_red
+kw_function_ctl|php|m=6|||tree=SAME(m=6|)|bc=SAME(m=6|)|aot=SAME(m=6|)|all_green
+kw_function_upper|php|m=6|||tree=DIFF(Uncaught UndefinedVariableError: Undefined variable: $FUNCTION in FILE:LINE|)|bc=DIFF(Uncaught UndefinedVariableError: Undefined variable: $FUNCTION in FILE:LINE|)|aot=SAME(m=6|)|vm_only_red
+kw_class_new_ctl|php|c=3|||tree=SAME(c=3|)|bc=SAME(c=3|)|aot=SAME(c=3|)|all_green
+kw_class_upper|php|c=3|||tree=DIFF(Uncaught UndefinedVariableError: Undefined variable: $CLASS in FILE:LINE|)|bc=DIFF(c=|)|aot=SAME(c=3|)|vm_only_red
+kw_new_upper|php|c=3|||tree=DIFF(c=Uncaught UndefinedVariableError: Undefined variable: $o in FILE:LINE|)|bc=DIFF(c=|)|aot=SAME(c=3|)|vm_only_red
+kw_foreach_ctl|php|f=1|f=2|||tree=SAME(f=1|f=2|)|bc=SAME(f=1|f=2|)|aot=SAME(f=1|f=2|)|all_green
+kw_foreach_upper|php|f=1|f=2|||tree=DIFF()|bc=DIFF()|aot=SAME(f=1|f=2|)|vm_only_red
+kw_while_upper|php|w=0|w=1|||tree=DIFF(Uncaught UndefinedFunctionError: Call to undefined function WHILE() in FILE:LINE|)|bc=DIFF(Uncaught UndefinedFunctionError: Call to undefined function WHILE() in FILE:LINE|)|aot=SAME(w=0|w=1|)|vm_only_red
+kw_bool_upper|php|b=truefalseNULL|||tree=DIFF(Uncaught UndefinedVariableError: Undefined variable: $TRUE in FILE:LINE|)|bc=DIFF(b=NULLNULLNULL|)|aot=SAME(b=truefalseNULL|)|vm_only_red
+ELAPSED=68s
+C010I_DONE shapes=19 tree_same=7 tree_diff=12 bc_same=7 bc_diff=12 aot_same=19 aot_diff=0 aot_compile_fail=0 both_red=0 vm_only_red=12 aot_only_red=0 repo_build_residue=0 SMOKE_ONLY=0

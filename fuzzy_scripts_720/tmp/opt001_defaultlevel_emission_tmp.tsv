@@ -1,0 +1,166 @@
+# opt001 §5.13 轮次#109 默认档 ON<->NC 生成码+运行面 2026-10-06 18:31:38
+bin_md5=1f15e4ce9b5c9cdaaef7cabf5efb9c76
+optimizer=252234ef48cb47a42e6f39d1bc3e845b/6877
+native_linker=fbe6382a2e0904b6740d771b88c409c7/32797
+ir_generator=cb53c2da7d4fe2e1f62b728511f7c3ea
+level=真默认档（无 --optimize、无 licm/迭代旗标 = release_small 预设 1 轮）  唯一变量=cfg_cleanup 开关
+arm_on=--compile --no-debug-info [--no-link]   arm_nc=同前 + --aot-disable-pass=cfg-cleanup
+baseline=fuzzy_scripts_720/baseline_main_zig_md5.tsv  dphi(#107 默认档)=opt001_droppedphi_face_tmp.tsv.r3-defaultlevel-stricttramp  red(#94)=c007_rf_face_tmp.tsv
+L1_HEADER|shape|L1|verdict|on=lines/md5|nc=lines/md5|dlines|frozen=lines/md5|base_ok|refuse_tramp|red
+L2_HEADER|shape|L2|verdict|nc_gen=lines/md5|l1eq_l2|rt=exit|php_rc|detail
+f004_oop_deep_inheritance_magic|L1|SAME|on=9910/c475e6e0f8a307dff413ab83df7fdc60|nc=9910/c475e6e0f8a307dff413ab83df7fdc60|dlines=0|frozen=9910/c475e6e0f8a307dff413ab83df7fdc60|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f004_oop_deep_inheritance_magic|L2|PHP_EXIT|nc_gen=-|l1eq_l2=-|rt=-|php_rc=255
+f006_oop_observer_event_dispatcher|L1|DIFF|on=9903/47509158e26753981433027317b4feb3|nc=9920/a3400ce81d9fc3356049f12780fab8eb|dlines=17|frozen=9903/47509158e26753981433027317b4feb3|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f006_oop_observer_event_dispatcher|L2|PASS|nc_gen=9920/a3400ce81d9fc3356049f12780fab8eb|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f007_string_encoding_crypto_hash|L1|DIFF|on=15293/e404458d8794c21382af49b255c30288|nc=15307/7bf3e0d8e5dc6cc0e5e818eb3c7eeddd|dlines=14|frozen=15293/e404458d8794c21382af49b255c30288|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f007_string_encoding_crypto_hash|L2|DIFF|nc_gen=15307/7bf3e0d8e5dc6cc0e5e818eb3c7eeddd|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0|d=18,19c18,19~< caesar('Hello World', 3): Khoor Zruog~< caesar decrypt: Hello World~---~> caesar('Hello World', 3): hoor ruog~> caesar decrypt: ello orld~
+f009_oop_decorator_chain_command|L1|DIFF|on=13702/f2813a041c54669d4066c761842e9041|nc=13808/9a80e62abb516cad6f61790a5a0934ae|dlines=106|frozen=13702/f2813a041c54669d4066c761842e9041|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f009_oop_decorator_chain_command|L2|PASS|nc_gen=13808/9a80e62abb516cad6f61790a5a0934ae|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f010_oop_singleton_registry_di|L1|DIFF|on=16111/f8d8e64b83bd46b968cef42f6dc7c160|nc=16084/1e9d83af5ef38195a51e8a492915b2eb|dlines=-27|frozen=16111/f8d8e64b83bd46b968cef42f6dc7c160|base_ok=BASELINE_OK|refuse_tramp=1|red=0
+f010_oop_singleton_registry_di|L2|PASS|nc_gen=16084/1e9d83af5ef38195a51e8a492915b2eb|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f012_json_tree_recursive_traverse|L1|DIFF|on=22616/a0a3363759170846bfff1e6a2464018f|nc=22614/d163f4616548bc7eb40b04dd1ea396cd|dlines=-2|frozen=22616/a0a3363759170846bfff1e6a2464018f|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f012_json_tree_recursive_traverse|L2|PASS|nc_gen=22614/d163f4616548bc7eb40b04dd1ea396cd|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f016_hash_bloom_consistent|L1|DIFF|on=46782/c8dc9660f4fe42f63af5d7ed2e8cd43f|nc=46795/d581d1daed175706d0ab733333374e1c|dlines=13|frozen=46782/c8dc9660f4fe42f63af5d7ed2e8cd43f|base_ok=BASELINE_OK|refuse_tramp=3|red=1
+f016_hash_bloom_consistent|L2|PASS|nc_gen=46795/d581d1daed175706d0ab733333374e1c|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f024_rbac_role_inheritance_policy|L1|DIFF|on=42792/6327ea54259aeb08f05da2625cadae31|nc=42794/0f862a1b8a01fcd6d488a40d4b92e3c0|dlines=2|frozen=42792/6327ea54259aeb08f05da2625cadae31|base_ok=BASELINE_OK|refuse_tramp=0|red=1
+f024_rbac_role_inheritance_policy|L2|PASS|nc_gen=42794/0f862a1b8a01fcd6d488a40d4b92e3c0|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f025_coding_hamming_rle_lzw_crc|L1|DIFF|on=30713/e5b87748a0c4bc34f67c96d8261374fb|nc=30730/92e5baf0dfb6aaf678c8844f2e18b6ab|dlines=17|frozen=30713/e5b87748a0c4bc34f67c96d8261374fb|base_ok=BASELINE_OK|refuse_tramp=0|red=1
+f025_coding_hamming_rle_lzw_crc|L2|PASS|nc_gen=30730/92e5baf0dfb6aaf678c8844f2e18b6ab|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f026_linkedlist_stack_queue_deque|L1|SAME|on=49506/bf3e9c6576daa6a63eabaf850a40635e|nc=49506/bf3e9c6576daa6a63eabaf850a40635e|dlines=0|frozen=49506/bf3e9c6576daa6a63eabaf850a40635e|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f026_linkedlist_stack_queue_deque|L2|PASS|nc_gen=49506/bf3e9c6576daa6a63eabaf850a40635e|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f027_number_theory_primes_modular|L1|DIFF|on=29534/de4bf1edd82aa34e6e7661b5d28846fb|nc=29476/bf170f9a58bb04083de86a11a1248acc|dlines=-58|frozen=29534/de4bf1edd82aa34e6e7661b5d28846fb|base_ok=BASELINE_OK|refuse_tramp=3|red=0
+f027_number_theory_primes_modular|L2|DIFF|nc_gen=29476/bf170f9a58bb04083de86a11a1248acc|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0|d=8,9c8,117~< Primes up to 50: 2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47~< Count: 15~---~> PHP Warning:  Trying to access array offset on null in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f027_number_theory_primes_modular.php on line 32~> Warning: Trying to access array of
+f028_dp_knapsack_lcs_lis|L1|DIFF|on=24741/6daa5bd7117a977bfa6d3171eee2c2b6|nc=24741/e53c92fbc2bb536eb8ef46825a6dbe38|dlines=0|frozen=24741/6daa5bd7117a977bfa6d3171eee2c2b6|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f028_dp_knapsack_lcs_lis|L2|PASS|nc_gen=24741/e53c92fbc2bb536eb8ef46825a6dbe38|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f031_builder_fluent_immutable|L1|DIFF|on=5838/06e6ec761e06a357c34eba022bd853f8|nc=6013/ef9c87aeddcf6bda08d915077cf0c16a|dlines=175|frozen=5838/06e6ec761e06a357c34eba022bd853f8|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f031_builder_fluent_immutable|L2|PASS|nc_gen=6013/ef9c87aeddcf6bda08d915077cf0c16a|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f032_chain_responsibility_middleware|L1|SAME|on=6580/a76166a47c1386a2cea9fbf738eeb837|nc=6580/a76166a47c1386a2cea9fbf738eeb837|dlines=0|frozen=6580/a76166a47c1386a2cea9fbf738eeb837|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f032_chain_responsibility_middleware|L2|PASS|nc_gen=6580/a76166a47c1386a2cea9fbf738eeb837|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f033_state_pattern_order_machine|L1|DIFF|on=17004/d46207ed96e0d1ee537000f80a557293|nc=16760/d52c2cb59d61a1e4038de569af9e8113|dlines=-244|frozen=17004/d46207ed96e0d1ee537000f80a557293|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f033_state_pattern_order_machine|L2|DIFF|nc_gen=16760/d52c2cb59d61a1e4038de569af9e8113|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0|d=4c4~< Transition: true, state=paid~---~> Transition: NULL, state=pending~6c6~< Transition (no tracking): false, state=processing~
+f034_template_method_pipeline|L1|DIFF|on=5718/877e104382dfd82509ae8bfea11f2d2e|nc=5875/23573ec5ca53c3ee5f8fbd718a933069|dlines=157|frozen=5718/877e104382dfd82509ae8bfea11f2d2e|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f034_template_method_pipeline|L2|PASS|nc_gen=5875/23573ec5ca53c3ee5f8fbd718a933069|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f036_strategy_dynamic_pricing|L1|DIFF|on=25319/d722965cbeec43af846a82f9ec2a0b24|nc=25320/f1ef453d91c4fb1392494dc4c0986238|dlines=1|frozen=25319/d722965cbeec43af846a82f9ec2a0b24|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f036_strategy_dynamic_pricing|L2|PASS|nc_gen=25320/f1ef453d91c4fb1392494dc4c0986238|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f037_adapter_unified_cache|L1|SAME|on=16519/b240ff76ac6f3085c9fa8c888e681554|nc=16519/b240ff76ac6f3085c9fa8c888e681554|dlines=0|frozen=16519/b240ff76ac6f3085c9fa8c888e681554|base_ok=BASELINE_OK|refuse_tramp=2|red=0
+f037_adapter_unified_cache|L2|PASS|nc_gen=16519/b240ff76ac6f3085c9fa8c888e681554|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f038_composite_filesystem_tree|L1|DIFF|on=17017/d256275e10f8e54439872e06d1635ddc|nc=16946/3fd0e765b6d50dbcb9a251cc572f12e8|dlines=-71|frozen=17017/d256275e10f8e54439872e06d1635ddc|base_ok=BASELINE_OK|refuse_tramp=1|red=0
+f038_composite_filesystem_tree|L2|PASS|nc_gen=16946/3fd0e765b6d50dbcb9a251cc572f12e8|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f039_bridge_shape_renderer|L1|DIFF|on=7689/2be70d48b9a9f09a4cfbcafb150b2f78|nc=7687/c85cbf35ad8518c05d38e4f0b600133e|dlines=-2|frozen=7689/2be70d48b9a9f09a4cfbcafb150b2f78|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f039_bridge_shape_renderer|L2|PASS|nc_gen=7687/c85cbf35ad8518c05d38e4f0b600133e|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f040_flyweight_forest_pool|L1|SAME|on=5606/3c9aad342472611a6903a512a61931f3|nc=5606/3c9aad342472611a6903a512a61931f3|dlines=0|frozen=5606/3c9aad342472611a6903a512a61931f3|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f040_flyweight_forest_pool|L2|PASS|nc_gen=5606/3c9aad342472611a6903a512a61931f3|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f042_array_functions_full|L1|DIFF|on=29420/a96ab31ab7fc386ba34c7429a3708b25|nc=29416/1f01e60ac986fb2ed59cb7e560ef5900|dlines=-4|frozen=29420/a96ab31ab7fc386ba34c7429a3708b25|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f042_array_functions_full|L2|PASS|nc_gen=29416/1f01e60ac986fb2ed59cb7e560ef5900|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f043_math_functions_full|L1|DIFF|on=21463/269131da91ae7645030d0d3c90c6686a|nc=21462/94a3eea2294e6692d4a1e6ef50d8034a|dlines=-1|frozen=21463/269131da91ae7645030d0d3c90c6686a|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f043_math_functions_full|L2|PASS|nc_gen=21462/94a3eea2294e6692d4a1e6ef50d8034a|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f044_json_deepops_merge_diff|L1|DIFF|on=28120/5ea70c4ed443046bd87f8354d2c13b4f|nc=28052/2cf2e365dee3492645fca3d14f827bf3|dlines=-68|frozen=28120/5ea70c4ed443046bd87f8354d2c13b4f|base_ok=BASELINE_OK|refuse_tramp=3|red=1
+f044_json_deepops_merge_diff|L2|PASS|nc_gen=28052/2cf2e365dee3492645fca3d14f827bf3|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f045_datetime_calendar_format|L1|DIFF|on=14598/0a4ac7b333782a756351ed344e18e0b8|nc=14602/b0126707632ee5c6fa0e9fc2f4826e69|dlines=4|frozen=14598/0a4ac7b333782a756351ed344e18e0b8|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f045_datetime_calendar_format|L2|PASS|nc_gen=14602/b0126707632ee5c6fa0e9fc2f4826e69|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f047_closures_curry_compose|L1|SAME|on=37552/7631e497c97abf16c3f1aee84a282341|nc=37552/7631e497c97abf16c3f1aee84a282341|dlines=0|frozen=37552/7631e497c97abf16c3f1aee84a282341|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f047_closures_curry_compose|L2|PASS|nc_gen=37552/7631e497c97abf16c3f1aee84a282341|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f048_match_pattern_dispatch|L1|DIFF|on=21693/81a109d2bcfdab53a04a99aee3e93f74|nc=21824/7393e1db6bf5983730c00e0c5f578937|dlines=131|frozen=21693/81a109d2bcfdab53a04a99aee3e93f74|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f048_match_pattern_dispatch|L2|PASS|nc_gen=21824/7393e1db6bf5983730c00e0c5f578937|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f051_validator_rule_chain_batch|L1|DIFF|on=25339/61e7b43dd88ae257f853f7c1a99fb9c9|nc=25336/0cf04e705838001a0446094052dcca38|dlines=-3|frozen=25339/61e7b43dd88ae257f853f7c1a99fb9c9|base_ok=BASELINE_OK|refuse_tramp=0|red=1
+f051_validator_rule_chain_batch|L2|DIFF|nc_gen=25336/0cf04e705838001a0446094052dcca38|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0|d=6,28d5~< --- Invalid Data ---~< Errors:~< name: Field 'name' failed rule 'min_len'~< email: Field 'email' failed rule 'email'~< age: Field 'age' failed rule 'min'~
+f056_crdt_gcounter_lww_orset|L1|DIFF|on=40909/40d7cd33b2b7daa6f8bea858d9b035f1|nc=40895/28c469d11eeb3c77f74667dc97abbd61|dlines=-14|frozen=40909/40d7cd33b2b7daa6f8bea858d9b035f1|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f056_crdt_gcounter_lww_orset|L2|PASS|nc_gen=40895/28c469d11eeb3c77f74667dc97abbd61|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f057_workflow_engine_rollback|L1|DIFF|on=19408/c0847bc9dd88d4528adaf07a19370c9b|nc=19415/0997abf4baf1db040fdd1dff472d63e6|dlines=7|frozen=19408/c0847bc9dd88d4528adaf07a19370c9b|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f057_workflow_engine_rollback|L2|PASS|nc_gen=19415/0997abf4baf1db040fdd1dff472d63e6|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f061_graph_dijkstra_bellmanford_floyd|L1|DIFF|on=43099/d86ac542ae04792ca3f43ff61469959e|nc=39977/23a4d00a4c1ebefc74296208b85ebabc|dlines=-3122|frozen=43099/d86ac542ae04792ca3f43ff61469959e|base_ok=BASELINE_OK|refuse_tramp=4|red=1
+f061_graph_dijkstra_bellmanford_floyd|L2|DIFF|nc_gen=39977/23a4d00a4c1ebefc74296208b85ebabc|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0|d=8,25c8,15~< --- Bellman-Ford from A ---~< A→A = 0~< A→B = 3~< A→C = 2~< A→D = 8~
+f065_crypto_rc4_sha1_base64_crc|L1|DIFF|on=25305/561dd7f6f42fe8135ca291dab2b2cff2|nc=25340/9637dcaa5efa714d78b203c04e046247|dlines=35|frozen=25305/561dd7f6f42fe8135ca291dab2b2cff2|base_ok=BASELINE_OK|refuse_tramp=3|red=0
+f065_crypto_rc4_sha1_base64_crc|L2|PASS|nc_gen=25340/9637dcaa5efa714d78b203c04e046247|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f066_hamming_code_parity_checksum|L1|SAME|on=20227/bd3a4c6b51eb9caaede8025c00c7754a|nc=20227/bd3a4c6b51eb9caaede8025c00c7754a|dlines=0|frozen=20227/bd3a4c6b51eb9caaede8025c00c7754a|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f066_hamming_code_parity_checksum|L2|PASS|nc_gen=20227/bd3a4c6b51eb9caaede8025c00c7754a|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f067_json_parser_schema_path_diff|L1|DIFF|on=47364/ad2f742d3a9d31562c40b57a199619ac|nc=45758/072aeca73fb7dfc84af47f742e405c04|dlines=-1606|frozen=47364/ad2f742d3a9d31562c40b57a199619ac|base_ok=BASELINE_OK|refuse_tramp=3|red=0
+f067_json_parser_schema_path_diff|L2|RUNTIME_FAIL|nc_gen=45758/072aeca73fb7dfc84af47f742e405c04|l1eq_l2=L1EQ_L2|rt=exit255|php_rc=0|msg=PHP Fatal error:  Uncaught RuntimeException: Expected '"' in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f067_json_parser_sche
+f067_min_repro|L1|DIFF|on=6768/bf2e16e6ff53672db07deca49662f96c|nc=6772/56bde4ab327e76dce899db76d4ef995f|dlines=4|frozen=6768/bf2e16e6ff53672db07deca49662f96c|base_ok=BASELINE_OK|refuse_tramp=1|red=0
+f067_min_repro|L2|RUNTIME_FAIL|nc_gen=6772/56bde4ab327e76dce899db76d4ef995f|l1eq_l2=L1EQ_L2|rt=exit255|php_rc=0|msg=Test1: PHP Fatal error:  Uncaught RuntimeException: Expected '"' in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f067_min_repro
+f070_event_sourcing_cqrs_snapshot|L1|DIFF|on=27257/e81d0b89daa1bc3d836d71e339be599d|nc=27261/e4ccd61d26991ee8b6e27f93835884a7|dlines=4|frozen=27257/e81d0b89daa1bc3d836d71e339be599d|base_ok=BASELINE_OK|refuse_tramp=1|red=0
+f070_event_sourcing_cqrs_snapshot|L2|PASS|nc_gen=27261/e4ccd61d26991ee8b6e27f93835884a7|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f072_type_inference_hindley_milner|L1|DIFF|on=37103/b97bdc8a4c6ebaa028e915d1f2e9ba9b|nc=37111/f6a3872480e15759f71579ef9789117d|dlines=8|frozen=37103/b97bdc8a4c6ebaa028e915d1f2e9ba9b|base_ok=BASELINE_OK|refuse_tramp=0|red=1
+f072_type_inference_hindley_milner|L2|PASS|nc_gen=37111/f6a3872480e15759f71579ef9789117d|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f080_db_transaction_mvcc_deadlock|L1|DIFF|on=41160/13288cfe6773a9865f9e0b1594300f45|nc=41161/aa343b8b7e6f98ffadf8f8a353bfe5b7|dlines=1|frozen=41160/13288cfe6773a9865f9e0b1594300f45|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f080_db_transaction_mvcc_deadlock|L2|PASS|nc_gen=41161/aa343b8b7e6f98ffadf8f8a353bfe5b7|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f081_bplustree_index_range_query|L1|SAME|on=17659/b54390296ea82c9efa5ead85961f6d4a|nc=17659/b54390296ea82c9efa5ead85961f6d4a|dlines=0|frozen=17659/b54390296ea82c9efa5ead85961f6d4a|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f081_bplustree_index_range_query|L2|PASS|nc_gen=17659/b54390296ea82c9efa5ead85961f6d4a|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f085_geo_rtree_knn_geocoder|L1|NOART|on=48095/dcfaa082a47f759a3a56df814f271641|nc=NOART/NOART|dlines=-|frozen=48095/dcfaa082a47f759a3a56df814f271641|base_ok=BASELINE_OK|refuse_tramp=1|red=0
+f085_geo_rtree_knn_geocoder|L2|COMPILE_FAIL|nc_gen=NOART/NOART|l1eq_l2=NO_ART|rt=rc1|php_rc=0|error: CompilationFailed 
+f087_rbac_abac_policy_inheritance|L1|DIFF|on=30020/8e39a39bb723d561dce9cb308f66c1a1|nc=30027/9942430838c65d0639ac273528f11c9c|dlines=7|frozen=30020/8e39a39bb723d561dce9cb308f66c1a1|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f087_rbac_abac_policy_inheritance|L2|PASS|nc_gen=30027/9942430838c65d0639ac273528f11c9c|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f090_promise_future_async_concurrent|L1|DIFF|on=30284/898d752e87b74dac8751a32dba89bfac|nc=30308/9885d1abdfd33aed23a1f89470c18e71|dlines=24|frozen=30284/898d752e87b74dac8751a32dba89bfac|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f090_promise_future_async_concurrent|L2|PASS|nc_gen=30308/9885d1abdfd33aed23a1f89470c18e71|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f095_compiler_opt_constfold_dce_cse|L1|DIFF|on=59496/74f26f50969e3e89dfa729f83f8f37f8|nc=59508/bea0eb392b63e51aac952eb006514ab8|dlines=12|frozen=59496/74f26f50969e3e89dfa729f83f8f37f8|base_ok=BASELINE_OK|refuse_tramp=2|red=0
+f095_compiler_opt_constfold_dce_cse|L2|DIFF|nc_gen=59508/bea0eb392b63e51aac952eb006514ab8|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0|d=23c23~< Propagated 1 constants~---~> Propagated 0 constants~
+f097_search_engine_inverted_index_tfidf|L1|DIFF|on=46805/a6c3d2bd5672f1b828cebad8252f992e|nc=46807/135175db4f26a3018be37950d0118dc2|dlines=2|frozen=46805/a6c3d2bd5672f1b828cebad8252f992e|base_ok=BASELINE_OK|refuse_tramp=8|red=0
+f097_search_engine_inverted_index_tfidf|L2|PASS|nc_gen=46807/135175db4f26a3018be37950d0118dc2|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f102_memory_gc_marksweep_refcount_gen|L1|DIFF|on=42195/018722be40995f1f26f2179acf7ddec8|nc=42188/f1f7fd234a89f7286466d340b1561d7e|dlines=-7|frozen=42195/018722be40995f1f26f2179acf7ddec8|base_ok=BASELINE_OK|refuse_tramp=1|red=0
+f102_memory_gc_marksweep_refcount_gen|L2|PASS|nc_gen=42188/f1f7fd234a89f7286466d340b1561d7e|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f104_game_engine_ecs_collision_render|L1|DIFF|on=48588/d2d7ce3df1300bb35460e2c106a7ed97|nc=48586/6ab5a5dcb3c2b1b11cedcc04512d84ce|dlines=-2|frozen=48588/d2d7ce3df1300bb35460e2c106a7ed97|base_ok=BASELINE_OK|refuse_tramp=0|red=1
+f104_game_engine_ecs_collision_render|L2|PASS|nc_gen=48586/6ab5a5dcb3c2b1b11cedcc04512d84ce|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f105_db_index_btree_hash_queryplan|L1|DIFF|on=40343/862f91b321a79020a40a155624dc179d|nc=40345/b2f17acdf86dd5b648f6b03be542ce7b|dlines=2|frozen=40343/862f91b321a79020a40a155624dc179d|base_ok=BASELINE_OK|refuse_tramp=2|red=0
+f105_db_index_btree_hash_queryplan|L2|PASS|nc_gen=40345/b2f17acdf86dd5b648f6b03be542ce7b|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f110_os_sim_process_memory_filesystem|L1|DIFF|on=82470/45e7c78cf0c6801fbc3ddeada512679d|nc=82370/dbfd92fb4ec2ebe5c6d3d878563640fb|dlines=-100|frozen=82470/45e7c78cf0c6801fbc3ddeada512679d|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f110_os_sim_process_memory_filesystem|L2|DIFF|nc_gen=82370/dbfd92fb4ec2ebe5c6d3d878563640fb|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0|d=43,44c43,44~< Readme: Hello World~< Config: key=value~---~> Readme:~> Config:~
+f113_distributed_consistenthash_vectorclock_quorum|L1|DIFF|on=104334/dab7d3a61ea9723886d2319553ce32c7|nc=104326/0e7f67c91b9dd3ff912f2807b580a949|dlines=-8|frozen=104334/dab7d3a61ea9723886d2319553ce32c7|base_ok=BASELINE_OK|refuse_tramp=1|red=1
+f113_distributed_consistenthash_vectorclock_quorum|L2|PASS|nc_gen=104326/0e7f67c91b9dd3ff912f2807b580a949|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f117_search_engine_inverted_tfidf_bm25|L1|DIFF|on=54519/7137b820e895c69a42ca3080455db699|nc=54512/8c54f9a3b31a001dad913dd2f830d6e6|dlines=-7|frozen=54519/7137b820e895c69a42ca3080455db699|base_ok=BASELINE_OK|refuse_tramp=4|red=1
+f117_search_engine_inverted_tfidf_bm25|L2|DIFF|nc_gen=54512/8c54f9a3b31a001dad913dd2f830d6e6|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0|d=40,42d39~< Doc 1: FOUND - "The quick brown fox jumps over the lazy dog"~< Doc 3: FOUND - "Lazy cats and lazy dogs sleep all day"~< Doc 7: FOUND - "The lazy dog sleeps while the fox hunts"~
+f119_logging_structured_levels_rotation|L1|SAME|on=44790/e4aa150149c26df71043ed9ab0929a45|nc=44790/e4aa150149c26df71043ed9ab0929a45|dlines=0|frozen=44790/e4aa150149c26df71043ed9ab0929a45|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f119_logging_structured_levels_rotation|L2|PASS|nc_gen=44790/e4aa150149c26df71043ed9ab0929a45|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f124_container_orchestrator_pod_service_autoscale|L1|NOART|on=112965/f1468155f612eccc6ff2b2535d016466|nc=NOART/NOART|dlines=-|frozen=112965/f1468155f612eccc6ff2b2535d016466|base_ok=BASELINE_OK|refuse_tramp=6|red=1
+f124_container_orchestrator_pod_service_autoscale|L2|COMPILE_FAIL|nc_gen=NOART/NOART|l1eq_l2=NO_ART|rt=rc1|php_rc=0|error: CompilationFailed 
+f134_event_sourcing_snapshot_cqrs_projection|L1|NOART|on=77134/ce101454817e12a193c8f00f9948a452|nc=NOART/NOART|dlines=-|frozen=77134/ce101454817e12a193c8f00f9948a452|base_ok=BASELINE_OK|refuse_tramp=0|red=1
+f134_event_sourcing_snapshot_cqrs_projection|L2|COMPILE_FAIL|nc_gen=NOART/NOART|l1eq_l2=NO_ART|rt=rc1|php_rc=0|error: CompilationFailed 
+f135_math_number_theory_crt_miller_rabin|L1|DIFF|on=58374/513c8d7d6fcb7a0da2baea34245426ee|nc=58332/4aea8aefdce8c6511faf76974523669c|dlines=-42|frozen=58374/513c8d7d6fcb7a0da2baea34245426ee|base_ok=BASELINE_OK|refuse_tramp=6|red=1
+f135_math_number_theory_crt_miller_rabin|L2|DIFF|nc_gen=58332/4aea8aefdce8c6511faf76974523669c|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0|d=23c23~< 1000033: true~---~> 1000033: false~26c26~< 1000081: true~
+f151_type_system_generics_variance|L1|DIFF|on=26400/5effa57b19f9364215ca3a2c13192948|nc=26408/2be47b652939fbe0b3b568c58863c66d|dlines=8|frozen=26400/5effa57b19f9364215ca3a2c13192948|base_ok=BASELINE_OK|refuse_tramp=1|red=0
+f151_type_system_generics_variance|L2|PASS|nc_gen=26408/2be47b652939fbe0b3b568c58863c66d|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f152_closure_arrow_higher_order|L1|SAME|on=46376/f4c41d87a3bfbb78c7ff42fff27c3d66|nc=46376/f4c41d87a3bfbb78c7ff42fff27c3d66|dlines=0|frozen=46376/f4c41d87a3bfbb78c7ff42fff27c3d66|base_ok=BASELINE_OK|refuse_tramp=0|red=1
+f152_closure_arrow_higher_order|L2|PASS|nc_gen=46376/f4c41d87a3bfbb78c7ff42fff27c3d66|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f160_virtual_fs_path_traversal|L1|SAME|on=38080/9fa003cfc616b5dfa1f1ac6b4ed10c1f|nc=38080/9fa003cfc616b5dfa1f1ac6b4ed10c1f|dlines=0|frozen=38080/9fa003cfc616b5dfa1f1ac6b4ed10c1f|base_ok=BASELINE_OK|refuse_tramp=1|red=1
+f160_virtual_fs_path_traversal|L2|PASS|nc_gen=38080/9fa003cfc616b5dfa1f1ac6b4ed10c1f|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f161_json_xml_csv_parsing|L1|DIFF|on=48051/94f5b0ca6d90b3d38315d45ddc3a9269|nc=48037/bf3eda833ae66d6ed0443c82d6012ff7|dlines=-14|frozen=48051/94f5b0ca6d90b3d38315d45ddc3a9269|base_ok=BASELINE_OK|refuse_tramp=1|red=1
+f161_json_xml_csv_parsing|L2|DIFF|nc_gen=48037/bf3eda833ae66d6ed0443c82d6012ff7|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0|d=42a43,46~> PHP Warning:  Undefined variable $attrMatches in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f161_json_xml_csv_parsing.php on line 167~> Warning: Undefined variable $attrMatches in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f161_json_xml_csv_parsing.php on lin
+f163_event_driven_dispatch_bus|L1|SAME|on=27462/2f59df223595601fd28a512b8b0ba385|nc=27462/2f59df223595601fd28a512b8b0ba385|dlines=0|frozen=27462/2f59df223595601fd28a512b8b0ba385|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f163_event_driven_dispatch_bus|L2|PASS|nc_gen=27462/2f59df223595601fd28a512b8b0ba385|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f164_plugin_hook_system|L1|SAME|on=20356/383c4c98d7d380afd034981d2a55466f|nc=20356/383c4c98d7d380afd034981d2a55466f|dlines=0|frozen=20356/383c4c98d7d380afd034981d2a55466f|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f164_plugin_hook_system|L2|PASS|nc_gen=20356/383c4c98d7d380afd034981d2a55466f|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f171_state_machine_dfa|L1|DIFF|on=32081/49ae75e8520a0cebad2f473932a9b991|nc=32079/c0bf0ed167f91586c3124b2e22ffa1ca|dlines=-2|frozen=32081/49ae75e8520a0cebad2f473932a9b991|base_ok=BASELINE_OK|refuse_tramp=0|red=1
+f171_state_machine_dfa|L2|PASS|nc_gen=32079/c0bf0ed167f91586c3124b2e22ffa1ca|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f173_concurrency_primitives_sim|L1|SAME|on=53395/d0f1ab012b116ac5b6bdd2c5b7ebbb9a|nc=53395/d0f1ab012b116ac5b6bdd2c5b7ebbb9a|dlines=0|frozen=53395/d0f1ab012b116ac5b6bdd2c5b7ebbb9a|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f173_concurrency_primitives_sim|L2|PASS|nc_gen=53395/d0f1ab012b116ac5b6bdd2c5b7ebbb9a|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f174_command_undo_redo_macro|L1|SAME|on=33745/ae808e6574aaef898d32fe95a091f221|nc=33745/ae808e6574aaef898d32fe95a091f221|dlines=0|frozen=33745/ae808e6574aaef898d32fe95a091f221|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f174_command_undo_redo_macro|L2|PASS|nc_gen=33745/ae808e6574aaef898d32fe95a091f221|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f175_decorator_strategy_template|L1|DIFF|on=21107/8f5faa3feea43a5d723065ed2473c0f8|nc=21106/dadf7d941807a6df6701108935cf6f9f|dlines=-1|frozen=21107/8f5faa3feea43a5d723065ed2473c0f8|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f175_decorator_strategy_template|L2|PASS|nc_gen=21106/dadf7d941807a6df6701108935cf6f9f|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f176_specification_chain_rules|L1|DIFF|on=42076/9fe7b6e600b042ff85aa3205c96462e5|nc=42070/c673b3ecbeb6c4a50d756c7a37f74c90|dlines=-6|frozen=42076/9fe7b6e600b042ff85aa3205c96462e5|base_ok=BASELINE_OK|refuse_tramp=0|red=1
+f176_specification_chain_rules|L2|PASS|nc_gen=42070/c673b3ecbeb6c4a50d756c7a37f74c90|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+f177_graph_traversal_dfs_bfs|L1|DIFF|on=50310/02f8b623e2661673a39ed9a461a907a4|nc=50264/0d7ba96ea57cad6960427400c02da50d|dlines=-46|frozen=50310/02f8b623e2661673a39ed9a461a907a4|base_ok=BASELINE_OK|refuse_tramp=11|red=1
+f177_graph_traversal_dfs_bfs|L2|TIMEOUT_10S|nc_gen=50264/0d7ba96ea57cad6960427400c02da50d|l1eq_l2=L1EQ_L2|rt=exit124|php_rc=0|msg=
+f178_numeric_precision_matrix|L1|DIFF|on=28790/d3bbad22b7abb4796ede78ff6a523542|nc=28807/b6483f411247aba29ff0dac8f56fdeda|dlines=17|frozen=28790/d3bbad22b7abb4796ede78ff6a523542|base_ok=BASELINE_OK|refuse_tramp=1|red=0
+f178_numeric_precision_matrix|L2|RUNTIME_FAIL|nc_gen=28807/b6483f411247aba29ff0dac8f56fdeda|l1eq_l2=L1EQ_L2|rt=exit139|php_rc=0|msg=
+f179_visitor_composite_ast|L1|DIFF|on=30827/dbbd5449a407aaa17e5a9af135957e68|nc=30839/4b419648057e50e9971c04a2c53211bf|dlines=12|frozen=30827/dbbd5449a407aaa17e5a9af135957e68|base_ok=BASELINE_OK|refuse_tramp=0|red=0
+f179_visitor_composite_ast|L2|PASS|nc_gen=30839/4b419648057e50e9971c04a2c53211bf|l1eq_l2=L1EQ_L2|rt=exit0|php_rc=0
+DEFLEM_DONE shapes=68 l1_same=15 l1_diff=50 l1_noart=3 base_ok=68 base_miss=0 base_absent=0 src_missing=0 php_exit=1
+LAYER2_DONE skip=0 pass=50 diff=10 runtime_fail=3 compile_fail=3 timeout=1 l1eq_ok=64 l1eq_neq=0
+--- 交叉表（P0 中性前提）---
+L1_DIFF_SHAPES        = f006_oop_observer_event_dispatcher f007_string_encoding_crypto_hash f009_oop_decorator_chain_command f010_oop_singleton_registry_di f012_json_tree_recursive_traverse f016_hash_bloom_consistent f024_rbac_role_inheritance_policy f025_coding_hamming_rle_lzw_crc f027_number_theory_primes_modular f028_dp_knapsack_lcs_lis f031_builder_fluent_immutable f033_state_pattern_order_machine f034_template_method_pipeline f036_strategy_dynamic_pricing f038_composite_filesystem_tree f039_bridge_shape_renderer f042_array_functions_full f043_math_functions_full f044_json_deepops_merge_diff f045_datetime_calendar_format f048_match_pattern_dispatch f051_validator_rule_chain_batch f056_crdt_gcounter_lww_orset f057_workflow_engine_rollback f061_graph_dijkstra_bellmanford_floyd f065_crypto_rc4_sha1_base64_crc f067_json_parser_schema_path_diff f067_min_repro f070_event_sourcing_cqrs_snapshot f072_type_inference_hindley_milner f080_db_transaction_mvcc_deadlock f087_rbac_abac_policy_inheritance f090_promise_future_async_concurrent f095_compiler_opt_constfold_dce_cse f097_search_engine_inverted_index_tfidf f102_memory_gc_marksweep_refcount_gen f104_game_engine_ecs_collision_render f105_db_index_btree_hash_queryplan f110_os_sim_process_memory_filesystem f113_distributed_consistenthash_vectorclock_quorum f117_search_engine_inverted_tfidf_bm25 f135_math_number_theory_crt_miller_rabin f151_type_system_generics_variance f161_json_xml_csv_parsing f171_state_machine_dfa f175_decorator_strategy_template f176_specification_chain_rules f177_graph_traversal_dfs_bfs f178_numeric_precision_matrix f179_visitor_composite_ast 
+L1_SAME_SHAPES_TOTAL  = 15
+P0_MAY_DRIFT (DIFF ∧ refuse_tramp>0) = f010_oop_singleton_registry_di f016_hash_bloom_consistent f027_number_theory_primes_modular f038_composite_filesystem_tree f044_json_deepops_merge_diff f061_graph_dijkstra_bellmanford_floyd f065_crypto_rc4_sha1_base64_crc f067_json_parser_schema_path_diff f067_min_repro f070_event_sourcing_cqrs_snapshot f095_compiler_opt_constfold_dce_cse f097_search_engine_inverted_index_tfidf f102_memory_gc_marksweep_refcount_gen f105_db_index_btree_hash_queryplan f113_distributed_consistenthash_vectorclock_quorum f117_search_engine_inverted_tfidf_bm25 f135_math_number_theory_crt_miller_rabin f151_type_system_generics_variance f161_json_xml_csv_parsing f177_graph_traversal_dfs_bfs f178_numeric_precision_matrix 
+P0_MAY_DRIFT_COUNT = 21
+DIFF_NOT_P0 (DIFF ∧ refuse_tramp==0) = f006_oop_observer_event_dispatcher f007_string_encoding_crypto_hash f009_oop_decorator_chain_command f012_json_tree_recursive_traverse f024_rbac_role_inheritance_policy f025_coding_hamming_rle_lzw_crc f028_dp_knapsack_lcs_lis f031_builder_fluent_immutable f033_state_pattern_order_machine f034_template_method_pipeline f036_strategy_dynamic_pricing f039_bridge_shape_renderer f042_array_functions_full f043_math_functions_full f045_datetime_calendar_format f048_match_pattern_dispatch f051_validator_rule_chain_batch f056_crdt_gcounter_lww_orset f057_workflow_engine_rollback f072_type_inference_hindley_milner f080_db_transaction_mvcc_deadlock f087_rbac_abac_policy_inheritance f090_promise_future_async_concurrent f104_game_engine_ecs_collision_render f110_os_sim_process_memory_filesystem f171_state_machine_dfa f175_decorator_strategy_template f176_specification_chain_rules f179_visitor_composite_ast 
+DIFF_NOT_P0_COUNT = 29
+P0_FREE (SAME ∧ refuse_tramp>0)      = f037_adapter_unified_cache f160_virtual_fs_path_traversal 
+P0_FREE_COUNT = 2
+BASELINE_MISS_SHAPES = 
+BASELINE_ABSENT_SHAPES = 
+BASELINE_OK_COUNT = 68
+REFUSE_TRAMP_NOROW = 
+DLINES_SUM_over_DIFF = -4677
+L2_FAIL_SHAPES = f004_oop_deep_inheritance_magic(PHP_EXIT) f007_string_encoding_crypto_hash(DIFF) f027_number_theory_primes_modular(DIFF) f033_state_pattern_order_machine(DIFF) f051_validator_rule_chain_batch(DIFF) f061_graph_dijkstra_bellmanford_floyd(DIFF) f067_json_parser_schema_path_diff(RUNTIME_FAIL) f067_min_repro(RUNTIME_FAIL) f085_geo_rtree_knn_geocoder(COMPILE_FAIL) f095_compiler_opt_constfold_dce_cse(DIFF) f110_os_sim_process_memory_filesystem(DIFF) f117_search_engine_inverted_tfidf_bm25(DIFF) f124_container_orchestrator_pod_service_autoscale(COMPILE_FAIL) f134_event_sourcing_snapshot_cqrs_projection(COMPILE_FAIL) f135_math_number_theory_crt_miller_rabin(DIFF) f161_json_xml_csv_parsing(DIFF) f177_graph_traversal_dfs_bfs(TIMEOUT_10S) f178_numeric_precision_matrix(RUNTIME_FAIL) 
+L2_RED_NC_PASS = 11
+L2_RED_TOTAL = 19
+ELAPSED=724s

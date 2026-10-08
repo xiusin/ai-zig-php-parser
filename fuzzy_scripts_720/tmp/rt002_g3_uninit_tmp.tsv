@@ -1,0 +1,9 @@
+# compiler_md5=1f15e4ce9b5c9cdaaef7cabf5efb9c76
+# runtime_lib_template_md5=008b7b639f1069cb73e443064e115ed1
+# ir_generator_md5=cb53c2da7d4fe2e1f62b728511f7c3ea
+# prelude_md5=98841bf3711b65c3cf3b2fe4c9582fe4
+# columns: shape|php_rc|aot_rc|verdict|before_init(php/aot)||php_norm||aot_norm
+g3_uninit_polluted|php_rc=0|aot_rc=0|DIFF|before_init(php=YES/aot=NO)|TypeError: Cannot assign string to property UHolder::$n of type int|Error: Typed property UHolder::$n must not be accessed before initialization|NO_ERROR|after_ok=5|NO_ERROR|DONE|||aot=TypeError: Cannot assign string to property UHolder::$n of type int|read=\TypeError::__set_state(array(|   'file' => '/private/tmp/rt002g3u.REJSVe/g3u_g3_uninit_polluted_tmp.php',|   'line' => 17,|   'message' => 'Cannot assign string to property UHolder::$n of type int',|))|NO_ERROR|NO_ERROR|after_ok=5|NO_ERROR|DONE|
+g3_uninit_clean|php_rc=0|aot_rc=0|SAME|before_init(php=YES/aot=YES)|Error: Typed property UHolder::$n must not be accessed before initialization|isset=0 propset=1|NO_ERROR|NO_ERROR|after_ok=7|NO_ERROR|DONE|||aot=Error: Typed property UHolder::$n must not be accessed before initialization|isset=0 propset=1|NO_ERROR|NO_ERROR|after_ok=7|NO_ERROR|DONE|
+ELAPSED=10s
+G3UNINIT_DONE shapes=2 same=1 diff=1 state_lost=1 compile_fail=0

@@ -1,0 +1,18 @@
+DIFF|c008_p1_top_echo_arm#1|arg=a|rc_a=0|aot=1|php=1/AFTER/END
+DIFF|c008_p1_top_echo_arm#2|arg=b|rc_a=0|aot=2|php=2/AFTER/END
+SAME|c008_p1_top_echo_arm#3|arg=z|rc_a=0
+DIFF|c008_p2_fn_echo_arm_return#1|arg=a|rc_a=0|aot=1/B=END|php=1/B=R/END
+DIFF|c008_p2_fn_echo_arm_return#2|arg=b|rc_a=0|aot=2/B=END|php=2/B=R/END
+SAME|c008_p2_fn_echo_arm_return#3|arg=z|rc_a=0
+DIFF|c008_p3_fn_echo_arm_assign#1|arg=a|rc_a=0|aot=arm-empty/D=null/END|php=arm-empty/D={"tail":1}/END
+DIFF|c008_p3_fn_echo_arm_assign#2|arg=b|rc_a=0|aot=arm-empty/D=null/END|php=arm-empty/D={"tail":1}/END
+DIFF|c008_p3_fn_echo_arm_assign#3|arg=z|rc_a=0|aot=arm-empty/D=null/END|php=arm-empty/D={"tail":1}/END
+SAME|c008_c1_if_else_arm#1|arg=a|rc_a=0
+SAME|c008_c1_if_else_arm#2|arg=b|rc_a=0
+SAME|c008_c1_if_else_arm#3|arg=z|rc_a=0
+DIFF|c008_p4_loop_echo_arm#1|arg=a|rc_a=0|aot=L-1 x/END|php=L-1 x/L-after x/L-1 y/L-after y/END
+SAME|c008_p4_loop_echo_arm#2|arg=b|rc_a=0
+SAME|c008_p4_loop_echo_arm#3|arg=z|rc_a=0
+SAME|c008_c2_arr_arm#1|arg=-|rc_a=0
+SAME|c008_c3_echo_not_last#1|arg=-|rc_a=0
+SAME|c008_c4_void_call_arm_tail#1|arg=-|rc_a=0

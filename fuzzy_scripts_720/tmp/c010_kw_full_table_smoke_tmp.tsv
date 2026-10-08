@@ -1,0 +1,20 @@
+# compiler_md5=5beb1591018e6092ffc0ab0446344eee
+# keyword_lookup_md5=ef70993a7caac6deb9b2e5a23bf7d143
+# lexer_md5=e3dd4191a1c3dfdf816b5873b4c60e5f
+# parser_md5=e3987a361d1db45bc3eadefc7afa249e
+# columns: shape|kw|probe_spell|ctrl_verdict|ctrl_rc|probe_verdict|probe_rc|class|ctrl_php||ctrl_aot||probe_php||probe_aot
+k_true|true|True|RUN(T|T)|php_rc=0|RUN(T|T)|php_rc=0|NOFACE
+k_null|null|Null|RUN(N|N)|php_rc=0|RUN(N|N)|php_rc=0|NOFACE
+k_goto|goto|Goto|RUN(2|)|php_rc=0|RUN(2|)|php_rc=0|CONFOUNDED_CTRL_DIFF
+k_unset|unset|Unset|RUN(1|1)|php_rc=0|RUN(1|1)|php_rc=0|NOFACE
+k_match|match|Match|RUN(match_ok|match_ok)|php_rc=0|RUN(match_ok|match_ok)|php_rc=0|NOFACE
+k_include|include|Include|RUN(inc_ok|inc_ok)|php_rc=0|RUN(inc_ok|inc_ok)|php_rc=0|NOFACE
+k_function|function|Function|RUN(14|14)|php_rc=0|RUN(14|14)|php_rc=0|NOFACE
+k_iterable|iterable|Iterable|RUN(2|2)|php_rc=0|RUN(2|2)|php_rc=0|NOFACE
+k_namespace|namespace|Namespace|RUN(20|20)|php_rc=0|RUN(20|20)|php_rc=0|NOFACE
+m_class|__CLASS__|__Class__|RUN(mac_ok|mac_ok)|php_rc=0|RUN(mac_ok|mac_ok)|php_rc=0|NOFACE
+m_namespace|__NAMESPACE__|__Namespace__|RUN(7|7)|php_rc=0|RUN(7|7)|php_rc=0|NOFACE
+invf_go|go|zzkwhgo|alias(RUN:101|101)|php_rc_na|collide(RUN:101|101)|rc=0|NOFACE
+invm_struct|struct|zzkwhstruct|alias(RUN:307|307)|php_rc_na|collide(RUN:307|307)|rc=0|NOFACE
+ELAPSED=97s
+C010H_DONE shapes=11 arms=26 face=0 noface=10 confounded=1 bad_probe=0 ctrl_compile_fail=0 probe_compile_fail=0 probe_timeout=0 inverse_shapes=2 inverse_face=0 inverse_noface=2 inverse_confounded=0 repo_build_residue=0 SMOKE_ONLY=1

@@ -1,0 +1,21 @@
+f016_hash_bloom_consistent|CHAIN|PASS|ctrl=|gen=DIFF_FROM_RF
+f044_json_deepops_merge_diff|CHAIN|PASS|ctrl=|gen=DIFF_FROM_RF
+f104_game_engine_ecs_collision_render|CHAIN|PASS|ctrl=|gen=DIFF_FROM_RF
+f113_distributed_consistenthash_vectorclock_quorum|CHAIN|PASS|ctrl=|gen=DIFF_FROM_RF
+f117_search_engine_inverted_tfidf_bm25|CHAIN|DIFF|ctrl=|gen=DIFF_FROM_RF
+f124_container_orchestrator_pod_service_autoscale|CHAIN|COMPILE_FAIL|ctrl=|error: CompilationFailed 
+f134_event_sourcing_snapshot_cqrs_projection|CHAIN|COMPILE_FAIL|ctrl=|error: CompilationFailed 
+f161_json_xml_csv_parsing|CHAIN|DIFF|ctrl=|gen=DIFF_FROM_RF
+f177_graph_traversal_dfs_bfs|CHAIN|RUNTIME_FAIL|ctrl=|gen=DIFF_FROM_RF|exit=124 
+f024_rbac_role_inheritance_policy|NOHIT|PASS|ctrl=|gen=DIFF_FROM_RF
+f025_coding_hamming_rle_lzw_crc|NOHIT|PASS|ctrl=|gen=DIFF_FROM_RF
+f051_validator_rule_chain_batch|NOHIT|DIFF|ctrl=|gen=DIFF_FROM_RF
+f061_graph_dijkstra_bellmanford_floyd|NOHIT|DIFF|ctrl=|gen=DIFF_FROM_RF
+f072_type_inference_hindley_milner|NOHIT|PASS|ctrl=|gen=DIFF_FROM_RF
+f135_math_number_theory_crt_miller_rabin|NOHIT|DIFF|ctrl=|gen=DIFF_FROM_RF
+f152_closure_arrow_higher_order|NOHIT|RUNTIME_FAIL|ctrl=|gen=DIFF_FROM_RF|exit=139  --- Partial Application ---
+f160_virtual_fs_path_traversal|NOHIT|PASS|ctrl=|gen=DIFF_FROM_RF
+f171_state_machine_dfa|NOHIT|PASS|ctrl=|gen=DIFF_FROM_RF
+f176_specification_chain_rules|NOHIT|PASS|ctrl=|gen=DIFF_FROM_RF
+CHAIN: PASS=4 DIFF=2 RUNTIME_FAIL=1 COMPILE_FAIL=2
+NOHIT: PASS=6 DIFF=3 RUNTIME_FAIL=1 COMPILE_FAIL=0

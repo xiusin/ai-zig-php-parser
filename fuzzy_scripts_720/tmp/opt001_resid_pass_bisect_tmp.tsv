@@ -1,0 +1,57 @@
+# opt001 §5.6 residual pass bisection 2026-10-06 13:57:30
+bin_md5=1f15e4ce9b5c9cdaaef7cabf5efb9c76
+optimizer=252234ef48cb47a42e6f39d1bc3e845b/6877
+native_linker=fbe6382a2e0904b6740d771b88c409c7/32797
+level=default(无 --optimize) 触发臂=各形最小红配置 二分集=dce constprop box-unbox typespec cse strength mem2reg
+f117_search_engine_inverted_tfidf_bm25|trig|DIFF|gen=[54498/694e5340312849eea2fa4d77a7c311e8]|17,19c17,19~< Doc 2: score=4.6740 - "A quick brown dog outruns the quick fox"~< Doc 1: score=2.9808 - "The quick brown fox jumps over the lazy dog"~< Doc 5: score=2.9808 - "Quick thinking saves the day for the fox"~---~> Doc 1: score=1.2877 - "The quick brown fox jumps over the lazy dog"~
+f117_search_engine_inverted_tfidf_bm25|no_dce|DIFF|gen=[58598/f8a336e171bb2df66272f0c6966c52aa]|17,19c17,19~< Doc 2: score=4.6740 - "A quick brown dog outruns the quick fox"~< Doc 1: score=2.9808 - "The quick brown fox jumps over the lazy dog"~< Doc 5: score=2.9808 - "Quick thinking saves the day for the fox"~---~> Doc 1: score=1.2877 - "The quick brown fox jumps over the lazy dog"~
+f117_search_engine_inverted_tfidf_bm25|no_constprop|DIFF|NO_EFFECT|gen=[54498/694e5340312849eea2fa4d77a7c311e8]|17,19c17,19~< Doc 2: score=4.6740 - "A quick brown dog outruns the quick fox"~< Doc 1: score=2.9808 - "The quick brown fox jumps over the lazy dog"~< Doc 5: score=2.9808 - "Quick thinking saves the day for the fox"~---~> Doc 1: score=1.2877 - "The quick brown fox jumps over the lazy dog"~
+f117_search_engine_inverted_tfidf_bm25|no_box-unbox|DIFF|NO_EFFECT|gen=[54498/694e5340312849eea2fa4d77a7c311e8]|17,19c17,19~< Doc 2: score=4.6740 - "A quick brown dog outruns the quick fox"~< Doc 1: score=2.9808 - "The quick brown fox jumps over the lazy dog"~< Doc 5: score=2.9808 - "Quick thinking saves the day for the fox"~---~> Doc 1: score=1.2877 - "The quick brown fox jumps over the lazy dog"~
+f117_search_engine_inverted_tfidf_bm25|no_typespec|DIFF|NO_EFFECT|gen=[54498/694e5340312849eea2fa4d77a7c311e8]|17,19c17,19~< Doc 2: score=4.6740 - "A quick brown dog outruns the quick fox"~< Doc 1: score=2.9808 - "The quick brown fox jumps over the lazy dog"~< Doc 5: score=2.9808 - "Quick thinking saves the day for the fox"~---~> Doc 1: score=1.2877 - "The quick brown fox jumps over the lazy dog"~
+f117_search_engine_inverted_tfidf_bm25|no_cse|DIFF|gen=[55003/613ecefa1041d0c2869eb877fa6f5946]|17,19c17,19~< Doc 2: score=4.6740 - "A quick brown dog outruns the quick fox"~< Doc 1: score=2.9808 - "The quick brown fox jumps over the lazy dog"~< Doc 5: score=2.9808 - "Quick thinking saves the day for the fox"~---~> Doc 1: score=1.2877 - "The quick brown fox jumps over the lazy dog"~
+f117_search_engine_inverted_tfidf_bm25|no_strength|DIFF|NO_EFFECT|gen=[54498/694e5340312849eea2fa4d77a7c311e8]|17,19c17,19~< Doc 2: score=4.6740 - "A quick brown dog outruns the quick fox"~< Doc 1: score=2.9808 - "The quick brown fox jumps over the lazy dog"~< Doc 5: score=2.9808 - "Quick thinking saves the day for the fox"~---~> Doc 1: score=1.2877 - "The quick brown fox jumps over the lazy dog"~
+f117_search_engine_inverted_tfidf_bm25|no_mem2reg|DIFF|gen=[59979/b7f2c4129c466c0b5caf75b0a7be3fd8]|17,19c17,19~< Doc 2: score=4.6740 - "A quick brown dog outruns the quick fox"~< Doc 1: score=2.9808 - "The quick brown fox jumps over the lazy dog"~< Doc 5: score=2.9808 - "Quick thinking saves the day for the fox"~---~> Doc 1: score=1.2877 - "The quick brown fox jumps over the lazy dog"~
+f161_json_xml_csv_parsing|trig|DIFF|gen=[48037/a2617fa037d7ea775f151f04d1ac9053]|36,37c36~< Beijing: Alice, Charlie~< Shanghai: Bob, Diana~---~> 0: Alice, Bob, Charlie, Diana~40,41c39,40~
+f161_json_xml_csv_parsing|no_dce|DIFF|gen=[54149/afd616ee81d5ca25dfcf9f332bf64523]|36,37c36~< Beijing: Alice, Charlie~< Shanghai: Bob, Diana~---~> 0: Alice, Bob, Charlie, Diana~40,41c39,40~
+f161_json_xml_csv_parsing|no_constprop|DIFF|NO_EFFECT|gen=[48037/a2617fa037d7ea775f151f04d1ac9053]|36,37c36~< Beijing: Alice, Charlie~< Shanghai: Bob, Diana~---~> 0: Alice, Bob, Charlie, Diana~40,41c39,40~
+f161_json_xml_csv_parsing|no_box-unbox|DIFF|NO_EFFECT|gen=[48037/a2617fa037d7ea775f151f04d1ac9053]|36,37c36~< Beijing: Alice, Charlie~< Shanghai: Bob, Diana~---~> 0: Alice, Bob, Charlie, Diana~40,41c39,40~
+f161_json_xml_csv_parsing|no_typespec|DIFF|NO_EFFECT|gen=[48037/a2617fa037d7ea775f151f04d1ac9053]|36,37c36~< Beijing: Alice, Charlie~< Shanghai: Bob, Diana~---~> 0: Alice, Bob, Charlie, Diana~40,41c39,40~
+f161_json_xml_csv_parsing|no_cse|DIFF|gen=[48888/582884d78f7ed8868f24a3350e116d0a]|36,37c36~< Beijing: Alice, Charlie~< Shanghai: Bob, Diana~---~> 0: Alice, Bob, Charlie, Diana~40,41c39,40~
+f161_json_xml_csv_parsing|no_strength|DIFF|NO_EFFECT|gen=[48037/a2617fa037d7ea775f151f04d1ac9053]|36,37c36~< Beijing: Alice, Charlie~< Shanghai: Bob, Diana~---~> 0: Alice, Bob, Charlie, Diana~40,41c39,40~
+f161_json_xml_csv_parsing|no_mem2reg|DIFF|gen=[58747/8ffc0bb590a0aa6ba2afa05d691456e1]|36,37c36~< Beijing: Alice, Charlie~< Shanghai: Bob, Diana~---~> 0: Alice, Bob, Charlie, Diana~40,41c39,40~
+f051_validator_rule_chain_batch|trig|DIFF|gen=[24822/c7ed932361642eec303b9a76cc1d409c]|15,27c15,27~< email('test@test.com'): true [OK]~< email('bad'): false [OK]~< url('https://x.com'): true [OK]~< url('not-url'): false [OK]~< uuid('550e8400-e29b-41d4-a716-446655440000'): true [OK]~
+f051_validator_rule_chain_batch|no_dce|DIFF|gen=[30050/770564304ee3e5d158693dc330f1df75]|15,27c15,27~< email('test@test.com'): true [OK]~< email('bad'): false [OK]~< url('https://x.com'): true [OK]~< url('not-url'): false [OK]~< uuid('550e8400-e29b-41d4-a716-446655440000'): true [OK]~
+f051_validator_rule_chain_batch|no_constprop|DIFF|NO_EFFECT|gen=[24822/c7ed932361642eec303b9a76cc1d409c]|15,27c15,27~< email('test@test.com'): true [OK]~< email('bad'): false [OK]~< url('https://x.com'): true [OK]~< url('not-url'): false [OK]~< uuid('550e8400-e29b-41d4-a716-446655440000'): true [OK]~
+f051_validator_rule_chain_batch|no_box-unbox|DIFF|NO_EFFECT|gen=[24822/c7ed932361642eec303b9a76cc1d409c]|15,27c15,27~< email('test@test.com'): true [OK]~< email('bad'): false [OK]~< url('https://x.com'): true [OK]~< url('not-url'): false [OK]~< uuid('550e8400-e29b-41d4-a716-446655440000'): true [OK]~
+f051_validator_rule_chain_batch|no_typespec|DIFF|NO_EFFECT|gen=[24822/c7ed932361642eec303b9a76cc1d409c]|15,27c15,27~< email('test@test.com'): true [OK]~< email('bad'): false [OK]~< url('https://x.com'): true [OK]~< url('not-url'): false [OK]~< uuid('550e8400-e29b-41d4-a716-446655440000'): true [OK]~
+f051_validator_rule_chain_batch|no_cse|DIFF|gen=[25172/2db4caf4fec3a01e06d9609d108c6701]|5c5,10~< role: Field 'role' failed rule 'in'~---~> name: Field 'name' failed rule 'required'; Field 'name' failed rule 'string'; Field 'name' failed rule 'min_len'; Field 'name' failed rule 'max_len'~> email: Field 'email' failed rule 'required'; Field 'email' failed rule 'email'~> age: Field 'age' 
+f051_validator_rule_chain_batch|no_strength|DIFF|NO_EFFECT|gen=[24822/c7ed932361642eec303b9a76cc1d409c]|15,27c15,27~< email('test@test.com'): true [OK]~< email('bad'): false [OK]~< url('https://x.com'): true [OK]~< url('not-url'): false [OK]~< uuid('550e8400-e29b-41d4-a716-446655440000'): true [OK]~
+f051_validator_rule_chain_batch|no_mem2reg|DIFF|gen=[30129/fed10a11aae7aedd214f1b382867a7be]|15,27c15,27~< email('test@test.com'): true [OK]~< email('bad'): false [OK]~< url('https://x.com'): true [OK]~< url('not-url'): false [OK]~< uuid('550e8400-e29b-41d4-a716-446655440000'): true [OK]~
+f061_graph_dijkstra_bellmanford_floyd|trig|DIFF|gen=[42432/ad9589aeaca77752fef396a51beb4357]|16,20c16,20~< A	0	3	2	8	10~< B	3	0	1	5	7~< C	2	1	0	6	8~< D	8	5	6	0	2~< E	10	7	8	2	0~
+f061_graph_dijkstra_bellmanford_floyd|no_dce|DIFF|gen=[48357/3ad41067e2cc9073f3d474fefb6cb1e4]|16,20c16,20~< A	0	3	2	8	10~< B	3	0	1	5	7~< C	2	1	0	6	8~< D	8	5	6	0	2~< E	10	7	8	2	0~
+f061_graph_dijkstra_bellmanford_floyd|no_constprop|DIFF|NO_EFFECT|gen=[42432/ad9589aeaca77752fef396a51beb4357]|16,20c16,20~< A	0	3	2	8	10~< B	3	0	1	5	7~< C	2	1	0	6	8~< D	8	5	6	0	2~< E	10	7	8	2	0~
+f061_graph_dijkstra_bellmanford_floyd|no_box-unbox|DIFF|NO_EFFECT|gen=[42432/ad9589aeaca77752fef396a51beb4357]|16,20c16,20~< A	0	3	2	8	10~< B	3	0	1	5	7~< C	2	1	0	6	8~< D	8	5	6	0	2~< E	10	7	8	2	0~
+f061_graph_dijkstra_bellmanford_floyd|no_typespec|DIFF|NO_EFFECT|gen=[42432/ad9589aeaca77752fef396a51beb4357]|16,20c16,20~< A	0	3	2	8	10~< B	3	0	1	5	7~< C	2	1	0	6	8~< D	8	5	6	0	2~< E	10	7	8	2	0~
+f061_graph_dijkstra_bellmanford_floyd|no_cse|DIFF|gen=[43247/dd349e9233cd092ff4cf3e7a4589249a]|16,20c16,20~< A	0	3	2	8	10~< B	3	0	1	5	7~< C	2	1	0	6	8~< D	8	5	6	0	2~< E	10	7	8	2	0~
+f061_graph_dijkstra_bellmanford_floyd|no_strength|DIFF|NO_EFFECT|gen=[42432/ad9589aeaca77752fef396a51beb4357]|16,20c16,20~< A	0	3	2	8	10~< B	3	0	1	5	7~< C	2	1	0	6	8~< D	8	5	6	0	2~< E	10	7	8	2	0~
+f061_graph_dijkstra_bellmanford_floyd|no_mem2reg|DIFF|gen=[46434/257c0082233552a2859eca4c7f800419]|16,20c16,20~< A	0	3	2	8	10~< B	3	0	1	5	7~< C	2	1	0	6	8~< D	8	5	6	0	2~< E	10	7	8	2	0~
+f135_math_number_theory_crt_miller_rabin|trig|DIFF|gen=[57820/9bbafbdaa5ecb84b43601738c9359b28]|19,20c19,20~< ✓✓✓✓✓✓✓✓✓✓ primes~< ✓✓✓✓✓✓✓✓✓✓ composites~---~> primes~> composites~
+f135_math_number_theory_crt_miller_rabin|no_dce|DIFF|gen=[60785/78377e7d4c76d2a444e9c1d14a5dd233]|19,20c19,20~< ✓✓✓✓✓✓✓✓✓✓ primes~< ✓✓✓✓✓✓✓✓✓✓ composites~---~> primes~> composites~
+f135_math_number_theory_crt_miller_rabin|no_constprop|DIFF|NO_EFFECT|gen=[57820/9bbafbdaa5ecb84b43601738c9359b28]|19,20c19,20~< ✓✓✓✓✓✓✓✓✓✓ primes~< ✓✓✓✓✓✓✓✓✓✓ composites~---~> primes~> composites~
+f135_math_number_theory_crt_miller_rabin|no_box-unbox|DIFF|NO_EFFECT|gen=[57820/9bbafbdaa5ecb84b43601738c9359b28]|19,20c19,20~< ✓✓✓✓✓✓✓✓✓✓ primes~< ✓✓✓✓✓✓✓✓✓✓ composites~---~> primes~> composites~
+f135_math_number_theory_crt_miller_rabin|no_typespec|DIFF|NO_EFFECT|gen=[57820/9bbafbdaa5ecb84b43601738c9359b28]|19,20c19,20~< ✓✓✓✓✓✓✓✓✓✓ primes~< ✓✓✓✓✓✓✓✓✓✓ composites~---~> primes~> composites~
+f135_math_number_theory_crt_miller_rabin|no_cse|DIFF|gen=[58738/c2c20cc9a5b01aa2e6bcc81959ce008d]|19,20c19,20~< ✓✓✓✓✓✓✓✓✓✓ primes~< ✓✓✓✓✓✓✓✓✓✓ composites~---~> primes~> composites~
+f135_math_number_theory_crt_miller_rabin|no_strength|DIFF|gen=[58026/c41355a379b1650f0188ce43b6b3c3f7]|19,20c19,20~< ✓✓✓✓✓✓✓✓✓✓ primes~< ✓✓✓✓✓✓✓✓✓✓ composites~---~> primes~> composites~
+f135_math_number_theory_crt_miller_rabin|no_mem2reg|DIFF|gen=[62232/74e08a4aa0855fbf5fe2915810240af0]|19,20c19,20~< ✓✓✓✓✓✓✓✓✓✓ primes~< ✓✓✓✓✓✓✓✓✓✓ composites~---~> primes~> composites~
+BISECT_SUMMARY
+trig: PASS=0 DIFF=5 RUNTIME_FAIL=0 COMPILE_FAIL=0 NO_EFFECT=0
+dce: PASS=0 DIFF=0 RUNTIME_FAIL=0 COMPILE_FAIL=0 NO_EFFECT=0
+constprop: PASS=0 DIFF=0 RUNTIME_FAIL=0 COMPILE_FAIL=0 NO_EFFECT=0
+box-unbox: PASS=0 DIFF=0 RUNTIME_FAIL=0 COMPILE_FAIL=0 NO_EFFECT=0
+typespec: PASS=0 DIFF=0 RUNTIME_FAIL=0 COMPILE_FAIL=0 NO_EFFECT=0
+cse: PASS=0 DIFF=0 RUNTIME_FAIL=0 COMPILE_FAIL=0 NO_EFFECT=0
+strength: PASS=0 DIFF=0 RUNTIME_FAIL=0 COMPILE_FAIL=0 NO_EFFECT=0
+mem2reg: PASS=0 DIFF=0 RUNTIME_FAIL=0 COMPILE_FAIL=0 NO_EFFECT=0
+0
+# CORRECTION 2026-10-06 (#99): 上方 BISECT_SUMMARY 的七枚 `|<pass>: …` 行为**缺陷产物，整体作废**——原实现用 `grep -c "|$p|…"` 而落盘标签带 `no_` 前缀 ⇒ 除 trig 外恒为全 0。
+# 按原始 40 行重算（awk 按第 2 列等值，已回填进脚本）：40/40 全为 DIFF、PASS 行数=0；NO_EFFECT 真实分布 no_constprop=5/5、no_box-unbox=5/5、no_typespec=5/5、no_strength=4/5（例外 f135）、no_dce/no_cse/no_mem2reg=0/5。

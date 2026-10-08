@@ -1,0 +1,16 @@
+# compiler_md5=1f15e4ce9b5c9cdaaef7cabf5efb9c76
+# runtime_lib_template_md5=008b7b639f1069cb73e443064e115ed1
+# ir_generator_md5=cb53c2da7d4fe2e1f62b728511f7c3ea
+# prelude_md5=a6562c625cf240ffbd746b9ba333bc69
+# columns: shape|php_rc|aot_rc|verdict|acc(php/aot)|te(php/aot)|bi(php/aot)|accname(php/aot)||php_norm||aot_norm
+st_ok_write|php_rc=0|aot_rc=0|SAME|acc(php=NO/aot=NO)|te(php=NO/aot=NO)|bi(php=NO/aot=NO)|accname(php=/aot=)|NO_ERROR|t=integer v=3|NO_ERROR|DONE|||aot=NO_ERROR|t=integer v=3|NO_ERROR|DONE|
+st_type_bad|php_rc=0|aot_rc=0|DIFF|acc(php=NO/aot=NO)|te(php=YES/aot=NO)|bi(php=YES/aot=NO)|accname(php=/aot=)|TypeError: Cannot assign string to property STBad::$v of type int|Error: Typed static property STBad::$v must not be accessed before initialization|DONE|||aot=NO_ERROR|t=string v='abc'|NO_ERROR|DONE|
+st_type_coerce|php_rc=0|aot_rc=0|DIFF|acc(php=NO/aot=NO)|te(php=NO/aot=NO)|bi(php=NO/aot=NO)|accname(php=/aot=)|NO_ERROR|t=integer v=42|NO_ERROR|DONE|||aot=NO_ERROR|t=string v='42'|NO_ERROR|DONE|
+st_uninit_read|php_rc=0|aot_rc=0|DIFF|acc(php=NO/aot=NO)|te(php=NO/aot=NO)|bi(php=YES/aot=NO)|accname(php=/aot=)|Error: Typed static property STUn::$s must not be accessed before initialization|DONE|||aot=read=NULL|NO_ERROR|DONE|
+st_priv_read|php_rc=0|aot_rc=0|DIFF|acc(php=YES/aot=NO)|te(php=NO/aot=NO)|bi(php=NO/aot=NO)|accname(php=STPriv/aot=)|Error: Cannot access private property STPriv::$p|DONE|||aot=p=1|NO_ERROR|DONE|
+st_priv_write|php_rc=0|aot_rc=0|DIFF|acc(php=YES/aot=NO)|te(php=NO/aot=NO)|bi(php=NO/aot=NO)|accname(php=STPrivW/aot=)|Error: Cannot access private property STPrivW::$p|Error: Cannot access private property STPrivW::$p|DONE|||aot=NO_ERROR|p=5|NO_ERROR|DONE|
+st_inherit_priv_read|php_rc=0|aot_rc=0|DIFF|acc(php=YES/aot=YES)|te(php=NO/aot=NO)|bi(php=NO/aot=NO)|accname(php=STPaC/aot=STPa)|Error: Cannot access private property STPaC::$p|DONE|||aot=Error: Cannot access private property STPa::$p|DONE|
+st_inherit_type_bad|php_rc=0|aot_rc=0|DIFF|acc(php=NO/aot=NO)|te(php=YES/aot=NO)|bi(php=YES/aot=NO)|accname(php=/aot=)|TypeError: Cannot assign string to property STTb::$v of type int|Error: Typed static property STTb::$v must not be accessed before initialization|DONE|||aot=NO_ERROR|t=NULL v=NULL|NO_ERROR|DONE|
+st_child_write_alias|php_rc=0|aot_rc=0|DIFF|acc(php=NO/aot=NO)|te(php=NO/aot=NO)|bi(php=NO/aot=NO)|accname(php=/aot=)|NO_ERROR|via_parent=integer/8 via_child=integer/8|NO_ERROR|DONE|||aot=NO_ERROR|via_parent=NULL/NULL via_child=integer/8|NO_ERROR|DONE|
+ELAPSED=44s
+STATENTRY_DONE shapes=9 same=1 diff=8 protect_lost=5 compile_fail=0

@@ -1,0 +1,22 @@
+# opt001 §5.6 residual-shape mechanism sweep 2026-10-06 14:25:35 bin=1f15e4ce9b5c9cdaaef7cabf5efb9c76 optimizer=252234ef48cb47a42e6f39d1bc3e845b flags=--compile --no-debug-info --no-link --emit-ir
+f117_search_engine_inverted_tfidf_bm25|base|C1=0|C2=23|C6=0|C9=0|C4=0/0|C4b=6/6|C7=-/-|H=-|ir=1228|zig=54519
+f117_search_engine_inverted_tfidf_bm25|licm|C1=4|C2=25|C6=2|C9=0|C4=0/0|C4b=6/0|C7=22/51(hm=51,hl=51)|ir=1220|zig=54498
+f117_search_engine_inverted_tfidf_bm25|li5|C1=3|C2=32|C6=5|C9=0|C4=0/0|C4b=6/0|C7=13/32(hm=32,hl=32)|ir=1190|zig=51852
+f117_search_engine_inverted_tfidf_bm25|li5nc|C1=0|C2=27|C6=0|C9=0|C4=0/0|C4b=4/0|C7=16/35(hm=35,hl=35)|ir=1286|zig=53141
+f161_json_xml_csv_parsing|base|C1=0|C2=30|C6=0|C9=1|C4=0/0|C4b=5/5|C7=-/-|H=-|ir=1369|zig=48051
+f161_json_xml_csv_parsing|licm|C1=2|C2=32|C6=2|C9=1|C4=0/0|C4b=5/0|C7=24/33(hm=33,hl=33)|ir=1365|zig=48037
+f161_json_xml_csv_parsing|li5|C1=2|C2=32|C6=2|C9=1|C4=0/0|C4b=5/0|C7=20/26(hm=26,hl=26)|ir=1354|zig=47799
+f161_json_xml_csv_parsing|li5nc|C1=0|C2=30|C6=0|C9=0|C4=0/0|C4b=5/0|C7=21/27(hm=27,hl=27)|ir=1423|zig=47875
+f051_validator_rule_chain_batch|base|C1=0|C2=5|C6=0|C9=0|C4=0/0|C4b=1/1|C7=-/-|H=-|ir=959|zig=25339
+f051_validator_rule_chain_batch|licm|C1=0|C2=5|C6=0|C9=0|C4=0/0|C4b=1/0|C7=18/26(hm=26,hl=26)|ir=959|zig=25339
+f051_validator_rule_chain_batch|li5|C1=1|C2=6|C6=1|C9=0|C4=0/0|C4b=1/0|C7=18/26(hm=26,hl=26)|ir=946|zig=24822
+f051_validator_rule_chain_batch|li5nc|C1=0|C2=5|C6=0|C9=0|C4=0/0|C4b=1/0|C7=18/26(hm=26,hl=26)|ir=985|zig=25116
+f061_graph_dijkstra_bellmanford_floyd|base|C1=0|C2=23|C6=0|C9=0|C4=0/0|C4b=11/11|C7=-/-|H=-|ir=1070|zig=43099
+f061_graph_dijkstra_bellmanford_floyd|licm|C1=0|C2=23|C6=0|C9=0|C4=0/0|C4b=11/0|C7=39/44(hm=44,hl=44)|ir=1070|zig=43099
+f061_graph_dijkstra_bellmanford_floyd|li5|C1=0|C2=23|C6=0|C9=5|C4=0/0|C4b=12/0|C7=32/34(hm=34,hl=34)|ir=1056|zig=42432
+f061_graph_dijkstra_bellmanford_floyd|li5nc|C1=0|C2=47|C6=0|C9=0|C4=0/0|C4b=11/0|C7=32/34(hm=34,hl=34)|ir=1148|zig=39380
+f135_math_number_theory_crt_miller_rabin|base|C1=0|C2=40|C6=3|C9=1|C4=0/0|C4b=19/19|C7=-/-|H=-|ir=1426|zig=58374
+f135_math_number_theory_crt_miller_rabin|licm|C1=0|C2=39|C6=2|C9=0|C4=0/0|C4b=19/0|C7=13/29(hm=29,hl=29)|ir=1425|zig=58348
+f135_math_number_theory_crt_miller_rabin|li5|C1=2|C2=41|C6=4|C9=0|C4=0/0|C4b=19/0|C7=13/28(hm=28,hl=28)|ir=1412|zig=57820
+f135_math_number_theory_crt_miller_rabin|li5nc|C1=0|C2=37|C6=0|C9=0|C4=0/0|C4b=17/0|C7=13/28(hm=28,hl=28)|ir=1504|zig=57788
+RESID_SWEEP_DONE shapes=5

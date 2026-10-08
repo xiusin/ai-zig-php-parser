@@ -1,0 +1,25 @@
+# php_interpreter_md5=1f15e4ce9b5c9cdaaef7cabf5efb9c76
+# native_linker_md5=fbe6382a2e0904b6740d771b88c409c7
+# runtime_lib_template_md5=008b7b639f1069cb73e443064e115ed1
+# probe_md5=ba58ffdb9c8fe3118bcab8a581702b38
+# columns: shape|php|aot_rc|aot_stdout|debug_frame
+COMPILE rc=0 elapsed=5s tmpdir=.zigphp_aot_build_40149
+# generated_face
+# fallback_lines=2
+# make_ref_lines=1
+# initRef_lines=0
+# FB 109:    reg_1 = if (args.len > 0 and !args[0].isMissing() and args[0].isRef()) args[0].asRef() else &null_val;
+# FB 208:    reg_3 = if (args.len > 0 and !args[0].isMissing() and args[0].isRef()) args[0].asRef() else &null_val;
+ctrl_static|php=SHAPE=ctrl_static before=[1,2] ret=3 after=[1,2,99]||aot_rc=0|aot=SHAPE=ctrl_static before=[1,2] ret=3 after=[1,2,99]
+cuf_string|php=|Warning: RefStub::take(): Argument #1 ($a) must be passed by reference, value given in /Users/wangjianjun/products/parser/fuzzy_scripts_720/tmp/t004_stub_dynentry_tmp.php on line 46|SHAPE=cuf_string before=[1,2] ret=3 after=[1,2]||aot_rc=139|aot=
+cuf_array|php=|Warning: RefStub::takeP(): Argument #1 ($a) must be passed by reference, value given in /Users/wangjianjun/products/parser/fuzzy_scripts_720/tmp/t004_stub_dynentry_tmp.php on line 50|SHAPE=cuf_array before=[1,2] ret=3 after=[1,2]||aot_rc=139|aot=
+varfunc_str|php=SHAPE=varfunc_str before=[1,2] ret=3 after=[1,2,99]||aot_rc=139|aot=
+inst_dyn|php=SHAPE=inst_dyn before=[1,2] ret=3 after=[1,2,7]||aot_rc=139|aot=
+DEBUG_BUILD rc=0 elapsed=3s
+ctrl_static|debug_frames=
+cuf_string|debug_frames=runtime_lib.zig:2585:16: 0x103107b23 in asArray (main);main.zig:129:26: 0x1030c39d3 in RefStub::take (main);main.zig:1977:36: 0x103026b4b in aot_dispatch_static_method (main);
+cuf_array|debug_frames=runtime_lib.zig:2585:16: 0x100c07b23 in asArray (main);main.zig:228:26: 0x100bc2beb in RefStub::takeP (main);runtime_lib.zig:18544:42: 0x100b0fa2b in callMethod (main);
+varfunc_str|debug_frames=runtime_lib.zig:2585:16: 0x101047b23 in asArray (main);main.zig:129:26: 0x1010039d3 in RefStub::take (main);main.zig:1977:36: 0x100f66b4b in aot_dispatch_static_method (main);
+inst_dyn|debug_frames=runtime_lib.zig:2585:16: 0x104bb3b23 in asArray (main);main.zig:228:26: 0x104b6ebeb in RefStub::takeP (main);runtime_lib.zig:18544:42: 0x104abba2b in callMethod (main);
+ELAPSED=10s
+STUB_DONE

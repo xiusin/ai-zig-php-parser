@@ -1,0 +1,24 @@
+# opt001 §5.11-3 被 cfg_cleanup 丢弃块内 phi 计数 2026-10-06 18:17:32
+bin_md5=1f15e4ce9b5c9cdaaef7cabf5efb9c76
+optimizer=252234ef48cb47a42e6f39d1bc3e845b/6877
+native_linker=fbe6382a2e0904b6740d771b88c409c7/32797
+ir_generator=cb53c2da7d4fe2e1f62b728511f7c3ea
+analyzer=53803dd164a0ea00b76f0e0bb686a4e7 42b9658c89e30ae9e93914783c2d97e8
+level=default(无 --optimize)  轮=2  唯一变量=cfg_cleanup 开关  faces=red
+HEADER|face|shape|COUNT|dropped|label_only|phi_in_D|refuse_all|refuse_tramp|causeless|on_c1|funcs|unmatched|err|rc
+red|f016_hash_bloom_consistent|COUNT|41|13|2|14|3|0|2|21|0|OK|rc_on=0/rc_nc=0
+red|f061_graph_dijkstra_bellmanford_floyd|COUNT|46|19|0|44|9|0|0|8|0|OK|rc_on=0/rc_nc=0
+red|f124_container_orchestrator_pod_service_autoscale|COUNT|54|21|1|17|7|0|2|47|0|OK|rc_on=0/rc_nc=1
+FACE_DONE|red|shapes=3|noir=0|analyze_fail=0
+DROPPEDPHI_DONE faces=1 round=2
+face red: rows=3 align_or_parse_fail=0 | dropped>0 形=3 | refuse_tramp>0 形=3/3 | 仅 all 命中(tramp=0)形=0 | Σdropped=141 Σlabel_only=53 Σphi_in_D=3 Σrefuse_all=75 Σrefuse_tramp=19 Σcauseless=0 Σon_c1=4
+  top f061_graph_dijkstra_bellmanford_floyd                    tramp=9 all=44 dropped=46 phi_in_D=0 on_c1=0
+  top f124_container_orchestrator_pod_service_autoscale        tramp=7 all=17 dropped=54 phi_in_D=1 on_c1=2
+  top f016_hash_bloom_consistent                               tramp=3 all=14 dropped=41 phi_in_D=2 on_c1=2
+  noir red = 0
+RED_TRAMP_REFUSE_SHAPES = f016_hash_bloom_consistent f061_graph_dijkstra_bellmanford_floyd f124_container_orchestrator_pod_service_autoscale 
+RED_TRAMP_BLIND_SHAPES  = 
+RED_ALLONLY_SHAPES      = 
+RED_C1ZERO_BUT_TRAMP_HIT = f061_graph_dijkstra_bellmanford_floyd 
+CORPUS_WITH_TRAMP_REFUSE = 
+ELAPSED=0s

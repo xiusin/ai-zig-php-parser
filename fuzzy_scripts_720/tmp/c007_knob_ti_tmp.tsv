@@ -1,0 +1,21 @@
+# arm=ti flags=[--compile --no-debug-info --aot-enable-pass=typespec --aot-max-iterations=5] bin=1f15e4ce9b5c9cdaaef7cabf5efb9c76 linker=fbe6382a2e0904b6740d771b88c409c7/32797 optimizer=252234ef48cb47a42e6f39d1bc3e845b
+f016_hash_bloom_consistent|GEN_DRIFT|PASS|46766|7f41c13a9058420f9356f2cfa8a81592||
+f024_rbac_role_inheritance_policy|GEN_DRIFT|PASS|42704|f3c50d29ecc42f7eb1467bf580c14a9e||
+f025_coding_hamming_rle_lzw_crc|GEN_DRIFT|PASS|30710|a98b7624be902ff2b930d40b2579c7c8||
+f044_json_deepops_merge_diff|GEN_DRIFT|PASS|27849|0a9316a6ca18b7dbcbabaaca581774c6||
+f051_validator_rule_chain_batch|GEN_DRIFT|PASS|25308|8b52e411d23702dc2c718b303be2768d||
+f061_graph_dijkstra_bellmanford_floyd|GEN_DRIFT|PASS|43111|dc362b2f3042c39cc7543b38b1b3a05a||
+f072_type_inference_hindley_milner|GEN_DRIFT|PASS|37102|b98c8bd15fc492368c75dd0f6caaaf52||
+f104_game_engine_ecs_collision_render|GEN_DRIFT|PASS|48579|1677e5c5542eefb0d5dfda0a6654b1d5||
+f113_distributed_consistenthash_vectorclock_quorum|GEN_DRIFT|PASS|104077|2a82c337a476dcc3817579a84776e6f3||
+f117_search_engine_inverted_tfidf_bm25|GEN_DRIFT|PASS|54339|ac4647e79d6cccd0e33cc37737a65826||
+f124_container_orchestrator_pod_service_autoscale|GEN_DRIFT|PASS|112469|39e617e22525b9266bfb36a37058f31d||
+f134_event_sourcing_snapshot_cqrs_projection|GEN_DRIFT|PASS|77063|b85f7bf3c4fd8d2f3c9b7ef8b30ce7c1||
+f135_math_number_theory_crt_miller_rabin|GEN_DRIFT|PASS|58314|8b73859836eea8d8c0cc5cf01b77a22e||
+f152_closure_arrow_higher_order|GEN_DRIFT|PASS|46363|81da618d46ba6fe2fb175523d4d5c17e||
+f160_virtual_fs_path_traversal|GEN_DRIFT|PASS|37964|781562a88a3749539ad0da81a44357a5||
+f161_json_xml_csv_parsing|GEN_SAME|PASS|48051|94f5b0ca6d90b3d38315d45ddc3a9269||
+f171_state_machine_dfa|GEN_DRIFT|PASS|32060|bc7867973e9b75c5293677f25c7e417f||
+f176_specification_chain_rules|GEN_DRIFT|PASS|42067|6111d9ebd7c27f14098945bb81fdd645||
+f177_graph_traversal_dfs_bfs|GEN_DRIFT|PASS|49374|b01dc4cefb1bcbb9b59a39e7b8d4c0bd||
+KNOB_DONE arm=ti total=19 gen_same=1 gen_drift=18 pass=19 diff=0 runtime_fail=0 compile_fail=0

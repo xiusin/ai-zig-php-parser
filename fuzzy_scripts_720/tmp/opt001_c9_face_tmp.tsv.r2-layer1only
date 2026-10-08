@@ -1,0 +1,51 @@
+# opt001 §5.7 ending-B face sweep + default-档 li5 causal face 2026-10-06 15:19:27
+bin_md5=1f15e4ce9b5c9cdaaef7cabf5efb9c76
+optimizer=252234ef48cb47a42e6f39d1bc3e845b/6877
+native_linker=fbe6382a2e0904b6740d771b88c409c7/32797
+level=default(无 --optimize)  层1=--no-link 签名  层2=全编译输出面  唯一变量=licm/迭代5/cfg-cleanup
+LAYER1_HEADER|shape|arm|C1|C2|C6|C9|C4h|C4bh|C7|H|hm|hl|ir|zig
+f016_hash_bloom_consistent|li5|C1=0/2(d=2)|C2=0/2(d=2)|C6=0/2(d=2)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=15/H=36(hm=36,hl=36)|END_A_HIT|ir=1116|zig=45957
+f016_hash_bloom_consistent|li5nc|C1=0/0(d=0)|C2=0/0(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=16/H=37(hm=37,hl=37)|END_BLIND|ir=1201|zig=46574
+f024_rbac_role_inheritance_policy|li5|C1=0/1(d=1)|C2=2/1(d=-1)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=11/H=12(hm=12,hl=12)|END_A_HIT|ir=948|zig=42333
+f024_rbac_role_inheritance_policy|li5nc|C1=0/0(d=0)|C2=2/0(d=-2)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=11/H=12(hm=12,hl=12)|END_BLIND|ir=987|zig=42555
+f025_coding_hamming_rle_lzw_crc|li5|C1=0/1(d=1)|C2=21/22(d=1)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=35/H=43(hm=43,hl=43)|END_A_HIT|ir=1080|zig=30696
+f025_coding_hamming_rle_lzw_crc|li5nc|C1=0/0(d=0)|C2=21/21(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=35/H=43(hm=43,hl=43)|END_BLIND|ir=1147|zig=30727
+f044_json_deepops_merge_diff|li5|C1=0/1(d=1)|C2=21/21(d=0)|C6=0/1(d=1)|C9=3/1(d=-2)|C4h=0|C4bh=0|C7=41/H=42(hm=42,hl=42)|END_A_HIT|ir=1220|zig=27947
+f044_json_deepops_merge_diff|li5nc|C1=0/0(d=0)|C2=21/20(d=-1)|C6=0/0(d=0)|C9=3/0(d=-3)|C4h=0|C4bh=0|C7=41/H=42(hm=42,hl=42)|END_BLIND|ir=1275|zig=27937
+f051_validator_rule_chain_batch|li5|C1=0/1(d=1)|C2=5/6(d=1)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=18/H=26(hm=26,hl=26)|END_A_HIT|ir=946|zig=24822
+f051_validator_rule_chain_batch|li5nc|C1=0/0(d=0)|C2=5/5(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=18/H=26(hm=26,hl=26)|END_BLIND|ir=985|zig=25116
+f061_graph_dijkstra_bellmanford_floyd|li5|C1=0/0(d=0)|C2=23/23(d=0)|C6=0/0(d=0)|C9=0/5(d=5)|C4h=0|C4bh=0|C7=32/H=34(hm=34,hl=34)|END_B_HIT|ir=1056|zig=42432
+f061_graph_dijkstra_bellmanford_floyd|li5nc|C1=0/0(d=0)|C2=23/47(d=24)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=32/H=34(hm=34,hl=34)|END_BLIND|ir=1148|zig=39380
+f072_type_inference_hindley_milner|li5|C1=0/0(d=0)|C2=5/5(d=0)|C6=0/0(d=0)|C9=0/2(d=2)|C4h=0|C4bh=0|C7=9/H=18(hm=18,hl=18)|END_B_HIT|ir=1281|zig=37013
+f072_type_inference_hindley_milner|li5nc|C1=0/0(d=0)|C2=5/5(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=9/H=18(hm=18,hl=18)|END_BLIND|ir=1309|zig=37025
+f104_game_engine_ecs_collision_render|li5|C1=0/1(d=1)|C2=20/20(d=0)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=40/H=43(hm=43,hl=43)|END_A_HIT|ir=1249|zig=47497
+f104_game_engine_ecs_collision_render|li5nc|C1=0/0(d=0)|C2=20/19(d=-1)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=41/H=44(hm=44,hl=44)|END_BLIND|ir=1307|zig=48525
+f113_distributed_consistenthash_vectorclock_quorum|li5|C1=0/4(d=4)|C2=11/10(d=-1)|C6=0/4(d=4)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=27/H=52(hm=52,hl=52)|END_A_HIT|ir=1511|zig=102042
+f113_distributed_consistenthash_vectorclock_quorum|li5nc|C1=0/0(d=0)|C2=11/6(d=-5)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=28/H=53(hm=53,hl=53)|END_BLIND|ir=1616|zig=103546
+f117_search_engine_inverted_tfidf_bm25|li5|C1=0/3(d=3)|C2=23/32(d=9)|C6=0/5(d=5)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=13/H=32(hm=32,hl=32)|END_A_HIT|ir=1190|zig=51852
+f117_search_engine_inverted_tfidf_bm25|li5nc|C1=0/0(d=0)|C2=23/27(d=4)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=16/H=35(hm=35,hl=35)|END_BLIND|ir=1286|zig=53141
+f124_container_orchestrator_pod_service_autoscale|li5nc|SIG_COMPILE_FAIL|rc=1|error: CompilationFailed 
+f124_container_orchestrator_pod_service_autoscale|li5|C1=0/2(d=2)|C2=56/49(d=-7)|C6=0/2(d=2)|C9=3/4(d=1)|C4h=0|C4bh=0|C7=17/H=48(hm=48,hl=48)|END_A+B_HIT|ir=2081|zig=110732
+f134_event_sourcing_snapshot_cqrs_projection|li5nc|SIG_COMPILE_FAIL|rc=1|error: CompilationFailed 
+f134_event_sourcing_snapshot_cqrs_projection|li5|C1=0/0(d=0)|C2=20/26(d=6)|C6=0/6(d=6)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=18/H=29(hm=29,hl=29)|END_A_HIT|ir=1607|zig=75366
+f135_math_number_theory_crt_miller_rabin|li5|C1=0/2(d=2)|C2=40/41(d=1)|C6=3/4(d=1)|C9=1/0(d=-1)|C4h=0|C4bh=0|C7=13/H=28(hm=28,hl=28)|END_A_HIT|ir=1412|zig=57820
+f135_math_number_theory_crt_miller_rabin|li5nc|C1=0/0(d=0)|C2=40/37(d=-3)|C6=3/0(d=-3)|C9=1/0(d=-1)|C4h=0|C4bh=0|C7=13/H=28(hm=28,hl=28)|END_BLIND|ir=1504|zig=57788
+f152_closure_arrow_higher_order|li5|C1=0/0(d=0)|C2=67/67(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=0/H=0(hm=0,hl=0)|END_BLIND|ir=1174|zig=46372
+f152_closure_arrow_higher_order|li5nc|C1=0/0(d=0)|C2=67/67(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=0/H=0(hm=0,hl=0)|END_BLIND|ir=1182|zig=46372
+f160_virtual_fs_path_traversal|li5|C1=0/0(d=0)|C2=28/28(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=11/H=22(hm=22,hl=22)|END_BLIND|ir=1374|zig=38115
+f160_virtual_fs_path_traversal|li5nc|C1=0/0(d=0)|C2=28/28(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=11/H=22(hm=22,hl=22)|END_BLIND|ir=1402|zig=38117
+f161_json_xml_csv_parsing|li5|C1=0/2(d=2)|C2=30/32(d=2)|C6=0/2(d=2)|C9=1/1(d=0)|C4h=0|C4bh=0|C7=20/H=26(hm=26,hl=26)|END_A_HIT|ir=1354|zig=47799
+f161_json_xml_csv_parsing|li5nc|C1=0/0(d=0)|C2=30/30(d=0)|C6=0/0(d=0)|C9=1/0(d=-1)|C4h=0|C4bh=0|C7=21/H=27(hm=27,hl=27)|END_BLIND|ir=1423|zig=47875
+f171_state_machine_dfa|li5|C1=0/3(d=3)|C2=9/12(d=3)|C6=0/3(d=3)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=15/H=20(hm=20,hl=20)|END_A_HIT|ir=937|zig=30716
+f171_state_machine_dfa|li5nc|C1=0/0(d=0)|C2=9/9(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=17/H=22(hm=22,hl=22)|END_BLIND|ir=978|zig=31810
+f176_specification_chain_rules|li5|C1=0/7(d=7)|C2=5/12(d=7)|C6=0/7(d=7)|C9=0/1(d=1)|C4h=0|C4bh=0|C7=28/H=28(hm=28,hl=28)|END_A+B_HIT|ir=937|zig=39698
+f176_specification_chain_rules|li5nc|C1=0/0(d=0)|C2=5/5(d=0)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=28/H=28(hm=28,hl=28)|END_BLIND|ir=1002|zig=39950
+f177_graph_traversal_dfs_bfs|li5|C1=0/1(d=1)|C2=14/11(d=-3)|C6=0/1(d=1)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=13/H=19(hm=19,hl=19)|END_A_HIT|ir=1323|zig=49523
+f177_graph_traversal_dfs_bfs|li5nc|C1=0/0(d=0)|C2=14/12(d=-2)|C6=0/0(d=0)|C9=0/0(d=0)|C4h=0|C4bh=0|C7=14/H=20(hm=20,hl=20)|END_BLIND|ir=1409|zig=49676
+LAYER1_DONE total=19 arm_compile_fail=2 arm_rows=36
+LAYER1_FACE B_HIT_only=2 A_or_AB=15
+LAYER2_DONE total=0
+arm li5: PASS=0 DIFF=0 RUNTIME_FAIL=0 TIMEOUT_10S=0 COMPILE_FAIL=0
+arm li5nc: PASS=0 DIFF=0 RUNTIME_FAIL=0 TIMEOUT_10S=0 COMPILE_FAIL=0
+causal_eff: EFFECTIVE=0 NO_EFFECT=0 NO_TEMP=0
+LAYER2_GREEN_BY_CLOSING_CFG=0

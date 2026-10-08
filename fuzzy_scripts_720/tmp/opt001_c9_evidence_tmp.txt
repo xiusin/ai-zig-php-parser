@@ -1,0 +1,72 @@
+===== f072_type_inference_hindley_milner arm=li5 签名证据（C9 = 结局 B 半拷贝站点） =====
+C1=0 C4=0 C4h=0 C4b=1 C4bh=0 C7=9 H=18(base_id_matched=18 loop_found=18)
+C2=5 C6=0 C9=2
+  [C9 reg_30 空臂=then 标记行 :9846]
+  [C9 reg_208 空臂=then 标记行 :22278]
+  C2 regs: reg_0 reg_3 reg_5 reg_7
+  [C4b entry->foreach_cond_0] .{ .id = 13, .type_ = .{ .php_value = void } } = global.get $literals
+  [C7 ternary_then_5=>entry->foreach_cond_0] .{ .id = 25, .type_ = .{ .php_string = void } } = const.string $7
+  [C7 ternary_then_5=>entry->foreach_cond_0] .{ .id = 26, .type_ = .{ .php_value = void } } = box .{ .id = 25, .type_ = .{ .php_string = void } } from .{ .php_string = void }
+  [C7 ternary_then_23=>foreach_cleanup_16->foreach_cond_18] .{ .id = 190, .type_ = .{ .php_string = void } } = const.string $133
+  [C7 ternary_else_24=>foreach_cleanup_16->foreach_cond_18] .{ .id = 192, .type_ = .{ .php_string = void } } = const.string $134
+  [C7 ternary_else_24=>foreach_cleanup_16->foreach_cond_18] .{ .id = 193, .type_ = .{ .php_string = void } } = const.string $135
+  [C7 ternary_else_24=>foreach_cleanup_16->foreach_cond_18] .{ .id = 195, .type_ = .{ .php_string = void } } = const.string $165
+  [C7 ternary_else_24=>foreach_cleanup_16->foreach_cond_18] .{ .id = 196, .type_ = .{ .bool = void } } = const.bool false
+  [C7 ternary_else_24=>foreach_cleanup_16->foreach_cond_18] .{ .id = 205, .type_ = .{ .php_string = void } } = const.string $139
+  [C7 ternary_then_23=>foreach_cleanup_16->foreach_cond_18] .{ .id = 191, .type_ = .{ .php_value = void } } = box .{ .id = 190, .type_ = .{ .php_string = void } } from .{ .php_string = void }
+===== f124_container_orchestrator_pod_service_autoscale arm=li5 签名证据（C9 = 结局 B 半拷贝站点） =====
+C1=2 C4=0 C4h=0 C4b=10 C4bh=0 C7=17 H=48(base_id_matched=48 loop_found=48)
+C2=49 C6=2 C9=4
+  [C9 reg_90 空臂=then 标记行 :13633]
+  [C9 reg_79 空臂=then 标记行 :13636]
+  [C9 reg_74 空臂=then 标记行 :13639]
+  [C9 reg_68 空臂=then 标记行 :13642]
+  C6 regs: reg_301 reg_60
+  C2 regs: reg_0 reg_1 reg_11 reg_14 reg_3 reg_301 reg_5 reg_60
+  [C7 if_then_5=>entry->foreach_cond_0] .{ .id = 17, .type_ = .{ .php_string = void } } = const.string $74
+  [C7 if_merge_8=>entry->foreach_cond_0] .{ .id = 29, .type_ = .{ .php_string = void } } = const.string $75
+  [C7 if_merge_6=>entry->foreach_cond_0] .{ .id = 23, .type_ = .{ .i64 = void } } = const.i64 5
+  [C7 foreach_body_1=>entry->foreach_cond_0] .{ .id = 15, .type_ = .{ .php_string = void } } = const.string $36
+  [C4b entry->foreach_cond_0] .{ .id = 5, .type_ = .{ .php_value = void } } = property.get .{ .id = 0, .type_ = .{ .php_value = void } }.nodes
+  [C4b foreach_body_1->foreach_cond_5] .{ .id = 14, .type_ = .{ .php_value = void } } = property.get .{ .id = 0, .type_ = .{ .php_value = void } }.pods
+  [C7 if_then_21=>foreach_body_1->foreach_cond_5] .{ .id = 53, .type_ = .{ .php_value = void } } = cast .{ .id = 9, .type_ = .{ .php_value = void } } from .{ .php_value = void } to .{ .php_value = void }
+  [C4b if_merge_11->foreach_cond_12] .{ .id = 28, .type_ = .{ .php_value = void } } = property.get .{ .id = 9, .type_ = .{ .php_value = void } }.selector
+  [C4b entry->foreach_cond_0] .{ .id = 3, .type_ = .{ .php_value = void } } = property.get .{ .id = 0, .type_ = .{ .php_value = void } }.services
+  [C7 if_then_19=>entry->foreach_cond_0] .{ .id = 48, .type_ = .{ .bool = void } } = const.bool false
+  [C7 foreach_body_13=>entry->foreach_cond_0] .{ .id = 42, .type_ = .{ .php_value = void } } = const.null
+  [C1 if_merge_6] .{ .id = 60, .type_ = .{ .php_value = void } } = phi [.{ .id = 57, .type_ = .{ .php_value = void } }, if_merge_6], [.{ .id = 59, .type_ = .{ .php_value = void } }, if_merge_6]
+===== f176_specification_chain_rules arm=li5 签名证据（C9 = 结局 B 半拷贝站点） =====
+C1=7 C4=0 C4h=0 C4b=1 C4bh=0 C7=28 H=28(base_id_matched=28 loop_found=28)
+C2=12 C6=7 C9=1
+  [C9 reg_268 空臂=then 标记行 :29628]
+  C6 regs: reg_114 reg_126 reg_138 reg_150 reg_183 reg_194 reg_314
+  C2 regs: reg_0 reg_114 reg_126 reg_138 reg_150 reg_183 reg_194 reg_314
+  [C7 foreach_body_1=>entry->foreach_cond_0] .{ .id = 16, .type_ = .{ .php_string = void } } = const.string $60
+  [C7 foreach_body_1=>entry->foreach_cond_0] .{ .id = 18, .type_ = .{ .php_value = void } } = cast .{ .id = 3, .type_ = .{ .php_value = void } } from .{ .php_value = void } to .{ .php_value = void }
+  [C7 if_then_5=>entry->foreach_cond_0] .{ .id = 21, .type_ = .{ .php_string = void } } = const.string $59
+  [C7 if_then_5=>entry->foreach_cond_0] .{ .id = 25, .type_ = .{ .php_string = void } } = const.string $61
+  [C1 foreach_body_1] .{ .id = 114, .type_ = .{ .php_value = void } } = phi [.{ .id = 147, .type_ = .{ .php_value = void } }, foreach_body_1], [.{ .id = 149, .type_ = .{ .php_value = void } }, foreach_body_1]
+  [C1 foreach_body_1] .{ .id = 126, .type_ = .{ .php_value = void } } = phi [.{ .id = 147, .type_ = .{ .php_value = void } }, foreach_body_1], [.{ .id = 149, .type_ = .{ .php_value = void } }, foreach_body_1]
+  [C1 foreach_body_1] .{ .id = 138, .type_ = .{ .php_value = void } } = phi [.{ .id = 147, .type_ = .{ .php_value = void } }, foreach_body_1], [.{ .id = 149, .type_ = .{ .php_value = void } }, foreach_body_1]
+  [C1 foreach_body_1] .{ .id = 150, .type_ = .{ .php_value = void } } = phi [.{ .id = 147, .type_ = .{ .php_value = void } }, foreach_body_1], [.{ .id = 149, .type_ = .{ .php_value = void } }, foreach_body_1]
+  [C1 foreach_body_18] .{ .id = 183, .type_ = .{ .php_value = void } } = phi [.{ .id = 147, .type_ = .{ .php_value = void } }, foreach_body_18], [.{ .id = 149, .type_ = .{ .php_value = void } }, foreach_body_18]
+  [C1 foreach_body_18] .{ .id = 194, .type_ = .{ .php_value = void } } = phi [.{ .id = 147, .type_ = .{ .php_value = void } }, foreach_body_18], [.{ .id = 149, .type_ = .{ .php_value = void } }, foreach_body_18]
+  [C1 foreach_body_37] .{ .id = 314, .type_ = .{ .php_value = void } } = phi [.{ .id = 311, .type_ = .{ .php_value = void } }, foreach_body_37], [.{ .id = 313, .type_ = .{ .php_value = void } }, foreach_body_37]
+  [C4b entry->foreach_cond_0] .{ .id = 92, .type_ = .{ .php_value = void } } = global.get $users
+===== f134_event_sourcing_snapshot_cqrs_projection arm=li5 签名证据（C9 = 结局 B 半拷贝站点） =====
+C1=0 C4=0 C4h=0 C4b=23 C4bh=0 C7=18 H=29(base_id_matched=29 loop_found=29)
+C2=26 C6=6 C9=0
+  C6 regs: reg_129 reg_151 reg_35 reg_52 reg_77 reg_99
+  C2 regs: reg_0 reg_11 reg_129 reg_151 reg_3 reg_35 reg_5 reg_52
+  [C7 foreach_cleanup_3=>entry->foreach_cond_0] .{ .id = 22, .type_ = .{ .php_string = void } } = const.string $89
+  [C7 coalesce_merge_18=>entry->foreach_cond_0] .{ .id = 60, .type_ = .{ .php_value = void } } = const.string $105
+  [C7 coalesce_merge_20=>entry->foreach_cond_0] .{ .id = 78, .type_ = .{ .i64 = void } } = const.i64 1
+  [C7 coalesce_merge_20=>entry->foreach_cond_0] .{ .id = 82, .type_ = .{ .php_value = void } } = const.string $106
+  [C7 coalesce_merge_20=>entry->foreach_cond_0] .{ .id = 83, .type_ = .{ .php_value = void } } = const.null
+  [C7 coalesce_merge_22=>entry->foreach_cond_0] .{ .id = 110, .type_ = .{ .php_string = void } } = const.string $76
+  [C7 foreach_cleanup_3=>entry->foreach_cond_0] .{ .id = 138, .type_ = .{ .php_string = void } } = const.string $50
+  [C7 foreach_cleanup_3=>entry->foreach_cond_0] .{ .id = 146, .type_ = .{ .php_string = void } } = const.string $92
+  [C7 coalesce_rhs_25=>entry->foreach_cond_0] .{ .id = 150, .type_ = .{ .i64 = void } } = const.i64 0
+  [C7 foreach_cleanup_3=>entry->foreach_cond_0] .{ .id = 116, .type_ = .{ .php_string = void } } = const.string $79
+  [C7 foreach_cleanup_3=>entry->foreach_cond_0] .{ .id = 124, .type_ = .{ .php_string = void } } = const.string $86
+  [C7 foreach_cleanup_3=>entry->foreach_cond_0] .{ .id = 20, .type_ = .{ .php_string = void } } = const.string $81

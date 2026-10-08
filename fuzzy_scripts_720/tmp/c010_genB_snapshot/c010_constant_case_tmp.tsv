@@ -1,0 +1,12 @@
+# compiler_md5=b416d3fbceed199b186676619043bcc5
+# runtime_lib_template_md5=5fdae1ab0cffde3eaba477a52a9713b4
+# columns: shape|php_rc|aot_rc|verdict|role|php_norm||aot_norm
+k_const_true_lower|php_rc=0|aot_rc=0|SAME|red_expected|a=true|||aot=a=true|
+k_const_false_lower|php_rc=0|aot_rc=0|SAME|red_expected|b=false|||aot=b=false|
+k_const_null_title|php_rc=0|aot_rc=0|SAME|red_expected|c=NULL|||aot=c=NULL|
+k_const_true_upper|php_rc=0|aot_rc=0|SAME|guard_same|d=true|||aot=d=true|
+k_const_nonkw_lower|php_rc=255|aot_rc=255|SAME|guard_same|e=Fatal error: Uncaught Error: Undefined constant "php_int_max"|||aot=e=Fatal error: Uncaught Error: Undefined constant "php_int_max"|
+k_const_user_exact|php_rc=0|aot_rc=0|SAME|guard_same|f=7|||aot=f=7|
+k_const_user_wrong|php_rc=255|aot_rc=255|SAME|guard_same|g=Fatal error: Uncaught Error: Undefined constant "ggc2"|||aot=g=Fatal error: Uncaught Error: Undefined constant "ggc2"|
+ELAPSED=23s
+C010G_DONE shapes=7 same=7 diff=0 red_confirmed=0 guard_same=4 guard_red=0 compile_fail=0

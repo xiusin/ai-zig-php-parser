@@ -1,0 +1,6 @@
+# opt001 cfg-cleanup discriminant 2026-10-06 13:13:36
+bin_md5=1f15e4ce9b5c9cdaaef7cabf5efb9c76
+optimizer=252234ef48cb47a42e6f39d1bc3e845b/6877
+native_linker=fbe6382a2e0904b6740d771b88c409c7/32797
+flags=--compile --no-debug-info --optimize=release-fast --aot-disable-pass=cfg-cleanup
+control=fuzzy_scripts_720/tmp/c007_rf_face_tmp.tsv

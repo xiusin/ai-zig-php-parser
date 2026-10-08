@@ -1,0 +1,69 @@
+f004_oop_deep_inheritance_magic|SKIP|EXCLUDED||||php_exit=255
+f006_oop_observer_event_dispatcher|GEN_DRIFT|PASS|9713|0b3d2c6380297c019b6ea848f870d288|-OReleaseFast|
+f007_string_encoding_crypto_hash|GEN_DRIFT|PASS|15288|df2ae3e9bb17ea40e31f99793e252d2c|-OReleaseFast|
+f009_oop_decorator_chain_command|GEN_DRIFT|PASS|13693|2c543ee562d2547f062b01e52a3df796|-OReleaseFast|
+f010_oop_singleton_registry_di|GEN_DRIFT|PASS|16024|c1fc5530625e7d40030788536a73bad1|-OReleaseFast|
+f012_json_tree_recursive_traverse|GEN_DRIFT|PASS|22426|d4a364c00e9acdd4868b8b552b5cc1b0|-OReleaseFast|
+f016_hash_bloom_consistent|GEN_DRIFT|DIFF|45941|5fdea94d874463f5ee30c97b442898ce|-OReleaseFast|32c32~< Distribution: {"ServerA":8}~---~> Distribution: {"ServerA":1}~43c43~< Distribution: {"ServerA":8}~---~> Distribution: {"ServerA":1}~
+f024_rbac_role_inheritance_policy|GEN_DRIFT|DIFF|42333|9b8840bd17dedc309123b8d6c0c813b9|-OReleaseFast|4,23c4,23~< Alice (admin)/article:YES     YES     YES     YES~< Alice (admin)/comment:YES     YES     YES     YES~< Alice (admin)/user: YES     YES     YES     YES~< Alice (admin)/system:YES     YES     YES     YES~< Bob (editor)/article:YES     YES     YES     no~< Bob (editor)/comment:YES     YES     no      YES~< Bob (editor)/user:  no      no      no      no~< Bob (editor)/system:no      no   
+f025_coding_hamming_rle_lzw_crc|GEN_DRIFT|DIFF|30696|c751306a66ac9f86641f7a015f5c85a8|-OReleaseFast|26c26~< Binary: 11111111~---~> Binary:~30c30~< Binary → Decimal: 255~---~> Binary → Decimal: 0~
+f026_linkedlist_stack_queue_deque|GEN_DRIFT|PASS|49506|04ff516d9063f273d6e72d377aaf891e|-OReleaseFast|
+f027_number_theory_primes_modular|GEN_DRIFT|PASS|29502|5facfcab85e78d8dd2767bc1dd0e909f|-OReleaseFast|
+f028_dp_knapsack_lcs_lis|GEN_DRIFT|PASS|24605|12866e060fe66e52fa5f392224fb9902|-OReleaseFast|
+f031_builder_fluent_immutable|GEN_DRIFT|PASS|5812|7fe9b8c113bba265996f6c7c67409c09|-OReleaseFast|
+f032_chain_responsibility_middleware|GEN_DRIFT|PASS|6557|f30e03e68df75c8309689229e846ecee|-OReleaseFast|
+f033_state_pattern_order_machine|GEN_DRIFT|PASS|16811|a185c9f14f97b1e46c3aa124fc5abcf9|-OReleaseFast|
+f034_template_method_pipeline|GEN_DRIFT|PASS|5662|3538de59376867a149c9431db8c1c091|-OReleaseFast|
+f036_strategy_dynamic_pricing|GEN_DRIFT|PASS|23961|4c9e82a547ef3da240d9700a245564e9|-OReleaseFast|
+f037_adapter_unified_cache|GEN_DRIFT|PASS|16455|4d27f18b00dfbf5257051254e69f6a78|-OReleaseFast|
+f038_composite_filesystem_tree|GEN_DRIFT|PASS|16892|877d046a725eaa99d7da78582af4d2f2|-OReleaseFast|
+f039_bridge_shape_renderer|GEN_DRIFT|PASS|7464|03637b79306203664711d12bf13377e5|-OReleaseFast|
+f040_flyweight_forest_pool|GEN_DRIFT|PASS|5595|4766decfc3b55191f384db46296774f4|-OReleaseFast|
+f042_array_functions_full|GEN_DRIFT|PASS|29338|4ce10b88a2c2680475772870bfbac3b3|-OReleaseFast|
+f043_math_functions_full|GEN_DRIFT|PASS|21449|c7f90e5c7fdc9718fcc1014747c27176|-OReleaseFast|
+f044_json_deepops_merge_diff|GEN_DRIFT|DIFF|27731|521abbbaae2ac22c4a36eb5779ea74d2|-OReleaseFast|23c23~< Invalid data errors: Missing required field: age; Field 'email': does not match pattern /^[^@]+@[^@]+$/~---~> Invalid data errors: Missing required field: age~
+f045_datetime_calendar_format|GEN_DRIFT|PASS|14593|731dd67ef0adfa88479d7f9d0737d03a|-OReleaseFast|
+f047_closures_curry_compose|GEN_DRIFT|PASS|37531|5ef8cdd72b0391ca2b4ca0f101f7c299|-OReleaseFast|
+f048_match_pattern_dispatch|GEN_DRIFT|PASS|21594|2d504d940d4f08f896338575039e86eb|-OReleaseFast|
+f051_validator_rule_chain_batch|GEN_DRIFT|DIFF|24791|3d67e0bdc5e999d1d733eff1836cb230|-OReleaseFast|15,27c15,27~< email('test@test.com'): true [OK]~< email('bad'): false [OK]~< url('https://x.com'): true [OK]~< url('not-url'): false [OK]~< uuid('550e8400-e29b-41d4-a716-446655440000'): true [OK]~< uuid('not-uuid'): false [OK]~< alpha('HelloWorld'): true [OK]~< alpha('Hello123'): false [OK]~< alnum('Hello123'): true [OK]~
+f056_crdt_gcounter_lww_orset|GEN_DRIFT|PASS|39938|b449943b325229ec5333a7e5b41f3702|-OReleaseFast|
+f057_workflow_engine_rollback|GEN_DRIFT|PASS|19360|33782a9657983d033cee3d150335a1e6|-OReleaseFast|
+f061_graph_dijkstra_bellmanford_floyd|GEN_DRIFT|DIFF|42379|7fc8bf1a2bc4250cef97d0e84f166772|-OReleaseFast|16,20c16,20~< A	0	3	2	8	10~< B	3	0	1	5	7~< C	2	1	0	6	8~< D	8	5	6	0	2~< E	10	7	8	2	0~---~> A		3	2	8	10~> B	3	2	1	5	7~> C	2	1	2	6	8~
+f065_crypto_rc4_sha1_base64_crc|GEN_DRIFT|PASS|25198|7bf80fbe1d3090743f63bdd95975769f|-OReleaseFast|
+f066_hamming_code_parity_checksum|GEN_DRIFT|PASS|20146|f84e0672fffa8873fe9e3b74dcff2bde|-OReleaseFast|
+f067_json_parser_schema_path_diff|GEN_DRIFT|PASS|46970|2abc97453c5162661765c1364da76539|-OReleaseFast|
+f067_min_repro|GEN_DRIFT|PASS|6702|624273228d4d191860add32b2941a845|-OReleaseFast|
+f070_event_sourcing_cqrs_snapshot|GEN_DRIFT|PASS|27243|932c14b8ce98284585608aa77b687339|-OReleaseFast|
+f072_type_inference_hindley_milner|GEN_DRIFT|DIFF|37013|824eb4e190413e59a963dd8c351f15d2|-OReleaseFast|8c8~< array → array~---~> NULL → array~25c25~< [] → array~---~> [1, 'two', 3.0] → array~
+f080_db_transaction_mvcc_deadlock|GEN_DRIFT|PASS|40884|873c1c3d9820db41b2b8e622bbcc0c76|-OReleaseFast|
+f081_bplustree_index_range_query|GEN_DRIFT|PASS|17636|5d13a018ca6c4bf62055b70e67f57633|-OReleaseFast|
+f085_geo_rtree_knn_geocoder|GEN_DRIFT|PASS|47359|3343d12e9348dcf79b3937283fd5358b|-OReleaseFast|
+f087_rbac_abac_policy_inheritance|GEN_DRIFT|PASS|29895|a01716f97bd6ef3208bf305428edf8eb|-OReleaseFast|
+f090_promise_future_async_concurrent|GEN_DRIFT|PASS|30236|93c9c0db2e6dea193819e31d6d857fff|-OReleaseFast|
+f095_compiler_opt_constfold_dce_cse|GEN_DRIFT|PASS|58824|8f240085a1e2d6eb26c51f39fdac6f8f|-OReleaseFast|
+f097_search_engine_inverted_index_tfidf|GEN_DRIFT|PASS|45335|0b2f2f7fbe637e80c2c2ccb6a3bb187f|-OReleaseFast|
+f102_memory_gc_marksweep_refcount_gen|GEN_DRIFT|PASS|41674|26e387f8f186c2a69a797db015f86457|-OReleaseFast|
+f104_game_engine_ecs_collision_render|GEN_DRIFT|DIFF|47497|aa57da47005920a1bb2fe2fe4a7fae30|-OReleaseFast|59,61c59,61~< Entity 1: pos=(355,300) hp=100/100 sprite=Player~< Entity 3: pos=(396,174.5) hp=30/30 sprite=Enemy~< Entity 4: pos=(300,400) sprite=Wall~---~> Entity 1: pos=(355,300) hp=100/100 sprite=~> Entity 3: pos=(396,174.5) hp=30/30 sprite=~> Entity 4: pos=(300,400) sprite=~
+f105_db_index_btree_hash_queryplan|GEN_DRIFT|PASS|39993|0d287903c1a70682c582e2e8da1bfc19|-OReleaseFast|
+f110_os_sim_process_memory_filesystem|GEN_DRIFT|PASS|81951|44575f73b75c933450f19a1e8d55289b|-OReleaseFast|
+f113_distributed_consistenthash_vectorclock_quorum|GEN_DRIFT|DIFF|101965|b044d5c69d24c9fbdb328685a6a055e8|-OReleaseFast|18c18~< vc1 vs vc2: concurrent~---~> vc1 vs vc2: equal~20,21c20,21~< vc1 vs merged: before~< vc2 vs merged: before~---~> vc1 vs merged: equal~> vc2 vs merged: equal~
+f117_search_engine_inverted_tfidf_bm25|GEN_DRIFT|DIFF|51665|0cf28f2d0bd444ec25f47d523229a710|-OReleaseFast|17,19c17,19~< Doc 2: score=4.6740 - "A quick brown dog outruns the quick fox"~< Doc 1: score=2.9808 - "The quick brown fox jumps over the lazy dog"~< Doc 5: score=2.9808 - "Quick thinking saves the day for the fox"~---~> Doc 1: score=1.2877 - "The quick brown fox jumps over the lazy dog"~> Doc 2: score=1.2877 - "A quick brown dog outruns the quick fox"~> Doc 5: score=1.2877 - "Quick thinking saves
+f119_logging_structured_levels_rotation|GEN_DRIFT|PASS|44732|42eb362983fc0b8e263fe67f412dd29f|-OReleaseFast|
+f124_container_orchestrator_pod_service_autoscale|GEN_DRIFT|DIFF|110591|33b2521ede03989461a18e22f8d6c85b|-OReleaseFast|18,20c18,20~< web-0: healthy~< web-1: healthy~< web-2: healthy~---~> web-0:~> web-1:~> web-2:~23,25c23,25~< web-0: restarted~
+f134_event_sourcing_snapshot_cqrs_projection|GEN_DRIFT|DIFF|75296|1c80d2807eadac3e4433e9bf53409ff2|-OReleaseFast|36c36~< paid: 3~---~> paid: 1~40c40~< customer-alice: 2~---~> customer-alice: 1~
+f135_math_number_theory_crt_miller_rabin|GEN_DRIFT|DIFF|57820|9bbafbdaa5ecb84b43601738c9359b28|-OReleaseFast|19,20c19,20~< ✓✓✓✓✓✓✓✓✓✓ primes~< ✓✓✓✓✓✓✓✓✓✓ composites~---~> primes~> composites~
+f151_type_system_generics_variance|GEN_DRIFT|PASS|26364|6733fc1d8177e6a58c61481134be9c46|-OReleaseFast|
+f152_closure_arrow_higher_order|GEN_DRIFT|RUNTIME_FAIL|46785|48c9e996bc78873172d694a260179352|-OReleaseFast|exit=139   memo(5) = 25 (calls: 2)  --- Partial Application --- 
+f160_virtual_fs_path_traversal|GEN_DRIFT|RUNTIME_FAIL|37958|6d6ee10cec6be7e078c69caa6979fbe5|-OReleaseFast|exit=255 Stack trace: #0 {main}   thrown in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f160_virtual_fs_path_traversal.php on line 101 
+f161_json_xml_csv_parsing|GEN_DRIFT|DIFF|47799|064f30153b1c436b63c5159c7aa92d35|-OReleaseFast|36,37c36~< Beijing: Alice, Charlie~< Shanghai: Bob, Diana~---~> 0: Alice, Bob, Charlie, Diana~40,41c39,40~< Team A,95~< Team B,87~---~> ,~
+f163_event_driven_dispatch_bus|GEN_DRIFT|PASS|27448|d5befab24a363a1945618aad9cd783f6|-OReleaseFast|
+f164_plugin_hook_system|GEN_DRIFT|PASS|20276|2c17d68676177801073a80a938fe9898|-OReleaseFast|
+f171_state_machine_dfa|GEN_DRIFT|DIFF|30644|50953a06dbb274a7c8f534bbfbbd7367|-OReleaseFast|18,27c18,27~< 'ab': ACCEPT~< 'aab': ACCEPT~< 'bab': ACCEPT~< 'baab': ACCEPT~< 'aabb': REJECT~< 'abab': ACCEPT~< 'aaa': REJECT~< 'bba': REJECT~< 'ababab': ACCEPT~
+f173_concurrency_primitives_sim|GEN_DRIFT|PASS|53162|b2fea00f2c003708d7ad8892609b3ef5|-OReleaseFast|
+f174_command_undo_redo_macro|GEN_DRIFT|PASS|33741|e09bb814819bb83cb5b92d2cbb17d370|-OReleaseFast|
+f175_decorator_strategy_template|GEN_DRIFT|PASS|21057|730bd1d8ad83e4c55b6566bd084ca27f|-OReleaseFast|
+f176_specification_chain_rules|GEN_DRIFT|DIFF|39689|93935160b5d356633b714ff84ab01333|-OReleaseFast|5,8c5,8~< Admin access: Y~< Can edit: Y~< Can delete: Y~< Young adult: Y~---~> Admin access:~> Can edit:~> Can delete:~> Young adult:~
+f177_graph_traversal_dfs_bfs|GEN_DRIFT|DIFF|49083|4a7709715c9c3b27a79b21f312933e73|-OReleaseFast|15c15~< Course order: CS101 → MATH101 → CS102 → CS201 → CS301 → CS302 → CS401~---~> Course order: CS101 → MATH101 → CS201 → CS102 → CS301 → CS302 → CS401~
+f178_numeric_precision_matrix|GEN_DRIFT|PASS|28769|c04b360dc33a5e4766a22b3d45145099|-OReleaseFast|
+f179_visitor_composite_ast|GEN_DRIFT|PASS|30814|d9088fc5e4fbe1f83cfc86e4d8f7e484|-OReleaseFast|
+RFACE_DONE total=68 gen_same=0 gen_drift=67 gen_norow=0 notemp=0 pass=48 diff=17 runtime_fail=2 compile_fail=0 skip=1

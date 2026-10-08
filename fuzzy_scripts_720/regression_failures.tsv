@@ -1,102 +1,62 @@
 SKIP|f004_oop_deep_inheritance_magic.php|PHP_error_exit=255
-FAIL_DIFF|f006_oop_observer_event_dispatcher.php|PHP:=== f006: Observer + Event Dispatcher + Priority + Exception Isolation ===|--- Event: user.login (normal) ---|[SECURITY] Checking IP: 192.168.1.1||AOT:=== f006: Observer + Event Dispatcher + Priority + Exception Isolation ===|--- Event: user.login (normal) ---|[SECURITY] Checking IP: 192.168.1.1|
-FAIL_RUNTIME|f007_string_encoding_crypto_hash.php|exit=142|kebabCase('HelloWorldFooBar'): hello-world-foo-bar truncate('Hello World', 8): Hello... pad('42', 5, '0', STR_PAD_LEFT): 00042 pad('42', 5, '0', STR_PAD_BOTH): 04200 wordCount top 3: {"the":3,"quick":
-FAIL_DIFF|f009_oop_decorator_chain_command.php|PHP:=== f009: Decorator Chain + Command Pattern + Middleware ===|After create: created=true|After update: value=new_value||AOT:=== f009: Decorator Chain + Command Pattern + Middleware ===|After create: created=true|After update: value=new_value|
+PASS|f006_oop_observer_event_dispatcher.php
+PASS|f007_string_encoding_crypto_hash.php
+PASS|f009_oop_decorator_chain_command.php
 PASS|f010_oop_singleton_registry_di.php
-FAIL_DIFF|f012_json_tree_recursive_traverse.php|PHP:=== f012: JSON Tree + Recursive Traverse + Path Find ===|Tree structure:|root ({"type":"dir"})||AOT:=== f012: JSON Tree + Recursive Traverse + Path Find ===|Tree structure:|root ({"type":"dir"})|
+PASS|f012_json_tree_recursive_traverse.php
 PASS|f016_hash_bloom_consistent.php
 PASS|f024_rbac_role_inheritance_policy.php
-FAIL_RUNTIME|f025_coding_hamming_rle_lzw_crc.php|exit=142|=== f025: Hamming + RLE + LZW + CRC === --- Hamming (Repetition Code) --- Original: 'Hi' (2 bytes) Encoded: 000111000000111000000000000111111000111000000111 (48 bits) 
+PASS|f025_coding_hamming_rle_lzw_crc.php
 PASS|f026_linkedlist_stack_queue_deque.php
 PASS|f027_number_theory_primes_modular.php
-FAIL_RUNTIME|f028_dp_knapsack_lcs_lis.php|exit=142|--- 0/1 Knapsack --- Weights: 2,3,4,5 Values: 3,4,5,6 Cap: 8 Max value: 10, Items: 1,3  --- LCS --- 
-FAIL_DIFF|f031_builder_fluent_immutable.php|PHP:=== f031: Builder + Fluent + Immutable + Freeze ===|POST https://api.example.com/v1/users?page=1&limit=20 [timeout=15s ssl=false]|Headers: {"Content-Type":"application\/json","Authorization":"Bearer token123"}||AOT:=== f031: Builder + Fluent + Immutable + Freeze ===|POST https://api.example.com/v1/users?page=1&limit=20 [timeout=15s ssl=false]|Headers: {"Content-Type":"application\/json","Authorization":"Bearer token123"}|
+PASS|f028_dp_knapsack_lcs_lis.php
+PASS|f031_builder_fluent_immutable.php
 PASS|f032_chain_responsibility_middleware.php
-FAIL_DIFF|f033_state_pattern_order_machine.php|PHP:=== f033: State Pattern + Order State Machine ===|Initial: pending|--- Paid (amount=100) ---||AOT:=== f033: State Pattern + Order State Machine ===|Initial: pending|--- Paid (amount=100) ---|
+PASS|f033_state_pattern_order_machine.php
 PASS|f034_template_method_pipeline.php
 PASS|f036_strategy_dynamic_pricing.php
-FAIL_RUNTIME|f037_adapter_unified_cache.php|exit=255| Fatal error: Uncaught RuntimeException: Unknown cache:  in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f037_adapter_unified_cache.php:90 Stack trace: #0 {main}   thrown in /Users/wangji
-FAIL_RUNTIME|f038_composite_filesystem_tree.php|exit=142|Total size: 5120B Total leaves: 1 Max depth: 3  --- Find --- 
+PASS|f037_adapter_unified_cache.php
+PASS|f038_composite_filesystem_tree.php
 PASS|f039_bridge_shape_renderer.php
 PASS|f040_flyweight_forest_pool.php
 PASS|f042_array_functions_full.php
 PASS|f043_math_functions_full.php
-FAIL_DIFF|f044_json_deepops_merge_diff.php|PHP:=== f044: JSON Deep Ops + Merge + Diff + Schema ===|deepGet(user.name): Alice|deepGet(user.roles.0): admin||AOT:=== f044: JSON Deep Ops + Merge + Diff + Schema ===|deepGet(user.name): Alice|deepGet(user.roles.0): admin|
-FAIL_DIFF|f045_datetime_calendar_format.php|PHP:=== f045: DateTime + Calendar + Interval + Format ===|isLeapYear(2000): true|isLeapYear(1900): false||AOT:=== f045: DateTime + Calendar + Interval + Format ===|isLeapYear(2000): true|isLeapYear(1900): false|
+PASS|f044_json_deepops_merge_diff.php
+PASS|f045_datetime_calendar_format.php
 PASS|f047_closures_curry_compose.php
 PASS|f048_match_pattern_dispatch.php
-FAIL_DIFF|f051_validator_rule_chain_batch.php|PHP:=== f051: Validator + Rule Chain + Batch ===|--- Form Validation ---|Valid: false||AOT:=== f051: Validator + Rule Chain + Batch ===|--- Form Validation ---|Valid: false|
+PASS|f051_validator_rule_chain_batch.php
 PASS|f056_crdt_gcounter_lww_orset.php
 PASS|f057_workflow_engine_rollback.php
-FAIL_DIFF|f061_graph_dijkstra_bellmanford_floyd.php|PHP:=== f061: Graph + Dijkstra + BellmanFord + FloydWarshall ===|--- Dijkstra from A ---|A→A = 0||AOT:=== f061: Graph + Dijkstra + BellmanFord + FloydWarshall ===|--- Dijkstra from A ---|A→A = 0|
-FAIL_DIFF|f065_crypto_rc4_sha1_base64_crc.php|PHP:=== f065: Crypto + RC4 + Base64 + CRC32 + SHA1 ===|--- RC4 ---|Plaintext: Hello World!||AOT:=== f065: Crypto + RC4 + Base64 + CRC32 + SHA1 ===|--- RC4 ---|Plaintext: Hello World!|
+PASS|f061_graph_dijkstra_bellmanford_floyd.php
+PASS|f065_crypto_rc4_sha1_base64_crc.php
 PASS|f066_hamming_code_parity_checksum.php
-PASS|f067_ctype_test.php
-PASS|f067_debug_char.php
-PASS|f067_debug_char2.php
-PASS|f067_debug_char3.php
-SKIP|f067_debug_char4.php|PHP_error_exit=255
-SKIP|f067_debug_char5.php|PHP_error_exit=255
-PASS|f067_debug_coalesce.php
-FAIL_RUNTIME|f067_debug_full_parser.php|exit=255| Fatal error: Uncaught RuntimeException: Expected '"' at pos 38 char=8 in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f067_debug_full_parser.php:68 Stack trace: #0 {main}   thrown in /Us
-PASS|f067_debug_full_parser2.php
-PASS|f067_debug_identical.php
-PASS|f067_debug_match.php
-PASS|f067_debug_pos.php
-PASS|f067_debug_pos2.php
-PASS|f067_debug_route.php
-PASS|f067_debug_route2.php
-FAIL_RUNTIME|f067_debug_single.php|exit=255| Fatal error: Uncaught RuntimeException: Expected end '"' in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f067_debug_single.php:35 Stack trace: #0 {main}   thrown in /Users/wangjianjun/pr
-PASS|f067_debug_while.php
-FAIL_RUNTIME|f067_json_parser_schema_path_diff.php|exit=255| Fatal error: Uncaught RuntimeException: Expected '"' in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f067_json_parser_schema_path_diff.php:74 Stack trace: #0 {main}   thrown in /Users/wa
-PASS|f067_match_test.php
-PASS|f067_min_match.php
-PASS|f067_min_match2.php
-PASS|f067_min_match3.php
-PASS|f067_min_match3a.php
-PASS|f067_min_match3b.php
-PASS|f067_min_match3c.php
-PASS|f067_min_match3d.php
-PASS|f067_min_match3e.php
-PASS|f067_min_match3f.php
-PASS|f067_min_match3g.php
-PASS|f067_min_match4.php
+PASS|f067_json_parser_schema_path_diff.php
 PASS|f067_min_repro.php
-PASS|f067_min_repro2.php
-PASS|f067_min_repro3.php
-PASS|f067_minimal.php
-PASS|f067_minimal2.php
-PASS|f067_minimal3.php
-PASS|f067_minimal4.php
-PASS|f067_minimal4a.php
-PASS|f067_test_ctype.php
-PASS|f067_test_ctype2.php
-PASS|f067_test_ctype3.php
-PASS|f067_test_simple_json.php
-FAIL_DIFF|f070_event_sourcing_cqrs_snapshot.php|PHP:=== f070: Event Sourcing + Snapshot + CQRS ===|--- Event Sourcing: Bank Account ---|Initial balances: acc1=0 acc2=0||AOT:=== f070: Event Sourcing + Snapshot + CQRS ===|--- Event Sourcing: Bank Account ---|Initial balances: acc1=0 acc2=0|
-FAIL_DIFF|f072_type_inference_hindley_milner.php|PHP:=== f072: Type Inference + Hindley-Milner ===|--- Literal Inference ---|42 → int||AOT:=== f072: Type Inference + Hindley-Milner ===|--- Literal Inference ---|42 → int|
-FAIL_DIFF|f080_db_transaction_mvcc_deadlock.php|PHP:=== f080: DB Transaction + Isolation + MVCC + Deadlock ===|--- Basic Transaction ---|Read user:1: {"name":"Alice","balance":100}||AOT:=== f080: DB Transaction + Isolation + MVCC + Deadlock ===|--- Basic Transaction ---|Read user:1: {"name":"Alice","balance":100}|
+PASS|f070_event_sourcing_cqrs_snapshot.php
+PASS|f072_type_inference_hindley_milner.php
+PASS|f080_db_transaction_mvcc_deadlock.php
 PASS|f081_bplustree_index_range_query.php
-FAIL_RUNTIME|f085_geo_rtree_knn_geocoder.php|exit=255| Fatal error: Uncaught TypeError: BoundingBox::contains(): Argument #1 ($p) must be of type Point, null given in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f085_geo_rtree_knn_geocoder.p
-FAIL_DIFF|f087_rbac_abac_policy_inheritance.php|PHP:=== f087: RBAC + ABAC + Policy + Inheritance ===|--- RBAC ---|Alice can article:write = true||AOT:=== f087: RBAC + ABAC + Policy + Inheritance ===|--- RBAC ---|Alice can article:write = false|
+PASS|f085_geo_rtree_knn_geocoder.php
+PASS|f087_rbac_abac_policy_inheritance.php
 PASS|f090_promise_future_async_concurrent.php
-FAIL_RUNTIME|f095_compiler_opt_constfold_dce_cse.php|exit=142|  c3 = const(10)   t4 = const(7)   ret   --- Dead Code Elimination --- 
-FAIL_RUNTIME|f097_search_engine_inverted_index_tfidf.php|exit=255| Fatal error: Uncaught DivisionByZeroError: Division by zero in /Users/wangjianjun/products/parser/fuzzy_scripts_720/pass/f097_search_engine_inverted_index_tfidf.php:40 Stack trace: #0 {main}   thrown
+PASS|f095_compiler_opt_constfold_dce_cse.php
+PASS|f097_search_engine_inverted_index_tfidf.php
 PASS|f102_memory_gc_marksweep_refcount_gen.php
 PASS|f104_game_engine_ecs_collision_render.php
-FAIL_DIFF|f105_db_index_btree_hash_queryplan.php|PHP:=== f105: DB Index + BTree + HashIndex + QueryPlan ===|--- B-Tree Index ---|Inserted: 10, 20, 5, 6, 12, 30, 7, 17, 25, 31, 3, 1, 40, 50, 15, 8, 45, 35, 28, 22||AOT:=== f105: DB Index + BTree + HashIndex + QueryPlan ===|--- B-Tree Index ---|Inserted: 10, 20, 5, 6, 12, 30, 7, 17, 25, 31, 3, 1, 40, 50, 15, 8, 45, 35, 28, 22|
+PASS|f105_db_index_btree_hash_queryplan.php
 PASS|f110_os_sim_process_memory_filesystem.php
-FAIL_RUNTIME|f113_distributed_consistenthash_vectorclock_quorum.php|exit=133|--- Consistent Hashing --- Distribution (1000 keys):   node3: 302 ##############################   node1: 438 ###########################################   node2: 260 ########################## 
-FAIL_DIFF|f117_search_engine_inverted_tfidf_bm25.php|PHP:=== f117: Search Engine + InvertedIndex + TF-IDF + BM25 ===|--- Build Index ---|Index stats: {"documents":7,"terms":20,"avg_doc_length":5.7}||AOT:=== f117: Search Engine + InvertedIndex + TF-IDF + BM25 ===|--- Build Index ---|Index stats: {"documents":7,"terms":4,"avg_doc_length":5.7}|
+PASS|f113_distributed_consistenthash_vectorclock_quorum.php
+PASS|f117_search_engine_inverted_tfidf_bm25.php
 PASS|f119_logging_structured_levels_rotation.php
-FAIL_DIFF|f124_container_orchestrator_pod_service_autoscale.php|PHP:=== f124: Container Orchestrator + Pod + ServiceDiscovery + Autoscale ===|--- Setup Cluster ---|Nodes: 3||AOT:=== f124: Container Orchestrator + Pod + ServiceDiscovery + Autoscale ===|--- Setup Cluster ---|Nodes: 3|
-FAIL_DIFF|f134_event_sourcing_snapshot_cqrs_projection.php|PHP:=== f134: EventSourcing + Snapshot + CQRS + Projection ===|--- Event Sourcing: Order Lifecycle ---|Order state:||AOT:=== f134: EventSourcing + Snapshot + CQRS + Projection ===|--- Event Sourcing: Order Lifecycle ---|Order state:|
-FAIL_RUNTIME|f135_math_number_theory_crt_miller_rabin.php|exit=133|--- Primality Testing --- Deterministic: ✓✓✓✓✓✓✓✓✓✓ primes ✓✓✓✓✓✓✓✓✓✓ composites Miller-Rabin (large primes): 
-FAIL_DIFF|f151_type_system_generics_variance.php|PHP:=== f151: Type System + Generics + Variance + Inference ===|--- Covariant Return ---|Dog shelter: Woof||AOT:=== f151: Type System + Generics + Variance + Inference ===|--- Covariant Return ---|Dog shelter: Woof|
+PASS|f124_container_orchestrator_pod_service_autoscale.php
+PASS|f134_event_sourcing_snapshot_cqrs_projection.php
+PASS|f135_math_number_theory_crt_miller_rabin.php
+PASS|f151_type_system_generics_variance.php
 PASS|f152_closure_arrow_higher_order.php
-FAIL_DIFF|f160_virtual_fs_path_traversal.php|PHP:=== f160: Virtual FS + Path Ops + Directory Traversal ===|--- Virtual File System ---|Directory structure:||AOT:=== f160: Virtual FS + Path Ops + Directory Traversal ===|--- Virtual File System ---|Directory structure:|
-FAIL_RUNTIME|f161_json_xml_csv_parsing.php|exit=1|  Team A,95   Team B,87    --- XML Parsing --- error: RuntimeError 
-FAIL_DIFF|f163_event_driven_dispatch_bus.php|PHP:=== f163: Event-Driven + PubSub + EventSourcing ===|--- Event Bus Pub/Sub ---|[Email Service] Welcome email sent to Alice||AOT:=== f163: Event-Driven + PubSub + EventSourcing ===|--- Event Bus Pub/Sub ---|[Email Service] Welcome email sent to Alice|
+PASS|f160_virtual_fs_path_traversal.php
+PASS|f161_json_xml_csv_parsing.php
+PASS|f163_event_driven_dispatch_bus.php
 PASS|f164_plugin_hook_system.php
 PASS|f171_state_machine_dfa.php
 PASS|f173_concurrency_primitives_sim.php
@@ -104,5 +64,5 @@ PASS|f174_command_undo_redo_macro.php
 PASS|f175_decorator_strategy_template.php
 PASS|f176_specification_chain_rules.php
 PASS|f177_graph_traversal_dfs_bfs.php
-FAIL_RUNTIME|f178_numeric_precision_matrix.php|exit=142|   A - B:   [   -8.00,    -6.00,    -4.00]   [   -2.00,     0.00,     2.00]   [    4.00,     6.00,     8.00] 
+PASS|f178_numeric_precision_matrix.php
 PASS|f179_visitor_composite_ast.php

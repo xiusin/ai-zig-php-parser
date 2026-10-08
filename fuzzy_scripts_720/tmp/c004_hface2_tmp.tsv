@@ -1,0 +1,77 @@
+# started=2026-10-07 06:49:01
+# php_interpreter_md5=1f15e4ce9b5c9cdaaef7cabf5efb9c76
+# native_linker_md5=fbe6382a2e0904b6740d771b88c409c7
+# analyzer_md5=7f8fe65da52b512f8ceef3c2380a5b23
+===== f042_array_functions_full (compile 13s) =====
+# fallback_emitters=5 names=['ArrayTools::sort', 'ArrayTools::sortAssoc', 'ArrayTools::sortByKey', 'ArrayTools::splice', 'ArrayTools::usort']
+  REF_FILLED     @main.zig:10214  ArrayTools::sort                   reg_64 <- try runtime.make_ref(reg_62, runtime.runtime_allocator);
+  TRAMPOLINE     @main.zig:28396  ArrayTools::sort                   整组 args 透传
+  TRAMPOLINE     @main.zig:28399  ArrayTools::sortAssoc              整组 args 透传
+  TRAMPOLINE     @main.zig:28402  ArrayTools::sortByKey              整组 args 透传
+  TRAMPOLINE     @main.zig:28381  ArrayTools::splice                 整组 args 透传
+  TRAMPOLINE     @main.zig:28405  ArrayTools::usort                  整组 args 透传
+CALLSITE_STATS REF_FILLED=1 REF_FORWARDED=0 REF_GLOBAL=0 ARG_OMITTED=0 TRAMPOLINE=5 VALUE_PASSED=0
+TOTAL_SITES 6
+===== f044_json_deepops_merge_diff (compile 12s) =====
+# fallback_emitters=1 names=['JsonTools::deepSet']
+  REF_FILLED     @main.zig:6279   JsonTools::deepSet                 reg_14 <- try runtime.make_ref(reg_3, runtime.runtime_allocator);
+  REF_FILLED     @main.zig:15910  JsonTools::deepSet                 reg_59 <- try runtime.make_ref(reg_57, runtime.runtime_allocator);
+  TRAMPOLINE     @main.zig:27114  JsonTools::deepSet                 整组 args 透传
+CALLSITE_STATS REF_FILLED=2 REF_FORWARDED=0 REF_GLOBAL=0 ARG_OMITTED=0 TRAMPOLINE=1 VALUE_PASSED=0
+TOTAL_SITES 3
+===== f057_workflow_engine_rollback (compile 10s) =====
+# fallback_emitters=4 names=['WorkflowExecution::executeDecision', 'WorkflowExecution::executeNode', 'WorkflowExecution::executeParallel', 'WorkflowExecution::executeTask']
+  REF_FILLED     @main.zig:3148   WorkflowExecution::executeNode     reg_41 <- try runtime.make_ref(reg_2, runtime.runtime_allocator);
+  REF_FILLED     @main.zig:4579   WorkflowExecution::executeTask     runtime.Value.initRef(reg_3.*)
+  REF_FILLED     @main.zig:4714   WorkflowExecution::executeDecision runtime.Value.initRef(reg_3.*)
+  REF_FILLED     @main.zig:4849   WorkflowExecution::executeParallel runtime.Value.initRef(reg_3.*)
+  REF_FILLED     @main.zig:6182   WorkflowExecution::executeNode     runtime.Value.initRef(reg_3.*)
+CALLSITE_STATS REF_FILLED=5 REF_FORWARDED=0 REF_GLOBAL=0 ARG_OMITTED=0 TRAMPOLINE=0 VALUE_PASSED=0
+TOTAL_SITES 5
+===== f085_geo_rtree_knn_geocoder (compile 14s) =====
+# fallback_emitters=2 names=['RTree::collectPoints', 'RTree::rangeSearchNode']
+  REF_FILLED     @main.zig:9904   RTree::rangeSearchNode             reg_10 <- try runtime.make_ref(reg_5, runtime.runtime_allocator);
+  REF_FILLED     @main.zig:10955  RTree::rangeSearchNode             runtime.Value.initRef(reg_4.*)
+  REF_FILLED     @main.zig:11366  RTree::collectPoints               reg_11 <- try runtime.make_ref(reg_7, runtime.runtime_allocator);
+  REF_FILLED     @main.zig:12337  RTree::collectPoints               runtime.Value.initRef(reg_3.*)
+CALLSITE_STATS REF_FILLED=4 REF_FORWARDED=0 REF_GLOBAL=0 ARG_OMITTED=0 TRAMPOLINE=0 VALUE_PASSED=0
+TOTAL_SITES 4
+===== f102_memory_gc_marksweep_refcount_gen (compile 12s) =====
+# fallback_emitters=2 names=['GenerationalGC::markGen', 'RefCountGC::findCycle']
+  REF_FILLED     @main.zig:9036   RefCountGC::findCycle              reg_20 <- try runtime.make_ref(reg_14, runtime.runtime_allocator);
+  REF_FILLED     @main.zig:9036   RefCountGC::findCycle              reg_21 <- try runtime.make_ref(reg_3, runtime.runtime_allocator);
+  REF_FILLED     @main.zig:10374  RefCountGC::findCycle              runtime.Value.initRef(reg_4.*)
+  REF_FILLED     @main.zig:10374  RefCountGC::findCycle              runtime.Value.initRef(reg_5.*)
+  REF_FILLED     @main.zig:11873  GenerationalGC::markGen            reg_26 <- try runtime.make_ref(reg_15, runtime.runtime_allocator);
+  REF_FILLED     @main.zig:15379  GenerationalGC::markGen            reg_26 <- try runtime.make_ref(reg_15, runtime.runtime_allocator);
+  REF_FILLED     @main.zig:17769  GenerationalGC::markGen            runtime.Value.initRef(reg_3.*)
+CALLSITE_STATS REF_FILLED=7 REF_FORWARDED=0 REF_GLOBAL=0 ARG_OMITTED=0 TRAMPOLINE=0 VALUE_PASSED=0
+TOTAL_SITES 7
+===== f105_db_index_btree_hash_queryplan (compile 13s) =====
+# fallback_emitters=2 names=['BTree::inorderTraverse', 'BTree::rangeSearch']
+  REF_FILLED     @main.zig:10354  BTree::rangeSearch                 reg_13 <- try runtime.make_ref(reg_7, runtime.runtime_allocator);
+  REF_FILLED     @main.zig:10916  BTree::rangeSearch                 runtime.Value.initRef(reg_5.*)
+  REF_FILLED     @main.zig:11800  BTree::rangeSearch                 runtime.Value.initRef(reg_5.*)
+  REF_FILLED     @main.zig:12001  BTree::inorderTraverse             reg_7 <- try runtime.make_ref(reg_3, runtime.runtime_allocator);
+  REF_FILLED     @main.zig:12391  BTree::inorderTraverse             runtime.Value.initRef(reg_3.*)
+  REF_FILLED     @main.zig:12794  BTree::inorderTraverse             runtime.Value.initRef(reg_3.*)
+CALLSITE_STATS REF_FILLED=6 REF_FORWARDED=0 REF_GLOBAL=0 ARG_OMITTED=0 TRAMPOLINE=0 VALUE_PASSED=0
+TOTAL_SITES 6
+===== f177_graph_traversal_dfs_bfs (compile 13s) =====
+# fallback_emitters=3 names=['Graph::dfsHelper', 'Graph::hasCycleDFS', 'Graph::hasCycleUndirected']
+  REF_FILLED     @main.zig:1147   Graph::dfsHelper                   reg_10 <- try runtime.make_ref(reg_5, runtime.runtime_allocator);
+  REF_FILLED     @main.zig:1147   Graph::dfsHelper                   reg_11 <- try runtime.make_ref(reg_7, runtime.runtime_allocator);
+  REF_FILLED     @main.zig:1621   Graph::dfsHelper                   runtime.Value.initRef(reg_3.*)
+  REF_FILLED     @main.zig:1621   Graph::dfsHelper                   runtime.Value.initRef(reg_4.*)
+  REF_FILLED     @main.zig:17067  Graph::dfsHelper                   reg_29 <- try runtime.make_ref(reg_7, runtime.runtime_allocator);
+  REF_FILLED     @main.zig:17067  Graph::dfsHelper                   reg_30 <- try runtime.make_ref(reg_26, runtime.runtime_allocator);
+  REF_FILLED     @main.zig:18092  Graph::hasCycleDFS                 reg_26 <- try runtime.make_ref(reg_5, runtime.runtime_allocator);
+  REF_FILLED     @main.zig:18092  Graph::hasCycleDFS                 reg_27 <- try runtime.make_ref(reg_7, runtime.runtime_allocator);
+  REF_FILLED     @main.zig:18983  Graph::hasCycleUndirected          reg_52 <- try runtime.make_ref(reg_5, runtime.runtime_allocator);
+  REF_FILLED     @main.zig:19781  Graph::hasCycleDFS                 runtime.Value.initRef(reg_3.*)
+  REF_FILLED     @main.zig:19781  Graph::hasCycleDFS                 runtime.Value.initRef(reg_4.*)
+  REF_FILLED     @main.zig:20495  Graph::hasCycleUndirected          runtime.Value.initRef(reg_3.*)
+CALLSITE_STATS REF_FILLED=12 REF_FORWARDED=0 REF_GLOBAL=0 ARG_OMITTED=0 TRAMPOLINE=0 VALUE_PASSED=0
+TOTAL_SITES 12
+ELAPSED=87s
+HFACE2_DONE

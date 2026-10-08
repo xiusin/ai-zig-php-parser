@@ -1,0 +1,6 @@
+# c007 release-fast face sweep 2026-10-06 10:29:16
+bin_md5=1f15e4ce9b5c9cdaaef7cabf5efb9c76
+native_linker=fbe6382a2e0904b6740d771b88c409c7/32797
+ir_generator=cb53c2da7d4fe2e1f62b728511f7c3ea
+optimizer=252234ef48cb47a42e6f39d1bc3e845b
+flags=--compile --no-debug-info --optimize=release-fast

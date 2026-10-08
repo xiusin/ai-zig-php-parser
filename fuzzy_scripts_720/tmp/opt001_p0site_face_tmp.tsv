@@ -1,0 +1,35 @@
+# opt001 §5.13.4 #110 rt>0∧非绿 逐枚归因 2026-10-06 19:50:44
+bin_md5=1f15e4ce9b5c9cdaaef7cabf5efb9c76
+optimizer=252234ef48cb47a42e6f39d1bc3e845b/6877
+native_linker=fbe6382a2e0904b6740d771b88c409c7/32797
+ir_generator=cb53c2da7d4fe2e1f62b728511f7c3ea
+analyzer=0e9f4aca09dbec60d0d549525c6d7cc8 1a2e02e765d10ef3985920c3dfa17ffe 42b9658c89e30ae9e93914783c2d97e8
+level=真默认档（release_small 1 轮 = 冻结基线档）  唯一变量=cfg_cleanup 开关  通道=--no-link + --emit-ir
+名单来源=#109 TSV 查表(L1.refuse_tramp>0 ∩ L2 非绿) 排除 f085_geo_rtree_knn_geocoder  枚数=11
+HEADER|tag|L2verdict|refuse_tramp|verdict|drift|p0_funcs|inter|drift_only|reg_on|reg_nc|unmatched|coverage|p0_tramp|p0_all|c2_on|c2_nc|c6_on|c6_nc|c9_on|c9_nc|on_vs_baseline|err|inter_names
+f027_number_theory_primes_modular|P0SITE|DIFF|rt=3|UNDETERMINED|drift=4|p0_funcs=2|inter=2|drift_only=2|reg_on=46|reg_nc=46|unmatched=0|coverage=OK|p0_tramp=2|p0_all=4|c2_on=26|c2_nc=26|c6_on=0|c6_nc=0|c9_on=0|c9_nc=0|BASE_OK|OK|NumberTheory::primeFactors;NumberTheory::sieveOfEratosthenes
+f061_graph_dijkstra_bellmanford_floyd|P0SITE|DIFF|rt=4|UNDETERMINED|drift=4|p0_funcs=1|inter=1|drift_only=3|reg_on=41|reg_nc=41|unmatched=0|coverage=OK|p0_tramp=1|p0_all=4|c2_on=23|c2_nc=47|c6_on=0|c6_nc=0|c9_on=0|c9_nc=0|BASE_OK|OK|WeightedGraph::dijkstra
+f067_json_parser_schema_path_diff|P0SITE|RUNTIME_FAIL|rt=3|UNDETERMINED|drift=8|p0_funcs=2|inter=2|drift_only=6|reg_on=46|reg_nc=46|unmatched=0|coverage=OK|p0_tramp=2|p0_all=4|c2_on=15|c2_nc=17|c6_on=0|c6_nc=0|c9_on=0|c9_nc=0|BASE_OK|OK|JsonParser::parseNumber;JsonParser::parseObject
+f067_min_repro|P0SITE|RUNTIME_FAIL|rt=1|UNDETERMINED|drift=1|p0_funcs=1|inter=1|drift_only=0|reg_on=38|reg_nc=38|unmatched=0|coverage=OK|p0_tramp=1|p0_all=1|c2_on=1|c2_nc=1|c6_on=0|c6_nc=0|c9_on=0|c9_nc=0|BASE_OK|OK|MinJsonParser::parseObject
+f095_compiler_opt_constfold_dce_cse|P0SITE|DIFF|rt=2|UNDETERMINED|drift=4|p0_funcs=1|inter=1|drift_only=3|reg_on=45|reg_nc=45|unmatched=0|coverage=OK|p0_tramp=1|p0_all=5|c2_on=26|c2_nc=26|c6_on=0|c6_nc=0|c9_on=0|c9_nc=0|BASE_OK|OK|DeadCodeElimination::optimize
+f117_search_engine_inverted_tfidf_bm25|P0SITE|DIFF|rt=4|UNDETERMINED|drift=4|p0_funcs=3|inter=3|drift_only=1|reg_on=50|reg_nc=50|unmatched=0|coverage=OK|p0_tramp=3|p0_all=6|c2_on=23|c2_nc=23|c6_on=0|c6_nc=0|c9_on=0|c9_nc=0|BASE_OK|OK|InvertedIndex::search;InvertedIndex::searchBM25;InvertedIndex::searchTFIDF
+f124_container_orchestrator_pod_service_autoscale|P0SITE|COMPILE_FAIL|rt=6|NC_NO_EMISSION|drift=0|p0_funcs=0|inter=0|drift_only=0|reg_on=0|reg_nc=0|unmatched=0|coverage=NO|p0_tramp=0|p0_all=0|c2_on=-|c2_nc=-|c6_on=-|c6_nc=-|c9_on=-|c9_nc=-|BASE_OK|missing:aot_compile_f124_container_orchestrator_pod_service_autoscale_nc.zig|-
+f135_math_number_theory_crt_miller_rabin|P0SITE|DIFF|rt=6|UNDETERMINED|drift=4|p0_funcs=3|inter=3|drift_only=1|reg_on=52|reg_nc=52|unmatched=0|coverage=OK|p0_tramp=3|p0_all=8|c2_on=40|c2_nc=37|c6_on=3|c6_nc=0|c9_on=1|c9_nc=0|BASE_OK|OK|NumberTheory::millerRabin;NumberTheory::primeFactorize;NumberTheory::sieveOfEratosthenes
+f161_json_xml_csv_parsing|P0SITE|DIFF|rt=1|UNDETERMINED|drift=5|p0_funcs=1|inter=1|drift_only=4|reg_on=53|reg_nc=53|unmatched=0|coverage=OK|p0_tramp=1|p0_all=7|c2_on=30|c2_nc=30|c6_on=0|c6_nc=0|c9_on=1|c9_nc=0|BASE_OK|OK|CsvHelper::parse
+f177_graph_traversal_dfs_bfs|P0SITE|TIMEOUT_10S|rt=11|UNDETERMINED|drift=5|p0_funcs=3|inter=3|drift_only=2|reg_on=49|reg_nc=49|unmatched=0|coverage=OK|p0_tramp=3|p0_all=4|c2_on=14|c2_nc=16|c6_on=0|c6_nc=0|c9_on=0|c9_nc=0|BASE_OK|OK|Graph::bfs;Graph::dijkstra;Graph::topologicalSort
+f178_numeric_precision_matrix|P0SITE|RUNTIME_FAIL|rt=1|UNDETERMINED|drift=9|p0_funcs=1|inter=1|drift_only=8|reg_on=56|reg_nc=56|unmatched=0|coverage=OK|p0_tramp=1|p0_all=14|c2_on=23|c2_nc=23|c6_on=0|c6_nc=0|c9_on=0|c9_nc=0|BASE_OK|OK|Matrix::minor
+P0SITE_DONE rows=11 名单=11 not_attributable=0 undetermined=10 nc_no_emission=1 no_drift=0 analyze_or_other_err=0 base_ok=11 base_miss=0
+UNDETERMINED_SHAPES   = f027_number_theory_primes_modular f061_graph_dijkstra_bellmanford_floyd f067_json_parser_schema_path_diff f067_min_repro f095_compiler_opt_constfold_dce_cse f117_search_engine_inverted_tfidf_bm25 f135_math_number_theory_crt_miller_rabin f161_json_xml_csv_parsing f177_graph_traversal_dfs_bfs f178_numeric_precision_matrix 
+NOT_ATTRIBUTABLE      = 
+NC_NO_EMISSION_SHAPES = f124_container_orchestrator_pod_service_autoscale 
+OTHER_VERDICTS        = 
+INTER_SEVERITY        = shapes=10 Σinter_functions=18 max_per_shape=3
+DRIFT_ONLY_SEVERITY   = shapes=11 Σdrift_only_functions=30
+P0SITE_FULLY_DRIFTING = f027_number_theory_primes_modular f061_graph_dijkstra_bellmanford_floyd f067_json_parser_schema_path_diff f067_min_repro f095_compiler_opt_constfold_dce_cse f117_search_engine_inverted_tfidf_bm25 f135_math_number_theory_crt_miller_rabin f161_json_xml_csv_parsing f177_graph_traversal_dfs_bfs f178_numeric_precision_matrix 
+P0SITE_PARTIAL        = 
+CANARY_SUM            = shapes=11 Σc2_on=221 Σc2_nc=246 Σc6_on=3 Σc6_nc=0 Σc9_on=2 Σc9_nc=0
+CANARY_NC_WORSE       = f061_graph_dijkstra_bellmanford_floyd(c2 23/47 c6 0/0 c9 0/0) f067_json_parser_schema_path_diff(c2 15/17 c6 0/0 c9 0/0) f177_graph_traversal_dfs_bfs(c2 14/16 c6 0/0 c9 0/0) 
+ERR_SHAPES            = f124_container_orchestrator_pod_service_autoscale(missing:aot_compile_f124_container_orchestrator_pod_service_autoscale_nc.zig) 
+COVERAGE_NOT_OK       = f124_container_orchestrator_pod_service_autoscale(NO) 
+BASELINE_NOT_OK       = 
+ELAPSED=3s

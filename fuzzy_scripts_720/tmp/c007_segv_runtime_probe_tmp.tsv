@@ -1,0 +1,44 @@
+45|gen|FP_MATCH|md5=1c59a2935865215911c8925ff933d1ae lines=47101
+45|copy|copied_to|/tmp/c007_p111_work/t45 main.zig_md5=1c59a2935865215911c8925ff933d1ae links=7
+45|dbg|exit|134
+45|dbg|last_line|???:?:?: 0x191516b97 in start (/usr/lib/dyld)
+45|dbg|CUT_MATCH|--- Function Composition ---
+45|dbg|fault_msg|Segmentation fault at address 0x7f
+45|dbg|trace|runtime_lib.zig:1899:27: in put (main)~runtime_lib.zig:2220:30: in pushRaw (main)~main.zig:21332:38: in __main__ (main)~main.zig:47093:20: in main (main)~
+45|dbg|fault_main_line|21332
+45|probe|GEN|PROBE_GEN out=/tmp/c007_p111_work/t45/main_probe.zig inserted_lines=14 regs=6 slots=2 reg_list=reg_2,reg_3,reg_4,reg_371,reg_372,reg_374 slot_list=reg_2,reg_3 php_src_line=49 orig_lines=47101 new_lines=47115 stmt=try reg_3.*.asArray().pushRaw(runtime.runtime_allocator, reg_2.*);
+45|probe|exit|134
+45|probe|PROBE_COUNT|9
+45|probe|PROBE|PROBE-CTX fault_line=21332 php_src_line=49 stmt=try reg_3.*.asArray().pushRaw(runtime.runtime_allocator, reg_2.*);
+45|probe|PROBE|PROBE reg_2 SLOT val=0x7ffd000104d302e8 nil=0 arr=1 ref=0 str=0 obj=0 dp=0x104d302e8slot=0x16b796b88 
+45|probe|PROBE|PROBE-ARR reg_2 ref_count=1 next_index=0 packed_len=0 mixed=0
+45|probe|PROBE|PROBE reg_3 SLOT val=0x7ffc800104f60f80 nil=0 arr=0 ref=0 str=1 obj=0 dp=0x104f60f80slot=0x16b7973b8 
+45|probe|PROBE|PROBE reg_4 val=0x7ffc000000000002 nil=0 arr=0 ref=0 str=0 obj=0 dp=0x2
+45|probe|PROBE|PROBE reg_371 val=0x7ffd000104d31440 nil=0 arr=1 ref=0 str=0 obj=0 dp=0x104d31440
+45|probe|PROBE|PROBE-ARR reg_371 ref_count=1 next_index=0 packed_len=0 mixed=0
+45|probe|PROBE|PROBE reg_372 val=0x7ffc000000000001 nil=1 arr=0 ref=0 str=0 obj=0 dp=0x1
+45|probe|PROBE|PROBE reg_374 val=0x7ffc000000000001 nil=1 arr=0 ref=0 str=0 obj=0 dp=0x1
+50|gen|FP_MATCH|md5=ed742689d9e44b7088c1bcdcbe340a01 lines=47849
+50|copy|copied_to|/tmp/c007_p111_work/t50 main.zig_md5=ed742689d9e44b7088c1bcdcbe340a01 links=7
+50|dbg|exit|134
+50|dbg|last_line|???:?:?: 0x191516b97 in start (/usr/lib/dyld)
+50|dbg|CUT_MATCH|--- Partial Application ---
+50|dbg|fault_msg|Segmentation fault at address 0x10
+50|dbg|trace|runtime_lib.zig:1917:49: in put (main)~runtime_lib.zig:2220:30: in pushRaw (main)~main.zig:17542:36: in __main__ (main)~main.zig:47841:20: in main (main)~
+50|dbg|fault_main_line|17542
+50|probe|GEN|PROBE_GEN out=/tmp/c007_p111_work/t50/main_probe.zig inserted_lines=10 regs=4 slots=0 reg_list=reg_4,reg_5,reg_6,reg_373 slot_list= php_src_line=38 orig_lines=47849 new_lines=47859 stmt=try reg_6.asArray().pushRaw(runtime.runtime_allocator, reg_4);
+50|probe|exit|134
+50|probe|PROBE_COUNT|6
+50|probe|PROBE|PROBE-CTX fault_line=17542 php_src_line=38 stmt=try reg_6.asArray().pushRaw(runtime.runtime_allocator, reg_4);
+50|probe|PROBE|PROBE reg_4 val=0x7ffc000000000002 nil=0 arr=0 ref=0 str=0 obj=0 dp=0x2
+50|probe|PROBE|PROBE reg_5 val=0x7ffe000103440658 nil=0 arr=0 ref=0 str=0 obj=0 dp=0x103440658
+50|probe|PROBE|PROBE reg_6 val=0x7ffe000103440658 nil=0 arr=0 ref=0 str=0 obj=0 dp=0x103440658
+50|probe|PROBE|PROBE reg_373 val=0x7ffd0001034a0d38 nil=0 arr=1 ref=0 str=0 obj=0 dp=0x1034a0d38
+50|probe|PROBE|PROBE-ARR reg_373 ref_count=1 next_index=0 packed_len=0 mixed=0
+34|gen|FP_MATCH|md5=f4c41d87a3bfbb78c7ff42fff27c3d66 lines=46376
+34|copy|copied_to|/tmp/c007_p111_work/t34 main.zig_md5=f4c41d87a3bfbb78c7ff42fff27c3d66 links=7
+34|dbg|exit|0
+34|dbg|last_line|=== f152 Done ===
+34|dbg|CUT_MATCH|=== f152 Done ===
+34|dbg|fault_msg|
+34|dbg|trace|
