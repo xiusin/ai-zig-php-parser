@@ -403,8 +403,14 @@ pub const IRGenerator = struct {
                                 }
                             }
                         }
+                        self.current_namespace = prev_ns;
+                    } else {
+                        // AOT-CODEGEN-010 §8 #5：无 body（namespace Foo;）作用于文件其余部分 ——
+                        // 保持 current_namespace 不恢复，并把节点本身按源顺序追加进 __main__ 语句流，
+                        // 使 __NAMESPACE__ 魔术常量（含多段无括号 namespace）在生成期取到正确名字。
+                        // 原先设完立即恢复 ⇒ __NAMESPACE__ 恒为空串（d5a 红）。
+                        try top_level_stmts.append(self.allocator, stmt_idx);
                     }
-                    self.current_namespace = prev_ns;
                 } else if (stmt_node.tag == .function_decl or stmt_node.tag == .class_decl or
                     stmt_node.tag == .interface_decl or stmt_node.tag == .trait_decl or
                     stmt_node.tag == .enum_decl or
@@ -5480,7 +5486,10 @@ pub const IRGenerator = struct {
                 break :blk self.emitWithResult(.{ .const_string = id }, .php_value);
             },
             .namespace => blk: {
-                const id = try module.internString("");
+                // AOT-CODEGEN-010 §8 #5：__NAMESPACE__ 取生成期已维护的命名空间状态
+                //（generateNamespaceStatement 随 namespace 语句更新，含大括号块的 prev_ns 保存/恢复）。
+                // 原先硬编码 internString("") ⇒ `namespace Foo;` 后恒取空串。
+                const id = try module.internString(self.current_namespace orelse "");
                 break :blk self.emitWithResult(.{ .const_string = id }, .php_value);
             },
         };
@@ -6530,7 +6539,9 @@ pub const IRGenerator = struct {
 
         // unset($arr[$key])：这是语言结构而非真实函数，AOT 需要生成 array_unset 指令
         // 这里只做最小覆盖：单参数且为 array_access，并且带 index。
-        if (func_name.len != 0 and indirect_callee == null and std.mem.eql(u8, func_name, "unset")) {
+        // §8 #6：函数名不区分大小写 ⇒ `Unset($a[0])` 同样走本特判（原先精确匹配漏掉
+        // Title 拼写 ⇒ 数组元素按值传入 php_unset 拷贝 ⇒ 元素未被删除）。
+        if (func_name.len != 0 and indirect_callee == null and std.ascii.eqlIgnoreCase(func_name, "unset")) {
             var unset_handled = false;
             for (call_data.args) |arg_idx| {
                 const arg_node = self.getNode(arg_idx);

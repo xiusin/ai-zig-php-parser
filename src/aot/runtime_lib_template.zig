@@ -833,12 +833,21 @@ pub fn deinitRuntime() void {
 
 /// 注册用户定义函数
 pub fn registerUserFunction(name: []const u8, func: *const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value) !void {
-    try registerUserFunctionWithLocation(name, func, "", 0);
+    // AOT-CODEGEN-010 §8 #7：内建伪函数（go/go_wait_all/go_join）占位注册 ——
+    // 不写 decl_locations ⇒ 用户同名声明随后注册时按「占位覆盖」放行（用户函数优先），
+    // 而非 Cannot redeclare。原先占位抢坑 ⇒ 用户声明 `function go()` 直接 Fatal（d7a）。
+    if (user_function_registry) |*registry| {
+        try registry.put(name, func);
+    }
 }
 
 pub fn registerUserFunctionWithLocation(name: []const u8, func: *const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value, file: []const u8, line: u32) !void {
     if (user_function_registry) |*registry| {
         if (registry.get(name) != null) {
+            // AOT-CODEGEN-010 §8 #7：占位注册（无 decl_locations 记录）允许用户同名声明覆盖；
+            // 有位置记录 = 用户 vs 用户重复声明 ⇒ 保持 PHP Cannot redeclare 语义。
+            const is_placeholder = if (user_function_decl_locations) |*locations| locations.get(name) == null else true;
+            if (!is_placeholder) {
             var prev_file = file;
             var prev_line = line;
             if (user_function_decl_locations) |*locations| {
@@ -863,6 +872,7 @@ pub fn registerUserFunctionWithLocation(name: []const u8, func: *const fn (ctx: 
             ) catch "";
             fileWriteAll(1, msg);
             std.process.exit(255);
+            }
         }
         try registry.put(name, func);
         if (user_function_decl_locations) |*locations| {
@@ -5972,6 +5982,10 @@ pub fn php_check_param_type(
     // 空类型声明 = 无类型约束
     if (expected_type.len == 0) return;
 
+    // AOT-CODEGEN-010 §8 #4：参数名元数据自带 `$` 前缀，下方消息格式串又补一个 `$`
+    // ⇒ 渲染成 `($$a)` 双 `$`。剥掉前导 `$` 后无论元数据带不带均正确。
+    const bare_param_name = if (param_name.len > 0 and param_name[0] == '$') param_name[1..] else param_name;
+
     // mixed 类型隐含 nullable（PHP 8 语义：mixed 等价于所有类型含 null）
     if (containsTypeComponent(expected_type, "mixed")) return;
 
@@ -5982,7 +5996,7 @@ pub fn php_check_param_type(
         const got_type = "null";
         var buf: [512]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "{s}(): Argument #{d} (${s}) must be of type {s}, {s} given", .{
-            func_name, arg_index + 1, param_name, expected_type, got_type,
+            func_name, arg_index + 1, bare_param_name, expected_type, got_type,
         }) catch "TypeError";
         _ = try throwThrowable("TypeError", msg, runtime_allocator);
         return;
@@ -5994,7 +6008,7 @@ pub fn php_check_param_type(
     if (!matches) {
         var buf: [512]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "{s}(): Argument #{d} (${s}) must be of type {s}, {s} given", .{
-            func_name, arg_index + 1, param_name, expected_type, got_type,
+            func_name, arg_index + 1, bare_param_name, expected_type, got_type,
         }) catch "TypeError";
         _ = try throwThrowable("TypeError", msg, runtime_allocator);
         return;
@@ -6194,6 +6208,19 @@ fn checkSingleType(expected: []const u8, got: []const u8, arg: Value) bool {
         // 复用 php_is_callable 做深度验证（函数名存在性、array 格式、__invoke 等）
         const result = php_is_callable(arg) catch return false;
         return result.isBool() and result.asBool();
+    }
+
+    // iterable 伪类型：array 或实现 Traversable 的对象（PHP 语义；AOT-CODEGEN-010 §8 #4 ——
+    // 原先无此分支落到类名检查 ⇒ `iterable` 参数收到数组被拒 TypeError）
+    if (std.mem.eql(u8, expected, "iterable")) {
+        if (arg.isArray()) return true;
+        if (Value_isObject(arg)) {
+            const obj = Value_asObject(arg);
+            if (obj.class_meta) |meta| {
+                if (meta.implementsInterface("Traversable")) return true;
+            }
+        }
+        return false;
     }
 
     // Closure 类型

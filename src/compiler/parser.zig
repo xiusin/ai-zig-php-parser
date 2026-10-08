@@ -902,6 +902,9 @@ pub const Parser = struct {
         while (true) {
             switch (self.curr.tag) {
                 .k_public => modifiers.is_public = true,
+                // AOT-CODEGEN-010 §8 #2：PHP4 风格 `var` 属性声明 = 隐式 public，
+                // 原先缺此臂导致 `var $p = 3;` 编译失败（报 `unexpected token "var", expecting variable`）
+                .k_var => modifiers.is_public = true,
                 .k_protected => modifiers.is_protected = true,
                 .k_private => modifiers.is_private = true,
                 .k_static => modifiers.is_static = true,
@@ -2017,9 +2020,25 @@ pub const Parser = struct {
             break :blk true;
         } else false;
 
-        const val = try self.parseExpression(0);
+        // AOT-CODEGEN-010 §8 #1：赋值为右结合（prec 5），RHS 须按 next_p-1=4 解析，
+        // 使低优先级逻辑符 and/or/xor（prec 4/3/2）截止在赋值之外 —— PHP 语义 `$r = 1 and 0` ≡ `($r = 1) and 0`。
+        // 原 parseExpression(0) 会把 `and` 吸进 RHS ⇒ $r = (1 and 0) = false（静默错值）。
+        const val = try self.parseExpression(4);
+
+        // AOT-CODEGEN-010 §8 #1：RHS 截断后遗留的低优先级逻辑符续接在赋值节点之上
+        //（and(4) > xor(3) > or(2)，族内左结合）；否则尾随 `and 0` 悬空、分号断言失败 ⇒ 编译失败。
+        var stmt_expr = try self.createNode(.{ .tag = .assignment, .main_token = op, .data = .{ .assignment = .{ .target = target, .value = val, .is_reference = is_reference } } });
+        while (true) {
+            const logical_tag = self.curr.tag;
+            if (logical_tag != .k_and and logical_tag != .k_xor and logical_tag != .k_or) break;
+            const logical_op = self.curr;
+            const logical_p = self.getPrecedence(logical_tag);
+            self.nextToken();
+            const logical_right = try self.parseExpression(logical_p);
+            stmt_expr = try self.createNode(.{ .tag = .binary_expr, .main_token = logical_op, .data = .{ .binary_expr = .{ .lhs = stmt_expr, .op = logical_tag, .rhs = logical_right } } });
+        }
         _ = try self.eat(.semicolon);
-        return self.createNode(.{ .tag = .assignment, .main_token = op, .data = .{ .assignment = .{ .target = target, .value = val, .is_reference = is_reference } } });
+        return stmt_expr;
     }
 
     /// Parse array destructuring assignment: [$a, $b] = $arr or ['key' => $var] = $arr
@@ -2686,10 +2705,13 @@ pub const Parser = struct {
                     self.reportError("Can't use function return value in write context");
                     return error.ParseError;
                 }
-                const right = try self.parseExpression(precedence);
+                // AOT-CODEGEN-010 §8 #1：右结合 RHS 按 next_p-1 解析（同 star_star 惯例），
+                // 截断 and/or/xor；原用循环下限 precedence 会把低优先级逻辑符吞进 RHS
+                const right = try self.parseExpression(next_p - 1);
                 left = try self.createNode(.{ .tag = .assignment, .main_token = op, .data = .{ .assignment = .{ .target = left, .value = right } } });
             } else if (tag == .plus_equal or tag == .minus_equal or tag == .asterisk_equal or tag == .slash_equal or tag == .percent_equal or tag == .dot_equal or tag == .star_star_equal or tag == .less_less_equal or tag == .greater_greater_equal or tag == .and_equal or tag == .or_equal or tag == .caret_equal or tag == .double_question_equal) {
-                const right = try self.parseExpression(precedence);
+                // AOT-CODEGEN-010 §8 #1：复合赋值同为右结合（prec 5），RHS 按 next_p-1 解析（同上）
+                const right = try self.parseExpression(next_p - 1);
                 left = try self.createNode(.{ .tag = .compound_assignment, .main_token = op, .data = .{ .compound_assignment = .{ .target = left, .op = tag, .value = right } } });
             } else if (tag == .question) {
                 var then_expr: ?ast.Node.Index = null;

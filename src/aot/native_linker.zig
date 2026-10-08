@@ -3842,6 +3842,17 @@ pub const NativeLinker = struct {
         return false;
     }
 
+    /// AOT-CODEGEN-010 §8 #6：大小写不敏感地解析用户函数，返回**规范声明名**（供符号发射）。
+    /// PHP 函数名不区分大小写 ⇒ `get()` 须解析到声明为 `Get` 的函数；
+    /// 原先精确匹配 ⇒ 跨大小写调用双向 Fatal（d6b/d6c）。
+    fn findUserFunctionCanonical(self: *const Self, func_name: []const u8) ?[]const u8 {
+        const module = self.ir_module orelse return null;
+        for (module.functions.items) |f| {
+            if (std.ascii.eqlIgnoreCase(f.name, func_name)) return f.name;
+        }
+        return null;
+    }
+
     /// 检查函数是否是"语句函数"（返回值通常被忽略）
     fn isStatementFunction(self: *const Self, func_name: []const u8) bool {
         _ = self;
@@ -3878,7 +3889,15 @@ pub const NativeLinker = struct {
     };
 
     fn builtinInfo(func_name: []const u8) ?BuiltinInfo {
-        return builtin_map.get(func_name);
+        // AOT-CODEGEN-010 §8 #6：内建查名大小写不敏感（表键全小写；PHP 内建函数名不区分大小写）
+        // ⇒ `Unset($a[0])` 须解析到 `unset`（原先精确匹配 ⇒ Fatal: undefined function Unset）。
+        if (builtin_map.get(func_name)) |info| return info;
+        if (func_name.len <= 64) {
+            var folded: [64]u8 = undefined;
+            for (func_name, 0..) |c, i| folded[i] = std.ascii.toLower(c);
+            return builtin_map.get(folded[0..func_name.len]);
+        }
+        return null;
     }
 
     /// Get reference parameter indices for a builtin function (public for IR Generator)
@@ -21908,8 +21927,11 @@ pub const NativeLinker = struct {
                 } else {
 
                     // 生成函数调用
-                    // 检查是否是内置函数
-                    const is_builtin = self.isBuiltinFunction(op.func_name);
+                    // AOT-CODEGEN-010 §8 #7：**用户函数优先于内建表**（大小写不敏感）——
+                    // 原先内建表先行 ⇒ 用户声明的 `function go()` 被内建条目 php_go_builtin 遮蔽
+                    // （d7a 静默空输出）；用户未声明时才回落内建表。
+                    const is_user_call = self.findUserFunctionCanonical(op.func_name) != null;
+                    const is_builtin = if (is_user_call) false else self.isBuiltinFunction(op.func_name);
                     const is_runtime_declare = std.mem.startsWith(u8, op.func_name, "__declare_function__::");
 
                     // 生成函数调用
@@ -23163,43 +23185,47 @@ pub const NativeLinker = struct {
                                 }
                             }
                         } else {
-                            // 用户定义函数 - 先检查是否存在
-                            const escaped_func_name = try self.escapeString(op.func_name);
-                            defer self.allocator.free(escaped_func_name);
-                            if (!self.isUserDefinedFunction(op.func_name)) {
-                                // 函数未定义：生成运行时 Fatal error
+                            // 用户定义函数 - 大小写不敏感解析到规范声明名（§8 #6）
+                            const canonical_call_name = self.findUserFunctionCanonical(op.func_name);
+                            if (canonical_call_name == null) {
+                                // 函数未定义：生成运行时 Fatal error（消息保留被调拼写）
+                                const escaped_func_name = try self.escapeString(op.func_name);
+                                defer self.allocator.free(escaped_func_name);
                                 if (inst.location.line > 0) {
                                     try writer.print("    runtime.setSourceLocation(\"{s}\", {d});\n", .{ inst.location.file, inst.location.line });
                                 }
                                 try writer.print("    runtime.php_call_undefined_function(\"{s}\");\n", .{escaped_func_name});
                             } else {
-                                const func_has_return_value = self.func_return_types.get(op.func_name) orelse false;
+                                const call_name = canonical_call_name.?;
+                                const escaped_call_name = try self.escapeString(call_name);
+                                defer self.allocator.free(escaped_call_name);
+                                const func_has_return_value = self.func_return_types.get(call_name) orelse false;
                                 const in_try_block = self.current_exception_handler != null;
 
                                 // 查找函数的引用参数信息
-                                const target_func = if (self.ir_module) |module| module.findFunction(op.func_name) else null;
+                                const target_func = if (self.ir_module) |module| module.findFunction(call_name) else null;
                                 const ref_params = if (target_func) |func| func.ref_params.items else &[_]u32{};
 
                                 if (func_has_return_value) {
                                     if (in_try_block) {
                                         try self.writeRegAssignmentPrefix(writer, reg.id);
-                                        try writer.print("@\"{s}\"(runtime.Value.initNull(), ", .{escaped_func_name});
-                                        try self.writeValueArgsArrayWithRefs(writer, op.args, op.func_name, ref_params);
+                                        try writer.print("@\"{s}\"(runtime.Value.initNull(), ", .{escaped_call_name});
+                                        try self.writeValueArgsArrayWithRefs(writer, op.args, call_name, ref_params);
                                         try writer.writeAll(", runtime.runtime_allocator) catch runtime.Value.initNull();\n");
                                     } else {
                                         try self.writeRegAssignmentPrefix(writer, reg.id);
-                                        try writer.print("try @\"{s}\"(runtime.Value.initNull(), ", .{escaped_func_name});
-                                        try self.writeValueArgsArrayWithRefs(writer, op.args, op.func_name, ref_params);
+                                        try writer.print("try @\"{s}\"(runtime.Value.initNull(), ", .{escaped_call_name});
+                                        try self.writeValueArgsArrayWithRefs(writer, op.args, call_name, ref_params);
                                         try writer.writeAll(", runtime.runtime_allocator);\n");
                                     }
                                 } else {
                                     if (in_try_block) {
-                                        try writer.print("    _ = @\"{s}\"(runtime.Value.initNull(), ", .{escaped_func_name});
-                                        try self.writeValueArgsArrayWithRefs(writer, op.args, op.func_name, ref_params);
+                                        try writer.print("    _ = @\"{s}\"(runtime.Value.initNull(), ", .{escaped_call_name});
+                                        try self.writeValueArgsArrayWithRefs(writer, op.args, call_name, ref_params);
                                         try writer.writeAll(", runtime.runtime_allocator) catch {};\n");
                                     } else {
-                                        try writer.print("    _ = try @\"{s}\"(runtime.Value.initNull(), ", .{escaped_func_name});
-                                        try self.writeValueArgsArrayWithRefs(writer, op.args, op.func_name, ref_params);
+                                        try writer.print("    _ = try @\"{s}\"(runtime.Value.initNull(), ", .{escaped_call_name});
+                                        try self.writeValueArgsArrayWithRefs(writer, op.args, call_name, ref_params);
                                         try writer.writeAll(", runtime.runtime_allocator);\n");
                                     }
                                     try self.writeRegAssignmentPrefix(writer, reg.id);
