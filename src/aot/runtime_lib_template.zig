@@ -75,6 +75,8 @@ const FunctionDeclLocation = struct {
 pub var user_function_decl_locations: ?std.StringHashMap(FunctionDeclLocation) = null;
 /// AOT-CODEGEN-012：用户类/接口/trait 声明位置（重复声明 Fatal 的 prev 定位）
 pub var class_decl_locations: ?std.StringHashMap(FunctionDeclLocation) = null;
+/// AOT-CODEGEN-012 R-137：类 → trait 使用记录（class_uses 枚举；键 = 规范类名）
+pub var class_trait_uses: ?std.StringHashMap(std.ArrayListUnmanaged([]const u8)) = null;
 
 /// 函数元数据（参数计数等，用于反射 API）
 pub const FunctionMeta = struct {
@@ -447,6 +449,7 @@ pub fn initRuntime(allocator: Allocator) !void {
     user_function_registry = std.StringHashMap(*const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value).init(runtime_allocator);
     user_function_decl_locations = std.StringHashMap(FunctionDeclLocation).init(runtime_allocator);
     class_decl_locations = std.StringHashMap(FunctionDeclLocation).init(runtime_allocator);
+    class_trait_uses = std.StringHashMap(std.ArrayListUnmanaged([]const u8)).init(runtime_allocator);
     function_meta_registry = std.StringHashMap(FunctionMeta).init(runtime_allocator);
     constants = std.StringHashMap(Value).init(runtime_allocator);
     static_vars = std.StringHashMap(Value).init(runtime_allocator);
@@ -789,6 +792,12 @@ pub fn deinitRuntime() void {
     if (class_decl_locations) |*locations| {
         locations.deinit();
         class_decl_locations = null;
+    }
+    if (class_trait_uses) |*map| {
+        var it = map.iterator();
+        while (it.next()) |entry| entry.value_ptr.deinit(runtime_allocator);
+        map.deinit();
+        class_trait_uses = null;
     }
     if (function_meta_registry) |*meta_reg| {
         meta_reg.deinit();
@@ -14373,6 +14382,12 @@ pub const ClassMeta = struct {
 
         try registerClass(meta);
 
+        // AOT-CODEGEN-012 R-137：ReflectionException extends Exception
+        //（ReflectionClass 构造失败 / ReflectionMethod::invoke(null) 抛出，catch 可捕获）
+        const ref_ex_meta = try ClassMeta.init(allocator, "ReflectionException");
+        ref_ex_meta.parent = meta;
+        try registerClass(ref_ex_meta);
+
         // Register standard PHP exception subclasses (flat: extends Exception)
         const exception_subclasses = [_][]const u8{
             "RuntimeException",
@@ -18323,6 +18338,21 @@ pub fn registerClassRedeclare(name: []const u8, file: []const u8, line: u32) !vo
     std.process.exit(255);
 }
 
+/// AOT-CODEGEN-012 R-137：记录类的 trait 使用（class_uses 枚举数据源；发射器逐
+/// `use T` 调用一次；类名经 findClass 规范化，trait 名保留声明拼写）
+pub fn registerClassTraitUse(class_name: []const u8, trait_name: []const u8) !void {
+    const meta = findClass(class_name) orelse return;
+    if (class_trait_uses) |*map_ptr| {
+        const gop = try map_ptr.getOrPut(meta.name);
+        if (!gop.found_existing) gop.value_ptr.* = .{ .items = &.{}, .capacity = 0 };
+        for (gop.value_ptr.items) |existing| {
+            if (std.ascii.eqlIgnoreCase(existing, trait_name)) return;
+        }
+        const copied = try runtime_allocator.dupe(u8, trait_name);
+        try gop.value_ptr.append(runtime_allocator, copied);
+    }
+}
+
 /// 检查 final class 继承：如果 child 类继承自 final 类，输出 fatal error 并退出
 pub fn php_check_final_inheritance(child_class_name: []const u8, parent_meta: *const ClassMeta, file: []const u8, line: u32) void {
     if (parent_meta.is_final) {
@@ -20177,9 +20207,27 @@ pub fn php_class_alias(from: Value, to: Value) !Value {
 /// 无 trait 记录的类返回空 array（与 PHP 对无 trait 类的行为一致）；
 /// 有 trait 类的枚举需 ClassMeta 增加 trait 使用记录，登记未实现。
 pub fn php_class_uses(value: Value, allocator: Allocator) !Value {
-    _ = value;
     _ = allocator;
+    // 解析目标类：对象取其类名，字符串直接用（CI 规范化经 findClass）
+    var class_name: []const u8 = "";
+    if (Value_isObject(value)) {
+        class_name = Value_asObject(value).class_name;
+    } else if (value.isString()) {
+        class_name = value.asString().data;
+    } else {
+        return Value.initBool(false);
+    }
+    const meta = findClass(class_name) orelse return Value.initBool(false);
+
     const result = try PHPArray.init(runtime_allocator);
+    if (class_trait_uses) |*map| {
+        if (map.get(meta.name)) |uses| {
+            for (uses.items) |trait_name| {
+                const key_str = try PHPString.init(runtime_allocator, trait_name);
+                try result.elements.put(.{ .string = key_str }, Value.initString(key_str));
+            }
+        }
+    }
     return Value.initArray(result);
 }
 

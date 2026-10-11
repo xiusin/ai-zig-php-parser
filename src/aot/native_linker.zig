@@ -3570,6 +3570,15 @@ pub const NativeLinker = struct {
             } else {
                 try writer.print("    try runtime.registerClass({s}_meta);\n", .{short_cname});
             }
+            // AOT-CODEGEN-012 R-137：记录 trait 使用（class_uses 枚举数据源）
+            if (type_def_idx[ci]) |tdi_tu| {
+                const td_tu = ir_module.types.items[tdi_tu].*;
+                for (td_tu.traits) |used_trait| {
+                    const escaped_tu = try self.escapeString(used_trait);
+                    defer self.allocator.free(escaped_tu);
+                    try writer.print("    try runtime.registerClassTraitUse(\"{s}\", \"{s}\");\n", .{ escaped_full_cname, escaped_tu });
+                }
+            }
 
             // Register enum cases as static properties（必须在 registerClass 之后）
             if (type_def_idx[ci]) |tdi2| {
