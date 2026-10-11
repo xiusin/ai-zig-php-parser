@@ -73,6 +73,8 @@ const FunctionDeclLocation = struct {
     line: u32,
 };
 pub var user_function_decl_locations: ?std.StringHashMap(FunctionDeclLocation) = null;
+/// AOT-CODEGEN-012：用户类/接口/trait 声明位置（重复声明 Fatal 的 prev 定位）
+pub var class_decl_locations: ?std.StringHashMap(FunctionDeclLocation) = null;
 
 /// 函数元数据（参数计数等，用于反射 API）
 pub const FunctionMeta = struct {
@@ -444,6 +446,7 @@ pub fn initRuntime(allocator: Allocator) !void {
     initClassRegistry(runtime_allocator);
     user_function_registry = std.StringHashMap(*const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value).init(runtime_allocator);
     user_function_decl_locations = std.StringHashMap(FunctionDeclLocation).init(runtime_allocator);
+    class_decl_locations = std.StringHashMap(FunctionDeclLocation).init(runtime_allocator);
     function_meta_registry = std.StringHashMap(FunctionMeta).init(runtime_allocator);
     constants = std.StringHashMap(Value).init(runtime_allocator);
     static_vars = std.StringHashMap(Value).init(runtime_allocator);
@@ -782,6 +785,10 @@ pub fn deinitRuntime() void {
     if (user_function_decl_locations) |*locations| {
         locations.deinit();
         user_function_decl_locations = null;
+    }
+    if (class_decl_locations) |*locations| {
+        locations.deinit();
+        class_decl_locations = null;
     }
     if (function_meta_registry) |*meta_reg| {
         meta_reg.deinit();
@@ -3244,8 +3251,9 @@ pub fn php_create_closure(name: Value, captures: Value, is_static_val: Value, al
     // Lookup function
     var func_ptr: ?BuiltinFn = null;
 
-    if (user_function_registry) |registry| {
-        func_ptr = registry.get(func_name);
+    // §8 #6：用户函数名 CI（Closure::fromCallable("dyn") 须命中声明为 Dyn 的函数）
+    if (lookupUserFunctionCI(func_name)) |func| {
+        func_ptr = func;
     }
 
     if (func_ptr == null) {
@@ -5104,10 +5112,9 @@ pub fn php_invoke_callable(callback: Value, args: []const Value, allocator: Allo
         if (lookupBuiltinFunction(func_name)) |func| {
             return func(Value.initNull(), args, allocator);
         }
-        if (user_function_registry) |registry| {
-            if (registry.get(func_name)) |func| {
-                return func(Value.initNull(), args, allocator);
-            }
+        // §8 #6：用户函数名 CI（$f = "dyn"; $f() 跨大小写动态调用）
+        if (lookupUserFunctionCI(func_name)) |func| {
+            return func(Value.initNull(), args, allocator);
         }
         // PHP: 对不存在的函数发出 warning 并返回 false
         return Value.initBool(false);
@@ -5818,6 +5825,25 @@ fn checkArithmeticOperand(v: Value) bool {
 }
 
 /// 输出 PHP Warning 到 stdout 和 stderr
+/// AOT-CODEGEN-012 R-132：PHP 8.2+ Deprecated 诊断（动态属性创建等）
+pub fn emitDeprecated(msg: []const u8) void {
+    if (isErrorSuppressed()) return;
+    var ebuf: [1024]u8 = undefined;
+    const emsg = std.fmt.bufPrint(
+        &ebuf,
+        "PHP Deprecated:  {s} in {s} on line {d}\n",
+        .{ msg, src_file, src_line },
+    ) catch "";
+    fileWriteAll(2, emsg);
+    var buf: [1024]u8 = undefined;
+    const smsg = std.fmt.bufPrint(
+        &buf,
+        "Deprecated: {s} in {s} on line {d}\n",
+        .{ msg, src_file, src_line },
+    ) catch "";
+    fileWriteAll(1, smsg);
+}
+
 pub fn emitWarning(msg: []const u8) void {
     // @操作符：错误抑制时不输出警告
     if (isErrorSuppressed()) return;
@@ -12594,6 +12620,18 @@ pub fn php_is_numeric(val: Value) !Value {
     return Value.initBool(false);
 }
 
+/// AOT-CODEGEN-010 §8 #6：用户函数注册表大小写不敏感查找 —— 精确命中优先，
+/// 未命中回落 CI 线性扫描（PHP 函数名不区分大小写；注册表规模 = 用户函数数，可接受）。
+fn lookupUserFunctionCI(name: []const u8) ?*const fn (ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
+    const reg_ptr = user_function_registry orelse return null;
+    if (reg_ptr.get(name)) |func| return func;
+    var it = reg_ptr.iterator();
+    while (it.next()) |entry| {
+        if (std.ascii.eqlIgnoreCase(entry.key_ptr.*, name)) return entry.value_ptr.*;
+    }
+    return null;
+}
+
 /// is_callable - 检查是否可调用（简化实现）
 pub fn php_is_callable(val: Value) !Value {
     const actual_val = if (val.isRef()) val.asRef().* else val;
@@ -12602,9 +12640,8 @@ pub fn php_is_callable(val: Value) !Value {
         // 字符串只有是已知函数名时才callable
         const name = actual_val.asString().data;
         if (lookupBuiltinFunction(name) != null) return Value.initBool(true);
-        if (user_function_registry) |reg| {
-            if (reg.contains(name)) return Value.initBool(true);
-        }
+        // §8 #6：用户函数名 CI（is_callable("get") 须命中声明为 Get 的函数）
+        if (lookupUserFunctionCI(name) != null) return Value.initBool(true);
         if (aot_callable_hook) |hook| {
             _ = hook(name, &[_]Value{}, runtime_allocator) catch return Value.initBool(false);
             return Value.initBool(true);
@@ -13021,7 +13058,22 @@ pub const ClassMeta = struct {
             return .{ .owner = self, .method = method };
         }
         if (self.parent) |parent| {
-            return parent.findMethodLookup(name);
+            if (parent.findMethodLookup(name)) |lookup| {
+                return lookup;
+            }
+        }
+        // AOT-CODEGEN-012 R-131：方法名 CI（PHP 方法名不区分大小写）——精确链全 miss 后
+        // 沿继承链 CI 扫描（仅 miss 路径付出扫描成本；28 调用者一次性受益：实例分发 /
+        // method_exists / 静态分发 / __call 探测 …）
+        var current: ?*const ClassMeta = self;
+        while (current) |meta| {
+            var it = meta.methods.iterator();
+            while (it.next()) |entry| {
+                if (std.ascii.eqlIgnoreCase(entry.key_ptr.*, name)) {
+                    return .{ .owner = meta, .method = entry.value_ptr };
+                }
+            }
+            current = meta.parent;
         }
         return null;
     }
@@ -13032,7 +13084,20 @@ pub const ClassMeta = struct {
             return method;
         }
         if (self.parent) |parent| {
-            return parent.findMethod(name);
+            if (parent.findMethod(name)) |method| {
+                return method;
+            }
+        }
+        // AOT-CODEGEN-012 R-131：方法名 CI（同 findMethodLookup）
+        var current: ?*const ClassMeta = self;
+        while (current) |meta| {
+            var it = meta.methods.iterator();
+            while (it.next()) |entry| {
+                if (std.ascii.eqlIgnoreCase(entry.key_ptr.*, name)) {
+                    return entry.value_ptr.*;
+                }
+            }
+            current = meta.parent;
         }
         return null;
     }
@@ -17254,10 +17319,8 @@ pub const ClassMeta = struct {
                     if (this.getPropertyDirect("__func_name")) |name_val| {
                         if (name_val.isString()) {
                             const func_name = name_val.asString().data;
-                            if (user_function_registry) |reg| {
-                                if (reg.get(func_name)) |func| {
-                                    return func(Value.initNull(), args, alloc);
-                                }
+                            if (lookupUserFunctionCI(func_name)) |func| {
+                                return func(Value.initNull(), args, alloc);
                             }
                             if (aot_callable_hook) |hook| {
                                 return hook(func_name, args, alloc);
@@ -17298,10 +17361,8 @@ pub const ClassMeta = struct {
                         if (this.getPropertyDirect("__func_name")) |name_val| {
                             if (name_val.isString()) {
                                 const func_name = name_val.asString().data;
-                                if (user_function_registry) |reg| {
-                                    if (reg.get(func_name)) |func| {
-                                        return func(Value.initNull(), real_args, alloc);
-                                    }
+                                if (lookupUserFunctionCI(func_name)) |func| {
+                                    return func(Value.initNull(), real_args, alloc);
                                 }
                                 if (aot_callable_hook) |hook| {
                                     return hook(func_name, real_args, alloc);
@@ -17343,9 +17404,7 @@ pub const ClassMeta = struct {
                     // 从函数名判断：如果存在于用户函数注册表中则为用户定义
                     if (this.getPropertyDirect("__func_name")) |name_val| {
                         if (name_val.isString()) {
-                            if (user_function_registry) |reg| {
-                                if (reg.get(name_val.asString().data) != null) return Value.initBool(true);
-                            }
+                            if (lookupUserFunctionCI(name_val.asString().data) != null) return Value.initBool(true);
                         }
                     }
                     // AOT编译的函数都是用户定义的
@@ -17366,9 +17425,7 @@ pub const ClassMeta = struct {
                     }
                     if (this.getPropertyDirect("__func_name")) |name_val| {
                         if (name_val.isString()) {
-                            if (user_function_registry) |reg| {
-                                if (reg.get(name_val.asString().data) != null) return Value.initBool(false);
-                            }
+                            if (lookupUserFunctionCI(name_val.asString().data) != null) return Value.initBool(false);
                         }
                     }
                     return Value.initBool(false);
@@ -18167,6 +18224,84 @@ pub fn registerClass(meta: *ClassMeta) !void {
     }
 }
 
+/// AOT-CODEGEN-012：用户类/接口/trait 注册（带声明位置）——CI 查重（PHP 类名不区分
+/// 大小写 ⇒ `class Foo` 与 `class foo` 为重复声明，双声明在 PHP 侧 Fatal redeclare）。
+/// 运行时内建类（stdClass/ArrayIterator/Exception 基类等）仍走无检查的 registerClass；
+/// 用户类 CI 撞内建名（如 `class stdclass`）同样 Fatal（PHP 语义一致）。
+pub fn registerClassWithLocation(meta: *ClassMeta, file: []const u8, line: u32) !void {
+    if (class_registry) |*registry| {
+        if (findClass(meta.name)) |prev_meta| {
+            // 占位判定：内部类（registerZigChannel 预注册的 Mutex/Channel/Atomic 族等）
+            // 不写 decl_locations ⇒ 用户同名声明**覆盖占位**（用户优先，R-124 函数侧同款原则
+            // —— f173 语料合法声明自己的 Mutex 即此形态）；有位置记录 = 用户 vs 用户 ⇒ Fatal。
+            const prev_is_placeholder = if (class_decl_locations) |*locations| locations.get(prev_meta.name) == null else true;
+            if (!prev_is_placeholder) {
+            // 报名与 prev 位置都取**首声明**（PHP 语义：报告先声明者的名字与位置）
+            const prev_name = prev_meta.name;
+            const noun: []const u8 = if (prev_meta.is_interface) "interface" else if (prev_meta.is_trait) "trait" else if (prev_meta.is_enum) "enum" else "class";
+            var prev_file = file;
+            var prev_line = line;
+            if (class_decl_locations) |*locations| {
+                if (locations.get(prev_name)) |loc| {
+                    prev_file = loc.file;
+                    prev_line = loc.line;
+                }
+            }
+            var ebuf: [512]u8 = undefined;
+            const emsg = std.fmt.bufPrint(
+                &ebuf,
+                "PHP Fatal error:  Cannot redeclare {s} {s} (previously declared in {s}:{d}) in {s} on line {d}\nStack trace:\n#0 {{main}}\n",
+                .{ noun, prev_name, prev_file, prev_line, file, line },
+            ) catch "";
+            fileWriteAll(2, emsg);
+            var buf: [512]u8 = undefined;
+            const msg = std.fmt.bufPrint(
+                &buf,
+                "\nFatal error: Cannot redeclare {s} {s} (previously declared in {s}:{d}) in {s} on line {d}\nStack trace:\n#0 {{main}}\n",
+                .{ noun, prev_name, prev_file, prev_line, file, line },
+            ) catch "";
+            fileWriteAll(1, msg);
+            std.process.exit(255);
+            }
+        }
+        try registry.put(meta.name, meta);
+        if (class_decl_locations) |*locations| {
+            try locations.put(meta.name, .{ .file = file, .line = line });
+        }
+    }
+}
+
+/// AOT-CODEGEN-012：完全同名重复声明（发射器跳过第二份 meta 构建，仅发本调用）——
+/// 首声明必已注册，命中即按 PHP 语义 Fatal（prev 名与位置取首声明）。
+pub fn registerClassRedeclare(name: []const u8, file: []const u8, line: u32) !void {
+    const prev_meta = findClass(name) orelse return; // 保险：未注册则忽略
+    const prev_name = prev_meta.name;
+    const noun: []const u8 = if (prev_meta.is_interface) "interface" else if (prev_meta.is_trait) "trait" else if (prev_meta.is_enum) "enum" else "class";
+    var prev_file = file;
+    var prev_line = line;
+    if (class_decl_locations) |*locations| {
+        if (locations.get(prev_name)) |loc| {
+            prev_file = loc.file;
+            prev_line = loc.line;
+        }
+    }
+    var ebuf: [512]u8 = undefined;
+    const emsg = std.fmt.bufPrint(
+        &ebuf,
+        "PHP Fatal error:  Cannot redeclare {s} {s} (previously declared in {s}:{d}) in {s} on line {d}\nStack trace:\n#0 {{main}}\n",
+        .{ noun, prev_name, prev_file, prev_line, file, line },
+    ) catch "";
+    fileWriteAll(2, emsg);
+    var buf: [512]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        &buf,
+        "\nFatal error: Cannot redeclare {s} {s} (previously declared in {s}:{d}) in {s} on line {d}\nStack trace:\n#0 {{main}}\n",
+        .{ noun, prev_name, prev_file, prev_line, file, line },
+    ) catch "";
+    fileWriteAll(1, msg);
+    std.process.exit(255);
+}
+
 /// 检查 final class 继承：如果 child 类继承自 final 类，输出 fatal error 并退出
 pub fn php_check_final_inheritance(child_class_name: []const u8, parent_meta: *const ClassMeta, file: []const u8, line: u32) void {
     if (parent_meta.is_final) {
@@ -18274,7 +18409,14 @@ pub fn php_check_abstract_methods(child_class_name: []const u8, file: []const u8
 /// 查找类
 pub fn findClass(name: []const u8) ?*ClassMeta {
     if (class_registry) |registry| {
-        return registry.get(name);
+        if (registry.get(name)) |meta| return meta;
+        // AOT-CODEGEN-012：类名不区分大小写（PHP 语义）—— 精确未命中回落 CI 线性扫描。
+        // 命中路径（热路径）零额外开销，仅 miss 才扫描；104 调用者一次性全族受益
+        //（new / instanceof 元数据 / class_exists / 静态调用 lookup_meta / 类常量 …）。
+        var it = registry.iterator();
+        while (it.next()) |entry| {
+            if (std.ascii.eqlIgnoreCase(entry.key_ptr.*, name)) return entry.value_ptr.*;
+        }
     }
     return null;
 }
@@ -19208,11 +19350,23 @@ pub fn php_object_get(obj_val: Value, property_name: []const u8) !Value {
             if (try tryMagicGet(obj_val, meta, property_name)) |result| {
                 return result;
             }
+            // AOT-CODEGEN-012 R-132：PHP 对未定义属性读发 Warning（诊断对齐，原先静默 null；
+            // __get 已接管的路径不告警 ✓；@ 抑制由 emitWarning 自带 ✓）
+            var wbuf: [256]u8 = undefined;
+            const wmsg = std.fmt.bufPrint(&wbuf, "Undefined property: {s}::${s}", .{ meta.name, property_name }) catch "Undefined property";
+            emitWarning(wmsg);
             return Value.initNull();
         }
     }
 
-    return obj.getProperty(property_name) orelse Value.initNull();
+    // 无 meta（非类实例对象，如 stdClass 动态对象）——PHP 同样对未定义读告警
+    if (obj.getProperty(property_name)) |val| {
+        return val;
+    }
+    var wbuf: [256]u8 = undefined;
+    const wmsg = std.fmt.bufPrint(&wbuf, "Undefined property: {s}::${s}", .{ obj.class_name, property_name }) catch "Undefined property";
+    emitWarning(wmsg);
+    return Value.initNull();
 }
 
 pub fn php_object_get_ref(obj_val: Value, prop_name_val: Value, allocator: Allocator) !Value {
@@ -19512,6 +19666,12 @@ pub fn php_object_set(obj_val: Value, property_name: []const u8, value: Value) !
             // 属性未声明：尝试 __set 魔术方法
             if (try tryMagicSet(obj_val, meta, property_name, value)) {
                 return Value.initNull();
+            }
+            // AOT-CODEGEN-012 R-132：PHP 8.2+ 动态属性创建发 Deprecated（stdClass 豁免）
+            if (!std.mem.eql(u8, meta.name, "stdClass")) {
+                var dbuf: [256]u8 = undefined;
+                const dmsg = std.fmt.bufPrint(&dbuf, "Creation of dynamic property {s}::${s} is deprecated", .{ meta.name, property_name }) catch "Creation of dynamic property is deprecated";
+                emitDeprecated(dmsg);
             }
         }
     }
@@ -19949,6 +20109,47 @@ pub fn php_enum_exists(name_val: Value, allocator: Allocator) !Value {
 }
 
 /// 检查是否是某个类的子类
+/// AOT-CODEGEN-012 R-131：is_a —— 对象实例/子类判定；allow_string 时类名字符串亦可。
+/// 类名 CI（经 findClass 规范化）。
+pub fn php_is_a(value: Value, class_name: Value, allow_string: Value) !Value {
+    if (!class_name.isString()) return Value.initBool(false);
+    const target_meta = findClass(class_name.asString().data) orelse return Value.initBool(false);
+    const target = target_meta.name;
+
+    if (Value_isObject(value)) {
+        const obj = Value_asObject(value);
+        if (std.mem.eql(u8, obj.class_name, target)) return Value.initBool(true);
+        if (obj.class_meta) |meta| {
+            if (meta.isSubclassOf(target)) return Value.initBool(true);
+            if (meta.implementsInterface(target)) return Value.initBool(true);
+        }
+        return Value.initBool(false);
+    }
+    if (allow_string.toBool() and value.isString()) {
+        const src_meta = findClass(value.asString().data) orelse return Value.initBool(false);
+        if (std.mem.eql(u8, src_meta.name, target)) return Value.initBool(true);
+        if (src_meta.isSubclassOf(target)) return Value.initBool(true);
+        if (src_meta.implementsInterface(target)) return Value.initBool(true);
+        return Value.initBool(false);
+    }
+    return Value.initBool(false);
+}
+
+/// AOT-CODEGEN-012 R-131：class_alias —— 为已注册类建立别名（同一 ClassMeta 双键）。
+/// 源类未注册 ⇒ false（PHP 8 行为为 Warning/ValueError 族，此处从简）。
+pub fn php_class_alias(from: Value, to: Value) !Value {
+    if (!from.isString() or !to.isString()) return Value.initBool(false);
+    const from_meta = findClass(from.asString().data) orelse {
+        // PHP 8：源类缺失 ⇒ PHP Warning + false（emitWarning 自带位置后缀，norm 对齐）
+        emitWarning(std.fmt.allocPrint(runtime_allocator, "Class \"{s}\" not found", .{from.asString().data}) catch "Class not found");
+        return Value.initBool(false);
+    };
+    if (class_registry) |*registry| {
+        try registry.put(to.asString().data, from_meta);
+    }
+    return Value.initBool(true);
+}
+
 pub fn php_is_subclass_of(child: Value, parent: Value) !Value {
     // 第一个参数可以是对象或类名字符串
     var child_class_name: []const u8 = undefined;
@@ -19967,7 +20168,9 @@ pub fn php_is_subclass_of(child: Value, parent: Value) !Value {
 
     // 第二个参数必须是类名字符串
     if (!parent.isString()) return Value.initBool(false);
-    const parent_class_name = parent.asString().data;
+    // AOT-CODEGEN-012 R-131：父类名 CI —— 规范化到注册拼写后再比较
+    const parent_raw = parent.asString().data;
+    const parent_class_name = if (findClass(parent_raw)) |pm| pm.name else parent_raw;
 
     // 如果子类元数据不存在，返回 false
     if (child_meta == null) return Value.initBool(false);
@@ -20007,17 +20210,25 @@ pub fn php_instanceof(obj_val: Value, class_name: Value) !Value {
     const obj = Value_asObject(obj_val);
     const name = class_name.asString().data;
 
+    // AOT-CODEGEN-012：类名 CI —— 先把被测名解析到规范注册名（未注册名原样比较，
+    // Throwable/Stringable 伪接口特判不受影响），随后所有比较使用规范拼写。
+    const canonical = blk: {
+        if (findClass(name)) |meta| break :blk meta.name;
+        break :blk name;
+    };
+
     // 检查类名直接匹配
-    if (std.mem.eql(u8, obj.class_name, name)) return Value.initBool(true);
+    if (std.mem.eql(u8, obj.class_name, canonical)) return Value.initBool(true);
 
     // 检查继承链和接口
     if (obj.class_meta) |meta| {
-        if (meta.isSubclassOf(name)) return Value.initBool(true);
-        if (meta.implementsInterface(name)) return Value.initBool(true);
+        if (meta.isSubclassOf(canonical)) return Value.initBool(true);
+        if (meta.implementsInterface(canonical)) return Value.initBool(true);
     }
 
     // PHP: Throwable 是所有 Exception 和 Error 的基接口
-    if (std.mem.eql(u8, name, "Throwable")) {
+    //（伪接口未注册 ⇒ canonicalization 不覆盖 ⇒ 此处必须 CI 比较，`throwable` 拼写同样命中）
+    if (std.ascii.eqlIgnoreCase(canonical, "Throwable")) {
         if (obj.class_meta) |meta| {
             // 检查是否是Exception或Error的子类
             if (meta.isSubclassOf("Exception") or std.mem.eql(u8, obj.class_name, "Exception")) return Value.initBool(true);
@@ -20025,8 +20236,8 @@ pub fn php_instanceof(obj_val: Value, class_name: Value) !Value {
         }
     }
 
-    // PHP 8.0+: 实现了 __toString() 的类自动实现 Stringable 接口
-    if (std.mem.eql(u8, name, "Stringable")) {
+    // PHP 8.0+: 实现了 __toString() 的类自动实现 Stringable 接口（同上：CI 比较）
+    if (std.ascii.eqlIgnoreCase(canonical, "Stringable")) {
         if (obj.class_meta) |meta| {
             if (meta.magic_toString != null) return Value.initBool(true);
             if (meta.methods.get("__toString") != null) return Value.initBool(true);
@@ -20112,6 +20323,13 @@ pub fn php_method_exists(obj_val: Value, method_name: Value) !Value {
     if (Value_isObject(obj_val)) {
         const obj = Value_asObject(obj_val);
         if (obj.class_meta) |meta| {
+            return Value.initBool(meta.findMethod(name) != null);
+        }
+    }
+    // AOT-CODEGEN-012 R-131：PHP 的 method_exists 亦接受**类名字符串**形态
+    //（两级 CI 链：findClass 类名 CI + findMethod 方法名 CI）
+    if (obj_val.isString()) {
+        if (findClass(obj_val.asString().data)) |meta| {
             return Value.initBool(meta.findMethod(name) != null);
         }
     }
@@ -27822,16 +28040,15 @@ fn php_coroutine_entry(context: ?*anyopaque) anyerror!void {
         // Execute the callable
         if (ctx.callable.isString()) {
             const func_name = ctx.callable.asString().data;
-            if (user_function_registry) |registry| {
-                if (registry.get(func_name)) |func| {
-                    _ = func(Value.initNull(), ctx.args, ctx.allocator) catch |err| {
-                        if (has_exception) {
-                            php_handle_uncaught_exception();
-                        }
-                        return err;
-                    };
-                } else {}
-            }
+            // §8 #6：用户函数名 CI（go 协程字符串 callable 同样不区分大小写）
+            if (lookupUserFunctionCI(func_name)) |func| {
+                _ = func(Value.initNull(), ctx.args, ctx.allocator) catch |err| {
+                    if (has_exception) {
+                        php_handle_uncaught_exception();
+                    }
+                    return err;
+                };
+            } else {}
         } else if (ctx.callable.isFunction()) {
             const closure = ctx.callable.asFunction();
             _ = closure.func(Value.initFunction(closure), ctx.args, ctx.allocator) catch |err| {

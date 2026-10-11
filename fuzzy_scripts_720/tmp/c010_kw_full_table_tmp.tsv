@@ -1,7 +1,7 @@
-# compiler_md5=b416d3fbceed199b186676619043bcc5
+# compiler_md5=73e27d8055b77fc37700013a92a66324
 # keyword_lookup_md5=ef70993a7caac6deb9b2e5a23bf7d143
 # lexer_md5=e3dd4191a1c3dfdf816b5873b4c60e5f
-# parser_md5=e3987a361d1db45bc3eadefc7afa249e
+# parser_md5=1eab26c068b13b9f904d2f432464d852
 # columns: shape|kw|probe_spell|ctrl_verdict|ctrl_rc|probe_verdict|probe_rc|class|ctrl_php||ctrl_aot||probe_php||probe_aot
 k_fn|fn|Fn|RUN(3|3)|php_rc=0|RUN(3|3)|php_rc=0|NOFACE
 k_if|if|If|RUN(if_ok|if_ok)|php_rc=0|RUN(if_ok|if_ok)|php_rc=0|NOFACE
@@ -22,7 +22,7 @@ k_true|true|True|RUN(T|T)|php_rc=0|RUN(T|T)|php_rc=0|NOFACE
 k_null|null|Null|RUN(N|N)|php_rc=0|RUN(N|N)|php_rc=0|NOFACE
 k_void|void|Void|RUN(void_ok|void_ok)|php_rc=0|RUN(void_ok|void_ok)|php_rc=0|NOFACE
 k_enum|enum|Enum|RUN(a|a)|php_rc=0|RUN(a|a)|php_rc=0|NOFACE
-k_goto|goto|Goto|RUN(2|)|php_rc=0|RUN(2|)|php_rc=0|CONFOUNDED_CTRL_DIFF
+k_goto|goto|Goto|RUN(2|2)|php_rc=0|RUN(2|2)|php_rc=0|NOFACE
 k_list|list|List|RUN(3|3)|php_rc=0|RUN(3|3)|php_rc=0|NOFACE
 k_self|self|Self|RUN(1|1)|php_rc=0|RUN(1|1)|php_rc=0|NOFACE
 k_class|class|Class|RUN(class_ok|class_ok)|php_rc=0|RUN(class_ok|class_ok)|php_rc=0|NOFACE
@@ -103,5 +103,5 @@ invm_lock|lock|zzkwhlock|alias(RUN:304|304)|php_rc_na|collide(RUN:304|304)|rc=0|
 invm_with|with|zzkwhwith|alias(RUN:305|305)|php_rc_na|collide(RUN:305|305)|rc=0|NOFACE
 invm_from|from|zzkwhfrom|alias(RUN:306|306)|php_rc_na|collide(RUN:306|306)|rc=0|NOFACE
 invm_struct|struct|zzkwhstruct|alias(RUN:307|307)|php_rc_na|collide(RUN:307|307)|rc=0|NOFACE
-ELAPSED=721s
-C010H_DONE shapes=79 arms=200 face=0 noface=78 confounded=1 bad_probe=0 ctrl_compile_fail=0 probe_compile_fail=0 probe_timeout=0 inverse_shapes=21 inverse_face=0 inverse_noface=21 inverse_confounded=0 repo_build_residue=0 SMOKE_ONLY=0
+ELAPSED=714s
+C010H_DONE shapes=79 arms=200 face=0 noface=79 confounded=0 bad_probe=0 ctrl_compile_fail=0 probe_compile_fail=0 probe_timeout=0 inverse_shapes=21 inverse_face=0 inverse_noface=21 inverse_confounded=0 repo_build_residue=0 SMOKE_ONLY=0

@@ -97,3 +97,187 @@ C010H2_DONE shapes=15 over_accept=14 strict_same=1 aot_compile_fail=0 php_ok_aot
 C010I_DONE shapes=19 tree_same=7 tree_diff=12 bc_same=7 bc_diff=12 aot_same=19 aot_diff=0 aot_compile_fail=0 both_red=0 vm_only_red=12 aot_only_red=0 repo_build_residue=0 SMOKE_ONLY=0
 == 影子读数 ==
 C010_SHADOW_DONE total=68 same=68 diff=0 miss=0 ELAPSED=1502s
+== [1/3] shadow start 2026-10-10 23:37:45
+C010_SHADOW_DONE total=68 same=68 diff=0 miss=0 ELAPSED=1564s
+== [1/3] shadow rc=0 2026-10-11 00:03:49
+== [2/3] gates start 2026-10-11 00:03:49
+gateE_rc=0
+gateF_rc=0
+gateG_rc=0
+gateH_rc=0
+gateH2_rc=0
+gateI_rc=0
+== [2/3] gates done 2026-10-11 00:19:57
+== [3/3] main regression start 2026-10-11 00:19:57
+regression_rc=0
+== [3/3] regression done 2026-10-11 00:32:47
+== 六门新读数 ==
+C010KW_DONE shapes=19 same=19 diff=0 silent_empty=0 aot_fatal=0 compile_fail=0
+C010MECH_DONE shapes=8 same=8 diff=0 zero_instr=0 compile_fail=0
+C010G_DONE shapes=7 same=7 diff=0 red_confirmed=0 guard_same=4 guard_red=0 compile_fail=0
+C010H_DONE shapes=79 arms=200 face=0 noface=79 confounded=0 bad_probe=0 ctrl_compile_fail=0 probe_compile_fail=0 probe_timeout=0 inverse_shapes=21 inverse_face=0 inverse_noface=21 inverse_confounded=0 repo_build_residue=0 SMOKE_ONLY=0
+C010H2_DONE shapes=15 over_accept=12 strict_same=1 aot_compile_fail=2 both_reject=2 aot_only_red=0 php_ok_aot_diff=0 repo_build_residue=0 SMOKE_ONLY=0
+C010I_DONE shapes=19 tree_same=7 tree_diff=12 bc_same=7 bc_diff=12 aot_same=19 aot_diff=0 aot_compile_fail=0 both_red=0 vm_only_red=12 aot_only_red=0 repo_build_residue=0 SMOKE_ONLY=0
+== 影子读数 ==
+C010_SHADOW_DONE total=68 same=68 diff=0 miss=0 ELAPSED=1564s
+== [1/3] shadow start 2026-10-11 00:38:53
+C010_SHADOW_DONE total=68 same=68 diff=0 miss=0 ELAPSED=1492s
+== [1/3] shadow rc=0 2026-10-11 01:03:46
+== [2/3] gates start 2026-10-11 01:03:46
+gateE_rc=0
+gateF_rc=0
+gateG_rc=0
+gateH_rc=0
+gateH2_rc=0
+gateI_rc=0
+== [2/3] gates done 2026-10-11 01:19:22
+== [3/3] main regression start 2026-10-11 01:19:22
+regression_rc=0
+== [3/3] regression done 2026-10-11 01:32:11
+== 六门新读数 ==
+C010KW_DONE shapes=19 same=19 diff=0 silent_empty=0 aot_fatal=0 compile_fail=0
+C010MECH_DONE shapes=8 same=8 diff=0 zero_instr=0 compile_fail=0
+C010G_DONE shapes=7 same=7 diff=0 red_confirmed=0 guard_same=4 guard_red=0 compile_fail=0
+C010H_DONE shapes=79 arms=200 face=0 noface=79 confounded=0 bad_probe=0 ctrl_compile_fail=0 probe_compile_fail=0 probe_timeout=0 inverse_shapes=21 inverse_face=0 inverse_noface=21 inverse_confounded=0 repo_build_residue=0 SMOKE_ONLY=0
+C010H2_DONE shapes=15 over_accept=12 strict_same=1 aot_compile_fail=2 both_reject=2 aot_only_red=0 php_ok_aot_diff=0 repo_build_residue=0 SMOKE_ONLY=0
+C010I_DONE shapes=19 tree_same=7 tree_diff=12 bc_same=7 bc_diff=12 aot_same=19 aot_diff=0 aot_compile_fail=0 both_red=0 vm_only_red=12 aot_only_red=0 repo_build_residue=0 SMOKE_ONLY=0
+== 影子读数 ==
+C010_SHADOW_DONE total=68 same=68 diff=0 miss=0 ELAPSED=1492s
+== [1/3] shadow start 2026-10-11 01:40:32
+C010_SHADOW_DONE total=68 same=68 diff=0 miss=0 ELAPSED=1492s
+== [1/3] shadow rc=0 2026-10-11 02:05:24
+== [2/3] gates start 2026-10-11 02:05:24
+gateE_rc=0
+gateF_rc=0
+gateG_rc=0
+gateH_rc=0
+gateH2_rc=0
+gateI_rc=0
+== [2/3] gates done 2026-10-11 02:20:53
+== [3/3] main regression start 2026-10-11 02:20:53
+regression_rc=0
+== [3/3] regression done 2026-10-11 02:33:44
+== 六门新读数 ==
+C010KW_DONE shapes=19 same=19 diff=0 silent_empty=0 aot_fatal=0 compile_fail=0
+C010MECH_DONE shapes=8 same=8 diff=0 zero_instr=0 compile_fail=0
+C010G_DONE shapes=7 same=7 diff=0 red_confirmed=0 guard_same=4 guard_red=0 compile_fail=0
+C010H_DONE shapes=79 arms=200 face=0 noface=79 confounded=0 bad_probe=0 ctrl_compile_fail=0 probe_compile_fail=0 probe_timeout=0 inverse_shapes=21 inverse_face=0 inverse_noface=21 inverse_confounded=0 repo_build_residue=0 SMOKE_ONLY=0
+C010H2_DONE shapes=15 over_accept=12 strict_same=1 aot_compile_fail=2 both_reject=2 aot_only_red=0 php_ok_aot_diff=0 repo_build_residue=0 SMOKE_ONLY=0
+C010I_DONE shapes=19 tree_same=7 tree_diff=12 bc_same=7 bc_diff=12 aot_same=19 aot_diff=0 aot_compile_fail=0 both_red=0 vm_only_red=12 aot_only_red=0 repo_build_residue=0 SMOKE_ONLY=0
+== 影子读数 ==
+C010_SHADOW_DONE total=68 same=68 diff=0 miss=0 ELAPSED=1492s
+== [1/3] shadow start 2026-10-11 02:41:39
+C010_SHADOW_DONE total=68 same=68 diff=0 miss=0 ELAPSED=1488s
+== [1/3] shadow rc=0 2026-10-11 03:06:27
+== [2/3] gates start 2026-10-11 03:06:27
+gateE_rc=0
+gateF_rc=0
+gateG_rc=0
+gateH_rc=0
+gateH2_rc=0
+gateI_rc=0
+== [2/3] gates done 2026-10-11 03:22:04
+== [3/3] main regression start 2026-10-11 03:22:04
+regression_rc=0
+== [3/3] regression done 2026-10-11 03:34:51
+== 六门新读数 ==
+C010KW_DONE shapes=19 same=19 diff=0 silent_empty=0 aot_fatal=0 compile_fail=0
+C010MECH_DONE shapes=8 same=8 diff=0 zero_instr=0 compile_fail=0
+C010G_DONE shapes=7 same=7 diff=0 red_confirmed=0 guard_same=4 guard_red=0 compile_fail=0
+C010H_DONE shapes=79 arms=200 face=0 noface=79 confounded=0 bad_probe=0 ctrl_compile_fail=0 probe_compile_fail=0 probe_timeout=0 inverse_shapes=21 inverse_face=0 inverse_noface=21 inverse_confounded=0 repo_build_residue=0 SMOKE_ONLY=0
+C010H2_DONE shapes=15 over_accept=12 strict_same=1 aot_compile_fail=2 both_reject=2 aot_only_red=0 php_ok_aot_diff=0 repo_build_residue=0 SMOKE_ONLY=0
+C010I_DONE shapes=19 tree_same=7 tree_diff=12 bc_same=7 bc_diff=12 aot_same=19 aot_diff=0 aot_compile_fail=0 both_red=0 vm_only_red=12 aot_only_red=0 repo_build_residue=0 SMOKE_ONLY=0
+== 影子读数 ==
+C010_SHADOW_DONE total=68 same=68 diff=0 miss=0 ELAPSED=1488s
+== [1/3] shadow start 2026-10-11 03:48:47
+C010_SHADOW_DONE total=68 same=0 diff=68 miss=0 ELAPSED=1492s
+== [1/3] shadow rc=0 2026-10-11 04:13:39
+== [2/3] gates start 2026-10-11 04:13:39
+gateE_rc=0
+gateF_rc=0
+gateG_rc=0
+gateH_rc=0
+gateH2_rc=0
+gateI_rc=0
+== [2/3] gates done 2026-10-11 04:29:21
+== [3/3] main regression start 2026-10-11 04:29:21
+regression_rc=0
+== [3/3] regression done 2026-10-11 04:42:11
+== 六门新读数 ==
+C010KW_DONE shapes=19 same=19 diff=0 silent_empty=0 aot_fatal=0 compile_fail=0
+C010MECH_DONE shapes=8 same=8 diff=0 zero_instr=0 compile_fail=0
+C010G_DONE shapes=7 same=7 diff=0 red_confirmed=0 guard_same=4 guard_red=0 compile_fail=0
+C010H_DONE shapes=79 arms=200 face=0 noface=79 confounded=0 bad_probe=0 ctrl_compile_fail=0 probe_compile_fail=0 probe_timeout=0 inverse_shapes=21 inverse_face=0 inverse_noface=21 inverse_confounded=0 repo_build_residue=0 SMOKE_ONLY=0
+C010H2_DONE shapes=15 over_accept=12 strict_same=1 aot_compile_fail=2 both_reject=2 aot_only_red=0 php_ok_aot_diff=0 repo_build_residue=0 SMOKE_ONLY=0
+C010I_DONE shapes=19 tree_same=7 tree_diff=12 bc_same=7 bc_diff=12 aot_same=19 aot_diff=0 aot_compile_fail=0 both_red=0 vm_only_red=12 aot_only_red=0 repo_build_residue=0 SMOKE_ONLY=0
+== 影子读数 ==
+C010_SHADOW_DONE total=68 same=0 diff=68 miss=0 ELAPSED=1492s
+== [1/3] shadow start 2026-10-11 05:04:57
+C010_SHADOW_DONE total=68 same=0 diff=68 miss=0 ELAPSED=1492s
+== [1/3] shadow rc=0 2026-10-11 05:29:49
+== [2/3] gates start 2026-10-11 05:29:49
+gateE_rc=0
+gateF_rc=0
+gateG_rc=0
+gateH_rc=0
+gateH2_rc=0
+gateI_rc=0
+== [2/3] gates done 2026-10-11 05:45:24
+== [3/3] main regression start 2026-10-11 05:45:24
+regression_rc=0
+== [3/3] regression done 2026-10-11 05:58:14
+== 六门新读数 ==
+C010KW_DONE shapes=19 same=19 diff=0 silent_empty=0 aot_fatal=0 compile_fail=0
+C010MECH_DONE shapes=8 same=8 diff=0 zero_instr=0 compile_fail=0
+C010G_DONE shapes=7 same=7 diff=0 red_confirmed=0 guard_same=4 guard_red=0 compile_fail=0
+C010H_DONE shapes=79 arms=200 face=0 noface=79 confounded=0 bad_probe=0 ctrl_compile_fail=0 probe_compile_fail=0 probe_timeout=0 inverse_shapes=21 inverse_face=0 inverse_noface=21 inverse_confounded=0 repo_build_residue=0 SMOKE_ONLY=0
+C010H2_DONE shapes=15 over_accept=12 strict_same=1 aot_compile_fail=2 both_reject=2 aot_only_red=0 php_ok_aot_diff=0 repo_build_residue=0 SMOKE_ONLY=0
+C010I_DONE shapes=19 tree_same=7 tree_diff=12 bc_same=7 bc_diff=12 aot_same=19 aot_diff=0 aot_compile_fail=0 both_red=0 vm_only_red=12 aot_only_red=0 repo_build_residue=0 SMOKE_ONLY=0
+== 影子读数 ==
+C010_SHADOW_DONE total=68 same=0 diff=68 miss=0 ELAPSED=1492s
+== [1/3] shadow start 2026-10-11 06:11:44
+C010_SHADOW_DONE total=68 same=0 diff=68 miss=0 ELAPSED=1491s
+== [1/3] shadow rc=0 2026-10-11 06:36:35
+== [2/3] gates start 2026-10-11 06:36:35
+gateE_rc=0
+gateF_rc=0
+gateG_rc=0
+gateH_rc=0
+gateH2_rc=0
+gateI_rc=0
+== [2/3] gates done 2026-10-11 06:52:28
+== [3/3] main regression start 2026-10-11 06:52:28
+regression_rc=0
+== [3/3] regression done 2026-10-11 07:05:35
+== 六门新读数 ==
+C010KW_DONE shapes=19 same=19 diff=0 silent_empty=0 aot_fatal=0 compile_fail=0
+C010MECH_DONE shapes=8 same=8 diff=0 zero_instr=0 compile_fail=0
+C010G_DONE shapes=7 same=7 diff=0 red_confirmed=0 guard_same=4 guard_red=0 compile_fail=0
+C010H_DONE shapes=79 arms=200 face=0 noface=79 confounded=0 bad_probe=0 ctrl_compile_fail=0 probe_compile_fail=0 probe_timeout=0 inverse_shapes=21 inverse_face=0 inverse_noface=21 inverse_confounded=0 repo_build_residue=0 SMOKE_ONLY=0
+C010H2_DONE shapes=15 over_accept=12 strict_same=1 aot_compile_fail=2 both_reject=2 aot_only_red=0 php_ok_aot_diff=0 repo_build_residue=0 SMOKE_ONLY=0
+C010I_DONE shapes=19 tree_same=7 tree_diff=12 bc_same=7 bc_diff=12 aot_same=19 aot_diff=0 aot_compile_fail=0 both_red=0 vm_only_red=12 aot_only_red=0 repo_build_residue=0 SMOKE_ONLY=0
+== 影子读数 ==
+C010_SHADOW_DONE total=68 same=0 diff=68 miss=0 ELAPSED=1491s
+== [1/3] shadow start 2026-10-11 08:33:39
+C010_SHADOW_DONE total=68 same=0 diff=68 miss=0 ELAPSED=1577s
+== [1/3] shadow rc=0 2026-10-11 08:59:56
+== [2/3] gates start 2026-10-11 08:59:56
+gateE_rc=0
+gateF_rc=0
+gateG_rc=0
+gateH_rc=0
+gateH2_rc=0
+gateI_rc=0
+== [2/3] gates done 2026-10-11 09:15:39
+== [3/3] main regression start 2026-10-11 09:15:39
+regression_rc=0
+== [3/3] regression done 2026-10-11 09:29:09
+== 六门新读数 ==
+C010KW_DONE shapes=19 same=19 diff=0 silent_empty=0 aot_fatal=0 compile_fail=0
+C010MECH_DONE shapes=8 same=8 diff=0 zero_instr=0 compile_fail=0
+C010G_DONE shapes=7 same=7 diff=0 red_confirmed=0 guard_same=4 guard_red=0 compile_fail=0
+C010H_DONE shapes=79 arms=200 face=0 noface=79 confounded=0 bad_probe=0 ctrl_compile_fail=0 probe_compile_fail=0 probe_timeout=0 inverse_shapes=21 inverse_face=0 inverse_noface=21 inverse_confounded=0 repo_build_residue=0 SMOKE_ONLY=0
+C010H2_DONE shapes=15 over_accept=12 strict_same=1 aot_compile_fail=2 both_reject=2 aot_only_red=0 php_ok_aot_diff=0 repo_build_residue=0 SMOKE_ONLY=0
+C010I_DONE shapes=19 tree_same=7 tree_diff=12 bc_same=7 bc_diff=12 aot_same=19 aot_diff=0 aot_compile_fail=0 both_red=0 vm_only_red=12 aot_only_red=0 repo_build_residue=0 SMOKE_ONLY=0
+== 影子读数 ==
+C010_SHADOW_DONE total=68 same=0 diff=68 miss=0 ELAPSED=1577s

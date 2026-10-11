@@ -471,11 +471,9 @@ pub const IRGenerator = struct {
         const entry = try func.createBlock("entry");
         self.setCurrentBlock(entry);
 
-        // Generate all top-level statements
-        for (stmts) |stmt_idx| {
-            try self.generateStatement(stmt_idx);
-            if (self.isBlockTerminated()) break;
-        }
+        // Generate all top-level statements（§8 #3：语句层后向 goto 降级，见
+        // generateStatementListGotoAware——顶层与 generateBlock 共用同一配对机制）
+        try self.generateStatementListGotoAware(stmts);
 
         // Add implicit return if not terminated
         if (!self.isBlockTerminated()) {
@@ -775,10 +773,78 @@ pub const IRGenerator = struct {
     /// Generate IR for a block of statements
     fn generateBlock(self: *Self, node: *const Node) !void {
         const block_data = node.data.block;
-        for (block_data.stmts) |stmt_idx| {
+        // AOT-CODEGEN-010 §8 #3（R-126 下沉）：块内语句走查与顶层共用 label→closer 配对
+        //（函数体/花括号块内的规范后向 goto 同样降级为 do-while IR）；配对失败按原序生成。
+        try self.generateStatementListGotoAware(block_data.stmts);
+    }
+
+    /// AOT-CODEGEN-010 §8 #3：语句层后向 goto 降级走查（顶层 generateMainFunction 与
+    /// generateBlock 共用）——规范模式（`L: S…; if (C) { goto L; }` / `L: S…; goto L;`）
+    /// 降级为 do-while IR（形状镜像 generateDoWhileStmt，块名 do_while_* ⇒ 发射器既有
+    /// 机制原生出码）；配对失败（多标签/双 goto/带 else 等非规范形态）按原序生成（现状行为）。
+    /// 语料 goto 0 处 ⇒ 零漂移。
+    fn generateStatementListGotoAware(self: *Self, stmts: []const Node.Index) anyerror!void {
+        var gl_label: ?[]const u8 = null;
+        var gl_label_idx: Node.Index = 0;
+        var gl_body = std.ArrayListUnmanaged(Node.Index){ .items = &.{}, .capacity = 0 };
+        defer gl_body.deinit(self.allocator);
+
+        for (stmts) |stmt_idx| {
+            const stmt_node = self.getNode(stmt_idx);
+
+            if (gl_label) |label| {
+                if (stmt_node) |sn| {
+                    if (sn.tag == .goto_label) {
+                        // 另一标签 ⇒ 当前标签无从闭合：按原序 flush 后以其为新起点
+                        try self.flushGotoLoopBuffer(gl_label_idx, gl_body.items);
+                        gl_label = self.getString(sn.data.goto_label.label);
+                        gl_label_idx = stmt_idx;
+                        gl_body.clearRetainingCapacity();
+                        continue;
+                    }
+                    if (sn.tag == .goto_stmt) {
+                        const g_label = self.getString(sn.data.goto_stmt.label);
+                        if (std.ascii.eqlIgnoreCase(g_label, label)) {
+                            // 无条件闭合：do { S…; } while (true);
+                            try self.generateGotoLoopLowering(label, gl_body.items, null);
+                            gl_label = null;
+                            gl_body.clearRetainingCapacity();
+                            if (self.isBlockTerminated()) break;
+                            continue;
+                        }
+                    }
+                    if (sn.tag == .if_stmt) {
+                        if (try self.gotoLoopCloserInspect(stmt_idx, label)) |closer| {
+                            // 条件闭合：then 位 ⇒ do { S…; } while (C)；
+                            // else 位（R-130）⇒ do { S…; if (C) { X…; break; } } while (true);
+                            try self.generateGotoLoopLowering(label, gl_body.items, closer);
+                            gl_label = null;
+                            gl_body.clearRetainingCapacity();
+                            if (self.isBlockTerminated()) break;
+                            continue;
+                        }
+                    }
+                }
+                // 非闭合语句 ⇒ 缓冲（延迟生成）
+                try gl_body.append(self.allocator, stmt_idx);
+                continue;
+            }
+
+            // 无 pending：等待标签起点
+            if (stmt_node) |sn| {
+                if (sn.tag == .goto_label) {
+                    gl_label = self.getString(sn.data.goto_label.label);
+                    gl_label_idx = stmt_idx;
+                    gl_body.clearRetainingCapacity();
+                    continue;
+                }
+            }
             try self.generateStatement(stmt_idx);
-            // Stop if block is terminated (return, break, etc.)
             if (self.isBlockTerminated()) break;
+        }
+        // 尾部未闭合 ⇒ 按原序生成（含标签标记），保持无循环标签的现状行为
+        if (gl_label != null) {
+            try self.flushGotoLoopBuffer(gl_label_idx, gl_body.items);
         }
     }
 
@@ -3943,6 +4009,146 @@ pub const IRGenerator = struct {
         }
     }
 
+    /// AOT-CODEGEN-010 §8 #3：closer 形态（R-130 扩展 else 位）
+    const GotoLoopCloser = struct {
+        cond_idx: Node.Index,
+        /// else 位 closer：then 位的真实语句（循环体内 closer-if 的 then 路径）
+        then_stmts: []const Node.Index = &.{},
+        /// true = goto 在 else 位（`if (C) { X…; } else { goto L; }`）；
+        /// false = goto 在 then 位（`if (C) { goto L; }`，现行形态）
+        in_else: bool = false,
+    };
+
+    /// 检查 if 节点是否为「goto L 的唯一载体」：
+    /// - then 位：无 else 且 then 块首语句为 goto L（尾随语句 PHP 语义下不可达 ⇒ 丢弃；g4 类）
+    /// - else 位（R-130）：else 块首语句为 goto L（尾随死语句同丢弃）⇒ then 位为循环体内的真实路径
+    fn gotoLoopCloserInspect(self: *Self, if_idx: Node.Index, label_name: []const u8) anyerror!?GotoLoopCloser {
+        const node = self.getNode(if_idx) orelse return null;
+        if (node.tag != .if_stmt) return null;
+        const if_data = node.data.if_stmt;
+
+        if (if_data.else_branch == null) {
+            // then 位（现行形态）
+            const then_node = self.getNode(if_data.then_branch) orelse return null;
+            if (then_node.tag != .block) return null;
+            if (then_node.data.block.stmts.len == 0) return null;
+            const g_node = self.getNode(then_node.data.block.stmts[0]) orelse return null;
+            if (g_node.tag != .goto_stmt) return null;
+            const g_label = self.getString(g_node.data.goto_stmt.label);
+            if (!std.ascii.eqlIgnoreCase(g_label, label_name)) return null;
+            return .{ .cond_idx = if_data.condition, .then_stmts = &.{}, .in_else = false };
+        }
+
+        // else 位（R-130）：else 块首语句为 goto L（尾随死语句丢弃）
+        const else_node = self.getNode(if_data.else_branch.?) orelse return null;
+        if (else_node.tag != .block) return null;
+        if (else_node.data.block.stmts.len == 0) return null;
+        const g_node = self.getNode(else_node.data.block.stmts[0]) orelse return null;
+        if (g_node.tag != .goto_stmt) return null;
+        const g_label = self.getString(g_node.data.goto_stmt.label);
+        if (!std.ascii.eqlIgnoreCase(g_label, label_name)) return null;
+        // then 位 = 循环体内的真实路径（块或单语句）
+        const then_node = self.getNode(if_data.then_branch);
+        var then_stmts: []const Node.Index = &.{};
+        if (then_node) |tn| {
+            if (tn.tag == .block) {
+                then_stmts = tn.data.block.stmts;
+            } else {
+                const one = try self.allocator.dupe(Node.Index, &.{if_data.then_branch});
+                then_stmts = one;
+            }
+        }
+        return .{ .cond_idx = if_data.condition, .then_stmts = then_stmts, .in_else = true };
+    }
+
+    /// AOT-CODEGEN-010 §8 #3：把缓冲的 label→closer 语句序列降级为 do-while IR。
+    /// 形状镜像 generateDoWhileStmt（do_while_body_/do_while_cond_/do_while_exit_ 命名），
+    /// 发射器按既有 do-while 机制原生出码；goto L 的回边 = body 块（goto 语义 = 重跑 S）。
+    /// cond_idx = null ⇒ while (true)（无条件闭合，rest 不可达 = PHP 语义）。
+    fn generateGotoLoopLowering(self: *Self, label_name: []const u8, body_stmts: []const Node.Index, closer: ?GotoLoopCloser) anyerror!void {
+        const body_block = try self.createBlock("do_while_body");
+        const cond_block = try self.createBlock("do_while_cond");
+        const exit_block = try self.createBlock("do_while_exit");
+
+        // 跳入循环体（do-while 恒先执行一次）
+        self.setTerminator(.{ .br = body_block });
+
+        try self.loop_stack.append(self.allocator, .{
+            .break_block = exit_block,
+            .continue_block = cond_block,
+        });
+
+        // 标签落点 = 循环体起点：体内嵌套 goto L 由 goto_labels 解析为重跑边
+        try self.goto_labels.put(self.allocator, label_name, body_block);
+
+        // 循环条件：then 位 closer = closer 的 C（`do {S} while (C)`）；
+        // else 位 closer 与无条件闭合 = 恒真（closer-if 在体内尾部）
+        self.setCurrentBlock(cond_block);
+        const head_cond_reg = if (closer) |cl|
+            if (!cl.in_else) try self.generateExpression(cl.cond_idx) else try self.emitWithResult(.{ .const_bool = true }, .bool)
+        else
+            try self.emitWithResult(.{ .const_bool = true }, .bool);
+        self.setTerminator(.{ .cond_br = .{
+            .cond = head_cond_reg,
+            .then_block = body_block,
+            .else_block = exit_block,
+        } });
+
+        self.setCurrentBlock(body_block);
+        for (body_stmts) |stmt_idx| {
+            try self.generateStatement(stmt_idx);
+            if (self.isBlockTerminated()) break;
+        }
+        if (!self.isBlockTerminated()) {
+            if (closer) |cl| {
+                if (cl.in_else) {
+                    // else 位 closer（R-130）：`if (C) { X…; break; } else { continue; }`
+                    // goto L = continue（br 回循环头）；C 真路径 = break（br 出口）。
+                    // 形态族已由 w2/w3 探针证实为 do-while 渲染路径原生支持。
+                    const c_reg = try self.generateExpression(cl.cond_idx);
+                    const then_blk = try self.createBlock("if_then");
+                    const else_blk = try self.createBlock("if_else");
+                    self.setTerminator(.{ .cond_br = .{
+                        .cond = c_reg,
+                        .then_block = then_blk,
+                        .else_block = else_blk,
+                    } });
+                    self.setCurrentBlock(then_blk);
+                    for (cl.then_stmts) |stmt_idx| {
+                        try self.generateStatement(stmt_idx);
+                        if (self.isBlockTerminated()) break;
+                    }
+                    if (!self.isBlockTerminated()) {
+                        self.setTerminator(.{ .br = exit_block });
+                    }
+                    self.setCurrentBlock(else_blk);
+                    self.setTerminator(.{ .br = cond_block });
+                    self.setCurrentBlock(exit_block);
+                } else {
+                    // then 位 closer 的 C 已在循环头消费 ⇒ 体尾 latch 回头
+                    self.setTerminator(.{ .br = cond_block });
+                }
+            } else {
+                self.setTerminator(.{ .br = cond_block });
+            }
+        }
+
+        _ = self.loop_stack.pop();
+        self.setCurrentBlock(exit_block);
+    }
+
+    /// AOT-CODEGEN-010 §8 #3：配对失败的缓冲序列按原序生成（标签标记 + 逐条语句），
+    /// 保持无循环标签的现状行为。
+    fn flushGotoLoopBuffer(self: *Self, label_idx: Node.Index, body_stmts: []const Node.Index) anyerror!void {
+        if (self.getNode(label_idx)) |label_node| {
+            try self.generateGotoLabel(label_node);
+        }
+        for (body_stmts) |stmt_idx| {
+            try self.generateStatement(stmt_idx);
+            if (self.isBlockTerminated()) break;
+        }
+    }
+
     /// Generate IR for echo statement
     fn generateEchoStmt(self: *Self, node: *const Node) !void {
         const echo_data = node.data.echo_stmt;
@@ -6668,7 +6874,8 @@ prop_name: ?[]const u8 = null,
             if (func_symbol != null and func_symbol.?.metadata == .function) break :blk null; // symbol_table 已有
             if (self.module) |mod| {
                 for (mod.functions.items) |f| {
-                    if (std.mem.eql(u8, f.name, func_name)) {
+                    // §8 #6：函数名不区分大小写 ⇒ 跨大小写调用的命名参数元数据同样可解析
+                    if (std.ascii.eqlIgnoreCase(f.name, func_name)) {
                         break :blk f.params.items;
                     }
                 }
@@ -6692,7 +6899,7 @@ prop_name: ?[]const u8 = null,
                 const p_is_ref: bool = if (use_symbol) func_symbol.?.metadata.function.params[pi].is_reference else blk: {
                     if (self.module) |mod| {
                         for (mod.functions.items) |f| {
-                            if (std.mem.eql(u8, f.name, func_name)) {
+                            if (std.ascii.eqlIgnoreCase(f.name, func_name)) {
                                 for (f.ref_params.items) |rp| {
                                     if (rp == pi) break :blk true;
                                 }
@@ -6710,7 +6917,7 @@ prop_name: ?[]const u8 = null,
                     }
                     if (self.module) |mod| {
                         for (mod.functions.items) |f| {
-                            if (std.mem.eql(u8, f.name, func_name) and pi < f.params.items.len) {
+                            if (std.ascii.eqlIgnoreCase(f.name, func_name) and pi < f.params.items.len) {
                                 break :blk f.params.items[pi].is_variadic;
                             }
                         }

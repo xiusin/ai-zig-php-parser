@@ -1,0 +1,30 @@
+c1	SAME	PHP[7]	AOT[7]
+c2	SAME	PHP[y]	AOT[y]
+c3	SAME	PHP[5]	AOT[5]
+c4	SAME	PHP[y]	AOT[y]
+c5	SAME	PHP[3]	AOT[3]
+c6	SAME	PHP[myclass]	AOT[myclass]
+c7	SAME	PHP[2]	AOT[2]
+c8	SAME	PHP[MyClass]	AOT[MyClass]
+c9	SAME	PHP[PHP Fatal error:  Cannot redeclare class Foo (previously declared in FILE:LINE) in FILE:LINE]	AOT[PHP Fatal error:  Cannot redeclare class Foo (previously declared in FILE:LINE) in FILE:LINE]
+c10	SAME	PHP[PHP Fatal error:  Cannot redeclare class Dub (previously declared in FILE:LINE) in FILE:LINE]	AOT[PHP Fatal error:  Cannot redeclare class Dub (previously declared in FILE:LINE) in FILE:LINE]
+c11	SAME	PHP[PHP Fatal error:  Cannot redeclare interface MyI2 (previously declared in FILE:LINE) in FILE:LINE]	AOT[PHP Fatal error:  Cannot redeclare interface MyI2 (previously declared in FILE:LINE) in FILE:LINE]
+c12	SAME	PHP[PHP Fatal error:  Cannot redeclare trait T2 (previously declared in FILE:LINE) in FILE:LINE]	AOT[PHP Fatal error:  Cannot redeclare trait T2 (previously declared in FILE:LINE) in FILE:LINE]
+c13	SAME	PHP[33]	AOT[33]
+c14	SAME	PHP[yS]	AOT[yS]
+c15	SAME	PHP[y]	AOT[y]
+c16	SAME	PHP[yYo]	AOT[yYo]
+c17	SAME	PHP[7PHP Warning:  Class "Nope" not found in FILE:LINE
+Warning: Class "Nope" not found in FILE:LINE
+ok]	AOT[7PHP Warning:  Class "Nope" not found in FILE:LINE
+Warning: Class "Nope" not found in FILE:LINE
+ok]
+p1	SAME	PHP[PHP Warning:  Undefined property: PC::$pr in FILE:LINE
+Warning: Undefined property: PC::$pr in FILE:LINE]	AOT[PHP Warning:  Undefined property: PC::$pr in FILE:LINE
+Warning: Undefined property: PC::$pr in FILE:LINE]
+p2	SAME	PHP[PHP Deprecated:  Creation of dynamic property PC::$pr is deprecated in FILE:LINE
+Deprecated: Creation of dynamic property PC::$pr is deprecated in FILE:LINE
+5]	AOT[PHP Deprecated:  Creation of dynamic property PC::$pr is deprecated in FILE:LINE
+Deprecated: Creation of dynamic property PC::$pr is deprecated in FILE:LINE
+5]
+C010M_DONE shapes=19 red=0 green=19 compile_fail=0 bad_probe=0 repo_build_residue=0 SMOKE_ONLY=0 ELAPSED=70s

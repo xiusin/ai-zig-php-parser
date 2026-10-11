@@ -3308,9 +3308,32 @@ pub const NativeLinker = struct {
             \\
         );
 
+        var emitted_class_names = std.StringHashMap(void).init(self.allocator);
+        defer emitted_class_names.deinit();
+
         for (0..class_count) |ci| {
             const full_cname = class_names[ci]; // 完整类名
             const short_cname = class_short_names[ci]; // 短名（用于变量名）
+
+            // AOT-CODEGEN-012：完全同名重复声明 ⇒ 跳过 meta 构建（Zig 符号会重定义），
+            // 仅发 registerClassRedeclare（运行期按 PHP 语义 Fatal，prev 取首声明）。
+            // 跨大小写重复（Foo/foo，符号不同）⇒ 正常双 meta，由 registerClassWithLocation 的 CI 查重 Fatal。
+            if (emitted_class_names.contains(full_cname)) {
+                var dup_file: []const u8 = "";
+                var dup_line: u32 = 0;
+                if (type_def_idx[ci]) |tdi_dup| {
+                    const td_dup = ir_module.types.items[tdi_dup].*;
+                    dup_file = td_dup.location.file;
+                    dup_line = td_dup.location.line;
+                }
+                const escaped_dup = try self.escapeString(full_cname);
+                defer self.allocator.free(escaped_dup);
+                const escaped_df = try self.escapeString(dup_file);
+                defer self.allocator.free(escaped_df);
+                try writer.print("    try runtime.registerClassRedeclare(\"{s}\", \"{s}\", {d});\n", .{ escaped_dup, escaped_df, dup_line });
+                continue;
+            }
+            try emitted_class_names.put(full_cname, {});
             // ✅ 转义完整类名中的反斜杠
             const escaped_full_cname = try escapeBackslashes(self.allocator, full_cname);
             defer self.allocator.free(escaped_full_cname);
@@ -3538,7 +3561,15 @@ pub const NativeLinker = struct {
             try writer.print("    if ({s}_meta.methods.get(\"__toString\")) |m| {s}_meta.magic_toString = m.func;\n", .{ short_cname, short_cname });
 
             // 先注册类，使 enum case 的 php_object_new 能找到 ClassMeta
-            try writer.print("    try runtime.registerClass({s}_meta);\n", .{short_cname});
+            // AOT-CODEGEN-012：带声明位置注册 ⇒ CI 查重（重复声明按 PHP 语义 Fatal）
+            if (type_def_idx[ci]) |tdi_reg| {
+                const td_reg = ir_module.types.items[tdi_reg].*;
+                const escaped_rf = try self.escapeString(td_reg.location.file);
+                defer self.allocator.free(escaped_rf);
+                try writer.print("    try runtime.registerClassWithLocation({s}_meta, \"{s}\", {d});\n", .{ short_cname, escaped_rf, td_reg.location.line });
+            } else {
+                try writer.print("    try runtime.registerClass({s}_meta);\n", .{short_cname});
+            }
 
             // Register enum cases as static properties（必须在 registerClass 之后）
             if (type_def_idx[ci]) |tdi2| {
@@ -3585,6 +3616,9 @@ pub const NativeLinker = struct {
         }
 
         // 注册含静态属性的 trait（使 self::$prop 在 trait 方法中可用）
+        var emitted_trait_names = std.StringHashMap(void).init(self.allocator);
+        defer emitted_trait_names.deinit();
+
         for (ir_module.types.items) |td_ptr| {
             const td = td_ptr.*;
             if (td.kind != .trait) continue;
@@ -3599,6 +3633,14 @@ pub const NativeLinker = struct {
             if (!has_static) continue;
 
             const tname = td.name;
+            // AOT-CODEGEN-012：同名 trait 重复声明 ⇒ 跳过 meta 构建，仅发 Redeclare 调用
+            if (emitted_trait_names.contains(tname)) {
+                const escaped_tf2 = try self.escapeString(td.location.file);
+                defer self.allocator.free(escaped_tf2);
+                try writer.print("    try runtime.registerClassRedeclare(\"{s}\", \"{s}\", {d});\n", .{ tname, escaped_tf2, td.location.line });
+                continue;
+            }
+            try emitted_trait_names.put(tname, {});
             try writer.print("    const trait_{s}_meta = try runtime.ClassMeta.init(allocator, \"{s}\");\n", .{ tname, tname });
 
             for (td.properties) |prop| {
@@ -3645,7 +3687,10 @@ pub const NativeLinker = struct {
                 try writer.writeAll(");\n");
             }
 
-            try writer.print("    try runtime.registerClass({s}_meta);\n", .{tname});
+            // AOT-CODEGEN-012：trait 注册同样带位置 CI 查重
+            const escaped_tf = try self.escapeString(td.location.file);
+            defer self.allocator.free(escaped_tf);
+            try writer.print("    try runtime.registerClassWithLocation({s}_meta, \"{s}\", {d});\n", .{ tname, escaped_tf, td.location.line });
         }
 
         // 初始化类常量
@@ -3932,6 +3977,8 @@ pub const NativeLinker = struct {
         .{ "method_exists", bi(.{ .runtime_name = "php_method_exists", .needs_allocator = false }) },
         .{ "property_exists", bi(.{ .runtime_name = "php_property_exists", .needs_allocator = false }) },
         .{ "is_subclass_of", bi(.{ .runtime_name = "php_is_subclass_of", .needs_allocator = false }) },
+        .{ "is_a", bi(.{ .runtime_name = "php_is_a", .needs_allocator = false }) },
+        .{ "class_alias", bi(.{ .runtime_name = "php_class_alias", .needs_allocator = false }) },
         .{ "get_class", bi(.{ .runtime_name = "php_get_class", .needs_allocator = true }) },
         .{ "get_parent_class", .{ .runtime_name = "php_get_parent_class", .needs_allocator = true } },
         .{ "get_called_class", bi(.{ .runtime_name = "php_get_called_class_name", .needs_allocator = false }) },
@@ -22968,6 +23015,14 @@ pub const NativeLinker = struct {
                                         try writer.writeAll("runtime.Value.initNull(), &[_]runtime.Value{}");
                                     }
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
+                                } else if (std.mem.eql(u8, runtime_name, "php_is_a")) {
+                                    // is_a(value, class, allow_string = false)
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                    try self.writeValueArgs(writer, op.args);
+                                    if (op.args.len == 2) {
+                                        try writer.writeAll(", runtime.Value.initBool(false)");
+                                    }
+                                    try writer.writeAll(");\n");
                                 } else if (std.mem.eql(u8, runtime_name, "php_call_user_func")) {
                                     // call_user_func(callback, ...args) — 需要传切片
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(&[_]runtime.Value{{", .{runtime_name});

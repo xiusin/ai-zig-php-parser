@@ -3,7 +3,7 @@
 **问题 ID**: AOT-CODEGEN-010
 **优先级**: **P0**（穷举面实测：静默空输出 **12 形** + 无消息错值 **7 形** 全程 rc=0 ⇒ 假绿；另有 **25 形**使**合法 PHP 语法在 AOT 编译失败**，按宪法 §七-8 前半句禁止以简化脚本绕过）
 **性质**: 编译前端（`src/compiler/lexer.zig` + `src/compiler/keyword_lookup.zig`）⇒ **跨模式共享**：AOT 与字节码/解释器模式走同一 `lexIdentifier`；本轮按宪法 §五**只归因不修复**，且已实测两模式的结局同族（见 §2.2）
-**状态**: **R-2 批 + §8 七枚缺陷中六枚已修复（2026-10-07），仅余 #3 goto（P2 子轮），📦 待提交**：R-2/R-2b/R-4 + 名位容忍支（已由老铁 `b92f206` 入库）＋ §8 #1/#2/#5（R123）＋ §8 #4/#6/#7（R124，调用解析序 + iterable + 消息渲染）全部落地并验收 —— 终态实测：门 H **face=0**（79 形全绿，原 59 红）+ **inverse_face=0**（反例组 21 形全绿，原 15 红）+ **confounded=1**（余 k_goto=#3）+ probe_compile_fail=0；门 E/F/G 全绿且守卫臂零越界；门 H2 `over_accept=14` 不变；门 I `aot_same=19` 且 tree/bc 读数逐项不变（D-2 分叉达成）；影子 68 语料 `main.zig` md5 **68/68 一致**；主回归 **Pass 67 / Skip 1** 保持。修复代二进制 `b416d3fbceed199b186676619043bcc5`
+**状态**: **R-2 批 + §8 七枚缺陷中六枚已修复（2026-10-07）＋ R-3 批（替代语法严格闭合，2026-10-09）＋ R-5 批（`switch` 臂表位严格化 = §7-15c 面孔 A，2026-10-09 任务 #127）已落地并全链验收绿，#3 goto 已由 R-125 降级批关闭（2026-10-11，§3.9，门 D8 `defect_red=0`）与面 B/C（待裁决；2026-10-09 任务 #126 由永久侧门 K 取证收口 ⇒ 量化为 4 枚 `OVER_ACCEPT`（面 A，**已由 R-5 收掉**）+ 5 枚 `AOT_ONLY_RED`（面 B）+ `default` 臂位次缺失（面 C），面 B/C 已另立 [AOT-CODEGEN-011](AOT-CODEGEN-011-switch-case-semicolon-terminator-and-default-arm-position.md)，落地仍待 D-1…D-4 裁决），📦 R-3 + R-5 两批**均未提交**（git 实测 `--porcelain` = 14 枚 M（已入库但被本两批改到）+ 16 枚 ??（新建资产），`git diff --numstat HEAD -- src/` = **+81/−6** ⇒ 该 diff 同时含 R-3 的 +64/−6 与 R-5 的 +17/−0，**提交消息必须点名两批**；HEAD 现为 `f9432e2`，其祖先 `73f4d6b` 已把 R-2 代次门资产入库 ⇒ M 项≠未入库资产，勿混判）**：R-2/R-2b/R-4 + 名位容忍支（已由老铁 `b92f206` 入库）＋ §8 #1/#2/#5（R123）＋ §8 #4/#6/#7（R124，调用解析序 + iterable + 消息渲染）全部落地并验收 —— 终态实测：门 H **face=0**（79 形全绿，原 59 红）+ **inverse_face=0**（反例组 21 形全绿，原 15 红）+ **confounded=1**（余 k_goto=#3）+ probe_compile_fail=0；门 E/F/G 全绿且守卫臂零越界；门 H2 **`over_accept` 14→12**（R-3 批把关闭标记位 2 枚收为同拒，其余 12 枚仍待裁决，见 §3.6）；门 I `aot_same=19` 且 tree/bc 读数逐项不变（D-2 分叉达成）；影子 68 语料 `main.zig` md5 **68/68 一致**；主回归 **Pass 67 / Skip 1** 保持。**R-3 批（门 J P1）验收 = 门 J v3 29 形 `same=19 over_accept=0 both_reject=10 aot_only_red=0 run_red=0` + 本代次实测过的九腿全绿（门 E/F/G/H/H2/I/D8 + 影子门 + 官方主回归，逐腿读数见 §3.6「R-3 批落地实测」），链耗时实测 56m33s。R-5 批（面孔 A）验收 = 门 K `over_accept` 4→0 且硬守卫列 `aot_only_red` 恒 5／`diff_php_ok` 恒 1（面 B/C 零扰动）+ 新建永久侧门 L 23 形 `same=10 over_accept=0 aot_only_red=0`（并把 R-3 漏网形 `l_alt_semi_arm` 一并收掉）+ 其余八腿（J/D8/E/F/G/H/H2/I）与影子逐行 `diff_rows=0` + 主回归 Pass 67/Skip 1，十腿读数见 §3.8 与 §6「R-5 批落地后实测读数」，链耗时实测 56m24s**（R-2 代二进制 `b416d3fbceed199b186676619043bcc5`｜R-3 代二进制 `81f8a55a989f9a793fec2f75c32fd37d`｜R-5 代二进制 `6939cd2e891f20aef590de2585b15681`｜**R-125 goto 降级代二进制 `5c436e9e48e816e666c8996f29d18138`（含 R-3/R-5 合并态），链 V 验收 = 门 D8 `defect_red=0 guard_same=14` + 门 H `face=0 noface=79 confounded=0 inverse_face=0`（k_goto 的 CONFOUNDED 亦清零）+ 影子 68/68 + 主回归 Pass 67/Skip 1，读数见 §3.9**｜**R-126 配对下沉代二进制 `85b51931d0f5b79f2d681e1481a1ff3e`，链 VI 同口径全绿（函数体/块内 goto 循环解除登记，f1/f2/f3 探针全绿），读数见 §3.9**）
 **发现日期**: 2026-10-07（任务 #117 收窄「解释器模式 `var_export(静态属性)` panic」时顺带实测；非 AOT-RUNTIME-002 家族，故另立本单）
 **触发档**: 默认档（`--compile --no-debug-info`），无需抬档
 
@@ -24,8 +24,8 @@
 | `fuzzy_scripts_720/tmp/c010_constant_case_tmp.tsv`（侧门 G 读数） | 门尾行 `C010G_DONE shapes=7 same=4 diff=3 red_confirmed=3 guard_same=4 guard_red=0 compile_fail=0` | `ELAPSED=26s`（= 3.7 s/形） |
 | `fuzzy_scripts_720/tmp/c010_kw_full_table_gate_tmp.sh`（**永久侧门 H = §7-2 的 87 枚表项穷举双臂门**，任务 #120 新立；修门两轮：① `k_callable` 坏探针 + `php -l` 预检与 `BAD_PROBE_*` 两类，② 反例组由 7 形扩为 **7 词 × 3 名位 = 21 形**） | `c5d6343151193a7e489f814f309ae39c` | 279 |
 | `fuzzy_scripts_720/tmp/c010_kw_full_table_tmp.tsv`（侧门 H 读数，**注册读数 = 两轮修门后的全量跑**，107 行 = 4 表头 + 79 主群 + 21 反例组 + 2 门尾） | 门尾行 `C010H_DONE shapes=79 arms=200 face=59 noface=15 confounded=5 bad_probe=0 ctrl_compile_fail=1 probe_compile_fail=25 probe_timeout=0 inverse_shapes=21 inverse_face=15 inverse_noface=6 inverse_confounded=0 repo_build_residue=0 SMOKE_ONLY=0` | `ELAPSED=595s`（= 6.0 s/形，共 100 形、每形两次 AOT 编译）<br>⇒ 主群 79 行与上一轮（`ELAPSED=527s` 那次，仅反例组形集不同）逐字节比对 `run1_rows=79 run2_rows=79 diff_bytes=0` ⇒ 自证「修门只动了反例组」 |
-| `fuzzy_scripts_720/tmp/c010_noface_tolerance_gate_tmp.sh`（**永久侧门 H2 = 15 枚 NOFACE 的同位换瞎词判别门**，任务 #120 新立） | `8e11de20dd598f0875d166022f4c905c` | 99 |
-| `fuzzy_scripts_720/tmp/c010_noface_tolerance_tmp.tsv`（侧门 H2 读数） | 门尾行 `C010H2_DONE shapes=15 over_accept=14 strict_same=1 aot_compile_fail=0 php_ok_aot_diff=0 repo_build_residue=0 SMOKE_ONLY=0` | `ELAPSED=54s`（= 3.6 s/形） |
+| `fuzzy_scripts_720/tmp/c010_noface_tolerance_gate_tmp.sh`（**永久侧门 H2 = 15 枚 NOFACE 的同位换瞎词判别门**，任务 #120 新立；★ **任务 #125 已于 2026-10-09 修门**：补 `BOTH_REJECT`/`AOT_ONLY_RED` 分桶 + `parser_md5` 锚点 + `aot_log=` 列 ⇒ 本行为 R-2 前初代，当代次脚本 md5 `582ca74d50ff85567ac933b0f85dc7b3`／116 行，见 §3.5.1） | `8e11de20dd598f0875d166022f4c905c` | 99 |
+| `fuzzy_scripts_720/tmp/c010_noface_tolerance_tmp.tsv`（侧门 H2 读数；★ 初代四桶口径，当代次读数见 §3.5.1） | 门尾行 `C010H2_DONE shapes=15 over_accept=14 strict_same=1 aot_compile_fail=0 php_ok_aot_diff=0 repo_build_residue=0 SMOKE_ONLY=0` | `ELAPSED=54s`（= 3.6 s/形） |
 | `fuzzy_scripts_720/tmp/c010_crossmode_gate_tmp.sh`（**永久侧门 I = 跨模式 AOT/tree/bytecode 对照门，§7-4 量化前置**，任务 #120 新立，源形逐字复制门 E 的 19 形；修门 = `ONLY=` 补循环级过滤） | `d28ae3dcaa57afe4b70829cf827967d1` | 138 |
 | `fuzzy_scripts_720/tmp/c010_crossmode_tmp.tsv`（侧门 I 读数） | 门尾行 `C010I_DONE shapes=19 tree_same=7 tree_diff=12 bc_same=7 bc_diff=12 aot_same=8 aot_diff=8 aot_compile_fail=3 both_red=11 vm_only_red=1 aot_only_red=0 repo_build_residue=0 SMOKE_ONLY=0` | `ELAPSED=57s`（= 3.0 s/形，每形一次 AOT 编译 + 两次 VM 执行） |
 
@@ -44,6 +44,12 @@
 | `fuzzy_scripts_720/tmp/c010_shadow_main_md5_tmp.sh` | `7cd0b611c3787ddaa121f78d97237afb` | 影子门：68 语料 × 新旧二进制 `main.zig` md5 对照 |
 | `fuzzy_scripts_720/tmp/c010_shadow_main_md5_tmp.tsv` | `ef7fac035855e3b0f3d0d326a0be4b1b` | `C010_SHADOW_DONE total=68 same=68 diff=0 miss=0`（末行汇总为超时后手工补记，136 行数据完整） |
 | `fuzzy_scripts_720/tmp/c010_acceptance_chain_tmp.sh` | `d12e2fa96016a065c5f5da86253106b5` | 验收链（影子 → 六门 → 主回归，串行） |
+
+> **⚠ 代次已过三轮（2026-10-09 实测重登）**：上表二进制 `a71d97d7…` 为 **R-2 落地代**，非当前树。
+> **R-3 批**（替代语法严格闭合）代次锚点 = `parser.zig` `5ad452fe…` / 二进制 `81f8a55a…`，读数登记在 §3.6「R-3 批落地实测」；
+> **R-5 批**（`switch` 臂表位严格化 = 面孔 A）当代次锚点 = `parser.zig` `1eab26c068b13b9f904d2f432464d852`／**4305 行** / 二进制 `6939cd2e891f20aef590de2585b15681`，`lexer.zig` `e3dd4191…`（543 行）与 `keyword_lookup.zig` `ef70993a…`（186 行）**逐字未动** ⇒ 本批零词法面扰动，读数登记在 §3.8 与 §6「R-5 批落地后实测读数」。
+> **两批都还在未提交的工作树里**（实测 `git show HEAD:src/compiler/parser.zig | md5 -q` = `e3987a361d1db45bc3eadefc7afa249e`／4230 行 ⇒ HEAD 只到 §8 缺陷修复代）⇒ 算术自证：4230 + (R-3 `+64/−6`) + (R-5 `+17/−0`) = **4305** = 当前树行数，与 `git diff --numstat HEAD -- src/` 的 `+81/−6` 一致。
+> 引用任何门的读数前先按 §9 的三级判代次顺序核对表头 `compiler_md5=`；**★ 新增口径（§9.7）**：`git show <commit>:<path> | md5 -q` 这条「已入库等价取证」捷径只对**已提交**代次成立，R-3/R-5 未入库 ⇒ 判代次只能取门 TSV 表头 + 工作树 md5。
 
 ---
 
@@ -311,6 +317,46 @@
 
 **固化坑（跑前静态核对抓到，未产生坏读数）**：门 H2 首版循环变量为 `sid`，四处文件路径却写 `$s` ⇒ `set -u` 下会**整门静默中止**；已改 `$sid`，并补 `ONLY=` 循环级过滤（同门 I 的坑，见 §6）。
 
+#### 3.5.1 任务 #125 修门：H2 补 `BOTH_REJECT` / `AOT_ONLY_RED` 分桶（**纯门改动，零 `src/` 改动**，2026-10-09）
+
+**缺陷（R-3 落地轮踩到，见 §3.6「R-3 批落地实测」）**：本门首版只有四桶（`OVER_ACCEPT` / `SAME_BOTH_ERROR_LIKE` / `DIFF_PHP_OK_AOT_DIFF` / `AOT_COMPILE_FAIL`），而 **`AOT_COMPILE_FAIL` 把「PHP 也拒（收敛）」与「PHP 通过而 AOT 拒（真回归）」压成同一枚计数** ⇒ R-3 后 `aot_compile_fail` 从 0 跳到 2 时，只能靠**人工逐形回读 `php_rc`** 才能判明那是收敛。本门作为长期守卫门，方向判别必须制度化。
+
+**口径（已固化进门尾注释）**：**AOT 拒 ≠ 红。PHP 同拒 ⇒ 收敛（`BOTH_REJECT`）；PHP 通过而 AOT 拒 ⇒ 真回归（硬守卫列 `aot_only_red`，必须恒 0）**。
+
+| 改动 | 内容 |
+|---|---|
+| 判向前置 | 新增 `php_err` 计算并**上移**到编译失败分支之前（旧版该分支**完全不判向**，见下方 git 取证） |
+| 拒绝支拆分 | 产物不可执行时（规则 21：`--compile` 解析失败仍 `rc=0`，只能以**产物存在性**判）⇒ `php_err=1` 记 **`BOTH_REJECT`**、`php_err=0` 记 **`AOT_ONLY_RED_COMPILE`**；两支均把编译日志经归一后写入 `aot_log=` 列（旧版拒绝行不记录 AOT 侧文本，无法复算报错位置） |
+| 运行侧补守卫 | `php_rc=0` 而 AOT `arc!=0` 或输出含 `Fatal/Parse error` ⇒ 记 **`AOT_ONLY_RED_RUN`**（旧版落入 `DIFF_PHP_OK_AOT_DIFF`，与「输出不同」混计） |
+| 归一口径对齐 | 新增 `normlog()`：剥行首 `Error: `、行号归 `LINE`、`/tmp/…` 归 `TMPDIR` ⇒ 与门 J `:54` **逐字同口径**（新登记的 `aot_log=` 列必须走它，否则原始日志含随机临时目录 `/tmp/c010h2.XXXXXX`，跨 run 不可比） |
+| 代次锚点 | 表头补 `# parser_md5=`（原仅 `compiler/lexer/keyword_lookup` 三枚；本门判据落在 parser 文法位，缺该锚点无法自证代次） |
+| 总数行 | 新增 `both_reject` / `aot_only_red` 两列；**`aot_compile_fail` 语义更正为「拒绝总数」= `both_reject + aot_only_red`**（保持历史列不删、口径变更须读分列） |
+
+**旧版门实文取证（不靠记忆，取已入库 blob `73f4d6b:fuzzy_scripts_720/tmp/c010_noface_tolerance_gate_tmp.sh`）**：`:76-80` 的拒绝支为
+
+```bash
+if [ ! -x "$T/aot_compile_c010h2_${sid}_tmp" ]; then
+  echo "$sid|php_rc=$prc|aot_rc=NA|AOT_COMPILE_FAIL|$php_n||<none>" >> "$OUT"
+  CF=$((CF + 1))
+  continue
+fi
+```
+
+⇒ 拒绝支**只写 `php_rc=` 数字、不做任何判向**（`php_err` 仅在 `:84` 的运行路径分类里出现），AOT 侧文本固定写 `<none>`，表头也无 `parser_md5` ⇒ 「收敛 vs 真回归」在旧表结构上不可判，必须靠人工回读 `php_rc`。
+
+**修门证明（先修门、后引用）**：与 R-3 代次快照 `c010_r3_presnap/c010_noface_tolerance_r3gen_tmp.tsv`（md5 `7577d51ce6181a84102f5d35d49459ae`）逐字节 `diff` ⇒ 差异行 **12** 枚，分解为「表头 4（`parser_md5`/`columns`/`verdicts` 新增与改写）+ 数据 2 形改写（`n_endif`/`n_endswitch`：`AOT_COMPILE_FAIL` → `BOTH_REJECT`，旧 2 + 新 2 = 4 行）+ `ELAPSED` + 总数行」；**判据数据行 13/15 逐字节全等**（`comm -12` 实测）⇒ 修门只动分类与日志列，未扰动任何一形的 PHP/AOT 结局。
+
+**新代次注册读数（全量，`SMOKE_ONLY=0`，先 `ONLY=n_endif,n_endswitch` 冒烟）**：
+
+```
+C010H2_DONE shapes=15 over_accept=12 strict_same=1 aot_compile_fail=2 both_reject=2 aot_only_red=0 php_ok_aot_diff=0 repo_build_residue=0
+ELAPSED=44s
+```
+
+⇒ 判定列与 R-3 代次**逐项等值**（`over_accept=12` / `strict_same=1`），首次把「2 枚拒绝」显式记为**收敛**并给出 AOT 侧报错原文（`Parse error: syntax error, unexpected end of file, expecting "endif"` / `expecting "endswitch", "case" or "default"`），硬守卫列 `aot_only_red=0` 转正即真回归。
+
+**注册锚点（脚本定稿后同命令取四枚，防 §3.6 的「md5 早于定稿」坑）**：脚本 `fuzzy_scripts_720/tmp/c010_noface_tolerance_gate_tmp.sh` md5 `582ca74d50ff85567ac933b0f85dc7b3` / 116 行（mtime 11:09:11）→ 表 `c010_noface_tolerance_tmp.tsv` md5 `0663be8da1ef8f17449d5409937b6f87`（mtime 11:10:05，**晚于脚本** ⇒ 该 md5 即本读数生成版）；二进制 `81f8a55a989f9a793fec2f75c32fd37d`、`parser.zig` `5ad452fe4bc250b4732cbb3a2827b28a`（与 R-3 代次全等 ⇒ 零 `src/` 改动自证）。
+
 ### 3.6 替代语法（`endif;` / `endswitch;` 族）真实支持性取证（**永久侧门 J = §7-15 的收口门**，2026-10-08 实测，`ELAPSED=77s` / 23 形 = **3.3 s/形**）
 
 **为什么必须另建一张门**：侧门 H2 只做「关键字位换瞎词 `Zkwhq`」，其 `n_endif`/`n_endswitch` 两形证明的是**该文法位对任意标识符宽容**，**推不出**替代语法已实现 ⇒ §7-15 只能登记为「不可判」。本门直接写替代语法的正/负例，与拼写无关，是独立面孔。
@@ -327,8 +373,12 @@
 | 体扫描 | `parseAlternativeBody:1592-1604`，循环条件 `:1594` = `curr != end_tag and curr != .eof` | **EOF 静默收尾**；`:1596` 仅在 `end_tag==.k_endif` 时另停 `elseif`/`else` ⇒ **异种 end 标记不停** |
 | 语句层兜底 | `:482` `else => self.parseExpressionStatement()` → `:2426-2430`（`:2428` 软分号）→ `parsePrimary` 兜底 `:3295-3309` | R-2 甲批新增的 `:3299-3305` 在旗标开启时把**容忍清单内关键字 tag**（含 `isAotExtendedKeywordIdentifierTag:3916-3927` 的 5 枚 `end*`）当标识符接成 `.variable` ⇒ **裸 `endif;` 在语句位被静默吃成一条变量表达式** |
 
-**门资产与两轮读数（先修门、后引用）**
-- 脚本 `fuzzy_scripts_720/tmp/c010_alt_syntax_gate_tmp.sh`（**v2** md5 `69806529f6bdf8feb2919dcac182db07`）→ `c010_alt_syntax_gate_tmp.tsv`（md5 `8b208dd0b9123c5f6bc8ee306cda5360`）；头行四枚代次戳 `compiler_md5=5beb1591… / lexer e3dd4191… / keyword_lookup ef70993a… / parser e3987a36…`，并带 `# gate_rev=v2`。
+**门资产与三轮读数（先修门、后引用）**
+- **v3**（R-3 落地轮，2026-10-09）：脚本 `fuzzy_scripts_720/tmp/c010_alt_syntax_gate_tmp.sh` md5 `592ef97458d6ae7e044e97ad6289fd69`，头行 `# gate_rev=v3`、`# positive_shapes=19 negative_shapes=10`，29 形（正例 16+3、负例 7+3）→ 表 md5 `2a25520cf7e4e78362a6be601e7cc5f6`（含 `ELAPSED=70s` 行；跨 run 复证时按 v2 口径先把耗时行归一）。
+  - **★ md5 更正（2026-10-09 复测）**：本行曾登记 `1ff97d51a8be8bbddc8642f638a05b8e`，该值是「加完 6 形、尚未改头行 `gate_rev`／`positive_shapes` 两行」时的中途读数 ⇒ 不是产出注册读数的高亮版。判定依据为实测时序：脚本 mtime `09:46:35` **早于** 表 mtime `09:47:54`，且此后脚本未再被编辑 ⇒ 09:47:54 那轮跑的就是 `592ef974…`。教训：**脚本改完（含头行的自证戳）再取 md5，并在同一条命令里同时抓脚本与表的 md5**，否则登记的正是"上一版脚本"。
+  - v2→v3 只加形不改判据：正例补 `p_if_elseif_multi` / `p_if_else_multi` / `p_if_elseif_chain_multi`（**elseif/else 臂多语句**——若不补这三枚，硬 `eat` 落地会把 PHP 合法写法误拒，而旧 16 形全是单语句臂、抓不到该误拒）；负例补 `n_switch_stmt_before_case_alt`（替代语法 `case` 前裸语句）/ `n_else_no_endif` / `n_elseif_no_endif`（缺闭合的两个臂形态）。
+- **v2**：脚本 md5 `69806529f6bdf8feb2919dcac182db07` → 表 md5 `8b208dd0b9123c5f6bc8ee306cda5360`（首轮）／`6d4dc390aef69c916ed1fa171b5f8aaa`（第二轮，仅 `ELAPSED` 行不同）；头行四枚代次戳 `compiler_md5=5beb1591… / lexer e3dd4191… / keyword_lookup ef70993a… / parser e3987a36…`，并带 `# gate_rev=v2`。
+  - **★ 入库更正（2026-10-09 实测）**：v2 的门脚本与第二轮 TSV **已随 commit `73f4d6b` 入库**（上一版此处写的「均未入库、`git show 0652130:` 取不到」已失效）⇒ 取回用 `git show 73f4d6b:fuzzy_scripts_720/tmp/c010_alt_syntax_gate_tmp.tsv | md5 -q` = `6d4dc390…`，与登记的第二轮表 md5 逐字节一致；复跑前仍以脚本 md5 自证代次。
 - **v1→v2 两处修门**（v1 脚本 md5 `4009de13…`、v1 表 md5 `a8afda22…`，v1 数据列**禁止引用**）：① `tr '\n' '|'` 与列分隔符 `|` 冲突 ⇒ PHP CLI 的 Parse error 打两行，实测 `n_*` 行 **NF=9** 而表头声明 7 列（`p_*` 行 NF=7）⇒ 改为字面量 `\n` 连接；② compile_fail 支只写 `<compile_fail>` 且随后 `rm` 掉 `.clog` ⇒ **AOT 自己的报错原文不在表内**，本门最需要的证据丢失 ⇒ 新增 `normlog`（剥 `Error: `、`on line N`→`LINE`、`/tmp/…`→`TMPDIR`）写入 aot 列。
 - **跨 run 自证**：修门后 23 行的 `(shape, php_rc, aot_rc, verdict)` 四列与 v1 **逐行全等**（`diff` 空 ⇒ `V1V2_KEYCOLS_IDENTICAL=23/23`）⇒ 修门未扰动判据。
 - 注册读数（v2 全量，`SMOKE_ONLY=0`）：`C010J_DONE shapes=23 same=16 diff=0 over_accept=5 both_reject=2 aot_only_red=0 run_red=0 both_err_diff=0 repo_build_residue=0`，`ELAPSED=77s`。
@@ -379,16 +429,391 @@
 2. **代价是新立一张面孔**：**5 形过度接受**＝AOT 接受 PHP 拒绝的替代语法错写，且**静默**（`echo` 臂照常执行或整形空输出，无 warning）⇒ 与本单 §4「静默性」同族，属**解析层宽容**而非发射层缺陷。
 3. **本门与 H2 都属「未受基线保护」面**（语料 0）⇒ 官方十二腿门链对本家族零暴露，纳入与否仍是 D-7。
 
-**修复建议（本会话未动一行源码，按宪法 §五/§六 待裁决）**
+**修复建议（落地前登记，2026-10-08；未动源码 ⇒ 成本列当时为「未实测」。实际落地形态与实测见下方「R-3 批落地实测」）**
 
 | 优先级 | 影响面 | 落地成本 |
 |---|---|---|
-| **P1** 把 `:1515-1517`（`endif`）与 `:3563-3565`（`endswitch`）的软消耗改为**硬 `eat`**，与 `:1581`/`:1672`/`:1833` 对齐 ⇒ 一次消 5 枚 OVER_ACCEPT 中的 2 枚根因面并让另 3 枚报错点后移到明确位置 | 仅 parser 错误路径；正例面（16 形 + 真实语料 3 枚）零影响，因它们本就走完整闭合；**风险 = 现网"缺闭合"脚本从静默错输出变编译期报错**（即 §七-1 意义上更正确） | **未实测**；复测 = 门 J 77s（预期 `over_accept 5→0`、`same=16` 不变、`both_reject 2→7`）+ 主回归 68 语料（语料面 0 ⇒ 预期零扰动） |
-| **P1** `:1594` 体扫描补「异种 `end*` 即终止并报 unexpected」 | 消 `n_mismatch_end`/`n_double_endif`/`n_endif_alone` 三枚的直接入口 | **未实测**；同上复测档 |
-| **P2** `tagToExpected:220-235` 补 `.k_*` 臂（至少 5 枚 `end*`），使消息与 PHP 对齐（`expecting "endwhile"`） | 纯错误消息面，语义零影响 | **未实测**；秒级门 J 的 `aot_log=` 列即验收位（v2 门已把该列做成可断言字段） |
-| **P2** 维持现状 + 只把门 J 当**守卫门**（读数不得变化） | 零风险，但 5 枚宽容面长期存在 | 77s/轮 |
+| **P1** 把 `:1515-1517`（`endif`）与 `:3563-3565`（`endswitch`）的软消耗改为**硬 `eat`**，与 `:1581`/`:1672`/`:1833` 对齐 ⇒ 一次消 5 枚 OVER_ACCEPT 中的 2 枚根因面并让另 3 枚报错点后移到明确位置 | 仅 parser 错误路径；正例面（16 形 + 真实语料 3 枚）零影响，因它们本就走完整闭合；**风险 = 现网"缺闭合"脚本从静默错输出变编译期报错**（即 §七-1 意义上更正确） | **实测**：门 J v3 `70s`/29 形 + 真实语料 3 枚复跑 + 六门 `E/F/G` 等值复跑（主回归/影子另计）。**「必须与改动 2 同批」＝读码推导，未做单臂反证**（旧代码 `parseElseifAlternative` 用 `parseStatement()` 只取一条语句 ⇒ 硬 `eat` 会在臂内第二条语句处见到非 `endif` 而报错）；实测侧只证明「同批后 `p_if_elseif_multi`/`p_if_else_multi`/`p_if_elseif_chain_multi` 三枚 SAME」 |
+| **P1** `:1594` 体扫描补「异种 `end*` 即终止并报 unexpected」 | 消 `n_mismatch_end`/`n_double_endif`/`n_endif_alone` 三枚的直接入口 | **实测**：落地为 `:1627` 的 `isAlternativeCloserTag` 停止条件 + `:3333` 把五枚 `end*` 排除出表达式主位容忍支，三枚形均转 `BOTH_REJECT`。**「只做前者不彻底」＝读码推导**（`:3333` 的容忍支仍会把 `endif` 接成 `.variable` ⇒ 推断会静默），**未单独回滚 `:3333` 复测** ⇒ 若要定该反证需另开一臂 |
+| **P2** `tagToExpected:220-235` 补 `.k_*` 臂（至少 5 枚 `end*`），使消息与 PHP 对齐（`expecting "endwhile"`） | 纯错误消息面，语义零影响 | **已实测**：补臂后 10 枚同拒形里 **6 枚**消息与 PHP 同词族，**4 枚**仍走通用句 `Unexpected token in expression`（另一条报错支）⇒ 消息面**部分**收口，残差见下方登记 |
+| **P2** 维持现状 + 只把门 J 当**守卫门**（读数不得变化） | 零风险，但 5 枚宽容面长期存在 | **未采用**（老铁裁决为修） |
+
+**R-3 批落地实测（2026-10-09，老铁裁决＝「A 旗标门控，只改 AOT」+「只做 CODEGEN-010 门 J P1」）**
+> 批次号「R-3」＝本单第 3 个修复批次，**与 §5 的路线 `R-3`（发射期静默金丝雀）无关**（后者仍未启动）；消歧全文见 §5 开头「★ 编号消歧」。
+
+代次戳：`parser.zig` md5 `5ad452fe4bc250b4732cbb3a2827b28a` / **4288 行**（落地前 `e3987a36…` / 4230 行）；`lexer.zig` `e3dd4191…`、`keyword_lookup.zig` `ef70993a…` **未动一行**；二进制 `zig-out/bin/php-interpreter` md5 `81f8a55a989f9a793fec2f75c32fd37d`（`timeout 600 zig build` → `rc=0`）。
+
+改动面 = **一枚旗标 + 七处判定**，全部只在 `strict_alt_closers == true` 时生效（新→旧锚点，旧行号即本小节前文表格的读码锚点）：
+
+| # | 位置（新代次） | 落地前 | 落地后 |
+|---|---|---|---|
+| 0 | 旗标声明 `:32`、置位点 `:75`（`initWithModeInsensitive` 内，**在 `initFromLexer` 预取 curr/peek 之后**） | 无 | `strict_alt_closers: bool = false` ⇒ 只有 AOT 入口为 true |
+| 1 | `if` 闭合 `:1533-1537`（旧 `:1515-1517`） | 软消耗 `if (curr == .k_endif) { nextToken(); eat(.semicolon) }` | `_ = try self.eat(.k_endif); _ = try self.eat(.semicolon)` |
+| 2 | `elseif` 臂 then `:1561`、else 臂 `:1574`（旧 `:1540`/`:1549` 用 `parseStatement()`） | 单语句臂 ⇒ **读码推导**：与硬 `eat` 组合会误拒 PHP 合法的多语句臂（未做单臂反证） | 旗标开启时改走 `parseAlternativeBody(.k_endif)`（多语句扫到闭合位）；实测覆盖 = 三枚多语句臂形 SAME |
+| 3 | 体扫描 `:1627`（旧 `:1594` 循环条件） | 只认同种 `end_tag` ⇒ 异种 `endwhile` 被当普通语句吞掉 | `if (strict_alt_closers and isAlternativeCloserTag(curr)) break` ⇒ 停在闭合位由调用侧硬 `eat` 报错 |
+| 4 | 表达式主位 `:3333`（旧 `:3299-3305` R-2 甲批容忍支） | 旗标开启时 `end*` 可降级成 `.variable` ⇒ 裸 `endif;`／`endif; endif;` 生成**零指令**语句而静默通过 | 五枚关闭标记**排除出容忍支** ⇒ 落回 `eat` 报错路径 |
+| 5 | `switch` 意外 token `:3595`（旧 `:3556-3558`）＋闭合 `:3603-3607`（旧 `:3563-3565`） | 整枚跳过 + 软消耗 | 仅在 `is_alternative` 时 `break`（花括号支行为不变）＋ `eat(.k_endswitch)`/`eat(.semicolon)` |
+| 6 | 集合助手 `:3976` | 复用 `isAotExtendedKeywordIdentifierTag`（**6 枚含 `.k_struct`**） | 新建 `isAlternativeCloserTag`＝**恰好 5 枚**，覆盖面独立、不收窄不扩 |
+| 7 | 消息面 `:245-249`（旧 `tagToExpected:220-235` 无任何 `.k_*` 臂） | 兜底 `else => "token"` ⇒ 报 `expecting token` | 补 5 枚 `end*` 臂 ⇒ 报 `expecting "endif"` / `"endwhile"` / `"endswitch"`（纯消息，不改接受/拒绝判定） |
+
+**门 J v3 全量读数（29 形，`SMOKE_ONLY=0`，`ELAPSED=70s` = **2.4 s/形**）**：
+```
+C010J_DONE shapes=29 same=19 diff=0 over_accept=0 both_reject=10 aot_only_red=0 run_red=0 both_err_diff=0 repo_build_residue=0
+```
+- **对照本小节前文的登记预测**：`over_accept 5→0` **达成**；`same` 旧 16 枚**全部仍 SAME**（新增 3 枚多语句臂正例也 SAME ⇒ `same=19`）；`both_reject` 预测 `2→7` 是**按 23 形口径**给的，v3 实际 10 形＝旧 7 + 新增 3 枚负例，逐形对照无缺一枚；两枚硬守卫列 `aot_only_red=0`、`run_red=0` ⇒ **零真回归**。
+- **预测偏差的根因（登记为口径教训，不是门坏）**：预测写「`same=16` 不变」时假定「正例面本就单语句臂」，而 `parseElseifAlternative` 用的是 `parseStatement()`（**读码推导**：只取一条语句 ⇒ 硬 `eat` 会在臂内第二条语句处报错；**未做单臂反证实测**）⇒ 照预测只改硬 `eat`，`if (0): … elseif (1): $s=1; $s+=2; …` 这类 PHP 合法写法**推断**会转成 `AOT_ONLY_RED`。落地时把这三枚补进门（改动 2 的验收位），实测 3/3 SAME ⇒ **本门的正例面必须含多语句臂形才算守住改动 2**，旧 16 形对改动 2 零保护力。
+- **改动 5 的落地前置实测**（`case` 前裸语句，四形含花括号对照）：PHP 全部 `Parse error … expecting "endswitch" or "case" or "default"` ⇒ 新增的 `break` 与 PHP 同向，非新造拒绝；`n_switch_stmt_before_case_alt` 实测 `BOTH_REJECT`。
+- **消息面残差（P2 未收口）**：10 枚 `BOTH_REJECT` 里 **6 枚** AOT 原文与 PHP 同词族（`unexpected end of file, expecting "endif"`／`expecting "endwhile"`／`expecting "endswitch"`／`unexpected token "endwhile", expecting "endif"`／`unexpected token "echo", expecting "endswitch"`），另 **4 枚**（`n_endif_alone`、`n_colon_brace_mix`、`n_double_endif`、`n_else_no_endif`）仍是通用句 `Unexpected token in expression` ⇒ 走的是另一条报错支、不经 `tagToExpected`。**本门判据只比接受/拒绝边界**（与 H2 同源），消息措辞不入判据。
+
+**真实语料复跑（新代次，非最小探针）**：`fuzzy_scripts/test_006_loops_for.php` / `test_007_loops_while.php` / `test_008_loops_foreach.php` 逐枚 `--compile --no-debug-info --output=/tmp/aot_compile_*` + 运行 ⇒ **3/3 `cmp` 逐字节 SAME**，行数 **40 / 37 / 43** 全等、`php_rc=0 aot_rc=0`，产物与临时目录已删、`git status` 语料目录净空 ⇒ 正例面（含 5 枚替代语法构造的大脚本）在严格档下零误拒。
+
+**分叉的源码级取证（D-2 裁决口径的硬证据，`grep` 全仓 `Parser.init*`）**：置位点只有 `initWithModeInsensitive`（`:70-77`），而它的调用点只有 **2 枚且都是 AOT 入口** —— `src/main.zig:726`（单文件 AOT）与 `src/aot/multi_file_compiler.zig:203`（多文件 AOT）。其余 5 枚构造点 **旗标恒为 `false`** ⇒ 逐字节等价于落地前：`src/main.zig:508`（`initWithMode`，tree/bytecode/fast 解释执行）、`src/runtime/vm.zig:1441`、`src/runtime/vm.zig:9576`、`src/compiler/root.zig:133`（`Parser.init`，只被 `src/aot/test_control_flow_ir.zig:64` 与 root 内部 `:179` 用）、`initWithModeAndHooks`（全仓零调用）。`src/aot/compiler.zig:906` 只接收外部 AST，不自建 Parser。
+
+**六门在新代次的复跑（链 `fuzzy_scripts_720/tmp/c010_r3_acceptance_chain_tmp.sh`，六门 → 主回归 → 影子）**：门 E/F/G 已实测且与登记值**逐项等值**（表头 `compiler_md5=81f8a55a…`）：
+```
+门 E：C010KW_DONE shapes=19 same=19 diff=0 silent_empty=0 aot_fatal=0 compile_fail=0
+门 F：C010MECH_DONE shapes=8 same=8 diff=0 zero_instr=0 compile_fail=0
+门 G：C010G_DONE  shapes=7 same=7 diff=0 red_confirmed=0 guard_same=4 guard_red=0 compile_fail=0
+```
+**门 H / H2 / I 在新代次的实测（同链 `[1/3]` 阶段 09:53:24 → 10:09:42 = **16 分 18 秒**，六门含 E/F/G）**：
+
+| 门 | 新代次读数（表头 `compiler_md5=81f8a55a…`） | 与注册值对照 | 逐行取证 | `ELAPSED`（本轮 / 上一轮同代脚本） |
+|---|---|---|---|---|
+| E | `shapes=19 same=19 diff=0 silent_empty=0 aot_fatal=0 compile_fail=0` | 逐项等值 | 19 行 `diff_rows=0` | 69s / 68s |
+| F | `shapes=8 same=8 diff=0 zero_instr=0 compile_fail=0` | 逐项等值 | 8 行 `diff_rows=0` | （同链） |
+| G | `shapes=7 same=7 diff=0 red_confirmed=0 guard_same=4 guard_red=0 compile_fail=0` | 逐项等值 | 7 行 `diff_rows=0` | （同链） |
+| H | `shapes=79 arms=200 face=0 noface=78 confounded=1 bad_probe=0 ctrl_compile_fail=0 probe_compile_fail=0 probe_timeout=0 inverse_shapes=21 inverse_face=0 inverse_noface=21 inverse_confounded=0 repo_build_residue=0` | **逐项等值**（R-2 落地后的 face=0 面未被动摇） | 103 数据行 `diff_rows=0`（排除 4 表头行与 `ELAPSED`）⇒ **逐字节等值** | 738s / 721s（注册首轮 595s） |
+| H2 | `shapes=15 over_accept=12 strict_same=1 aot_compile_fail=2 php_ok_aot_diff=0 repo_build_residue=0` | `over_accept` **14→12**、`aot_compile_fail` **0→2**（唯一变动列） | 13 行等值、**2 行按预期改写**（见下） | 46s / 53s |
+| I | `shapes=19 tree_same=7 tree_diff=12 bc_same=7 bc_diff=12 aot_same=19 aot_diff=0 aot_compile_fail=0 both_red=0 vm_only_red=12 aot_only_red=0 repo_build_residue=0` | **逐项等值** ⇒ **分叉判据达成**：`tree`/`bc` 四列与冻结注册值一致且 `aot_same=19`，VM 侧 12 枚红面按 D-2 裁决保留现状 | 19 行 `diff_rows=0`（每行含三模式输出列）⇒ 解释器/字节码侧**逐字节未动** | 69s / 68s |
+
+- **门 H2 的两列变动 = 收敛，不是回归（已逐形定位）**：变动行为 `n_endif`、`n_endswitch` 两形，探针体为 `if (1 > 0): echo "endif_ok"; Zkwhq;` / `switch (1): case 1: echo "s"; break; Zkwhq;`（瞎词 `Zkwhq` 占在**关闭标记位**，脚本 `:45-46`）。两形 **PHP 均 `php_rc=255`**（`expecting "elseif" or "else" or "endif"` / `expecting "endswitch" or "case" or "default"`），落地前 AOT **rc=0 且照打 `endif_ok`/`s`** ⇒ 旧读数为 `OVER_ACCEPT`；落地后旗标开启使闭合位改硬 `eat`，AOT 在**解析期即报错、无产物**（`--compile` 仍 rc=0 ⇒ 按规则 21 以产物存在性判，记为 `AOT_COMPILE_FAIL`）。⇒ **`over_accept` 净减 2 枚与门 J 的 `over_accept 5→0` 同源**，是宽容面继续收窄；`aot_compile_fail` 桶在本门的历史语义是「潜在红」，此处实为「与 PHP 同拒」。
+- **上述两形的直接复测（新代次二进制，逐字原文，产物已删、临时目录净空）**：
+  ```
+  if (1 > 0): echo "endif_ok"; Zkwhq;
+    PHP: Parse error: syntax error, unexpected end of file, expecting "elseif" or "else" or "endif" on line 3
+    AOT: Error: Parse error: syntax error, unexpected end of file, expecting "endif" on line 3   ⇒ 无产物（真拒）
+  switch (1): case 1: echo "s"; break; Zkwhq;
+    PHP: Parse error: syntax error, unexpected end of file, expecting "endswitch" or "case" or "default" on line 3
+    AOT: Error: Parse error: syntax error, unexpected end of file, expecting "endswitch" on line 3 ⇒ 无产物（真拒）
+  ```
+  ⇒ 同时**实证改动 7（`tagToExpected` 五枚 `end*` 臂，`:245-249`）在真实报错面可见**：AOT 已报出词族正确的 `expecting "endif"` / `expecting "endswitch"`（旧兜底为 `expecting token`），与 PHP 同词族、只差 PHP 附带的并列词。
+- **门口径局限（登记，下轮引用勿误判）**：门 H2 的汇总列**没有 `BOTH_REJECT` 桶**（建门时 15 形全为「PHP 拒 / AOT 收」，未预见到两侧同拒）⇒ **本轮起 `aot_compile_fail>0` 必须回读逐形列的 `php_rc` 才能判向**：`php_rc=255` ⇒ 同拒（收敛方向）；`php_rc=0` ⇒ 真回归。守卫列 `php_ok_aot_diff=0`、`repo_build_residue=0` 本轮仍为 0 ⇒ **本轮无任何「PHP 能跑而 AOT 变红」**。
+- **对既有 P1 建议的部分收口（本轮的额外收益）**：R-2 时代 §3.4.6 把 H2 读作「`over_accept=14` **不变** ⇒ 瞎词臂不受影响」，交接文档据此立了 P1「H2 面收口：文法位过度宽容」。**本轮实测推翻「不受影响」的适用范围**：14 枚中有 **2 枚**（`n_endif`/`n_endswitch`＝**关闭标记位**）随 R-3 收敛，⇒ 该 P1 面从 14 枚**收窄为 12 枚**（`n_do`/`n_else`/`n_void`/`n_const`/`n_final`/`n_mixed`/`n_public`/`n_global`/`n_object`/`n_private`/`n_finally`/`n_namespace`＝类型位、修饰符位、声明关键字位），**其余 12 枚与替代语法无关、仍待单独裁决**，本批未触碰。
+- **主回归（官方 `fuzzy_scripts_720/run_regression.sh`，`[2/3]` 阶段 10:09:42 → 10:23:32 = 13 分 50 秒）**：`Total=68 / Pass=67 / Fail(Compile)=0 / Fail(Runtime)=0 / Fail(Diff)=0 / Skip=1`，唯一非 PASS 仍为 `f004_oop_deep_inheritance_magic.php SKIP PHP_error_exit=255` ⇒ **与 R-2 注册基线逐项相同，基线保持**。报表逐字取自 `fuzzy_scripts_720/regression_report.md`（测试时间行 `2026-10-09 10:23:32`）。
+  - 对照口径更正（登记）：同目录 `regression_failures.tsv` 在上一轮快照里**只有 20 行**（19 PASS + 1 SKIP，非 68 行全表）⇒ **不可用作逐行等值对照**，等值判据取报表的六个计数器；本轮该表为 **68 行 = 67 PASS + 1 SKIP**（`cut -d'|' -f1 | uniq -c` 实测）。
+- **影子门（`c010_shadow_main_md5_tmp.sh`，`[3/3]` 阶段 10:23:32 → 10:49:57 = 26 分 25 秒）**：`C010_SHADOW_DONE total=68 same=68 diff=0 miss=0 ELAPSED=1585s` ⇒ **冻结基线（修复前二进制 `1f15e4ce…`，`/tmp/c010_prefix_backup/`）零漂移**，68 语料的生成码 `main.zig` 逐形 md5 与新代次全等 ⇒ 本批在语料面上**实测发射中性**（跨 R-2 + R-3 两批的累计自证）。中途只读到 49 对时的部分读数已为 `DIFF=0`、`NO_MAINDIR=0`。
+- **门 D8（§8 独立缺陷家族验收面）在新代次的补测**：本链未把 D8 排进去，故链毕后单独补跑。
+  - **首轮（10:31 前后，与影子门**并发**执行）读数 `… repo_build_residue=1 … ELAPSED=51s` ⇒ 禁止引用**：D8 的 residue 列判据是 `ls -d .zigphp_aot_build_* aot_compile_*`（脚本 `:90`），而影子门在 `ZIGPHP_AOT_KEEP_TEMP=1` 下每形抽取生成码后才 `rm -rf "$tdir"`（脚本 `:36`）⇒ 并发窗口里仓库根必有该目录，属**门自身与被测物无关的并发污染**。
+  - **复跑（10:50，串行无并发）**：`C010D8_DONE shapes=14 defect_red=1 guard_same=13 compile_fail=0 bad_probe=0 repo_build_residue=0 SMOKE_ONLY=0 ELAPSED=49s`，逐行与上一代次快照 `diff` **零差异** ⇒ 与注册值（修复代 #122c `defect_red=1 guard_same=13 … 48s`）**逐项等值**，唯余 `d3a`=goto 发射侧子轮。**教训登记：任何带 `repo_build_residue` 列的门都不得与影子/回归类长时间门并发执行。**
+- **整条链实测耗时**：09:53:24 → 10:49:57 = **56 分 33 秒**（六门 16m18s + 主回归 13m50s + 影子 26m25s）；加 D8 补测两轮 ≈ 100 秒 ⇒ **本轮验收总成本 ≈ 58 分钟**，零源码改动。
+
+**`zig build test` 的既有噪声（不在本单，登记以免下轮误判为回归）**：`timeout 900 zig build test` **RC=0**，但日志固定尾行 `failed command: ./.zig-cache/o/55e298300f7347fe4f670dbeb02073ec/test`。已归因为与解析器无关的 CI 门面试验（该产物 mtime `Oct 5 08:55`，早于本轮；直接跑 `./.zig-cache/o/55e29…/test` ⇒ `All 3 tests passed`，3/3 OK，其 `CIRunner` 用例向 stdout 打性能报告）。⇒ **复跑必现同一路径尾行，非本轮新增**。
 
 ---
+
+### 3.7 任务 #126 取证轮：**永久侧门 K**（花括号 `switch` 与 `case` 臂族）v1 实测 ⇒ §7-15c 由 1 形扩到 **4 形**，并新立**两张独立面孔**（零 `src/` 改动，2026-10-09）
+
+**建门动因**：§7-15c 只登记了 **1 枚**形（`switch (1) { echo "W"; }`），且「`is_alternative` 门控可保证对 68 语料的花括号 `switch` 零扰动」这一句属**未实测推断**。本轮把它取证到「面孔穷举 + 语料面穷举」，形为**新门文件**（门 J v3 已注册 ⇒ 禁扩已注册门，见记忆口径「new shapes ⇒ new gate file」）。
+
+**代次锚点（一条命令同抓四戳，脚本定稿后取值）**：
+
+| 资产 | md5 | 备注 |
+|---|---|---|
+| `fuzzy_scripts_720/tmp/c010_brace_switch_gate_tmp.sh` | `6408a6b6f32d73367fa8e458a8ee249b` | 门 K v1，24 形，脚本 mtime **早于**表 mtime |
+| `fuzzy_scripts_720/tmp/c010_brace_switch_tmp.tsv` | `b3eb6e913edbc774a8b95a3fe61f0613` | 注册读数表（第二轮全量跑） |
+| `…/c010k_presnap/c010_brace_switch_gen1_tmp.tsv` | `6f4e9f8b2d119b8cb5c08f694cfbca7a` | 首轮快照；与注册表**仅 `ELAPSED` 一行不同**（43s／42s） |
+| `…/c010k_brace_switch_corpus_scan_tmp.php` / `.txt` | `d7a2ccdc0a3002cacfe0d7c0cd858a04` / `a999224aba026cd5bf6096cf31d3e639` | 语料扫描器 ①（头型 / 语句头位） |
+| `…/c010k_case_order_terminator_scan_tmp.php` / `.txt` | `83247654ada70c9b587181869753af66` / `653fc553cf255214fc0f50254ad2d628` | 语料扫描器 ②（default 位次 / 分号臂），**v2**（v1 读数全废，见下） |
+| 二进制 / `parser.zig` | `81f8a55a…` / `5ad452fe…` | 与 §3.6 的 R-3 批**同代次** ⇒ 本轮零源码改动，读数可直接对接 R-3 终态 |
+| `fuzzy_scripts_720/tmp/c010km_crossmode_probe_tmp.sh` / `.txt` | `973996ef88c6db340871dc9402682c42` / `52f32f9d0d71bf350e522f1b89ac8b5b` | **跨模式探针门 C010KM**（面 B／C 落地前置问询的取证件：6 形 × `php`/`--mode=tree`/`--mode=bytecode`/`AOT` 四侧，实测 `ELAPSED=13s`；把 `/private/tmp/c010km.XXXXXX` 路径归一后跨 run `diff_rows=0`）⇒ 读数与判读归 **AOT-CODEGEN-011 §2.3**，本节只引其「三模式三样错答」结论 |
+
+**判据**：承 §3.5.1（任务 #125）定稿的**五桶契约**逐字同口径（`SAME_BOTH_ERROR_LIKE` / `OVER_ACCEPT` / `DIFF_PHP_OK_AOT_DIFF` / `BOTH_REJECT`=收敛 / `AOT_ONLY_RED_COMPILE`+`AOT_ONLY_RED_RUN`=硬守卫），编译失败以**产物可执行性**判（规则 21）。
+
+**门 K v1 注册读数（24 形 = 正例 14 + 负例 10，`ELAPSED=42s` ⇒ 1.8 s/形，本单最便宜的门）**：
+
+```
+C010K_DONE shapes=24 same=8 over_accept=4 diff_php_ok=1 both_reject=6 aot_only_red=5 run_red=0 repo_build_residue=0 SMOKE_ONLY=0
+```
+
+> **【2026-10-09 任务 #127 就地更正】** 上块是**面孔 A 落地前**（R-3 代次 `81f8a55a…`）的历史注册读数。R-5 落地后门 K 的**活跃表已同地覆写**：注册副本逐字节存于 `fuzzy_scripts_720/tmp/c010_r5_presnap/c010_brace_switch_tmp.tsv`（md5 `b3eb6e91…` 不变），当代读数 = `same=8 over_accept=0 diff_php_ok=1 both_reject=10 aot_only_red=5 run_red=0`（`ELAPSED=31s` = **1.3 s/形**）。引用口径：① `over_accept=0` 是**修复达成**、不是门坏掉；② `aot_only_red` **必须恒 = 5**（面 B 的 5 枚假拒绝属 AOT-CODEGEN-011，本批零触碰 ⇒ 该列若变动即为面 A 的改动外溢，须停手归因）；③ `diff_php_ok` **必须恒 = 1**（面 C 的 `k_default_first`）⇒ 逐形前后对照见 §3.8.4。
+
+**跨 run 复证**：注册表与首轮快照去掉 `ELAPSED` 行后 `diff` ⇒ **`diff_rows=0`**（24 形数据行 + 7 行表头逐字节全等）。
+★ **本门自建成起就不是「守卫门」**：硬守卫列 `aot_only_red=5` **非 0** ⇒ 它是**验收门**（有已知红面），引用时禁止把该列读成「本轮新增回归」。
+
+**三张面孔（实测到行）**
+
+| 面孔 | 形（门 K 内 id） | PHP 真值 | AOT 实测 | 机制锚点（实文核对） | 归属 |
+|---|---|---|---|---|---|
+| **A（§7-15c 本体，宽容面）** | `k_stmt_before_case`、`k_stmt_before_case_two`、`k_nested_stmt_head`、`k_stray_endswitch` = **4 枚 OVER_ACCEPT** | 全部 rc=255 `unexpected token "…", expecting "case" or "default" or "}"` | 全部 **rc=0**；前三枚**空输出**，`k_stray_endswitch` 更**照跑并打 `z`**（`endswitch` 被当成意外 token 跳过后，`case 1:` 正常成臂） | `parser.zig:3592-3597` 的 `else` 支＝`if (is_alternative and self.strict_alt_closers) break;` ⇒ **花括号支保留** `self.nextToken(); // Skip unexpected tokens`，随后 `:3611 _ = try self.eat(.r_brace);` 仍成立 | **本单**（R-3 批的姊妹面 ⇒ §5 路线 **R-5**） |
+| **B（新，反向面孔＝假拒绝）** | `k_case_semi`、`k_case_semi_fall`、`k_default_semi`、`k_case_semi_alt`、`k_case_semi_two_arms` = **5 枚 AOT_ONLY_RED_COMPILE** | PHP 8.5 仅 `Deprecated: Case statements followed by a semicolon (;) are deprecated, use a colon (:) instead`，**rc=0 且臂体照常执行**（`S`/`T`/`D`/`Q`/`b`） | **无产物**，AOT 原文一律 `Parse error: syntax error, unexpected ";", expecting ":"` | `parser.zig:3571`（`case` 臂）与 `:3583`（`default` 臂）= `_ = try self.eat(.colon); // or .fat_arrow` **硬只认冒号**；该处注释声称的「or .fat_arrow」实测**方向反了**（`case 1 => echo` PHP 自己 rc=255 ⇒ 见 `k_case_arrow` 形，实测 `BOTH_REJECT`） | ✅ **已另立 AOT-CODEGEN-011**（路线 **R-B1**，§五 裁决项 D-1 必答） |
+| **C（新，语义面孔＝臂序丢失）** | `k_default_first` = **1 枚 DIFF_PHP_OK_AOT_DIFF**（PHP `DC` / AOT `D`） | 见下补充六形 | 见下补充六形 | `parser.zig:3616` 的 `.switch_stmt = .{ .expression, .cases, .default }` ⇒ **default 不在 `cases` 序列内 ⇒ 源码位次信息在 AST 层就没有**；IR 侧 `ir_generator.zig:3211-3221` 按 `case_blocks.items[i + 1]` 链 fall-through、末臂才 `:3215-3217` 接 `default_block`，default 体尾 `:3236-3237` **恒 `br merge_block`** ⇒ default 被强制搬到末臂位 | ✅ **已另立 AOT-CODEGEN-011**（路线 **R-C1**+**R-C2**，跨模式面 **R-C3** 待 §五） |
+
+**面孔 C 的六枚补充实测（`/tmp` 一次性形，仓库根执行；与门 K 的 `k_default_first` 同代次同二进制）**
+
+| 形 | PHP | AOT | 判读 |
+|---|---|---|---|
+| `switch (1) { default: echo "D"; case 2: echo "C"; }` | `DC` | `D` | default 体尾**不落进后续 case**（丢臂尾） |
+| `switch (2) { default: echo "D"; case 2: echo "C"; }` | `C` | **`CD`** | 末位 case 的体尾**错落进 default** ⇒ 执行了 PHP 不执行的语句（**比丢尾更重**：假执行） |
+| `switch (1) { case 1: echo "a"; default: echo "d"; case 2: echo "b"; }` | `adb` | `abd` | default 被搬到**末臂**位（臂序丢失的直接证据） |
+| `switch (9) { case 1: "a"; default: "d"; case 2: "b"; }` | `db` | `d` | 未匹配走 default 后同样丢后续臂 |
+| `switch (1) { case 1: "a"; case 2: "b"; default: "d"; }`（default 已在末） | `abd` | `abd` | **SAME ⇒ 控制臂**：default 位于末臂时全绿，正是 68 语料的唯一形态 |
+| `switch (0) { case 1: "a"; default: "d"; case 2: "b"; case 3: "c"; }` | `dbc` | `d` | 多臂同形复现，非单臂特例 |
+
+⇒ 面孔 C 的分界实测为「**default 是否位于末臂**」，与花括号／替代语法无关（替代语法侧同一 AST 结构同样受影响，但语料该族构造为 0，见 §3.6 语料面表）。
+
+**跨模式补记（本轮新立探针门 `C010KM`，6 形 × `php`/`--mode=tree`/`--mode=bytecode`/AOT，实测 `ELAPSED=13s`，路径归一后跨 run `diff_rows=0`）**：上表六形中的四形（`k_default_first` 同码位形、`c_lastcase_fall_into_default`、`c_middle_default`、`c_ctl_default_last`）已进门固化，另两形（未匹配走的 `db/d`、多臂的 `dbc/d`）仍是一次性 AOT 侧形。三条判读（逐形读数与修复路线归 **AOT-CODEGEN-011 §2.3/§5**，此处只登记取证）：
+1. **面 B 的修复点在三模式共享的 `parser.zig`** ⇒ 直改会让 tree/bytecode 从「**rc=0 零输出**」变成「真的执行」；AOT 侧反而至少留下了 `Parse error` 日志 ⇒ 是否一并改 VM 属 §五 问询项（011 的 D-1）。
+2. **面 C 呈「三模式三样错答」**（`c_middle_default`：PHP `adb`／tree `ab`／bc `abd`／AOT `abd`）⇒ 根不在发射侧，而在 `ast.zig:186` 的形态缺字段；★★ **控制臂（default 已在末臂）在 tree 模式也是红的**（`ab` vs PHP `abd`，`vm.zig:10186` 的 default 支条件是 `if (!matched …)` ⇒ 解释器模式**永不 fall-through 进 default**）⇒ 冻结基线绿恰好只覆盖 AOT/bc 侧。
+3. **副产品＝一张新流程面（非本单面孔）**：`--mode=tree`／`--mode=bytecode` **对解析失败静默吞掉**（rc=0、零输出、无错误行；另测缺 `}` 的 `if` 同现象）⇒ 任何只看 rc 的 VM 腿会把「编译失败」读成绿（承 §7-5 同族但更危险）。按 §五 **本轮只登记不修**。
+
+**语料面穷举（两枚独立扫描器，`token_get_all` 分词器口径，判据 3/4）**
+
+| 语料 | 文件 | switch 总数 | 花括号头 | 替代语法头 | 首 case 前有语句 | default 非末臂 | `case`/`default` 分号臂 | 冒号臂 |
+|---|---|---|---|---|---|---|---|---|
+| `fuzzy_scripts_720/pass/`（冻结基线） | 68 | 4 | 4 | 0 | **0** | **0** | **0** | 20 |
+| `fuzzy_scripts_720/fail_runtime/` | 77 | 1 | 1 | 0 | 0 | 0 | 0 | 4 |
+| `fuzzy_scripts_720/fail_compile/` | 12 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| `fuzzy_scripts/`（旧语料，非基线） | 42 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| `fuzzy_scripts_715/` | 50 | 2 | 2 | 0 | 0 | 0 | 0 | 13 |
+| **GRAND** | 249 | **7** | **7** | **0** | **0** | **0** | **0** | **37** |
+
+- **两枚扫描器的 switch/花括号头/替代头 三项独立计数逐项全等**（7／7／0）⇒ 互证（同 §3.6「开口头与关闭标记成对」的自证法）。
+- 基线 4 枚花括号 `switch` 的站点已逐处回文核对 = `pass/f048:118`（default 末臂）、`pass/f134:94`、`pass/f134:160`、`pass/f163:133`（三枚**无 default**）＋ `fail_runtime/f082:98`（无 default）⇒ **三面孔的「语料内」暴露面全为 0**，冻结基线对它们**零保护力**；**「机制可达」= 完全可达**（写一个 default 不在末尾的 switch 即命中 C，用 `case 1;` 即命中 B，`switch` 首臂前塞一条语句即命中 A）。
+- 面孔 A 的补充：语料里 `stmt_before_first_case=0` 意味着**合法代码永远不进入** `:3592` 的 `else` 支 ⇒ 「硬化该支对 68 语料发射中性」这一句由**推断升为实测**（但影子仍须跑，理由见下「落地成本」）。
+
+**修 scanner 记录（先修 scanner、后引用；v1 读数全废，禁止引用）**：扫描器 ② v1 把**全树**的 `T_CASE`/`T_DEFAULT` 一律当 switch 臂，且终止边界只有 `:`/`;` ⇒ 两枚假阳性（enum 的 `case Hearts = 'v';`／`case Hearts;`，match 的 `default => "…"`）。v1 实测 `semi_terminator=87`（pass 20 + fail_runtime 46 + fail_compile 1 + 旧语料 3 + 715 17）**全部为这两族，switch 分号臂实为 0**。v2 改为「先算 switch 与 enum 的 token 区间、只落在 switch 区间内才分类；终止集扩 `:` `;` `=` `=>` `,`；臂序列只取本层深度」，并配**三枚必过控制臂**（`f048:15` match 不得记 SEMI、`f154:71` enum 带值 case 不得记 SEMI、合成形 `switch(1){case 1;}` 必须记 SEMI）＋ 一枚嵌套 switch 的过计控制臂（外层 default 末臂时不得记非末臂）。v1→v2 的**同输入合成控制**读数：`switch=10 / brace=8` 两代全等，`semi_arm 6→6`、`nonlast_default 4→3`（差的那枚正是 v2 修掉的过计）⇒ 修 scanner 只收窄假阳性。
+**已知低估边界（明示）**：v2 的臂序列以花括号深度为界 ⇒ **替代语法体内嵌套的花括号 switch**、以及 `case` 后带花括号体（`case 1: { … }`）内的臂不计入外层，二者语料面均为 0。
+
+**三条结论**：
+1. **§7-15c 未收口面已量化**：花括号 `switch` 的宽容面 = **4 枚**（非 1 枚），其中 `k_stray_endswitch` 呈「**跳过关闭标记后照常执行**」的实质语义分歧，比空输出更重。
+2. **同一段代码的另一方向也有面**：`case`/`default` 的**分号终结符**被 AOT **假拒绝** 5 枚（硬守卫列非 0）⇒ 「严格化」与「过度宽容」在 `parseSwitchStmt` 内**同时存在**，任何只盯 `OVER_ACCEPT` 列的评审会漏掉它（这正是 §3.5.1 五桶分向判据的价值）。
+3. **面孔 C 与 A/B 不同根**：A/B 在 `parser.zig` 文法位，C 在 **AST 无臂序 + IR 按末臂链入**（`parser.zig:3616` × `ir_generator.zig:3211-3221/:3236-3237`）⇒ **不可并入 R-3 系列批**，且修复需动 `ir_generator.zig`（宪法 §一 超大文件，改前须 grep 既有模式）与 AST 形态 ⇒ **已另立 ✅ [AOT-CODEGEN-011](AOT-CODEGEN-011-switch-case-semicolon-terminator-and-default-arm-position.md)**（面孔 B = 路线 R-B1，面孔 C = R-C1+R-C2）。跨模式探针（C010KM）实测给该单新增两个必答问询项：**D-1**（面 B 落在三模式共享的前端 ⇒ 直改 vs 旗标门控只改 AOT）与 **D-3**（tree 侧连控制臂都红 ⇒ 是否一并修 VM/bytecode）。
+
+**落地成本（实测口径，禁估算）**：门 K 本身 `42s`／24 形 = **1.8 s/形**；扫描器 ① `~2s`、② `~4s`（`timeout 90` 上限内）。面孔 A 的硬化 = ~~`:3595` 去掉 `is_alternative and`（**一行**）~~ **【该措辞已被任务 #127 实测否证，见 §3.8：直接去掉 `is_alternative and` 会把两枚 PHP 合法形新拒 ⇒ 实际形态＝旗标 + 单枚前导分号豁免支，共三处改动】**，面孔 B = `:3571`/`:3583` 两处 `eat(.colon)` 改「`:` 或 `;` 二者取其一」（**两行**）⇒ 二者均可沿用 §3.6 的既有验收链：**六门 16m18s + 主回归 13m50s + 影子 26m25s = 56m33s**（实测值，非估算）。面孔 C 无既有验收链可套（需 AST 形态先定），成本列「**未实测**」。
+
+---
+
+### 3.8 任务 #127 落地轮：**R-5（面孔 A 硬化）已落地并实测收口** + **永久侧门 L**（`switch` 臂表位邻形门，23 形）建成（2026-10-09）
+
+**落地范围与裁决口径（先划界）**：老铁指令「继续推进已知问题修复」按已接受计划推进 ⇒ 本批**只落地面 A**，理由有二 —— ① 面 A 落在本单（根 = `parseSwitch` 的意外 token 跳过支）；② 修复形态沿用 §3.6 已验收的**旗标门控 AOT-only** 分叉 ⇒ 宪法 §五（不擅自改解释器/字节码）与 §六（非 AOT 逻辑调整须先问）均不越界。**面孔 B／C 属 [AOT-CODEGEN-011](AOT-CODEGEN-011-switch-case-semicolon-terminator-and-default-arm-position.md)，其 D-1…D-4 未裁决 ⇒ 本批零触碰**（门 K 的 `aot_only_red=5` 因此在本批前后**恒为 5**，不是「本批没修好」）。
+
+#### 3.8.1 ★ 实测语法规则：**「一行」措辞被否证**（已在 §3.7「落地成本」就地标注）
+
+`php 8.5.8` 直测得到的文法事实（决定 R-5 的最终形态，非推断）：
+
+> **`switch` 的 case 列表位「恰好接受一枚空语句分号 `;`」**，花括号与替代语法皆然；第二枚分号、裸 `:`、裸 `{ }` 以及任何语句仍为 `php_rc=255`。
+
+| 形（门 L id） | 源码 | PHP 实测 | 若照 §3.7 旧措辞「只去掉 `is_alternative and`」 |
+|---|---|---|---|
+| `l_semi_arm_list` | `switch (1) { ; case 1: echo "A"; break; }` | **rc=0**，输出 `A` | ✗ 新拒 ⇒ `AOT_ONLY_RED_COMPILE`（**今日绿形变红**） |
+| `l_semi_only` | `switch (1) { ; }` | **rc=0**，空输出 | ✗ 同上 |
+| `l_alt_semi_arm` | `switch (1): ; case 1: echo "A"; endswitch;` | **rc=0**，输出 `A` | ✗ 同上（且该形今日**已是红**，见 §3.8.5） |
+| `l_two_semi_arm_list` | `switch (1) { ;; case 1: … }` | rc=255 `unexpected ";"` | ✓ 正确拒绝 |
+| `l_alt_two_semi` | `switch (1): ;; case 1: … endswitch;` | rc=255 | ✓ 正确拒绝 |
+| `l_semi_then_block` | `switch (1) { ; { } case 1: … }` | rc=255 `unexpected "{"` | ✓ 正确拒绝 |
+| `l_bare_colon_arm_list` | `switch (1) { : case 1: … }` | rc=255 `unexpected ":"` | ✓ 正确拒绝 |
+
+⇒ **实际落地形态 = 旗标 + 「单枚前导分号豁免」支**，共**三处**改动（§3.7 旧措辞「一行」作废）。守卫门 L 在落地**前**建成的全部价值就是先拿到这张真值表：若直接按「一行」落地，会把两枚今日绿的合法形打成硬守卫红，且消不掉 §3.8.5 的既有红。
+
+#### 3.8.2 落地三处（`src/compiler/parser.zig`，`parseSwitch` 在 `:3555`）
+
+| # | 位置 | 内容 | 为什么必须在此 |
+|---|---|---|---|
+| ① | `:33–38` | 新增字段 `strict_switch_case_list: bool = false;`（紧邻 R-3 的 `strict_alt_closers`） | 缺省 `false` ⇒ 解释器/字节码构造点逐字节等于历史（承 §3.6.4 的分叉口径） |
+| ② | `:80–82` | `initWithModeInsensitive` 内 `p.strict_switch_case_list = true;`（与 `p.strict_alt_closers = true;` 同批） | 该旗标**只参与 parse 期判定**，curr/peek 已由 `initFromLexer`（`:41–58`）预取 ⇒ 构造后补设安全（与 `Lexer.case_insensitive_keywords` 必须在预取**前**置位形成对照，见 §3.4.6） |
+| ③ | `parseSwitch` `:3572` + `:3601–3613` | 局部 `var case_list_empty_stmt = false;` + 在意外 token 的 `else` 支**之前**插入 `.semicolon and !case_list_empty_stmt` 豁免支，`else` 支改为 `if (self.strict_switch_case_list or (is_alternative and self.strict_alt_closers)) break;` | 豁免支实现 §3.8.1 的「只放行单枚」；`break` 后由 `:3628 _ = try self.eat(.r_brace);` / `:3620` 的 `endswitch` 硬 `eat` 报精确 `unexpected X, expecting "}"` |
+
+```zig
+// src/compiler/parser.zig:3601–3613（实测落地文本）
+} else if (self.curr.tag == .semicolon and !case_list_empty_stmt) {
+    // R-5 例外（门 L 实测，php 8.5.8）：case 列表首**恰好接受一枚空语句分号**——
+    case_list_empty_stmt = true;
+    self.nextToken();
+} else {
+    if (self.strict_switch_case_list or (is_alternative and self.strict_alt_closers)) break;
+    self.nextToken(); // Skip unexpected tokens
+}
+```
+
+**Zig 语言面记录（本轮踩到，登记为口径）**：`:3572` 的局部 `var` 上方注释**必须用 `//`**；写 `///` 触发 `expected statement, found 'a document comment'` ⇒ 首次 `zig build` 失败。doc comment 只能贴在声明式（字段/函数），不能贴局部变量。
+
+**改动量实测**：`git diff --numstat src/compiler/parser.zig` ⇒ **81 插入 / 6 删除**（= R-3 批的 64/−6 + 本批净 **+17/−0**）；文件 `4305` 行。
+
+#### 3.8.3 永久侧门 L（`switch` 臂表位邻形，23 形 = 控制臂 4 + 邻形 19）
+
+| 资产 | md5 | 备注 |
+|---|---|---|
+| `fuzzy_scripts_720/tmp/c010l_switch_armslot_gate_tmp.sh` | `babe087708ec2e518f06c1cea2100ee4` | 门 L v1，`gate_rev=v1`，头行内嵌 §3.8.1 实测规则 |
+| `fuzzy_scripts_720/tmp/c010l_presnap/prefix.tsv` | `8a0116db0108bb97147661ede573c854` | **注册读数 = 落地前**（`same=9 over_accept=6 both_reject=7 aot_only_red=1`，`ELAPSED=50s`）⇒ 落地前快照，永久保留 |
+| `fuzzy_scripts_720/tmp/c010l_switch_armslot_tmp.tsv` | `19cac57546634f4d748f2d96893b1857` | **验收读数 = 落地后**（`same=10 over_accept=0 both_reject=13 aot_only_red=0`，`ELAPSED=33s`） |
+| `fuzzy_scripts_720/tmp/c010_r5_presnap/`（11 枚 TSV） | — | 全链复跑前的各门快照（K/L/J/D8/E/F/G/H/H2/I/影子） |
+| `fuzzy_scripts_720/tmp/c010_r5_acceptance_chain_tmp.sh` / `…_rowdiff_tmp.sh` | — | 十门 → 主回归 → 影子的串行验收链 + 逐行 `diff_rows` 比对器（排除 `#` 表头与 `ELAPSED`/`*_DONE` 行） |
+
+**判据**：承 §3.5.1 五桶契约逐字同口径；`compile_fail` 以**产物可执行性**判（记忆规则 21）；`--compile` 在仓库根执行。
+
+#### 3.8.4 读数对照（注册＝落地前 → 验收＝落地后）
+
+| 门 | 落地前 | 落地后 | 判读 |
+|---|---|---|---|
+| **L**（23 形） | `same=9 over_accept=6 diff_php_ok=0 both_reject=7 aot_only_red=1 run_red=0` @`50s`（2.2 s/形） | `same=10 over_accept=0 diff_php_ok=0 both_reject=13 aot_only_red=0 run_red=0` @`33s`（**1.4 s/形**） | **过度接受 6→0**；**硬守卫 1→0**（§3.8.5）；目标全达成 |
+| **K**（24 形，面 A 取证门） | `same=8 over_accept=4 diff_php_ok=1 both_reject=6 aot_only_red=5` @`42s` | `same=8 over_accept=0 diff_php_ok=1 both_reject=10 aot_only_red=5` @`31s` | §3.7 面 A 的 **4 枚 OVER_ACCEPT 全转 BOTH_REJECT**（逐行差 = 恰好这 4 行）；`aot_only_red=5` 恒 = 面 B（属 011）⇒ **本批不该动它，实测也没动它** |
+
+**门 L 的 12 行逐行变化（vs `c010l_presnap/prefix.tsv`）= 6 枚判据翻转 + 1 枚红闭合 + 5 枚同桶消息精确化**：
+
+| 形 | 前 → 后 | AOT 新日志（归一后） |
+|---|---|---|
+| `l_two_semi_arm_list` | OVER_ACCEPT → **BOTH_REJECT** | `syntax error, unexpected ";", expecting "}"` |
+| `l_assign_before_case` | OVER_ACCEPT → **BOTH_REJECT** | `syntax error, unexpected variable "$a", expecting "}"` |
+| `l_var_before_case` | OVER_ACCEPT → **BOTH_REJECT** | 同上 |
+| `l_alt_if_before_case` | OVER_ACCEPT → **BOTH_REJECT** | `syntax error, unexpected token "if", expecting "}"`（该形是**花括号** switch 内嵌 `if():…endif;` ⇒ 报 `}` 正确） |
+| `l_endif_stray` | OVER_ACCEPT → **BOTH_REJECT** | `syntax error, unexpected token "endif", expecting "}"` |
+| `l_bare_colon_arm_list` | OVER_ACCEPT → **BOTH_REJECT** | `syntax error, unexpected ":", expecting "}"` |
+| **`l_alt_semi_arm`** | **AOT_ONLY_RED_COMPILE → SAME_BOTH_ERROR_LIKE**（`php=A` / `aot=A`） | 见 §3.8.5 |
+| `l_bare_block_arm_list`、`l_bare_block_nested`、`l_semi_then_block` | 同桶（BOTH_REJECT）仅消息变 | `Unexpected token in expression` → `syntax error, unexpected "{", expecting "}"` |
+| `l_if_before_case`、`l_for_before_case` | 同桶仅消息变 | → `unexpected token "if"/"for", expecting "}"` |
+
+⇒ **控制臂零扰动实测**：`l_ctl_case_first`/`l_ctl_default_first`/`l_ctl_empty`/`l_ctl_between_arms` 与 `l_semi_arm_list`/`l_semi_only`/`l_case_before_default`/`l_nested_brace_inner`/`l_semi_between_arms` 九枚 **逐字节 IDENTICAL** ⇒ §3.8.1 的单枚分号豁免支没有把任何 PHP 合法形新拒。
+
+#### 3.8.5 顺带闭合：**R-3 批的漏网硬守卫红** `l_alt_semi_arm`
+
+落地前门 L 唯一一枚 `aot_only_red=1` 与本单面 A **无关**：
+
+- 形：`switch (1): ; case 1: echo "A"; endswitch;`（PHP **rc=0** 输出 `A`）
+- R-3 代次实测：`Parse error: syntax error, unexpected ";", expecting "endswitch"` ⇒ **无产物**
+- 机制：R-3 批把替代语法的 `endswitch` 改为硬 `eat`（`:3620–3623`），而**臂表位那枚合法的空语句分号**从未被消费 ⇒ `eat(.k_endswitch)` 停在 `;` 上。
+- ⇒ **门 J 的 29 形未探「替代语法 `switch` 的 case 列表首有分号」这一位**（门 J 覆盖 `end*` 闭合位，不覆盖该邻位）⇒ 该红在 R-3 验收链里是**覆盖意外**，不是回归判据漏读。
+- 本批的豁免支（③）在任何语法下先消费单枚 `;` ⇒ 该形转 `SAME_BOTH_ERROR_LIKE`（`A` vs `A`）⇒ **R-5 同时是 R-3 批的补丁**。
+
+#### 3.8.6 parseSwitch 锚点漂移登记（**引用本单/011 旧行号前必读**）
+
+本批 ③ 在 `parseSwitch` 中部插入 17 行 ⇒ §3.7/§5 与 011 内的旧锚点整体后移。**实测新行号（当代次 `parser.zig 1eab26c0…`，`grep` 复验）**：
+
+| 语义 | 旧引用 | **当代次实测** | 漂移 |
+|---|---|---|---|
+| `case` 臂的 `eat(.colon)`（面 B 根，011 R-B1） | `:3571` | **`:3580`** | +9 |
+| `default` 臂的 `eat(.colon)`（面 B 根，011 R-B1） | `:3583` | **`:3592`** | +9 |
+| 意外 token 的 `else` 支（面 A 根，**本批已改**） | `:3592-3597` | **`:3608–3614`**（严格 `break` 单枚在 **`:3612`**） | +16 |
+| **本批新增**：单枚空语句分号豁免支 | —— | **`:3601–3607`**（判定头 `:3601`、置位 `:3606`） | 新增 |
+| switch 关闭 `eat(.r_brace)` | `:3611` | **`:3628`** | +17 |
+| `.switch_stmt` 节点构造（面 C 根，011 R-C1） | `:3616` | **`:3633`** | +17 |
+| `fn parseSwitch` | —— | **`:3555`** | 函数名实测为 `parseSwitch`（§3.7 行文中的 `parseSwitchStmt` 为口误，语义不变） |
+
+**`parseSwitch` 之后的锚点：一致 +17（实测确认）**。本批 17 枚插入的分布 = 旗标字段声明 **6**（`:33–38`）＋ `initWithModeInsensitive` 置位 **2**（`:80–82`）＋ `parseSwitch` 体内 **9**（`:3571-3572`、`:3601-3607`）⇒ **`parser.zig` 中任何行号 > `:3634` 的锚点相对 R-3 代次恰好后移 17 行**。唯一实测确认点：`isAlternativeCloserTag` 在 §3.6 登记为 R-3 代次 `:3976`，当代次 `grep` 实测 **`:3993`** ⇒ `+17` ✓。
+
+| 语义（历史引用） | 当代次实测（`1eab26c0…`） | 说明 |
+|---|---|---|
+| D-4 死桩 `isKeywordUsableAsIdentifier`（旧引 `:3756-3759`） | **`:3853-3856`** | 旧行号属 **R-2 代次**（比 R-3 更早）⇒ 本表非「+17」而是逐枚重测 |
+| `isKeywordIdentifierTag`（旧引 `:3761`，§3.4.2 名位矩阵） | **`:3858`** | 同上 |
+| `eatKeywordAsIdentifier`（旧引 `:3843`） | **`:3962`** | 同上 |
+| `isAlternativeCloserTag`（R-3 代次 `:3976`） | **`:3993`** | ★ +17 的实测确认点 |
+
+⇒ **引用本单/011 里任何 `parser.zig` 行号前先按本节换算**；行号本身随每批插入漂移，语义锚点（函数名 + 判定条件）才是稳定引用位。
+
+**门脚本头注释同样停在落地前代次（实测，本批不编辑已登记门脚本）**：门 L 的脚本头（`c010l_switch_armslot_gate_tmp.sh`，md5 `babe087708ec2e518f06c1cea2100ee4`／139 行，**落地前建档 ⇒ 头注释为 R-3 代次**）引 `:3592-3597`（意外 token 支）、`:3596`（整枚跳过）、`:3611`（硬 `eat(.r_brace)`）三枚旧锚点 ⇒ **当代次实测 = 豁免支 `:3601–3607`、严格支 `:3608–3614`（`break` 在 `:3612`）、硬 `eat(.r_brace)` `:3628`**；门 K 的脚本头（`c010_brace_switch_gate_tmp.sh`，md5 `6408a6b6…`）同属落地前代次，口径一致。
+处置决策：**只在工单登记漂移，不改门脚本头注释** ⇒ 已登记门脚本的 md5 与读数表保持逐字节可复现（改形须先回显再重登，见 §7-9）。
+
+> 追加一条坑（本批实测）：**「门在哪一批建，门头的源码锚点就属于哪一批的代次」**。守卫门按流程必须在落地**前**建立，所以它的头注释天然引用落地前的行号；落地后引用门头的锚点会指向已被挪动的语义位（本例 `:3596` Today 落在别处）。⇒ 复现门判据时按本节换算表取行号，**不要**按门头取。
+
+#### 3.8.7 代次锚点（本批 = 新代次）
+
+| 资产 | md5 |
+|---|---|
+| `zig-out/bin/php-interpreter` | `6939cd2e891f20aef590de2585b15681`（R-3 批为 `81f8a55a…`） |
+| `src/compiler/parser.zig` | `1eab26c068b13b9f904d2f432464d852`（R-3 批为 `5ad452fe…`） |
+| `src/compiler/lexer.zig` / `keyword_lookup.zig` | `e3dd4191a1c3dfdf816b5873b4c60e5f` / `ef70993a7caac6deb9b2e5a23bf7d143`（**与 R-3 批全等 ⇒ 本批零触碰前端词法**） |
+| `git HEAD` | `f9432e2`（R-2 六枚修复源码已入库于 `0652130`；**本批 + 文档 + 门资产均未提交**） |
+
+⇒ 按 §9 的代次口径，本批**改了 `parser.zig`** ⇒ 等价取证（§9.2 的 md5 对照）不适用，**必须走整链**（十门 + 主回归 + 影子）。
+
+#### 3.8.8 流程负面记录（登记为口径，非面孔）
+
+本轮踩到**双层后台**事故：在 `run_in_background` 的命令里再套 `nohup bash -c '…' &` ⇒ harness 立即报「完成」，而真实的链仍在前台进程存活 ⇒ 我据该假完成信号又启动了一条链 ⇒ **两条链并发写同一批 TSV**，门 K 被截断到 1 行数据、门 J 出现 51 行／两枚 `_DONE`。处置：`ps ax -o pid,ppid,command` 追父进程映射 ⇒ `kill -TERM` 三个 pid ⇒ 删孤儿锁 `.zigphp_aot_build_11167` ⇒ 以**单层** `run_in_background` 重跑。另 `setsid` 在 macOS **不存在** ⇒ 一次启动静默失败（launcher 无输出）。⇒ **口径固化：`ps` 见进程存活 ≠ 已完成；后台链只允许单层；每轮复跑前先快照 TSV（本轮即 `c010_r5_presnap/`）**。
+
+#### 3.8.9 结论
+
+1. **§7-15c 面 A 收口**：花括号 `switch` 的 4 枚过度接受全部转为与 PHP 同向拒绝，门 K／门 L 的 `over_accept` 两列同时归零。
+2. **旧措辞「一行」被实测否证**，真实形态为「旗标 + 单枚前导分号豁免」三处改动；该规则（`case` 列表首恰好一枚 `;`）现固化在门 L 表头与源码注释两处。
+3. **R-3 批的替代语法硬守卫红 `l_alt_semi_arm` 由本批顺带闭合** ⇒ 门 J 的覆盖面缺陷登记为新口径：闭合位门**不覆盖臂表位邻形**。
+4. **消息精确化为副产品**：5 枚同桶行的泛化文案（`Unexpected token in expression`）改为带 token 与期望集的精确文案 ⇒ §7 的「泛化消息（P2）」面收窄。
+5. **面 B／C 未被触碰**（`aot_only_red=5` 前后恒等）⇒ 仍待 011 的 D-1…D-4。
+
+#### 3.8.10 R-5 批全链实测读数（十腿门段 + 逐行等值比对器）
+
+**链脚本** `fuzzy_scripts_720/tmp/c010_r5_acceptance_chain_tmp.sh`（md5 `df6eed2b557e5e5e935626629a07ca2e`）＝**十腿串行**（`K → L → J → D8 → E → F → G → H → H2 → I`，全部带 `timeout`）→ 主回归 → 影子；腿序按「先读本批直接判据（3 分钟内可见）、再吃长时间影子」排。
+
+**十腿读数（R-5 代次 `6939cd2e…`／`parser 1eab26c0…`，`repo_build_residue` 全 = 0、`SMOKE_ONLY` 全 = 0）**
+
+| 腿 | 读数 | `ELAPSED` |
+|---|---|---|
+| K（面 A 主验收） | `shapes=24 same=8 over_accept=0 diff_php_ok=1 both_reject=10 aot_only_red=5 run_red=0` | 31s（1.3 s/形） |
+| L（过度拒绝守卫） | `shapes=23 same=10 over_accept=0 diff_php_ok=0 both_reject=13 aot_only_red=0 run_red=0` | 33s（1.4 s/形） |
+| J（R-3 同支路 alt 语法） | `shapes=29 same=19 diff=0 over_accept=0 both_reject=10 aot_only_red=0 run_red=0 both_err_diff=0` | 66s |
+| D8（§8 独立缺陷面） | `shapes=14 defect_red=1 guard_same=13 compile_fail=0 bad_probe=0` | 47s |
+| E | `shapes=19 same=19 diff=0 silent_empty=0 aot_fatal=0 compile_fail=0` | 65s |
+| F | `shapes=8 same=8 diff=0 zero_instr=0 compile_fail=0` | 26s |
+| G | `shapes=7 same=7 diff=0 red_confirmed=0 guard_same=4 guard_red=0 compile_fail=0` | 24s |
+| H | `shapes=79 arms=200 face=0 noface=78 confounded=1 bad_probe=0 ctrl_compile_fail=0 probe_compile_fail=0 inverse_shapes=21 inverse_face=0 inverse_noface=21` | 700s |
+| H2 | `shapes=15 over_accept=12 strict_same=1 aot_compile_fail=2 both_reject=2 aot_only_red=0 php_ok_aot_diff=0` | 45s |
+| I（跨模式分叉证明） | `shapes=19 tree_same=7 tree_diff=12 bc_same=7 bc_diff=12 aot_same=19 aot_diff=0 both_red=0 vm_only_red=12 aot_only_red=0` | 66s |
+
+⇒ 逐腿 `ELAPSED` 之和 = **1103 s**；门段墙钟 `12:21:51 → 12:40:14` = **18m23s = 1103 s** ⇒ **两口径互证**（串行无并发污染，与记忆口径「带 `repo_build_residue` 的门禁不得与影子/主回归并发」一致）。
+
+**逐行等值比对器** `fuzzy_scripts_720/tmp/c010_r5_rowdiff_tmp.sh`（对照 `c010_r5_presnap/`＝**R-3 代次落地前快照**，剔除表头与 `ELAPSED`/`_DONE` 行只比逐形数据行）：
+
+| 门表 | `diff_rows` | 判读 |
+|---|---|---|
+| 门 K | **8**（= 4 行 × 旧/新） | ★ **恰为面 A 的四形**：`k_stmt_before_case`／`k_stmt_before_case_two`／`k_nested_stmt_head`／`k_stray_endswitch` 全部 `OVER_ACCEPT → BOTH_REJECT`；余 20 行逐字节不变 ⇒ **面 B 的 5 行仍 `AOT_ONLY_RED_COMPILE`（原文仍 `unexpected ";", expecting ":"`）、面 C 的 `k_default_first` 仍 `DIFF_PHP_OK_AOT_DIFF`** = 零触碰的实测证据 |
+| 门 L | **24**（= 12 行 × 旧/新） | 拆 = **7 行改判**（`l_two_semi_arm_list`／`l_assign_before_case`／`l_var_before_case`／`l_alt_if_before_case`／`l_endif_stray`／`l_bare_colon_arm_list` 六枚 `OVER_ACCEPT → BOTH_REJECT` ＋ `l_alt_semi_arm` `AOT_ONLY_RED_COMPILE → SAME_BOTH_ERROR_LIKE`【§3.8.5 的 R-3 漏网闭合】）＋ **5 行仅文案变精确、判据不变**（`l_bare_block_arm_list`／`l_bare_block_nested`／`l_if_before_case`／`l_for_before_case`／`l_semi_then_block`，均 `php_rc=255` 的 `BOTH_REJECT`，AOT 文案由泛化 `Unexpected token in expression` 改为 `unexpected token "X", expecting "}"`）⇒ **形名集与新旧逐行完全对齐**（`cut -d'|' -f1` 逐字节相同 ⇒ 不存在行增删）。**权威指针：逐形清单与 AOT 新日志文案以 §3.8.4 的表为准，本行只登记比对器的行计数口径** |
+| 门 J / D8 / E / F / G / H / H2 / I | **0** | 八腿逐形数据行**逐字节等值** ⇒ 本批对既有面零扰动；门 I 的 `tree_diff=12`/`bc_diff=12` 与冻结注册值逐项相同 ⇒ **旗标分叉（AOT-only）达成** |
+| 影子表 | **0**（腿后复测，真等值） | ★ 中途读数**作废**：第一次 rowdiff 跑在影子腿开跑**之前**，读到的是 R-3 代次旧表 ⇒ 当时的 `diff_rows=0` 只是「旧表 vs 旧表」，已在 §3.8.11 以腿后复测替换。影子腿完成后（13:18:15）复跑比对器 ⇒ `old_rows=136 new_rows=136 diff_rows=0`，即对照侧 = `c010_r5_presnap/c010_shadow_main_md5_tmp.tsv`（R-3 代次 68 语料 × 新旧两列 md5）与新表**逐行逐字节全等** ⇒ **R-5 在语料面上实测发射中性**（跨 R-2 + R-3 + R-5 三批累计零漂移）。⇒ 口径固化：**长腿（主回归／影子）的等值必须在腿完成后复测比对器**，中途读数一律标注「禁引用」 |
+
+**控制臂与豁免面核验（形名实测更正）**：门 L 的**四枚控制臂**为 `l_ctl_case_first`／`l_ctl_default_first`／`l_ctl_empty`／`l_ctl_between_arms`（全部 `php_rc=0`、当代判据 `SAME_BOTH_ERROR_LIKE`）——它们在 rowdiff 的 12 行变更清单里**一形未列** ⇒ 落地前后**逐字节未变**；另有**三枚豁免面对照形** `l_semi_arm_list`／`l_semi_only`／`l_alt_semi_arm`（`php_rc=0` 的「case 列表首单枚空语句分号」合法形）当代同样全部 `SAME_BOTH_ERROR_LIKE`，其中前两枚前后未变、第三枚 `l_alt_semi_arm` 由 `AOT_ONLY_RED_COMPILE` 转 `SAME`（§3.8.5）⇒ **`same` 列 9→10 的唯一来源即该形**。⇒ 两条结论同时成立：**豁免支没有误拒任何 PHP 合法形（含单枚分号三形与控制臂四形），也没有放过任何 PHP 非法形（六枚 `OVER_ACCEPT` 全部转 `BOTH_REJECT`）**。
+
+#### 3.8.11 R-5 批长腿实测（主回归 + 影子）与全链墙钟 ⇒ §5 R-5 行的占位口径就此收口
+
+**腿 2 = 官方主回归**（`fuzzy_scripts_720/run_regression.sh`，`timeout 1800`，12:40:14 → 12:53:08 = **12m54s**，`regression_rc=0`）：
+
+| Total | Pass | Fail(Compile) | Fail(Runtime) | Fail(Diff) | Skip |
+|---|---|---|---|---|---|
+| 68 | **67** | 0 | 0 | 0 | **1**（`f004_oop_deep_inheritance_magic.php`，`PHP_error_exit=255`，基线保持） |
+
+**腿 3 = 影子门**（`c010_shadow_main_md5_tmp.sh`，脚本 md5 `cb8183142569c0afbed4385478558c98`／53 行，`timeout 3600`，12:53:08 → 13:18:15 = **25m07s**）：`C010_SHADOW_DONE total=68 same=68 diff=0 miss=0 ELAPSED=1507s` ⇒ 相对**修复前冻结二进制 `1f15e4ce…`**（`/tmp/c010_prefix_backup/`）零漂移；与 §3.8.10 影子行的 `diff_rows=0`（对照 R-3 代次表）互证 ⇒ **R-5 的生成码与 R-3 代次逐字节相同**，即本批在 68 语料面上**实测发射中性**。
+
+**全链墙钟（`c010_r5_acceptance_chain_tmp.log` 的六枚时间戳）**：
+
+| 阶段 | 区间 | 墙钟 |
+|---|---|---|
+| [1/3] 十腿门段 | 12:21:51 → 12:40:14 | **18m23s**（= Σ `ELAPSED` 1103 s，两口径互证） |
+| [2/3] 主回归 | 12:40:14 → 12:53:08 | **12m54s** |
+| [3/3] 影子 | 12:53:08 → 13:18:15 | **25m07s** |
+| **合计** | 12:21:51 → **13:18:15 `== ALL DONE`** | **56m24s** |
+
+⇒ **R-5 批验收判据全部实测达成**（面 A 主判据 K/L + 八腿逐行等值 + 分叉判据门 I + 主回归 67/1 + 影子 68/68）；§5 路线 R-5 行里「本轮实测值随链日志登记」的占位口径由本节闭合，**引用链耗时一律取 56m24s**（R-3 批为 56m33s，两批同构、耗时同量级 ⇒ 十门口径的固定预算 ≈ **1 小时**，排期按此计）。
+
+---
+
+### 3.9 任务 #122e 落地轮：**R-125 goto 降级批**（§8 #3 关闭，门 D8 `defect_red=0`）——不触碰发射器，把规范后向 goto 在 IR 语句层降级为 do-while（2026-10-11）
+
+**子轮定论前置（#122d）**：发射器（native_linker 函数体渲染）是基于索引区间的结构化渲染（`buildControlFlowBoundaries` ⇒ cond_br 的 then/else/merge 下标区间），**无条件 br 到非相邻块无 Zig 表示** ⇒ 标签块内容被静默丢弃——IR 侧行试验（去除 goto_after）已被实测否证回滚。
+
+**R-125 形态（本次落地）**：绕开发射器——在 `generateMainFunction` 顶层语句走查加 **label→closer 配对**，把规范后向 goto 模式降级为 do-while IR（镜像 `generateDoWhileStmt` 的块图与 `do_while_*` 命名 ⇒ 发射器既有 do-while 机制原生出码）：
+- `L: S…; if (C) { goto L; }` ≡ `do { S…; } while (C);`（**严格等价**：S 恒先执行一次，closer 的 C 决定重跑）
+- `L: S…; goto L;` ≡ `do { S…; } while (true);`（rest 不可达 = PHP 语义）
+- `gotoLoopCloserCondition` 判据 = 无 else 且 then 块仅含一条 goto L；`goto_labels.put(L → body_block)` 使体内嵌套 goto 解析为重跑边；`loop_stack.push` 使体内 break/continue 正确绑定
+- 配对失败（多标签/双 goto/带 else 等非规范形态）⇒ `flushGotoLoopBuffer` 按原序生成（现状行为）；**R-126 起下沉为 `generateStatementListGotoAware` 共用助手**（`generateMainFunction` 与 `generateBlock` 共用 ⇒ 函数体/花括号块内的规范后向 goto 同样降级，f1/f2/f3 探针全绿）
+- 附带收益：前向 `goto L; L: …` 的**尾随语句丢失**（历史 `12` vs PHP `123`）经 flush 路径一并修复（g1 探针 `123` ✅）
+
+**验收实测（链 V，2026-10-11，合并态 = 本批 + 并行 R-3/R-5）**：
+| 门 | 读数 |
+|---|---|
+| D8 | `defect_red=0 guard_same=13→14 compile_fail=0 bad_probe=0 residue=0 ELAPSED=50s`（d3a 转绿，**§8 七枚全数关闭**） |
+| H | `face=0 noface=79 **confounded=0** inverse_face=0 inverse_noface=21 probe_compile_fail=0 ctrl_compile_fail=0`（k_goto 的 CONFOUNDED 清零，79+21 全绿） |
+| H2/I | over_accept=12 both_reject=2（R-3 代注册值，零扰动）；tree/bc 四项逐项不变、aot_same=19 |
+| 影子 | `total=68 same=68 diff=0`（语料 goto 0 处 ⇒ 零漂移实证） |
+| 主回归 | Pass 67 / Skip 1（2026-10-11 00:32:47 报表） |
+| 探针 | g1 `123` ✅ g2 `9` ✅ g3 `n3` ✅ g5 `aaa` ✅；g4（双 goto 非规范形态）维持现状 = 登记边界 |
+
+**代次锚点**：R-125 代二进制 `5c436e9e48e816e666c8996f29d18138`（顶层配对）；**R-126 代二进制 `85b51931d0f5b79f2d681e1481a1ff3e`（配对下沉 generateBlock，链 VI = 门 D8 `defect_red=0 guard_same=14` + 门 H `face=0 noface=79 confounded=0 inverse_face=0` + 影子 68/68 + 主回归 Pass 67/Skip 1，2026-10-11 01:32:11 报表）**；**R-127 收尾代二进制 `7fbdbcf620de98b2c7bf69517b63c7a5`（closer 放宽 + 命名参数 CI + 运行期查名 CI 七处，链 VII 同口径全绿，g4/n1/n2/n4 探针全绿，2026-10-11 02:33:44 报表）**；`ir_generator.zig` `（当前树）`（+137 配对走查 + 下沉重构）；`parser.zig` `1eab26c0…`/4305 行逐字未动（R-5 锚点保持）。已知边界（R-127 后仅余）：**closer 的 else 位 goto**（`if (C) {X} else {goto L}` 形）与**类名族 CI**（`class_registry` 精确查，独立面孔未立单）；~~双 goto 连发~~（R-127 死代码判据解除）、~~命名参数 CI~~（R-127 三处扫描折形）、~~运行期查名族~~（R-127 `lookupUserFunctionCI` 七处：is_callable/动态调用×2/Closure 创建/go 协程/存在性判定×2）均已解除；函数体/块内边界已由 R-126 解除。
 
 ## 4. 语料面与风险
 
@@ -397,6 +822,7 @@
 | 68 语料面（**穷举实测**） | `grep -onE '\b(Echo\|ECHO\|Print\|PRINT\|If\|IF\|Else\|ELSE\|Elseif\|Return\|RETURN\|Function\|FUNCTION\|Class\|CLASS\|New\|NEW\|ForEach\|FOREACH\|True\|False\|Null)\b' fuzzy_scripts_720/pass/*.php` ⇒ 命中 10 处（f016:196 `True`、f038:144 `New`、f072:180 `Function`、f113:192 `New`、f151:82 `Return`、f152:96/120 `Function`、f179:170 `If`/181 `Else`/295 `Function`/268 `Print`）⇒ **逐处回文核对：全部位于字符串字面量内**（如 `echo "New total: "`、`$this->output .= "If\n"`）⇒ **关键字位的混合大小写命中 = 0 处** |
 | 判据 3/4 应用 | 「扫描器 0 命中 ≠ 语料 0 命中」在本单成立：扫描器有 10 处命中但**语料内真实触发面为 0** ⇒ 冻结基线对本面**零保护力**；同时该面**机制可达**（任何混合大小写关键字书写即命中），语料 0 只说明绿语料恰好全用小写 |
 | **替代语法家族语料面**（2026-10-08，`token_get_all` 分词器实测，见 §3.6） | 与关键字大小写**无关**但共用同一 `lexer/parser` 前端 ⇒ 一并登记：冻结基线 `pass/` 68 文件 + `fail_runtime/` 77 + `fail_compile/` 12 的**替代语法开口头与关闭标记均为 0**（32 处粗筛命中全在字符串/注释内）⇒ 正例面（已支持）与负例面（5 形过度接受）**都不受官方回归保护**；同判据 4「机制完全可达」 |
+| **`parseSwitchStmt` 三面孔语料面**（2026-10-09 任务 #126，两枚独立分词器扫描器互证，见 §3.7） | 面 A（首 `case` 前裸语句被跳）／面 B（`case`/`default` 分号终结符被假拒）／面 C（`default` 非末臂 ⇒ 臂序丢失 + 假执行）在 **249 个语料文件、7 枚 `switch`（全为花括号头、替代头 0）** 中的实测暴露面 **全为 0**：`stmt_before_first_case=0`、`semi_arm=0`、`nonlast_default=0`（对照组 `colon_arm=37` 证明扫描器对该构造有判别力）。基线 4 枚花括号 switch 站点已逐处回文核对（`pass/f048:118` default 末臂、`pass/f134:94/160`、`pass/f163:133` 三枚无 default，另 `fail_runtime/f082:98`）⇒ **判据 3/4**：三面孔均「语料内 0 且机制完全可达」⇒ 冻结基线零保护力；反过来说，parser 侧对该族的硬化／放宽对**合法代码**结构上发射中性（面 A 的「发射中性」已由推断升为实测，影子仍须跑）|
 | R-2b 面语料穷举（任务 #119 实测） | `grep -onE 'constant\(' fuzzy_scripts_720/pass/*.php` ⇒ **0 命中**；`grep -onE '\bdefined\('` ⇒ **0 命中** ⇒ 冻结基线对常量表拼写面**零暴露**；同判据 3/4：语料 0 ≠ 机制 0，任何用 `constant("true")` 风格动态查名的现网脚本即命中 |
 | 静默性 | **本单最危险处**：三形空输出 + 一形错臂双输出 + 一形错值全为 rc=0、无 warning、无 fatal ⇒ 若用户脚本用 `Echo`/`Print`/`IF`/`RETURN` 风格书写，官方回归「输出比对」会抓到（语料内无此形 ⇒ 现网脚本才会踩）；反之「整段静默不输出」在只看 exit 码的门里会被判绿 ⇒ 侧门 E 的 `silent_empty` 计数器专门盯这一类 |
 | 修复的破坏面 | 前端 lexer 改动 ⇒ **触发冻结基线漂移风险**（`main.zig` 生成码取决于 token 序列）；但语料关键字位混合大小写 0 处 ⇒ 只要改动只让「原先查不中的拼写」命中，理论上发射中性，**该中性未影子实测**。风险点：PHP 的标识符大小写规则不统一（类/函数名不敏感、变量敏感），若在 lexer 层无条件归一化大小写会**误伤变量名/类名原文**，必须先定「只在关键字位查表归一、token 文本仍交原文」的形态 |
@@ -408,6 +834,8 @@
 ## 5. 修复路线（优先级 / 影响面 / 落地成本 —— 成本列为「实测」或「未实测」，禁列估算）
 
 > **落地状态（2026-10-07）**：**R-2 / R-2b / R-4 已落地并验收**（形态与实测读数见 §3.4.6；R-2 与名位补洞同批 = D-1 甲裁决，分叉旗标门控 = D-2 裁决）；**R-3（金丝雀）仍未启动**。落地实测成本：验收链 II = 影子 ~2400s + 六门 822s + 主回归 ~834s；源码改动 8 文件 +268/−78 行（git diff HEAD 实测）。
+>
+> **★ 编号消歧（2026-10-09，必读）**：2026-10-09 落地的批次在 `parser.zig` 源码注释与 §3.6 里记作 **「R-3 批」**（＝本单第 3 个修复批次，内容是 §3.6 门 J 的 P1「替代语法严格闭合」旗标门控），**与本节路线 `R-3`（发射期静默金丝雀）不是同一件事** ⇒ 下表 **R-3 路线的状态仍是「未实测／未启动」**，任何会话不得因「R-3 批已落地」而把金丝雀路线判为已收口。后续若重命名需先改注释再改文档，二者必须同时改。
 
 | 路线 | 内容 | 优先级 | 影响面 | 落地成本 |
 |---|---|---|---|---|
@@ -416,8 +844,10 @@
 | **R-2b** | **常量表拼写面（与 lexer 缺陷无关的第二张独立面孔，任务 #119 实测新立 ⇒ 永久侧门 G）**：运行期常量表按**大写单拼写**建键（`runtime_lib_template.zig:7614/:7615/:7637`）⇒ **动态查名入口**实测红：`constant("true")` PHP `a=true` vs AOT `Fatal: Undefined constant "true"`；`constant("false")`/`constant("Null")` 同红。覆盖面实测收窄到**仅 `true`/`false`/`null` 三枚**：`constant("php_int_max")` 在 PHP 8.5.8 **亦** Fatal 且 AOT 侧逐字节等值 ⇒ 非关键字常量本就该敏感；`define("GgC1",7)` 后 `constant("GgC1")` 两侧同 `7`、`constant("ggc2")` 两侧同 Fatal ⇒ 用户常量侧 AOT 与 PHP **已等值**，扩面即为回归。⇒ **R-2 只改 lexer 对该面零收敛**（探针源码内无任何大写关键字拼写） | P0（本单第二张面孔） | 生成码 `getGlobalVar` 的 `runtime.constants.get(name)` 查名路径（`main.zig:1066-1070`）**或**常量表建键侧；二者取其一即收口，需先定形态，且**限定只放开三枚关键字常量名** | **取证已固化为永久侧门 G**（7 形实测 `ELAPSED=26s` = **3.7 s/形**，逐形读数见 §3.3；其中一枚因 `cd` 到仓库根以外目录执行而报 `executable generation failed: FileNotFound` 且无产物 ⇒ **复测必须在仓库根**）；落地成本未实测 |
 | **R-3** | 静默面兜底金丝雀：发射期断言「语句位置出现 `t_string` 且其原文忽略大小写等于关键字表条目 ⇒ 立即报错」，把「静默空输出」在任何修复前后都转成**编译期可见错误** | P1（防回归） | 只加断言支路，不改语义；对合法脚本零影响。**覆盖面实测收窄**：§3.1 D 类与 E 类**均非零指令**（`m_else_upper` 的 `instr=9 echo=2` 与控制臂**逐位相同**；`m_true_upper` 为 `instr=10`）⇒ 零指令金丝雀**只能抓 A 类**，D/E 类需另行判据 | **未实测**（可参考 CODEGEN-005/006 系列发射期金丝雀先例） |
 | **R-4** | `lexIdentifier:390/:394` 的 `len <= 15` 硬编码上限改为按表内最长键计算（消除「更长关键字静默不查」的潜在面） | P2 | **本代次实测更正**：87 枚键最长为 `__NAMESPACE__`（13 字符）⇒ 距上限**仅剩 2 字符余量**（旧措辞「最长 9 字符 ⇒ 现在无面」已按 `grep -oE` 实测更正）。现在仍无面，但「未来静默失效」的距离比旧估计近得多；且 **R-2 若改为「忽略大小写两级表 / 折叠副本表」，表结构一旦重排就必须同步把上限改为按表计算**，否则新增条目可能悄悄越界 ⇒ 与 R-2 **同批**做，零额外成本 | **未实测**；若与 R-2 同批则零额外成本 |
+| **R-5** ✅ **已落地（2026-10-09 任务 #127，面 A 收口）** | ~~`parser.zig:3595` 的 `if (is_alternative and self.strict_alt_closers) break;` 去掉 `is_alternative and`~~ **【该形态被 §3.8.1 实测否证：`case` 列表首恰好接受一枚空语句分号为 PHP 合法形，直改会把 `l_semi_arm_list`/`l_semi_only` 砸成硬守卫红】** ⇒ **实际落地三处**：① 新旗标 `Parser.strict_switch_case_list`（`:38`）② 仅由 `initWithModeInsensitive`（`:82`，即两枚 AOT 入口）置位 ⇒ 解释器/字节码构造点恒 `false`、行为逐字节等于历史 ③ `parseSwitch` 的**单枚前导分号豁免支**（`:3572` 标记 + `:3601–3607` 消费）与严格支 `if (self.strict_switch_case_list or (is_alternative and self.strict_alt_closers)) break;`（`:3612`），停原位后由 `:3620`/`:3628` 的硬 `eat` 报精确 unexpected | P1（§7-15c 收口位） | 覆盖面实测 = 门 K **4 枚** + 门 L **6 枚** `OVER_ACCEPT` 全部转 `BOTH_REJECT`；**顺带闭合 R-3 批的 1 枚硬守卫红** `l_alt_semi_arm`（替代语法臂表位分号，§3.8.5）；副产品 = 5 枚同桶行的消息由泛化 `Unexpected token in expression` 改为带 token/期望集的精确文案（收窄 §7 的 P2 消息面）；语料面实测 **0**（两枚扫描器互证 + 4 枚基线 switch 逐处回文核对，§3.7/§4）⇒ 合法代码永不进入该 `else` 支 ⇒ 结构上发射中性，**影子已实测**（见下方验收读数）；★ 门 L 的 **9 枚控制臂逐字节 IDENTICAL** ⇒ 豁免支未新拒任何 PHP 合法形 | **实测**：`git diff --numstat src/compiler/parser.zig` = 81/−6（本批净 **+17/−0**，三处）；门 L `50s`→`33s`／23 形（**2.2→1.4 s/形**）、门 K `42s`→`31s`／24 形；**全链验收（十门 → 主回归 → 影子）读数见 §3.8.4 与 §6「R-5 批落地后实测读数」**（链墙钟**实测 56m24s** = 十门 18m23s（Σ `ELAPSED` 1103s，与墙钟双向互证）+ 主回归 12m54s（774s）+ 影子 25m07s（1507s）；与 R-3 批实测 56m33s 同构 ⇒ **今后「十门 + 主回归 + 影子」的链预算一律取 ≈1 小时**，旧「4.3 分钟／形」类估算禁用） |
+| ~~门 K 面孔 B／C 的修复路线~~ | **不属本单根** ⇒ **已另立 [AOT-CODEGEN-011](AOT-CODEGEN-011-switch-case-semicolon-terminator-and-default-arm-position.md)**（2026-10-09 立项，路线 **R-B1**／**R-C1**+**R-C2**，待裁决项 D-1…D-4 见该单）：面 B = `parser.zig:3571`/`:3583`（**★ R-5 落地后当代次实测漂移为 `:3580`/`:3592`，完整漂移表见 §3.8.6**）的 `eat(.colon)` 硬只认冒号，使 PHP 合法的 `case expr;`／`default;`（8.5 仅 Deprecated）被 AOT **假拒绝** 5 枚；面 C = `parser.zig:3616`（**当代次 `:3633`**）的 AST **无 default 位次**（`{expression, cases, default}`）× `ir_generator.zig:3211-3221`/`:3236-3237` 把 default 强制链为末臂 ⇒ 丢 fall-through **与** 假执行（六形实测，§3.7） | P1（面 B，假拒绝比宽容更致命）／P2（面 C，需先定 AST 形态） | 两面孔语料面均实测 **0**（`semi_arm=0`、`nonlast_default=0`）⇒ 零回归数据可依赖，且面 C 需动宪法 §一 超大文件 `ir_generator.zig`（改前必须 grep 既有模式） | 面 B 实测 = **两行**，验收链同 56m33s 可复用；面 C **未实测**（无既有验收链可套，AST 形态先定） |
 
-**门控声明**：R-1 归因轮属「只读取证」，已在 `继续推进` 授权范围内完成；**R-2 / R-2b / R-3 / R-4 任一落地前仍需老铁点头**（宪法 §六：编译前端语义改动 + 可能损失/改变发射形态；§五：跨模式（解释器/字节码）同面**是否一并修**亦需明示）。
+**门控声明（2026-10-09 任务 #127 更新）**：R-1 归因轮与 R-5／门 K 面孔 B、C 的取证（任务 #119/#126）均属「只读取证」，已在 `继续推进` 授权范围内完成且**零 `src/` 改动**；**R-5 已于同一授权下落地并验收**（形态＝§5 R-5 行；老铁指令「继续推进已知问题修复」＝对已接受计划的推进授权，本批未偏离方向）⇒ 该批**只在 AOT 侧生效**（`strict_switch_case_list` 仅由两枚 AOT 入口置位，解释器/字节码构造点缺省 `false`、行为逐字节等于历史 ⇒ 宪法 §五 未越界，无需跨模式裁决）；**R-2 金丝雀路线（本节 R-3）与 R-4 仍待老铁点头**（宪法 §六：编译前端语义改动 + 可能改变发射形态）。**门 K 面孔 B／C（= AOT-CODEGEN-011）在本批零触碰**（实测证据：门 K `aot_only_red` 前后恒 5、门 L 形集不含该族），其 D-1…D-4 裁决未答 ⇒ 禁止顺带动。
 
 ---
 
@@ -474,13 +904,19 @@ timeout 900 bash fuzzy_scripts_720/tmp/c010_kw_full_table_gate_tmp.sh
 # 门侧固化坑：`norm()` 只剥离行首 `PHP `、不折叠双空格 ⇒ 引用 FACE 必须同时给 34（含噪声）/32（语义）
 # `ONLY=` 冒烟通道写入独立 `*_smoke_tmp.tsv`，总数行带 `SMOKE_ONLY=1` ⇒ **禁止当全量读数引用，用完必须删除**
 
-# 永久侧门 H2（15 枚 NOFACE 成因判别 = 同位换瞎词，实测 54s）
+# 永久侧门 H2（15 枚 NOFACE 成因判别 = 同位换瞎词，实测 44s）
 timeout 300 bash fuzzy_scripts_720/tmp/c010_noface_tolerance_gate_tmp.sh
-# 当前代次预期：C010H2_DONE shapes=15 over_accept=14 strict_same=1 aot_compile_fail=0 php_ok_aot_diff=0，ELAPSED=54s（= 3.6 s/形）
-# 判读：**本门不比谁对，只比「AOT 是否接受 PHP 不接受的」** ⇒ over_accept 计数即「宽容位」清单
-# 修复后预期：R-2 落地后 `Zkwhq` 仍**不是**关键字 ⇒ over_accept **应保持 14 不变**（本门不是修复验收门，是成因门）
+# 当前代次预期（R-3 落地 + 任务 #125 修门后，脚本 md5 582ca74d…）：
+#   C010H2_DONE shapes=15 over_accept=12 strict_same=1 aot_compile_fail=2 both_reject=2 aot_only_red=0 php_ok_aot_diff=0，ELAPSED=44s（= 2.9 s/形）
+# ★ 判读（修门后口径）：本门不比谁对，只比「AOT 是否接受 PHP 不接受的」⇒ over_accept 计数即「宽容位」清单；
+#   但「AOT 拒」必须再看方向 ⇒ `aot_compile_fail` 现为**拒绝总数 = both_reject（收敛）+ aot_only_red（真回归，硬守卫须 0）**，
+#   引用时禁止单独拿 `aot_compile_fail` 当红面（旧版四桶把它压成单计数，2026-10-09 R-3 批据此误判过一轮，见 §3.5.1）
+# 历史读数（勿作当代次引用）：#120 代次 `over_accept=14 strict_same=1 aot_compile_fail=0` @54s（R-2 前，脚本 md5 8e11de20…）
+#   ⇒ R-2 落地后曾判「瞎词臂不受影响」，R-3 把关闭标记位 2 枚收为同拒 ⇒ 14→12（见 §3.6「R-3 批落地实测」）
+# 修复后预期：`Zkwhq` 仍**不是**关键字 ⇒ over_accept **应保持 12 不变**（本门不是修复验收门，是成因门）
 #   ⇒ 若 over_accept 归零，说明改动把「任意标识符」也吞进了关键字支（越界），须回退
 #   ⇒ 唯一零判别形 `n_never`（PHP 对未知返回类型在 throw 形不报错）永久保持 strict_same
+#   ⇒ aot_only_red 任一枚转正 = 真回归（PHP 通过而 AOT 拒），须立即归因
 
 # 永久侧门 I（跨模式 AOT/tree/bytecode，门 E 同批 19 形，实测 57s）
 timeout 480 bash fuzzy_scripts_720/tmp/c010_crossmode_gate_tmp.sh
@@ -489,21 +925,58 @@ timeout 480 bash fuzzy_scripts_720/tmp/c010_crossmode_gate_tmp.sh
 #   **七枚 `*_ctl` 控制臂在三模式下必须始终 SAME**；`norm()` 已含「从 `=== PHP Interpreter Performance Statistics ===` 起整段删除」，
 #   若某日全部 VM 臂恒 DIFF ⇒ 是 VM 统计段标题变了（门坏），不是编译器回归
 
-# 永久侧门 J（替代语法正/负例 23 形，v2 实测 77s = 3.3 s/形；必须在仓库根执行）
+# 永久侧门 J（替代语法正/负例，v3 = 29 形；v2 = 23 形 77s、v3 实测 70s = 2.4 s/形；必须在仓库根执行）
 timeout 300 bash fuzzy_scripts_720/tmp/c010_alt_syntax_gate_tmp.sh
-# 注册读数（v2，脚本 md5 69806529…）：C010J_DONE shapes=23 same=16 diff=0 over_accept=5 both_reject=2 aot_only_red=0 run_red=0 both_err_diff=0 repo_build_residue=0，ELAPSED=77s
+# 注册读数（v3 全量，脚本 md5 592ef974…／表 md5 2a25520c…，R-3 落地代次 二进制 81f8a55a… / parser 5ad452fe…）：
+#   C010J_DONE shapes=29 same=19 diff=0 over_accept=0 both_reject=10 aot_only_red=0 run_red=0 both_err_diff=0 repo_build_residue=0，ELAPSED=70s = 2.4 s/形
+# 注册读数（v2 全量，脚本 md5 69806529…）：C010J_DONE shapes=23 same=16 diff=0 over_accept=5 both_reject=2 aot_only_red=0 run_red=0 both_err_diff=0 repo_build_residue=0，ELAPSED=77s
 # 跨 run 复证（2026-10-08 第二轮，同脚本同代次）：汇总列逐项等值，表 md5 6d4dc390… → 把 ELAPSED 归一回 77s 后 = 登记值 8b208dd0… ⇒ 除耗时行外逐字节全等
-#   ★ 本 TSV 与门脚本**均未入库**（`git show 0652130:` 取不到）⇒ 复跑前须以脚本 md5 69806529… 自证门的代次，勿凭文件存在性判断
-# 判读：same=16 ⇒ 正例面（已支持）；over_accept=5 ⇒ 宽容面（PHP 拒而 AOT 收）；both_reject=2 ⇒ 硬 eat 位与 PHP 同拒；
+#   ★ 入库状态：v2 表已入 HEAD（`git show 73f4d6b:fuzzy_scripts_720/tmp/c010_alt_syntax_gate_tmp.tsv` ⇒ md5 `6d4dc390…`）；v3 脚本与表**尚未提交**⇒ 复跑前以脚本 md5 自证代次，勿凭文件存在性判断
+# 判读（v3 口径）：same=19 ⇒ 正例面（含 3 枚 elseif/else 多语句臂，守住改动 2）；over_accept=0 ⇒ 宽容面已消；both_reject=10 ⇒ 十枚负例与 PHP 同拒；
 #   ★ aot_only_red 与 run_red **必须恒为 0**：任一转正即「替代语法从可用变不可用」的真回归（本门唯一的硬守卫列）
 #   ★ diff 判据是「AOT 与 PHP 输出逐字节等值」⇒ 与 §3.5 的 H2 判读口径同源：本门**不比谁语义更对**，只比接受/拒绝边界
-# 修复后预期（若裁决把 :1515/:3563 软消耗改硬 eat + :1594 补异种 end 终止）：over_accept 5→0、both_reject 2→7、same=16 不变、aot_only_red=0
+# R-3 落地实测（2026-10-09，旗标 `Parser.strict_alt_closers` 只由 AOT 入口置位）：预测 `over_accept 5→0` **达成**、
+#   `both_reject 2→7` 按 23 形口径给的而实测 10（= 旧 7 + v3 新增 3 枚负例，无缺一枚）、`aot_only_red=0` **守住**；
+#   预测里「`same=16` 不变」**不足以保证零误拒**（旧 16 形全为单语句臂 ⇒ 必须补 3 枚多语句臂才算验收，见 §3.6「预测偏差的根因」）
+# 尚未收口的 P2 消息面：10 枚同拒里 4 枚（`n_endif_alone`/`n_colon_brace_mix`/`n_double_endif`/`n_else_no_endif`）AOT 报通用句
+#   `Unexpected token in expression` 而非 PHP 的 `unexpected token "endif" …` ⇒ 不经 `tagToExpected`，另一条报错支
 # 修门提醒：**v1（脚本 4009de13…／表 a8afda22…）的数据列禁止引用**（`tr '\n' '|'` 撑破列契约 ⇒ n_* 行 NF=9），
 #   其四列 key（shape/php_rc/aot_rc/verdict）仍可与 v2 逐行对照 ⇒ 已实证 23/23 全等，修门未扰动判据
 # 语料面复扫（分词器口径，判据 3/4；pass 目录实测输出 3 行：root/php_files、close 计数、alt 开口头 + 花括号头计数）：
 timeout 30 /opt/homebrew/bin/php fuzzy_scripts_720/tmp/c010j_alt_corpus_scan_tmp.php fuzzy_scripts_720/pass
 # 预期：close_marker_tokens_at_syntax_position=0 / alt_syntax_headers=0 ⇒ 冻结基线对本面零保护；
 #   一旦两值同时 >0 ⇒ 语料已新增替代语法用例，本门从「守卫门」升级为「验收门」
+
+# 永久侧门 K（花括号 switch 与 case 臂族，24 形 = 正例 14 + 负例 10，实测 42s = 1.8 s/形；必须在仓库根执行）
+timeout 300 bash fuzzy_scripts_720/tmp/c010_brace_switch_gate_tmp.sh
+# 注册读数（v1 全量，脚本 md5 6408a6b6…／表 md5 b3eb6e91…，代次 二进制 81f8a55a… / parser 5ad452fe…，零 src/ 改动）：
+#   C010K_DONE shapes=24 same=8 over_accept=4 diff_php_ok=1 both_reject=6 aot_only_red=5 run_red=0 repo_build_residue=0 SMOKE_ONLY=0
+# 跨 run 复证：注册表 vs 首轮快照（c010k_presnap/，md5 6f4e9f8b…）去掉 ELAPSED 行后 diff ⇒ **diff_rows=0**
+# ★★ 本门自建成起即为「验收门」而非「守卫门」：aot_only_red=5 非 0（= 面孔 B 的五枚 `case`/`default` 分号臂假拒绝，
+#    见 §3.7）⇒ **禁止把该列读成本轮新增回归**；修复验收位为 over_accept 4→0 且 diff_php_ok 1→0，
+#    同时 aot_only_red 5→0（面孔 B 收口）；两枚硬守卫列 run_red 恒 0、repo_build_residue 恒 0
+# ★ 面孔 A（4 枚 OVER_ACCEPT）里 `k_stray_endswitch` 非空输出而是**照跑并打 `z`** ⇒ 只盯「空输出=静默」的判据会漏它
+# 面孔 C 的六枚补充形未进门（需 AST 侧先定形态）⇒ 逐形读数见 §3.7 表，复测为一次性 `/tmp` 探针、仓库根执行
+# 语料面复扫（分词器口径，判据 3/4；两枚独立扫描器互证 switch/花括号/替代头三列）：
+timeout 90 /opt/homebrew/bin/php fuzzy_scripts_720/tmp/c010k_brace_switch_corpus_scan_tmp.php fuzzy_scripts_720/pass
+# 预期（pass）：files=68 switch=4 brace=4 alt=0 stmt_before_first_case=0
+timeout 90 /opt/homebrew/bin/php fuzzy_scripts_720/tmp/c010k_case_order_terminator_scan_tmp.php fuzzy_scripts_720/pass
+# 预期（pass）：files=68 switch=4 brace=4 nonlast_default=0 semi_arm=0 colon_arm=20
+#   ★ 三列全 0 = 三面孔语料内零暴露 ⇒ 冻结基线零保护力；一旦非 0 即说明语料新增了受面构造，须重估落地风险
+#   ★ scanner ② 为 **v2**（v1 把 enum/match 全记为 switch 臂 ⇒ semi 假阳性 87，数据列禁止引用，见 §3.7 修 scanner 记录）
+#   必过控制臂（v2 内置，任一失配即 scanner 坏）：match `default =>` 与 enum 带值 case 不得记 SEMI；
+#     合成形 `switch(1){case 1;}` 必须记 SEMI；嵌套 switch 的外层 default 在末臂时不得记「非末臂」
+
+# 永久侧门 L（switch 臂表位邻形，23 形 = 控制臂 4 + 邻形 19；R-5 落地前置守卫门；必须在仓库根执行）
+timeout 300 bash fuzzy_scripts_720/tmp/c010l_switch_armslot_gate_tmp.sh
+# 注册读数（**落地前**快照，脚本 md5 babe0877…／表 md5 8a0116db…，代次 二进制 81f8a55a… / parser 5ad452fe…）：
+#   C010L_DONE shapes=23 same=9 over_accept=6 diff_php_ok=0 both_reject=7 aot_only_red=1 run_red=0 ELAPSED=50s（2.2 s/形）
+# R-5 的验收位（实测达成，读数见 §3.8.4）：over_accept 6→0、aot_only_red 1→0（后者为 R-3 批漏网形 l_alt_semi_arm）
+# ★ 表头内嵌「case 列表首恰好接受一枚空语句分号」的实测规则（php 8.5.8）⇒ 本门是 R-5 形态的**唯一来源**，
+#   复跑或改形时必须先回显该规则；引用行号一律按 §3.8.6 的当代次锚点（旧 :3571/:3583/:3611/:3616 已漂移）
+# 必过控制臂（9 枚，逐字节不得变）：l_ctl_case_first / l_ctl_default_first / l_ctl_empty / l_ctl_between_arms /
+#   l_semi_arm_list / l_semi_only / l_case_before_default / l_nested_brace_inner / l_semi_between_arms
+# ★ 面 B/C 的形**不在本门**（属 AOT-CODEGEN-011）⇒ 本门 aot_only_red 恒 0；若出现非 0 即为**本单新增回归**，须停下归因
 ```
 
 **R-2 批落地后实测读数（2026-10-07，分叉旗标门控 = D-2 裁决口径，替换上方「三模式同修」旧预期）**：
@@ -524,6 +997,61 @@ timeout 30 /opt/homebrew/bin/php fuzzy_scripts_720/tmp/c010j_alt_corpus_scan_tmp
 # 主回归：Total=68 / Pass=67 / Skip=1（f004，基线保持）
 ```
 
+**R-3 批落地后实测读数（2026-10-09，代次 `parser.zig` `5ad452fe…` / 二进制 `81f8a55a…`；链 `fuzzy_scripts_720/tmp/c010_r3_acceptance_chain_tmp.sh` = 六门 → 主回归 → 影子；逐门读数与逐行等值取证见 §3.6）**：
+```bash
+# 门 E：C010KW_DONE shapes=19 same=19 diff=0 silent_empty=0 aot_fatal=0 compile_fail=0（19 行 diff_rows=0，ELAPSED 69s）
+# 门 F：C010MECH_DONE shapes=8 same=8 diff=0 zero_instr=0 compile_fail=0（8 行 diff_rows=0）
+# 门 G：C010G_DONE  shapes=7 same=7 diff=0 red_confirmed=0 guard_same=4 guard_red=0 compile_fail=0（7 行 diff_rows=0）
+# 门 H：C010H_DONE shapes=79 arms=200 face=0 noface=78 confounded=1 bad_probe=0 ctrl_compile_fail=0
+#              probe_compile_fail=0 probe_timeout=0 inverse_shapes=21 inverse_face=0 inverse_noface=21
+#              inverse_confounded=0 repo_build_residue=0 SMOKE_ONLY=0（103 数据行 diff_rows=0，ELAPSED 738s）
+#       ★ 与 §3.4.6 的 R-2 落地代读数（face=1 noface=73 confounded=5）不同属**代次差异**：
+#         §8 六枚缺陷（#1/#2/#4/#5/#6/#7，任务 #122/#123/#124 代次）已把 k_unset、invf_go 等面收掉 ⇒ 本行为 §7 状态行登记的终态
+# 门 H2：C010H2_DONE shapes=15 over_accept=12 strict_same=1 aot_compile_fail=2 php_ok_aot_diff=0（ELAPSED 46s）
+#       ★ 变动列 = over_accept 14→12 / aot_compile_fail 0→2，逐形定位为 `n_endif`/`n_endswitch`（关闭标记位）**与 PHP 同拒**
+#         ⇒ 收敛而非回归；本门汇总列无 BOTH_REJECT 桶 ⇒ 引用前必须回读逐形列的 php_rc 判向（判据见 §3.6）
+# 门 I：C010I_DONE shapes=19 tree_same=7 tree_diff=12 bc_same=7 bc_diff=12 aot_same=19 aot_diff=0
+#              aot_compile_fail=0 both_red=0 vm_only_red=12 aot_only_red=0 repo_build_residue=0（19 行 diff_rows=0，ELAPSED 69s）
+#       ★ D-2 分叉判据达成：tree/bc 与注册值逐项相同 ⇒ 严格闭合只落在 AOT 侧
+# 门 J：C010J_DONE shapes=29 same=19 diff=0 over_accept=0 both_reject=10 aot_only_red=0 run_red=0（ELAPSED 70s，见上「注册读数」）
+# 门 D8（§8 家族验收面，链毕后串行补跑，timeout 300 bash fuzzy_scripts_720/tmp/c010_indep_defects_gate_tmp.sh）：
+#       C010D8_DONE shapes=14 defect_red=1 guard_same=13 compile_fail=0 bad_probe=0 repo_build_residue=0 ELAPSED=49s
+#       逐行与上一代次快照零差异 ⇒ 本批对 §8 面零扰动；★ 首轮与影子门并发所得 residue=1 **禁止引用**（并发污染，见 §3.6）
+# 主回归：Total=68 / Pass=67 / Skip=1（f004）；影子：total=68 same=68 diff=0 miss=0 ELAPSED=1585s（冻结基线零漂移）
+```
+
+**R-5 批落地后实测读数（2026-10-09，任务 #127，面孔 A 花括号 `switch` 臂表位严格化 + 永久侧门 L 建成；代次 `parser.zig` `1eab26c068b13b9f904d2f432464d852`／4305 行 ／ 二进制 `6939cd2e891f20aef590de2585b15681`，`lexer.zig` `e3dd4191…`／543 行与 `keyword_lookup.zig` `ef70993a…`／186 行**未动** ⇒ 零词法面扰动；链 `fuzzy_scripts_720/tmp/c010_r5_acceptance_chain_tmp.sh` = K→L→J→D8→E→F→G→H→H2→I → 主回归 → 影子，全链 `repo_build_residue=0`、`SMOKE_ONLY=0`）**：
+```bash
+# 门 K（§3.7 验收门，★ 硬守卫列非 0 属面 B/C，禁止当新增回归）：
+#       C010K_DONE shapes=24 same=8 over_accept=0 diff_php_ok=1 both_reject=10 aot_only_red=5 run_red=0（ELAPSED 31s）
+#       ★ 变动列 = over_accept 4→0（面 A 四枚转 BOTH_REJECT）；aot_only_red 恒 5、diff_php_ok 恒 1
+#         ⇒ 面 B（`case expr;` 五枚假拒绝）与面 C 零扰动，逐字与 #126 取证代次相同
+# 门 L（本轮新建，`switch` 臂表位邻形 23 形，面孔 A 的守门位）：
+#       C010L_DONE shapes=23 same=10 over_accept=0 diff_php_ok=0 both_reject=13 aot_only_red=0 run_red=0（ELAPSED 33s）
+#       ★ 落地前注册值 same=9 over_accept=6 aot_only_red=1（那枚红 = R-3 批漏网形 `l_alt_semi_arm`）
+#         ⇒ 本门同时收了 R-3 的第 2 张面孔，A 旗标位与臂表位邻形两套形集必须并存（见 §3.8）
+# 门 J：C010J_DONE shapes=29 same=19 diff=0 over_accept=0 both_reject=10 aot_only_red=0 run_red=0 both_err_diff=0（29 行 diff_rows=0，ELAPSED 66s）
+# 门 D8：C010D8_DONE shapes=14 defect_red=1 guard_same=13 compile_fail=0 bad_probe=0（14 行 diff_rows=0，ELAPSED 47s）
+# 门 E：C010KW_DONE shapes=19 same=19 diff=0 silent_empty=0 aot_fatal=0 compile_fail=0（19 行 diff_rows=0，ELAPSED 65s）
+# 门 F：C010MECH_DONE shapes=8 same=8 diff=0 zero_instr=0 compile_fail=0（8 行 diff_rows=0，ELAPSED 26s）
+# 门 G：C010G_DONE shapes=7 same=7 diff=0 red_confirmed=0 guard_same=4 guard_red=0 compile_fail=0（7 行 diff_rows=0，ELAPSED 24s）
+# 门 H：C010H_DONE shapes=79 arms=200 face=0 noface=78 confounded=1 bad_probe=0 ctrl_compile_fail=0
+#              probe_compile_fail=0 probe_timeout=0 inverse_shapes=21 inverse_face=0 inverse_noface=21
+#              inverse_confounded=0 repo_build_residue=0 SMOKE_ONLY=0（100 行 diff_rows=0，ELAPSED 700s）
+# 门 H2：C010H2_DONE shapes=15 over_accept=12 strict_same=1 aot_compile_fail=2 both_reject=2 aot_only_red=0
+#               php_ok_aot_diff=0 repo_build_residue=0 SMOKE_ONLY=0（15 行 diff_rows=0，ELAPSED 45s）
+#       ★ 与 R-3 代次逐字节相同 ⇒ 本批旗标只作用在 `switch` 臂表位，未触碰关闭标记位
+# 门 I：C010I_DONE shapes=19 tree_same=7 tree_diff=12 bc_same=7 bc_diff=12 aot_same=19 aot_diff=0
+#              aot_compile_fail=0 both_red=0 vm_only_red=12 aot_only_red=0 repo_build_residue=0（19 行 diff_rows=0，ELAPSED 66s）
+#       ★ D-2 分叉判据第 2 次达成：tree/bc 与冻结注册值逐项相同 ⇒ `strict_switch_case_list` 只落在 AOT 侧
+# 主回归：Total=68 / Pass=67 / Fail=0（三档全 0）/ Skip=1（f004，PHP_error_exit=255），regression_rc=0（12m54s）
+# 影子：C010_SHADOW_DONE total=68 same=68 diff=0 miss=0 ELAPSED=1507s（25m07s，冻结基线零漂移）
+# 逐行等值比对器 c010_r5_rowdiff_tmp.sh（腿后复测）：K=8 行 / L=24 行为**预期变动面**（K 的 4 枚 OVER_ACCEPT 转拒 ⇒ 4×2；
+#       L 为新建门 ⇒ 全表换判向），其余九腿（J/D8/E/F/G/H/H2/I/影子）**diff_rows=0**（影子 136/136）
+# 全链墙钟 56m24s（12:21:51 → 13:18:15）= 十门 18m23s（Σ ELAPSED 1103s，双向互证）+ 主回归 12m54s + 影子 25m07s
+# zig build test：21/21 steps succeeded、326/326 tests passed
+```
+
 **复测纪律（实测仅门 H / H2 / I 含 `ONLY=` 冒烟通道；门 E/F/G 经 `grep -c ONLY` 实测**无**该通道）**：`ONLY=` 冒烟通道写入的是**独立的** `*_smoke_tmp.tsv`，其总数行带 `SMOKE_ONLY=1` ⇒ **禁止当作全量读数引用、用完必须删除**（门 I 首跑的「smoke 里装了全量」、门 H 反例组的 3 形冒烟、以及归因轮里曾用临时脚本产生的假 `zero_instr=8` 三坑同源；注册读数一律取自无 `ONLY` 的全量跑）。
 
 ---
@@ -532,20 +1060,24 @@ timeout 30 /opt/homebrew/bin/php fuzzy_scripts_720/tmp/c010j_alt_corpus_scan_tmp
 
 1. ~~八枚红形的下游失败点未逐形归因~~ **已由 R-1 闭环（任务 #119）**：五类断点逐类到行（§3.1），A 类零指令 / B 类差一对括号 / C 类语句层臂表缺项 / D 类落点在守卫之外 / E 类两处缺陷互抵消 ⇒ 「R-2 一枚改动可能只消部分面」这一疑虑已被**实测收窄**：A/B/C/D 四类**同源于 lexer 一枚根**（D 类只是文法位不同 ⇒ 落在守卫外），故 R-2 可一次消四类；**唯一消不掉的是 E 类的第二张面孔**（常量表动态查名，源码内无大写关键字 ⇒ 必须并批 R-2b，见 §3.3）。
 2. ~~混合大小写关键字族的覆盖面未穷举~~ **已由永久侧门 H 闭环（任务 #120）**：按 `keyword_lookup.zig` **87 枚表项**自动生成 79 形（87 − 7 枚外族词走反例组 − 1 枚 `yield` 属宪法 §七-1 排除项），一形一文件、双臂只差拼写，实测 `ELAPSED=595s`（**100 形含 21 形反例组 = 6.0 s/形**）⇒ 覆盖面从 E 的 19 形扩至 79 形、红面从 11 枚扩至 **59 枚**。逐类读数与三分文法位见 §3.4.1，过度识别名位矩阵见 §3.4.2。
-3. **`len <= 15` 硬编码上限**（`lexer.zig:390`/`:394`）：**实测最长键 13 字符（`__NAMESPACE__`）⇒ 仅剩 2 字符余量**，非「远在安全区」。属宪法 §四-3「禁止硬编码」的存量违反，登记待与 R-2 并批（R-4）。
+3. ~~**`len <= 15` 硬编码上限**（`lexer.zig:390`/`:394`）：属宪法 §四-3 的存量违反，登记待与 R-2 并批（R-4）~~ **已由 R-4 闭环（2026-10-09 本轮 grep 实测锚点，原行号已漂移）**：查表上限不再是字面 15，`lexer.zig:405` 走 `text.len <= keyword_lookup.max_key_len`，该常量由 `keyword_lookup.zig:104` 从表项**计算**得出，并有 `keyword_lookup.zig:184` 的回归钉 `expectEqual(@as(usize, 13), max_key_len)` 守护（实测最长键 13 字符 = `__NAMESPACE__`）⇒ 新增更长关键字时上限自动跟随，硬编码已消除。**本项原判「仅剩 2 字符余量」的风险随 R-4 一并消解**（原始实测见 §3.4 表与 §7-11）。
 4. ~~跨模式是否一并修（证据仅 4 形定性）~~ **已由永久侧门 I 量化（任务 #120，19 形 × AOT/tree/bytecode）**：实测 `aot_only_red=0`、`both_red=11`、`vm_only_red=1`（见 §2.2）⇒ **不存在「只修 AOT 即可关掉的形」**，且本单根因在三模式共享的编译前端 ⇒ 需老铁裁决的问题已收窄为「**是否接受 R-2 天然三模式同修**」（宪法 §五 的形式要求由实测替代：无法只动 AOT 一侧，除非分叉前端）。
 5. **`--compile` 解析失败仍返回 0 且不产出二进制**：本面使官方门若只看 exit 码会把「编译失败」读成「运行成功但无输出」。属**测试流程**问题而非编译器语义，建议单列（与 RUNTIME-002 §7-4 的 skip-before-compile 流程项同族，可并批讨论）。
 6. ~~`TRUE`/`FALSE`/`NULL` 为何免疫~~ **已闭环并改判为「非免疫」（任务 #119）**：成因 = 大写失配 → `.variable "TRUE"` → `getGlobalVar("TRUE")` → 命中运行期**大写单拼写键**内置常量表（`runtime_lib_template.zig:7614/:7615/:7637`）⇒ 与 lexer 缺陷**互抵消**才呈 SAME。⇒ 原设想「用它当 R-2 的实现先例」**不成立**（它不是大小写不敏感通道，前端仍是零先例）；反之发现该表自身是**第二处独立缺陷**（§3.3 / R-2b）。
 7. **C 类无生成码侧读数**：侧门 F 的 8 形全为可编译形 ⇒ C 类的断点（`parser.zig:496 else =>` 后接 `:2747 parseUnary` 无臂）来自「侧门 E 的 `compile.log` 错误文本 + parser 实文核对」，**未取 AST 侧行级读数** ⇒ 若 R-2 落地后 C 类三形仍红，需另开 AST 探针轮。
 8. **D 类 `reg_5` 跳号属推断**：实测事实 = 生成码内 `reg_4`（then 串）之后直接是 `reg_6`（else 串），`reg_5` 全文 0 次出现；「`ELSE` 语句占用了 IR 寄存器号却未发射任何指令」是对该跳号的**推测解释**，未经 IR 侧取证 ⇒ 禁止在 R-2 落地评审中当证据引用。
-9. **侧门 F / G / H / H2 / I 五张为本轮新建资产**：尚未纳入官方十二腿门链，且与本轮全部工单文档同样**未提交**（待老铁「提交」指令）；五门总数已按「先修门、后引用」口径只登记修正后读数（H 的两轮修门见 §7-11）。**2026-10-08 追加第六张 = 侧门 J（§3.6，替代语法正/负例）**，处置口径相同：未入库、未纳官方门链、v1→v2 两轮读数按「先修门后引用」登记 ⇒ **D-7 的问询范围现为十门**。
+9. **侧门 F / G / H / H2 / I 五张为本轮新建资产**：尚未纳入官方十二腿门链，且与本轮全部工单文档同样**未提交**（待老铁「提交」指令）；五门总数已按「先修门、后引用」口径只登记修正后读数（H 的两轮修门见 §7-11）。**2026-10-08 追加第六张 = 侧门 J（§3.6，替代语法正/负例）**，处置口径相同：未入库、未纳官方门链、v1→v2 两轮读数按「先修门后引用」登记 ⇒ **D-7 的问询范围现为十门**。**2026-10-09 追加第七张 = 侧门 K（§3.7，花括号 `switch` 与 `case` 臂族，任务 #126）**，处置口径相同（未入库、未纳官方门链），但**判读口径不同**：门 K 自建成起即为**验收门**（硬守卫列 `aot_only_red=5` 非 0，= §7-15e 的面孔 B）⇒ **D-7 的问询范围随之 +1**，且引用本门时禁止把该列当新增回归。**2026-10-09 追加第八张 = 侧门 L（§3.8，`switch` 臂表位邻形 23 形，任务 #127 与 R-5 同批建成）**，处置口径与 K 相同（未入库、未纳官方门链），但**判读方向与 K 相反**：L 的硬守卫列 `aot_only_red` **必须恒 0**（非 0 即本单新增回归，须停下归因），面孔 B/C 的形刻意**不在本门** ⇒ **D-7 的问询范围随之扩至十一门**。L 的表头内嵌「case 列表首**恰好接受一枚空语句分号**」（php 8.5.8 实测：`l_semi_arm_list`/`l_semi_only`/`l_alt_semi_arm` 为 rc=0，`l_two_semi_*`/`l_semi_then_block` 为 rc=255）⇒ 该规则是 R-5 落地形态的**唯一来源**，改形或复跑前必须先回显；另外 L 首跑（落地前）曾以 `aot_only_red=1` 抓到 R-3 批的漏网形 `l_alt_semi_arm` ⇒ **新教训＝「只覆盖关闭标记位的门不覆盖臂表位邻形」**，A 旗标位形集与臂表位形集必须并存。
 10. **`parser.zig:3756-3759 isKeywordUsableAsIdentifier` 是恒返回 `false` 的死桩**（任务 #120 只读发现）：文档注释写「any keyword that can be used as method/property name after -> or ::」，但函数体 `return false;`，且**全树零调用点**（真实能力在同文件 `:3761 isKeywordIdentifierTag` + `:3843 eatKeywordAsIdentifier`，8 处名位调用）。⇒ 属宪法 §四-2「禁止打桩/stub 跳过真实逻辑」的**存量**违反，且对后续读码者是**误导源**（会以为名位不容忍关键字，而语料 45 处 `->get/->set/->lock` 全靠该容忍支才绿）。⇒ **删除或改名均需 §六 点头（涉及删除代码）**，本轮只登记；与 §5 的 R-2/R-4 不同批（不属大小写面孔，动它=纯注释/死码卫生）。
 11. **侧门 H（87 枚表项穷举门）已建并两轮修门后闭环**（任务 #120）：`fuzzy_scripts_720/tmp/c010_kw_full_table_gate_tmp.sh` ⇒ `c010_kw_full_table_tmp.tsv`。逐形双臂（同模板只差拼写）+ 过度识别反例组。**两轮修门均为「先修门、后引用」**：① `k_callable` 坏探针（Go 风格 `fn(): int {}` 被 PHP 自己拒）⇒ 补 `php -l` 预检 + `BAD_PROBE_*` 两类，读数 `face 58→59`、`confounded 6→5`、`bad_probe=0`；② 反例组旧版 7 形各用**不同名位** ⇒ 「`get`/`set` 绿」实为方法名位的功劳而非该词无害（**已由 3 形冒烟实测证实同一词的函数名位/类名位红、方法名位绿**）⇒ 形集改为 **7 词 × 3 名位 = 21**。两版首跑读数均**禁止引用**，注册读数取自最终全量跑（§3.4）：`C010H_DONE shapes=79 arms=200 … inverse_shapes=21 inverse_face=15 inverse_noface=6 inverse_confounded=0 repo_build_residue=0 SMOKE_ONLY=0` / `ELAPSED=595s`，且主群 79 行跨 run `diff_bytes=0` ⇒ 修门未扰动主群。
 12. **五枚与大小写无关的默认档独立缺陷是否立单（待老铁裁决）**：`k_and`（括号操作数组内 `and` 求值错、静默 rc=0）、`k_var`（`var` 属性声明编译失败）、`k_goto`（`goto` 形使尾部整体消失）、`k_iterable`（`iterable` 拒绝数组 + 消息内 `$$a` 双 `$` 渲染）、`m_namespace`（`__NAMESPACE__` 在 `namespace` 声明后取空串）。⇒ 逐枚**不属于**本单 lexer 根，R-2 不消（§3.4.3）⇒ 按宪法 §五「不扩散」原则本轮只登记；若要修需另立工单（`var`/`goto`/`and` 三枚属解析与求值面，`$$a` 属消息渲染面）。
 13. **AOT 重复警告行（新观察，未归因）**：同一未定义变量 AOT **连打两行** —— `Warning:  Undefined variable True`（双空格）与 `Warning: Undefined variable True`（单空格），PHP 只打一行 `PHP Warning: …`。出现在门 H 全部含 `Undefined variable` 的红面行，小写臂不出现 ⇒ 与本单根因无关，疑为警告发射点重复（登记待归因，优先级 P2；因其污染等值判据，**任何以「输出逐字节等值」为准的门都会因此多算红**）。
 14. **返回类型声明校验面无工单归属**：§3.5 三枚类型形（`void`/`mixed`/`object`）证明 AOT 对**未知/非规范拼写的返回类型名不校验**（PHP 侧 Fatal）。⇒ ①「AOT 对**已知**返回类型（`: int` 等）是否校验」**本门未测**；② 已核对 `AOT-TYPE-001` = PHI 节点类型混接、状态 CLOSED ⇒ **不覆盖**本面；③ 近邻仅 `AOT-RUNTIME-002` G4 的 typed 槽六面（静态属性侧）。⇒ 若要定面需**另立门/另立单**，禁止由本表外推。另 `n_never` 为**永久零判别力**形（PHP 对只 `throw` 的 `: never` 体不报错 ⇒ 无对照可选），登记于此而非门缺陷。
-15. ~~替代语法（`if:`…`endif;` / `switch:`…`endswitch;`）是否真被支持仍不可判~~ **已由永久侧门 J 闭环（2026-10-08，任务 #123 建门并实测；详见 §3.6）**：正/负例 23 形实测 `shapes=23 same=16 diff=0 over_accept=5 both_reject=2 aot_only_red=0 run_red=0 ELAPSED=77s` ⇒ **判为「真支持」**（16 枚正例逐字节等值 + 旧语料 `fuzzy_scripts/test_006/007/008` 三枚真实脚本内含 5 枚替代语法构造亦 3/3 等值），五支 `is_alternative` 支路产出标准 AST 节点 ⇒ 发射侧语法无关。**代价是新立一张面孔**：5 形 **OVER_ACCEPT**（缺 `endif;`、缺 `endswitch;`、异种 `endwhile`、顶层裸 `endif;`、双 `endif;` ⇒ PHP rc=255 而 AOT rc=0 且静默），分界实测为**关闭标记消耗软硬不对称**（`if :1515-1517`／`switch :3563-3565` 软，`while :1581`／`foreach :1672`／`for :1833` 硬）+ `:1594` 体扫描只认同种 end 标记 + `:3299-3305` 旗标容忍支把多余 `end*` 降级成变量语句。语料面按分词器实测为 **0**（`pass/`68、`fail_runtime/`77、`fail_compile/`12 的开口头与关闭标记全 0；32 处粗筛命中全在字符串/注释内）⇒ 判据 3/4：正例与负例**都不受冻结基线保护**，但机制完全可达。⇒ 修复（软改硬 + 体扫描补终止）**属新决策面，未落地**，建议表见 §3.6 末，待老铁裁决。
-15b. **门 J 自身两轮读数代次（先修门、后引用）**：v1（脚本 `4009de13…`／表 `a8afda22…`）有两个门缺陷 —— `tr '\n' '|'` 与列分隔符冲突致报错行 NF=9 撑破 7 列契约、compile_fail 支未记录 AOT 原文 ⇒ **v1 数据列禁止引用**；v2（脚本 `69806529…`／表 `8b208dd0…`）修复并复跑，`(shape, php_rc, aot_rc, verdict)` 四列与 v1 **逐行全等 23/23** ⇒ 修门未扰动判据。附带发现：`tagToExpected:220-235` 无任何 `.k_*` 臂（兜底 `else => "token"`）⇒ 硬 `eat` 的期望词名不如 PHP 精确，P2 消息面。
+15. ~~替代语法（`if:`…`endif;` / `switch:`…`endswitch;`）是否真被支持仍不可判~~ **已由永久侧门 J 闭环（2026-10-08，任务 #123 建门并实测；详见 §3.6）**：正/负例 23 形实测 `shapes=23 same=16 diff=0 over_accept=5 both_reject=2 aot_only_red=0 run_red=0 ELAPSED=77s` ⇒ **判为「真支持」**（16 枚正例逐字节等值 + 旧语料 `fuzzy_scripts/test_006/007/008` 三枚真实脚本内含 5 枚替代语法构造亦 3/3 等值），五支 `is_alternative` 支路产出标准 AST 节点 ⇒ 发射侧语法无关。**代价是新立一张面孔**：5 形 **OVER_ACCEPT**（缺 `endif;`、缺 `endswitch;`、异种 `endwhile`、顶层裸 `endif;`、双 `endif;` ⇒ PHP rc=255 而 AOT rc=0 且静默），分界实测为**关闭标记消耗软硬不对称**（`if :1515-1517`／`switch :3563-3565` 软，`while :1581`／`foreach :1672`／`for :1833` 硬）+ `:1594` 体扫描只认同种 end 标记 + `:3299-3305` 旗标容忍支把多余 `end*` 降级成变量语句。语料面按分词器实测为 **0**（`pass/`68、`fail_runtime/`77、`fail_compile/`12 的开口头与关闭标记全 0；32 处粗筛命中全在字符串/注释内）⇒ 判据 3/4：正例与负例**都不受冻结基线保护**，但机制完全可达。**修复已于 2026-10-09 落地（老铁裁决＝「A 旗标门控，只改 AOT」＋「只做门 J P1」）**：新增 `Parser.strict_alt_closers`（仅 `initWithModeInsensitive`＝两枚 AOT 入口置位，解释器/字节码构造点恒 `false`）⇒ 软消耗改硬 `eat` + 体扫描遇异种 `end*` 终止 + 五枚关闭标记排除出表达式主位容忍支 + `switch` 意外 token 不再整枚跳过 + `tagToExpected` 补 5 枚 `end*` 臂。**门 J v3 终态读数（29 形，`ELAPSED=70s`）**：`same=19 diff=0 over_accept=0 both_reject=10 aot_only_red=0 run_red=0 both_err_diff=0` ⇒ 5 枚宽容面**清零**、正例面（含 3 枚新补的 elseif/else 多语句臂）与真实语料 3 枚全绿、两枚硬守卫列仍为 0。逐处锚点、预测偏差根因与 P2 消息面残差见 §3.6「R-3 批落地实测」。
+15b. **门 J 自身读数代次（先修门、后引用）**：v1（脚本 `4009de13…`／表 `a8afda22…`）有两个门缺陷 —— `tr '\n' '|'` 与列分隔符冲突致报错行 NF=9 撑破 7 列契约、compile_fail 支未记录 AOT 原文 ⇒ **v1 数据列禁止引用**；v2（脚本 `69806529…`／表 `8b208dd0…`）修复并复跑，`(shape, php_rc, aot_rc, verdict)` 四列与 v1 **逐行全等 23/23** ⇒ 修门未扰动判据。附带发现：`tagToExpected:220-235` 无任何 `.k_*` 臂（兜底 `else => "token"`）⇒ 硬 `eat` 的期望词名不如 PHP 精确，P2 消息面（**R-3 批已补 5 枚 `end*` 臂 ⇒ 本附带发现的「无任何 `.k_*` 臂」仅对 v2 代次成立**）。v3（脚本 `592ef974…`／表 `2a25520c…`／29 形）为 R-3 落地轮，形集只加不改判据 ⇒ 与 v2 的等值对照用**逐形 join**（把 v2 表 `git show 73f4d6b:…tsv` 与 v3 表都折叠成 `(shape, verdict)` 后排序对齐，实测 23 枚共有形全覆盖）：**16 枚 `p_*` 全部 SAME→SAME**（正例面零扰动）、**5 枚 `OVER_ACCEPT` 全部转 `BOTH_REJECT`**（即本轮验收位）、2 枚原 `BOTH_REJECT` 保持；v3 新增 6 形落位为 3 枚 `p_*`（elseif/else 多语句臂）SAME + 3 枚 `n_*` BOTH_REJECT。
+15c. **残留宽容面（R-3 批落地后实测，2026-10-09）＝花括号 `switch` 在首个 `case` 前的裸语句仍被 AOT 静默接受**：`switch (1) { echo "W"; }` ⇒ PHP `php -l` **rc=255** `syntax error, unexpected token "echo", expecting "case" or "default" or "}"`；AOT **rc=0 且空输出**（产物可执行）。对照同位邻形 `if (1) { echo "A"; `（缺 `}`）⇒ 两侧同拒（AOT `unexpected end of file, expecting "}"`）。根因＝改动 5 的 `break` 条件写成 `is_alternative and strict_alt_closers`（`:3595`），**花括号支保留旧的 `self.nextToken(); // Skip unexpected tokens`** ⇒ 与 `n_switch_stmt_before_case_alt`（替代语法支，已 `BOTH_REJECT`）为同码位**两面孔**。**未扩面的理由＝本轮裁决口径「只做门 J P1」＋`is_alternative` 门控可保证对 68 语料的花括号 `switch` 零扰动**；若要消这枚需 §六 另行点头（改动点同 `:3595`，判据要加 1 枚花括号形进门，且必须重跑影子 ⇒ 花括号 switch 是语料高频构造，风险面远大于替代语法）。⇒ 当前门 J 的 10 枚负例**不含**此形，登记于此后不得当作已收口。**【2026-10-09 任务 #126 取证收口】**该面已由**新门文件**（永久侧门 K，禁扩已注册门 J）量化至 **4 枚 OVER_ACCEPT**（不止本枚：`k_stmt_before_case`/`_two`/`k_nested_stmt_head` + `k_stray_endswitch`，末枚非空输出而是**照跑并打 `z`**），且「对 68 语料零扰动」那句里的旧推断已**升为实测**：两枚独立分词器扫描器互证 `stmt_before_first_case=0`（全语料 249 文件、7 枚 switch 全花括号头）⇒ 合法代码永不进入 `:3592` 的 `else` 支。逐形读数、机制锚点与落地表单见 **§3.7** 与 §5 路线 **R-5**（一行：`:3595` 去掉 `is_alternative and`；验收链沿用实测 56m33s）。⇒ **取证状态＝已收口；落地状态＝仍待老铁点头（§六-2 风险面：花括号 switch 为语料高频构造，影子必跑）**，本项在老铁裁决前不得判为已修复。**【2026-10-09 任务 #127 落地批＝面 A 已收口】**老铁「继续推进已知问题修复」授权下按**旗标门控 AOT-only** 形态落地 R-5：新旗标 `Parser.strict_switch_case_list`（`:38`，仅由 `initWithModeInsensitive` `:82` 置位）+ `parseSwitch` 的**单枚前导分号豁免支**（`:3601–3606`）+ 严格支（`:3612`）。⇒ 本项里「改动点同 `:3595`，一行」的表述**由实测否证并更正**（详见 §3.8.1：`case` 列表首**恰好接受一枚空语句分号**为 PHP 合法形，直改会把 `l_semi_arm_list`/`l_semi_only` 两枚今日绿形砸成硬守卫红）。验收实测：**门 K `over_accept 4→0`**（`same=8 diff_php_ok=1 both_reject 6→10`，`aot_only_red=5` 恒等＝面 B 未触碰）、**门 L `over_accept 6→0` 且 `aot_only_red 1→0`**（`same 9→10 both_reject 7→13`）；副产品＝R-3 批的漏网硬守卫红 `l_alt_semi_arm` 同批闭合（§3.8.5）。⇒ **面 A（本项）判为已修复**；**面 B／C 仍待 AOT-CODEGEN-011 的 D-1…D-4 裁决**（本项旧句「若要消这枚需 §六 另行点头」对 B/C 两面孔仍然有效）；全链读数与代次见 §3.8.4/§3.8.7 与 §5 R-5 行。
+15d. **门 H2 自身读数代次（先修门、后引用，任务 #125，2026-10-09）**：初代（脚本 `8e11de20…`／99 行，四桶）与 R-3 代次读数 `over_accept=12 aot_compile_fail=2` **结构上不可判向** —— 拒绝支实测代码（入库 blob `73f4d6b:…sh:76-80`）只写 `php_rc=` 数字、AOT 侧文本固定 `<none>`，「收敛」与「真回归」压成同一枚计数，R-3 落地轮据此差点把 `aot_compile_fail 0→2` 读成新红（靠人工回读 `php_rc=255` 才判明，见 §3.6）。#125 修门＝补 `BOTH_REJECT`/`AOT_ONLY_RED_*` 分桶 + `aot_log=`（走与门 J `:54` 同口径的 `normlog()`）+ 表头 `parser_md5` + 运行侧硬守卫；**当代次注册（脚本 `582ca74d…`／116 行 → 表 `0663be8d…`，mtime 晚于脚本）**：`shapes=15 over_accept=12 strict_same=1 aot_compile_fail=2 both_reject=2 aot_only_red=0 php_ok_aot_diff=0` @44s；修门证明＝与 R-3 快照逐字节 diff **12 行**（表头 4 + 2 形重分类 4 + ELAPSED + 总数行），**判据数据行 13/15 逐字节全等**。⇒ §3.6「对既有 P1 建议的部分收口」登记的 12 枚 H2 宽容面（类型位/修饰位/声明位）现由 `aot_only_red` 恒 0 守卫，任何收口批若把它们砸成「PHP 通过而 AOT 拒」会立即转正。详见 §3.5.1。
+15e. **门 K 新立面孔 B（反向面＝假拒绝，2026-10-09 任务 #126 实测）＝`case`/`default` 的分号终结符被 AOT 拒绝编译**：PHP 8.5 对 `switch (1) { case 1; echo "S"; }` 只打 `Deprecated: Case statements followed by a semicolon (;) are deprecated, use a colon (:) instead`，**rc=0 且臂体照常执行**；AOT **无产物**，原文一律 `Parse error: syntax error, unexpected ";", expecting ":"` ⇒ 门 K 硬守卫列 `aot_only_red=5` **非 0**（`k_case_semi`/`_fall`/`k_default_semi`/`k_case_semi_alt`/`k_case_semi_two_arms`，含一枚替代语法同位形）。根因到行＝`parser.zig:3571`（`case` 臂）与 `:3583`（`default` 臂）两处 `_ = try self.eat(.colon); // or .fat_arrow` **硬只认冒号**。**附带否证**：该处注释声称的「or .fat_arrow」实测**方向相反** —— `case 1 => echo` 在 PHP 自己就 rc=255（门 K `k_case_arrow` 判 `BOTH_REJECT`）⇒ 注释描述的合法面不存在，而真实合法的 `;` 面反被拒（登记为源码注释失效锚点，属宪法 §四-2 语义的注释误导，改动需 §六 点头）。⇒ **与关键字大小写无关 ⇒ 不并入 R-3/R-5 批**，**已另立 [AOT-CODEGEN-011](AOT-CODEGEN-011-switch-case-semicolon-terminator-and-default-arm-position.md) 面孔 B**（路线 **R-B1**；改动 = 两行，验收链可复用实测 56m33s；该单另列待裁决 D-1「前端共用 vs 旗标只改 AOT」）。语料面实测 **0**（`semi_arm=0`，全 249 文件；对照 `colon_arm=37` 证明扫描器有判别力）⇒ 判据 3/4：**不受冻结基线保护、机制完全可达**。逐形读数与扫描器修 v1→v2 记录见 **§3.7**。
+15f. **门 K 新立面孔 C（语义面＝`default` 臂位次在 AST 层就不存在，2026-10-09 任务 #126 实测）**：门 K 唯一 `DIFF_PHP_OK_AOT_DIFF` 形 `k_default_first`（PHP `DC` / AOT `D`）扩测六形后定面（§3.7 表）⇒ 分界实测为「**`default` 是否位于末臂**」，与花括号/替代语法无关；后果有两重 —— ① default 体尾**不落进后续 case**（丢 fall-through，PHP 会执行）；② **末位 case 的体尾错落进 default**（`switch (2) { default: "D"; case 2: "C"; }` PHP `C` / AOT **`CD`**）⇒ 属「执行了 PHP 不执行的语句」，比丢输出更重。根因到行＝`parser.zig:3616` 的 `.switch_stmt = .{ .expression, .cases, .default }`（**default 不入 `cases` 序列 ⇒ 源码位次信息在 AST 层就丢失**）× `ir_generator.zig:3211-3221` 按 `case_blocks.items[i + 1]` 链 fall-through、`:3215-3217` 末臂才接 `default_block`、`:3236-3237` default 体尾**恒 `br merge_block`**。⇒ 修复面必须**三处同动**（AST 形态 + IR 链入 + 末臂判定），需先定 AST 形态、且要动宪法 §一 超大文件 `ir_generator.zig`（改前必须 grep 既有模式，禁止凭推测写代码）⇒ **已另立 [AOT-CODEGEN-011](AOT-CODEGEN-011-switch-case-semicolon-terminator-and-default-arm-position.md) 面孔 C**（路线 **R-C1** AST 形态 + **R-C2** IR 链入，跨模式面 **R-C3** 待该单 §五 裁决），成本列「**未实测**」（无既有验收链可套）。语料面实测 **0**（`nonlast_default=0`，全 249 文件；基线 4 枚花括号 switch 逐处回文核对 = default 末臂或无 default）⇒ 冻结基线**恰好只覆盖绿的那一侧**，判据 3/4 同 15e。
 16. **R-2 的落地形态是否含「parser 名位补洞」（✅ 已裁决并落地，2026-10-07）**：老铁裁决 **D-1 = 甲**（R-2 与名位补洞同批）+ **D-2 = 分叉**（仅 AOT 生效，解释器/字节码保持现状，机制 = `case_insensitive_keywords` 旗标门控）+ **D-2b 未答按保守口径 = 旗标门控**（文件级分叉违反 DRY §二-2 不采用）。落地过程与实测见 §3.4.6 —— 首轮仅补编目的两处名位被门 H 反例组实测打回（守卫探针 `function Get()`/`class With` 转红），第二批扩至 15 处名位 + 第四面孔后 `inverse_face 15→1`、守卫探针全绿。原判据「`inverse_face` 不得变小」系 R-2-乙（只改 lexer）口径；甲批下变小来自旗标门控容忍支（词表本身未动，编译期同源保证），残红 1 枚归属外族词家族（§8）。
 17. **裁决记录（2026-10-07，本单）**：**D-1 = 甲**（lexer + parser 名位同批，带 R-4 + R-2b + 扩展 6 tag）｜**D-2 = 不接受三模式同修，分叉前端（仅 AOT）**｜**D-3 = 五枚独立缺陷并入本单**（§8）｜**D-4 = 死桩 `parser.zig:3756-3759` 维持现状**（未删未改名）｜**D-5/D-2b/D-6/D-7 问询未获答复** ⇒ 按宪法 §五/§六 保守口径：D-5 字节码 VM popFast panic **不修**（登记）、D-6 维持 §7-5 登记、D-7 六门不入官方门链、**全程零提交**（未获「提交」二字）。
 18. **第四面孔（R-2 落地中发现）**：AOT 编译入口的 include/require 检测在**两处源文本层**做大小写敏感匹配 —— `main.zig` needs_multi_file 检测（决定单文件/多文件路由）与 `dependency_resolver.matchKeyword`（依赖图建边）。`Include "x.php";` 等合法拼写漏检 ⇒ 误走单文件 ⇒ `include_stmt` 在单文件 IR 层无人消费 ⇒ 整句静默（门 H k_include/k_require 四形残面根因）。修法 = 两处折形（检测 haystack 折小写；matchKeyword 改 `eqlIgnoreCase`）。
@@ -637,3 +1169,29 @@ timeout 30 /opt/homebrew/bin/php fuzzy_scripts_720/tmp/c010j_alt_corpus_scan_tmp
 ⇒ 六枚 md5 与 §9.2 表（门 TSV 注册头 + git blob 取证）逐枚相同 ⇒ **`0652130` 的树 = 产出注册读数的那代源码**；后续任何会话可用 `git show 0652130:<path> | md5 -q` 复现该判定，无需再依赖 mtime。二进制仍为 `5beb1591…`（10-07 22:28:25），即「已提交源码 + 未重建产物」，§9.4 四项未复证面**不因本提交而消解**。
 
 **结论**：N1 = ✅ 已收口（方案②；源码级 + 行为级双证，另有 `0652130` 提交锚点，残余未复证面见 §9.4）。本节零 `.zig` 改动、零 `.php` 删除、编译残留 0。
+
+### 9.7 R-5 批代次登记（任务 #127，2026-10-09）—— §9.2 的等价取证对本批**不适用**
+
+**三枚 AOT-only 旗标谱系（同一分叉口径，逐枚实测）**：
+
+| 旗标 | 落地批 | 声明位置 | 置位位置 | 关闭时行为 |
+|---|---|---|---|---|
+| `Lexer.case_insensitive_keywords` | R-2（已入库 `0652130`） | `lexer.zig` | `initWithModeInsensitive` 内、**预取 curr/peek 之前** | 关键字查表大小写敏感＝历史 |
+| `Parser.strict_alt_closers` | R-3（未提交） | `parser.zig:32` | `parser.zig:81`（构造后补设） | 五支 `end*` 闭合位＝历史软消耗 |
+| `Parser.strict_switch_case_list` | **R-5（本批，未提交）** | `parser.zig:38` | `parser.zig:82`（构造后补设） | `switch` 臂表位意外 token＝历史整枚跳过 |
+
+⇒ 两枚 Parser 旗标均在 `initWithModeInsensitive`（`:76–83`）内置位，而该构造器**只由 `src/main.zig` 与 `src/aot/multi_file_compiler.zig` 两枚 AOT 入口调用** ⇒ 解释器/字节码走 `init`/`initWithMode`（`:60–66`）⇒ 恒 `false`（承 §3.4.6 的 D-2 分叉裁决，门 I 已实测该分叉成立）。
+
+**本批代次锚点（实测，非记忆）**：
+
+| 资产 | md5 | 行数 |
+|---|---|---|
+| `zig-out/bin/php-interpreter` | `6939cd2e891f20aef590de2585b15681` | — |
+| `src/compiler/parser.zig` | `1eab26c068b13b9f904d2f432464d852` | **4305** |
+| `src/compiler/lexer.zig` | `e3dd4191a1c3dfdf816b5873b4c60e5f` | 543（**与 `0652130` 全等 ⇒ 本批零触碰**） |
+| `src/compiler/keyword_lookup.zig` | `ef70993a7caac6deb9b2e5a23bf7d143` | 186（同上） |
+| `git HEAD` = `f9432e2`（＝`0652130` 之后的文档/资产归档链） | `git show HEAD:src/compiler/parser.zig \| md5 -q` = `e3987a361d1db45bc3eadefc7afa249e`，4230 行 | — |
+
+⇒ **算术自证**：`git diff --numstat src/compiler/parser.zig`（对 HEAD）= **81 插入 / 6 删除**，`4230 + 81 − 6 = 4305` ✅ ⇒ 未提交的工作树里同时含 **R-3 批（64/−6）与 R-5 批（+17/−0）**两批 ⇒ 提交时二者会落进同一 commit，**提交消息必须分别点名**，否则 R-3 的验收读数会被误挂到 R-5 名下（`git status --porcelain -- src/` 现仅 `M src/compiler/parser.zig` 一项）。
+
+⇒ **§9.2 的「源码 md5 等价 ⇒ 免整链复跑」判定式在本批不成立**：本批改了 `parser.zig` 且改了**语义分支**（非纯注释，区别于任务 #74 的注释卫生批）⇒ 必须走全链（十门 + 主回归 + 影子）；影子门是本批**发射中性**的唯一实证（面 A 语料面 0 ⇒ 官方回归对立面 A 零暴露，见 §4）。

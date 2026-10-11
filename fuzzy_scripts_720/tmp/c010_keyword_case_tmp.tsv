@@ -1,4 +1,4 @@
-# compiler_md5=5beb1591018e6092ffc0ab0446344eee
+# compiler_md5=73e27d8055b77fc37700013a92a66324
 # lexer_md5=e3dd4191a1c3dfdf816b5873b4c60e5f
 # keyword_lookup_md5=ef70993a7caac6deb9b2e5a23bf7d143
 # columns: shape|php_rc|aot_rc|verdict|php_norm||aot_norm
@@ -21,5 +21,5 @@ kw_foreach_ctl|php_rc=0|aot_rc=0|SAME|f=1|f=2|||aot=f=1|f=2|
 kw_foreach_upper|php_rc=0|aot_rc=0|SAME|f=1|f=2|||aot=f=1|f=2|
 kw_while_upper|php_rc=0|aot_rc=0|SAME|w=0|w=1|||aot=w=0|w=1|
 kw_bool_upper|php_rc=0|aot_rc=0|SAME|b=truefalseNULL|||aot=b=truefalseNULL|
-ELAPSED=68s
+ELAPSED=67s
 C010KW_DONE shapes=19 same=19 diff=0 silent_empty=0 aot_fatal=0 compile_fail=0
