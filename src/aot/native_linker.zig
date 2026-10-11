@@ -3979,6 +3979,7 @@ pub const NativeLinker = struct {
         .{ "is_subclass_of", bi(.{ .runtime_name = "php_is_subclass_of", .needs_allocator = false }) },
         .{ "is_a", bi(.{ .runtime_name = "php_is_a", .needs_allocator = false }) },
         .{ "class_alias", bi(.{ .runtime_name = "php_class_alias", .needs_allocator = false }) },
+        .{ "class_uses", bi(.{ .runtime_name = "php_class_uses", .needs_allocator = true }) },
         .{ "get_class", bi(.{ .runtime_name = "php_get_class", .needs_allocator = true }) },
         .{ "get_parent_class", .{ .runtime_name = "php_get_parent_class", .needs_allocator = true } },
         .{ "get_called_class", bi(.{ .runtime_name = "php_get_called_class_name", .needs_allocator = false }) },

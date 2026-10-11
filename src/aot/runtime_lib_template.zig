@@ -15445,8 +15445,11 @@ pub const ClassMeta = struct {
                     if (args.len == 0) return Value.initNull();
                     const this = Value_asObject(ctx);
                     // 参数是类名字符串
-                    const name_str = try args[0].toString(alloc);
-                    try this.setProperty("__class_name", Value.initString(name_str));
+                    const name_str = (try args[0].toString(alloc)).data;
+                    // AOT-CODEGEN-012 R-136：类名 CI —— __class_name 存**规范注册拼写**
+                    //（getName 与 PHP 一致返回声明名；跨大小写查找已经 findClass CI 生效）
+                    const canonical = if (findClass(name_str)) |meta| meta.name else name_str;
+                    try this.setProperty("__class_name", Value.initString(try PHPString.init(alloc, canonical)));
                     return Value.initNull();
                 }
             }.call,
@@ -15585,7 +15588,8 @@ pub const ClassMeta = struct {
                         if (name_val.isString()) {
                             if (findClass(name_val.asString().data)) |cmeta| {
                                 if (args[0].isString()) {
-                                    return Value.initBool(cmeta.methods.contains(args[0].asString().data));
+                                    // AOT-CODEGEN-012 R-136：方法名 CI + 继承链（findMethodLookup 为 contains 的 CI+继承超集）
+                                    return Value.initBool(cmeta.findMethodLookup(args[0].asString().data) != null);
                                 }
                             }
                         }
@@ -20166,6 +20170,17 @@ pub fn php_class_alias(from: Value, to: Value) !Value {
         try registry.put(to.asString().data, from_meta);
     }
     return Value.initBool(true);
+}
+
+/// AOT-CODEGEN-012 R-136：class_uses —— 返回类使用的 trait 名数组。
+/// AOT 将 trait 在 parse 层展开进类（方法/属性平铺），未保留使用记录 ⇒
+/// 无 trait 记录的类返回空 array（与 PHP 对无 trait 类的行为一致）；
+/// 有 trait 类的枚举需 ClassMeta 增加 trait 使用记录，登记未实现。
+pub fn php_class_uses(value: Value, allocator: Allocator) !Value {
+    _ = value;
+    _ = allocator;
+    const result = try PHPArray.init(runtime_allocator);
+    return Value.initArray(result);
 }
 
 pub fn php_is_subclass_of(child: Value, parent: Value) !Value {
