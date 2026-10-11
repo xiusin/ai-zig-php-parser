@@ -5825,6 +5825,23 @@ fn checkArithmeticOperand(v: Value) bool {
 }
 
 /// 输出 PHP Warning 到 stdout 和 stderr
+/// AOT-CODEGEN-012 R-133：类是否携带 #[AllowDynamicProperties]（发射器将类注解
+/// 存入 __attributes 静态属性，元素为 ReflectionAttribute 形态对象，__name 为注解名）
+fn hasAllowDynamicProperties(meta: *const ClassMeta) bool {
+    const attrs_val = meta.getStaticProperty("__attributes") orelse return false;
+    if (!attrs_val.isArray()) return false;
+    var it = attrs_val.asArray().elements.iterator();
+    while (it.next()) |entry| {
+        const v = entry.value_ptr.*;
+        if (!Value_isObject(v)) continue;
+        const attr_obj = Value_asObject(v);
+        if (attr_obj.getPropertyDirect("__name")) |name_val| {
+            if (name_val.isString() and std.ascii.eqlIgnoreCase(name_val.asString().data, "AllowDynamicProperties")) return true;
+        }
+    }
+    return false;
+}
+
 /// AOT-CODEGEN-012 R-132：PHP 8.2+ Deprecated 诊断（动态属性创建等）
 pub fn emitDeprecated(msg: []const u8) void {
     if (isErrorSuppressed()) return;
@@ -19667,8 +19684,9 @@ pub fn php_object_set(obj_val: Value, property_name: []const u8, value: Value) !
             if (try tryMagicSet(obj_val, meta, property_name, value)) {
                 return Value.initNull();
             }
-            // AOT-CODEGEN-012 R-132：PHP 8.2+ 动态属性创建发 Deprecated（stdClass 豁免）
-            if (!std.mem.eql(u8, meta.name, "stdClass")) {
+            // AOT-CODEGEN-012 R-132/R-133：PHP 8.2+ 动态属性创建发 Deprecated
+            //（stdClass 豁免 + #[AllowDynamicProperties] 豁免）
+            if (!std.mem.eql(u8, meta.name, "stdClass") and !hasAllowDynamicProperties(meta)) {
                 var dbuf: [256]u8 = undefined;
                 const dmsg = std.fmt.bufPrint(&dbuf, "Creation of dynamic property {s}::${s} is deprecated", .{ meta.name, property_name }) catch "Creation of dynamic property is deprecated";
                 emitDeprecated(dmsg);
@@ -20611,7 +20629,15 @@ pub fn php_get_static_property(class_name: []const u8, property_name: []const u8
 
     const val = meta.getStaticProperty(property_name);
     if (val == null) {
-        std.debug.print("ERROR: Property {s}.{s} not found\n", .{ meta.name, property_name });
+        // AOT-CODEGEN-012 R-133：未声明静态属性对齐 PHP —— 可捕获 Error（原先硬错误
+        // `ERROR: Property ... not found` 不可捕获且消息形状与 PHP 不同）
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(
+            &buf,
+            "Access to undeclared static property {s}::${s}",
+            .{ meta.name, property_name },
+        ) catch "Access to undeclared static property";
+        return throwThrowable("Error", msg, runtime_allocator);
     }
     // retain：调用方（代码生成器）会在寄存器释放时 release，
     // 如果不 retain，release 会减少静态属性本身的引用计数，可能导致数据丢失
