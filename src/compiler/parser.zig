@@ -3568,6 +3568,8 @@ pub const Parser = struct {
 
         var cases = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
         var default_case: ?ast.Node.Index = null;
+        // R-C1：default 的源码位次（在 cases 第几项前；末臂/无 default ⇒ null）
+        var default_slot: ?u32 = null;
         // R-5：case 列表位是否已消费过那枚合法的空语句分号（PHP 只放行单枚，见下方分支注释）
         var case_list_empty_stmt = false;
 
@@ -3577,7 +3579,15 @@ pub const Parser = struct {
             if (self.curr.tag == .k_case) {
                 self.nextToken();
                 const case_expr = try self.parseExpression(0);
-                _ = try self.eat(.colon); // or .fat_arrow
+                // R-B1（CODEGEN-011 面B，D-1 甲裁决）：PHP 8.5 亦接受分号终结符
+                // （`case X;` 发 Deprecated 但合法）⇒ colon-or-semicolon 二者取其一；
+                // 原硬 eat(.colon) 假拒绝 5 形（门 N compile_fail=5）。
+                // 失效注释所述 `=>` 形态 PHP 本身 rc=255（门 K BOTH_REJECT）⇒ 注释删除。
+                if (self.curr.tag == .semicolon) {
+                    self.nextToken();
+                } else {
+                    _ = try self.eat(.colon);
+                }
                 var stmts = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
                 while (self.curr.tag != .k_case and self.curr.tag != .k_default and self.curr.tag != end_token and self.curr.tag != .eof) {
                     try stmts.append(self.allocator, try self.parseStatement());
@@ -3589,7 +3599,15 @@ pub const Parser = struct {
                 try cases.append(self.allocator, case_node);
             } else if (self.curr.tag == .k_default) {
                 self.nextToken();
-                _ = try self.eat(.colon); // or .fat_arrow
+                // R-B1：default 臂同面B（分号终结符合法，见上）
+                if (self.curr.tag == .semicolon) {
+                    self.nextToken();
+                } else {
+                    _ = try self.eat(.colon);
+                }
+                // R-C1（CODEGEN-011 面C，D-2 甲裁决）：记录 default 的源码位次
+                //（= 此前已收集的 case 数；末臂/无 default 时由消费侧按 null/len 处理）
+                default_slot = @intCast(cases.items.len);
                 var stmts = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
                 while (self.curr.tag != .k_case and self.curr.tag != .k_default and self.curr.tag != end_token and self.curr.tag != .eof) {
                     try stmts.append(self.allocator, try self.parseStatement());
@@ -3630,7 +3648,7 @@ pub const Parser = struct {
         const arena = self.context.arena.allocator();
         const cases_slice = try arena.dupe(ast.Node.Index, cases.items);
         cases.deinit(self.allocator);
-        return self.createNode(.{ .tag = .switch_stmt, .main_token = token, .data = .{ .switch_stmt = .{ .expression = expr, .cases = cases_slice, .default = default_case } } });
+        return self.createNode(.{ .tag = .switch_stmt, .main_token = token, .data = .{ .switch_stmt = .{ .expression = expr, .cases = cases_slice, .default = default_case, .default_slot = default_slot } } });
     }
 
     fn parseYieldExpr(self: *Parser) anyerror!ast.Node.Index {

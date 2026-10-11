@@ -3262,45 +3262,51 @@ pub const IRGenerator = struct {
             .continue_block = merge_block, // switch中的continue无意义，指向merge
         });
 
-        // 生成每个case的代码
+        // R-C1/R-C2（CODEGEN-011 面C，D-2 甲裁决）：臂体生成按**源码序**——
+        // default 依 default_slot 插入臂链（此前 default 独立生成于末位 ⇒
+        // c_default_first 丢臂尾 / c_lastcase 假执行 / c_middle_default 搬末臂）。
+        // 分发侧（switch_/比较链，:3156-3191 区）语义与位次无关，不变。
+        const ArmEntry = struct { block: *BasicBlock, stmts: []const Node.Index, is_default: bool };
+        var arms = std.ArrayListUnmanaged(ArmEntry){ .items = &.{}, .capacity = 0 };
+        defer arms.deinit(self.allocator);
+
+        var default_stmts: []const Node.Index = &.{};
+        if (switch_data.default) |default_idx| {
+            const default_node = self.getNode(default_idx).?;
+            default_stmts = default_node.data.default.body;
+        }
+        const slot: usize = if (switch_data.default_slot) |ds| @min(@as(usize, ds), switch_data.cases.len) else switch_data.cases.len;
+
         for (switch_data.cases, 0..) |case_idx, i| {
-            self.current_block = case_blocks.items[i];
-            const case_node = self.getNode(case_idx).?;
-            const case_data = case_node.data.case;
-
-            for (case_data.body) |stmt_idx| {
-                try self.generateStatement(stmt_idx);
-                if (self.isBlockTerminated()) break;
-            }
-
-            // 如果没有break，fall through到下一个case或merge
-            if (!self.isBlockTerminated()) {
-                if (i + 1 < case_blocks.items.len) {
-                    // Fall through到下一个case
-                    self.setTerminator(.{ .br = case_blocks.items[i + 1] });
-                } else if (switch_data.default != null) {
-                    // Fall through到default
-                    self.setTerminator(.{ .br = default_block });
-                } else {
-                    // 跳转到merge
-                    self.setTerminator(.{ .br = merge_block });
+            if (i == slot) {
+                if (switch_data.default != null) {
+                    try arms.append(self.allocator, .{ .block = default_block, .stmts = default_stmts, .is_default = true });
                 }
+            }
+            const case_node = self.getNode(case_idx).?;
+            try arms.append(self.allocator, .{ .block = case_blocks.items[i], .stmts = case_node.data.case.body, .is_default = false });
+        }
+        if (slot >= switch_data.cases.len) {
+            if (switch_data.default != null) {
+                try arms.append(self.allocator, .{ .block = default_block, .stmts = default_stmts, .is_default = true });
             }
         }
 
-        // 生成default块
-        if (switch_data.default) |default_idx| {
-            self.current_block = default_block;
-            const default_node = self.getNode(default_idx).?;
-            const default_data = default_node.data.default;
+        for (arms.items, 0..) |arm, ai| {
+            self.current_block = arm.block;
 
-            for (default_data.body) |stmt_idx| {
+            for (arm.stmts) |stmt_idx| {
                 try self.generateStatement(stmt_idx);
                 if (self.isBlockTerminated()) break;
             }
 
+            // 没有 break ⇒ fall through 到**源码序**的下一臂；末臂 ⇒ merge
             if (!self.isBlockTerminated()) {
-                self.setTerminator(.{ .br = merge_block });
+                if (ai + 1 < arms.items.len) {
+                    self.setTerminator(.{ .br = arms.items[ai + 1].block });
+                } else {
+                    self.setTerminator(.{ .br = merge_block });
+                }
             }
         }
 

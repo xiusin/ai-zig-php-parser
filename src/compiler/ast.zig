@@ -183,7 +183,7 @@ pub const Node = struct {
         for_stmt: struct { init: ?Index, condition: ?Index, loop: ?Index, body: Index },
         for_range_stmt: struct { count: Index, variable: ?Index, body: Index },
         foreach_stmt: struct { iterable: Index, key: ?Index, value: Index, body: Index, value_by_ref: bool = false },
-        switch_stmt: struct { expression: Index, cases: []const Index, default: ?Index },
+        switch_stmt: struct { expression: Index, cases: []const Index, default: ?Index, default_slot: ?u32 = null },
         case: struct { condition: Index, body: []const Index },
         default: struct { body: []const Index },
         try_stmt: struct { body: Index, catch_clauses: []const Index, finally_clause: ?Index },
