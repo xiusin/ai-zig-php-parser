@@ -1,0 +1,25 @@
+# compiler_md5=5beb1591018e6092ffc0ab0446344eee
+# lexer_md5=e3dd4191a1c3dfdf816b5873b4c60e5f
+# keyword_lookup_md5=ef70993a7caac6deb9b2e5a23bf7d143
+# columns: shape|php_rc|aot_rc|verdict|php_norm||aot_norm
+kw_echo_ctl|php_rc=0|aot_rc=0|SAME|e=1|||aot=e=1|
+kw_echo_title|php_rc=0|aot_rc=0|SAME|e=1|||aot=e=1|
+kw_echo_upper|php_rc=0|aot_rc=0|SAME|e=1|||aot=e=1|
+kw_print_ctl|php_rc=0|aot_rc=0|SAME|p=1|||aot=p=1|
+kw_print_title|php_rc=0|aot_rc=0|SAME|p=1|||aot=p=1|
+kw_if_ctl|php_rc=0|aot_rc=0|SAME|i=gt|||aot=i=gt|
+kw_if_title|php_rc=0|aot_rc=0|SAME|i=gt|||aot=i=gt|
+kw_else_upper|php_rc=0|aot_rc=0|SAME|i=gt|||aot=i=gt|
+kw_return_ctl|php_rc=0|aot_rc=0|SAME|r=3|||aot=r=3|
+kw_return_upper|php_rc=0|aot_rc=0|SAME|r=3|||aot=r=3|
+kw_function_ctl|php_rc=0|aot_rc=0|SAME|m=6|||aot=m=6|
+kw_function_upper|php_rc=0|aot_rc=0|SAME|m=6|||aot=m=6|
+kw_class_new_ctl|php_rc=0|aot_rc=0|SAME|c=3|||aot=c=3|
+kw_class_upper|php_rc=0|aot_rc=0|SAME|c=3|||aot=c=3|
+kw_new_upper|php_rc=0|aot_rc=0|SAME|c=3|||aot=c=3|
+kw_foreach_ctl|php_rc=0|aot_rc=0|SAME|f=1|f=2|||aot=f=1|f=2|
+kw_foreach_upper|php_rc=0|aot_rc=0|SAME|f=1|f=2|||aot=f=1|f=2|
+kw_while_upper|php_rc=0|aot_rc=0|SAME|w=0|w=1|||aot=w=0|w=1|
+kw_bool_upper|php_rc=0|aot_rc=0|SAME|b=truefalseNULL|||aot=b=truefalseNULL|
+ELAPSED=68s
+C010KW_DONE shapes=19 same=19 diff=0 silent_empty=0 aot_fatal=0 compile_fail=0

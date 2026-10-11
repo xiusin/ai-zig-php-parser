@@ -26,6 +26,16 @@ pub const Parser = struct {
     top_level_stmt_count: usize = 0,
     /// Track namespace declaration style: 0=none, 1=unbracketed, 2=bracketed
     namespace_style: u8 = 0,
+    /// R-3（AOT-CODEGEN-010 §3.6）：替代语法关闭标记严格化 —— 五枚 `end*` 只在闭合位接受、
+    /// 缺失或异种闭合一律硬 `eat` 报错。仅由 `initWithModeInsensitive`（AOT 编译入口）置位；
+    /// 旗标关闭时（解释器/字节码构造点）五支路行为与历史逐字节等价。
+    strict_alt_closers: bool = false,
+    /// R-5（AOT-CODEGEN-010 §7-15c 面 A）：`switch` 的 case 列表位严格化 —— 意外 token 不再整枚跳过，
+    /// 停在原位由下方 `}` / `endswitch` 硬 `eat` 报 unexpected；PHP 实测该位**恰好接受一枚空语句分号**
+    /// （门 L l_semi_arm_list / l_semi_only / l_alt_semi_arm 为 php_rc=0，l_two_semi_* 为 php_rc=255）
+    /// ⇒ 单枚前导分号仍消费，其余一律拒。仅由 `initWithModeInsensitive`（AOT 编译入口）置位；
+    /// 旗标关闭时（解释器/字节码构造点）行为与历史逐字节等价。
+    strict_switch_case_list: bool = false,
 
     /// 公共预取逻辑：取 curr/peek 并装配 Parser（各构造函数共享，DRY）
     fn initFromLexer(allocator: std.mem.Allocator, context: *PHPContext, lexer: Lexer, mode: SyntaxMode, hooks: ?*const SyntaxHooks) anyerror!Parser {
@@ -66,7 +76,11 @@ pub const Parser = struct {
     pub fn initWithModeInsensitive(allocator: std.mem.Allocator, context: *PHPContext, source: [:0]const u8, mode: SyntaxMode) anyerror!Parser {
         var lexer = Lexer.initWithMode(source, mode);
         lexer.case_insensitive_keywords = true;
-        return initFromLexer(allocator, context, lexer, mode, null);
+        var p = try initFromLexer(allocator, context, lexer, mode, null);
+        // R-3 / R-5：这两枚旗标仅参与 parse 期判定，curr/peek 已由 initFromLexer 预取 ⇒ 构造后补设安全
+        p.strict_alt_closers = true;
+        p.strict_switch_case_list = true;
+        return p;
     }
 
     /// Set syntax hooks after initialization
@@ -232,6 +246,14 @@ pub const Parser = struct {
             .colon => "\":\"",
             .t_string => "identifier",
             .t_variable => "variable",
+            // R-3（AOT-CODEGEN-010 §3.6 附带发现）：兜底 `else => "token"` 使硬 eat 的期望词
+            // 不如 PHP 精确（`expecting token` vs `expecting "endwhile"`）⇒ 至少补齐五枚关闭标记。
+            // 纯消息面，不改任何接受/拒绝判定。
+            .k_endif => "\"endif\"",
+            .k_endwhile => "\"endwhile\"",
+            .k_endfor => "\"endfor\"",
+            .k_endforeach => "\"endforeach\"",
+            .k_endswitch => "\"endswitch\"",
             else => "token",
         };
     }
@@ -1512,7 +1534,13 @@ pub const Parser = struct {
                 else_branch = try self.parseAlternativeBody(.k_endif);
             }
             // 消耗 endif;
-            if (self.curr.tag == .k_endif) {
+            // R-3（AOT-CODEGEN-010 §3.6）：旗标开启（仅 AOT）时改为硬 eat，与 while `:eat(.k_endwhile)`
+            // / for / foreach 的硬闭合先例对齐 ⇒ 缺失 `endif` 与异种闭合不再被静默接受。
+            // 旗标关闭（解释器/字节码）时保持原软消耗 ⇒ 行为逐字节不变。
+            if (self.strict_alt_closers) {
+                _ = try self.eat(.k_endif);
+                _ = try self.eat(.semicolon);
+            } else if (self.curr.tag == .k_endif) {
                 self.nextToken();
                 _ = try self.eat(.semicolon);
             }
@@ -1537,7 +1565,10 @@ pub const Parser = struct {
         if (self.curr.tag == .colon) {
             _ = try self.eat(.colon);
         }
-        const then = try self.parseStatement();
+        const then = if (self.strict_alt_closers)
+            try self.parseAlternativeBody(.k_endif)
+        else
+            try self.parseStatement();
         var else_branch: ?ast.Node.Index = null;
         if (self.curr.tag == .k_elseif) {
             else_branch = try self.parseElseifAlternative();
@@ -1546,7 +1577,11 @@ pub const Parser = struct {
             if (self.curr.tag == .colon) {
                 _ = try self.eat(.colon);
             }
-            else_branch = try self.parseStatement();
+            // R-3：同上 —— 旗标开启时 else 臂也须扫到 endif，否则多语句臂会在闭合位误拒
+            else_branch = if (self.strict_alt_closers)
+                try self.parseAlternativeBody(.k_endif)
+            else
+                try self.parseStatement();
         }
         return self.createNode(.{ .tag = .if_stmt, .main_token = token, .data = .{ .if_stmt = .{ .condition = cond, .then_branch = then, .else_branch = else_branch } } });
     }
@@ -1594,6 +1629,9 @@ pub const Parser = struct {
         while (self.curr.tag != end_tag and self.curr.tag != .eof) {
             // Also stop at elseif/else/endif for if alternative syntax
             if (end_tag == .k_endif and (self.curr.tag == .k_elseif or self.curr.tag == .k_else)) break;
+            // R-3（AOT-CODEGEN-010 §3.6）：旗标开启时，异种关闭标记（如 if 体里遇 endwhile）
+            // 不再当普通语句吞掉 ⇒ 立刻停，由调用侧硬 eat 在闭合位报 unexpected
+            if (self.strict_alt_closers and isAlternativeCloserTag(self.curr.tag)) break;
             const stmt = try self.parseStatement();
             try stmts.append(self.allocator, stmt);
         }
@@ -3296,7 +3334,11 @@ pub const Parser = struct {
                 // R-2（甲批扩展）：旗标开启时容忍清单内关键字 tag 在表达式主位按标识符接受
                 //（守卫 p1/p4：`echo Get();` 调用位今日绿不得转红；节点形态镜像 .t_string 臂
                 // 的 intern+resolveName ⇒ 下游发射逐位一致）
-                if (self.lexer.case_insensitive_keywords) {
+                // R-3（AOT-CODEGEN-010 §3.6）例外：五枚替代语法关闭标记在严格档下不得降级成变量名
+                // ⇒ 否则裸 `endif;` / `endif; endif;` 会生成零指令变量表达式而被静默接受（PHP 拒绝）
+                if (self.lexer.case_insensitive_keywords and
+                    !(self.strict_alt_closers and isAlternativeCloserTag(self.curr.tag)))
+                {
                     if (self.eatKeywordAsIdentifier()) |tok| {
                         const raw_name = self.lexer.buffer[tok.loc.start..tok.loc.end];
                         const name_id = try self.context.intern(raw_name);
@@ -3526,6 +3568,8 @@ pub const Parser = struct {
 
         var cases = std.ArrayListUnmanaged(ast.Node.Index){ .items = &.{}, .capacity = 0 };
         var default_case: ?ast.Node.Index = null;
+        // R-5：case 列表位是否已消费过那枚合法的空语句分号（PHP 只放行单枚，见下方分支注释）
+        var case_list_empty_stmt = false;
 
         // 使用 Token.Tag 类型避免 comptime-only 错误
         const end_token: Token.Tag = if (is_alternative) .k_endswitch else .r_brace;
@@ -3554,14 +3598,29 @@ pub const Parser = struct {
                 const stmts_slice = try arena.dupe(ast.Node.Index, stmts.items);
                 stmts.deinit(self.allocator);
                 default_case = try self.createNode(.{ .tag = .default, .main_token = token, .data = .{ .default = .{ .body = stmts_slice } } });
+            } else if (self.curr.tag == .semicolon and !case_list_empty_stmt) {
+                // R-5 例外（门 L 实测，php 8.5.8）：case 列表首**恰好接受一枚空语句分号**——
+                // l_semi_arm_list / l_semi_only / l_alt_semi_arm 均 php_rc=0 且臂体照常执行，
+                // 而 l_two_semi_arm_list / l_alt_two_semi / l_semi_then_block 的第二枚或后续非法 token php_rc=255
+                // ⇒ 该分号属合法形态，只放行单枚；其余意外 token 一律走下方严格支。
+                case_list_empty_stmt = true;
+                self.nextToken();
             } else {
+                // R-3（§3.6，替代语法）+ R-5（§7-15c，花括号语法）：旗标开启时意外 token 不再静默跳过
+                // ⇒ 停在这里，由下方 `}` / endswitch 硬 eat 报 unexpected
+                //   （门 K 的 4 枚 OVER_ACCEPT 即由此转 BOTH_REJECT；门 I 实测旗标为 AOT-only ⇒ 解释器/字节码不感知）
+                if (self.strict_switch_case_list or (is_alternative and self.strict_alt_closers)) break;
                 self.nextToken(); // Skip unexpected tokens
             }
         }
 
         if (is_alternative) {
             // 消耗 endswitch;
-            if (self.curr.tag == .k_endswitch) {
+            // R-3：旗标开启（仅 AOT）时改硬 eat，与 `eat(.k_endwhile)`/`.k_endfor`/`.k_endforeach` 对齐
+            if (self.strict_alt_closers) {
+                _ = try self.eat(.k_endswitch);
+                _ = try self.eat(.semicolon);
+            } else if (self.curr.tag == .k_endswitch) {
                 self.nextToken();
                 _ = try self.eat(.semicolon);
             }
@@ -3922,6 +3981,22 @@ pub const Parser = struct {
             .k_endswitch,
             .k_endwhile,
             .k_struct,
+            => true,
+            else => false,
+        };
+    }
+
+    /// R-3（AOT-CODEGEN-010 §3.6）：五枚替代语法关闭标记 —— 它们在 PHP 里只占闭合位，
+    /// 既不是表达式主位也不是名位以外的普通语句 token。严格化的三处判定（体扫描停止条件、
+    /// switch 意外 token、表达式主位容忍支）共用本集合。注意与
+    /// `isAotExtendedKeywordIdentifierTag`（6 枚，含 `.k_struct`）覆盖面不同，勿收窄亦勿扩。
+    fn isAlternativeCloserTag(tag: Token.Tag) bool {
+        return switch (tag) {
+            .k_endfor,
+            .k_endforeach,
+            .k_endif,
+            .k_endswitch,
+            .k_endwhile,
             => true,
             else => false,
         };

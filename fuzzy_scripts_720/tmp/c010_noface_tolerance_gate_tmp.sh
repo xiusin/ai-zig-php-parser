@@ -9,9 +9,14 @@
 #   再与 PHP 真值对照 ⇒
 #     over_accept   = PHP 报错而 AOT 正常输出 ⇒ 该文法位对**任意标识符 token** 宽容
 #                     ⇒ 侧门 H 的 NOFACE 绿是「宽容得绿」，**不是**「已正确支持大小写」
-#     strict_both   = PHP 与 AOT 同错（逐字节等值）⇒ 该位严格 ⇒ NOFACE 另有成因，须继续归因
-#     aot_compile_fail = AOT 拒绝 ⇒ 该位严格
-#   ★ 判别力说明：本门**不比 AOT 与 PHP 谁对**，只比「AOT 是否接受 PHP 不接受的东西」
+#     strict_same   = PHP 与 AOT 同错且逐字节等值 ⇒ 该位严格 ⇒ NOFACE 另有成因，须继续归因
+#     both_reject   = AOT 编译/运行拒绝**且 PHP 同拒** ⇒ **收敛**（修复把错接受转成正确拒绝），**不是红**
+#     aot_only_red  = PHP 通过而 AOT 拒（编译面 AOT_ONLY_RED_COMPILE / 运行面 AOT_ONLY_RED_RUN）⇒ **硬守卫列，必须恒 0**
+#     php_ok_aot_diff = PHP 通过且 AOT 也跑通但输出不同
+#   ★ 判别力说明：本门**不比 AOT 与 PHP 谁对**，只比「AOT 是否接受 PHP 不接受的东西」；
+#     但「AOT 拒」必须再判一次方向（both_reject vs aot_only_red），否则收敛会被读成新增红（2026-10-09 R-3 批踩过）。
+#   ★ 上方第 4-6 行「全树无大小写折叠通道」＝ R-2 前的建门依据；当代次已有 `case_insensitive_keywords` 旗标，
+#     本门判的仍是**与大小写无关的文法位宽容**（同位换瞎词），故形集与判据在 R-2/R-3 后代次依旧有效。
 set -u
 cd "$(dirname "$0")/../.." || exit 1
 BIN="zig-out/bin/php-interpreter"
@@ -25,6 +30,8 @@ trap 'rm -rf "$T"' EXIT
 START=$(date +%s)
 
 norm() { sed -E -e 's/[[:space:]]*$//' -e 's|/[^[:space:]:]*\.php:[0-9]+|FILE:LINE|g' -e 's| in [^ ]*\.php on line [0-9]+| in FILE:LINE|g' -e '/^Stack trace:/,$d' -e '/^=== PHP Interpreter Performance Statistics ===$/,$d' -e '/^$/d'; }
+# 与门 J :54 逐字同口径 ⇒ 编译失败支的 AOT 报错原文也能入表（否则本门最需要的证据只剩 <none>）
+normlog() { norm | sed -E -e 's/^Error: //' -e 's/ on line [0-9]+$/ on line LINE/' -e 's|/tmp/[^ :]+|TMPDIR|g'; }
 
 # 15 枚 NOFACE 形：模板取自侧门 H 的 specs（逐字一致），关键字位仍用 @KW@
 noface_specs() {
@@ -50,11 +57,13 @@ SPEC
 { echo "# compiler_md5=$(md5 -q "$BIN")"
   echo "# lexer_md5=$(md5 -q src/compiler/lexer.zig)"
   echo "# keyword_lookup_md5=$(md5 -q src/compiler/keyword_lookup.zig)"
+  echo "# parser_md5=$(md5 -q src/compiler/parser.zig)"
   echo "# nonsense_spelling=Zkwhq"
-  echo "# columns: shape|php_rc|aot_rc|verdict|php_norm||aot_norm"
+  echo "# columns: shape|php_rc|aot_rc|verdict|php_norm||aot_norm（AOT 拒绝支为 aot_log=…，取自编译日志归一原文）"
+  echo "# verdicts: SAME_BOTH_ERROR_LIKE / OVER_ACCEPT / DIFF_PHP_OK_AOT_DIFF / BOTH_REJECT(收敛：两侧同拒) / AOT_ONLY_RED_*PHP 通过而 AOT 拒(硬守卫，须 0)"
 } > "$OUT"
 
-CNT=0; OA=0; STRICT=0; CF=0; BOTHOK=0
+CNT=0; OA=0; STRICT=0; CF=0; BOTHOK=0; BR=0; AOR=0
 while IFS='|' read -r sid stpl; do
   [ -z "$sid" ] && continue
   if [ -n "$ONLY" ]; then
@@ -73,27 +82,35 @@ while IFS='|' read -r sid stpl; do
   php_n=$(norm < "$T/$sid.php.out" | tr '\n' '|')
 
   timeout 120 "$BIN" --compile --output="$T/aot_compile_c010h2_${sid}_tmp" "$SRC" >"$T/$sid.clog" 2>&1
+  php_err=0
+  if [ "$prc" != 0 ] || grep -qE 'Parse error|syntax error|Fatal error' "$T/$sid.php.out"; then php_err=1; fi
   if [ ! -x "$T/aot_compile_c010h2_${sid}_tmp" ]; then
-    echo "$sid|php_rc=$prc|aot_rc=NA|AOT_COMPILE_FAIL|$php_n||<none>" >> "$OUT"
-    CF=$((CF + 1))
+    aot_l=$(normlog < "$T/$sid.clog" | tr '\n' '|')
+    # ★ 判向：AOT 拒 ≠ 红。PHP 同拒 ⇒ 收敛（BOTH_REJECT）；PHP 通过而 AOT 拒 ⇒ 真回归（硬守卫列）
+    if [ "$php_err" = 1 ]; then
+      echo "$sid|php_rc=$prc|aot_rc=NA|BOTH_REJECT|$php_n||aot_log=$aot_l" >> "$OUT"
+      BR=$((BR + 1)); CF=$((CF + 1))
+    else
+      echo "$sid|php_rc=$prc|aot_rc=NA|AOT_ONLY_RED_COMPILE|$php_n||aot_log=$aot_l" >> "$OUT"
+      AOR=$((AOR + 1)); CF=$((CF + 1))
+    fi
     continue
   fi
   timeout 10 "$T/aot_compile_c010h2_${sid}_tmp" >"$T/$sid.aot.out" 2>&1; arc=$?
   aot_n=$(norm < "$T/$sid.aot.out" | tr '\n' '|')
 
-  php_err=0
-  if [ "$prc" != 0 ] || grep -qE 'Parse error|syntax error|Fatal error' "$T/$sid.php.out"; then php_err=1; fi
   if [ "$php_n" = "$aot_n" ]; then
     v=SAME_BOTH_ERROR_LIKE; STRICT=$((STRICT + 1))
   elif [ "$php_err" = 1 ]; then
     v=OVER_ACCEPT; OA=$((OA + 1))
   else
     v=DIFF_PHP_OK_AOT_DIFF; BOTHOK=$((BOTHOK + 1))
+    if [ "$arc" != 0 ] || grep -qE 'Fatal error|Parse error' "$T/$sid.aot.out"; then AOR=$((AOR + 1)); v=AOT_ONLY_RED_RUN; fi
   fi
   echo "$sid|php_rc=$prc|aot_rc=$arc|$v|$php_n||aot=$aot_n" >> "$OUT"
 done < <(noface_specs)
 
 RESID=$(ls -d .zigphp_aot_build_* 2>/dev/null | wc -l | tr -d ' ')
 echo "ELAPSED=$(($(date +%s) - START))s" >> "$OUT"
-echo "C010H2_DONE shapes=$CNT over_accept=$OA strict_same=$STRICT aot_compile_fail=$CF php_ok_aot_diff=$BOTHOK repo_build_residue=$RESID SMOKE_ONLY=${ONLY:-0}" >> "$OUT"
+echo "C010H2_DONE shapes=$CNT over_accept=$OA strict_same=$STRICT aot_compile_fail=$CF both_reject=$BR aot_only_red=$AOR php_ok_aot_diff=$BOTHOK repo_build_residue=$RESID SMOKE_ONLY=${ONLY:-0}" >> "$OUT"
 cat "$OUT"

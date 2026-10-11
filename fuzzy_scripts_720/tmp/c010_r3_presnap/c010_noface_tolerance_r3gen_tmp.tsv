@@ -1,0 +1,22 @@
+# compiler_md5=81f8a55a989f9a793fec2f75c32fd37d
+# lexer_md5=e3dd4191a1c3dfdf816b5873b4c60e5f
+# keyword_lookup_md5=ef70993a7caac6deb9b2e5a23bf7d143
+# nonsense_spelling=Zkwhq
+# columns: shape|php_rc|aot_rc|verdict|php_norm||aot_norm
+n_do|php_rc=255|aot_rc=0|OVER_ACCEPT|PHP Parse error:  syntax error, unexpected token "{" in FILE:LINE|Parse error: syntax error, unexpected token "{" in FILE:LINE|||aot=do_ok
+n_else|php_rc=255|aot_rc=0|OVER_ACCEPT|PHP Parse error:  syntax error, unexpected token "{" in FILE:LINE|Parse error: syntax error, unexpected token "{" in FILE:LINE|||aot=else_ok
+n_void|php_rc=255|aot_rc=0|OVER_ACCEPT|void_okPHP Fatal error:  Uncaught TypeError: kwh_vf1(): Return value must be of type Zkwhq, none returned in FILE:LINE|||aot=void_ok
+n_const|php_rc=255|aot_rc=0|OVER_ACCEPT|PHP Parse error:  syntax error, unexpected identifier "KWH_C1" in FILE:LINE|Parse error: syntax error, unexpected identifier "KWH_C1" in FILE:LINE|||aot=5
+n_final|php_rc=255|aot_rc=0|OVER_ACCEPT|PHP Parse error:  syntax error, unexpected token "class" in FILE:LINE|Parse error: syntax error, unexpected token "class" in FILE:LINE|||aot=final_ok
+n_mixed|php_rc=255|aot_rc=0|OVER_ACCEPT|PHP Fatal error:  Uncaught TypeError: kwh_mx1(): Return value must be of type Zkwhq, int returned in FILE:LINE|||aot=7
+n_never|php_rc=0|aot_rc=0|SAME_BOTH_ERROR_LIKE|never_ok||aot=never_ok
+n_public|php_rc=255|aot_rc=0|OVER_ACCEPT|PHP Parse error:  syntax error, unexpected identifier "Zkwhq", expecting "function" in FILE:LINE|Parse error: syntax error, unexpected identifier "Zkwhq", expecting "function" in FILE:LINE|||aot=4
+n_global|php_rc=255|aot_rc=0|OVER_ACCEPT|PHP Parse error:  syntax error, unexpected variable "$G" in FILE:LINE|Parse error: syntax error, unexpected variable "$G" in FILE:LINE|||aot=10
+n_object|php_rc=255|aot_rc=0|OVER_ACCEPT|PHP Fatal error:  Uncaught TypeError: kwh_ob1(): Return value must be of type Zkwhq, stdClass returned in FILE:LINE|||aot=object_ok
+n_private|php_rc=255|aot_rc=0|OVER_ACCEPT|PHP Parse error:  syntax error, unexpected identifier "Zkwhq", expecting "function" in FILE:LINE|Parse error: syntax error, unexpected identifier "Zkwhq", expecting "function" in FILE:LINE|||aot=11
+n_finally|php_rc=255|aot_rc=0|OVER_ACCEPT|PHP Parse error:  syntax error, unexpected token "{" in FILE:LINE|Parse error: syntax error, unexpected token "{" in FILE:LINE|||aot=xfinally_ok
+n_namespace|php_rc=255|aot_rc=0|OVER_ACCEPT|PHP Parse error:  syntax error, unexpected identifier "KwhNs1" in FILE:LINE|Parse error: syntax error, unexpected identifier "KwhNs1" in FILE:LINE|||aot=20
+n_endif|php_rc=255|aot_rc=NA|AOT_COMPILE_FAIL|PHP Parse error:  syntax error, unexpected end of file, expecting "elseif" or "else" or "endif" in FILE:LINE|Parse error: syntax error, unexpected end of file, expecting "elseif" or "else" or "endif" in FILE:LINE|||<none>
+n_endswitch|php_rc=255|aot_rc=NA|AOT_COMPILE_FAIL|PHP Parse error:  syntax error, unexpected end of file, expecting "endswitch" or "case" or "default" in FILE:LINE|Parse error: syntax error, unexpected end of file, expecting "endswitch" or "case" or "default" in FILE:LINE|||<none>
+ELAPSED=46s
+C010H2_DONE shapes=15 over_accept=12 strict_same=1 aot_compile_fail=2 php_ok_aot_diff=0 repo_build_residue=0 SMOKE_ONLY=0

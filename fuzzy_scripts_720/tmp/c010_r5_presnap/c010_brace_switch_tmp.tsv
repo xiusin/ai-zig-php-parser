@@ -1,0 +1,33 @@
+# compiler_md5=81f8a55a989f9a793fec2f75c32fd37d
+# lexer_md5=e3dd4191a1c3dfdf816b5873b4c60e5f
+# keyword_lookup_md5=ef70993a7caac6deb9b2e5a23bf7d143
+# parser_md5=5ad452fe4bc250b4732cbb3a2827b28a
+# gate_rev=v1 (K 族首代；形集＝正例 14 + 负例 10 = 24 形，全部以 /opt/homebrew/bin/php 实测真值归类；其中 5 枚 k_*semi* 为 PHP「Deprecated 但 rc=0」的分号终结符形)
+# columns: shape|php_rc|aot_rc|verdict|php_norm||aot_norm（AOT 拒绝支为 <compile_fail> aot_log=…）
+# 行内多行输出以字面量 \n 连接
+k_empty|php_rc=0|aot_rc=0|SAME_BOTH_ERROR_LIKE|||aot=
+k_case_colon|php_rc=0|aot_rc=0|SAME_BOTH_ERROR_LIKE|C\n||aot=C\n
+k_default_first|php_rc=0|aot_rc=0|DIFF_PHP_OK_AOT_DIFF|DC\n||aot=D\n
+k_default_empty|php_rc=0|aot_rc=0|SAME_BOTH_ERROR_LIKE|||aot=
+k_fallthrough|php_rc=0|aot_rc=0|SAME_BOTH_ERROR_LIKE|f\n||aot=f\n
+k_case_brace_body|php_rc=0|aot_rc=0|SAME_BOTH_ERROR_LIKE|B\n||aot=B\n
+k_case_semi|php_rc=0|aot_rc=NA|AOT_ONLY_RED_COMPILE|PHP Deprecated:  Case statements followed by a semicolon (;) are deprecated, use a colon (:) instead in FILE:LINE\nDeprecated: Case statements followed by a semicolon (;) are deprecated, use a colon (:) instead in FILE:LINE\nS\n||<compile_fail> aot_log=Parse error: syntax error, unexpected ";", expecting ":" on line LINE\n
+k_case_semi_fall|php_rc=0|aot_rc=NA|AOT_ONLY_RED_COMPILE|PHP Deprecated:  Case statements followed by a semicolon (;) are deprecated, use a colon (:) instead in FILE:LINE\nDeprecated: Case statements followed by a semicolon (;) are deprecated, use a colon (:) instead in FILE:LINE\nPHP Deprecated:  Case statements followed by a semicolon (;) are deprecated, use a colon (:) instead in FILE:LINE\nDeprecated: Case statements followed by a semicolon (;) are deprecated, use a colon (:) instead in FILE:LINE\nT\n||<compile_fail> aot_log=Parse error: syntax error, unexpected ";", expecting ":" on line LINE\n
+k_default_semi|php_rc=0|aot_rc=NA|AOT_ONLY_RED_COMPILE|PHP Deprecated:  Case statements followed by a semicolon (;) are deprecated, use a colon (:) instead in FILE:LINE\nDeprecated: Case statements followed by a semicolon (;) are deprecated, use a colon (:) instead in FILE:LINE\nD\n||<compile_fail> aot_log=Parse error: syntax error, unexpected ";", expecting ":" on line LINE\n
+k_case_semi_alt|php_rc=0|aot_rc=NA|AOT_ONLY_RED_COMPILE|PHP Deprecated:  Case statements followed by a semicolon (;) are deprecated, use a colon (:) instead in FILE:LINE\nDeprecated: Case statements followed by a semicolon (;) are deprecated, use a colon (:) instead in FILE:LINE\nQ\n||<compile_fail> aot_log=Parse error: syntax error, unexpected ";", expecting ":" on line LINE\n
+k_case_semi_two_arms|php_rc=0|aot_rc=NA|AOT_ONLY_RED_COMPILE|PHP Deprecated:  Case statements followed by a semicolon (;) are deprecated, use a colon (:) instead in FILE:LINE\nDeprecated: Case statements followed by a semicolon (;) are deprecated, use a colon (:) instead in FILE:LINE\nPHP Deprecated:  Case statements followed by a semicolon (;) are deprecated, use a colon (:) instead in FILE:LINE\nDeprecated: Case statements followed by a semicolon (;) are deprecated, use a colon (:) instead in FILE:LINE\nb\n||<compile_fail> aot_log=Parse error: syntax error, unexpected ";", expecting ":" on line LINE\n
+k_nested_switch|php_rc=0|aot_rc=0|SAME_BOTH_ERROR_LIKE|N\n||aot=N\n
+k_in_for|php_rc=0|aot_rc=0|SAME_BOTH_ERROR_LIKE|12\n||aot=12\n
+k_break_tail|php_rc=0|aot_rc=0|SAME_BOTH_ERROR_LIKE|x\n||aot=x\n
+k_stmt_before_case|php_rc=255|aot_rc=0|OVER_ACCEPT|PHP Parse error:  syntax error, unexpected token "echo", expecting "case" or "default" or "}" in FILE:LINE\nParse error: syntax error, unexpected token "echo", expecting "case" or "default" or "}" in FILE:LINE\n||aot=
+k_stmt_before_case_two|php_rc=255|aot_rc=0|OVER_ACCEPT|PHP Parse error:  syntax error, unexpected token "echo", expecting "case" or "default" or "}" in FILE:LINE\nParse error: syntax error, unexpected token "echo", expecting "case" or "default" or "}" in FILE:LINE\n||aot=
+k_nested_stmt_head|php_rc=255|aot_rc=0|OVER_ACCEPT|PHP Parse error:  syntax error, unexpected token "echo", expecting "case" or "default" or "}" in FILE:LINE\nParse error: syntax error, unexpected token "echo", expecting "case" or "default" or "}" in FILE:LINE\n||aot=
+k_stray_endswitch|php_rc=255|aot_rc=0|OVER_ACCEPT|PHP Parse error:  syntax error, unexpected token "endswitch", expecting "case" or "default" or "}" in FILE:LINE\nParse error: syntax error, unexpected token "endswitch", expecting "case" or "default" or "}" in FILE:LINE\n||aot=z\n
+k_dup_case_kw|php_rc=255|aot_rc=NA|BOTH_REJECT|PHP Parse error:  syntax error, unexpected token "case" in FILE:LINE\nParse error: syntax error, unexpected token "case" in FILE:LINE\n||<compile_fail> aot_log=Parse error: syntax error, unexpected token "1", expecting ":" on line LINE\n
+k_case_arrow|php_rc=255|aot_rc=NA|BOTH_REJECT|PHP Parse error:  syntax error, unexpected token "=>" in FILE:LINE\nParse error: syntax error, unexpected token "=>" in FILE:LINE\n||<compile_fail> aot_log=Parse error: syntax error, unexpected "=>", expecting ":" on line LINE\n
+k_case_no_term|php_rc=255|aot_rc=NA|BOTH_REJECT|PHP Parse error:  syntax error, unexpected token "echo" in FILE:LINE\nParse error: syntax error, unexpected token "echo" in FILE:LINE\n||<compile_fail> aot_log=Parse error: syntax error, unexpected token "echo", expecting ":" on line LINE\n
+k_case_unclosed|php_rc=255|aot_rc=NA|BOTH_REJECT|PHP Parse error:  Unclosed '{' on line 2 in FILE:LINE\nParse error: Unclosed '{' on line 2 in FILE:LINE\n||<compile_fail> aot_log=Parse error: syntax error, unexpected end of file, expecting "}" on line LINE\n
+k_alt_stmt_head|php_rc=255|aot_rc=NA|BOTH_REJECT|PHP Parse error:  syntax error, unexpected token "echo", expecting "endswitch" or "case" or "default" in FILE:LINE\nParse error: syntax error, unexpected token "echo", expecting "endswitch" or "case" or "default" in FILE:LINE\n||<compile_fail> aot_log=Parse error: syntax error, unexpected token "echo", expecting "endswitch" on line LINE\n
+k_alt_no_endswitch|php_rc=255|aot_rc=NA|BOTH_REJECT|PHP Parse error:  syntax error, unexpected end of file, expecting "endswitch" or "case" or "default" in FILE:LINE\nParse error: syntax error, unexpected end of file, expecting "endswitch" or "case" or "default" in FILE:LINE\n||<compile_fail> aot_log=Parse error: syntax error, unexpected end of file, expecting "endswitch" on line LINE\n
+ELAPSED=42s
+C010K_DONE shapes=24 same=8 over_accept=4 diff_php_ok=1 both_reject=6 aot_only_red=5 run_red=0 repo_build_residue=0 SMOKE_ONLY=0

@@ -1,0 +1,37 @@
+# compiler_md5=81f8a55a989f9a793fec2f75c32fd37d
+# lexer_md5=e3dd4191a1c3dfdf816b5873b4c60e5f
+# keyword_lookup_md5=ef70993a7caac6deb9b2e5a23bf7d143
+# parser_md5=5ad452fe4bc250b4732cbb3a2827b28a
+# gate_rev=v1 (L 族首代；R-5 落地前置守卫门。形集＝控制臂 4 + 臂表位邻形 19 = 23 形，全部以 /opt/homebrew/bin/php 实测真值归类；控制臂 l_ctl_* 为 PHP 合法形，用于捕获过度拒绝)
+# ★ 实测规则（决定 R-5 形态，php 8.5.8 直测）：case 列表首**恰好接受一枚空语句分号**，两种语法皆然——
+#   l_semi_arm_list / l_semi_only / l_alt_semi_arm php_rc=0 且臂体照常执行；
+#   l_two_semi_arm_list / l_alt_two_semi / l_semi_then_block 第二枚或后续非法 token 仍 php_rc=255
+#   ⇒ R-5 的意外 token 收紧必须「消费单枚分号、其余一律停在原位报错」，
+#     否则落地即把今日绿形新拒（= AOT_ONLY_RED_COMPILE），且 l_alt_semi_arm 的既有红无法消
+# columns: shape|php_rc|aot_rc|verdict|php_norm||aot_norm（AOT 拒绝支为 <compile_fail> aot_log=…）
+# 行内多行输出以字面量 \n 连接
+l_ctl_case_first|php_rc=0|aot_rc=0|SAME_BOTH_ERROR_LIKE|A\n||aot=A\n
+l_ctl_default_first|php_rc=0|aot_rc=0|SAME_BOTH_ERROR_LIKE|D\n||aot=D\n
+l_ctl_empty|php_rc=0|aot_rc=0|SAME_BOTH_ERROR_LIKE|||aot=
+l_ctl_between_arms|php_rc=0|aot_rc=0|SAME_BOTH_ERROR_LIKE|A\n||aot=A\n
+l_semi_arm_list|php_rc=0|aot_rc=0|SAME_BOTH_ERROR_LIKE|A\n||aot=A\n
+l_two_semi_arm_list|php_rc=255|aot_rc=0|OVER_ACCEPT|PHP Parse error:  syntax error, unexpected token ";", expecting "case" or "default" or "}" in FILE:LINE\nParse error: syntax error, unexpected token ";", expecting "case" or "default" or "}" in FILE:LINE\n||aot=A\n
+l_semi_only|php_rc=0|aot_rc=0|SAME_BOTH_ERROR_LIKE|||aot=
+l_bare_block_arm_list|php_rc=255|aot_rc=NA|BOTH_REJECT|PHP Parse error:  syntax error, unexpected token "{", expecting "case" or "default" or "}" in FILE:LINE\nParse error: syntax error, unexpected token "{", expecting "case" or "default" or "}" in FILE:LINE\n||<compile_fail> aot_log=Parse error: Unexpected token in expression on line LINE\n
+l_bare_block_nested|php_rc=255|aot_rc=NA|BOTH_REJECT|PHP Parse error:  syntax error, unexpected token "{", expecting "case" or "default" or "}" in FILE:LINE\nParse error: syntax error, unexpected token "{", expecting "case" or "default" or "}" in FILE:LINE\n||<compile_fail> aot_log=Parse error: Unexpected token in expression on line LINE\n
+l_if_before_case|php_rc=255|aot_rc=NA|BOTH_REJECT|PHP Parse error:  syntax error, unexpected token "if", expecting "case" or "default" or "}" in FILE:LINE\nParse error: syntax error, unexpected token "if", expecting "case" or "default" or "}" in FILE:LINE\n||<compile_fail> aot_log=Parse error: Unexpected token in expression on line LINE\n
+l_for_before_case|php_rc=255|aot_rc=NA|BOTH_REJECT|PHP Parse error:  syntax error, unexpected token "for", expecting "case" or "default" or "}" in FILE:LINE\nParse error: syntax error, unexpected token "for", expecting "case" or "default" or "}" in FILE:LINE\n||<compile_fail> aot_log=Parse error: Unexpected token in expression on line LINE\n
+l_assign_before_case|php_rc=255|aot_rc=0|OVER_ACCEPT|PHP Parse error:  syntax error, unexpected variable "$a", expecting "case" or "default" or "}" in FILE:LINE\nParse error: syntax error, unexpected variable "$a", expecting "case" or "default" or "}" in FILE:LINE\n||aot=A\n
+l_var_before_case|php_rc=255|aot_rc=0|OVER_ACCEPT|PHP Parse error:  syntax error, unexpected variable "$a", expecting "case" or "default" or "}" in FILE:LINE\nParse error: syntax error, unexpected variable "$a", expecting "case" or "default" or "}" in FILE:LINE\n||aot=A\n
+l_alt_if_before_case|php_rc=255|aot_rc=0|OVER_ACCEPT|PHP Parse error:  syntax error, unexpected token "if", expecting "case" or "default" or "}" in FILE:LINE\nParse error: syntax error, unexpected token "if", expecting "case" or "default" or "}" in FILE:LINE\n||aot=A\n
+l_endif_stray|php_rc=255|aot_rc=0|OVER_ACCEPT|PHP Parse error:  syntax error, unexpected token "endif", expecting "case" or "default" or "}" in FILE:LINE\nParse error: syntax error, unexpected token "endif", expecting "case" or "default" or "}" in FILE:LINE\n||aot=A\n
+l_alt_semi_arm|php_rc=0|aot_rc=NA|AOT_ONLY_RED_COMPILE|A\n||<compile_fail> aot_log=Parse error: syntax error, unexpected ";", expecting "endswitch" on line LINE\n
+l_alt_two_semi|php_rc=255|aot_rc=NA|BOTH_REJECT|PHP Parse error:  syntax error, unexpected token ";", expecting "endswitch" or "case" or "default" in FILE:LINE\nParse error: syntax error, unexpected token ";", expecting "endswitch" or "case" or "default" in FILE:LINE\n||<compile_fail> aot_log=Parse error: syntax error, unexpected ";", expecting "endswitch" on line LINE\n
+l_case_before_default|php_rc=0|aot_rc=0|SAME_BOTH_ERROR_LIKE|A\n||aot=A\n
+l_nested_brace_inner|php_rc=0|aot_rc=0|SAME_BOTH_ERROR_LIKE|N\n||aot=N\n
+l_semi_then_block|php_rc=255|aot_rc=NA|BOTH_REJECT|PHP Parse error:  syntax error, unexpected token "{", expecting "case" or "default" or "}" in FILE:LINE\nParse error: syntax error, unexpected token "{", expecting "case" or "default" or "}" in FILE:LINE\n||<compile_fail> aot_log=Parse error: Unexpected token in expression on line LINE\n
+l_bare_colon_arm_list|php_rc=255|aot_rc=0|OVER_ACCEPT|PHP Parse error:  syntax error, unexpected token ":", expecting "case" or "default" or "}" in FILE:LINE\nParse error: syntax error, unexpected token ":", expecting "case" or "default" or "}" in FILE:LINE\n||aot=A\n
+l_semi_between_arms|php_rc=0|aot_rc=0|SAME_BOTH_ERROR_LIKE|A\n||aot=A\n
+l_stray_rbrace|php_rc=255|aot_rc=NA|BOTH_REJECT|PHP Parse error:  Unmatched '}' in FILE:LINE\nParse error: Unmatched '}' in FILE:LINE\n||<compile_fail> aot_log=Parse error: Unexpected token in expression on line LINE\n
+ELAPSED=50s
+C010L_DONE shapes=23 same=9 over_accept=6 diff_php_ok=0 both_reject=7 aot_only_red=1 run_red=0 repo_build_residue=0 SMOKE_ONLY=0

@@ -71,6 +71,9 @@ p_fn_return_alt|function kwh_j_f(): string { if (true): return "R"; endif; retur
 p_break_in_alt_while|while (true): echo "X"; break; endwhile;
 p_alt_multi_stmt|if (1): $s = 0; for ($i = 1; $i <= 3; $i++): $s += $i; endfor; echo $s; endif;
 p_alt_top_and_tail|if (1): echo "Z"; endif; echo "!";
+p_if_elseif_multi|if (0): echo "A"; elseif (1): $s = 1; $s += 2; echo $s; endif;
+p_if_else_multi|if (0): echo "A"; else: $t = 2; $t *= 5; echo $t; endif;
+p_if_elseif_chain_multi|if (0): echo "A"; elseif (0): echo "B"; else: $u = 1; $u++; echo $u; endif;
 n_if_no_endif|if (1 > 0): echo "P";
 n_endif_alone|endif;
 n_while_no_endwhile|while (false): echo "Q";
@@ -78,6 +81,9 @@ n_switch_no_endswitch|switch (1): case 1: echo "S"; break;
 n_mismatch_end|if (1): echo "T"; endwhile;
 n_colon_brace_mix|if (1) { echo "U"; endif;
 n_double_endif|if (1): echo "V"; endif; endif;
+n_switch_stmt_before_case_alt|switch (1): echo "W"; endswitch;
+n_else_no_endif|if (0): echo "A"; else: echo "B";
+n_elseif_no_endif|if (0): echo "A"; elseif (1): echo "B";
 SPEC
 }
 
@@ -85,8 +91,8 @@ SPEC
   echo "# lexer_md5=$(md5 -q src/compiler/lexer.zig)"
   echo "# keyword_lookup_md5=$(md5 -q src/compiler/keyword_lookup.zig)"
   echo "# parser_md5=$(md5 -q src/compiler/parser.zig)"
-  echo "# gate_rev=v2 (v1: tr 换列分隔符致列溢出 + compile_fail 行丢 AOT 原文 ⇒ v1 数据列禁止引用)"
-  echo "# positive_shapes=16 negative_shapes=7"
+  echo "# gate_rev=v3 (v3=R-3 严格闭合落地轮 +6 形守卫面；v2=69806529…/表 8b208dd0…，已入 git HEAD 可取回；v1 数据列禁止引用)"
+  echo "# positive_shapes=19 negative_shapes=10"
   echo "# columns: shape|php_rc|aot_rc|verdict|php_norm||aot_norm(或 <compile_fail> aot_log=…)"
   echo "# 行内多行输出以字面量 \n 连接"
 } > "$OUT"

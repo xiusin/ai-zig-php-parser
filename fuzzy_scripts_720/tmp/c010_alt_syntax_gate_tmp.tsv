@@ -1,9 +1,9 @@
-# compiler_md5=5beb1591018e6092ffc0ab0446344eee
+# compiler_md5=6939cd2e891f20aef590de2585b15681
 # lexer_md5=e3dd4191a1c3dfdf816b5873b4c60e5f
 # keyword_lookup_md5=ef70993a7caac6deb9b2e5a23bf7d143
-# parser_md5=e3987a361d1db45bc3eadefc7afa249e
-# gate_rev=v2 (v1: tr 换列分隔符致列溢出 + compile_fail 行丢 AOT 原文 ⇒ v1 数据列禁止引用)
-# positive_shapes=16 negative_shapes=7
+# parser_md5=1eab26c068b13b9f904d2f432464d852
+# gate_rev=v3 (v3=R-3 严格闭合落地轮 +6 形守卫面；v2=69806529…/表 8b208dd0…，已入 git HEAD 可取回；v1 数据列禁止引用)
+# positive_shapes=19 negative_shapes=10
 # columns: shape|php_rc|aot_rc|verdict|php_norm||aot_norm(或 <compile_fail> aot_log=…)
 # 行内多行输出以字面量 \n 连接
 p_if|php_rc=0|aot_rc=0|SAME|A\n||aot=A\n
@@ -22,12 +22,18 @@ p_fn_return_alt|php_rc=0|aot_rc=0|SAME|R\n||aot=R\n
 p_break_in_alt_while|php_rc=0|aot_rc=0|SAME|X\n||aot=X\n
 p_alt_multi_stmt|php_rc=0|aot_rc=0|SAME|6\n||aot=6\n
 p_alt_top_and_tail|php_rc=0|aot_rc=0|SAME|Z!\n||aot=Z!\n
-n_if_no_endif|php_rc=255|aot_rc=0|OVER_ACCEPT|PHP Parse error:  syntax error, unexpected end of file, expecting "elseif" or "else" or "endif" in FILE:LINE\nParse error: syntax error, unexpected end of file, expecting "elseif" or "else" or "endif" in FILE:LINE\n||aot=P\n
-n_endif_alone|php_rc=255|aot_rc=0|OVER_ACCEPT|PHP Parse error:  syntax error, unexpected token "endif", expecting end of file in FILE:LINE\nParse error: syntax error, unexpected token "endif", expecting end of file in FILE:LINE\n||aot=
-n_while_no_endwhile|php_rc=255|aot_rc=NA|BOTH_REJECT|PHP Parse error:  syntax error, unexpected end of file in FILE:LINE\nParse error: syntax error, unexpected end of file in FILE:LINE\n||<compile_fail> aot_log=Parse error: syntax error, unexpected end of file, expecting token on line LINE\n
-n_switch_no_endswitch|php_rc=255|aot_rc=0|OVER_ACCEPT|PHP Parse error:  syntax error, unexpected end of file, expecting "endswitch" or "case" or "default" in FILE:LINE\nParse error: syntax error, unexpected end of file, expecting "endswitch" or "case" or "default" in FILE:LINE\n||aot=S\n
-n_mismatch_end|php_rc=255|aot_rc=0|OVER_ACCEPT|PHP Parse error:  syntax error, unexpected token "endwhile", expecting "elseif" or "else" or "endif" in FILE:LINE\nParse error: syntax error, unexpected token "endwhile", expecting "elseif" or "else" or "endif" in FILE:LINE\n||aot=T\n
-n_colon_brace_mix|php_rc=255|aot_rc=NA|BOTH_REJECT|PHP Parse error:  syntax error, unexpected token "endif" in FILE:LINE\nParse error: syntax error, unexpected token "endif" in FILE:LINE\n||<compile_fail> aot_log=Parse error: syntax error, unexpected end of file, expecting "}" on line LINE\n
-n_double_endif|php_rc=255|aot_rc=0|OVER_ACCEPT|PHP Parse error:  syntax error, unexpected token "endif", expecting end of file in FILE:LINE\nParse error: syntax error, unexpected token "endif", expecting end of file in FILE:LINE\n||aot=V\n
-ELAPSED=76s
-C010J_DONE shapes=23 same=16 diff=0 over_accept=5 both_reject=2 aot_only_red=0 run_red=0 both_err_diff=0 repo_build_residue=0 SMOKE_ONLY=0
+p_if_elseif_multi|php_rc=0|aot_rc=0|SAME|3\n||aot=3\n
+p_if_else_multi|php_rc=0|aot_rc=0|SAME|10\n||aot=10\n
+p_if_elseif_chain_multi|php_rc=0|aot_rc=0|SAME|2\n||aot=2\n
+n_if_no_endif|php_rc=255|aot_rc=NA|BOTH_REJECT|PHP Parse error:  syntax error, unexpected end of file, expecting "elseif" or "else" or "endif" in FILE:LINE\nParse error: syntax error, unexpected end of file, expecting "elseif" or "else" or "endif" in FILE:LINE\n||<compile_fail> aot_log=Parse error: syntax error, unexpected end of file, expecting "endif" on line LINE\n
+n_endif_alone|php_rc=255|aot_rc=NA|BOTH_REJECT|PHP Parse error:  syntax error, unexpected token "endif", expecting end of file in FILE:LINE\nParse error: syntax error, unexpected token "endif", expecting end of file in FILE:LINE\n||<compile_fail> aot_log=Parse error: Unexpected token in expression on line LINE\n
+n_while_no_endwhile|php_rc=255|aot_rc=NA|BOTH_REJECT|PHP Parse error:  syntax error, unexpected end of file in FILE:LINE\nParse error: syntax error, unexpected end of file in FILE:LINE\n||<compile_fail> aot_log=Parse error: syntax error, unexpected end of file, expecting "endwhile" on line LINE\n
+n_switch_no_endswitch|php_rc=255|aot_rc=NA|BOTH_REJECT|PHP Parse error:  syntax error, unexpected end of file, expecting "endswitch" or "case" or "default" in FILE:LINE\nParse error: syntax error, unexpected end of file, expecting "endswitch" or "case" or "default" in FILE:LINE\n||<compile_fail> aot_log=Parse error: syntax error, unexpected end of file, expecting "endswitch" on line LINE\n
+n_mismatch_end|php_rc=255|aot_rc=NA|BOTH_REJECT|PHP Parse error:  syntax error, unexpected token "endwhile", expecting "elseif" or "else" or "endif" in FILE:LINE\nParse error: syntax error, unexpected token "endwhile", expecting "elseif" or "else" or "endif" in FILE:LINE\n||<compile_fail> aot_log=Parse error: syntax error, unexpected token "endwhile", expecting "endif" on line LINE\n
+n_colon_brace_mix|php_rc=255|aot_rc=NA|BOTH_REJECT|PHP Parse error:  syntax error, unexpected token "endif" in FILE:LINE\nParse error: syntax error, unexpected token "endif" in FILE:LINE\n||<compile_fail> aot_log=Parse error: Unexpected token in expression on line LINE\n
+n_double_endif|php_rc=255|aot_rc=NA|BOTH_REJECT|PHP Parse error:  syntax error, unexpected token "endif", expecting end of file in FILE:LINE\nParse error: syntax error, unexpected token "endif", expecting end of file in FILE:LINE\n||<compile_fail> aot_log=Parse error: Unexpected token in expression on line LINE\n
+n_switch_stmt_before_case_alt|php_rc=255|aot_rc=NA|BOTH_REJECT|PHP Parse error:  syntax error, unexpected token "echo", expecting "endswitch" or "case" or "default" in FILE:LINE\nParse error: syntax error, unexpected token "echo", expecting "endswitch" or "case" or "default" in FILE:LINE\n||<compile_fail> aot_log=Parse error: syntax error, unexpected token "echo", expecting "endswitch" on line LINE\n
+n_else_no_endif|php_rc=255|aot_rc=NA|BOTH_REJECT|PHP Parse error:  syntax error, unexpected end of file in FILE:LINE\nParse error: syntax error, unexpected end of file in FILE:LINE\n||<compile_fail> aot_log=Parse error: syntax error, unexpected end of file, expecting "endif" on line LINE\n
+n_elseif_no_endif|php_rc=255|aot_rc=NA|BOTH_REJECT|PHP Parse error:  syntax error, unexpected end of file, expecting "elseif" or "else" or "endif" in FILE:LINE\nParse error: syntax error, unexpected end of file, expecting "elseif" or "else" or "endif" in FILE:LINE\n||<compile_fail> aot_log=Parse error: syntax error, unexpected end of file, expecting "endif" on line LINE\n
+ELAPSED=66s
+C010J_DONE shapes=29 same=19 diff=0 over_accept=0 both_reject=10 aot_only_red=0 run_red=0 both_err_diff=0 repo_build_residue=0 SMOKE_ONLY=0
