@@ -511,11 +511,23 @@ pub fn main(init: std.process.Init.Minimal) !void {
         std.debug.print("Error parsing code: {s}\n", .{@errorName(err)});
         if (context.errors.items.len > 0) {
             for (context.errors.items) |error_item| {
+                // R-135：Deprecated 诊断非解析错误，不在此列印（成功路径统一打印）
+                if (error_item.is_deprecated) continue;
                 std.debug.print("Parse error: {s}\n", .{error_item.msg});
             }
         }
         return;
     };
+
+    // AOT-CODEGEN-011 R-135：parse 期非致命 Deprecated 诊断（case/default 分号终结符）
+    // —— PHP 语义三模式同打；stderr 通道（PHP Deprecated 双写由 display 机制对齐，
+    // 此处单条 stderr 打印即可与 norm 对齐）
+    for (context.errors.items) |error_item| {
+        if (error_item.is_deprecated) {
+            const df = if (php_file) |f| f else "<stdin>";
+            std.debug.print("PHP Deprecated:  {s} in {s} on line {d}\n", .{ error_item.msg, df, error_item.line });
+        }
+    }
 
     var vm_instance = try vm.VM.init(allocator);
     vm_instance.context = &context;
@@ -731,15 +743,32 @@ fn runAOTCompilation(allocator: std.mem.Allocator, io: std.Io, cwd_dir: std.Io.D
         std.debug.print("Error: Parsing failed: {s}\n", .{@errorName(err)});
         if (context.errors.items.len > 0) {
             for (context.errors.items) |error_item| {
+                // R-135：Deprecated 诊断非解析错误，不在此列印（成功路径统一打印）
+                if (error_item.is_deprecated) continue;
                 std.debug.print("Parse error: {s}\n", .{error_item.msg});
             }
         }
         return;
     };
 
+    // AOT-CODEGEN-011 R-135：parse 期非致命 Deprecated 诊断（仅 AOT 编译入口打印；
+    // is_deprecated 项不计入解析失败）
+    for (context.errors.items) |error_item| {
+        if (error_item.is_deprecated) {
+            std.debug.print("PHP Deprecated:  {s} in {s} on line {d}\n", .{ error_item.msg, options.input_file, error_item.line });
+        }
+    }
+
     // 检查解析错误：AOT 编译模式下直接报告，不生成错误二进制
-    if (context.errors.items.len > 0) {
-        const first_err = context.errors.items[0];
+    //（R-135：跳过 is_deprecated 诊断项——它们非解析失败）
+    var first_fatal: ?@TypeOf(context.errors.items[0]) = null;
+    for (context.errors.items) |error_item| {
+        if (!error_item.is_deprecated) {
+            first_fatal = error_item;
+            break;
+        }
+    }
+    if (first_fatal) |first_err| {
         std.debug.print("Error: Parse error: {s} on line {d}\n", .{ first_err.msg, first_err.line });
         return;
     }

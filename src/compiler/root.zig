@@ -9,6 +9,9 @@ pub const Error = struct {
     msg: []const u8,
     line: u32,
     column: u32,
+    /// AOT-CODEGEN-011 R-135：非致命诊断标记（true = Deprecated 警告，非解析错误；
+    /// main 双入口按此分流打印 PHP 风格 Deprecated，不计入解析失败）
+    is_deprecated: bool = false,
 };
 
 pub const PHPContext = struct {
@@ -80,6 +83,17 @@ pub const PHPContext = struct {
         self.errors.clearRetainingCapacity();
         self.imports.clearRetainingCapacity();
         self.current_namespace = null;
+    }
+
+    /// AOT-CODEGEN-011 R-135：parse 期非致命 Deprecated 诊断（case/default 分号终结符等）
+    /// —— 复用 errors 列表（is_deprecated=true），main 双入口按 PHP 风格打印，不计入解析失败。
+    pub fn addDeprecatedWarning(self: *PHPContext, msg: []const u8, line: u32) void {
+        self.errors.append(self.allocator, .{
+            .msg = self.arena.allocator().dupe(u8, msg) catch msg,
+            .line = line,
+            .column = 0,
+            .is_deprecated = true,
+        }) catch {};
     }
 
     /// Intern a string - uses fast pool if enabled, otherwise standard pool

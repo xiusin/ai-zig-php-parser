@@ -3,7 +3,7 @@
 **问题 ID**: AOT-CODEGEN-011
 **优先级**: **P1**（面孔 B = **PHP 合法而 AOT 拒**，按宪法 §七-8 前半句禁止以简化脚本绕过 ⇒ 比宽容面更致命；面孔 C = **rc=0 无消息的错语义 + 假执行** ⇒ 假绿）
 **性质**: **两张面孔不同根**。面孔 B = 编译前端**文法位**（`src/compiler/parser.zig` 两处 `eat(.colon)`）；面孔 C = **AST 形态缺字段**（`src/compiler/ast.zig:186`）× 三模式各自的臂序消费（`ir_generator.zig` / `vm.zig` / `bytecode/generator.zig`）⇒ 与 AOT-CODEGEN-010 的 lexer 根**无关**，与 §3.6 的替代语法根也无关（实测与花括号／替代语法**无关**）。
-**状态**: **立项 + 取证完成，落地待老铁裁决**（本轮**零 `src/` 改动**；面孔 B 的跨模式副作用与面孔 C 的 AST 形态选择均需 §六 点头）。**姊妹面 A（= CODEGEN-010 路线 R-5）已于 2026-10-09 任务 #127 落地收口** ⇒ 本单两面孔**仍未落地**（实测证据见 §7-7 与页顶「任务 #127 代次更正」块：门 K `aot_only_red` 前后恒 5、`diff_php_ok` 恒 1）；D-1…D-4 裁决仍未获答复。
+**状态**: **R-B1/R-C1/R-C2 已落地并验收（2026-10-11，D-1~D-4 裁决全按推荐项执行：面B=共享前端直改、面C=default_slot 字段 AOT 先行、新建门 N/O），📦 待提交**；面 B/C 的 VM/bytecode 侧（R-C3）与 `case X;` 的 PHP 风格 Deprecated（消息面）维持登记待明示（本轮**零 `src/` 改动**；面孔 B 的跨模式副作用与面孔 C 的 AST 形态选择均需 §六 点头）。**姊妹面 A（= CODEGEN-010 路线 R-5）已于 2026-10-09 任务 #127 落地收口** ⇒ 本单两面孔**仍未落地**（实测证据见 §7-7 与页顶「任务 #127 代次更正」块：门 K `aot_only_red` 前后恒 5、`diff_php_ok` 恒 1）；D-1…D-4 裁决仍未获答复。
 **发现日期**: 2026-10-09（任务 #126 建**永久侧门 K** 轮实测发现，自 `AOT-CODEGEN-010` §3.7 拆出 ⇒ 该单只保留与关键字大小写同源的面孔 A）
 **触发档**: 默认档（`--compile --no-debug-info`），无需抬档
 
@@ -231,3 +231,14 @@ timeout 90 /opt/homebrew/bin/php fuzzy_scripts_720/tmp/c010k_case_order_terminat
 | A：花括号 `switch` 首 `case` 前的裸语句被静默跳过（4 枚 `OVER_ACCEPT`） | **CODEGEN-010** §7-15c / 路线 R-5 | ~~`:3595` 去掉 `is_alternative and`~~ ⇒ **该形态被任务 #127 实测否证**；实际落地 = 旗标 `Parser.strict_switch_case_list`（`:38`/`:82`）+ 单枚前导分号豁免支（`:3601–3606`）+ 严格支（`:3612`），**已落地并验收**（CODEGEN-010 §3.8）。R-3 批（`Parser.strict_alt_closers`）的姊妹面，同源于旗标引入时的**故意保守** |
 | B：`case expr;`／`default;` 假拒绝（5 枚 `AOT_ONLY_RED_COMPILE`） | **本单** R-B1 | `:3571`/`:3583`（当代次 `:3580`/`:3592`）的硬 `eat(.colon)`，与旗标、与关键字大小写**均无关**；★ 与面 A 的「臂表位单枚分号」**同函数不同文法位** ⇒ 落地前需自建门 N（§7-7） |
 | C：`default` 臂位次丢失（1 枚 `DIFF` + 5 枚补充实测） | **本单** R-C1/R-C2（+ R-C3 待 §五） | 根在 `ast.zig:186` 形态缺字段，三模式各自重排 ⇒ 与 `parser.zig` 文法位不同层 |
+
+
+## 9. R-134 落地轮（2026-10-11，D-1~D-4 裁决执行）
+
+**裁决记录**：D-1 = 甲（共享前端直改）｜D-2 = 甲（default_slot 字段）｜D-3 = AOT 先行 VM 登记｜D-4 = 新建门 N/O。
+
+**落地**：①R-B1：case/default 两处 `eat(.colon)` → colon-or-semicolon（失效注释 `// or .fat_arrow` 删除——`=>` 形态 PHP rc=255）；②R-C1：`ast.zig` switch_stmt + `default_slot: ?u32 = null`（default 位次，parser 写入 = 此前已收集 case 数）；③R-C2：`generateSwitchStmt` 臂体生成改统一 `arms` 序列（cases[0..slot] ++ [default] ++ cases[slot..]），臂尾 fall-through 按源码序；分发侧不变。
+
+**验收**：门 N（新建，7 形）修复前 `compile_fail=5`（恰为 5 枚假拒绝）→ **`red=0 green=7`**；门 O（新建，6 形）修复前 `red=5 green=1` → **`red=0 green=6`**；影子 68/68 零漂移（语料 4 枚 switch 全为 default 末臂 ⇒ default_slot=len 语义恒等）；门 D8/M 与六门读数保持；`zig build test` 通过；主回归见 regression_report.md（链 XIII）。
+
+**变更文档**：`docs/changes/2026-10-11/AOT-CODEGEN-011_面B面C落地_R134_2026-10-11_fbe6382a.md`。

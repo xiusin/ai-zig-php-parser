@@ -110,13 +110,19 @@ pub const Parser = struct {
         self.all_tokens.append(self.allocator, self.peek) catch {};
     }
 
-    fn reportError(self: *Parser, msg: []const u8) void {
-        // 从当前 token 位置计算行号
+    /// 当前行号（从当前 token 位置计算；R-135 提取自 reportError 供诊断复用）
+    fn currLine(self: *Parser) u32 {
         var line: u32 = 1;
         const pos = self.curr.loc.start;
         for (self.lexer.buffer[0..@min(pos, self.lexer.buffer.len)]) |c| {
             if (c == '\n') line += 1;
         }
+        return line;
+    }
+
+    fn reportError(self: *Parser, msg: []const u8) void {
+        // 从当前 token 位置计算行号
+        const line = self.currLine();
         const err = @import("root.zig").Error{
             .msg = self.context.arena.allocator().dupe(u8, msg) catch msg,
             .line = line,
@@ -3584,6 +3590,11 @@ pub const Parser = struct {
                 // 原硬 eat(.colon) 假拒绝 5 形（门 N compile_fail=5）。
                 // 失效注释所述 `=>` 形态 PHP 本身 rc=255（门 K BOTH_REJECT）⇒ 注释删除。
                 if (self.curr.tag == .semicolon) {
+                    // R-135（R-B1 消息面）：PHP 8.5 对分号终结符发 Deprecated（parse 期诊断）
+                    self.context.addDeprecatedWarning(
+                        "Case statements followed by a semicolon (;) are deprecated, use a colon (:) instead",
+                        self.currLine(),
+                    );
                     self.nextToken();
                 } else {
                     _ = try self.eat(.colon);
@@ -3601,6 +3612,11 @@ pub const Parser = struct {
                 self.nextToken();
                 // R-B1：default 臂同面B（分号终结符合法，见上）
                 if (self.curr.tag == .semicolon) {
+                    // R-135：default 臂同面B
+                    self.context.addDeprecatedWarning(
+                        "Case statements followed by a semicolon (;) are deprecated, use a colon (:) instead",
+                        self.currLine(),
+                    );
                     self.nextToken();
                 } else {
                     _ = try self.eat(.colon);
