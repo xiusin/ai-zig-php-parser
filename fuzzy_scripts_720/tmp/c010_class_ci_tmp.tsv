@@ -27,4 +27,4 @@ Deprecated: Creation of dynamic property PC::$pr is deprecated in FILE:LINE
 5]	AOT[PHP Deprecated:  Creation of dynamic property PC::$pr is deprecated in FILE:LINE
 Deprecated: Creation of dynamic property PC::$pr is deprecated in FILE:LINE
 5]
-C010M_DONE shapes=19 red=0 green=19 compile_fail=0 bad_probe=0 repo_build_residue=0 SMOKE_ONLY=0 ELAPSED=70s
+C010M_DONE shapes=19 red=0 green=19 compile_fail=0 bad_probe=0 repo_build_residue=0 SMOKE_ONLY=0 ELAPSED=68s

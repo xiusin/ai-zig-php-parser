@@ -281,3 +281,49 @@ C010H2_DONE shapes=15 over_accept=12 strict_same=1 aot_compile_fail=2 both_rejec
 C010I_DONE shapes=19 tree_same=7 tree_diff=12 bc_same=7 bc_diff=12 aot_same=19 aot_diff=0 aot_compile_fail=0 both_red=0 vm_only_red=12 aot_only_red=0 repo_build_residue=0 SMOKE_ONLY=0
 == 影子读数 ==
 C010_SHADOW_DONE total=68 same=0 diff=68 miss=0 ELAPSED=1577s
+== [1/3] shadow start 2026-10-11 10:43:33
+C010_SHADOW_DONE total=68 same=68 diff=0 miss=0 ELAPSED=1554s
+== [1/3] shadow rc=0 2026-10-11 11:09:27
+== [2/3] gates start 2026-10-11 11:09:27
+gateE_rc=0
+gateF_rc=0
+gateG_rc=0
+gateH_rc=0
+gateH2_rc=0
+gateI_rc=0
+== [2/3] gates done 2026-10-11 11:25:03
+== [3/3] main regression start 2026-10-11 11:25:03
+regression_rc=0
+== [3/3] regression done 2026-10-11 11:37:57
+== 六门新读数 ==
+C010KW_DONE shapes=19 same=19 diff=0 silent_empty=0 aot_fatal=0 compile_fail=0
+C010MECH_DONE shapes=8 same=8 diff=0 zero_instr=0 compile_fail=0
+C010G_DONE shapes=7 same=7 diff=0 red_confirmed=0 guard_same=4 guard_red=0 compile_fail=0
+C010H_DONE shapes=79 arms=200 face=0 noface=79 confounded=0 bad_probe=0 ctrl_compile_fail=0 probe_compile_fail=0 probe_timeout=0 inverse_shapes=21 inverse_face=0 inverse_noface=21 inverse_confounded=0 repo_build_residue=0 SMOKE_ONLY=0
+C010H2_DONE shapes=15 over_accept=12 strict_same=1 aot_compile_fail=2 both_reject=2 aot_only_red=0 php_ok_aot_diff=0 repo_build_residue=0 SMOKE_ONLY=0
+C010I_DONE shapes=19 tree_same=7 tree_diff=12 bc_same=7 bc_diff=12 aot_same=19 aot_diff=0 aot_compile_fail=0 both_red=0 vm_only_red=12 aot_only_red=0 repo_build_residue=0 SMOKE_ONLY=0
+== 影子读数 ==
+C010_SHADOW_DONE total=68 same=68 diff=0 miss=0 ELAPSED=1554s
+== [1/3] shadow start 2026-10-11 12:41:06
+C010_SHADOW_DONE total=68 same=68 diff=0 miss=0 ELAPSED=1583s
+== [1/3] shadow rc=0 2026-10-11 13:07:29
+== [2/3] gates start 2026-10-11 13:07:29
+gateE_rc=0
+gateF_rc=0
+gateG_rc=0
+gateH_rc=0
+gateH2_rc=0
+gateI_rc=0
+== [2/3] gates done 2026-10-11 13:23:43
+== [3/3] main regression start 2026-10-11 13:23:43
+regression_rc=0
+== [3/3] regression done 2026-10-11 13:36:49
+== 六门新读数 ==
+C010KW_DONE shapes=19 same=19 diff=0 silent_empty=0 aot_fatal=0 compile_fail=0
+C010MECH_DONE shapes=8 same=8 diff=0 zero_instr=0 compile_fail=0
+C010G_DONE shapes=7 same=7 diff=0 red_confirmed=0 guard_same=4 guard_red=0 compile_fail=0
+C010H_DONE shapes=79 arms=200 face=0 noface=79 confounded=0 bad_probe=0 ctrl_compile_fail=0 probe_compile_fail=0 probe_timeout=0 inverse_shapes=21 inverse_face=0 inverse_noface=21 inverse_confounded=0 repo_build_residue=0 SMOKE_ONLY=0
+C010H2_DONE shapes=15 over_accept=12 strict_same=1 aot_compile_fail=2 both_reject=2 aot_only_red=0 php_ok_aot_diff=0 repo_build_residue=0 SMOKE_ONLY=0
+C010I_DONE shapes=19 tree_same=7 tree_diff=12 bc_same=7 bc_diff=12 aot_same=19 aot_diff=0 aot_compile_fail=0 both_red=0 vm_only_red=12 aot_only_red=0 repo_build_residue=0 SMOKE_ONLY=0
+== 影子读数 ==
+C010_SHADOW_DONE total=68 same=68 diff=0 miss=0 ELAPSED=1583s

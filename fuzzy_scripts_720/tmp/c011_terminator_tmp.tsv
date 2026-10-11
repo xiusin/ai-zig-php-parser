@@ -1,0 +1,8 @@
+n_case_colon	SAME	PHP[A|end]	AOT[A|end]
+n_case_semi	SAME	PHP[A|end]	AOT[A|end]
+n_default_colon	SAME	PHP[D]	AOT[D]
+n_default_semi	SAME	PHP[D]	AOT[D]
+n_alt_case_semi	SAME	PHP[A]	AOT[A]
+n_alt_default_semi	SAME	PHP[D]	AOT[D]
+n_two_semi	SAME	PHP[A]	AOT[A]
+C011N_DONE shapes=7 red=0 green=7 compile_fail=0 bad_probe=0 repo_build_residue=0 SMOKE_ONLY=0 ELAPSED=25s

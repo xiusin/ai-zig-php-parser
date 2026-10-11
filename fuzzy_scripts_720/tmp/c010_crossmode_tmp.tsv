@@ -1,4 +1,4 @@
-# compiler_md5=73e27d8055b77fc37700013a92a66324
+# compiler_md5=7f3a1d70611afde01f7c5ce32c807df1
 # lexer_md5=e3dd4191a1c3dfdf816b5873b4c60e5f
 # keyword_lookup_md5=ef70993a7caac6deb9b2e5a23bf7d143
 # columns: shape|kind|verdict|php_norm||mode_norm|raw_rc
@@ -21,5 +21,5 @@ kw_foreach_ctl|php|f=1|f=2|||tree=SAME(f=1|f=2|)|bc=SAME(f=1|f=2|)|aot=SAME(f=1|
 kw_foreach_upper|php|f=1|f=2|||tree=DIFF()|bc=DIFF()|aot=SAME(f=1|f=2|)|vm_only_red
 kw_while_upper|php|w=0|w=1|||tree=DIFF(Uncaught UndefinedFunctionError: Call to undefined function WHILE() in FILE:LINE|)|bc=DIFF(Uncaught UndefinedFunctionError: Call to undefined function WHILE() in FILE:LINE|)|aot=SAME(w=0|w=1|)|vm_only_red
 kw_bool_upper|php|b=truefalseNULL|||tree=DIFF(Uncaught UndefinedVariableError: Undefined variable: $TRUE in FILE:LINE|)|bc=DIFF(b=NULLNULLNULL|)|aot=SAME(b=truefalseNULL|)|vm_only_red
-ELAPSED=66s
+ELAPSED=67s
 C010I_DONE shapes=19 tree_same=7 tree_diff=12 bc_same=7 bc_diff=12 aot_same=19 aot_diff=0 aot_compile_fail=0 both_red=0 vm_only_red=12 aot_only_red=0 repo_build_residue=0 SMOKE_ONLY=0

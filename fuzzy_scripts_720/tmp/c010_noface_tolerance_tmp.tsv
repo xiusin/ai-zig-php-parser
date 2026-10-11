@@ -1,7 +1,7 @@
-# compiler_md5=73e27d8055b77fc37700013a92a66324
+# compiler_md5=7f3a1d70611afde01f7c5ce32c807df1
 # lexer_md5=e3dd4191a1c3dfdf816b5873b4c60e5f
 # keyword_lookup_md5=ef70993a7caac6deb9b2e5a23bf7d143
-# parser_md5=1eab26c068b13b9f904d2f432464d852
+# parser_md5=dd07fb09c6ac41b2f5ff5fafe41792d6
 # nonsense_spelling=Zkwhq
 # columns: shape|php_rc|aot_rc|verdict|php_norm||aot_norm（AOT 拒绝支为 aot_log=…，取自编译日志归一原文）
 # verdicts: SAME_BOTH_ERROR_LIKE / OVER_ACCEPT / DIFF_PHP_OK_AOT_DIFF / BOTH_REJECT(收敛：两侧同拒) / AOT_ONLY_RED_*PHP 通过而 AOT 拒(硬守卫，须 0)

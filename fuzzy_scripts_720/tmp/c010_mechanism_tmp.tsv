@@ -1,8 +1,8 @@
-# compiler_md5=73e27d8055b77fc37700013a92a66324
+# compiler_md5=7f3a1d70611afde01f7c5ce32c807df1
 # lexer_md5=e3dd4191a1c3dfdf816b5873b4c60e5f
 # keyword_lookup_md5=ef70993a7caac6deb9b2e5a23bf7d143
-# parser_md5=1eab26c068b13b9f904d2f432464d852
-# runtime_lib_template_md5=6f99162a400f5d8000626361a1e844fa
+# parser_md5=dd07fb09c6ac41b2f5ff5fafe41792d6
+# runtime_lib_template_md5=c7bf17ad6b22d45e8950d0f3360f5e3c
 # columns: shape|php_rc|aot_rc|verdict|php_norm||aot_norm||instr|echo_calls|gvar|undef_fn
 m_echo_bare_ctl|php_rc=0|aot_rc=0|SAME|A|||aot=A|||instr=2|echo=1|gvar=none|undef=none
 m_echo_bare_title|php_rc=0|aot_rc=0|SAME|A|||aot=A|||instr=2|echo=1|gvar=none|undef=none
@@ -12,5 +12,5 @@ m_true_upper|php_rc=0|aot_rc=0|SAME|t=true|||aot=t=true|||instr=10|echo=3|gvar=n
 m_true_title|php_rc=0|aot_rc=0|SAME|t=true|||aot=t=true|||instr=10|echo=3|gvar=none|undef=none
 m_else_ctl|php_rc=0|aot_rc=0|SAME|P|||aot=P|||instr=9|echo=2|gvar=none|undef=none
 m_else_upper|php_rc=0|aot_rc=0|SAME|P|||aot=P|||instr=9|echo=2|gvar=none|undef=none
-ELAPSED=27s
+ELAPSED=28s
 C010MECH_DONE shapes=8 same=8 diff=0 zero_instr=0 compile_fail=0

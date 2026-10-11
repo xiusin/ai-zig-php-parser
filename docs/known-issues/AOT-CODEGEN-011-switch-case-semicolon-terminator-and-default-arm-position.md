@@ -242,3 +242,10 @@ timeout 90 /opt/homebrew/bin/php fuzzy_scripts_720/tmp/c010k_case_order_terminat
 **验收**：门 N（新建，7 形）修复前 `compile_fail=5`（恰为 5 枚假拒绝）→ **`red=0 green=7`**；门 O（新建，6 形）修复前 `red=5 green=1` → **`red=0 green=6`**；影子 68/68 零漂移（语料 4 枚 switch 全为 default 末臂 ⇒ default_slot=len 语义恒等）；门 D8/M 与六门读数保持；`zig build test` 通过；主回归见 regression_report.md（链 XIII）。
 
 **变更文档**：`docs/changes/2026-10-11/AOT-CODEGEN-011_面B面C落地_R134_2026-10-11_fbe6382a.md`。
+
+
+## 10. R-135（2026-10-11）：`case X;` 分号终结符的 PHP 风格 Deprecated（R-B1 消息面收口）
+
+**实现**：parse 期诊断无法跨层调 AOT 运行时 emitDeprecated（模块边界 + 运行时位置全局 parse 期未设）⇒ 走 PHPContext 诊断通道：`Error` 结构 + `is_deprecated` 标记（复用 errors 列表）+ `PHPContext.addDeprecatedWarning(msg, line)`（行号经 `currLine()` 提取）+ main 双入口按 PHP 形态打印（解释器 stderr / AOT 编译日志；PHP 单进程在运行输出——通道差异为 AOT 双过程模型固有）。**自纠**：AOT 入口 fatal 检查原用 `errors.items.len > 0` + `items[0]`，Deprecated 入列后纯 Deprecated 脚本会被误判解析失败 ⇒ 改跳过 `is_deprecated` 的 first-fatal 扫描；两处 catch 列印同步过滤。
+
+**验收**：消息与 PHP **逐字节一致**（`PHP Deprecated:  Case statements followed by a semicolon (;) are deprecated, use a colon (:) instead in FILE:LINE`）；三模式值输出一致；门 N/O 保持全绿（norm 剥 Deprecated 行）；`zig build test` 通过。变更文档 `docs/changes/2026-10-11/..._R135_2026-10-11_fbe6382a.md`。

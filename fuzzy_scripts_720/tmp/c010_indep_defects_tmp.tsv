@@ -12,4 +12,4 @@ d6a	GUARD_SAME	PHP[1]	AOT[1]
 d6b	GUARD_SAME	PHP[11]	AOT[11]
 d7a	GUARD_SAME	PHP[101]	AOT[101]
 d7b	GUARD_SAME	PHP[102]	AOT[102]
-C010D8_DONE shapes=14 defect_red=0 guard_same=14 compile_fail=0 bad_probe=0 repo_build_residue=0 SMOKE_ONLY=0 ELAPSED=48s
+C010D8_DONE shapes=14 defect_red=0 guard_same=14 compile_fail=0 bad_probe=0 repo_build_residue=0 SMOKE_ONLY=0 ELAPSED=49s
