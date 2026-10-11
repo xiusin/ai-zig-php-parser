@@ -1,8 +1,8 @@
-# compiler_md5=7f3a1d70611afde01f7c5ce32c807df1
+# compiler_md5=754f9f3a03e1367705e27b177d9540bf
 # lexer_md5=e3dd4191a1c3dfdf816b5873b4c60e5f
 # keyword_lookup_md5=ef70993a7caac6deb9b2e5a23bf7d143
 # parser_md5=dd07fb09c6ac41b2f5ff5fafe41792d6
-# runtime_lib_template_md5=c7bf17ad6b22d45e8950d0f3360f5e3c
+# runtime_lib_template_md5=38aea2b9e4577536ca6e8dc3ef790772
 # columns: shape|php_rc|aot_rc|verdict|php_norm||aot_norm||instr|echo_calls|gvar|undef_fn
 m_echo_bare_ctl|php_rc=0|aot_rc=0|SAME|A|||aot=A|||instr=2|echo=1|gvar=none|undef=none
 m_echo_bare_title|php_rc=0|aot_rc=0|SAME|A|||aot=A|||instr=2|echo=1|gvar=none|undef=none
