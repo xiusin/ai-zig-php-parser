@@ -3989,6 +3989,11 @@ pub const NativeLinker = struct {
         .{ "is_a", bi(.{ .runtime_name = "php_is_a", .needs_allocator = false }) },
         .{ "class_alias", bi(.{ .runtime_name = "php_class_alias", .needs_allocator = false }) },
         .{ "class_uses", bi(.{ .runtime_name = "php_class_uses", .needs_allocator = true }) },
+        // AOT-CODEGEN-012 R-138：get_class_methods / get_class_vars 此前只由 :1715 区发射顶层桩
+        // `@"get_class_methods"`，而调用侧只查本表 ⇒ 整枚内建 Fatal「undefined function」
+        //（工单 §4.4 旧归因「标签驱动发射器无内建分发」实测否证：函数体路径同样失效）。
+        .{ "get_class_methods", bi(.{ .runtime_name = "php_get_class_methods_builtin_wrapper", .needs_allocator = true }) },
+        .{ "get_class_vars", bi(.{ .runtime_name = "php_get_class_vars_builtin_wrapper", .needs_allocator = true }) },
         .{ "get_class", bi(.{ .runtime_name = "php_get_class", .needs_allocator = true }) },
         .{ "get_parent_class", .{ .runtime_name = "php_get_parent_class", .needs_allocator = true } },
         .{ "get_called_class", bi(.{ .runtime_name = "php_get_called_class_name", .needs_allocator = false }) },
@@ -10717,7 +10722,11 @@ pub const NativeLinker = struct {
                             // PHI 消解（非 coalesce 情况）：在 else 分支末尾添加 PHI 赋值
                             // 当 else 块有嵌套 cond_br（if/elseif）时，PHI 的 incoming
                             // 来自嵌套 if 的 merge 块而非 else 块本身，需扩展匹配范围
-                            if (!else_is_coalesce_merge) {
+                            // AOT-CODEGEN-013 R-A：臂尾若已以 return/break 终止，该臂就不是 merge 块
+                            // 的前驱 ⇒ 臂尾 PHI 会被写在 return 之后 ⇒ Zig 判 unreachable code ⇒
+                            // 合法 PHP（elseif 合取 + else 臂 return + 链后仍有语句）整体编译失败。
+                            // 守卫口径取自本文件既有先例（:17515 同一函数的调用条件），不新造判据。
+                            if (!else_is_coalesce_merge and !self.return_generated and !self.break_generated) {
                                 if (merge_bi) |mi| {
                                     try self.materializeMergePHIForArm(
                                         writer,
@@ -32836,6 +32845,10 @@ pub const NativeLinker = struct {
                         "Zig compiler failed with exit code {d}",
                         .{code},
                     );
+                    // AOT-CODEGEN-013 R-C：zig build-exe 失败时会留下 0 字节但仍带 +x 位的目标文件，
+                    // 使调用方（脚本门禁/人工复测）把「编译失败」误读为「产物存在且运行后无输出」。
+                    // 本仓库已因此产生过一次整页错误归因（工单 013 §5）。⇒ 失败即删产物。
+                    deleteStaleProduct(abs_output_path);
                     return error.CompilationFailed;
                 }
             },
@@ -32845,9 +32858,16 @@ pub const NativeLinker = struct {
                     "Zig compiler terminated abnormally",
                     .{},
                 );
+                deleteStaleProduct(abs_output_path);
                 return error.CompilationFailed;
             },
         }
+    }
+
+    /// AOT-CODEGEN-013 R-C：删除编译失败残留的产物文件（best-effort，失败不影响主错误码）
+    fn deleteStaleProduct(output_path: []const u8) void {
+        const io = getIo();
+        getCwd().deleteFile(io, output_path) catch {};
     }
 
     /// 获取目标平台字符串

@@ -4772,6 +4772,16 @@ pub fn php_get_class_vars_builtin(ctx: Value, args: []const Value, allocator: Al
     return php_get_class_vars(args[0], allocator);
 }
 
+// AOT-CODEGEN-012 R-138：分发表约定为「位置实参 + allocator」（needs_allocator=true 时发射
+// f(arg, allocator)），故按 get_object_vars 的既有包装口径补两枚 2 参入口。
+pub fn php_get_class_methods_builtin_wrapper(class_or_obj: Value, allocator: Allocator) !Value {
+    return php_get_class_methods_builtin(Value.initNull(), &[_]Value{class_or_obj}, allocator);
+}
+
+pub fn php_get_class_vars_builtin_wrapper(class_name: Value, allocator: Allocator) !Value {
+    return php_get_class_vars_builtin(Value.initNull(), &[_]Value{class_name}, allocator);
+}
+
 pub fn php_get_object_vars_builtin(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
     _ = ctx;
     if (args.len < 1) return error.InvalidArgumentCount;
@@ -4900,65 +4910,245 @@ pub fn php_array_get_ref(arr_val: Value, key_val: Value, allocator: Allocator) !
     return make_ref(slot, allocator);
 }
 
+/// AOT-CODEGEN-012 R-138：沿继承链按声明序收集方法名（自身 → 祖先，逐类按 method_order）。
+/// 同名去重保首位 ⇒ 子类覆写沿用其在自身表中的位次（PHP 函数表行为）。
+/// public_only=true 供 get_class_methods（仅 public）；false 供 ReflectionClass::getMethods（全可见性）。
+fn collectMethodNamesInOrder(
+    meta: *const ClassMeta,
+    public_only: bool,
+    allocator: Allocator,
+) !std.ArrayList([]const u8) {
+    var out: std.ArrayList([]const u8) = .empty;
+    errdefer out.deinit(allocator);
+    var seen = std.StringHashMap(void).init(allocator);
+    defer seen.deinit();
+
+    var cur: ?*const ClassMeta = meta;
+    while (cur) |m| {
+        for (m.method_order.items) |mname| {
+            if (seen.contains(mname)) continue;
+            if (public_only) {
+                const cm = m.methods.get(mname) orelse continue;
+                if (!cm.is_public) continue;
+            }
+            try seen.put(mname, {});
+            try out.append(allocator, mname);
+        }
+        cur = m.parent;
+    }
+    return out;
+}
+
+/// AOT-CODEGEN-012 R-138：沿继承链按声明序收集属性名（自身 → 祖先），同名去重保首位。
+/// 供 ReflectionClass::getProperties（PHP 含继承属性、全可见性）。
+fn collectPropertyNamesInOrder(meta: *const ClassMeta, allocator: Allocator) !std.ArrayList([]const u8) {
+    var out: std.ArrayList([]const u8) = .empty;
+    errdefer out.deinit(allocator);
+    var seen = std.StringHashMap(void).init(allocator);
+    defer seen.deinit();
+
+    var cur: ?*const ClassMeta = meta;
+    while (cur) |m| {
+        for (m.property_order.items) |pname| {
+            if (seen.contains(pname)) continue;
+            try seen.put(pname, {});
+            try out.append(allocator, pname);
+        }
+        cur = m.parent;
+    }
+    return out;
+}
+
+/// AOT-CODEGEN-012 R-138：Reflection 族只读属性面（PHP 真值实测）。
+/// 一处共享支覆盖全部构造点（ReflectionClass/Method/Property/ClassConstant 共 8 个 new 站点）：
+///   读 name / class ⇒ 由内部 __class_name / __method_name / __prop_name 派生；
+///   其余名字 ⇒ 复刻 PHP 的 Undefined property 告警（因 __get 接管后原生告警支不再触发）。
+fn reflectionRoGet(ctx: Value, args: []const Value, alloc: Allocator) anyerror!Value {
+    if (!Value_isObject(ctx) or args.len == 0) return Value.initNull();
+    const obj = Value_asObject(ctx);
+    const pname = if (args[0].isString()) args[0].asString().data else return Value.initNull();
+    const owner: []const u8 = if (obj.class_meta) |m| m.name else obj.class_name;
+    const cn: []const u8 = if (obj.getPropertyDirect("__class_name")) |v| (if (v.isString()) v.asString().data else "") else "";
+    const mn: []const u8 = if (obj.getPropertyDirect("__method_name")) |v| (if (v.isString()) v.asString().data else "") else "";
+    const pn: []const u8 = if (obj.getPropertyDirect("__prop_name")) |v| (if (v.isString()) v.asString().data else "") else "";
+
+    // PHP 真值：ReflectionClass->$name=类名；ReflectionMethod->$name=方法名、->$class=类名；
+    // ReflectionProperty->$name=属性名、->$class=类名。
+    var derived: []const u8 = "";
+    if (std.mem.eql(u8, pname, "name")) {
+        if (std.mem.eql(u8, owner, "ReflectionMethod")) {
+            derived = mn;
+        } else if (std.mem.eql(u8, owner, "ReflectionProperty")) {
+            derived = pn;
+        } else {
+            derived = cn;
+        }
+    } else if (std.mem.eql(u8, pname, "class") and !std.mem.eql(u8, owner, "ReflectionClass")) {
+        derived = cn;
+    }
+
+    if (derived.len == 0) {
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Undefined property: {s}::${s}", .{ owner, pname }) catch
+            "Undefined property";
+        emitWarning(msg);
+        return Value.initNull();
+    }
+    const s = try PHPString.init(alloc, derived);
+    return Value.initString(s);
+}
+
+/// AOT-CODEGEN-012 R-138：写只读属性 ⇒ PHP ReflectionException
+/// 「Cannot set read-only property ReflectionMethod::$class」（真值实测）。
+fn reflectionRoSet(ctx: Value, args: []const Value, alloc: Allocator) anyerror!Value {
+    if (!Value_isObject(ctx) or args.len < 2) return Value.initBool(false);
+    const obj = Value_asObject(ctx);
+    const owner: []const u8 = if (obj.class_meta) |m| m.name else obj.class_name;
+    const pname = if (args[0].isString()) args[0].asString().data else return Value.initBool(false);
+    if (std.mem.eql(u8, pname, "name") or std.mem.eql(u8, pname, "class")) {
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Cannot set read-only property {s}::${s}", .{ owner, pname }) catch
+            "Cannot set read-only property";
+        _ = throwThrowable("ReflectionException", msg, alloc) catch {};
+        return error.ReflectionReadOnlyProperty;
+    }
+    // 非只读名：PHP 对 Reflection* 的未知属性赋值同样落告警支，这里交回动态属性创建路径
+    try obj.setProperty(pname, args[1]);
+    return Value.initBool(true);
+}
+
+/// AOT-CODEGEN-012 R-138：为 Reflection 元数据挂只读属性面（三枚 meta 共用两支）
+fn attachReflectionReadOnlyProps(meta: *ClassMeta) !void {
+    try meta.addMethod(.{
+        .name = "__get",
+        .func = reflectionRoGet,
+        .is_static = false,
+    });
+    try meta.addMethod(.{
+        .name = "__set",
+        .func = reflectionRoSet,
+        .is_static = false,
+    });
+}
+
+/// AOT-CODEGEN-012 R-138：接口列表的传递闭包判定（含接口的父接口）。`target` 传入**规范名**
+/// （调用侧已经 findClass 归一 ⇒ 天然 CI，且 class_alias 的同 meta 双键亦命中）。
+/// depth 上限防接口环（PHP 禁止循环继承，此处为编译器不可证明的运行时不变量兜底）。
+fn interfaceListHas(ifaces: []const []const u8, target: []const u8, depth: u8) bool {
+    if (depth > 16) return false;
+    for (ifaces) |raw| {
+        const meta = findClass(raw) orelse {
+            if (std.ascii.eqlIgnoreCase(raw, target)) return true;
+            continue;
+        };
+        if (std.mem.eql(u8, meta.name, target)) return true;
+        if (interfaceListHas(meta.interfaces, target, depth + 1)) return true;
+    }
+    return false;
+}
+
+/// AOT-CODEGEN-012 R-138：类/接口是否实现（或继承）给定接口 —— 沿类链逐层的 interfaces 求闭包。
+fn classImplementsInterfaceNamed(cmeta: *const ClassMeta, target: []const u8) bool {
+    var cur: ?*const ClassMeta = cmeta;
+    var depth: u8 = 0;
+    while (cur) |m| : (depth += 1) {
+        if (depth > 64) return false;
+        if (interfaceListHas(m.interfaces, target, 0)) return true;
+        cur = m.parent;
+    }
+    return false;
+}
+
+/// AOT-CODEGEN-012 R-138：PHP 的实参类型词（此族消息用 true/false 而非 bool）
+fn phpArgTypeWord(v: Value) []const u8 {
+    if (v.isBool()) return if (v.toBool()) "true" else "false";
+    return valueTypeName(v);
+}
+
 fn php_get_class_methods(class_name_val: Value, allocator: Allocator) !Value {
+    // PHP 签名：get_class_methods(object|string $object_or_class): array
+    // 非对象且字符串未注册为类 ⇒ TypeError「must be an object or a valid class name, {type} given」
     var meta_opt: ?*const ClassMeta = null;
     if (class_name_val.isString()) {
         meta_opt = findClass(class_name_val.asString().data);
     } else if (Value_isObject(class_name_val)) {
         const obj = Value_asObject(class_name_val);
         meta_opt = obj.class_meta orelse findClass(obj.class_name);
-    } else {
-        return error.InvalidArgument;
     }
+    const meta = meta_opt orelse {
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(
+            &buf,
+            "get_class_methods(): Argument #1 ($object_or_class) must be an object or" ++
+                " a valid class name, {s} given",
+            .{phpArgTypeWord(class_name_val)},
+        ) catch "get_class_methods(): Argument #1 must be an object or a valid class name";
+        return throwThrowable("TypeError", msg, allocator);
+    };
 
-    const meta = meta_opt orelse return Value.initNull();
-
-    var seen = std.StringHashMap(void).init(allocator);
-    defer seen.deinit();
+    var names = try collectMethodNamesInOrder(meta, true, allocator);
+    defer names.deinit(allocator);
 
     const res_arr = try PHPArray.init(allocator);
-
-    var cur: ?*const ClassMeta = meta;
-    while (cur) |m| : (cur = m.parent) {
-        var iter = m.methods.iterator();
-        while (iter.next()) |entry| {
-            const method = entry.value_ptr.*;
-            if (!method.is_public) continue;
-            if (seen.contains(entry.key_ptr.*)) continue;
-            try seen.put(entry.key_ptr.*, {});
-
-            const s = try PHPString.init(allocator, entry.key_ptr.*);
-            const v = Value.initString(s);
-            try res_arr.push(allocator, v);
-            v.release(allocator);
-        }
+    for (names.items) |mname| {
+        const s = try PHPString.init(allocator, mname);
+        const v = Value.initString(s);
+        try res_arr.push(allocator, v);
+        v.release(allocator);
     }
 
     return Value.initArray(res_arr);
 }
 
 fn php_get_class_vars(class_name_val: Value, allocator: Allocator) !Value {
-    var meta_opt: ?*const ClassMeta = null;
-    if (class_name_val.isString()) {
-        meta_opt = findClass(class_name_val.asString().data);
-    } else if (Value_isObject(class_name_val)) {
+    // PHP 签名：get_class_vars(string $class): array —— 未注册类名 ⇒ TypeError（消息用**值**而非类型词）
+    const display_val = blk: {
+        if (class_name_val.isString()) break :blk class_name_val.asString().data;
+        if (class_name_val.isNull()) break :blk "";
+        if (class_name_val.isArray()) break :blk "Array";
+        const s = class_name_val.toString(allocator) catch break :blk valueTypeName(class_name_val);
+        break :blk s.data;
+    };
+    const meta_opt: ?*const ClassMeta = if (class_name_val.isString())
+        findClass(class_name_val.asString().data)
+    else if (Value_isObject(class_name_val)) blk: {
         const obj = Value_asObject(class_name_val);
-        meta_opt = obj.class_meta orelse findClass(obj.class_name);
-    } else {
-        return error.InvalidArgument;
-    }
+        break :blk obj.class_meta orelse findClass(obj.class_name);
+    } else null;
 
-    const meta = meta_opt orelse return Value.initNull();
+    const meta = meta_opt orelse {
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(
+            &buf,
+            "get_class_vars(): Argument #1 ($class) must be a valid class name, {s} given",
+            .{display_val},
+        ) catch "get_class_vars(): Argument #1 must be a valid class name";
+        return throwThrowable("TypeError", msg, allocator);
+    };
+
     const res_arr = try PHPArray.init(allocator);
 
-    var iter = meta.properties.iterator();
-    while (iter.next()) |entry| {
-        const prop = entry.value_ptr.*;
-        if (prop.is_static) continue;
-        if (!prop.is_public) continue;
-        const key_str = try PHPString.init(allocator, entry.key_ptr.*);
-        try res_arr.set(allocator, ArrayKey{ .string = key_str }, prop.default_value orelse Value.initNull());
-        key_str.release(allocator);
+    // PHP 真值实测口径（R-138）：先「实例属性 pass」沿链（自身→祖先），再「静态属性 pass」沿链，
+    // 每趟逐类按 property_order（声明序）；仅 public。混合声明（static 在实例之前）亦成立。
+    var pass: u8 = 0;
+    while (pass < 2) : (pass += 1) {
+        const want_static = pass == 1;
+        var cur: ?*const ClassMeta = meta;
+        while (cur) |m| {
+            for (m.property_order.items) |pname| {
+                const prop = m.properties.get(pname) orelse continue;
+                if (prop.is_static != want_static) continue;
+                if (!prop.is_public) continue;
+                const val = if (want_static)
+                    (m.static_properties.get(pname) orelse prop.default_value orelse Value.initNull())
+                else
+                    (prop.default_value orelse Value.initNull());
+                const key_str = try PHPString.init(allocator, pname);
+                try res_arr.set(allocator, ArrayKey{ .string = key_str }, val);
+                key_str.release(allocator);
+            }
+            cur = m.parent;
+        }
     }
 
     return Value.initArray(res_arr);
@@ -4969,8 +5159,52 @@ fn php_get_object_vars(obj_val: Value, allocator: Allocator) !Value {
     const obj = Value_asObject(obj_val);
 
     const res_arr = try PHPArray.init(allocator);
-    var iter = obj.properties.iterator();
-    while (iter.next()) |entry| {
+
+    // PHP 真值实测口径（R-138）：
+    //   1) 顺序 = 声明属性沿链**根→叶**（对象属性表按祖先先初始化），其后为动态属性（插入序）；
+    //   2) 可见性按**调用作用域**过滤：全局/函数作用域仅 public，类方法内 private/protected 可见
+    //     （复用 checkPropertyAccess，含 trait 上下文语义）。
+    var printed = std.StringHashMap(void).init(allocator);
+    defer printed.deinit();
+
+    // 先把链收集成数组，再反向遍历（根→叶）
+    var chain: std.ArrayList(*const ClassMeta) = .empty;
+    defer chain.deinit(allocator);
+    var cur: ?*const ClassMeta = obj.class_meta;
+    while (cur) |m| {
+        try chain.append(allocator, m);
+        cur = m.parent;
+    }
+    var idx = chain.items.len;
+    while (idx > 0) {
+        idx -= 1;
+        const m = chain.items[idx];
+        const obj_meta = obj.class_meta orelse break;
+        for (m.property_order.items) |pname| {
+            if (printed.contains(pname)) continue;
+            const decl = findPropertyDeclaringClass(obj_meta, pname) orelse continue;
+            if (decl.prop.is_static) continue;
+            if (!checkPropertyAccess(decl.class, decl.prop)) continue;
+            const val = obj.properties.get(pname) orelse continue;
+            try printed.put(pname, {});
+            const key_str = try PHPString.init(allocator, pname);
+            try res_arr.set(allocator, ArrayKey{ .string = key_str }, val);
+            key_str.release(allocator);
+        }
+    }
+
+    // 余下动态属性：PHP 保插入序，AOT 的 obj.properties 为 StringHashMap（无插入序）⇒
+    // 单枚动态属性等值，多枚动态属性的相对序属已知残留（工单登记，需对象级插入序字段）。
+    var it = obj.properties.iterator();
+    while (it.next()) |entry| {
+        if (printed.contains(entry.key_ptr.*)) continue;
+        // 已声明但被可见性过滤掉的属性不得从动态支漏出
+        if (obj.class_meta) |meta| {
+            if (findPropertyDeclaringClass(meta, entry.key_ptr.*)) |decl| {
+                if (!checkPropertyAccess(decl.class, decl.prop)) continue;
+            }
+        }
+        try printed.put(entry.key_ptr.*, {});
         const key_str = try PHPString.init(allocator, entry.key_ptr.*);
         try res_arr.set(allocator, ArrayKey{ .string = key_str }, entry.value_ptr.*);
         key_str.release(allocator);
@@ -8414,37 +8648,37 @@ pub fn registerArrayIterator(allocator: Allocator) !void {
     };
 
     // 注册方法
-    try meta.methods.put("__construct", .{
+    try meta.putMethodOrdered(.{
         .name = "__construct",
         .func = arrayIterator_construct,
         .is_public = true,
     });
 
-    try meta.methods.put("rewind", .{
+    try meta.putMethodOrdered(.{
         .name = "rewind",
         .func = arrayIterator_rewind,
         .is_public = true,
     });
 
-    try meta.methods.put("valid", .{
+    try meta.putMethodOrdered(.{
         .name = "valid",
         .func = arrayIterator_valid,
         .is_public = true,
     });
 
-    try meta.methods.put("current", .{
+    try meta.putMethodOrdered(.{
         .name = "current",
         .func = arrayIterator_current,
         .is_public = true,
     });
 
-    try meta.methods.put("key", .{
+    try meta.putMethodOrdered(.{
         .name = "key",
         .func = arrayIterator_key,
         .is_public = true,
     });
 
-    try meta.methods.put("next", .{
+    try meta.putMethodOrdered(.{
         .name = "next",
         .func = arrayIterator_next,
         .is_public = true,
@@ -8683,24 +8917,24 @@ pub fn registerSplFixedArray(allocator: Allocator) !void {
     };
 
     // 注册方法
-    try meta.methods.put("__construct", .{ .name = "__construct", .func = splFixedArray_construct, .is_public = true });
-    try meta.methods.put("getSize", .{ .name = "getSize", .func = splFixedArray_getSize, .is_public = true });
-    try meta.methods.put("setSize", .{ .name = "setSize", .func = splFixedArray_setSize, .is_public = true });
-    try meta.methods.put("toArray", .{ .name = "toArray", .func = splFixedArray_toArray, .is_public = true });
-    try meta.methods.put("count", .{ .name = "count", .func = splFixedArray_count, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "__construct", .func = splFixedArray_construct, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "getSize", .func = splFixedArray_getSize, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "setSize", .func = splFixedArray_setSize, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "toArray", .func = splFixedArray_toArray, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "count", .func = splFixedArray_count, .is_public = true });
 
     // ArrayAccess接口
-    try meta.methods.put("offsetExists", .{ .name = "offsetExists", .func = splFixedArray_offsetExists, .is_public = true });
-    try meta.methods.put("offsetGet", .{ .name = "offsetGet", .func = splFixedArray_offsetGet, .is_public = true });
-    try meta.methods.put("offsetSet", .{ .name = "offsetSet", .func = splFixedArray_offsetSet, .is_public = true });
-    try meta.methods.put("offsetUnset", .{ .name = "offsetUnset", .func = splFixedArray_offsetUnset, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "offsetExists", .func = splFixedArray_offsetExists, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "offsetGet", .func = splFixedArray_offsetGet, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "offsetSet", .func = splFixedArray_offsetSet, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "offsetUnset", .func = splFixedArray_offsetUnset, .is_public = true });
 
     // Iterator接口
-    try meta.methods.put("rewind", .{ .name = "rewind", .func = splFixedArray_rewind, .is_public = true });
-    try meta.methods.put("valid", .{ .name = "valid", .func = splFixedArray_valid, .is_public = true });
-    try meta.methods.put("current", .{ .name = "current", .func = splFixedArray_current, .is_public = true });
-    try meta.methods.put("key", .{ .name = "key", .func = splFixedArray_key, .is_public = true });
-    try meta.methods.put("next", .{ .name = "next", .func = splFixedArray_next, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "rewind", .func = splFixedArray_rewind, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "valid", .func = splFixedArray_valid, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "current", .func = splFixedArray_current, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "key", .func = splFixedArray_key, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "next", .func = splFixedArray_next, .is_public = true });
 
     meta.magic_construct = splFixedArray_construct;
 
@@ -9276,10 +9510,10 @@ pub fn registerSplStack(allocator: Allocator) !void {
         .allocator = allocator,
     };
 
-    try meta.methods.put("__construct", .{ .name = "__construct", .func = splStack_construct, .is_public = true });
-    try meta.methods.put("push", .{ .name = "push", .func = splStack_push, .is_public = true });
-    try meta.methods.put("pop", .{ .name = "pop", .func = splStack_pop, .is_public = true });
-    try meta.methods.put("isEmpty", .{ .name = "isEmpty", .func = splStack_isEmpty, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "__construct", .func = splStack_construct, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "push", .func = splStack_push, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "pop", .func = splStack_pop, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "isEmpty", .func = splStack_isEmpty, .is_public = true });
 
     meta.magic_construct = splStack_construct;
 
@@ -9381,10 +9615,10 @@ pub fn registerSplQueue(allocator: Allocator) !void {
         .allocator = allocator,
     };
 
-    try meta.methods.put("__construct", .{ .name = "__construct", .func = splQueue_construct, .is_public = true });
-    try meta.methods.put("enqueue", .{ .name = "enqueue", .func = splQueue_enqueue, .is_public = true });
-    try meta.methods.put("dequeue", .{ .name = "dequeue", .func = splQueue_dequeue, .is_public = true });
-    try meta.methods.put("isEmpty", .{ .name = "isEmpty", .func = splQueue_isEmpty, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "__construct", .func = splQueue_construct, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "enqueue", .func = splQueue_enqueue, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "dequeue", .func = splQueue_dequeue, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "isEmpty", .func = splQueue_isEmpty, .is_public = true });
 
     meta.magic_construct = splQueue_construct;
 
@@ -12994,6 +13228,7 @@ pub const ClassMeta = struct {
     parent: ?*const ClassMeta = null,
     interfaces: []const []const u8 = &.{},
     methods: std.StringHashMap(ClassMethod),
+    method_order: std.ArrayList([]const u8) = .empty,
     properties: std.StringHashMap(ClassProperty),
     property_order: std.ArrayList([]const u8),
     static_properties: std.StringHashMap(Value),
@@ -13029,6 +13264,7 @@ pub const ClassMeta = struct {
         meta.* = .{
             .name = try allocator.dupe(u8, name),
             .methods = std.StringHashMap(ClassMethod).init(allocator),
+            .method_order = try std.ArrayList([]const u8).initCapacity(allocator, 0),
             .properties = std.StringHashMap(ClassProperty).init(allocator),
             .property_order = try std.ArrayList([]const u8).initCapacity(allocator, 0),
             .static_properties = std.StringHashMap(Value).init(allocator),
@@ -13047,15 +13283,29 @@ pub const ClassMeta = struct {
 
         // 再释放其他资源
         self.methods.deinit();
+        self.method_order.deinit(self.allocator);
         self.properties.deinit();
         self.property_order.deinit(self.allocator);
         self.allocator.free(self.name);
         self.allocator.destroy(self);
     }
 
+    /// AOT-CODEGEN-012 R-138：受声明/注册序登记（addMethod 的登记内核）。
+    /// 内部类（Generator/SplFixedArray/迭代器族共 28 处）原以 `methods.put` 直注 ⇒
+    /// method_order 为空 ⇒ get_class_methods 于这些类被枚举成空数组（PHP 真值为注册序，
+    /// 实测 SplFixedArray 15 枚 = __construct|__wakeup|__serialize|__unserialize…）。
+    /// 故这些站点统一改走本入口，且刻意不触发 addMethod 的 magic_* 派发副作用。
+    pub fn putMethodOrdered(self: *ClassMeta, method: ClassMethod) !void {
+        // 同名覆盖保持首位 ⇒ 与 PHP「子类覆写沿用其在表中的位次」一致。
+        if (!self.methods.contains(method.name)) {
+            try self.method_order.append(self.allocator, method.name);
+        }
+        try self.methods.put(method.name, method);
+    }
+
     /// 添加方法
     pub fn addMethod(self: *ClassMeta, method: ClassMethod) !void {
-        try self.methods.put(method.name, method);
+        try self.putMethodOrdered(method);
         if (std.mem.eql(u8, method.name, "__construct")) self.magic_construct = method.func;
         if (std.mem.eql(u8, method.name, "__destruct")) self.magic_destruct = method.func;
         if (std.mem.eql(u8, method.name, "__get")) self.magic_get = method.func;
@@ -15459,13 +15709,25 @@ pub const ClassMeta = struct {
                 fn call(ctx: Value, args: []const Value, alloc: Allocator) anyerror!Value {
                     if (args.len == 0) return Value.initNull();
                     const this = Value_asObject(ctx);
-                    // 参数是类名字符串
-                    const name_str = (try args[0].toString(alloc)).data;
+                    // PHP 签名：ReflectionClass::__construct(object|string $object_or_class)
+                    const name_str = if (Value_isObject(args[0]))
+                        Value_asObject(args[0]).class_name
+                    else
+                        (try args[0].toString(alloc)).data;
                     // AOT-CODEGEN-012 R-136：类名 CI —— __class_name 存**规范注册拼写**
                     //（getName 与 PHP 一致返回声明名；跨大小写查找已经 findClass CI 生效）
-                    const canonical = if (findClass(name_str)) |meta| meta.name else name_str;
-                    try this.setProperty("__class_name", Value.initString(try PHPString.init(alloc, canonical)));
-                    return Value.initNull();
+                    const found = findClass(name_str);
+                    if (found) |meta| {
+                        try this.setProperty("__class_name", Value.initString(try PHPString.init(alloc, meta.name)));
+                        return Value.initNull();
+                    }
+                    // AOT-CODEGEN-012 R-138 重落 R-137b：未注册类 ⇒ ReflectionException（可 catch）
+                    //（原批只入库了 ReflectionException 的类注册，抛出支从未进树 ⇒ 门 P g4 实测 NO THROW）
+                    var buf: [256]u8 = undefined;
+                    const msg = std.fmt.bufPrint(&buf, "Class \"{s}\" does not exist", .{name_str}) catch
+                        "Class does not exist";
+                    _ = throwThrowable("ReflectionException", msg, alloc) catch {};
+                    return error.ReflectionClassNotFound;
                 }
             }.call,
             .is_static = false,
@@ -15583,6 +15845,10 @@ pub const ClassMeta = struct {
                     if (this.getPropertyDirect("__class_name")) |name_val| {
                         if (name_val.isString()) {
                             if (findClass(name_val.asString().data)) |cmeta| {
+                                // PHP 真值：interface / trait / enum / abstract 一律不可实例化
+                                if (cmeta.is_interface or cmeta.is_trait or cmeta.is_enum) {
+                                    return Value.initBool(false);
+                                }
                                 return Value.initBool(!cmeta.is_abstract);
                             }
                         }
@@ -15626,16 +15892,29 @@ pub const ClassMeta = struct {
                     const cname = cname_val.asString().data;
                     const mname = args[0].asString().data;
                     if (findClass(cname)) |cmeta| {
-                        if (cmeta.methods.contains(mname)) {
+                        // AOT-CODEGEN-012 R-138：原 `methods.contains` 精确且不含继承链 ⇒
+                        // 跨大小写/继承方法查名返回 null，调用侧冒「Call to a member function on a
+                        // non-object」。改走 findMethodLookup（CI + 继承链，hasMethod 同款口径）。
+                        if (cmeta.findMethodLookup(mname)) |lookup| {
                             if (findClass("ReflectionMethod")) |rm_class| {
                                 const rm_obj = try PHPObject.initWithMeta(alloc, rm_class);
-                                try rm_obj.setProperty("__class_name", Value.initString(try PHPString.init(alloc, cname)));
-                                try rm_obj.setProperty("__method_name", Value.initString(try PHPString.init(alloc, mname)));
+                                try rm_obj.setProperty("__class_name", Value.initString(try PHPString.init(alloc, cmeta.name)));
+                                try rm_obj.setProperty("__method_name", Value.initString(try PHPString.init(alloc, lookup.method.name)));
                                 return Value_initObject(rm_obj);
                             }
                         }
+                        // PHP 真值：未找到 ⇒ ReflectionException「Method {class}::{name}() does not exist」
+                        var buf: [256]u8 = undefined;
+                        const msg = std.fmt.bufPrint(&buf, "Method {s}::{s}() does not exist", .{ cmeta.name, mname }) catch
+                            "Method does not exist";
+                        _ = throwThrowable("ReflectionException", msg, alloc) catch {};
+                        return error.ReflectionMethodNotFound;
                     }
-                    return Value.initNull();
+                    var ebuf: [256]u8 = undefined;
+                    const emsg = std.fmt.bufPrint(&ebuf, "Class \"{s}\" does not exist", .{cname}) catch
+                        "Class does not exist";
+                    _ = throwThrowable("ReflectionException", emsg, alloc) catch {};
+                    return error.ReflectionClassNotFound;
                 }
             }.call,
             .is_static = false,
@@ -15645,19 +15924,23 @@ pub const ClassMeta = struct {
             .name = "getMethods",
             .func = struct {
                 fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
-                    if (!Value_isObject(ctx)) return Value.initArray(try PHPArray.init(alloc));
+                    const empty_arr = try PHPArray.init(alloc);
+                    if (!Value_isObject(ctx)) return Value.initArray(empty_arr);
                     const this = Value_asObject(ctx);
-                    const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initArray(try PHPArray.init(alloc));
-                    if (!cname_val.isString()) return Value.initArray(try PHPArray.init(alloc));
+                    const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initArray(empty_arr);
+                    if (!cname_val.isString()) return Value.initArray(empty_arr);
                     const cname = cname_val.asString().data;
                     const arr = try PHPArray.init(alloc);
                     if (findClass(cname)) |cmeta| {
-                        var iter = cmeta.methods.iterator();
-                        while (iter.next()) |entry| {
-                            if (findClass("ReflectionMethod")) |rm_class| {
+                        // AOT-CODEGEN-012 R-138：原实现 ① HashMap 迭代序（非声明序）② 只收自身
+                        // ⇒ 继承方法整体缺失。改为沿链声明序收集（全可见性，PHP getMethods 口径）。
+                        var names = try collectMethodNamesInOrder(cmeta, false, alloc);
+                        defer names.deinit(alloc);
+                        if (findClass("ReflectionMethod")) |rm_class| {
+                            for (names.items) |mname| {
                                 const rm_obj = try PHPObject.initWithMeta(alloc, rm_class);
-                                try rm_obj.setProperty("__class_name", Value.initString(try PHPString.init(alloc, cname)));
-                                try rm_obj.setProperty("__method_name", Value.initString(try PHPString.init(alloc, entry.key_ptr.*)));
+                                try rm_obj.setProperty("__class_name", Value.initString(try PHPString.init(alloc, cmeta.name)));
+                                try rm_obj.setProperty("__method_name", Value.initString(try PHPString.init(alloc, mname)));
                                 try arr.push(alloc, Value_initObject(rm_obj));
                             }
                         }
@@ -15678,7 +15961,9 @@ pub const ClassMeta = struct {
                         if (name_val.isString()) {
                             if (findClass(name_val.asString().data)) |cmeta| {
                                 if (args[0].isString()) {
-                                    return Value.initBool(cmeta.properties.contains(args[0].asString().data));
+                                    // AOT-CODEGEN-012 R-138：PHP hasProperty 含继承属性 ⇒ 沿链查找
+                                    //（复用既有 findPropertyDeclaringClass，属性名区分大小写故精确匹配）
+                                    return Value.initBool(findPropertyDeclaringClass(cmeta, args[0].asString().data) != null);
                                 }
                             }
                         }
@@ -15699,13 +15984,16 @@ pub const ClassMeta = struct {
                     if (!cname_val.isString()) return Value.initArray(try PHPArray.init(alloc));
                     const arr = try PHPArray.init(alloc);
                     if (findClass(cname_val.asString().data)) |cmeta| {
-                        var iter = cmeta.properties.iterator();
-                        while (iter.next()) |entry| {
-                            if (findClass("ReflectionProperty")) |rp_cls| {
+                        // AOT-CODEGEN-012 R-138：原实现 HashMap 迭代序 + 只收自身 ⇒
+                        // 顺序失真（旧读数与 PHP 相同纯属哈希序巧合）且继承属性整体缺失。
+                        var names = try collectPropertyNamesInOrder(cmeta, alloc);
+                        defer names.deinit(alloc);
+                        if (findClass("ReflectionProperty")) |rp_cls| {
+                            for (names.items) |pname| {
                                 const rp_obj = try PHPObject.initWithMeta(alloc, rp_cls);
                                 try rp_obj.setProperty("__class_name", cname_val);
                                 _ = cname_val.retain();
-                                try rp_obj.setProperty("__prop_name", Value.initString(try PHPString.init(alloc, entry.key_ptr.*)));
+                                try rp_obj.setProperty("__prop_name", Value.initString(try PHPString.init(alloc, pname)));
                                 try arr.push(alloc, Value_initObject(rp_obj));
                             }
                         }
@@ -15926,21 +16214,30 @@ pub const ClassMeta = struct {
                     const this = Value_asObject(ctx);
                     const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initBool(false);
                     if (!cname_val.isString()) return Value.initBool(false);
+                    // 实参允许字符串（CI）或 ReflectionClass 对象
                     const parent_name = if (args[0].isString()) args[0].asString().data else if (Value_isObject(args[0])) blk: {
                         const arg_obj = Value_asObject(args[0]);
                         const pn = arg_obj.getPropertyDirect("__class_name") orelse return Value.initBool(false);
                         if (pn.isString()) break :blk pn.asString().data else return Value.initBool(false);
                     } else return Value.initBool(false);
-                    _ = alloc;
-                    if (findClass(cname_val.asString().data)) |cmeta| {
-                        var cur = cmeta.parent;
-                        while (cur) |p| {
-                            if (std.mem.eql(u8, p.name, parent_name)) return Value.initBool(true);
-                            cur = p.parent;
-                        }
-                        for (cmeta.interfaces) |iface| {
-                            if (std.mem.eql(u8, iface, parent_name)) return Value.initBool(true);
-                        }
+                    // PHP 真值（R-138）：未知名 ⇒ ReflectionException「Class "X" does not exist」；
+                    // 同类 ⇒ false（严格子类）；接口（含父接口传递闭包）也算 y。
+                    const tmeta = findClass(parent_name) orelse {
+                        var b: [256]u8 = undefined;
+                        const m = std.fmt.bufPrint(&b, "Class \"{s}\" does not exist", .{parent_name}) catch
+                            "Class does not exist";
+                        _ = throwThrowable("ReflectionException", m, alloc) catch {};
+                        return error.ReflectionClassNotFound;
+                    };
+                    const cmeta = findClass(cname_val.asString().data) orelse return Value.initBool(false);
+                    var cur = cmeta.parent;
+                    while (cur) |p| {
+                        if (p == tmeta) return Value.initBool(true);
+                        cur = p.parent;
+                    }
+                    // 接口实参：isSubclassOf(接口) = 该类（或其父类/自身）实现此接口
+                    if (tmeta.is_interface and classImplementsInterfaceNamed(cmeta, tmeta.name)) {
+                        return Value.initBool(true);
                     }
                     return Value.initBool(false);
                 }
@@ -15957,11 +16254,24 @@ pub const ClassMeta = struct {
                     const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initBool(false);
                     if (!cname_val.isString()) return Value.initBool(false);
                     const iface_name = if (args[0].isString()) args[0].asString().data else return Value.initBool(false);
-                    _ = alloc;
+                    // PHP 真值（R-138）：未知名 ⇒ Interface "X" does not exist；实参是类而非接口 ⇒
+                    // {规范名} is not an interface；否则查类链 + 接口父链的传递闭包（CI 经规范名归一）。
+                    const tmeta = findClass(iface_name) orelse {
+                        var b: [256]u8 = undefined;
+                        const m = std.fmt.bufPrint(&b, "Interface \"{s}\" does not exist", .{iface_name}) catch
+                            "Interface does not exist";
+                        _ = throwThrowable("ReflectionException", m, alloc) catch {};
+                        return error.ReflectionInterfaceNotFound;
+                    };
+                    if (!tmeta.is_interface) {
+                        var b: [256]u8 = undefined;
+                        const m = std.fmt.bufPrint(&b, "{s} is not an interface", .{tmeta.name}) catch
+                            "is not an interface";
+                        _ = throwThrowable("ReflectionException", m, alloc) catch {};
+                        return error.ReflectionNotInterface;
+                    }
                     if (findClass(cname_val.asString().data)) |cmeta| {
-                        for (cmeta.interfaces) |iface| {
-                            if (std.mem.eql(u8, iface, iface_name)) return Value.initBool(true);
-                        }
+                        if (classImplementsInterfaceNamed(cmeta, tmeta.name)) return Value.initBool(true);
                     }
                     return Value.initBool(false);
                 }
@@ -16053,6 +16363,7 @@ pub const ClassMeta = struct {
             .is_static = false,
         });
         rc_meta.magic_construct = rc_meta.methods.get("__construct").?.func;
+        try attachReflectionReadOnlyProps(rc_meta);
         try registerClass(rc_meta);
 
         // ReflectionEnum (extends ReflectionClass behavior)
@@ -16361,10 +16672,29 @@ pub const ClassMeta = struct {
                 fn call(ctx: Value, args: []const Value, alloc: Allocator) anyerror!Value {
                     if (args.len < 2) return Value.initNull();
                     const this = Value_asObject(ctx);
-                    const class_str = try args[0].toString(alloc);
-                    const method_str = try args[1].toString(alloc);
-                    try this.setProperty("__class_name", Value.initString(class_str));
-                    try this.setProperty("__method_name", Value.initString(method_str));
+                    // PHP 真值（R-138）：两参形态实参允许 类名字符串(CI) 或对象；getName 返回**注册拼写**、
+                    // class/消息用**规范类名** ⇒ 两侧都要归一；类/方法不存在分别抛 ReflectionException。
+                    const cname_in = if (Value_isObject(args[0]))
+                        Value_asObject(args[0]).class_name
+                    else
+                        (try args[0].toString(alloc)).data;
+                    const mname_in = (try args[1].toString(alloc)).data;
+                    const cmeta = findClass(cname_in) orelse {
+                        var b: [256]u8 = undefined;
+                        const m = std.fmt.bufPrint(&b, "Class \"{s}\" does not exist", .{cname_in}) catch
+                            "Class does not exist";
+                        _ = throwThrowable("ReflectionException", m, alloc) catch {};
+                        return error.ReflectionClassNotFound;
+                    };
+                    const lookup = cmeta.findMethodLookup(mname_in) orelse {
+                        var b: [256]u8 = undefined;
+                        const m = std.fmt.bufPrint(&b, "Method {s}::{s}() does not exist", .{ cmeta.name, mname_in }) catch
+                            "Method does not exist";
+                        _ = throwThrowable("ReflectionException", m, alloc) catch {};
+                        return error.ReflectionMethodNotFound;
+                    };
+                    try this.setProperty("__class_name", Value.initString(try PHPString.init(alloc, cmeta.name)));
+                    try this.setProperty("__method_name", Value.initString(try PHPString.init(alloc, lookup.method.name)));
                     return Value.initNull();
                 }
             }.call,
@@ -16524,13 +16854,39 @@ pub const ClassMeta = struct {
                     const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initNull();
                     const mname_val = this.getPropertyDirect("__method_name") orelse return Value.initNull();
                     if (!cname_val.isString() or !mname_val.isString()) return Value.initNull();
+                    const cname = cname_val.asString().data;
+                    const mname = mname_val.asString().data;
                     // args[0] = object, args[1..] = method args
+                    const cmeta = findClass(cname) orelse {
+                        var b: [256]u8 = undefined;
+                        const m = std.fmt.bufPrint(&b, "Class \"{s}\" does not exist", .{cname}) catch
+                            "Class does not exist";
+                        _ = throwThrowable("ReflectionException", m, alloc) catch {};
+                        return error.ReflectionClassNotFound;
+                    };
+                    const lookup = cmeta.findMethodLookup(mname) orelse {
+                        var b: [256]u8 = undefined;
+                        const m = std.fmt.bufPrint(&b, "Method {s}::{s}() does not exist", .{ cmeta.name, mname }) catch
+                            "Method does not exist";
+                        _ = throwThrowable("ReflectionException", m, alloc) catch {};
+                        return error.ReflectionMethodNotFound;
+                    };
+                    // AOT-CODEGEN-012 R-138 重落 R-137c：静态方法原样返回 null（g6 实测空输出）
+                    // ⇒ 静态走 func(Value.initNull(), ...)（口径同静态分发 :4616）。
+                    if (lookup.method.is_static) {
+                        return lookup.method.func(Value.initNull(), args[1..], alloc);
+                    }
                     if (Value_isObject(args[0])) {
                         const obj = Value_asObject(args[0]);
-                        return obj.callMethod(mname_val.asString().data, args[1..]) catch Value.initNull();
+                        // 原 `catch Value.initNull()` 会吞被调方法内的 PHP 异常（铁律 3 同款）⇒ 透传
+                        return obj.callMethod(mname, args[1..]);
                     }
-                    _ = alloc;
-                    return Value.initNull();
+                    // 非静态方法 + 无对象实参 ⇒ PHP ReflectionException
+                    var b: [256]u8 = undefined;
+                    const m = std.fmt.bufPrint(&b, "Trying to invoke non static method {s}::{s}() without an object", .{ cmeta.name, lookup.method.name }) catch
+                        "Trying to invoke non static method without an object";
+                    _ = throwThrowable("ReflectionException", m, alloc) catch {};
+                    return error.ReflectionNoObject;
                 }
             }.call,
             .is_static = false,
@@ -16785,6 +17141,7 @@ pub const ClassMeta = struct {
             .is_static = false,
         });
         rm_meta.magic_construct = rm_meta.methods.get("__construct").?.func;
+        try attachReflectionReadOnlyProps(rm_meta);
         try registerClass(rm_meta);
 
         // ReflectionParameter
@@ -16939,10 +17296,31 @@ pub const ClassMeta = struct {
                 fn call(ctx: Value, args: []const Value, alloc: Allocator) anyerror!Value {
                     if (args.len < 2) return Value.initNull();
                     const this = Value_asObject(ctx);
-                    const class_str = try args[0].toString(alloc);
-                    const prop_str = try args[1].toString(alloc);
-                    try this.setProperty("__class_name", Value.initString(class_str));
-                    try this.setProperty("__prop_name", Value.initString(prop_str));
+                    // AOT-CODEGEN-012 R-138：原实现存**原始拼写** ⇒ ->class 返回查询拼写；
+                    // 且类/属性不存在静默成功。PHP 真值：->class 为规范类名，缺失分别抛
+                    // ReflectionException「Class "X" does not exist」/「Property C::$p does not exist」。
+                    const cname_in = if (Value_isObject(args[0]))
+                        Value_asObject(args[0]).class_name
+                    else
+                        (try args[0].toString(alloc)).data;
+                    const pname_in = (try args[1].toString(alloc)).data;
+                    const cmeta = findClass(cname_in) orelse {
+                        var b: [256]u8 = undefined;
+                        const m = std.fmt.bufPrint(&b, "Class \"{s}\" does not exist", .{cname_in}) catch
+                            "Class does not exist";
+                        _ = throwThrowable("ReflectionException", m, alloc) catch {};
+                        return error.ReflectionClassNotFound;
+                    };
+                    // 属性名区分大小写 ⇒ 精确沿链查找
+                    if (findPropertyDeclaringClass(cmeta, pname_in) == null) {
+                        var b: [256]u8 = undefined;
+                        const m = std.fmt.bufPrint(&b, "Property {s}::${s} does not exist", .{ cmeta.name, pname_in }) catch
+                            "Property does not exist";
+                        _ = throwThrowable("ReflectionException", m, alloc) catch {};
+                        return error.ReflectionPropertyNotFound;
+                    }
+                    try this.setProperty("__class_name", Value.initString(try PHPString.init(alloc, cmeta.name)));
+                    try this.setProperty("__prop_name", Value.initString(try PHPString.init(alloc, pname_in)));
                     return Value.initNull();
                 }
             }.call,
@@ -17254,6 +17632,7 @@ pub const ClassMeta = struct {
             .is_static = false,
         });
         rprop_meta.magic_construct = rprop_meta.methods.get("__construct").?.func;
+        try attachReflectionReadOnlyProps(rprop_meta);
         try registerClass(rprop_meta);
 
         // ReflectionFunction
