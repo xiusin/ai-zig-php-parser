@@ -86,9 +86,13 @@ pub const FunctionMeta = struct {
 };
 pub var function_meta_registry: ?std.StringHashMap(FunctionMeta) = null;
 
-pub fn registerFunctionMeta(name: []const u8, param_count: u16, required_params: u16) void {
+/// AOT-CODEGEN-012 F-12：参数名必须一并登记——FunctionMeta.param_names 早已被
+/// ReflectionParameter 的 registry 回退路读取（原 `getParameters` 只能给出 param0/param1），
+/// 但本函数一直没有名字形参 ⇒ 恒空。全部 4 处调用点均已显式传名（不设默认值：
+/// Zig 0.16 对「切片的切片」形参默认值在此处解析失败）。
+pub fn registerFunctionMeta(name: []const u8, param_count: u16, required_params: u16, param_names: []const []const u8) void {
     if (function_meta_registry) |*registry| {
-        registry.put(name, .{ .param_count = param_count, .required_params = required_params }) catch {};
+        registry.put(name, .{ .param_count = param_count, .required_params = required_params, .param_names = param_names }) catch {};
     }
 }
 
@@ -2927,6 +2931,9 @@ pub const PHPClosure = struct {
     allocator: Allocator,
     param_count: u16 = 0,
     required_params: u16 = 0,
+    /// AOT-CODEGEN-012 F-12b：闭包形参名（与 function_meta_registry 中同一份切片的别名，由创建点
+    /// 从注册表带入 ⇒ 生命周期同注册表，不额外持有）。供 ReflectionFunction 读真名。
+    param_names: []const []const u8 = &.{},
     bound_this: Value = Value.initNull(), // Closure::bind/bindTo 绑定的 $this
     bound_scope: ?*const ClassMeta = null, // Closure::bind/bindTo 绑定的作用域类
     is_static: bool = false, // static closure 不能绑定 $this
@@ -3277,6 +3284,8 @@ pub fn php_create_closure(name: Value, captures: Value, is_static_val: Value, al
         if (meta_reg.get(func_name)) |meta| {
             closure.param_count = meta.param_count;
             closure.required_params = meta.required_params;
+            // AOT-CODEGEN-012 F-12b：一并带入形参名（注册表切片的别名）
+            closure.param_names = meta.param_names;
         }
     }
     closure.is_static = is_static;
@@ -5009,8 +5018,12 @@ fn reflectionRoSet(ctx: Value, args: []const Value, alloc: Allocator) anyerror!V
         var buf: [256]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "Cannot set read-only property {s}::${s}", .{ owner, pname }) catch
             "Cannot set read-only property";
-        _ = throwThrowable("ReflectionException", msg, alloc) catch {};
-        return error.ReflectionReadOnlyProperty;
+        // 必须是「置异常 + 返回异常 Value」的既有 F-9 形态（见 :19937 等），
+        // 不能 `return error.X`：发射点在 `try` 之后才查 `hasException()`，
+        // Zig error 会直接冒过 `try` ⇒ 绕过 catch 路由 ⇒ 实测不可捕获（门 P r10）。
+        // 值本身被上层丢弃（`php_object_set` → `tryMagicSet` 只取 bool，返回 initNull），
+        // 故不会形成 RUNTIME-002 G3 那类「异常对象入槽」脏写。
+        return throwThrowable("ReflectionException", msg, alloc);
     }
     // 非只读名：PHP 对 Reflection* 的未知属性赋值同样落告警支，这里交回动态属性创建路径
     try obj.setProperty(pname, args[1]);
@@ -5470,6 +5483,9 @@ pub fn php_closure_bind(closure_val: Value, new_this: Value, scope_val: Value) !
         .allocator = runtime_allocator,
         .param_count = orig.param_count,
         .required_params = orig.required_params,
+        // AOT-CODEGEN-012 F-12b：bindTo/bind 派生闭包必须保留形参名
+        //（PHPClosure 新字段有默认值 &.{} ⇒ 漏写就是静默丢名字，ReflectionFunction 退回 param{i}）
+        .param_names = orig.param_names,
         .bound_this = bound_this,
         .bound_scope = bound_scope,
         .is_static = orig.is_static or new_this.isNull(),
@@ -7829,6 +7845,8 @@ pub fn registerPHPPredefinedConstants(allocator: Allocator) !void {
         .{ .name = "PREG_PATTERN_ORDER", .value = 1 },
         .{ .name = "PREG_SPLIT_NO_EMPTY", .value = 1 },
         .{ .name = "PREG_SPLIT_DELIM_CAPTURE", .value = 2 },
+        // PHP 8.5.8 实测 PREG_SPLIT_OFFSET_CAPTURE = 4（此前缺失 ⇒ 引用它只得到「Undefined」告警）
+        .{ .name = "PREG_SPLIT_OFFSET_CAPTURE", .value = 4 },
         // 文件
         .{ .name = "FILE_APPEND", .value = 8 },
         .{ .name = "FILE_IGNORE_NEW_LINES", .value = 2 },
@@ -10580,6 +10598,85 @@ const PCRE2_SUBSTITUTE_OVERFLOW_LENGTH: c_uint = 0x00001000;
 const PCRE2_INFO_NAMECOUNT: c_uint = 17;
 const PCRE2_INFO_NAMEENTRYSIZE: c_uint = 18;
 const PCRE2_INFO_NAMETABLE: c_uint = 19;
+// 取自 /opt/homebrew/include/pcre2.h:449（PCRE2_INFO_CAPTURECOUNT = 4）
+const PCRE2_INFO_CAPTURECOUNT: c_uint = 4;
+// 取自 /opt/homebrew/include/pcre2.h:538（PCRE2_UNSET = ~(PCRE2_SIZE)0）
+const PCRE2_UNSET_VALUE: usize = ~@as(usize, 0);
+
+/// PHP PREG_* 位（口径全部来自 PHP 8.5.8 实测，见工单 AOT-CODEGEN-012 §17 真值表）
+const PREG_PATTERN_ORDER_BIT: i64 = 1;
+const PREG_SET_ORDER_BIT: i64 = 2;
+const PREG_OFFSET_CAPTURE_BIT: i64 = 256;
+const PREG_UNMATCHED_AS_NULL_BIT: i64 = 512;
+const PREG_SPLIT_NO_EMPTY_BIT: i64 = 1;
+const PREG_SPLIT_DELIM_CAPTURE_BIT: i64 = 2;
+const PREG_SPLIT_OFFSET_CAPTURE_BIT: i64 = 4;
+
+/// preg_match 的 flags 合法面：bit0..bit7 任一置位即 ValueError。
+/// 边界两侧实测：128 拒绝 / 256 接受；258(=2|256)、514(=2|512) 拒绝；768(=256|512) 接受。
+fn pregMatchFlagsInvalid(flags: i64) bool {
+    return (flags & 255) != 0;
+}
+
+/// preg_match_all 的 flags 合法面：bit2..bit7 置位拒绝，且 PREG_PATTERN_ORDER 与
+/// PREG_SET_ORDER 互斥。实测：1/2/256/1024/2048/1048576 接受，3/4/8/16/32/64/128/259 拒绝。
+fn pregMatchAllFlagsInvalid(flags: i64) bool {
+    return (flags & 252) != 0 or (flags & (PREG_PATTERN_ORDER_BIT | PREG_SET_ORDER_BIT)) == (PREG_PATTERN_ORDER_BIT | PREG_SET_ORDER_BIT);
+}
+
+/// 单个捕获组的 matches 条目。
+/// PHP 8.5.8 实测口径：未匹配组在 PREG_UNMATCHED_AS_NULL 下给 null，否则给 ""；
+/// PREG_OFFSET_CAPTURE 下每个条目包成 [文本, 偏移]，未匹配组的偏移为 -1。
+fn pcreCaptureEntry(
+    allocator: Allocator,
+    subject: []const u8,
+    start: usize,
+    end: usize,
+    unset: bool,
+    offset_capture: bool,
+    unmatched_as_null: bool,
+) !Value {
+    const text_val: Value = if (unset)
+        (if (unmatched_as_null) Value.initNull() else Value.initString(try PHPString.init(allocator, "")))
+    else
+        Value.initString(try PHPString.init(allocator, subject[start..end]));
+
+    if (!offset_capture) return text_val;
+
+    const pair = try PHPArray.init(allocator);
+    try pair.push(allocator, text_val);
+    try pair.push(allocator, Value.initInt(if (unset) -1 else @intCast(start)));
+    return Value.initArray(pair);
+}
+
+/// 组序号（1 起）→ 捕获名；无命名则返回 null。
+/// 名字切片指向 PCRE2 编译缓存内的 name table，生命周期与该缓存一致（与既有命名组填充同源）。
+fn pcreGroupNameForGroup(re: *const pcre2_code, group: usize) ?[]const u8 {
+    var name_count: c_uint = 0;
+    if (pcre2_pattern_info_8(re, PCRE2_INFO_NAMECOUNT, &name_count) != 0 or name_count == 0) return null;
+    var entry_size: c_uint = 0;
+    if (pcre2_pattern_info_8(re, PCRE2_INFO_NAMEENTRYSIZE, &entry_size) != 0 or entry_size < 3) return null;
+    var table_ptr: ?*const u8 = null;
+    if (pcre2_pattern_info_8(re, PCRE2_INFO_NAMETABLE, @ptrCast(&table_ptr)) != 0 or table_ptr == null) return null;
+    const table: [*]const u8 = @ptrCast(table_ptr.?);
+    var ni: usize = 0;
+    while (ni < @as(usize, name_count)) : (ni += 1) {
+        const entry = table + ni * @as(usize, entry_size);
+        const group_num: usize = (@as(usize, entry[0]) << 8) | @as(usize, entry[1]);
+        if (group_num != group) continue;
+        var j: usize = 2;
+        while (j < @as(usize, entry_size) and entry[j] != 0) : (j += 1) {}
+        return entry[2..j];
+    }
+    return null;
+}
+
+/// 模式的捕获组总数（含组 0）；查询失败时回退到已用组数 + 1。
+fn pcreGroupSpan(re: *const pcre2_code, used_groups: usize) usize {
+    var cc: c_uint = 0;
+    if (pcre2_pattern_info_8(re, PCRE2_INFO_CAPTURECOUNT, &cc) == 0) return @as(usize, cc) + 1;
+    return used_groups;
+}
 
 const ParsedPattern = struct {
     pattern: []const u8,
@@ -11171,7 +11268,9 @@ pub fn preg_split(pattern_val: Value, subject_val: Value, limit_val: Value, flag
     const limit: i64 = if (limit_val.isInt()) limit_val.asInt() else -1;
     // flags: PREG_SPLIT_NO_EMPTY=1, PREG_SPLIT_DELIM_CAPTURE=2, PREG_SPLIT_OFFSET_CAPTURE=4
     const flags: i64 = if (flags_val.isInt()) flags_val.asInt() else 0;
-    const no_empty = (flags & 1) != 0;
+    const no_empty = (flags & PREG_SPLIT_NO_EMPTY_BIT) != 0;
+    const delim_capture = (flags & PREG_SPLIT_DELIM_CAPTURE_BIT) != 0;
+    const offset_capture = (flags & PREG_SPLIT_OFFSET_CAPTURE_BIT) != 0;
 
     const parsed = parsePHPRegexPattern(pattern_str.data);
 
@@ -11191,51 +11290,69 @@ pub fn preg_split(pattern_val: Value, subject_val: Value, limit_val: Value, flag
     defer pcre2_match_data_free_8(match_data);
 
     const result_arr = try PHPArray.init(allocator);
-    var offset: usize = 0;
+    // 切片口径（PHP 8.5.8 实测）：piece = subject[cursor..match_start]，零宽匹配也照样产出空片，
+    // 且**尾部空片保留**（preg_split('/,/','a,b,') = ["a","b",""]、preg_split('//','') = ["",""]）；
+    // 旧实现的 `while (offset < length)` 少了「搜索点等于串尾」这一轮，故空串与串尾定界符都给不出末片。
+    var cursor: usize = 0;
+    var search: usize = 0;
     var part_count: i64 = 0;
+    var terminated = false;
 
-    while (offset < subject_str.length) {
+    while (search <= subject_str.length) {
         // 如果达到limit-1，把剩余部分全部放入最后一个元素
         if (limit > 0 and part_count >= limit - 1) {
-            const remaining = subject_str.data[offset..];
-            if (!no_empty or remaining.len > 0) {
-                const part_str = try PHPString.init(allocator, remaining);
-                try result_arr.push(allocator, Value.initString(part_str));
-            }
+            _ = try pregSplitPushPiece(result_arr, allocator, subject_str.data[cursor..], cursor, no_empty, offset_capture);
+            terminated = true;
             break;
         }
 
-        const rc = pcre2_match_8(re, subject_str.data.ptr, subject_str.length, @intCast(offset), 0, match_data, null);
+        const rc = pcre2_match_8(re, subject_str.data.ptr, subject_str.length, @intCast(search), 0, match_data, null);
 
         if (rc == PCRE2_ERROR_NOMATCH) {
             // 添加剩余部分
-            const remaining = subject_str.data[offset..];
-            if (!no_empty or remaining.len > 0) {
-                const part = try PHPString.init(allocator, remaining);
-                try result_arr.push(allocator, Value.initString(part));
-            }
+            _ = try pregSplitPushPiece(result_arr, allocator, subject_str.data[cursor..], cursor, no_empty, offset_capture);
+            terminated = true;
             break;
         }
 
-        if (rc < 0) break;
+        if (rc < 0) {
+            terminated = true;
+            break;
+        }
 
         const ovec = pcre2_get_ovector_pointer_8(match_data);
         const match_start = ovec[0];
         const match_end = ovec[1];
 
         // 添加匹配前的部分
-        const part = subject_str.data[offset..match_start];
-        if (!no_empty or part.len > 0) {
-            const part_str = try PHPString.init(allocator, part);
-            try result_arr.push(allocator, Value.initString(part_str));
+        if (try pregSplitPushPiece(result_arr, allocator, subject_str.data[cursor..match_start], cursor, no_empty, offset_capture)) {
             part_count += 1;
         }
 
-        offset = match_end;
-        if (match_start == match_end) {
-            // 空匹配，前进一个字符避免无限循环
-            offset += 1;
+        // PREG_SPLIT_DELIM_CAPTURE：定界符自身的捕获组按序成为独立的片（实测 ['a', ',', 'b']）
+        if (delim_capture) {
+            var g: usize = 1;
+            while (g < @as(usize, @intCast(rc))) : (g += 1) {
+                const gs = ovec[g * 2];
+                const ge = ovec[g * 2 + 1];
+                if (gs > subject_str.length or ge > subject_str.length or gs > ge) continue;
+                if (try pregSplitPushPiece(result_arr, allocator, subject_str.data[gs..ge], gs, no_empty, offset_capture)) {
+                    part_count += 1;
+                }
+            }
         }
+
+        cursor = match_end;
+        if (match_start == match_end) {
+            // 零宽匹配：只推进搜索点，切片起点保持在匹配处，下一片因此包含被跳过的字符
+            search = match_end + 1;
+        } else {
+            search = match_end;
+        }
+    }
+
+    if (!terminated and cursor <= subject_str.length) {
+        _ = try pregSplitPushPiece(result_arr, allocator, subject_str.data[cursor..], cursor, no_empty, offset_capture);
     }
 
     return Value.initArray(result_arr);
@@ -14786,6 +14903,8 @@ pub const ClassMeta = struct {
                         .allocator = alloc,
                         .param_count = orig_closure.param_count,
                         .required_params = orig_closure.required_params,
+                        // AOT-CODEGEN-012 F-12b：bind 派生新闭包时保留形参名，否则反射退化回 param{i}
+                        .param_names = orig_closure.param_names,
                         .bound_this = bound_this,
                         .bound_scope = bound_scope,
                         .is_static = orig_closure.is_static,
@@ -16924,6 +17043,12 @@ pub const ClassMeta = struct {
                                     if (i < m.param_nullable.len) {
                                         try rp_obj.setProperty("__allows_null", Value.initBool(m.param_nullable[i]));
                                     }
+                                    // AOT-CODEGEN-012 F-8：是否有默认值 ⇒ 位置 ≥ required_params
+                                    //（PHP: 前 required_params 个为无默认必填，其后各带默认值）。
+                                    // 同时补齐 __is_optional（PHP 口径 = 有默认值 或 变参）。
+                                    const has_def = i >= m.required_params;
+                                    try rp_obj.setProperty("__has_default", Value.initBool(has_def));
+                                    try rp_obj.setProperty("__is_optional", Value.initBool(has_def));
                                     try arr.push(alloc, Value_initObject(rp_obj));
                                 }
                             }
@@ -16943,6 +17068,10 @@ pub const ClassMeta = struct {
                                     if (i < meta.param_names.len) {
                                         try rp_obj.setProperty("__name", Value.initString(try PHPString.init(alloc, meta.param_names[i])));
                                     }
+                                    // AOT-CODEGEN-012 F-8：回退路径同口径（FunctionMeta 亦带 required_params）
+                                    const has_def = i >= meta.required_params;
+                                    try rp_obj.setProperty("__has_default", Value.initBool(has_def));
+                                    try rp_obj.setProperty("__is_optional", Value.initBool(has_def));
                                     try arr.push(alloc, Value_initObject(rp_obj));
                                 }
                             }
@@ -17204,6 +17333,21 @@ pub const ClassMeta = struct {
                     if (!Value_isObject(ctx)) return Value.initBool(false);
                     const this = Value_asObject(ctx);
                     if (this.getPropertyDirect("__is_optional")) |v| return v;
+                    return Value.initBool(false);
+                }
+            }.call,
+            .is_static = false,
+        });
+        try rp_meta.addMethod(.{
+            // AOT-CODEGEN-012 F-8：PHP 真名是 isDefaultValueAvailable()（`hasDefaultValue` 在 PHP 中不存在，
+            // 实测 Fatal「Call to undefined method ReflectionParameter::hasDefaultValue()」）。
+            // 数据源 = getParameters 构造时写入的 __has_default（位置 ≥ required_params）。
+            .name = "isDefaultValueAvailable",
+            .func = struct {
+                fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+                    if (!Value_isObject(ctx)) return Value.initBool(false);
+                    const this = Value_asObject(ctx);
+                    if (this.getPropertyDirect("__has_default")) |v| return Value.initBool(v.toBool());
                     return Value.initBool(false);
                 }
             }.call,
@@ -17864,8 +18008,40 @@ pub const ClassMeta = struct {
                         if (findClass("ReflectionParameter")) |_| {
                             const param_obj = try PHPObject.init(alloc, "ReflectionParameter");
                             try param_obj.setProperty("__position", Value.initInt(i));
-                            const param_name = try std.fmt.allocPrint(alloc, "param{d}", .{i});
-                            try param_obj.setProperty("__name", Value.initString(try PHPString.init(alloc, param_name)));
+                            // AOT-CODEGEN-012 F-12/F-12b：名字解析三级（各有真实数据源）
+                            //   ① 闭包对象自带 param_names（创建时从注册表带入）
+                            //   ② 具名函数按 __func_name 现查 function_meta_registry
+                            //   ③ 两处都无数据才回退合成 param{i}
+                            var resolved_name: ?[]const u8 = null;
+                            const idx: usize = @intCast(i);
+                            if (this.getPropertyDirect("__closure")) |cval| {
+                                if (cval.isFunction()) {
+                                    const clo = cval.asFunction();
+                                    if (idx < clo.param_names.len) resolved_name = clo.param_names[idx];
+                                }
+                            }
+                            if (resolved_name == null) {
+                                if (this.getPropertyDirect("__func_name")) |fname_val| {
+                                    if (fname_val.isString()) {
+                                        if (function_meta_registry) |reg| {
+                                            if (reg.get(fname_val.asString().data)) |fm| {
+                                                if (idx < fm.param_names.len) resolved_name = fm.param_names[idx];
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if (resolved_name) |rn| {
+                                try param_obj.setProperty("__name", Value.initString(try PHPString.init(alloc, rn)));
+                            } else {
+                                const param_name = try std.fmt.allocPrint(alloc, "param{d}", .{i});
+                                try param_obj.setProperty("__name", Value.initString(try PHPString.init(alloc, param_name)));
+                            }
+                            // AOT-CODEGEN-012 F-8：ReflectionFunction 路径同口径（构造时已存 __required_params）
+                            const rf_req = (this.getPropertyDirect("__required_params") orelse pc_val).toInt();
+                            const rf_has_def = i >= rf_req;
+                            try param_obj.setProperty("__has_default", Value.initBool(rf_has_def));
+                            try param_obj.setProperty("__is_optional", Value.initBool(rf_has_def));
                             try arr.push(alloc, Value_initObject(param_obj));
                         } else {
                             // 没注册 ReflectionParameter，返回 position 整数
@@ -20324,7 +20500,13 @@ pub fn php_object_call(obj_val: Value, method_name: []const u8, args: []const Va
             if (args.len < 1) return error.MissingArgument;
             return php_concat(obj_val, args[0], runtime_allocator);
         }
-        return error.UnknownMethod;
+        // AOT-CODEGEN-013 F-9：原 `return error.UnknownMethod`（全仓仅此一处产生、零消费者）
+        // 被调用侧 catch 成静默 null ⇒ PHP 实为可捕获 Error「Call to a member function foo() on string」。
+        // 上方伪方法面（toUpper/trim/replace… 非 PHP 语义）保持原样不动，只改「未命中」的落点。
+        var sbuf: [256]u8 = undefined;
+        const smsg = std.fmt.bufPrint(&sbuf, "Call to a member function {s}() on string", .{method_name}) catch
+            "Call to a member function on string";
+        return throwThrowable("Error", smsg, runtime_allocator);
     }
 
     // Closure 方法调用：bindTo/call/__invoke 等
@@ -20357,29 +20539,33 @@ pub fn php_object_call(obj_val: Value, method_name: []const u8, args: []const Va
                 return method.func(obj_val, args, runtime_allocator);
             }
         }
-        // 未知闭包方法
-        fileWriteAll(2, "PHP Fatal error:  Call to undefined method Closure::");
-        fileWriteAll(2, method_name);
-        fileWriteAll(2, "()\n");
-        return Value.initNull();
+        // AOT-CODEGEN-013 F-9：原实现「打印 PHP Fatal error 文本 + return null」⇒ 既不终止也不设异常，
+        // 后续语句继续执行且进程 rc=0（f170 内 7 次 fatal 一路跑到底）。PHP 真值是可捕获 Error：
+        // 「Call to undefined method Closure::nope()」。改走 throwThrowable（口径同 :20081 抽象类实例化）。
+        var cbuf: [256]u8 = undefined;
+        const cmsg = std.fmt.bufPrint(&cbuf, "Call to undefined method Closure::{s}()", .{method_name}) catch
+            "Call to undefined method";
+        return throwThrowable("Error", cmsg, runtime_allocator);
     }
 
     if (!Value_isObject(obj_val)) {
-        // PHP: 对非对象调用方法时发出 Fatal error
-        fileWriteAll(2, "PHP Fatal error:  Call to a member function on a non-object\n");
-        fileWriteAll(1, "\nFatal error: Call to a member function on a non-object\n");
-        return Value.initNull();
+        // AOT-CODEGEN-013 F-9：同上。PHP 真值「Call to a member function {m}() on {type}」
+        // （实测 int / null / string 形；bool 用 true/false 词，与 phpArgTypeWord 同口径）。
+        var nbuf: [256]u8 = undefined;
+        const nmsg = std.fmt.bufPrint(&nbuf, "Call to a member function {s}() on {s}", .{ method_name, phpArgTypeWord(obj_val) }) catch
+            "Call to a member function on a non-object";
+        return throwThrowable("Error", nmsg, runtime_allocator);
     }
     const obj = Value_asObject(obj_val);
     return obj.callMethod(method_name, args) catch |err| {
         if (err == error.MethodNotFound) {
+            // AOT-CODEGEN-013 F-9：原实现打印 Fatal 文本后 return null ⇒ 调用方无感续跑、rc=0。
+            // PHP 真值：可捕获 Error「Call to undefined method K::nopeMethod()」，未捕获则 rc=255 中止。
             const class_name = if (obj.class_meta) |m| m.name else "unknown";
             var buf: [512]u8 = undefined;
-            const msg = std.fmt.bufPrint(&buf, "PHP Fatal error:  Uncaught Error: Call to undefined method {s}::{s}()\n", .{ class_name, method_name }) catch "PHP Fatal error: MethodNotFound\n";
-            fileWriteAll(2, msg);
-            const msg2 = std.fmt.bufPrint(&buf, "\nFatal error: Uncaught Error: Call to undefined method {s}::{s}()\n", .{ class_name, method_name }) catch "";
-            fileWriteAll(1, msg2);
-            return Value.initNull();
+            const msg = std.fmt.bufPrint(&buf, "Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch
+                "Call to undefined method";
+            return throwThrowable("Error", msg, runtime_allocator);
         }
         return err;
     };
@@ -20954,6 +21140,29 @@ pub fn php_get_class_constant_dynamic(args: []const Value, allocator: Allocator)
     return Value.initNull();
 }
 
+/// `a` 与 `b` 是否同族（同一类，或其一为另一的祖先）。
+/// 实测口径来源：实例方法内写 `Base::bm()`（bm 声明于父类 Base）合法，写异类 `Other::om()` Fatal。
+fn classMetaSameFamily(a: *const ClassMeta, b: *const ClassMeta) bool {
+    var cur: ?*const ClassMeta = a;
+    while (cur) |m| {
+        if (m == b) return true;
+        cur = m.parent;
+    }
+    var up: ?*const ClassMeta = b;
+    while (up) |m| {
+        if (m == a) return true;
+        up = m.parent;
+    }
+    return false;
+}
+
+/// 当前类作用域是否与该方法所属类同族（类内用显式类名调用本族非静态方法合法）。
+/// 实测：`Sub` 内 `Base::bm()`、`Sub::bm()`（bm 继承自 Base）均合法；`Other` 内 `Base::bm()` ⇒ Fatal。
+fn scopeClassMatches(owner: *const ClassMeta) bool {
+    const scope = getCurrentScopeClass() orelse return false;
+    return classMetaSameFamily(scope, owner);
+}
+
 pub fn php_call_static_with_ctx(ctx: Value, class_name: []const u8, method_name: []const u8, args: []const Value, allocator: Allocator) !Value {
     const lookup_meta = blk: {
         if (std.mem.eql(u8, class_name, "self")) {
@@ -20995,6 +21204,27 @@ pub fn php_call_static_with_ctx(ctx: Value, class_name: []const u8, method_name:
 
     // 查找方法（静态或实例方法）
     if (lookup_meta.findMethodLookup(method_name)) |lookup| {
+        // PHP 8 实测：静态调用非静态方法 ⇒ Error「Non-static method C::m() cannot be called statically」
+        //   判据 = **调用处有没有 $this，且其对象类与所属类同族**（十形矩阵 f1…f10，门 P 常驻）：
+        //   实例方法内 `K::m()`/`self::m()`/`static::m()`/`parent::bm()`/`Base::bm()` 均合法；
+        //   静态方法内 `self::m()`、异类方法内 `Base::bm()`、顶层 `K::m()` 均 Fatal 且必须可捕获。
+        //   ctx 由发射侧透传（R-145 起 `.static_method_call` 两支都走 with_ctx）。
+        if (!lookup.method.is_static) {
+            // 运行期只能用两条近似证据：① 限定符是作用域常量（self/parent/static）；
+            // ② 当前类作用域与所属类同族。**不能用 ctx 判 $this**——`php_call_static`
+            // 包装层恒传 initNull，改成只看 ctx 会把实例方法内的动态类名调用误判为致命
+            //（f11 实测：PHP = 4，改后 AOT 抛 Error ⇒ 假阳性，已回退）。
+            // 「静态方法上下文」这一向由发射侧 staticEmitCallIsIllegal 的 has-this 闸门覆盖。
+            const scope_qualified = std.mem.eql(u8, class_name, "self") or
+                std.mem.eql(u8, class_name, "parent") or
+                std.mem.eql(u8, class_name, "static");
+            const legal = scope_qualified or scopeClassMatches(lookup.owner);
+            if (!legal) {
+                const msg = std.fmt.allocPrint(allocator, "Non-static method {s}::{s}() cannot be called statically", .{ lookup.owner.name, method_name }) catch return Value.initNull();
+                defer allocator.free(msg);
+                return throwThrowable("Error", msg, allocator);
+            }
+        }
         const guard = ClassContext.init(called_meta, lookup.owner);
         defer guard.deinit();
         return lookup.method.func(ctx, args, allocator);
@@ -26673,9 +26903,26 @@ pub fn php_sscanf(str: Value, format: Value, allocator: Allocator) !Value {
     return Value.initArray(arr);
 }
 
+/// preg_match / preg_match_all 的 offset 形参折算（PHP 8.5.8 实测）：
+///   null 或 <=0 视为 0；超出 subject 长度时调用返回 false 且 matches 置空数组。
+fn pcreSearchOffset(offset: Value, subject_len: usize) struct { start: usize, out_of_range: bool } {
+    if (offset.isNull()) return .{ .start = 0, .out_of_range = false };
+    const raw = offset.toInt();
+    if (raw <= 0) return .{ .start = 0, .out_of_range = false };
+    const as_len: usize = @intCast(raw);
+    if (as_len > subject_len) return .{ .start = as_len, .out_of_range = true };
+    return .{ .start = as_len, .out_of_range = false };
+}
+
 pub fn php_preg_match(pattern: Value, subject: Value, matches: *Value, flags: Value, offset: Value, allocator: Allocator) !Value {
-    _ = flags;
-    _ = offset;
+    const flags_val: i64 = if (flags.isNull()) 0 else flags.toInt();
+    if (pregMatchFlagsInvalid(flags_val)) {
+        matches.* = Value.initArray(try PHPArray.init(allocator));
+        _ = throwThrowable("ValueError", "preg_match(): Argument #4 ($flags) must be a PREG_* constant", allocator) catch {};
+        return Value.initBool(false);
+    }
+    const offset_capture = (flags_val & PREG_OFFSET_CAPTURE_BIT) != 0;
+    const unmatched_as_null = (flags_val & PREG_UNMATCHED_AS_NULL_BIT) != 0;
 
     if (!pattern.isString() or !subject.isString()) {
         matches.* = Value.initArray(try PHPArray.init(allocator));
@@ -26692,6 +26939,12 @@ pub fn php_preg_match(pattern: Value, subject: Value, matches: *Value, flags: Va
         return Value.initInt(0);
     };
 
+    const off = pcreSearchOffset(offset, subject_str.length);
+    if (off.out_of_range) {
+        matches.* = Value.initArray(try PHPArray.init(allocator));
+        return Value.initBool(false);
+    }
+
     const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse {
         matches.* = Value.initArray(try PHPArray.init(allocator));
         return Value.initInt(0);
@@ -26702,7 +26955,7 @@ pub fn php_preg_match(pattern: Value, subject: Value, matches: *Value, flags: Va
         re,
         subject_str.data.ptr,
         subject_str.length,
-        0,
+        @intCast(off.start),
         0,
         match_data,
         null,
@@ -26717,60 +26970,94 @@ pub fn php_preg_match(pattern: Value, subject: Value, matches: *Value, flags: Va
     const matches_arr = try PHPArray.init(allocator);
     const ovec = pcre2_get_ovector_pointer_8(match_data);
 
+    // PHP 口径：默认只到「最高已捕获组」（PCRE2 的 rc 即此值），其间未匹配的组补 ""/null；
+    // 带 PREG_UNMATCHED_AS_NULL 时一路补到模式的全部组（实测尾部未匹配组给 null 而非省略）。
+    const used_groups: usize = @intCast(rc);
+    const group_span = if (unmatched_as_null) pcreGroupSpan(re, used_groups) else used_groups;
+
     var i: usize = 0;
-    while (i < @as(usize, @intCast(rc))) : (i += 1) {
+    while (i < group_span) : (i += 1) {
         const start = ovec[i * 2];
         const end = ovec[i * 2 + 1];
-        if (start < subject_str.length and end <= subject_str.length and start <= end) {
-            const capture = subject_str.data[start..end];
-            const capture_str = try PHPString.init(allocator, capture);
-            try matches_arr.push(allocator, Value.initString(capture_str));
-        }
-    }
+        const unset = start > subject_str.length or end > subject_str.length or start > end;
 
-    // 填充命名捕获组
-    var name_count: c_uint = 0;
-    if (pcre2_pattern_info_8(re, PCRE2_INFO_NAMECOUNT, &name_count) == 0 and name_count > 0) {
-        var name_entry_size: c_uint = 0;
-        if (pcre2_pattern_info_8(re, PCRE2_INFO_NAMEENTRYSIZE, &name_entry_size) == 0 and name_entry_size > 0) {
-            var name_table_ptr: ?*const u8 = null;
-            if (pcre2_pattern_info_8(re, PCRE2_INFO_NAMETABLE, @ptrCast(&name_table_ptr)) == 0 and name_table_ptr != null) {
-                const name_table = name_table_ptr.?;
-                const name_table_ptr_arr: [*]const u8 = @ptrCast(name_table);
-                var ni: usize = 0;
-                while (ni < name_count) : (ni += 1) {
-                    const entry = name_table_ptr_arr + ni * name_entry_size;
-                    const group_num: usize = (@as(usize, entry[0]) << 8) | @as(usize, entry[1]);
-                    const name_start: usize = 2;
-                    const name_end = blk: {
-                        var j: usize = name_start;
-                        while (j < name_entry_size) : (j += 1) {
-                            if (entry[j] == 0) break;
-                        }
-                        break :blk j;
-                    };
-                    const name = entry[name_start..name_end];
-                    if (group_num < @as(usize, @intCast(rc))) {
-                        const gs = ovec[group_num * 2];
-                        const ge = ovec[group_num * 2 + 1];
-                        if (gs < subject_str.length and ge <= subject_str.length and gs <= ge) {
-                            const capture = subject_str.data[gs..ge];
-                            const capture_str = try PHPString.init(allocator, capture);
-                            const name_str = try PHPString.init(allocator, name);
-                            try matches_arr.set(allocator, .{ .string = name_str }, Value.initString(capture_str));
-                        }
-                    }
-                }
+        // 命名组键在 PHP 里紧随「上一数字键」之后、本组数字键之前（实测序：0, name1, 1, name2, 2）
+        if (i > 0) {
+            if (pcreGroupNameForGroup(re, i)) |gname| {
+                const name_str = try PHPString.init(allocator, gname);
+                const named_entry = try pcreCaptureEntry(allocator, subject_str.data, start, end, unset, offset_capture, unmatched_as_null);
+                try matches_arr.set(allocator, .{ .string = name_str }, named_entry);
             }
         }
+        const entry = try pcreCaptureEntry(allocator, subject_str.data, start, end, unset, offset_capture, unmatched_as_null);
+        try matches_arr.push(allocator, entry);
     }
 
     matches.* = Value.initArray(matches_arr);
     return Value.initInt(1);
 }
 
+/// 单次匹配里一个捕获组的原始跨度：先只留偏移，渲染阶段统一走 pcreCaptureEntry，
+/// 避免 preg_match 与 preg_match_all 各存一份「未匹配怎么表示」的真相。
+const PcreCaptureSpan = struct {
+    start: usize,
+    end: usize,
+    unset: bool,
+};
+
+/// preg_split 的一片入表：no_empty 只过滤空文本片；offset_capture 时包成 [文本, 起始下标]。
+/// 返回是否真的入表 —— limit 计数沿用既有口径（只计实际产出的片）。
+/// `arr` 取 PHPArray.init 的返回值本身（该构造函数返回 `*PHPArray`，故此处形参即指针）。
+fn pregSplitPushPiece(
+    arr: *PHPArray,
+    allocator: Allocator,
+    text: []const u8,
+    at: usize,
+    no_empty: bool,
+    offset_capture: bool,
+) !bool {
+    if (no_empty and text.len == 0) return false;
+    if (offset_capture) {
+        const pair = try PHPArray.init(allocator);
+        try pair.push(allocator, Value.initString(try PHPString.init(allocator, text)));
+        try pair.push(allocator, Value.initInt(@intCast(at)));
+        try arr.push(allocator, Value.initArray(pair));
+    } else {
+        try arr.push(allocator, Value.initString(try PHPString.init(allocator, text)));
+    }
+    return true;
+}
+
+/// PREG_PATTERN_ORDER 下某一组的全匹配列（命名键与数字键在 PHP 里是两份独立副本，故各建一次）
+fn pcreGroupColumn(
+    allocator: Allocator,
+    subject: []const u8,
+    all_matches: []const std.ArrayListUnmanaged(PcreCaptureSpan),
+    group: usize,
+    offset_capture: bool,
+    unmatched_as_null: bool,
+) !*PHPArray {
+    const group_arr = try PHPArray.init(allocator);
+    for (all_matches) |spans| {
+        const span: PcreCaptureSpan = if (group < spans.items.len)
+            spans.items[group]
+        else
+            .{ .start = 0, .end = 0, .unset = true };
+        try group_arr.push(allocator, try pcreCaptureEntry(allocator, subject, span.start, span.end, span.unset, offset_capture, unmatched_as_null));
+    }
+    return group_arr;
+}
+
 pub fn php_preg_match_all(pattern: Value, subject: Value, matches: *Value, flags: Value, offset: Value, allocator: Allocator) !Value {
-    _ = offset;
+    const flags_val: i64 = if (flags.isNull()) 0 else flags.toInt();
+    if (pregMatchAllFlagsInvalid(flags_val)) {
+        matches.* = Value.initArray(try PHPArray.init(allocator));
+        _ = throwThrowable("ValueError", "preg_match_all(): Argument #4 ($flags) must be a PREG_* constant", allocator) catch {};
+        return Value.initBool(false);
+    }
+    const offset_capture = (flags_val & PREG_OFFSET_CAPTURE_BIT) != 0;
+    const unmatched_as_null = (flags_val & PREG_UNMATCHED_AS_NULL_BIT) != 0;
+    const is_set_order = (flags_val & PREG_SET_ORDER_BIT) != 0;
 
     if (!pattern.isString() or !subject.isString()) {
         matches.* = Value.initArray(try PHPArray.init(allocator));
@@ -26787,6 +27074,12 @@ pub fn php_preg_match_all(pattern: Value, subject: Value, matches: *Value, flags
         return Value.initInt(0);
     };
 
+    const off = pcreSearchOffset(offset, subject_str.length);
+    if (off.out_of_range) {
+        matches.* = Value.initArray(try PHPArray.init(allocator));
+        return Value.initBool(false);
+    }
+
     const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse {
         matches.* = Value.initArray(try PHPArray.init(allocator));
         return Value.initInt(0);
@@ -26794,15 +27087,15 @@ pub fn php_preg_match_all(pattern: Value, subject: Value, matches: *Value, flags
     defer pcre2_match_data_free_8(match_data);
 
     // 存储所有匹配（临时）
-    var all_matches = std.ArrayListUnmanaged(std.ArrayListUnmanaged([]const u8)){ .items = &.{}, .capacity = 0 };
+    var all_matches = std.ArrayListUnmanaged(std.ArrayListUnmanaged(PcreCaptureSpan)){ .items = &.{}, .capacity = 0 };
     defer {
-        for (all_matches.items) |*match_groups| {
-            match_groups.deinit(allocator);
+        for (all_matches.items) |*spans| {
+            spans.deinit(allocator);
         }
         all_matches.deinit(allocator);
     }
 
-    var match_offset: usize = 0;
+    var match_offset: usize = off.start;
     var match_count: i64 = 0;
 
     // 循环匹配所有
@@ -26822,18 +27115,19 @@ pub fn php_preg_match_all(pattern: Value, subject: Value, matches: *Value, flags
         match_count += 1;
         const ovec = pcre2_get_ovector_pointer_8(match_data);
 
-        // 保存当前匹配的所有组
-        var match_groups = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
+        // 保存当前匹配的所有组偏移
+        var spans = std.ArrayListUnmanaged(PcreCaptureSpan){ .items = &.{}, .capacity = 0 };
         var i: usize = 0;
         while (i < @as(usize, @intCast(rc))) : (i += 1) {
             const start = ovec[i * 2];
             const end = ovec[i * 2 + 1];
-            if (start < subject_str.length and end <= subject_str.length and start <= end) {
-                const capture = subject_str.data[start..end];
-                try match_groups.append(allocator, capture);
-            }
+            try spans.append(allocator, .{
+                .start = start,
+                .end = end,
+                .unset = start > subject_str.length or end > subject_str.length or start > end,
+            });
         }
-        try all_matches.append(allocator, match_groups);
+        try all_matches.append(allocator, spans);
 
         // 移动到下一个位置
         const match_end = ovec[1];
@@ -26845,41 +27139,49 @@ pub fn php_preg_match_all(pattern: Value, subject: Value, matches: *Value, flags
     }
 
     // PREG_SET_ORDER=2: matches[i] = [full_match, group1, group2, ...]
-    // PREG_PATTERN_ORDER=1 (default): matches[0] = [all full matches], matches[1] = [all group1], ...
-    const flags_val: i64 = if (flags.isNull()) 0 else flags.toInt();
-    const is_set_order = (flags_val == 2);
+    // PREG_PATTERN_ORDER=1 (默认): matches[0] = [all full matches], matches[1] = [all group1], ...
+    const group_span = pcreGroupSpan(re, 1);
 
     const matches_arr = try PHPArray.init(allocator);
 
     if (is_set_order) {
-        // PREG_SET_ORDER: 每个元素是一个匹配的所有组
-        for (all_matches.items) |match_groups| {
+        // PREG_SET_ORDER: 每个元素是一个匹配的所有组。
+        // 实测：默认按本次匹配实际用到的组数截断（尾部未匹配组省略）；
+        //       带 PREG_UNMATCHED_AS_NULL 时补到模式全组数并给 null。
+        for (all_matches.items) |spans| {
             const set_arr = try PHPArray.init(allocator);
-            for (match_groups.items) |capture| {
-                const capture_str = try PHPString.init(allocator, capture);
-                try set_arr.push(allocator, Value.initString(capture_str));
+            const set_span: usize = if (unmatched_as_null) group_span else spans.items.len;
+            var g: usize = 0;
+            while (g < set_span) : (g += 1) {
+                const span: PcreCaptureSpan = if (g < spans.items.len)
+                    spans.items[g]
+                else
+                    .{ .start = 0, .end = 0, .unset = true };
+                const entry = try pcreCaptureEntry(allocator, subject_str.data, span.start, span.end, span.unset, offset_capture, unmatched_as_null);
+                if (g > 0) {
+                    if (pcreGroupNameForGroup(re, g)) |gname| {
+                        const name_str = try PHPString.init(allocator, gname);
+                        const named_copy = try pcreCaptureEntry(allocator, subject_str.data, span.start, span.end, span.unset, offset_capture, unmatched_as_null);
+                        try set_arr.set(allocator, .{ .string = name_str }, named_copy);
+                    }
+                }
+                try set_arr.push(allocator, entry);
             }
             try matches_arr.push(allocator, Value.initArray(set_arr));
         }
     } else {
-        // PREG_PATTERN_ORDER (默认)
-        if (all_matches.items.len > 0) {
-            const num_groups = all_matches.items[0].items.len;
-
-            var group_idx: usize = 0;
-            while (group_idx < num_groups) : (group_idx += 1) {
-                const group_arr = try PHPArray.init(allocator);
-
-                for (all_matches.items) |match_groups| {
-                    if (group_idx < match_groups.items.len) {
-                        const capture = match_groups.items[group_idx];
-                        const capture_str = try PHPString.init(allocator, capture);
-                        try group_arr.push(allocator, Value.initString(capture_str));
-                    }
+        // PREG_PATTERN_ORDER：恒按「模式全组数」出行，零匹配也给出 [[], [], ...]（实测）
+        var g: usize = 0;
+        while (g < group_span) : (g += 1) {
+            if (g > 0) {
+                if (pcreGroupNameForGroup(re, g)) |gname| {
+                    const name_str = try PHPString.init(allocator, gname);
+                    const named_column = try pcreGroupColumn(allocator, subject_str.data, all_matches.items, g, offset_capture, unmatched_as_null);
+                    try matches_arr.set(allocator, .{ .string = name_str }, Value.initArray(named_column));
                 }
-
-                try matches_arr.push(allocator, Value.initArray(group_arr));
             }
+            const numeric_column = try pcreGroupColumn(allocator, subject_str.data, all_matches.items, g, offset_capture, unmatched_as_null);
+            try matches_arr.push(allocator, Value.initArray(numeric_column));
         }
     }
 

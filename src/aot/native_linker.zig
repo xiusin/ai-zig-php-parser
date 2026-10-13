@@ -156,6 +156,16 @@ const PropertyGetOrigin = struct {
 };
 
 /// 原生链接器
+/// 与运行期 `isScopeQualifiedClassName`（runtime_lib_template.zig）同一口径：
+/// self / parent / static 是作用域常量，类内经它们调用非静态方法合法。
+/// 独立声明而非跨模块复用，因为此处只需类名字符串、不依赖任何运行期状态。
+fn isScopeQualifiedClassNameForEmit(class_name: []const u8) bool {
+    return std.mem.eql(u8, class_name, "self") or
+        std.mem.eql(u8, class_name, "parent") or
+        std.mem.eql(u8, class_name, "static");
+}
+
+
 pub const NativeLinker = struct {
     const Self = @This();
 
@@ -205,6 +215,10 @@ pub const NativeLinker = struct {
     diagnostics: *DiagnosticEngine,
     temp_dir: ?[]const u8,
     func_return_types: std.StringHashMap(bool), // 函数名 -> 是否有返回值
+    /// "Class::method" -> 是否 static。发射侧在 `@"Class::method"` 直调分支绕过运行期查名
+    /// （`php_call_static_with_ctx` 的静态性判定够不着），故在此登记静态性，让**编译期直调**与
+    /// **运行期查名**两条路共用同一份事实；消息文本仍由运行期 `throwThrowable` 单点构造。
+    method_is_static_map: std.StringHashMap(bool),
     current_reg_types: ?*const std.AutoHashMap(usize, IR.Type),
     current_reg_is_value: ?[]bool,
     current_reg_may_heap: ?[]bool,
@@ -1491,6 +1505,7 @@ pub const NativeLinker = struct {
             .diagnostics = diagnostics,
             .temp_dir = null,
             .func_return_types = std.StringHashMap(bool).init(allocator),
+            .method_is_static_map = std.StringHashMap(bool).init(allocator),
             .current_reg_types = null,
             .current_reg_is_value = null,
             .current_reg_may_heap = null,
@@ -1518,6 +1533,7 @@ pub const NativeLinker = struct {
             self.allocator.free(dir);
         }
         self.func_return_types.deinit();
+        self.method_is_static_map.deinit();
         if (self.hoisted_instructions) |*map| {
             map.deinit();
         }
@@ -1570,6 +1586,18 @@ pub const NativeLinker = struct {
         }
         if (!self.func_return_types.contains("select")) {
             try self.func_return_types.put("select", true);
+        }
+
+        // 登记 "Class::method" 的静态性，供 `.static_method_call` 的编译期直调分支判定
+        // （该分支不调 `php_call_static_with_ctx`，运行期那道 F-1 闸门够不着）
+        self.method_is_static_map.clearRetainingCapacity();
+        for (ir_module.types.items) |type_def| {
+            if (type_def.kind != .class) continue;
+            for (type_def.methods) |method| {
+                const key = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ type_def.name, method.name });
+                errdefer self.allocator.free(key);
+                try self.method_is_static_map.put(key, method.is_static);
+            }
         }
 
         // 生成文件头
@@ -2310,6 +2338,13 @@ pub const NativeLinker = struct {
                 \\        }
                 \\        return err;
                 \\    };
+                \\    // `.throw` 在无 handler 的帧里返回 null 而非 Zig error（:19492-19497 的既有口径），
+                \\    // 故上面的 catch 接不到它 ⇒ 实测顶层 `throw new LogicException("x")` 与 F-1 静态调用
+                \\    // 致命面均为「无输出 + rc=0」，而 PHP 是 stderr/stdout 双路 Fatal + rc=255。
+                \\    // 补这条等价守卫：主作用域跑完后若仍有挂起异常，按未捕获处理。
+                \\    if (runtime.hasException()) {
+                \\        runtime.php_handle_uncaught_exception();
+                \\    }
                 \\
             );
             // std.debug.print("After main call\n", .{});
@@ -2345,7 +2380,6 @@ pub const NativeLinker = struct {
 
     /// 生成函数注册代码
     fn generateFunctionRegistration(self: *Self, writer: anytype, ir_module: *const IR.Module) !void {
-        _ = self;
         try writer.writeAll(
             \\
             \\fn registerAllFunctions() !void {
@@ -2375,7 +2409,9 @@ pub const NativeLinker = struct {
             }
             try writer.writeAll("    runtime.registerFunctionMeta(\"");
             try writeEscapedZigString(writer, func.name);
-            try writer.print("\", {d}, {d});\n", .{ param_count, required_count });
+            try writer.print("\", {d}, {d}", .{ param_count, required_count });
+            try self.writeFunctionMetaParamNames(writer, func.params.items);
+            try writer.writeAll(");\n");
         }
 
         // 为闭包函数也注册元数据（闭包不走 register_at_startup 但需要反射元数据）
@@ -2388,7 +2424,9 @@ pub const NativeLinker = struct {
                 }
                 try writer.writeAll("    runtime.registerFunctionMeta(\"");
                 try writeEscapedZigString(writer, func.name);
-                try writer.print("\", {d}, {d});\n", .{ cpc, crc });
+                try writer.print("\", {d}, {d}", .{ cpc, crc });
+                try self.writeFunctionMetaParamNames(writer, func.params.items);
+                try writer.writeAll(");\n");
             }
         }
 
@@ -4532,6 +4570,35 @@ pub const NativeLinker = struct {
 
     fn bi(info: BuiltinInfo) BuiltinInfo {
         return info;
+    }
+
+    /// F-1 发射面判定：`@"Class::method"` 直调分支不经 `php_call_static_with_ctx`，
+    /// 故在此按编译期事实复刻同一规则。实测（PHP 8.5.8）三向：
+    ///   实例方法内 `K::m()` / `self::m()` / `static::m()` / `parent::bm()` 合法；
+    ///   **静态方法内 `self::m()` 同样 Fatal**（该上下文没有 $this）；异类内与顶层 `K::m()` Fatal。
+    /// ⇒ 合法 ⟺ 调用方带 $this（实例方法）且限定类名就是调用方自身或其祖先（作用域常量属此族）。
+    fn staticEmitCallIsIllegal(self: *Self, called_class: []const u8, direct_name: []const u8) !bool {
+        const called_is_static = self.method_is_static_map.get(direct_name) orelse return false;
+        if (called_is_static) return false;
+        const cur = self.current_function_for_resolve orelse return true;
+        if (!self.current_function_has_this) return true;
+        const sep = std.mem.indexOf(u8, cur.name, "::") orelse return true;
+        const caller_class = cur.name[0..sep];
+        if (isScopeQualifiedClassNameForEmit(called_class)) return false;
+        const ir_mod = self.ir_module orelse return true;
+        var walk: ?[]const u8 = caller_class;
+        while (walk) |name| {
+            if (std.mem.eql(u8, name, called_class)) return false;
+            var next_parent: ?[]const u8 = null;
+            for (ir_mod.types.items) |td| {
+                if (std.mem.eql(u8, td.name, name)) {
+                    next_parent = td.parent;
+                    break;
+                }
+            }
+            walk = next_parent;
+        }
+        return true;
     }
 
     /// 生成函数
@@ -22014,7 +22081,9 @@ pub const NativeLinker = struct {
                                 for (func.params.items) |p| {
                                     if (!p.has_default and !p.is_variadic) rc += 1;
                                 }
-                                try writer.print("    runtime.registerFunctionMeta(\"{s}\", {d}, {d});\n", .{ escaped_declared_name, pc, rc });
+                                try writer.print("    runtime.registerFunctionMeta(\"{s}\", {d}, {d}", .{ escaped_declared_name, pc, rc });
+                                try self.writeFunctionMetaParamNames(writer, func.params.items);
+                                try writer.writeAll(");\n");
                             }
                         }
                         if (inst.result) |reg| {
@@ -23335,7 +23404,9 @@ pub const NativeLinker = struct {
                                     for (func.params.items) |p| {
                                         if (!p.has_default and !p.is_variadic) rc += 1;
                                     }
-                                    try writer.print("    runtime.registerFunctionMeta(\"{s}\", {d}, {d});\n", .{ escaped_declared_name, pc, rc });
+                                    try writer.print("    runtime.registerFunctionMeta(\"{s}\", {d}, {d}", .{ escaped_declared_name, pc, rc });
+                                try self.writeFunctionMetaParamNames(writer, func.params.items);
+                                try writer.writeAll(");\n");
                                 }
                             }
                         } else if (is_builtin) {
@@ -24175,6 +24246,39 @@ pub const NativeLinker = struct {
                     defer self.allocator.free(escaped_direct);
                     const has_return = self.func_return_types.get(direct_name) orelse false;
 
+                    // F-1 发射面闸门：直调分支绕过 `php_call_static_with_ctx`，故在此补同一道判定。
+                    //   判据只取编译期已知事实（被调/调用双方的 is_static 来自 method_is_static_map，
+                    //   调用方所属类取自 current_function_for_resolve 的 "Class::method" 前缀），
+                    //   口径与运行期实测一致：合法 ⟺ 调用方是**实例方法**且限定类名是自身或其祖先。
+                    if (try self.staticEmitCallIsIllegal(op.class_name, direct_name)) {
+                        const msg_cls = try escapeBackslashes(self.allocator, op.class_name);
+                        defer self.allocator.free(msg_cls);
+                        const msg_m = try escapeBackslashes(self.allocator, op.method_name);
+                        defer self.allocator.free(msg_m);
+                        const msg_lit = std.fmt.allocPrint(
+                            self.allocator,
+                            "Non-static method {s}::{s}() cannot be called statically",
+                            .{ msg_cls, msg_m },
+                        ) catch return error.OutOfMemory;
+                        defer self.allocator.free(msg_lit);
+                        try writer.print("    _ = runtime.throwThrowable(\"Error\", \"{s}\", runtime.runtime_allocator) catch {{}};\n", .{msg_lit});
+                        try writer.writeAll("    if (runtime.hasException()) {\n");
+                        try writer.writeAll("        @branchHint(.unlikely);\n");
+                        try self.generateCleanupCode(writer);
+                        if (self.current_exception_handler) |handler_idx| {
+                            try writer.print("            current_block = {d};\n", .{handler_idx});
+                            try writer.writeAll("            continue;\n");
+                        } else {
+                            // 与 `.throw` 支同形态（:19492-19497）：返回 null 让**调用方**的
+                            // hasException() 检查路由到 catch。写成 `return error.RuntimeError`
+                            // 会让异常冒成 Zig error 穿过 try ⇒ 实测不可捕获（跨帧 throw 本可捕获）。
+                            try writer.writeAll("        return runtime.Value.initNull();\n");
+                            self.return_generated = true;
+                        }
+                        try writer.writeAll("    }\n");
+                        break :blk;
+                    }
+
                     // 查找方法的引用参数
                     const ref_params: []const u32 = rp_blk: {
                         if (self.ir_module) |ir_mod| {
@@ -24239,6 +24343,9 @@ pub const NativeLinker = struct {
                             try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
                         }
                         if (in_try_dyn) {
+                            // 本批刻意**不改**这条：透传 ctx 后实测把 f11（实例方法内 `$c::bm()`，
+                            // PHP = 4）误判为致命，且 f12 仍不可捕获 ⇒ 动态类名路需要单独一轮
+                            // （登记 F-18，含四向 PHP 真值）。这里保持既有形态 = 只漏报不误杀。
                             try self.writeRegAssignmentFmt(writer, reg.id, "runtime.php_call_static(dyn_class_name, \"{s}\", ", .{escaped_method});
                         } else {
                             try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_call_static(dyn_class_name, \"{s}\", ", .{escaped_method});
@@ -24271,6 +24378,11 @@ pub const NativeLinker = struct {
                 }
 
                 // 检测是否是 parent:: 调用，需要传递 ctx
+                //   R-145 曾试「一律透传 ctx」并以运行期的 ctx 判 $this，实测否证两条：
+                //   ① `php_call_static` 包装层恒传 initNull ⇒ 只看 ctx 会把 f11（实例方法内
+                //      `$c::bm()`，PHP = 4）误判为致命；② 动态类名支改了 ctx 后 f11 仍误杀、
+                //      f12 仍不可捕获。⇒ 保持既有形态，F-1 的强制只走**编译期可解析**的那条
+                //      （`staticEmitCallIsIllegal`），动态类名漏报登记为 F-18。
                 const is_parent_call = std.mem.eql(u8, op.class_name, "parent");
 
                 const in_try = self.current_exception_handler != null;
@@ -24329,7 +24441,10 @@ pub const NativeLinker = struct {
                     try writer.print("        current_block = {d};\n", .{handler_idx});
                     try writer.print("        continue;\n", .{});
                 } else {
-                    try writer.writeAll("        return error.RuntimeError;\n");
+                    // 与 `.throw` 支同形态（:19492-19497）：返回 null 让调用方的 hasException() 路由，
+                    // 写成 `return error.RuntimeError` 会冒成 Zig error 穿过外层 try ⇒ 不可捕获。
+                    try writer.writeAll("        return runtime.Value.initNull();\n");
+                    self.return_generated = true;
                 }
                 try writer.writeAll("    }\n");
             },
@@ -32478,6 +32593,28 @@ pub const NativeLinker = struct {
             }
         }
         return try result.toOwnedSlice(self.allocator);
+    }
+
+    /// AOT-CODEGEN-012 F-12：渲染 registerFunctionMeta 的第 4 实参（形参名数组）。
+    /// 渲染形态与 addMethod 的 `.param_names = &[_][]const u8{…}` 完全同款（escapeString + 字面量数组），
+    /// 使 ReflectionFunction/ReflectionMethod 的 registry 回退路不再只能给 param0/param1。
+    fn writeFunctionMetaParamNames(self: *Self, writer: anytype, params: []const IR.Parameter) !void {
+        // 零参数时 `&[_][]const u8{}` 长度无法推断 ⇒ 交给形参类型推断的 &.{}
+        if (params.len == 0) {
+            try writer.writeAll(", &.{}");
+            return;
+        }
+        try writer.writeAll(", &[_][]const u8{");
+        for (params, 0..) |p, i| {
+            if (i > 0) try writer.writeAll(", ");
+            // 与 :3212 同约定：剥 $ 前缀（PHP ReflectionParameter::getName() 不带 $）；
+            // 但不跳过 $this ⇒ 与调用点按全参数算出的 param_count/required_params 保持 1:1。
+            const clean_name = if (p.name.len > 0 and p.name[0] == '$') p.name[1..] else p.name;
+            const escaped_pn = try self.escapeString(clean_name);
+            defer self.allocator.free(escaped_pn);
+            try writer.print("\"{s}\"", .{escaped_pn});
+        }
+        try writer.writeAll("}");
     }
 
     fn escapeString(self: *Self, str: []const u8) ![]const u8 {

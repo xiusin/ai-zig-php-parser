@@ -3375,15 +3375,29 @@ pub const IRGenerator = struct {
 
         // Generate catch clauses — 每个 catch 子句一个独立块，dispatcher 链式类型匹配
         const target_after_catch = finally_block orelse exit_block;
-        if (try_data.catch_clauses.len == 1) {
-            // 单个 catch：直接在 catch_block 中生成
-            self.setCurrentBlock(catch_block);
-            try self.generateCatchClause(try_data.catch_clauses[0], target_after_catch);
-            if (!self.isBlockTerminated()) {
-                self.setTerminator(.{ .br = target_after_catch });
-            }
-        } else if (try_data.catch_clauses.len > 1) {
-            // 多个 catch：为每个创建独立块，dispatcher 用 exception_matches 分支
+        // ★F-21 修复一：取消 `catch_clauses.len == 1` 的短路支。
+        //   旧写法让单臂 catch 直接在 catch_block 里生成臂体，派发块（peek_exception + instanceof + cond_br）
+        //   只在 >1 支构造 ⇒ 单臂**完全没有类型过滤**（实测 f17/f19/f15/f23：
+        //   `catch (OutOfRangeException)` 收 `LogicException` 照样进臂，PHP 给 Uncaught Fatal）。
+        // ★F-21 修复二：末臂不匹配时的落点。旧落点 `target_after_catch` 是本层退出块，
+        //   异常仍 pending 却不再路由 ⇒ 有外层 try 时外层永不接管（f20），顶层则继续执行后续语句（f21 多打 TAIL）。
+        //   新建 unmatched_block 于本层 try 上下文弹出之后 ⇒ 按 createBlock 规则（:534-537）
+        //   继承**外层** handler，块内 `get_exception` + `.throw` 即把同一异常重新交回路由：
+        //   外层派发器命中外层臂；无外层时 `.throw` 的无 handler 支 `return Value.initNull()`，
+        //   由调用方的 hasException() 逐层上送，最终入口上报为 Fatal + rc=255（R-145 那条腿）。
+        //   本层带 finally 时**不改落点**（仍走 target_after_catch），否则会跳过 finally 语句块；
+        //   该交互面单独登记为红，不在本批强修。
+        var unmatched_target: ?*BasicBlock = null;
+        if (finally_block == null and try_data.catch_clauses.len > 0) {
+            const ub = try self.createBlock("catch_unmatched");
+            self.setCurrentBlock(ub);
+            const pending = try self.emitWithResult(.{ .get_exception = {} }, .php_value);
+            self.setTerminator(.{ .throw = pending });
+            unmatched_target = ub;
+        }
+        const propagate_target = unmatched_target orelse target_after_catch;
+        if (try_data.catch_clauses.len >= 1) {
+            // 单臂与多臂同路：为每个子句创建独立块，dispatcher 用 instanceof 分支
             var catch_blocks_list = std.ArrayListUnmanaged(*BasicBlock){ .items = &.{}, .capacity = 0 };
             defer catch_blocks_list.deinit(self.allocator);
             for (try_data.catch_clauses, 0..) |_, ci| {
@@ -3444,7 +3458,7 @@ pub const IRGenerator = struct {
                         }
                     }
 
-                    const next_check = if (ci + 1 < catch_blocks_list.items.len) catch_blocks_list.items[ci + 1] else target_after_catch;
+                    const next_check = if (ci + 1 < catch_blocks_list.items.len) catch_blocks_list.items[ci + 1] else propagate_target;
                     self.setTerminator(.{ .cond_br = .{
                         .cond = match_reg.?,
                         .then_block = catch_blocks_list.items[ci],
@@ -3519,7 +3533,7 @@ pub const IRGenerator = struct {
                         }
                     }
 
-                    const next_target = if (ci + 1 < catch_blocks_list.items.len) catch_blocks_list.items[ci + 1] else target_after_catch;
+                    const next_target = if (ci + 1 < catch_blocks_list.items.len) catch_blocks_list.items[ci + 1] else propagate_target;
                     const body_block = try self.createBlock("catch_body");
                     self.setTerminator(.{ .cond_br = .{
                         .cond = match_reg2.?,
@@ -7273,8 +7287,11 @@ prop_name: ?[]const u8 = null,
                     args = padded;
                 }
             } else if (std.mem.eql(u8, func_name, "preg_match")) {
-                // preg_match有3个参数时，第3个是引用参数matches
-                if (args.len == 3) {
+                // preg_match的第3个参数是引用参数matches，实参 ≥3 个时都要装填（原判断只认
+                // args.len == 3 ⇒ 一旦写了 flags/offset（4、5 个实参），args[2] 就停留在
+                // 上面 :7231 的 const_null 占位符，发射侧退化成 `blk: { var tmp = …; &tmp }`
+                // 的临时副本 ⇒ 引用整体丢失。实测：三实参能回填、四/五实参恒为原值不动。）
+                if (args.len >= 3) {
                     // 第3个参数需要转换为引用
                     // 获取原始参数表达式
                     const matches_arg_idx = positional_args.items[2];
@@ -7321,8 +7338,10 @@ prop_name: ?[]const u8 = null,
                         }
                     }
 
-                    // 修改函数名
-                    func_name = "preg_match_with_matches";
+                    // 修改函数名：仅三实参时走 preg_match_with_matches（该发射分支硬编码
+                    // flags=0/offset=0，实参更多时必须留在 preg_match 入口，由 :22065 分支
+                    // 把 flags/offset 位置传下去）
+                    if (args.len == 3) func_name = "preg_match_with_matches";
                 }
             } else if (std.mem.eql(u8, func_name, "preg_match_all")) {
                 // preg_match_all有3个参数时，第3个是引用参数matches

@@ -4357,6 +4357,19 @@ pub const IROptimizer = struct {
             return false;
         }
 
+        // 反向同理：不得把 try_body 的 handler **倒灌**进一个已有指令且自身不在 try 内的前驱块。
+        //   发射侧的路由完全按**块级** handler 决定（`.try_begin`/`.try_end` 只输出注释、不改状态），
+        //   一旦合并，前驱块里「try 之前」的语句也会跳进该 try 的 catch ⇒
+        //   实测 F-20：`$rp = new ReflectionProperty("C","nope"); try{…}catch{…}` 中前一语句的
+        //   未捕获异常被后一个 try 的 catch 吃掉（PHP = Fatal + rc=255，AOT = CONSUMED + rc=0）。
+        //   A/B 取证：`--aot-max-iterations=0` 时 entry 块不带 handler 且行为与 PHP 全等 ⇒ 归因到本 pass。
+        //   合并被跳过只会多留一个块（同一函数内线性 fallthrough 仍成立），不改控制流语义。
+        if (block.exception_handler == null and succ.exception_handler != null and
+            block.instructions.items.len > 0)
+        {
+            return false;
+        }
+
         // std.debug.print("  Merging block_{d} ({s}) with single successor block_{d} ({s})\n", .{ block.index, block.label, succ.index, succ.label });
 
         if (try self.simplifySinglePredecessorPhiNodes(func, succ)) {}
