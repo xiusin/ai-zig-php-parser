@@ -6498,9 +6498,9 @@ fn checkSingleType(expected: []const u8, got: []const u8, arg: Value) bool {
     // null 类型
     if (std.mem.eql(u8, expected, "null")) return arg.isNull();
 
-    // object 伪类型：接受任何对象实例
+    // object 伪类型：接受任何对象实例（闭包在 PHP 侧就是 Closure 实例 ⇒ 一并接受）
     if (std.mem.eql(u8, expected, "object")) {
-        return Value_isObject(arg);
+        return Value_isObject(arg) or arg.isFunction();
     }
 
     // callable: 深度验证（复用 php_is_callable）
@@ -19014,14 +19014,23 @@ pub fn php_check_abstract_methods(child_class_name: []const u8, file: []const u8
 
 /// 查找类
 pub fn findClass(name: []const u8) ?*ClassMeta {
+    // F-26：PHP 接受**完全限定名写法**的类名实参——实测 `class_exists("\Widget")` = true、
+    //   `class_exists("Widget")` = true，而类表按 `Widget` 登记 ⇒ 带前导 `\` 的名字必须剥净再查。
+    //   收口放在本函数而非各调用方：`findClass(` 在本文件就有 121 处，再加内省函数、instanceof 右侧、
+    //   动态类名静态调用等入口，逐处补必漏（R-150 归一经验：同语义只留一个口径，见规则 32）。
+    //   热路径成本 = 一次首字符比较；无 `\` 时与改前完全同路（语料实测此类实参 = 0 处 ⇒ 行为不变）。
+    var lookup_name = name;
+    while (lookup_name.len > 0 and lookup_name[0] == '\\') {
+        lookup_name = lookup_name[1..];
+    }
     if (class_registry) |registry| {
-        if (registry.get(name)) |meta| return meta;
+        if (registry.get(lookup_name)) |meta| return meta;
         // AOT-CODEGEN-012：类名不区分大小写（PHP 语义）—— 精确未命中回落 CI 线性扫描。
         // 命中路径（热路径）零额外开销，仅 miss 才扫描；104 调用者一次性全族受益
         //（new / instanceof 元数据 / class_exists / 静态调用 lookup_meta / 类常量 …）。
         var it = registry.iterator();
         while (it.next()) |entry| {
-            if (std.ascii.eqlIgnoreCase(entry.key_ptr.*, name)) return entry.value_ptr.*;
+            if (std.ascii.eqlIgnoreCase(entry.key_ptr.*, lookup_name)) return entry.value_ptr.*;
         }
     }
     return null;
@@ -19602,6 +19611,29 @@ fn typeExactMatch(type_name: []const u8, value: Value) bool {
 
 /// 尝试将值强制转换为单个类型（不抛出异常）
 /// 返回 null 表示类型不兼容，返回非 null 表示转换成功
+/// F-27 共享口径：PHP 里**闭包就是 `Closure` 类的实例**（同时满足 `object`/`mixed`），而 AOT 的闭包
+/// 用独立 `.function` tag 表示 ⇒ `Value_isObject` 为 false。类型检查有**三条互不复用**的链，
+/// 每条都要单独过这枚谓词，否则合法值被判 TypeError（R-154 实测：只修属性位时形参位仍红）：
+///   ① 属性位    tryCoerceSingleType / coercePropertyType
+///   ② 形参位    checkSingleType（`object` 伪类型 + 下方的 instanceof 式类名分支）
+///   ③ instanceof 运算符与 catch 派发（php_instanceof）
+/// 返回值位不校验（门 V v26 ⇒ 工单 F-35），故不在本谓词覆盖面内。
+/// 实测：修前 `public object $o` / `public Closure $c` / `public Closure|string $u` 三格全红
+/// （`Cannot assign unknown to property …`），`?Closure` 因走 null 早退而侥幸绿。
+/// 第二件事：声明类型可写成完全限定名（`\Closure`），而类表与 `class_meta.name` 都不带前导 `\`
+/// ⇒ 同一个 helper 里顺手剥净（F-26 的 `findClass` 剥斜杠只解决查表，不解决名字比较）。
+fn stripLeadingNamespaceSep(name: []const u8) []const u8 {
+    var n = name;
+    while (n.len > 0 and n[0] == '\\') n = n[1..];
+    return n;
+}
+
+fn closureSatisfiesType(declared: []const u8, value: Value) bool {
+    if (!value.isFunction()) return false;
+    const d = stripLeadingNamespaceSep(declared);
+    return std.ascii.eqlIgnoreCase(d, "Closure") or std.mem.eql(u8, d, "object") or std.mem.eql(u8, d, "mixed");
+}
+
 fn tryCoerceSingleType(type_name: []const u8, value: Value) ?Value {
     if (std.mem.eql(u8, type_name, "int") or std.mem.eql(u8, type_name, "integer")) {
         if (value.isInt()) return value;
@@ -19642,7 +19674,7 @@ fn tryCoerceSingleType(type_name: []const u8, value: Value) ?Value {
     }
     if (std.mem.eql(u8, type_name, "mixed")) return value;
     if (std.mem.eql(u8, type_name, "object")) {
-        if (Value_isObject(value)) return value;
+        if (Value_isObject(value) or value.isFunction()) return value; // F-27：闭包也是对象
         return null;
     }
     if (std.mem.eql(u8, type_name, "callable") or std.mem.eql(u8, type_name, "iterable")) return value;
@@ -19673,7 +19705,8 @@ fn tryCoerceSingleType(type_name: []const u8, value: Value) ?Value {
         return null;
     }
     // 类名/接口名类型：只接受精确 instanceof 匹配，不做 coercion
-    if (findClass(type_name)) |_| {
+    if (findClass(stripLeadingNamespaceSep(type_name))) |_| { // F-26/F-27：完全限定写法先剥净
+        if (closureSatisfiesType(type_name, value)) return value; // F-27：闭包 instanceof Closure
         if (Value_isObject(value)) {
             const obj = Value_asObject(value);
             if (obj.class_meta) |meta| {
@@ -19876,7 +19909,9 @@ fn coercePropertyType(prop: *const ClassProperty, value: Value, class_name: []co
     }
     if (std.mem.eql(u8, type_name, "mixed")) return value;
     if (std.mem.eql(u8, type_name, "object")) {
-        if (Value_isObject(value)) return value;
+        // F-27：AOT 的闭包是独立 .function tag（`Value_isObject` 为 false），而 PHP 里闭包就是对象
+        //   （实测 `class P1 { public object $o; } $p1->o = fn() => 1;` ⇒ 接受且 get_class = Closure）
+        if (Value_isObject(value) or value.isFunction()) return value;
         var buf: [256]u8 = undefined;
         const val_type = if (value.isArray()) "array" else if (value.isString()) "string" else if (value.isInt()) "int" else if (value.isFloat()) "float" else if (value.isBool()) "bool" else "unknown";
         const msg = std.fmt.bufPrint(&buf, "Cannot assign {s} to property {s}::${s} of type object", .{ val_type, class_name, prop.name }) catch "Cannot assign to object property";
@@ -19884,18 +19919,22 @@ fn coercePropertyType(prop: *const ClassProperty, value: Value, class_name: []co
     }
 
     // 类名/接口名类型：检查 instanceof（包括继承链和接口实现）
-    if (findClass(type_name)) |_| {
+    // F-26/F-27：声明类型可能是完全限定名，且闭包必须先按 `Closure` 实例放行
+    //   （口径统一在 stripLeadingNamespaceSep / closureSatisfiesType，见其注释）。
+    const declared_type = stripLeadingNamespaceSep(type_name);
+    if (findClass(declared_type)) |_| {
+        if (closureSatisfiesType(type_name, value)) return value;
         if (Value_isObject(value)) {
             const obj = Value_asObject(value);
             if (obj.class_meta) |meta| {
                 // 检查继承链
                 var current: ?*const ClassMeta = meta;
                 while (current) |m| {
-                    if (std.mem.eql(u8, m.name, type_name)) return value;
+                    if (std.mem.eql(u8, m.name, declared_type)) return value;
                     current = m.parent;
                 }
                 // 检查接口实现
-                if (meta.implementsInterface(type_name)) return value;
+                if (meta.implementsInterface(declared_type)) return value;
             }
             // 类型不匹配：TypeError
             var buf: [256]u8 = undefined;
@@ -19903,9 +19942,9 @@ fn coercePropertyType(prop: *const ClassProperty, value: Value, class_name: []co
             const msg = std.fmt.bufPrint(&buf, "Cannot assign {s} to property {s}::${s} of type {s}", .{ actual_class, class_name, prop.name, type_name }) catch "Cannot assign: type mismatch";
             return throwThrowable("TypeError", msg, runtime_allocator);
         }
-        // 非对象赋给类名属性：TypeError
+        // 非对象赋给类名属性：TypeError（实测 PHP 报 "Closure"，故 .function 必须有名，不得落 "unknown"）
         var buf: [256]u8 = undefined;
-        const val_type = if (value.isArray()) "array" else if (value.isString()) "string" else if (value.isInt()) "int" else if (value.isFloat()) "float" else if (value.isBool()) "bool" else "unknown";
+        const val_type = if (value.isFunction()) "Closure" else if (value.isArray()) "array" else if (value.isString()) "string" else if (value.isInt()) "int" else if (value.isFloat()) "float" else if (value.isBool()) "bool" else "unknown";
         const msg = std.fmt.bufPrint(&buf, "Cannot assign {s} to property {s}::${s} of type {s}", .{ val_type, class_name, prop.name, type_name }) catch "Cannot assign: type mismatch";
         return throwThrowable("TypeError", msg, runtime_allocator);
     }
@@ -20850,7 +20889,14 @@ pub fn is_subclass_of(ctx: Value, args: []const Value, allocator: Allocator) any
 
 /// instanceof 检查
 pub fn php_instanceof(obj_val: Value, class_name: Value) !Value {
-    if (!Value_isObject(obj_val)) return Value.initBool(false);
+    if (!Value_isObject(obj_val)) {
+        // 闭包在 PHP 侧就是 Closure 实例 ⇒ object/Closure/mixed 三格必须放行，
+        // 与属性位（coercePropertyType）、形参位（checkSingleType）共用同一枚谓词，禁另造口径。
+        if (obj_val.isFunction() and class_name.isString() and closureSatisfiesType(class_name.asString().data, obj_val)) {
+            return Value.initBool(true);
+        }
+        return Value.initBool(false);
+    }
     if (!class_name.isString()) return Value.initBool(false);
 
     const obj = Value_asObject(obj_val);
@@ -21711,11 +21757,15 @@ pub fn php_unserialize(str: Value, allocator: Allocator) !Value {
 
 /// 检查是否是对象
 pub fn php_is_object(val: Value) !Value {
-    return Value.initBool(Value_isObject(val));
+    // AOT 的闭包是独立 .function tag，但 PHP 侧闭包就是 Closure 实例
+    return Value.initBool(Value_isObject(val) or val.isFunction());
 }
 
 /// 获取对象的类名
 pub fn php_get_class(obj_val: Value, allocator: Allocator) !Value {
+    if (obj_val.isFunction()) {
+        return Value.initString(try PHPString.init(allocator, "Closure"));
+    }
     if (!Value_isObject(obj_val)) {
         return Value.initBool(false);
     }
@@ -24492,7 +24542,7 @@ pub fn php_gettype(val: Value, allocator: Allocator) !Value {
         "string"
     else if (val.isArray())
         "array"
-    else if (Value_isObject(val))
+    else if (Value_isObject(val) or val.isFunction())
         "object"
     else if (val.isResource())
         "resource"

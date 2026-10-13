@@ -67,6 +67,7 @@ const VarUsageEntry = struct {
     location: SourceLocation,
 };
 
+
 /// IR Generator - converts AST to SSA-form IR
 pub const IRGenerator = struct {
     allocator: Allocator,
@@ -989,10 +990,11 @@ pub const IRGenerator = struct {
         self.current_php_return_type = null;
         if (func_data.return_type) |rt_idx| {
             const rt_info = self.resolveTypeNodeToString(rt_idx);
-            if (rt_info.name.len > 0) {
-                func.php_return_type = rt_info.name;
+            const rt_norm = self.normalizeClassTypeName(rt_info.name) catch rt_info.name;
+            if (rt_norm.len > 0) {
+                func.php_return_type = rt_norm;
                 func.php_return_nullable = rt_info.nullable;
-                self.current_php_return_type = rt_info.name;
+                self.current_php_return_type = rt_norm;
             }
         }
         self.var_registers = .{ .items = &.{}, .capacity = 0 };
@@ -1042,7 +1044,8 @@ pub const IRGenerator = struct {
                 pname_list.append(self.allocator, self.getString(pdata.name)) catch {};
                 if (pdata.type) |type_idx| {
                     const ti = self.resolveTypeNodeToString(type_idx);
-                    ptype_list.append(self.allocator, ti.name) catch {};
+                    const norm = self.normalizeClassTypeName(ti.name) catch ti.name;
+                    ptype_list.append(self.allocator, norm) catch {};
                     pnullable_list.append(self.allocator, ti.nullable) catch {};
                 } else {
                     ptype_list.append(self.allocator, "") catch {};
@@ -1510,14 +1513,7 @@ pub const IRGenerator = struct {
         defer interfaces.deinit(self.allocator);
         for (class_data.implements) |impl_idx| {
             const impl_node = self.getNode(impl_idx) orelse continue;
-            const iface_name = switch (impl_node.tag) {
-                .named_type => self.getString(impl_node.data.named_type.name),
-                .variable => self.getString(impl_node.data.variable.name),
-                .literal_string => self.getString(impl_node.data.literal_string.value),
-                else => continue,
-            };
-            // ✅ 解析接口名称（可能有命名空间）
-            const full_iface_name = try self.resolveClassName(iface_name);
+            const full_iface_name = try self.containerTypeRefName(impl_node) orelse continue;
             try interfaces.append(self.allocator, full_iface_name);
         }
 
@@ -1529,13 +1525,7 @@ pub const IRGenerator = struct {
         // ✅ 解析父类名称（可能有命名空间）
         const parent_name = if (class_data.extends) |ext_idx| blk: {
             const ext_node = self.getNode(ext_idx) orelse break :blk null;
-            const parent_short_name = switch (ext_node.tag) {
-                .named_type => self.getString(ext_node.data.named_type.name),
-                .variable => self.getString(ext_node.data.variable.name),
-                .literal_string => self.getString(ext_node.data.literal_string.value),
-                else => break :blk null,
-            };
-            break :blk try self.resolveClassName(parent_short_name);
+            break :blk try self.containerTypeRefName(ext_node);
         } else null;
 
         type_def.* = .{
@@ -2401,7 +2391,8 @@ pub const IRGenerator = struct {
                     // 提取参数类型信息
                     if (param_node.data.parameter.type) |type_idx| {
                         const type_info = self.resolveTypeNodeToString(type_idx);
-                        param_type_list.append(self.allocator, type_info.name) catch {};
+                        const norm_pt = self.normalizeClassTypeName(type_info.name) catch type_info.name;
+                        param_type_list.append(self.allocator, norm_pt) catch {};
                         // nullable: 显式 ?Type 或无默认值时由类型决定
                         param_nullable_list.append(self.allocator, type_info.nullable) catch {};
                     } else {
@@ -2417,8 +2408,9 @@ pub const IRGenerator = struct {
         var ret_nullable: bool = false;
         if (method_data.return_type) |rt_idx| {
             const rt_info = self.resolveTypeNodeToString(rt_idx);
-            if (rt_info.name.len > 0) {
-                ret_type = rt_info.name;
+            const rt_mn = self.normalizeClassTypeName(rt_info.name) catch rt_info.name;
+            if (rt_mn.len > 0) {
+                ret_type = rt_mn;
                 ret_nullable = rt_info.nullable;
             }
         }
@@ -2557,10 +2549,11 @@ pub const IRGenerator = struct {
             self.current_php_return_type = null;
             if (method_data.return_type) |rt_idx| {
                 const rt_info = self.resolveTypeNodeToString(rt_idx);
-                if (rt_info.name.len > 0) {
-                    func.php_return_type = rt_info.name;
+                const rt_mv = self.normalizeClassTypeName(rt_info.name) catch rt_info.name;
+                if (rt_mv.len > 0) {
+                    func.php_return_type = rt_mv;
                     func.php_return_nullable = rt_info.nullable;
-                    self.current_php_return_type = rt_info.name;
+                    self.current_php_return_type = rt_mv;
                 }
             }
             self.current_class = class_name;
@@ -3422,7 +3415,7 @@ pub const IRGenerator = struct {
                         switch (tnode.?.tag) {
                             .named_type => {
                                 const type_name = self.getString(tnode.?.data.named_type.name);
-                                try exc_types.append(self.allocator, type_name);
+                                try exc_types.append(self.allocator, try self.resolveClassName(type_name));
                             },
                             .union_type => {
                                 // 多重捕获: catch (A | B $e)
@@ -3431,7 +3424,7 @@ pub const IRGenerator = struct {
                                     const tn = self.getNode(t) orelse continue;
                                     if (tn.tag == .named_type) {
                                         const type_name = self.getString(tn.data.named_type.name);
-                                        try exc_types.append(self.allocator, type_name);
+                                        try exc_types.append(self.allocator, try self.resolveClassName(type_name));
                                     }
                                 }
                             },
@@ -3497,7 +3490,7 @@ pub const IRGenerator = struct {
                         switch (tnode2.?.tag) {
                             .named_type => {
                                 const type_name = self.getString(tnode2.?.data.named_type.name);
-                                try exc_types2.append(self.allocator, type_name);
+                                try exc_types2.append(self.allocator, try self.resolveClassName(type_name));
                             },
                             .union_type => {
                                 const types = tnode2.?.data.union_type.types;
@@ -3505,7 +3498,7 @@ pub const IRGenerator = struct {
                                     const tn = self.getNode(t) orelse continue;
                                     if (tn.tag == .named_type) {
                                         const type_name = self.getString(tn.data.named_type.name);
-                                        try exc_types2.append(self.allocator, type_name);
+                                        try exc_types2.append(self.allocator, try self.resolveClassName(type_name));
                                     }
                                 }
                             },
@@ -5793,6 +5786,40 @@ pub const IRGenerator = struct {
         return class_name;
     }
 
+    /// 类型位点（参数/返回）名字的归一口径（F-24b）：
+    ///   这些名字来自 `parseType`（parser.zig:4317-4333）保存的**原文切片**，parser 的
+    ///   `resolveName` **没有**经过它们 ⇒ `\Throwable`（完全限定）与 `RE`（`use ... as RE` 别名）
+    ///   都会原样进 `php_coerce_value(..., "<name>", ...)`，运行期按**字面名**查类 ⇒ 合法实参被
+    ///   判成 TypeError（门 T 实测 t2/t6；同一名字里的裸反斜杠还会让生成码编译失败，见 t1/t4/t5/t14）。
+    ///   只对「类类型」做归一：标量/混配类型必须原样，否则 `namespace App` 下的 `int` 会被加前缀成
+    ///   `App\int`（语料 826 处标量参数即炸）；self/parent/static 交给运行期 LSB 语义，不得提前展开。
+    fn normalizeClassTypeName(self: *Self, raw: []const u8) ![]const u8 {
+        if (raw.len == 0) return raw;
+        if (std.mem.indexOfScalar(u8, raw, '|') != null or std.mem.indexOfScalar(u8, raw, '&') != null) return raw;
+        if (std.mem.eql(u8, raw, "mixed")) return raw;
+        if (ConcreteType.fromString(raw) != null) return raw;
+        if (std.mem.eql(u8, raw, "self") or std.mem.eql(u8, raw, "parent") or std.mem.eql(u8, raw, "static")) return raw;
+        return try self.resolveClassName(raw);
+    }
+
+    /// 父类 / 接口位点的类名取值口径（F-24c）：
+    ///   `.variable`（`extends X` / `implements X` 走 parseExpression ⇒ parser 主名分支）
+    ///   在 parser 侧已经过 `PHPContext.resolveName`（src/compiler/root.zig:152-176）解析
+    ///   —— 前导 `\` 已剥、`use` 别名与当前命名空间前缀都已施加 ⇒ **AOT 禁止二次解析**；
+    ///   否则 `namespace App; class E extends \Exception` 会被再加前缀成 `App\Exception`
+    ///   （门 T 实测 t7/t8/t12/t13：内建基类整族方法丢失、`get_parent_class` 失真、
+    ///   `implements \JsonSerializable` 变空对象；t11 反向：`\Base` 被错认同命名空间同名类）。
+    ///   `.named_type`（参数/返回/catch 类型位点走 parseType，:4317-4333 存**原文切片**，
+    ///   含前导 `\`）未经解析 ⇒ 仍须走 resolveClassName，两种来源不可混用同一口径。
+    fn containerTypeRefName(self: *Self, node: *const Node) !?[]const u8 {
+        switch (node.tag) {
+            .variable => return self.getString(node.data.variable.name),
+            .named_type => return try self.resolveClassName(self.getString(node.data.named_type.name)),
+            .literal_string => return try self.resolveClassName(self.getString(node.data.literal_string.value)),
+            else => return null,
+        }
+    }
+
     /// 处理 use 语句
     /// @param use_node use 语句节点
     fn generateUseStatement(self: *Self, use_node: *const Node) !void {
@@ -5956,6 +5983,11 @@ pub const IRGenerator = struct {
                 var class_name = self.getString(class_node.data.named_type.name);
                 // 解析 self/static/parent 为实际类名
                 class_name = self.resolveSelfStaticParent(class_name);
+                // F-24e：右侧操作数走 parseType ⇒ 存的是**原文切片**（`\Throwable` 连前导反斜杠一起），
+                //   而 `php_instanceof` → `findClass` 只折大小写、不剥 `\` ⇒ 实测 t19 单变量：
+                //   `instanceof Throwable` = true，`instanceof \Throwable` / `instanceof \RuntimeException` = false。
+                //   与参数/返回位点共用同一枚 normalizeClassTypeName（规则 32：同语义只留一个口径）。
+                class_name = try self.normalizeClassTypeName(class_name);
                 const class_name_id = try self.module.?.internString(class_name);
                 break :blk try self.emitWithResult(.{ .const_string = class_name_id }, .php_string);
             },
@@ -5963,6 +5995,8 @@ pub const IRGenerator = struct {
                 var class_name = self.getString(class_node.data.literal_string.value);
                 // 解析 self/static/parent 为实际类名
                 class_name = self.resolveSelfStaticParent(class_name);
+                // 字符串形态（`instanceof "Throwable"`）同表位：PHP 允许前导 `\`，AOT 查表同样不剥
+                class_name = try self.normalizeClassTypeName(class_name);
                 const class_name_id = try self.module.?.internString(class_name);
                 break :blk try self.emitWithResult(.{ .const_string = class_name_id }, .php_string);
             },

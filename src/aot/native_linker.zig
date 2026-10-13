@@ -18774,7 +18774,7 @@ pub const NativeLinker = struct {
             // 组合类型不做值转换
             if (rt.len > 0 and std.mem.indexOfScalar(u8, rt, '|') == null and std.mem.indexOfScalar(u8, rt, '&') == null) {
                 const nullable_str = if (self.current_return_nullable) "true" else "false";
-                try writer.print("{s}return if ({s} and {s}.isNull()) {s} else runtime.php_coerce_value({s}, \"{s}\", runtime.runtime_allocator);\n", .{ indent, nullable_str, val_expr, val_expr, val_expr, rt });
+                try writer.print("{s}return if ({s} and {s}.isNull()) {s} else runtime.php_coerce_value({s}, \"{s}\", runtime.runtime_allocator);\n", .{ indent, nullable_str, val_expr, val_expr, val_expr, try self.escapeString(rt) });
                 self.return_generated = true;
                 if (self.current_loop_label != null and !self.in_cond_br_branch) self.loop_body_return_generated = true;
                 return;
@@ -18801,7 +18801,7 @@ pub const NativeLinker = struct {
         if (self.current_return_type) |rt| {
             if (rt.len > 0 and std.mem.indexOfScalar(u8, rt, '|') == null and std.mem.indexOfScalar(u8, rt, '&') == null) {
                 const nullable_str = if (self.current_return_nullable) "true" else "false";
-                return std.fmt.allocPrint(self.allocator, "{s}return if ({s} and {s}.isNull()) {s} else runtime.php_coerce_value({s}, \"{s}\", runtime.runtime_allocator);\n", .{ indent, nullable_str, val_expr, val_expr, val_expr, rt });
+                return std.fmt.allocPrint(self.allocator, "{s}return if ({s} and {s}.isNull()) {s} else runtime.php_coerce_value({s}, \"{s}\", runtime.runtime_allocator);\n", .{ indent, nullable_str, val_expr, val_expr, val_expr, try self.escapeString(rt) });
             }
         }
         return std.fmt.allocPrint(self.allocator, "{s}return {s};\n", .{ indent, val_expr });
@@ -21308,7 +21308,7 @@ pub const NativeLinker = struct {
                                         // 跳过 COW：只做 retain + 赋值
                                         try writer.print("    {{\n", .{});
                                         if (php_ptype.len > 0) {
-                                            try writer.print("        var __pv = if (args.len > {d} and !args[{d}].isMissing()) (if (args[{d}].isNull() and {s}) args[{d}] else runtime.php_coerce_value(args[{d}], \"{s}\", runtime.runtime_allocator)) else runtime.Value.initNull();\n", .{ args_index, args_index, args_index, if (php_nullable) "true" else "false", args_index, args_index, php_ptype });
+                                            try writer.print("        var __pv = if (args.len > {d} and !args[{d}].isMissing()) (if (args[{d}].isNull() and {s}) args[{d}] else runtime.php_coerce_value(args[{d}], \"{s}\", runtime.runtime_allocator)) else runtime.Value.initNull();\n", .{ args_index, args_index, args_index, if (php_nullable) "true" else "false", args_index, args_index, try self.escapeString(php_ptype) });
                                         } else {
                                             try writer.print("        const __pv = if (args.len > {d} and !args[{d}].isMissing()) args[{d}] else runtime.Value.initNull();\n", .{ args_index, args_index, args_index });
                                         }
@@ -21323,7 +21323,7 @@ pub const NativeLinker = struct {
                                         // COW 检查：数组在 ref_count > 1 时深拷贝
                                         try writer.print("    {{\n", .{});
                                         if (php_ptype.len > 0) {
-                                            try writer.print("        var __pv = if (args.len > {d} and !args[{d}].isMissing()) (if (args[{d}].isNull() and {s}) args[{d}] else runtime.php_coerce_value(args[{d}], \"{s}\", runtime.runtime_allocator)) else runtime.Value.initNull();\n", .{ args_index, args_index, args_index, if (php_nullable) "true" else "false", args_index, args_index, php_ptype });
+                                            try writer.print("        var __pv = if (args.len > {d} and !args[{d}].isMissing()) (if (args[{d}].isNull() and {s}) args[{d}] else runtime.php_coerce_value(args[{d}], \"{s}\", runtime.runtime_allocator)) else runtime.Value.initNull();\n", .{ args_index, args_index, args_index, if (php_nullable) "true" else "false", args_index, args_index, try self.escapeString(php_ptype) });
                                         } else {
                                             try writer.print("        const __pv = if (args.len > {d} and !args[{d}].isMissing()) args[{d}] else runtime.Value.initNull();\n", .{ args_index, args_index, args_index });
                                         }
