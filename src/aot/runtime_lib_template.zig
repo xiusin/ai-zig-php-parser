@@ -10678,31 +10678,101 @@ fn pcreGroupSpan(re: *const pcre2_code, used_groups: usize) usize {
     return used_groups;
 }
 
+/// ★F-50（R-163）：PHP 在把模式交给 PCRE **之前**先做分隔符/修饰符校验；违规时只发一条 Warning，
+/// 然后让函数按各自口径返回 false / null（preg_replace、preg_filter、preg_replace_callback 返回 null），
+/// 并且**不写 `$matches` 出参**（实测见工单 §38.1）。本仓此前把这些形态直接送进 PCRE，导致**静默错值**
+/// （`preg_match("b","abc")` 返回 1 而 PHP 返回 false）。
+/// ★下列判定口径全部来自 PHP 8.5.8 实测（不是照抄 PCRE 文档）：
+///   • 空模式（含只有空白）        ⇒ `{fn}(): Empty regular expression`
+///   • 首字符为字母/数字/反斜杠/NUL ⇒ `{fn}(): Delimiter must not be alphanumeric, backslash, or NUL byte`
+///   • 开括号 `(`/`[`/`{`/`<` 作分隔符 ⇒ 找**配对**闭括号（同名可嵌套）；找不到 ⇒ `{fn}(): No ending matching delimiter ')' found`
+///   • 其它字符作分隔符           ⇒ 找同名字符（跳过 `\` 转义）；找不到 ⇒ `{fn}(): No ending delimiter '/' found`
+///     ★闭括号单独作分隔符是合法的（`)a)` 实测可用）⇒ 配对规则只对**开括号**生效
+///   • 结束分隔符之后的字符必须落在实测合法修饰符集合内；空白即终止 ⇒ `{fn}(): Unknown modifier 'g'`
+const PatternIssue = enum {
+    none,
+    empty,
+    bad_delimiter,
+    no_end_delimiter,
+    no_end_matching_delimiter,
+    unknown_modifier,
+};
+
 const ParsedPattern = struct {
     pattern: []const u8,
     options: c_uint,
+    /// ★非 `.none` ⇒ 调用方必须**先**用 `emitRegexPatternWarning` 发告警，再按本族函数的 PHP 返回值返回
+    issue: PatternIssue = .none,
+    /// 告警文本里要回显的字符（分隔符或非法修饰符）
+    issue_char: u8 = 0,
 };
 
-/// 解析PHP风格正则表达式 (/pattern/flags)
+/// 合法修饰符集合（★实测所得，禁凭记忆增删：i m s x n u r A D J S U X；其余全部 Unknown modifier）
+const php_regex_valid_modifiers = [_]u8{ 'i', 'm', 's', 'x', 'n', 'u', 'r', 'A', 'D', 'J', 'S', 'U', 'X' };
+
+fn isRegexModifierValid(ch: u8) bool {
+    for (php_regex_valid_modifiers) |c| {
+        if (c == ch) return true;
+    }
+    return false;
+}
+
+/// 开括号分隔符 ⇒ 对应的闭括号；返回 0 表示这不是开括号（闭括号/普通字符都按同名字符配对）
+fn pairedCloseDelimiter(open: u8) u8 {
+    return switch (open) {
+        '(' => ')',
+        '[' => ']',
+        '{' => '}',
+        '<' => '>',
+        else => @as(u8, 0),
+    };
+}
+
+/// 按 PHP 口径拼告警文本并发出（固定缓冲，避免在校验热路径上分配）
+fn emitRegexPatternWarning(fn_name: []const u8, parsed: ParsedPattern) void {
+    var buf: [256]u8 = undefined;
+    const msg = switch (parsed.issue) {
+        .empty => std.fmt.bufPrint(&buf, "{s}(): Empty regular expression", .{fn_name}) catch return,
+        .bad_delimiter => std.fmt.bufPrint(&buf, "{s}(): Delimiter must not be alphanumeric, backslash, or NUL byte", .{fn_name}) catch return,
+        .no_end_delimiter => std.fmt.bufPrint(&buf, "{s}(): No ending delimiter '{c}' found", .{ fn_name, parsed.issue_char }) catch return,
+        .no_end_matching_delimiter => std.fmt.bufPrint(&buf, "{s}(): No ending matching delimiter '{c}' found", .{ fn_name, parsed.issue_char }) catch return,
+        .unknown_modifier => std.fmt.bufPrint(&buf, "{s}(): Unknown modifier '{c}'", .{ fn_name, parsed.issue_char }) catch return,
+        .none => return,
+    };
+    emitWarning(msg);
+}
+
+/// 解析PHP风格正则表达式 (/pattern/flags)；非法形态只标记不猜测，由调用方决定返回值
 fn parsePHPRegexPattern(pattern: []const u8) ParsedPattern {
     var result = ParsedPattern{
         .pattern = pattern,
         .options = PCRE2_UTF | PCRE2_DOTALL,
     };
 
-    if (pattern.len == 0) return result;
-
     var start: usize = 0;
     while (start < pattern.len and pattern[start] == ' ') : (start += 1) {}
-    if (start >= pattern.len) return result;
+    if (start >= pattern.len) {
+        // 实测：'' 与 ' ' 都是 Empty regular expression
+        result.pattern = "";
+        result.issue = .empty;
+        return result;
+    }
 
     const delimiter = pattern[start];
-    var end: usize = start + 1;
-    var paren_depth: i32 = 0;
-    var in_escape = false;
+    if (delimiter == 0 or std.ascii.isAlphanumeric(delimiter)) {
+        result.pattern = "";
+        result.issue = .bad_delimiter;
+        result.issue_char = delimiter;
+        return result;
+    }
 
-    while (end < pattern.len) : (end += 1) {
-        const ch = pattern[end];
+    const close_delim = pairedCloseDelimiter(delimiter);
+    var depth: i32 = 0;
+    var end: usize = pattern.len;
+    var in_escape = false;
+    var i: usize = start + 1;
+    while (i < pattern.len) : (i += 1) {
+        const ch = pattern[i];
         if (in_escape) {
             in_escape = false;
             continue;
@@ -10711,29 +10781,49 @@ fn parsePHPRegexPattern(pattern: []const u8) ParsedPattern {
             in_escape = true;
             continue;
         }
-        if (ch == '(' or ch == '[' or ch == '{') {
-            paren_depth += 1;
-        } else if (ch == ')' or ch == ']' or ch == '}') {
-            paren_depth -= 1;
-        } else if (ch == delimiter and paren_depth == 0) {
+        if (close_delim != 0) {
+            if (ch == delimiter) {
+                depth += 1;
+                continue;
+            }
+            if (ch == close_delim) {
+                if (depth == 0) {
+                    end = i;
+                    break;
+                }
+                depth -= 1;
+                continue;
+            }
+        } else if (ch == delimiter) {
+            end = i;
             break;
         }
     }
 
     if (end >= pattern.len) {
-        result.pattern = pattern[start + 1 ..];
+        result.pattern = "";
+        const iss: PatternIssue = if (close_delim != 0) .no_end_matching_delimiter else .no_end_delimiter;
+        result.issue = iss;
+        result.issue_char = if (close_delim != 0) close_delim else delimiter;
         return result;
     }
+
     result.pattern = pattern[start + 1 .. end];
 
     const modifiers = pattern[end + 1 ..];
     for (modifiers) |ch| {
+        if (ch == ' ') break; // 实测："/a/ " 合法，空白即终止修饰符扫描
+        if (!isRegexModifierValid(ch)) {
+            result.issue = .unknown_modifier;
+            result.issue_char = ch;
+            return result;
+        }
         switch (ch) {
             'i' => result.options |= PCRE2_CASELESS,
             'm' => result.options |= PCRE2_MULTILINE,
             's' => result.options |= PCRE2_DOTALL,
             'x' => result.options |= PCRE2_EXTENDED,
-            ' ' => break,
+            // ★实测合法但语义尚未实现的修饰符（n u r A D J S U X）：工单 §38.4 已单列，禁在此静默当"已支持"
             else => {},
         }
     }
@@ -10741,12 +10831,14 @@ fn parsePHPRegexPattern(pattern: []const u8) ParsedPattern {
     return result;
 }
 
+
 /// 完整PCRE2实现的preg_match
 /// 支持所有正则语法，与解释器/Bytecode行为一致
 pub fn preg_match(pattern_val: Value, subject_val: Value, matches_ref: *Value, flags: Value, offset: Value, allocator: Allocator) !Value {
     _ = flags; // TODO: 实现flags支持
     _ = offset; // TODO: 实现offset支持
-    _ = matches_ref; // TODO: 实现matches填充
+    // ★F-50 起 `matches_ref` 在告警早退支上被真实写入 ⇒ 此处不再有"未使用参数"可丢弃；
+    //   成功支仍不填 matches（那属 `preg_match_with_matches`/`php_preg_match` 的分工，不在本批范围）
 
     if (!pattern_val.isString() or !subject_val.isString()) {
         return Value.initInt(0);
@@ -10756,6 +10848,13 @@ pub fn preg_match(pattern_val: Value, subject_val: Value, matches_ref: *Value, f
     const subject_str = subject_val.asString();
 
     const parsed = parsePHPRegexPattern(pattern_str.data);
+    // ★F-50（R-163）：非法分隔符/修饰符 ⇒ 按 PHP 口径发 Warning 后返回 false，不进 PCRE。
+    //   出参槽按本文件既有早退支装成空数组；★实测 PHP 在告警路径上**保留调用者预置值**，本仓因按引用实参未初始化而做不到 ⇒ 另立 F-53。
+    if (parsed.issue != .none) {
+        emitRegexPatternWarning("preg_match", parsed);
+        matches_ref.* = Value.initArray(try PHPArray.init(allocator));
+        return Value.initBool(false);
+    }
 
     // 使用缓存获取编译后的正则（不需要release，缓存管理生命周期）
     const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch return Value.initInt(0);
@@ -10781,6 +10880,13 @@ pub fn preg_match_with_matches(pattern_val: Value, subject_val: Value, matches_r
     const pattern_str = pattern_val.asString();
     const subject_str = subject_val.asString();
     const parsed = parsePHPRegexPattern(pattern_str.data);
+    // ★F-50（R-163）：非法分隔符/修饰符 ⇒ 按 PHP 口径发 Warning 后返回 false，不进 PCRE。
+    //   出参槽按本文件既有早退支装成空数组；★实测 PHP 在告警路径上**保留调用者预置值**，本仓因按引用实参未初始化而做不到 ⇒ 另立 F-53。
+    if (parsed.issue != .none) {
+        emitRegexPatternWarning("preg_match_with_matches", parsed);
+        matches_ref.* = Value.initArray(try PHPArray.init(allocator));
+        return Value.initBool(false);
+    }
 
     // 使用缓存获取编译后的正则
     const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch {
@@ -10879,6 +10985,13 @@ pub fn preg_match_all(pattern_val: Value, subject_val: Value, matches_ref: *Valu
     const pattern_str = pattern_val.asString();
     const subject_str = subject_val.asString();
     const parsed = parsePHPRegexPattern(pattern_str.data);
+    // ★F-50（R-163）：非法分隔符/修饰符 ⇒ 按 PHP 口径发 Warning 后返回 false，不进 PCRE。
+    //   出参槽按本文件既有早退支装成空数组；★实测 PHP 在告警路径上**保留调用者预置值**，本仓因按引用实参未初始化而做不到 ⇒ 另立 F-53。
+    if (parsed.issue != .none) {
+        emitRegexPatternWarning("preg_match_all", parsed);
+        matches_ref.* = Value.initArray(try PHPArray.init(allocator));
+        return Value.initBool(false);
+    }
 
     // 使用缓存获取编译后的正则
     const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch {
@@ -11002,6 +11115,11 @@ pub fn preg_replace(pattern_val: Value, replacement_val: Value, subject_val: Val
     if (limit == 0) return subject_val;
 
     const parsed = parsePHPRegexPattern(pattern_str.data);
+    // ★F-50（R-163）：非法分隔符/修饰符 ⇒ 按 PHP 口径发 Warning 后返回本族错误值（实测见工单 §38.1），不进 PCRE。
+    if (parsed.issue != .none) {
+        emitRegexPatternWarning("preg_replace", parsed);
+        return Value.initNull();
+    }
 
     // 使用缓存获取编译后的正则
     const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch return subject_val;
@@ -11171,6 +11289,11 @@ pub fn preg_filter(pattern_val: Value, replacement_val: Value, subject_val: Valu
                 if (pattern_val.isString() and replacement_val.isString()) {
                     const pattern_str = pattern_val.asString();
                     const parsed = parsePHPRegexPattern(pattern_str.data);
+                    // ★F-50（R-163）：非法分隔符/修饰符 ⇒ 按 PHP 口径发 Warning 后返回本族错误值（实测见工单 §38.1），不进 PCRE。
+                    if (parsed.issue != .none) {
+                        emitRegexPatternWarning("preg_filter", parsed);
+                        continue;
+                    }
 
                     const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch continue;
                     const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse continue;
@@ -11225,6 +11348,11 @@ pub fn preg_filter(pattern_val: Value, replacement_val: Value, subject_val: Valu
     const subject_str = subject_val.asString();
 
     const parsed = parsePHPRegexPattern(pattern_str.data);
+    // ★F-50（R-163）：非法分隔符/修饰符 ⇒ 按 PHP 口径发 Warning 后返回本族错误值（实测见工单 §38.1），不进 PCRE。
+    if (parsed.issue != .none) {
+        emitRegexPatternWarning("preg_filter", parsed);
+        return Value.initNull();
+    }
     const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch return Value.initNull();
 
     const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse return Value.initNull();
@@ -11273,6 +11401,11 @@ pub fn preg_split(pattern_val: Value, subject_val: Value, limit_val: Value, flag
     const offset_capture = (flags & PREG_SPLIT_OFFSET_CAPTURE_BIT) != 0;
 
     const parsed = parsePHPRegexPattern(pattern_str.data);
+    // ★F-50（R-163）：非法分隔符/修饰符 ⇒ 按 PHP 口径发 Warning 后返回本族错误值（实测见工单 §38.1），不进 PCRE。
+    if (parsed.issue != .none) {
+        emitRegexPatternWarning("preg_split", parsed);
+        return Value.initBool(false);
+    }
 
     // 使用缓存获取编译后的正则
     const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch {
@@ -11370,6 +11503,11 @@ pub fn preg_grep(pattern_val: Value, input_val: Value, flags_val: Value, allocat
     const invert = (flags & 1) != 0; // PREG_GREP_INVERT = 1
 
     const parsed = parsePHPRegexPattern(pattern_str.data);
+    // ★F-50（R-163）：非法分隔符/修饰符 ⇒ 按 PHP 口径发 Warning 后返回本族错误值（实测见工单 §38.1），不进 PCRE。
+    if (parsed.issue != .none) {
+        emitRegexPatternWarning("preg_grep", parsed);
+        return Value.initBool(false);
+    }
     const re = try getOrCompileRegex(parsed.pattern, parsed.options, allocator);
 
     const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse {
@@ -12800,7 +12938,17 @@ pub fn php_intdiv(dividend: Value, divisor: Value) !Value {
     const a = dividend.toInt();
     const b = divisor.toInt();
     if (b == 0) {
-        return error.DivisionByZero;
+        // 旧写法 `return error.DivisionByZero` 是 Zig error 外逸（门 Y y5：打 `error: DivisionByZero`
+        // 且 rc=1，未捕获面连后续语句都不跑）；PHP 侧是可捕获 DivisionByZeroError。
+        // 形态照搬本文件既有的 `/`、`%` 支（:5962/:5976/:6003）。
+        _ = try throwThrowable("DivisionByZeroError", "Division by zero", runtime_allocator);
+        return Value.initNull();
+    }
+    if (b == -1 and a == std.math.minInt(i64)) {
+        // 商不可表示为 int：PHP 给 ArithmeticError。旧写法直接 @divTrunc 会**静默回绕**回
+        // minInt 本身（门 Y y6 实测 AOT `Y6=RET`、rc=0）。minInt(i64) 即 :494 登记的 PHP_INT_MIN。
+        _ = try throwThrowable("ArithmeticError", "Division of PHP_INT_MIN by -1 is not an integer", runtime_allocator);
+        return Value.initNull();
     }
     return Value.initInt(@divTrunc(a, b));
 }
@@ -27014,6 +27162,13 @@ pub fn php_preg_match(pattern: Value, subject: Value, matches: *Value, flags: Va
     const pattern_str = pattern.asString();
     const subject_str = subject.asString();
     const parsed = parsePHPRegexPattern(pattern_str.data);
+    // ★F-50（R-163）：非法分隔符/修饰符 ⇒ 按 PHP 口径发 Warning 后返回 false，不进 PCRE。
+    //   出参槽按本文件既有早退支装成空数组；★实测 PHP 在告警路径上**保留调用者预置值**，本仓因按引用实参未初始化而做不到 ⇒ 另立 F-53。
+    if (parsed.issue != .none) {
+        emitRegexPatternWarning("preg_match", parsed);
+        matches.* = Value.initArray(try PHPArray.init(allocator));
+        return Value.initBool(false);
+    }
 
     // 使用缓存获取编译后的正则
     const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch {
@@ -27149,6 +27304,13 @@ pub fn php_preg_match_all(pattern: Value, subject: Value, matches: *Value, flags
     const pattern_str = pattern.asString();
     const subject_str = subject.asString();
     const parsed = parsePHPRegexPattern(pattern_str.data);
+    // ★F-50（R-163）：非法分隔符/修饰符 ⇒ 按 PHP 口径发 Warning 后返回 false，不进 PCRE。
+    //   出参槽按本文件既有早退支装成空数组；★实测 PHP 在告警路径上**保留调用者预置值**，本仓因按引用实参未初始化而做不到 ⇒ 另立 F-53。
+    if (parsed.issue != .none) {
+        emitRegexPatternWarning("preg_match_all", parsed);
+        matches.* = Value.initArray(try PHPArray.init(allocator));
+        return Value.initBool(false);
+    }
 
     // 使用缓存获取编译后的正则
     const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch {
@@ -27311,6 +27473,11 @@ pub fn php_preg_replace_callback(pattern: Value, callback: Value, subject: Value
 
     // 解析 PHP 正则模式
     const parsed = parsePHPRegexPattern(pattern_str);
+    // ★F-50（R-163）：非法分隔符/修饰符 ⇒ 按 PHP 口径发 Warning 后返回 null（实测），不进 PCRE
+    if (parsed.issue != .none) {
+        emitRegexPatternWarning("preg_replace_callback", parsed);
+        return Value.initNull();
+    }
 
     // 编译正则表达式
     const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch {

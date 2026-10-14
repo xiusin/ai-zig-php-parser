@@ -32990,6 +32990,7 @@ pub const NativeLinker = struct {
                     // AOT-CODEGEN-013 R-C：zig build-exe 失败时会留下 0 字节但仍带 +x 位的目标文件，
                     // 使调用方（脚本门禁/人工复测）把「编译失败」误读为「产物存在且运行后无输出」。
                     // 本仓库已因此产生过一次整页错误归因（工单 013 §5）。⇒ 失败即删产物。
+                    self.reportBuiltinArityCanary(temp_dir);
                     deleteStaleProduct(abs_output_path);
                     return error.CompilationFailed;
                 }
@@ -33010,6 +33011,251 @@ pub const NativeLinker = struct {
     fn deleteStaleProduct(output_path: []const u8) void {
         const io = getIo();
         getCwd().deleteFile(io, output_path) catch {};
+    }
+
+    // ==========================================================================
+    // ★F-41 丙型「arity 金丝雀」（R-160）——编译**终局失败**后把生成码的裸 Zig 错翻译成可读诊断
+    //
+    // 症状：`$x = strlen();`（PHP 侧是 ArgumentCountError）今天只留下
+    //   `main.zig:57:24: error: expected 1 argument(s), found 0` —— 指向**生成码**，
+    //   既不说哪个 PHP 函数、也不说源码第几行（门 AC 的 a1..a6+a12 七枚站点，工单 §36）。
+    // 三条已裁口径（§32.8/§33.4，老铁 2026-10-14）：
+    //   ① **不建 arity 表**：必填数直接取运行时库里 `pub fn php_X(...)` 的真实形参数 ⇒ 与 Zig 的判据同源，
+    //      不引入第二份真值（甲型才是真值表，届时把 PHP 的 min/variadic 语义带进来）；
+    //   ② **不碰子进程管道**：Zig 自己的诊断继续 inherit 透传 ⇒ 门 AC 的 `bare_symbol`/`zig_raw_arity_err`
+    //      恒为 7 就是这条的不变量；金丝雀只**追加** `AOT-ARITY:` 行，不改 rc、不改生成码（影子必须零漂移）；
+    //   ③ **宁可沉默也不骗人**：形参里有 comptime/anytype/省略号、或括号与字符串扫描不可靠 ⇒ 放弃该站点，
+    //      因为「实参数不够」在 Zig 里必然报错，反向的假阳性会直接误导用户。
+    // ==========================================================================
+
+    /// 顶层条目扫描结果：条目数 + 右括号之后的下标
+    const ArityList = struct { count: usize, close: usize };
+
+    fn isIdentByte(c: u8) bool {
+        return std.ascii.isAlphanumeric(c) or c == '_';
+    }
+
+    /// 标识符（`[A-Za-z0-9_]+`）的前导长度
+    fn leadingIdentLen(text: []const u8) usize {
+        var n: usize = 0;
+        while (n < text.len and isIdentByte(text[n])) : (n += 1) {}
+        return n;
+    }
+
+    /// 整词匹配（边界为非标识符字节）：用于识别形参表里的 comptime/anytype/type
+    fn containsStandaloneWord(text: []const u8, word: []const u8) bool {
+        if (word.len == 0) return false;
+        var pos: usize = 0;
+        while (std.mem.indexOf(u8, text[pos..], word)) |rel| {
+            const at = pos + rel;
+            const before_ok = at == 0 or !isIdentByte(text[at - 1]);
+            const after = at + word.len;
+            const after_ok = after >= text.len or !isIdentByte(text[after]);
+            if (before_ok and after_ok) return true;
+            pos = at + 1;
+        }
+        return false;
+    }
+
+    /// 从 `open`（必须指向 `(`）做括号平衡扫描，数出**顶层**逗号分隔的条目数。
+    /// 返回 null ＝「不可靠」（括号未闭合 / 三引号多行字符串 / 扫描越界）⇒ 调用方必须放弃这条诊断。
+    fn scanTopLevelList(text: []const u8, open: usize) ?ArityList {
+        if (open >= text.len or text[open] != '(') return null;
+        var depth: usize = 0;
+        var count: usize = 0;
+        var saw_item = false;
+        var i: usize = open;
+        while (i < text.len) {
+            const c = text[i];
+            if (c == '"' or c == '\'') {
+                // 三引号多行字符串无法可靠跳过 ⇒ 放弃
+                if (c == '"' and i + 2 < text.len and text[i + 1] == '"' and text[i + 2] == '"') return null;
+                i += 1;
+                var closed = false;
+                while (i < text.len) {
+                    if (text[i] == '\\') { i += 2; continue; }
+                    if (text[i] == c) { closed = true; i += 1; break; }
+                    i += 1;
+                }
+                if (!closed) return null;
+                saw_item = true;
+                continue;
+            }
+            if (c == '/' and i + 1 < text.len) {
+                if (text[i + 1] == '/') {
+                    while (i < text.len and text[i] != '\n') : (i += 1) {}
+                    continue;
+                }
+                if (text[i + 1] == '*') {
+                    i += 2;
+                    var closed = false;
+                    while (i + 1 < text.len) {
+                        if (text[i] == '*' and text[i + 1] == '/') { closed = true; i += 2; break; }
+                        i += 1;
+                    }
+                    if (!closed) return null;
+                    continue;
+                }
+            }
+            if (c == '(' or c == '[' or c == '{') {
+                depth += 1;
+                i += 1;
+                continue;
+            }
+            if (c == ')' or c == ']' or c == '}') {
+                if (depth == 0) return null;
+                depth -= 1;
+                i += 1;
+                if (depth == 0) {
+                    if (saw_item) count += 1;
+                    return .{ .count = count, .close = i };
+                }
+                continue;
+            }
+            if (c == ',') {
+                if (depth == 1) {
+                    if (saw_item) count += 1;
+                    saw_item = false;
+                }
+                i += 1;
+                continue;
+            }
+            if (!std.ascii.isWhitespace(c)) saw_item = true;
+            i += 1;
+        }
+        return null;
+    }
+
+    /// 形参表含 comptime / anytype / `type` / 省略号时，「必须传满 N 个」不成立 ⇒ 该 helper 不进金丝雀名单
+    fn paramsUnreliable(body: []const u8) bool {
+        return containsStandaloneWord(body, "comptime") or
+            containsStandaloneWord(body, "anytype") or
+            containsStandaloneWord(body, "type") or
+            std.mem.indexOf(u8, body, "...") != null;
+    }
+
+    /// 扫运行时库里的 `pub fn php_*(`，登记 `形参数`；不可靠的签名一律不登记。
+    fn collectRuntimeHelperArity(rt_src: []const u8, out: *std.StringHashMap(usize)) bool {
+        var pos: usize = 0;
+        while (std.mem.indexOf(u8, rt_src[pos..], "pub fn ")) |rel| {
+            const head = pos + rel + "pub fn ".len;
+            pos = head;
+            const name_len = leadingIdentLen(rt_src[head..]);
+            if (name_len == 0) continue;
+            const name = rt_src[head .. head + name_len];
+            var j = head + name_len;
+            while (j < rt_src.len and std.ascii.isWhitespace(rt_src[j])) : (j += 1) {}
+            if (j >= rt_src.len or rt_src[j] != '(') continue;
+            const list = scanTopLevelList(rt_src, j) orelse continue;
+            if (paramsUnreliable(rt_src[j + 1 .. list.close])) continue;
+            if (!std.mem.startsWith(u8, name, "php_")) continue;
+            out.put(name, list.count) catch return false;
+        }
+        return true;
+    }
+
+    /// 解析 `setSourceLocation("…php 路径…", 行号)` 的参数（生成码每条指令前都会发一枚）
+    fn parseEmittedSourceLocation(text: []const u8, file_out: *[]const u8, line_out: *usize) void {
+        if (text.len == 0 or text[0] != '"') return;
+        var i: usize = 1;
+        while (i < text.len) {
+            if (text[i] == '\\') { i += 2; continue; }
+            if (text[i] == '"') break;
+            i += 1;
+        }
+        if (i >= text.len) return;
+        file_out.* = text[1..i];
+        i += 1;
+        while (i < text.len and (text[i] == ',' or std.ascii.isWhitespace(text[i]))) : (i += 1) {}
+        var num: usize = 0;
+        var digits: usize = 0;
+        while (i < text.len and std.ascii.isDigit(text[i])) {
+            num = num * 10 + (text[i] - '0');
+            digits += 1;
+            i += 1;
+        }
+        if (digits > 0) line_out.* = num;
+    }
+
+    /// 编译失败后的**只追加**诊断：扫生成码找「实参数 ≠ 运行时形参数」的内置调用，报出 PHP 函数名与 PHP 源码位置。
+    /// 全程 best-effort：任何分配/读取失败都直接返回，绝不掩盖原有的 `Zig compiler failed` 错误。
+    fn reportBuiltinArityCanary(self: *Self, temp_dir: []const u8) void {
+        const io = getIo();
+        const cwd = getCwd();
+
+        const main_path = std.fs.path.join(self.allocator, &[_][]const u8{ temp_dir, "main.zig" }) catch return;
+        defer self.allocator.free(main_path);
+        const rt_path = std.fs.path.join(self.allocator, &[_][]const u8{ temp_dir, "runtime_lib.zig" }) catch return;
+        defer self.allocator.free(rt_path);
+
+        // 失败路径专属：这两次读盘不进入任何成功编译的热路径
+        const main_src = cwd.readFileAlloc(io, main_path, self.allocator, .limited(256 * 1024 * 1024)) catch return;
+        defer self.allocator.free(main_src);
+        const rt_src = cwd.readFileAlloc(io, rt_path, self.allocator, .limited(256 * 1024 * 1024)) catch return;
+        defer self.allocator.free(rt_src);
+
+        var sigs = std.StringHashMap(usize).init(self.allocator);
+        defer sigs.deinit();
+        if (!collectRuntimeHelperArity(rt_src, &sigs)) return;
+        if (sigs.count() == 0) return;
+
+        var pos: usize = 0;
+        var hits: usize = 0;
+        var src_file: []const u8 = "<未知源码位置>";
+        var src_line: usize = 0;
+        while (pos < main_src.len) {
+            const call_rel = std.mem.indexOf(u8, main_src[pos..], "runtime.php_");
+            const loc_rel = std.mem.indexOf(u8, main_src[pos..], "setSourceLocation(");
+            if (call_rel == null and loc_rel == null) break;
+
+            // 源码位置游标要先于调用点更新（生成码是 setSourceLocation → 指令 的顺序）
+            if (loc_rel != null and (call_rel == null or loc_rel.? < call_rel.?)) {
+                parseEmittedSourceLocation(main_src[pos + loc_rel.? + "setSourceLocation(".len ..], &src_file, &src_line);
+                pos = pos + loc_rel.? + 1;
+                continue;
+            }
+
+            const at = pos + call_rel.? + "runtime.".len;
+            // ★注释里的同名文本不算调用点：生成码每条指令前都有 `// <php 文件>:<行>` 注释，
+            //   若注释/说明文本里出现 `runtime.php_x(` 的片段，扫描器会把它读成一枚调用 ⇒ 假诊断。
+            //   口径：回退到本行行首，途中见到 `//` 就放弃这一处（只跳 1 字节继续扫，不漏后续真调用）。
+            var ls: usize = at;
+            while (ls > 0 and main_src[ls - 1] != '\n') : (ls -= 1) {}
+            if (std.mem.indexOf(u8, main_src[ls..at], "//") != null) {
+                pos = at + 1;
+                continue;
+            }
+            const name_len = leadingIdentLen(main_src[at..]);
+            if (name_len == 0) {
+                pos = at;
+                continue;
+            }
+            const name = main_src[at .. at + name_len];
+            var j = at + name_len;
+            while (j < main_src.len and std.ascii.isWhitespace(main_src[j])) : (j += 1) {}
+            const want = sigs.get(name) orelse {
+                pos = at + name_len;
+                continue;
+            };
+            const given = scanTopLevelList(main_src, j) orelse {
+                pos = at + name_len;
+                continue;
+            };
+            if (given.count != want) {
+                hits += 1;
+                std.debug.print(
+                    "AOT-ARITY: [{d}] PHP 内置函数 {s}() 的调用在生成码里传了 {d} 个实参（已含自动补上的 allocator/输出槽），而运行时实现 {s} 声明 {d} 个形参 ⇒ 实参数与该实现不符，AOT 在生成码阶段就编不过（PHP 侧同形为 ArgumentCountError；精确必填参数数属甲型工作）｜源码 {s}:{d}\n",
+                    .{ hits, name[4..], given.count, name, want, src_file, src_line },
+                );
+                if (hits >= 8) break;
+            }
+            pos = given.close;
+        }
+        if (hits == 0) {
+            // ★这行**不带** `AOT-ARITY:` 前缀：门 AC 的 `canary` 判据 grep 的正是该前缀，
+            //   把「查过、不是 arity 问题」也标成同一记号就会让任何无关的 Zig 失败都假亮。
+            std.debug.print("AOT: 未发现内置函数实参数与运行时形参数不符的调用 ⇒ 本次编译失败另有其因，请以上方 Zig 诊断为准\n", .{});
+        }
     }
 
     /// 获取目标平台字符串

@@ -15,7 +15,7 @@
 | 对象 | 影响 | 描述 |
 |---|---|---|
 | `src/aot/optimizer.zig` | 直接 | 新增 `redirectExceptionHandlerRef` + trampoline 站点一行调用 |
-| AOT 编译产物（`main.zig` 生成码） | **零**（实测） | 68 语料在 `--verify-ir` 下 `dangling=0 ok=68` ⇒ 语料内不存在本改道触发的形态 ⇒ 影子 new-side 列预期 `changed_rows=0` |
+| AOT 编译产物（`main.zig` 生成码） | **零**（实测） | 68 语料在 `--verify-ir` 下 `dangling=0 ok=68` ⇒ 语料内不存在本改道触发的形态；影子 new-side 列 `changed_rows=0`（整列 md5 仍 `f19fb070…`，自 r148b 起第 7 代同值） |
 | 合法 PHP 的 `try/finally` 族 | 修复 | 门 Z 修前 6 形 `dangling`（5 枚编译期 panic + **1 枚静默**）⇒ 修后 0 |
 | 门 P（78 形） | 改档 | `cf 2→0`、注册红 4→5 枚 |
 | 运行期模板 / `ir_generator` / `native_linker` | **未动** | F-44 留待下一批（不同层、不同文件，规则 31） |
@@ -107,13 +107,21 @@ flowchart TD
 
 ## 6. 影响与风险评估
 
-### 6.1 验收读数（R-158b 19 腿链）
+### 6.1 验收读数（R-158b 19 腿链，09:51:06→10:57:09，**3963 s**，链首尾二进制同为 `b71f9f41f182161df7ebab04a0b64879`）
 
-（链读数待填：本表在 `R158B_CHAIN_DONE` 之后按 `c027_r158b_acceptance_chain_tmp.log` 逐腿填写，禁预估。）
-
-| 腿 | 判据 | 实测 |
+| 腿 | 读数 | 判定 |
 |---|---|---|
-| — | — | — |
+| `zig build test` | rc=0 @8 s | 缓存命中档（R-156 代 @5 s） |
+| **门 Z 面孔（ZFACES）** | `shapes=10 same=9 diff=1 dangling=0 compile_fail=0 bad_probe=0` @36 s | ★**本批主判据**：`dangling 6→0`；唯一残红 `z2` = F-44（语义面，非本批） |
+| **门 Z 普查（ZCENSUS）** | `total=68 dangling=0 ok=68 other=0` @767 s | ★语料在「IR 校验 + 关保守退路」下 68/68 通过 ⇒ 零暴露，且**不需要兜底档**就能过全量校验 |
+| 门 X / V / W / T | `9→same=8 diff=1` @39s ／ `29→same=19 diff=10` @122s ／ `20→same=7 diff=13` @75s ／ `22→same=16 diff=5 cf=1` @88s | 全部等值注册档 |
+| **门 P** | `78 same=73 diff=5 compile_fail=0 bad_probe=0` @310 s | ★改档确认：`cf 2→0`、红集恰等 `v2 i1 i2 f12 f34`、`f35 SAME` ⇒ 与链前单跑（@306 s）逐枚同值，非并发假象 |
+| 门 S / M / N / O / D8 / Q / R | `47 diff=0` ／ `19 red=0` ／ `7/7` ／ `6/6` ／ `defect_red=0 guard_same=14` ／ `same=5` ／ `same=8 diff=1 terminate_lost=0` | 全等值 |
+| 门 U / 门 B | U 列聚合与 R-156 代**逐字节相同**（`diff /tmp/r156_U.out /tmp/r158b_U.out` 为空）；B `entries=497 dup_rows=33 diff_impl=3 identical=30` | 等值；B 的 `entries` 未变 ⇒ 地图零漂移 |
+| 主回归 | 报表 mtime 10:38:30 @785 s：`Total 68 / Pass 67 / Fail(Compile·Runtime·Diff) 全 0 / Skip 1`，`## 失败明细` 仅 `f004_oop_deep_inheritance_magic.php \| SKIP \| PHP_error_exit=255` 一行 | 零回归；回收 0 枚（语料无 `finally`，符合 §2 预期） |
+| 影子 | `total=68 same=0 diff=68 miss=0 invalid=0` @1119 s（对照冻结前缀 `be305cfa`） | 无 miss/invalid 即合格 |
+| 影子 new-side 列 | `gen=r158b rows=68 col_md5=f19fb070ba1b86c34f02b3883de8e4dd`＝r156 列同值 ⇒ **`changed_rows=0` / `col_identical=yes`** | ★换了二进制代次仍**逐字节发射中性**（自 r148b 起第 7 代同值）⇒ 「语料无 Face A 形态」由推断转为实测 |
+| 残留 | 各腿 `repo_build_residue=0`；`.php` 原件零删除；本轮 KEEP_TEMP 目录（`.zigphp_aot_build_10626`/`_15361`）取证后即删 | 合规 |
 
 ### 6.2 是否破坏式变更
 

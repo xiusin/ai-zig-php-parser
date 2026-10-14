@@ -3,7 +3,7 @@
 **问题 ID**: AOT-CODEGEN-012
 **优先级**: **P1**（合法 PHP 跨大小写类使用即命中；同族缺陷 = AOT-CODEGEN-010 §8 #6 函数名 CI，R-124/R-127 已修）
 **性质**: 运行期类表查名（`runtime_lib_template.zig findClass` 精确匹配 + `php_instanceof` 直接名比较）⇒ **仅 AOT**（解释器/字节码的类表为独立实现，本单不涉）
-**状态**: **R-1/R-2/R-3/R-131/R-132/R-136/R-137a/R-138/R-141/R-142/R-143/R-144/R-145/R-146/R-147/R-148/R-148b/R-149/R-150/R-151/R-151b/R-154/R-155/R-156/R-158b 已落地并验收（★R-158b=F-42：`tryRemoveTrampolineBlock` 释放快转块前改道 `exception_handler`（`optimizer.zig` +29/−0）⇒ **门 Z** 面孔门 `dangling 6→0`、门 P `compile_fail 2→0`（`f35` 转绿、`f34` 转为语义红 ⇒ **新立 F-44**：`ir_generator.zig:3744 redirectThroughFinally` 在 finally 体内 throw 时把整个 finally 体重发一份；A/B 关 cfg_cleanup 实测仍双打 ⇒ 属暴露非引入，待裁决）；同时**否证 §30.6 两条口径**——「`.index` 陈旧」（`analysis.zig:273-275 rebuildCFG` 一直统一重编号）与「用 `Dead blocks removed` 当分母」（旗标只由三枚删块站点之一 `:3364` 递增，恰好漏掉肇事的 trampoline 面）；门 Z 全语料普查 `total=68 dangling=0 ok=68` ⇒ 语料对本族零暴露）／★R-156=F-22：门 P 注册红 `f26` 已回收，现行门 P = **78 形 `same=72 diff=4 compile_fail=2`**，四枚红 `v2 i1 i2 f12` + 两枚既存 panic 臂 `f34 f35`=新立 F-42；同时改判 F-36（与 Error 支无关，真机制＝file/line 在 setException 惰性注入 ⇒ 未抛出的异常对象取不到位置）并新立 F-43（`function_exists("php_bool_or")` AOT=true ⇒ helper 登记泄漏成 PHP 可见函数名，与 F-4 同族））**（R-138 = 内省枚举族八项落地 + 永久侧门 P 建成，2026-10-12，详见 §12；R-141/142/143 = F-8a 参数默认值面、F-12/F-12b 参数名面，详见 §14–§16；**R-144 = F-5/F-7 PCRE flags/offset 全族收口 + 新立并修复 F-13（`preg_match` 实参 ≥4 时引用装填丢失），详见 §17**）。⚠️ **§10 的 R-137b/R-137c 记录为假阳性**（抛出支从未入库，已由 R-138 重落，更正见 §10 内联与 §12.0）。**门 P 现行读数（R-149 定档）= **76 形 `same=71 diff=5`**，5 枚恰为注册红 `v2/i1/i2/f12/f26`（F-8b／F-3×2／F-18 漏报／**F-22 多语句 finally**）；**f33（原 F-23）已由 R-149 的 F-24c 转绿**——它不是独立缺陷，而是「`extends`/`implements` 父名被解析两次」的症状（工单 §22）；新建**门 T**（R-150 定档 **19 形**，F-24 族：7 枚注册红 `t2 t8 t9 t11 t12 t13 t19` + 1 枚注册 compile_fail `t17`；F-24a/t1·t4·t5·t14 与 F-24b/t6 已转绿，另新立 F-24e 与 F-25）；**F-21 六枚臂（f15 f17 f19 f20 f21 f23）已由 R-148 全部转绿**，catch 类型名解析六枚臂（f27–f32）同批转绿；其「嵌套外溢」旧措辞作废（真根因＝单臂 catch 不建派发块，见 §21.1）；**r10 与 n15 已分别由 R-146／R-145 转绿，f14（F-20 handler 倒灌）由 R-147 转绿**；**n15 = F-1 已于 R-145 转绿**，其守卫移交 F 组 f1…f13（合法性矩阵，全部 PHP 8.5.8 实测）。R-144 轮为 39 形 `same=34 diff=5`（历史快照）；R-138 建成代次为 35 形 `same=31 diff=4`（见 §12.7，仅作历史快照）。**门 S 现行读数（R-144 建成轮）= 47 形 `same=47 diff=0`，判据即 `diff=0`（本门无注册红）**，修复前 30 形 `same=9 diff=21`（§17.1/§17.5）。门 M 19 形 `red=0 green=19`、门 D8 14/14、门 N 7/7、门 O 6/6、门 Q `same=5`、门 R `same=8 diff=1`、普查门 B `diff_impl=3`；`zig build test` 21/21 & 326/326；主回归 **13:38:37（R-149 代）Total 68 / Pass 67 / Fail(Compile·Runtime·Diff) 0 / Skip 1**，且影子 vs R-148b 列 **`changed_rows=0`**（F-24c 与 F-24a/b 均语料发射中性实测：影子 vs R-148b、vs R-149 两次 `changed_rows=0`）（★R-148a 代曾掉到 Pass 66：本批自造的 `f006 catch (\Throwable)` 回归，已由 `resolveClassName` 收口复证，见 §21.9/§21.10）（失败明细仅 1 行 `f004 SKIP` ⇒ 回收枚 0；判据取明细行存在性而非汇总数，见 [[feedback-aot-regression-rules]] 规则 27）；影子 `total=68 same=0 diff=68 miss=0 invalid=0` @1037s，且 **new-side 列相对 R-144 代 `changed_rows=68 / unchanged=0`** ⇒ R-145 因入口守卫进入每个 `main.zig`，**是一次彻底的影子重冻事件**（前缀 `be305cfa` 须在「提交」时按当代次重冻）。**当前代次（R-149 定档）**：`ir_generator.zig` **`f3d13cb82395d945d2a246b2158589ea`**（R-149 F-24c；R-148b 值 `81dffec5…` 作废）／`optimizer.zig` `6cffa137…`（R-147）／二进制 **`1abad89e2166d15e32fc304e2d071c28`**／门 P 脚本 **`cb1a622797cc7b0519f38dc1f8ca3bb1`**（76 形）／影子基线列 `c010_shadow_newside_r148b_tmp.txt`（表身 `f19fb070…`，R-147/R-148a 两列并存）；旧值 `8b5c65a1…`／`bbff3b4a…`／`001bc245…`／`8dae7b2b…`／`eab47607…`／`37a86a66…` 作废。原「R-147 定档」：`runtime_lib_template.zig` `4ff0befc7c5b50d4fcfb8b1fd1f057e7`（R-147 未变）／`native_linker.zig` `49a3da31660fef4963b8eb50d7587987`（未变）／`ir_generator.zig` `0242d8b5a960a8b8e06b063494f6ec23`（未变）／**`optimizer.zig` `6cffa137f766bdd2a13769c7ba3314b5`（本轮新增守卫）**／二进制 `8b5c65a1f34af70977e73e6c4dea2bd7`（**R-147 改优化器 ⇒ 已重建**，`fec549b26ab4d58f77bfa5316f61445e` 作废）／门 P 脚本 `eab47607d8d4d02979ed17dcdc76bb3b`／门 S 脚本 `f3c2c9e6b1a319cd76a297217212fb54`（未变）；影子 new-side 整列已落盘 `fuzzy_scripts_720/tmp/c010_shadow_newside_r147_tmp.txt`（68 行，表身 md5 `628aa13b3778359d1210c6800901f687`）；原 `3d5c0c8aa86954d389f533c1b1c184e9`（门 P 39/57 形代）；本批中途代次 `0b9cf3a7…`/`d40ee9a9…` 与 R-144 轮 `5c0ecf42…`/`86174723…`、R-145 中途轮 `67a60675…`（模板）与门 P `5904939b…`、R-144 轮 `5c0ecf42…`/`86174723…`、R-138 轮 `b356e19e…` 均作废（见规则 25）。**待裁决**：F-3（门 P 注册红 i1/i2）；F-1 已落地（R-145，§18）、F-2 已落地（R-146，§19）；**待裁决 F-25 修法（甲 改模板捕获名⇒全 68 枚漂移需重冻／乙 只给撞名用户函数改 Zig 符号⇒零漂移、建议／丙 甲+乙）**；**新增 F-29「类声明提前登记」（R-153 归因）＝F-24d 的硬前置：AOT 启动期一次性登记所有类，PHP 在声明语句执行处登记（d8/d9 实测 `class_exists` PHP=n／AOT=y）⇒ 直接在登记处加「父类缺失即 fatal」会把 PHP 不报错的场景变成 over-fatal，两者必须一起排；语料面：未解析父/接口引用 0 枚、作用域内类声明 0 枚 ⇒ 双双看不见**；F-27 第 1 层（属性位）已落地（R-151b，§25.3）⇒ **R-154 更正：类型检查实为三条互不复用的链，R-151b 只收了属性位**（形参位 v9/v27/v28、`instanceof` 位 v5/v6 由 R-154 落地；返回值位的「绿」被证伪为新立 F-35，见 §28.2/§28.9）；F-28 已随 R-154 落地，并新建永久侧门 **门 V**（定档 **29 形 `same=18 diff=11 compile_fail=0 bad_probe=0`** @122s，登记轮修前 `same=10 diff=19`）；F-24d（t9/t11）待修；**★R-154 新立六张面孔（全部未修、待裁决，§28.4–§28.9）＝F-30：PHP 8.5.8 实测 `Error` **不再继承** `Exception`（`is_subclass_of('TypeError','Exception')=false`、`get_parent_class('Error')=false`），AOT 仍按旧层级过度捕获 ⇒ 跨切面／F-31：`throwException:21822` 把异常置成**字符串**伪值 ⇒ `catch` 永不命中且 fatal 文本类名错，调用点实测 **17 枚**，逐枚须先测真值异常类别／F-32：`PHPObject.toString:19437` 无 `__toString` 时 fail-open 返类名／F-33：`count()` 对非 Countable 返 0（语料高频，改前必须普查）／F-34：`spl_object_id()` 对闭包返 0／F-35：返回值类型位**完全不校验**（`: object` 返回 `int` 静默放行）；**★R-155（§29）＝门 W（20 形 `same=7 diff=13`）与门 X（9 形）建成 ⇒ 实测否证我自己提的「`php_count` 需补解引用」前置（x1/x2/x3 引用三形本就与真值等值 ⇒ 引用在载入侧已解）；F-33 第一批已落地（`php_count` 非 Countable ⇒ `throwThrowable("TypeError", …)` + 专用 helper `countArgTypeName`）⇒ 门 X `x6`/`x9` 转绿且 `x4` 按 §28.7.2 **设计留红**（接口判定须与 F-3 内建接口表同批，否则打红 `SplFixedArray`/`ArrayObject`）、门 V `v15` 转绿（`18/11`→`19/10`）；另新立 F-36（`new Error(...)->getFile()` 为空而 `new Exception(...)` 非空 ⇒ **Error 根与 Exception 根不等价**，「搬根」必须含构造期属性初始化）／F-37（`intdiv(1,0)` 打印 `error: DivisionByZero` 且 **rc=1** ⇒ Zig error 外逸，属 F-9/R-145「未捕获必须 PHP 风格 fatal + rc=255」族的漏网站点，门 R 现有臂抓不到）／F-38（`zig build test-aot` **6 处编译错误**全在 `test {}` 块内 ⇒ AOT 单测步骤长期失编译；运行期模板的编译验证实际由 AOT 产品编译承担，旧「`zig build test` 覆盖模板」口径作废，见 §28.13.2）**；**F-20（f14，P1，try 前语句异常被无关 catch 吞）已落地（R-147，§20.2–§20.3）＋**F-21（六枚臂 f15 f17 f19 f20 f21 f23）已落地（R-148/R-148b，§21：根因＝单臂 catch 不建派发块 + 末臂 else 落点；含本批自造的 `\Throwable` 回归收口）**＋**新立 F-22（f26，多语句 finally 与 pending 异常共存，属暴露非引入）与 F-23（f33，命名空间用户类 `extends \Exception` 后内建方法整族丢失，前缀 `be305cfa` 证非本批引入）待归因****＋F-4 去重（删代码，§17.7 记「裸侧未动」的理由）／F-6（`debug_backtrace`）／F-8b（设计分叉，§14.4）／F-10（删功能，登于 013）／**F-13b、F-14、F-15（§17.7）**／**F-16（入口未捕获异常上报，R-145 已修，§18.3）、F-17（trait 名限定的 Deprecated 文本，§18.7）**；F-5/F-7/F-12/F-12b 已落地；**F-11 未登记（编号保留，勿误读为存在该项）**。门 M 终态 **17 形 `red=0 green=17`**（链 XI 同口径全绿：影子 68/68、主回归 Pass 67/Skip 1、门 D8/H/H2/I/E/F/G 注册值保持，2026-10-11 07:05:35 报表）：门 M `red=5→0 green=3→8 compile_fail=0 bad_probe=0 residue=0`（链 VIII 同口径全绿：影子 68/68 零漂移、主回归 Pass 67/Skip 1、门 D8/H/H2/I/E/F/G 与 R-127 代注册值一致；二进制随链 VIII 代 `5c436e9e…` 后续树，runtime 模板不改变解释器二进制 md5）；落地含两处自纠（php_instanceof 重写误删 Throwable 块 ⇒ 补回；伪接口比较 eqlIgnoreCase ⇒ `instanceof stringable` 双拼写 ✅）；变更文档 `docs/changes/2026-10-11/AOT-CODEGEN-012_类名族CI_R128_2026-10-11_fbe6382a.md`
+**状态**: **R-1/R-2/R-3/R-131/R-132/R-136/R-137a/R-138/R-141/R-142/R-143/R-144/R-145/R-146/R-147/R-148/R-148b/R-149/R-150/R-151/R-151b/R-154/R-155/R-156/R-158b/R-159/R-160/R-161/R-163 已落地并验收；★R-163（F-50 `preg_*` 分隔符/修饰符校验，**纯模板**）已落地、21 腿链进行中（门 PD 修前 17 臂 `same=7 diff=10` ⇒ 修后 20 臂 `same=18 diff=2`，红恰为新登记的 **F-53** 两枚；★建门轮两条预估被实测否证——成对分隔符 `(a)`/`{a}` 从未支持、缺校验面覆盖整个 preg 家族而非只 `preg_match`；合法修饰符集合＝**实测 13 枚** `imsxnurADJSUX`（第一版用 `error_get_last()` 得出"全部 UNKNOWN"的假结论，必须 `set_error_handler` 逐轮清零才测得准）；落地当场因 `_ = matches_ref;` 变成 pointless discard 导致 20 臂全 `compile_fail`，是「模板改动只有 AOT 产物编译才验得住」（F-38）的现形）；★R-160（F-41 丙型「arity 金丝雀」）**验收闭合**（§36：链 `16:16:30→17:26:23` 共 4193 s、影子 `changed_rows=0`＝自 R-148b 起**第 10 代发射同值**、门 AC `canary 0→7` 而 `compile_fail`/`zig_raw` 逐枚未动；★丙型**不解决**切片形参面（`json_decode()` 编译通过、运行期才炸）与用户函数/方法面，那三面属甲型）；★R-160b/R-160c（§37）＝甲型前置测量**已闭环**：`stdlib.zig:24-47` 早已用 `fn_table` 的 min/max 做中央校验（tree/fast 走、AOT 与 bytecode 不走）⇒ 表的 10 枚错值**今天就是 tree/fast 的活缺陷**（5 枚过度拒绝＋3 枚该拒不拒），而 **AOT 列补测否证了「把 AOT 接上表」的可行性顺序**——那 5 枚里 AOT 只对 `implode($a)` 失败，另 4 枚（`array_merge()`/`array_push($a)`/`array_diff($a)`/`array_unshift($a)`）AOT 与 PHP 逐字节等值（切片形参）⇒ **先修表再谈消费**，否则当场造 4 枚新红（违规则 30）；新立 **F-47/F-48/F-49**（全属非 AOT，待明示）＋ **F-50**（`preg_match("b",$s)` 缺分隔符校验且**返回错值 1 而非 false**，门 S 无臂可抓 ⇒ R-163 自办））（链 `16:16:30→17:26:23` 4193s，影子 `changed_rows=0`＝自 R-148b 起**第 10 代发射同值**；门 AC 13 臂 `compile_fail=8 canary=7 zig_raw=7`，12 臂口径与修前仅 `canary 0→7` 之差；门 F45FACE/Y 复证 R-161 档全等值；主回归 Pass 67/Skip 1；helper 签名登记率 **539/539**、`comptime/anytype/...` 排除 0 枚；★建门轮两条预估被实测否证——a12 `implode(",")` 其实是第 7 枚定长形参站点、`residue=7` 是我自己 KEEP_TEMP 留下的而非编译器泄漏；★丙型**不解决**切片形参面（a7 `json_decode()` 编译通过、运行期才炸）与用户函数/方法面（a10/a11），那三面属甲型＋运行期守卫）（★R-161=F-45（乙型）：DCE Phase 3 守卫追加「可抛出算术指令结果被丢弃也不删」+ 新谓词 `isRaisableArithmetic`（★按实测**只含 `.div`/`.mod`**）⇒ 门 F45FACE `on_eq_off=no` **9→2**（剩 p11/p12＝故意不收的 `.add/.mul`＝**F-45-ii**，其 TypeError 今天不可捕获⇒属 F-39 族）、p09/p10 **与 PHP 逐字节等值**；门 Y `y7` 回收 ⇒ 改档 `same=5 diff=5 zig_escape=1 cf=2`，红集降为 `y2 y4 y8 y9 y10`；★语料暴露实测 **0**（门 AB 折叠 `DATETIME` 后 `equal=67 diff=0`；首轮 f119/f175 系时间戳**假红**）；★新立 **F-46**（数组操作数的算术 TypeError **两臂都不抛**＝操作数类型检查缺数组，与 DCE 正交）；新资产＝门 AB＋门 F45FACE（14 臂，判据 `on_eq_off`）＋21 腿链；★R-160（F-41 丙型）方案已定：失败后自解析生成码报可读 arity 诊断（不碰子进程管道、不建 arity 表），甲型随后／★R-159=F-37：`php_intdiv` 两枚站点由「Zig error 外逸 / `@divTrunc` 静默回绕」改为可捕获 `DivisionByZeroError`/`ArithmeticError`（**纯模板**、不重建二进制、`builtin_map` 不动）⇒ 门 Y `y5 y6` 转绿、改档 **12 形 `same=4 diff=6 zig_escape=1 compile_fail=2`**，★门 Y **首次入链**（R-155/156/158b 三链均无 Y）；★修门轮否证旧口径「y7=`1 % 0` 是同族已正确先例」——`printf` 里裸 `%` 把探针静默截成 `1`，该臂从未测过取模 ⇒ 改转义口径后 y7 转真红并**新立 F-45**（结果被丢弃的 `%`/`/` 语句被 DCE 整条消除，A/B `--aot-disable-pass=dce`/`--aot-max-iterations=0` 两支复现 CAUGHT，待裁决）；★另登记一次资产事故：误写 `rm` 删掉未入库的门 Y 脚本，靠删除前 TSV 快照**逐臂字段比对**复验重建（除 ELAPSED 外全等）；模板锚点自 `:12811` 起 **+10**（§32.6 换算表）／★R-158b=F-42：`tryRemoveTrampolineBlock` 释放快转块前改道 `exception_handler`（`optimizer.zig` +29/−0）⇒ **门 Z** 面孔门 `dangling 6→0`、门 P `compile_fail 2→0`（`f35` 转绿、`f34` 转为语义红 ⇒ **新立 F-44**：`ir_generator.zig:3744 redirectThroughFinally` 在 finally 体内 throw 时把整个 finally 体重发一份；A/B 关 cfg_cleanup 实测仍双打 ⇒ 属暴露非引入，待裁决）；同时**否证 §30.6 两条口径**——「`.index` 陈旧」（`analysis.zig:273-275 rebuildCFG` 一直统一重编号）与「用 `Dead blocks removed` 当分母」（旗标只由三枚删块站点之一 `:3364` 递增，恰好漏掉肇事的 trampoline 面）；门 Z 全语料普查 `total=68 dangling=0 ok=68` ⇒ 语料对本族零暴露）／★R-156=F-22：门 P 注册红 `f26` 已回收，现行门 P = **78 形 `same=72 diff=4 compile_fail=2`**，四枚红 `v2 i1 i2 f12` + 两枚既存 panic 臂 `f34 f35`=新立 F-42；同时改判 F-36（与 Error 支无关，真机制＝file/line 在 setException 惰性注入 ⇒ 未抛出的异常对象取不到位置）并新立 F-43（`function_exists("php_bool_or")` AOT=true ⇒ helper 登记泄漏成 PHP 可见函数名，与 F-4 同族））**（R-138 = 内省枚举族八项落地 + 永久侧门 P 建成，2026-10-12，详见 §12；R-141/142/143 = F-8a 参数默认值面、F-12/F-12b 参数名面，详见 §14–§16；**R-144 = F-5/F-7 PCRE flags/offset 全族收口 + 新立并修复 F-13（`preg_match` 实参 ≥4 时引用装填丢失），详见 §17**）。⚠️ **§10 的 R-137b/R-137c 记录为假阳性**（抛出支从未入库，已由 R-138 重落，更正见 §10 内联与 §12.0）。**门 P 现行读数（R-149 定档）= **76 形 `same=71 diff=5`**，5 枚恰为注册红 `v2/i1/i2/f12/f26`（F-8b／F-3×2／F-18 漏报／**F-22 多语句 finally**）；**f33（原 F-23）已由 R-149 的 F-24c 转绿**——它不是独立缺陷，而是「`extends`/`implements` 父名被解析两次」的症状（工单 §22）；新建**门 T**（R-150 定档 **19 形**，F-24 族：7 枚注册红 `t2 t8 t9 t11 t12 t13 t19` + 1 枚注册 compile_fail `t17`；F-24a/t1·t4·t5·t14 与 F-24b/t6 已转绿，另新立 F-24e 与 F-25）；**F-21 六枚臂（f15 f17 f19 f20 f21 f23）已由 R-148 全部转绿**，catch 类型名解析六枚臂（f27–f32）同批转绿；其「嵌套外溢」旧措辞作废（真根因＝单臂 catch 不建派发块，见 §21.1）；**r10 与 n15 已分别由 R-146／R-145 转绿，f14（F-20 handler 倒灌）由 R-147 转绿**；**n15 = F-1 已于 R-145 转绿**，其守卫移交 F 组 f1…f13（合法性矩阵，全部 PHP 8.5.8 实测）。R-144 轮为 39 形 `same=34 diff=5`（历史快照）；R-138 建成代次为 35 形 `same=31 diff=4`（见 §12.7，仅作历史快照）。**门 S 现行读数（R-144 建成轮）= 47 形 `same=47 diff=0`，判据即 `diff=0`（本门无注册红）**，修复前 30 形 `same=9 diff=21`（§17.1/§17.5）。门 M 19 形 `red=0 green=19`、门 D8 14/14、门 N 7/7、门 O 6/6、门 Q `same=5`、门 R `same=8 diff=1`、普查门 B `diff_impl=3`；`zig build test` 21/21 & 326/326；主回归 **13:38:37（R-149 代）Total 68 / Pass 67 / Fail(Compile·Runtime·Diff) 0 / Skip 1**，且影子 vs R-148b 列 **`changed_rows=0`**（F-24c 与 F-24a/b 均语料发射中性实测：影子 vs R-148b、vs R-149 两次 `changed_rows=0`）（★R-148a 代曾掉到 Pass 66：本批自造的 `f006 catch (\Throwable)` 回归，已由 `resolveClassName` 收口复证，见 §21.9/§21.10）（失败明细仅 1 行 `f004 SKIP` ⇒ 回收枚 0；判据取明细行存在性而非汇总数，见 [[feedback-aot-regression-rules]] 规则 27）；影子 `total=68 same=0 diff=68 miss=0 invalid=0` @1037s，且 **new-side 列相对 R-144 代 `changed_rows=68 / unchanged=0`** ⇒ R-145 因入口守卫进入每个 `main.zig`，**是一次彻底的影子重冻事件**（前缀 `be305cfa` 须在「提交」时按当代次重冻）。**当前代次（R-149 定档）**：`ir_generator.zig` **`f3d13cb82395d945d2a246b2158589ea`**（R-149 F-24c；R-148b 值 `81dffec5…` 作废）／`optimizer.zig` `6cffa137…`（R-147）／二进制 **`1abad89e2166d15e32fc304e2d071c28`**／门 P 脚本 **`cb1a622797cc7b0519f38dc1f8ca3bb1`**（76 形）／影子基线列 `c010_shadow_newside_r148b_tmp.txt`（表身 `f19fb070…`，R-147/R-148a 两列并存）；旧值 `8b5c65a1…`／`bbff3b4a…`／`001bc245…`／`8dae7b2b…`／`eab47607…`／`37a86a66…` 作废。原「R-147 定档」：`runtime_lib_template.zig` `4ff0befc7c5b50d4fcfb8b1fd1f057e7`（R-147 未变）／`native_linker.zig` `49a3da31660fef4963b8eb50d7587987`（未变）／`ir_generator.zig` `0242d8b5a960a8b8e06b063494f6ec23`（未变）／**`optimizer.zig` `6cffa137f766bdd2a13769c7ba3314b5`（本轮新增守卫）**／二进制 `8b5c65a1f34af70977e73e6c4dea2bd7`（**R-147 改优化器 ⇒ 已重建**，`fec549b26ab4d58f77bfa5316f61445e` 作废）／门 P 脚本 `eab47607d8d4d02979ed17dcdc76bb3b`／门 S 脚本 `f3c2c9e6b1a319cd76a297217212fb54`（未变）；影子 new-side 整列已落盘 `fuzzy_scripts_720/tmp/c010_shadow_newside_r147_tmp.txt`（68 行，表身 md5 `628aa13b3778359d1210c6800901f687`）；原 `3d5c0c8aa86954d389f533c1b1c184e9`（门 P 39/57 形代）；本批中途代次 `0b9cf3a7…`/`d40ee9a9…` 与 R-144 轮 `5c0ecf42…`/`86174723…`、R-145 中途轮 `67a60675…`（模板）与门 P `5904939b…`、R-144 轮 `5c0ecf42…`/`86174723…`、R-138 轮 `b356e19e…` 均作废（见规则 25）。**待裁决**：F-3（门 P 注册红 i1/i2）；F-1 已落地（R-145，§18）、F-2 已落地（R-146，§19）；**待裁决 F-25 修法（甲 改模板捕获名⇒全 68 枚漂移需重冻／乙 只给撞名用户函数改 Zig 符号⇒零漂移、建议／丙 甲+乙）**；**新增 F-29「类声明提前登记」（R-153 归因）＝F-24d 的硬前置：AOT 启动期一次性登记所有类，PHP 在声明语句执行处登记（d8/d9 实测 `class_exists` PHP=n／AOT=y）⇒ 直接在登记处加「父类缺失即 fatal」会把 PHP 不报错的场景变成 over-fatal，两者必须一起排；语料面：未解析父/接口引用 0 枚、作用域内类声明 0 枚 ⇒ 双双看不见**；F-27 第 1 层（属性位）已落地（R-151b，§25.3）⇒ **R-154 更正：类型检查实为三条互不复用的链，R-151b 只收了属性位**（形参位 v9/v27/v28、`instanceof` 位 v5/v6 由 R-154 落地；返回值位的「绿」被证伪为新立 F-35，见 §28.2/§28.9）；F-28 已随 R-154 落地，并新建永久侧门 **门 V**（定档 **29 形 `same=18 diff=11 compile_fail=0 bad_probe=0`** @122s，登记轮修前 `same=10 diff=19`）；F-24d（t9/t11）待修；**★R-154 新立六张面孔（全部未修、待裁决，§28.4–§28.9）＝F-30：PHP 8.5.8 实测 `Error` **不再继承** `Exception`（`is_subclass_of('TypeError','Exception')=false`、`get_parent_class('Error')=false`），AOT 仍按旧层级过度捕获 ⇒ 跨切面／F-31：`throwException:21822` 把异常置成**字符串**伪值 ⇒ `catch` 永不命中且 fatal 文本类名错，调用点实测 **17 枚**，逐枚须先测真值异常类别／F-32：`PHPObject.toString:19437` 无 `__toString` 时 fail-open 返类名／F-33：`count()` 对非 Countable 返 0（语料高频，改前必须普查）／F-34：`spl_object_id()` 对闭包返 0／F-35：返回值类型位**完全不校验**（`: object` 返回 `int` 静默放行）；**★R-155（§29）＝门 W（20 形 `same=7 diff=13`）与门 X（9 形）建成 ⇒ 实测否证我自己提的「`php_count` 需补解引用」前置（x1/x2/x3 引用三形本就与真值等值 ⇒ 引用在载入侧已解）；F-33 第一批已落地（`php_count` 非 Countable ⇒ `throwThrowable("TypeError", …)` + 专用 helper `countArgTypeName`）⇒ 门 X `x6`/`x9` 转绿且 `x4` 按 §28.7.2 **设计留红**（接口判定须与 F-3 内建接口表同批，否则打红 `SplFixedArray`/`ArrayObject`）、门 V `v15` 转绿（`18/11`→`19/10`）；另新立 F-36（`new Error(...)->getFile()` 为空而 `new Exception(...)` 非空 ⇒ **Error 根与 Exception 根不等价**，「搬根」必须含构造期属性初始化）／F-37（`intdiv(1,0)` 打印 `error: DivisionByZero` 且 **rc=1** ⇒ Zig error 外逸，属 F-9/R-145「未捕获必须 PHP 风格 fatal + rc=255」族的漏网站点，门 R 现有臂抓不到）／F-38（`zig build test-aot` **6 处编译错误**全在 `test {}` 块内 ⇒ AOT 单测步骤长期失编译；运行期模板的编译验证实际由 AOT 产品编译承担，旧「`zig build test` 覆盖模板」口径作废，见 §28.13.2）**；**F-20（f14，P1，try 前语句异常被无关 catch 吞）已落地（R-147，§20.2–§20.3）＋**F-21（六枚臂 f15 f17 f19 f20 f21 f23）已落地（R-148/R-148b，§21：根因＝单臂 catch 不建派发块 + 末臂 else 落点；含本批自造的 `\Throwable` 回归收口）**＋**新立 F-22（f26，多语句 finally 与 pending 异常共存，属暴露非引入）与 F-23（f33，命名空间用户类 `extends \Exception` 后内建方法整族丢失，前缀 `be305cfa` 证非本批引入）待归因****＋F-4 去重（删代码，§17.7 记「裸侧未动」的理由）／F-6（`debug_backtrace`）／F-8b（设计分叉，§14.4）／F-10（删功能，登于 013）／**F-13b、F-14、F-15（§17.7）**／**F-16（入口未捕获异常上报，R-145 已修，§18.3）、F-17（trait 名限定的 Deprecated 文本，§18.7）**；F-5/F-7/F-12/F-12b 已落地；**F-11 未登记（编号保留，勿误读为存在该项）**。门 M 终态 **17 形 `red=0 green=17`**（链 XI 同口径全绿：影子 68/68、主回归 Pass 67/Skip 1、门 D8/H/H2/I/E/F/G 注册值保持，2026-10-11 07:05:35 报表）：门 M `red=5→0 green=3→8 compile_fail=0 bad_probe=0 residue=0`（链 VIII 同口径全绿：影子 68/68 零漂移、主回归 Pass 67/Skip 1、门 D8/H/H2/I/E/F/G 与 R-127 代注册值一致；二进制随链 VIII 代 `5c436e9e…` 后续树，runtime 模板不改变解释器二进制 md5）；落地含两处自纠（php_instanceof 重写误删 Throwable 块 ⇒ 补回；伪接口比较 eqlIgnoreCase ⇒ `instanceof stringable` 双拼写 ✅）；变更文档 `docs/changes/2026-10-11/AOT-CODEGEN-012_类名族CI_R128_2026-10-11_fbe6382a.md`
 **发现日期**: 2026-10-11（R-127 收尾轮顺带取证；与函数名 CI 同族，PHP 类名本不区分大小写）
 **触发档**: 默认档（`--compile --no-debug-info`）
 
@@ -1925,7 +1925,7 @@ pub fn rebuildCFG(func: *Function) !void {
 | 量法 | 读数 | 有效性 |
 |---|---|---|
 | `--compile --no-debug-info --verbose` 抓 `Dead blocks removed`（全 68 逐形，产物 `aot_compile_*` 逐枚删） | **`scripts_total=68 删块脚本数=4`**：`f009_oop_decorator_chain_command=1`／`f037_adapter_unified_cache=1`／`f048_match_pattern_dispatch=2`／`f177_graph_traversal_dfs_bfs=1` | ★**只是下界且是错的面孔**：旗标 `dead_blocks_removed` 全仓仅 `optimizer.zig:3364` 一处递增（声明 `:235`、打印 `:272/:1045`、递增 `:3364`、测试 `:6504/:6518`），**恰好只统计 Face C**，而肇事面是 Face A ⇒ §30.6.1 第 4 项的口径作废 |
-| **门 Z**＝`fuzzy_scripts_720/tmp/c026_dangling_ref_census_tmp.sh`（`--verify-ir --no-opt-fallback`，全 68 逐形单文件编译，桶 `DANGLING_REF/OK/OTHER_rc`） | 读数 **（待填：本轮跑动中，表身 61/68 已全 `OK`）** | ★这才是 F-42 的**有效分母**，且覆盖 A/B/C 三面的所有引用类型。**探针覆盖面已核**：`verifyModule` 在 pass 主循环里**每枚 pass 之后都调**，其中 cfg_cleanup 处有两枚 ⇒ `optimizer.zig:600-605`（模块级 `runCFGCleanup` 后）与 `:736-741`（超大函数的逐函数快路 `cleanupCFGInFunction` 后）⇒ Face A 的释放动作**一定被校验器看过**，不是「碰巧没跑到」 |
+| **门 Z**＝`fuzzy_scripts_720/tmp/c026_dangling_ref_census_tmp.sh`（`--verify-ir --no-opt-fallback`，全 68 逐形单文件编译，桶 `DANGLING_REF/OK/OTHER_rc`） | 读数 **`Z_DONE total=68 dangling=0 ok=68 other=0`**（767 s；R-158b 链内 ZCENSUS 腿复测同值，见 §31.12） | ★这才是 F-42 的**有效分母**，且覆盖 A/B/C 三面的所有引用类型。**探针覆盖面已核**：`verifyModule` 在 pass 主循环里**每枚 pass 之后都调**，其中 cfg_cleanup 处有两枚 ⇒ `optimizer.zig:600-605`（模块级 `runCFGCleanup` 后）与 `:736-741`（超大函数的逐函数快路 `cleanupCFGInFunction` 后）⇒ Face A 的释放动作**一定被校验器看过**，不是「碰巧没跑到」 |
 | 规则 41 口径（语料暴露） | 语料 `} finally {` 计数 = **0**（R-156 实测）⇒ Face A 的入口条件（空 catch 块）在语料内**不可达** | ⇒ 修复对基线**零暴露**，属「合法 PHP 编译不过」类；主回归与影子预期逐字节不变（`optimizer` 只改「删块前多改道一次」，语料无该形态 ⇒ 生成码不变）⇒ **影子不得漂移**是本轮硬验收项 |
 
 ### 31.6 修法（R-158b 待落地）与成本
@@ -1997,8 +1997,684 @@ pub fn rebuildCFG(func: *Function) !void {
 | `c026_dangling_ref_census_tmp.sh` | **门 Z 全语料普查**（68 语料 × `--verify-ir --no-opt-fallback`） | **`b5e5b1b889f100220d5fdbaa2d4cafe9`** | `Z_DONE total=68 dangling=0 ok=68 other=0`（修前测得；链内 ZCENSUS 腿复测须同值） |
 | `c012_reflection_gate_tmp.sh` | 门 P（78 形，内省族） | **`0d31ebf943c78b8426666a10acf28538`**（R-156 版 `e173c487079ef62e454293e8965a6570` 作废） | **改档**：`same=73 diff=5 compile_fail=0`，注册红 `v2 i1 i2 f12 f34`（★`f35` 转绿、`f34` 由 cf 转语义红 = F-44） |
 | `c027_r158b_acceptance_chain_tmp.sh` | R-158b 验收链（**19 腿**，新增 ZFACES/ZCENSUS 两腿） | `40deafd3263fe04ea12f5611334fc787` | 读数见 §31.12 |
-| 运行期模板 | `src/aot/runtime_lib_template.zig` | **`998aa7f6cb73d07050b5e7063eec0fe5`**（R-155 值 `c0e722b1…` 作废） | 本批**未动**模板 |
+| 运行期模板 | `src/aot/runtime_lib_template.zig` | **`6d520849c9a7eab50082c62e924662dd`**（R-159 终稿；R-156 的 `998aa7f6…` 作废；本表原记的 `998aa7f6…` 属 R-158b 代） | ★R-159 改 `php_intdiv` 两枚站点 ⇒ 纯模板、**不重建二进制**（`bin_md5` 仍 `b71f9f41…`） |
+| **门 Y（首次入链）** | `c024_zig_error_escape_tmp.sh` | **`89cd0ef91e1ad7a3348c9579e07b476a`**（★旧值随误删事故不可核对，见 §32.5） | 12 形 `same=4 diff=6 zig_escape=1 compile_fail=2`，注册红 `y2 y4 y7 y8 y9 y10` + `cf` `y1 y3`；★`zig_escape` 是正交旗标，非互斥桶 |
 | IR 生成 / 发射 | `ir_generator.zig` / `native_linker.zig` | `f3f11deff95fce0adfd0758aab32fac3` / `31f9433d7e6fd3b130cca60f0d8fc80a` | 本批**未动**（F-44 待裁决 ⇒ 留待下一批） |
 | ★优化器 | `src/aot/optimizer.zig` | **`e720145e5da407335bc301fbdfb0c909`**（R-147 值 `6cffa137…` 作废） | `+29/−0`：新增 `redirectExceptionHandlerRef` + trampoline 站点一行调用 |
 | 二进制 | `zig-out/bin/php-interpreter` | **`b71f9f41f182161df7ebab04a0b64879`**（R-156 值 `4e048f47…` 作废） | ★本批改 `optimizer` ⇒ **必须重建**；中间代 `e5a6522d…`（无自环守卫）/`df1feb36…`（守卫但注释未更正）均作废 |
 | 影子基线列 | `c010_shadow_newside_r156_tmp.txt`（表身 md5 `f19fb070ba1b86c34f02b3883de8e4dd`） | — | R-158b 列须与之 `changed_rows=0`（语料无 Face A 形态） |
+
+### 31.12 R-158b 验收链 19 腿读数（`R158B_CHAIN_START 2026-10-14 09:51:06 bin_md5=b71f9f41…`）
+
+| 腿 | DONE 行读数 | wall | 判读 |
+|---|---|---|---|
+| buildtest | `zig build test` rc=0 | 8 s | 与 R-156 代同为缓存命中档（R-156 腿 5 s） |
+| **ZFACES** | `ZFACE_DONE shapes=10 same=9 diff=1 dangling=0 compile_fail=0 bad_probe=0` | 36 s | ★**本批主判据**：`dangling=0` ⇒ Face A 悬垂引用清零；唯一残红 `z2`＝F-44 |
+| **ZCENSUS** | `Z_DONE total=68 dangling=0 ok=68 other=0` | 767 s | ★68 语料逐形 `--verify-ir --no-opt-fallback` 全通过 ⇒ 语料零暴露，且**无需保守退路**即可过全量 IR 校验 |
+| X | `shapes=9 same=8 diff=1 cf=0` | 39 s | 等值注册档（残红 `x4` 设计留红） |
+| V | `shapes=29 same=19 diff=10 cf=0` | 122 s | 等值注册档 |
+| W | `shapes=20 same=7 diff=13 cf=0` | 75 s | 等值注册档（F-3/F-30 未动） |
+| T | `shapes=22 same=16 diff=5 cf=1` | 88 s | 等值注册档（红 `t2 t9 t11 t12 t13` + 失败 `t17`） |
+| **P** | `shapes=78 same=73 diff=5 cf=0` | 310 s | ★**改档确认**：`cf 2→0`、注册红 4→5（`f35` 转绿、`f34` 转 F-44 语义红）⇒ 与链前单跑（@306 s）**逐枚同值** |
+| S | `shapes=47 same=47 diff=0 cf=0` | 187 s | 等值注册档（本门无注册红，判据即 `diff=0`） |
+| M | `shapes=19 red=0 green=19` | 68 s | 等值 |
+| N | `shapes=7 red=0 green=7` | 24 s | 等值 |
+| O | `shapes=6 red=0 green=6` | 21 s | 等值 |
+| D8 | `shapes=14 defect_red=0 guard_same=14` | 49 s | 等值 |
+| Q | `shapes=5 same=5 expect_fail=0 unexpected_fail=0` | 22 s | 等值 |
+| R | `shapes=9 same=8 diff=1 terminate_lost=0` | 38 s | 等值 |
+| U | 列聚合（无 DONE 行）与 R-156 代**逐字节相同**（`diff /tmp/r156_U.out /tmp/r158b_U.out` = 空） | 203 s | 等值（F-25 冲突普查面未动） |
+| B | `entries=497 distinct=464 dup_rows=33 diff_impl=3 field_diff=0 identical=30` | 2 s | ★`entries=497` 未变 ⇒ 本批零地图漂移（未新增登记项） |
+| regression | `Total 68 / Pass 67 / Fail(Compile·Runtime·Diff) 全 0 / Skip 1`，`## 失败明细` 仅 `f004 … SKIP` 一行 | 785 s | 回收枚 0、新增红 0（规则 27 取明细行存在性） |
+| shadow | `C010_SHADOW_DONE total=68 same=0 diff=68 miss=0 invalid=0` | 1119 s | `diff=68` 是**对照冻结前缀**（`be305cfa`，pre-72cdaca）的常态 ⇒ 无 miss/invalid 即合格 |
+| shadowcol | `SHADOWCOL_DONE gen=r158b rows=68 col_md5=f19fb070ba1b86c34f02b3883de8e4dd base=…r156_tmp.txt base_md5=同值 changed_rows=0 col_identical=yes` | — | ★**发射中性实证**：换了二进制代次，68 语料的 `main.zig` 整列仍逐字节不变 ⇒ F-42 改道在语料内零触发（自 r148b 起第 7 代同值） |
+| 链尾 | `R158B_CHAIN_END 2026-10-14 10:57:09 bin_md5=b71f9f41… ELAPSED=3963s` + `R158B_CHAIN_DONE` | — | 首尾二进制同值 ⇒ 链内无代次漂移；规则 28 双判满足 |
+
+★链内读数与链前单跑**逐枚同值**（门 P `same=73 diff=5 cf=0`、红集 `v2 i1 i2 f12 f34`、`f35 SAME`；门 Z `dangling=0`）⇒ 非并发假象。各腿 `repo_build_residue=0`；`.php` 原件零删除。
+
+## 32. R-159（2026-10-14）：F-37 落地（`intdiv` 两枚 Zig 外逸）⇒ 门 Y 改档；★一枚 printf 转义缺陷揪出「假绿守卫」⇒ 新立 F-45
+
+### 32.1 落地内容（纯模板 ⇒ 零 `zig build`、`main.zig` 中性）
+
+站点 = `src/aot/runtime_lib_template.zig:12798-12816 php_intdiv`。★`intdiv` 在 `builtin_map` 里是 `.needs_allocator = false`（`native_linker.zig:4311`）⇒ 沿用模板全局 `runtime_allocator`，**签名与地图都不动**（门 B `entries` 须仍 497）。
+
+| 面孔 | 修前实测（bin `b71f9f41…`） | PHP 8.5.8 真值（实测） | 落地形态 |
+|---|---|---|---|
+| `intdiv(1, 0)` | 打印 `error: DivisionByZero`、**rc=1**，后续语句不执行 | `DivisionByZeroError: Division by zero`，可捕获、rc=0 | `_ = try throwThrowable("DivisionByZeroError", "Division by zero", runtime_allocator); return Value.initNull();`（形态照搬同文件 `/`、`%` 三支 `:5962`/`:5976`/`:6003`） |
+| `intdiv(PHP_INT_MIN, -1)` | **静默回绕**：`@divTrunc` 结果仍是 `-9223372036854775808`、`rc=0` | `ArithmeticError: Division of PHP_INT_MIN by -1 is not an integer` | `if (b == -1 and a == std.math.minInt(i64))` ⇒ `throwThrowable("ArithmeticError", …)`；★不硬编码字面量（`std.math.minInt(i64)` 正是 `:494` 登记 `PHP_INT_MIN` 用的同一表达式） |
+| 正常位（对照） | `intdiv(PHP_INT_MAX,1)`／`intdiv(-9223372036854775807,3)`／`intdiv(±10,3)` | 与 AOT **逐字节全等** | 未触碰（⇒ 回绕守卫没有误伤正常商） |
+| `PHP_INT_MIN/MAX/SIZE` 本身 | 与 PHP 全等（`-9223372036854775808`／`9223372036854775807`／`8`） | 同 | ⇒ AOT 的 PHP 可见 int 面是 **i64**（虽然 `Value` 装箱是 int48，`:2391-2392`），故守卫基准取 i64 min 正确 |
+
+### 32.2 ★否证：门 Y 的「y7 = 同族已正确的先例」是 **printf 转义**造成的假绿
+
+| 环 | 证据 |
+|---|---|
+| 噪音 | 门 Y 修前首跑 stderr 就有一行 `line 48: printf: \`% 0': missing format character`——我先前把它当无害噪音，读数照收 |
+| 生成物实文 | 复现该臂的 printf 序列 ⇒ 探针主体是 `<?php\ntry { 1 ; echo "Y7=RET\n"; }`：**`% 0` 整段被吞**，取模从未执行 |
+| 后果 | 该臂永远 SAME ⇒ 「`%` 零除已是正确先例」这条写进门头与工单 §29.10 的结论**从未被实测支撑** |
+| 修法 | 表达式发射统一走单一转义口径 `printf '%s' '<expr>'`（本门 10 枚表达式臂全改），并在门头写下禁混用两种口径 |
+| 修后读数 | 仅修转义、未动模板时 = `same=2 diff=8 zig_escape=2 compile_fail=2` ⇒ 与 R-155 档的**唯一差值就是 y7 由假绿转真红**，其余逐臂同值（规则 34：带证据更正，不悄悄改档） |
+
+★**F-40 的同一家族再添一枚**：`printf` 的格式串里出现裸 `%` ⇒ bash 报错并**静默截断**，产物仍合法（PHP 语法没错）⇒ `php -l` 预检与「输出非空」预检都抓不到。**How to apply**：任何由 shell 生成的探针，建门轮必须回读一枚生成物实文核对预期表达式在不在；门脚本自身 stderr 的非零噪音行一律当缺陷查。
+
+### 32.3 ★F-45 新立（实测，未修）：**结果被丢弃**的可抛出算术语句被 DCE 整条消除
+
+四格探针（`/tmp/f45p/st.php`，同一文件内顺序四句）实测：
+
+| 语句 | PHP | AOT 默认档 | AOT `--aot-disable-pass=dce` | AOT `--aot-max-iterations=0` |
+|---|---|---|---|---|
+| `1 % 0;`（结果弃用） | `CAUGHT DivisionByZeroError` | **`RET`（无异常）** | `CAUGHT DivisionByZeroError` | `CAUGHT DivisionByZeroError` |
+| `1 / 0;`（结果弃用） | `CAUGHT DivisionByZeroError` | **`RET`（无异常）** | `CAUGHT` | `CAUGHT` |
+| `intdiv(1, 0);`（结果弃用） | `CAUGHT DivisionByZeroError` | `CAUGHT`（★本批 R-159 修好后） | `CAUGHT` | `CAUGHT` |
+| `$x = 1 % 0;`（结果使用） | `CAUGHT DivisionByZeroError` | `CAUGHT` | `CAUGHT` | `CAUGHT` |
+
+⇒ 归因（A/B 双支独立复证）：**DCE 的「无副作用」谓词不看「该运算能否抛出」**，于是把 `.mod`/`.div` 这类结果寄存器为死的指令整条删掉 ⇒ 应抛的可捕获异常消失。四格矩阵同时给出边界：**只有「结果弃用」+「运算在模板里以纯 binop 发射」的交集才中招**（`intdiv` 是 call、被保留；赋值形结果活、被保留）。
+
+| 项 | 内容 |
+|---|---|
+| 定级 | P1（静默错语义、非崩、非内存不安全；但属「合法 PHP 的行为被消除」） |
+| 语料面 | ★**不给正则分母**：我试的「结果被丢弃的除法/取模语句」粗正则命中 1075 行，属**过匹配**（把数组下标、跨行表达式、字符串内斜杠全算进去）⇒ 该数字作废、禁引用。正确口径需 IR 侧计数（死寄存器 ∧ `.div`/`.mod`）或逐形实测，留待 F-45 归因轮 |
+| 修法候选 | 甲 DCE 的 purity 判定加「可抛出性」（`.div`/`.mod`/`intdiv` 等一律视为有副作用）⇒ 少删指令＝**编译器优化损失**，按宪法 §六.7 须老铁点头；乙 仅在语句位（结果弃用）保留这类指令 ⇒ 面更小、非语句位仍可删 |
+| 本批不动的理由 | 规则 31（一臂一缺陷、一批一层）＋本批是纯模板收口，F-45 在 `optimizer` 侧需重建与全链 ⇒ 分开排 |
+
+### 32.4 门 Y 改档与链缺口
+
+- 门 Y 现行判读（R-159 定档）：**12 形 `same=4 diff=6 zig_escape=1 compile_fail=2 bad_probe=0`** @44s；注册红 = `y2 y4 y7 y8 y9 y10`，`cf` = `y1 y3`；`zig_escape` 是与 same/diff **正交的旗标**（数输出含 `error: ` 的臂 ⇒ 桶和须等于 12 才是自洽读数）。
+- ★**链缺口修补**：门 Y 自 R-155 建成后**从未进过验收链**（R-155/R-156/R-158b 三条链的腿表里都没有 Y）⇒ 本批起把 Y 作为永久腿并入链（R-159 链 20 腿）。
+- 落地复跑的逐臂变化：`y5 DIFF→SAME`、`y6 DIFF→SAME`（本批目标），其余 9 臂逐枚同值；守卫 `g1 g2` 恒绿。
+
+### 32.5 ★资产事故与复原（必须留档，不作静默修补）
+
+| 环 | 事实 |
+|---|---|
+| 事故 | 我在追加 §32 之后执行了一条**误写的命令** `rm -f <fragment> md5 -q <脚本>` ⇒ `rm` 把门 Y 脚本路径当参数吃掉 ⇒ `fuzzy_scripts_720/tmp/c024_zig_error_escape_tmp.sh` **被删除**。该脚本未入库（`?? ` 未跟踪），无 git 副本 |
+| 未受损 | 门 Y 的 TSV 表身 `c024_zig_error_escape_tmp.tsv`（11:05 那次真跑的输出）与所有已入工单的读数都还在 ⇒ 有**复验基准** |
+| 复原方式 | 按本会话内逐段读到的原文（`sed -n` 的 10-22 / 30-48 / 48-60 / 60-95 行区间）+ 同名旧代次脚本模板重建；**未凭记忆新写判据** |
+| 复验 | 先 `cp -p` 快照旧 TSV ⇒ 重跑重建门 ⇒ 用 python 逐臂解析记录做字段比对 ⇒ **`diff` 结果除 `ELAPSED` 外完全为空（TSV_IDENTICAL_EXCEPT_ELAPSED）**，12 臂桶值与表身文本逐一等值 |
+| 重建期发现的两处口径漂移（已当场更正并留证） | ① `zig_escape` 旗标：重建首跑给到 **5**，因为子串匹配 `"error: "` 把 PHP 自己的 `PHP Fatal error:  Uncaught …` 也算成外逸 ⇒ 改成**行首锚定** `^error: [A-Za-z]`（Zig 默认处理器的形态），复验回 **1**。② `norm`：重建首版用了 `/^Stack trace:/,$d`（从首个 Stack trace 删到**文件末尾**），把第二份回显与 `#0 {main}` 帧一并删掉 ⇒ 桶值虽同、表身文本与工单 §29.10 引用的读数**不可逐字节比对** ⇒ 改回「剥 `PHP Fatal error:`/`Fatal error:` 前缀、只删 `Stack trace:` 单行与 `thrown in …` 行、保留帧行与空行」 |
+| 终稿 | 门 Y 脚本 md5 **`89cd0ef91e1ad7a3348c9579e07b476a`**（旧值随脚本删除一并作废，无法再核对；★从此脚本必须入库，见下） |
+| 教训（入记忆） | ① `rm -f` 的**参数列表**里绝不能混进「本不想删的路径」——组合命令里 `md5 -q` 这类词被 `rm` 吞成文件名是典型形态；删除类命令前置 `ls`/`echo` 打印将要删除的参数，或分两条命令。② 永久门脚本长期 `?? 未跟踪` 是**资产流失风险面**（本仓已有 `AOT-PROC-001` 记 gitignore `test_*` 的同类事故）⇒ 所有 `fuzzy_scripts_720/tmp/c0*_tmp.sh` 门脚本应在首次定档后即入库。③ 重建后的门必须用**旧表身**做逐臂字段比对，而不是只看汇总 DONE 行数字（数字同值 ≠ 表身同值）。 |
+
+### 32.6 ★锚点漂移登记（本批在 `runtime_lib_template.zig` 内插入 10 行所致）
+
+本批于 `:12802-12811`（`php_intdiv` 两枚守卫的注释与语句）插入 10 行 ⇒ **模板文件内 `:12811` 之后的所有锚点一律 +10**。工单内**历史读数所记的行号按当轮代次保留、不改写**，换算表如下（★行号已按 R-159 代次逐枚 grep 复测，非推算）：
+
+| 符号 / 锚点文本 | R-156 代（旧记） | R-159 代（现值） | 用途 |
+|---|---|---|---|
+| `php_intdiv` 函数体 | `:12799`（旧 §30.8 记 `:12802` 为 `return error.DivisionByZero` 行） | `:12799`（守卫后函数体扩到 `:12816`） | F-37 站点 |
+| `// Register standard PHP exception subclasses (flat: extends Exception)` | `:14758` | **`:14784`** | F-30「Exception 平铺」证据 |
+| `// Error extends Exception in our implementation for simplicity` | `:14781` | **`:14808`** | ★F-30 根行 |
+| `oob_meta.parent = meta; // simplified: parent = Exception` | `:14803` | **`:14831`** | F-30 第三处 |
+| `DivisionByZeroError` 的 ClassMeta 登记注释 | `:14843` | **`:14853`** | 本批 F-37 依赖（异常类已存在 ⇒ 无需新登记） |
+| `pub fn toString(self: *PHPObject, …)` | `:19437` | **`:19449`** | ★F-32 根行（fail-open 返类名） |
+| `pub fn throwThrowable(class_name, message, allocator) !Value` | `:20827`（★该值记于**更早代次**（RUNTIME-002 轮），其间的累计漂移**不由本批 +10 解释**） | **`:21871`**（R-159 代实测） | F-37 使用的抛出入口；⇒ 旧跨代换算表不可复用，引用它须重 grep |
+
+⇒ 换算规则：**凡引用 `runtime_lib_template.zig` 的 `:12811` 之后行号，R-159 代一律 +10**；`native_linker.zig`（`:18020`/`:18033`/`:4311` 等）与 `optimizer.zig`/`ir_generator.zig` 的锚点**不受本批影响**（本批未动这三个文件；`optimizer.zig` 的 +29 漂移见 §31.10）。
+
+## 33. R-160 备料轮（2026-10-14，只读，零 `src/` 改动）：F-41「内置函数必填参数数」的三表对照 ⇒ **两张候选真值表都不可直接使用**
+
+### 33.1 新建永久普查门 **ARITY**（`c029_arity_census_tmp.sh`，md5 **`a85c9e1ff07fe319a45fa2cb3f707652`**，表身 `c029_arity_census_tmp.tsv`）
+
+★抽查行（表身实测，供后续复算）：`array_merge REFL min=0 total=1 variadic fn_table=Y`／`implode REFL min=1 total=2 fixed fn_table=Y`／`parse_str REFL min=2 total=2 fixed fn_table=Y`／`echo NO_PHP fn_table=Y`（★`fn_table` 连 `echo`/`print` 这类**语言构造**也当函数登记 ⇒ 它并非纯函数表）／`php_deref NO_PHP fn_table=N`。
+
+★与其余门不同：**本门不调 AOT**（纯静态抽取 + 纯 PHP 反射）⇒ 允许在验收链跑动期间执行（规则 35/46 的例外面）。
+
+建门轮读数（2026-10-14，`reflect_rc=0`）：
+
+```
+ARITY_DONE builtin_map_names=464 in_fn_table=299 missing_from_fn_table=165 php_reflected=412
+           php_no_such_func=52 php_minargs_ge1=354 ge2=112 variadic=21 sample_msg=10
+```
+
+| 计数 | 值 | 含义 |
+|---|---|---|
+| `builtin_map_names` | **464** | 与门 B 的 `distinct=464` 互证 ⇒ 抽取口径正确 |
+| `in_fn_table` / `missing_from_fn_table` | **299 / 165** | ★`src/runtime/fn_table.zig`（自称 SSOT）**覆盖不到 36% 的 AOT 内置名** |
+| `php_reflected` | **412** | 464 枚里 PHP 侧确有此函数并可反射的枚数 |
+| `php_no_such_func` | **52** | ★**F-43 的族谱定量**：AOT 登记成「可调用内置」而 PHP 无此名 ⇒ 含语言构造 `echo`/`print` 与内部 helper `php_deref`/`php_ref_assign`/`php_ref_assign_ptr`/`php_new_object_dynamic`/`preg_match_with_matches`/`php_array_get_ref` 等 |
+| `php_minargs_ge1` / `ge2` / `variadic` | **354 / 112 / 21** | arity 守卫的**理论覆盖面**（≥1 必填的枚数）⇒ F-41 不是冷门面 |
+
+### 33.2 消息文本公式（抽样 10 枚真调用实测，非推算）
+
+| 样本 | 反射 min | PHP 消息 |
+|---|---|---|
+| `strlen()` | 1 | `ArgumentCountError: strlen() expects exactly 1 argument, 0 given` |
+| `intdiv()` | 2 | `…intdiv() expects exactly 2 arguments, 0 given` |
+| `array_pop()` | 1 | `…array_pop() expects exactly 1 argument, 0 given` |
+| `json_decode()` | 1 | `…json_decode() expects at least 1 argument, 0 given` |
+| `substr()` | 2 | `…substr() expects at least 2 arguments, 0 given` |
+| `str_replace()` | 3 | `…str_replace() expects at least 3 arguments, 0 given` |
+
+⇒ **公式（全部由实测归纳，禁写死单函数消息）**：`ArgumentCountError: <name>() expects <exactly|at least> <min> argument(s), <given> given`
+- `exactly` ⇔ `min == total ∧ !variadic`；`at least` ⇔ 其余
+- 单复数随 `min`（`1 argument` / `2 arguments`）
+- ★反例校核：`array_merge()`（反射 min=0）真调用 **不报错** ⇒ min=0 的函数不得进守卫名单，否则造出 over-reject（与 010 门 H2「过度宽容」同类，方向相反）
+
+### 33.3 ★否证「复用 `fn_table` 就行」：它既不全也不准
+
+同表对照（`fn_table` 的 `min_args` vs PHP 反射必填数，可对照 292 枚）⇒ **10 枚不一致**，其中 4 枚已用**真调用**复证（反射与运行时消息同向）：
+
+| 函数 | `fn_table` | PHP 反射 | 真调用实测 |
+|---|---|---|---|
+| `array_merge` | min=1 max=255 | min=0 variadic | `array_merge()` ⇒ **无错**（fn_table 高估） |
+| `array_push` | min=2 max=255 | min=1 variadic | — |
+| `array_diff` | min=2 max=255 | min=1 variadic | `array_diff()` ⇒ `expects at least 1 argument, 0 given` |
+| `implode` / `join` | min=2 max=2 | min=1 total=2 | `implode()` ⇒ `expects at least 1 argument, 0 given` |
+| `parse_str` | min=1 max=2 | min=2 | `parse_str("a=1")` ⇒ `expects exactly 2 arguments, 1 given`（fn_table **低估**） |
+| `mktime` | min=0 max=6 | min=1 | `mktime()` ⇒ `expects at least 1 argument, 0 given` |
+| `get_class_methods` | min=0 max=1 | min=1 | `get_class_methods()` ⇒ `expects exactly 1 argument, 0 given` |
+
+⇒ 结论（决定 R-160 形态）：**两张候选表都不能直接当 AOT arity 真值** —— `fn_table` 缺 165 枚且 10 枚与 PHP 冲突；`builtin_map` 本身不带 arity 字段。而 AOT 侧已有 arity 数据模型（`ir.zig:226-227` `Method = { param_count, required_params }`、`:1203-1204` `ClosureNewOp` 同）⇒ **缺的只是内置函数那一份真值**。
+
+### 33.4 待老铁裁决的三型（我不动代码）
+
+| 型 | 内容 | 影响面 | 落地成本 |
+|---|---|---|---|
+| **甲** | **就地修 `src/runtime/fn_table.zig`**：补齐 165 枚缺失 + 更正 10 枚冲突，AOT 侧 `@import("runtime")` 复用（★可行性已核：`src/main.zig:12 const aot = @import("aot/root.zig")` ⇒ `src/aot/*.zig` 编在 **exe 根模块**内，而 `build.zig:84` 已给根模块 `addImport("runtime", runtime_mod)` ⇒ **不需要改 build.zig**；但 `src/aot/` 现有 @import 集合里从未出现过 `"runtime"`，首次引入需实测） | 单一真值源，最干净 | ★**跨模式**：`fn_table` 同时服务解释器/字节码/JIT ⇒ 按宪法 §五/§六 **必须老铁明示**；成本＝补 165 枚（可由反射脚本生成候选，仍需逐枚核） |
+| **乙** | **AOT 侧新建 arity 表**（由 PHP 反射生成、入库为 AOT 专用），只给直调快路径用 | 零跨模式风险 | 低-中：两张表并存 = 违 DRY，且 36% 覆盖差会**永久分叉**；需在建表注释里写明「真值来源＝PHP 反射实测 + 生成命令」 |
+| **丙** | 先只做 **arity 金丝雀**（编译期把「实参数 < 已知 min」报成显式警告/错误，名单取已反射确认的 354 枚里语料实际用到的枚数） | 语料面 0（pass/ 内内置调用实参都正确，R-156 已测） | 最低：不改任何真值表，先把「静默 Zig 编译错」变「可读诊断」；但**不解决**运行时 `ArgumentCountError` 语义（门 Y y1/y3 仍红） |
+
+⇒ 我的推荐：**丙 → 甲**（丙先把红面显性化，甲再一次性收真值源），但甲跨模式，**等老铁明示后才动**。
+
+### 33.5 本轮另两枚顺手实测（只登记，未修）
+
+1. ★`fn_table` 有 79 枚名字不在 AOT `builtin_map`（如 `array_change_key_case`、`array_first`、`array_last`、`bit_and`/`bit_or`/`bit_shift_*`）⇒ 与 `php_no_such_func=52` 合起来说明**两张名单的方向性缺失**：AOT 有表没有 × PHP 有表没接。
+2. ★`debug_zval_dump` 的 variadic 口径与反射不一致（`fn_table` 记 `max=255`，反射非 variadic）⇒ 若走甲型，这一枚要单独核。
+
+### 32.7 R-159 验收链读数（20 腿，11:15:25→12:22:32，**4027 s**；链首尾 `bin_md5=b71f9f41…`、`tpl_md5=6d520849…` **双双同值** ⇒ 纯模板批未换代次）
+
+| 腿 | 读数 | wall | 判定 |
+|---|---|---|---|
+| buildtest | rc=0 | 4 s | 缓存档（与 R-156/158b 的 5s/8s 同量级） |
+| **Y（首次入链）** | `shapes=12 same=4 diff=6 zig_escape=1 compile_fail=2 bad_probe=0` | 43 s | ★本批主门，与改档值等值；红集 `y2 y4 y7 y8 y9 y10` + `cf` `y1 y3` |
+| ZFACES | `shapes=10 same=9 diff=1 dangling=0 compile_fail=0 bad_probe=0` | 38 s | 等值 R-158b 档（本批零触碰） |
+| ZCENSUS | `total=68 dangling=0 ok=68 other=0` | 814 s | 等值（★跨 run 自证：与修前普查同值，且模板批不影响 IR 合法性） |
+| X / V / W / T | `9→8/1` @42s ／ `29→19/10` @126s ／ `20→7/13` @76s ／ `22→16/5 cf=1` @91s | — | 全部等值注册档 |
+| P | `78 same=73 diff=5 cf=0` | 320 s | 等值 R-158b 改档（红 `v2 i1 i2 f12 f34`） |
+| S / M / N / O / D8 / Q / R | `47 diff=0` ／ `19 red=0` ／ `7/7` ／ `6/6` ／ `defect_red=0 guard_same=14` ／ `same=5` ／ `same=8 diff=1 terminate_lost=0` | — | 全等值 |
+| U | 列聚合（无 DONE 行） | 210 s | 与 R-158b 代同值 |
+| B | `entries=497 distinct=464 dup_rows=33 diff_impl=3 field_diff=0 identical=30` | 2 s | ★`entries`/`distinct` 未变 ⇒ 「改函数体不动签名」确实零地图漂移；`distinct=464` 同时**互证 ARITY 普查的门 B 口径** |
+| regression | `Total 68 / Pass 67 / Fail(Compile·Runtime·Diff) 全 0 / Skip 1`；`## 失败明细` 仅 `f004 … SKIP` | 794 s（报表 mtime 12:05:09） | 零回归、回收 0 枚（语料 `intdiv(` = 0） |
+| shadow | `total=68 same=0 diff=68 miss=0 invalid=0` | 1043 s | 对照冻结前缀，无 miss/invalid |
+| shadowcol | `gen=r159 rows=68 col_md5=f19fb070ba1b86c34f02b3883de8e4dd`＝r158b 列同值 ⇒ `changed_rows=0 col_identical=yes` | — | ★自 r148b 起**第 8 代同值**；★但按规则 29，影子不哈希 `runtime_lib.zig` ⇒ 本批运行面证据是 **门 Y + 语料计数 0**，不是影子 |
+| 残留 | 各腿 `repo_build_residue=0`；`.php` 原件零删除 | — | 合规 |
+
+### 32.8 ★老铁裁决（2026-10-14，同轮记录，后续各批以此为前提）
+
+| 项 | 裁决 | 排期含义 |
+|---|---|---|
+| **F-41 arity 真值来源** | **丙 → 甲 两步走** | R-160 ＝ 丙（编译期 arity 金丝雀，把静默 Zig 编译错变可读诊断，不改真值表）；后续一轮 ＝ 甲（就地补齐/更正 `src/runtime/fn_table.zig` 的 165 缺失 + 10 冲突并让 AOT `@import("runtime")` 复用）。★甲跨解释器/字节码/JIT 三模式 ⇒ 甲开工前先把「改表对其他模式的行为影响」量出来再动，不擅改运行面 |
+| **F-45 DCE 消除可抛出语句** | **乙：仅语句位保留** | 只对「结果未被使用（语句位）」的 `.div`/`.mod` 等保留指令，非语句位仍可正常删除 ⇒ 性能损失面最小；先决条件＝IR 侧「死寄存器 ∧ 可抛 binop」分母实测（原粗正则 1075 行过匹配已作废） |
+| **门脚本入库** | **暂不提交，保持现状** | 我**不执行任何 `git add`/`commit`**（源码、门资产、文档均不提交），等老铁明说「提交」；误删风险期继续靠「改判据前先 `cp -p` 快照 TSV」自保 |
+
+### 33.6 ★F-45 分母的三次尝试：前两枚**静态启发式全部作废**，改用端到端差分（永久门 AB）
+
+| # | 量法 | 读数 | 判定 |
+|---|---|---|---|
+| ① | 粗正则 `^[^=;]*[/%][^=;]*;$` | 命中 **1075** 行 | **作废（过匹配）**：数组下标 `$a[1/2]`、跨行表达式、字符串里的斜杠（`sprintf('%4d')`）、注释全算进来 |
+| ② | 门 STMT（`c030_stmt_raise_census_tmp.sh`，PHP `token_get_all` 切语句 + 深度 0 判 `/`/`%`） | 命中 **2** 行（f045、f135） | **作废（假阳性）**：实为 `return (int)(($doy - 1) / 7) + 1;`／`return $x % $M;` 这类 **return 形（结果被使用）**，切分器把整个 `class …{…}` 当一条语句 ⇒ 深度跟踪错。⇒ 门 STMT 保留作**反面教材**，其读数禁引用 |
+| ③ | **门 AB**（`c031_dce_ab_gate_tmp.sh`）：同一份 PHP 分别用默认档与 `--aot-disable-pass=dce` 编译并运行，比对**输出与 rc** | 建门轮读数＝**待本门跑完后追加到 §33.6 末**（跑动中，禁预估） | ★**不依赖任何静态启发式**，直接量「DCE 有没有改变可观察行为」⇒ 这才是 F-45 的语料暴露面 |
+
+★**门 AB 的自检（先证门能探测到，再谈它的 0）**：合成三形跑同一门 ⇒
+| 探针 | 形态 | 门读数 | 手工对照 |
+|---|---|---|---|
+| `pos0` | `$a = 6; $a / 0; echo "TAIL\n";`（结果弃用 ∧ 除数 0） | **`on_eq_off=no`** ⇒ `DIFF_BOTH_WRONG` | `--dump` 两侧实文：默认档只打 `TAIL`（异常消失）；关 DCE 打 `PHP Fatal error: Uncaught DivisionByZeroError: Division by zero` ⇒ **门确实抓得到本族** |
+| `posmod` | `$a % 0;` 同位 | `on_eq_off=no` | 同上（`Modulo by zero`） |
+| `neg` | `$c = $a / $b;`（结果被使用） | `on_eq_off=yes EQUAL_BOTH_MATCH_PHP` | ⇒ 不假报 |
+| `pos`（除数非 0 的语句位） | `$a / $b;` | `on_eq_off=yes` | ⇒ 门的差分只在**真的抛**时才亮，符合预期 |
+
+★`DIFF_BOTH_WRONG` 的两枚**同时**计入「两侧都不等于 PHP」是**已知且可解释**的：off 侧文本属门 Y `y4/y8/y9/y10` 那族「未捕获上报格式与 PHP 不逐字节等值」（F-39-ii），与本族无关 ⇒ 读数解读时禁把它当第二枚独立缺陷。
+
+### 33.7 ★F-45 根因已由实文钉死（与门 AB 无关的独立证据，落地前取证）
+
+| 环 | 实文 | 结论 |
+|---|---|---|
+| DCE 删除点 | `optimizer.zig:2790-2801`：`inst.result` 未被 `used_registers` 命中 ⇒ `if (!self.hasSideEffects(inst))` 就 `orderedRemove` | 语句位（结果弃用）正是这个条件的目标集 |
+| **纯度谓词** | `:3239 hasSideEffects` 第 `:3243` 行**白纸黑字**：`.add, .sub, .mul, .div, .mod, .pow => false` | ★**除/取模/幂被声明为无副作用** ⇒ F-45 的根就在这枚枚举行，不在别处 |
+| `hasSideEffects` 的**消费者共 4 枚** | 实测 grep：`:996`（可删/可提升判定）、`:2793`（DCE Phase 3）、`:4594`（内联器）、`:5278`（LICM 提升） | ★甲型（直接改谓词）会**同时**改变 LICM 与内联器的行为 ⇒ 红面与影子漂移风险远大于本族收益；乙型只在 `:2793` 加局部守卫 ⇒ 谓词与其 4 枚消费者不动 |
+| 仓内已有的「可抛出」谓词 | `:3294 mayRaiseException` 列了 call/数组/属性/`cast`/`type_check`/`unbox` 等，**但不含 `.div`/`.mod`/`.pow`**；且全仓只被 `:4598`（内联器）**一枚**站点使用 | ⇒ 不复用/不扩它：改它会连带动内联器（更大红面 + 影子漂移）；本批另立局部谓词只在 DCE 站点用 |
+| 发射侧是否本来就对 | 关 DCE 后 `main.zig` 的除零调用带 `hasException()` 路由并正确抛 ⇒ **发射侧无需改** | ⇒ 修复面 = DCE 一处「别删会抛的算术指令」 |
+
+⇒ 采**乙型**（老铁已裁）的落地形状：在 `:2793` 的守卫上追加「该指令是可抛出算术（`.div`/`.mod`/`.pow`）则不删」。★语义上「结果弃用」＝「语句位」，所以乙型天然不需要新的 IR 标记；而甲型（改 `hasSideEffects`）会波及该谓词的其它消费者 ⇒ 二者在本仓的实际差集就是「改哪一枚谓词」。
+★成本与风险：改 `optimizer.zig` ⇒ 重建 + 全链；**影子可能漂移**（语料里若有被删的 dead `.div`，保留后会多生成一次调用与路由 ⇒ `main.zig` 变）⇒ 落地后须先看影子 `changed_rows`，非 0 则按当代次重冻并逐枚归因（禁默认放行，规则 30）。
+
+## 34. R-162 备料轮（2026-10-14）：F-31「`throwException` 置字符串伪异常」17 枚站点的 **PHP 真值全表**（纯只读，零 `src/` 改动，零 AOT 调用）
+
+### 34.1 站点清单与真值（消息文本与异常类名逐枚实测，PHP 8.5.8 `/opt/homebrew/bin/php`）
+
+| 站点（`runtime_lib_template.zig`） | AOT 现文本 | PHP 真值（类名 + 消息） | 差在哪 | 触发面实测 |
+|---|---|---|---|---|
+| `:2909` | `Object of class Closure could not be converted to string` | **`Error`**：`Object of class Closure could not be converted to string` | ★**文本全等**，只错在「伪异常字符串 ⇒ catch 永不命中」＋未捕获时类名打不出 | `(string)$closure` |
+| `:5405`、`:5425`、`:5531`、`:5560` | `Only arrays can be unpacked` | **`TypeError`**：`Only arrays and Traversables can be unpacked, int given`（`...$"abc"` ⇒ `…, string given`；`...$null` ⇒ `…, null given`） | ★**类名与文本都错**，且缺「实际类型」尾巴 | `function f(...$a){}` 以 `f(...$x)`（`x` 为 int / string / null） |
+| `:5554`、`:5585` | `Call to a member function on null` | **`Error`**：`Call to a member function go() on null` | ★缺**方法名**；且 `$b=false; $b->go()` 的尾巴是 `on false` 不是 `on null` ⇒ 类型词也得跟着算 | `null->go()` / `false->go()` |
+| `:5557`、`:5588` | `Method name must be a string` | **`Error`**：`Method name must be a string` | ★**文本全等**（同 `:2909`，只差伪异常本身） | `$o->{7}()` |
+| `:5591` | `Arguments must be an array` | 同 unpack 族：`TypeError: Only arrays and Traversables can be unpacked, <type> given` | ★AOT 用的是 **PHP 5 时代的旧文本**，PHP 8 已换措辞与类名 | 变参展开路径的第二枚站点 |
+| `:5599` | `Cannot find class metadata` | PHP **无此文本**（内部态） | ⇒ 落地时应换成 `Error` 的真实措辞或直接归入 undef 族 | 元数据缺失（AOT 内部条件） |
+| `:5600` | `Call to undefined method` | **`Error`**：`Call to undefined method stdClass::nope()` | ★缺 `类名::方法名` | `$o->nope()`（`stdClass`） |
+| `:21242` | `Cannot access self:: when no class scope is active` | **`Error`**：`Cannot access "self" when no class scope is active` | ★AOT 写 `self::`、PHP 写 `"self"`（带引号无冒号） | `self::VAL` 在类外 |
+| `:21247` | `Cannot access parent:: when no class scope is active` | **`Error`**：`Cannot access "parent" when no class scope is active`（★实测） | 同 `:21242`（只差引号形态与 `::`） | `$x = parent::Y;` 在类外 |
+| `:21250` | `Cannot access parent:: when current class has no parent` | **`PHP Fatal error: Cannot use "parent" when current class scope has no parent`** | ★动词错（`Cannot access` → **`Cannot use`**）+ 名词形态错（`parent::` → `"parent"`）+ `current class has no parent` → `current class scope has no parent` | `class A { static function f(){ return parent::f(); } } A::f();` |
+| `:21256` | `Cannot access static:: when no class scope is active` | **`Error`**：`Cannot access "static" when no class scope is active`（★实测） | 同上；⇒ 三枚合成一条规则：**`Cannot access "<kw>" when no class scope is active`**，AOT 系统性多写了 `::`、少了一对引号 | `$y = static::Y;` 在类外 |
+| `:21262` | 变量消息 | 逐枚决定 | — | 转发点 |
+| `:5599`/`:21262` 之外的回调族 | — | `call_user_func(7)` ⇒ **`TypeError`**：`call_user_func(): Argument #1 ($callback) must be a valid callback, no array or string given`；`array_map("nope_fn",[1])` ⇒ **`TypeError`**：`array_map(): Argument #1 ($callback) must be a valid callback or null, function "nope_fn" not found or invalid function name` | ⇒ 这两族的消息**带函数名与参数名**，`throwException` 的静态字符串根本装不下 ⇒ 属 F-31 的「需要新参数」子集 | 实测 |
+
+### 34.2 落地前必须先定的两件事（我这轮**没有**动代码）
+
+1. ★**伪异常 → 真对象的改造面**：`throwException:21864` 现在做 `Value.initString(msg)` + `setException` ⇒ `catch` 永不命中、未捕获时类名固定错。改成 `throwThrowable(class, msg, allocator)`（该函数已在 `:21871` 存在且被大量使用）即可，但**每枚站点的类名不同**（`Error` vs `TypeError`），且若干站点需要**运行时上下文**（方法名、类名::方法名、实际类型名、参数名）⇒ 需要给这些站点传参，改造面是「17 枚站点 + 其调用者签名」，不是单点。
+2. ★**与 F-30 的耦合**（禁混判，规则 31）：`TypeError`/`Error` 在 PHP 8.5 **不再**是 `Exception` 子类，而本仓 `:14808`（★R-159 后行号，旧 `:14781`）仍写作 `Error extends Exception in our implementation for simplicity` ⇒ 若先修 F-31，探针会从「catch 不到」变成「`catch (Exception)` 误接」⇒ **两类红都可能出现**。⇒ 排期上 **F-30 必须先于或同批于 F-31**，否则 F-31 的验收判据无法固定（这条正是 R-151「必须先修 F-27 才允许 F-26 留在树上」的同构情形）。
+
+### 34.3 语料暴露（规则 41）
+
+`throwException` 的 17 枚站点全部位于**错误路径**（unpack／动态调用／无类作用域），pass/ 语料内这些形全绿 ⇒ 暴露 0；★但**这不代表无缺陷**——门 P/T/V/W/X/Y/Z 的输出面判据只能看见「语料里跑得对的」，看不见这些错误路径 ⇒ 需要为 F-31 单独建永久门（拟名**门 FB**：break/dynamic-call/unpack/backtrace 错误路径族），且**先建门取修前红集，再动代码**。
+
+## 35. R-161（2026-10-14）：F-45 落地轮 —— 守卫集**按实测收窄到 `.div/.mod`**，`.add/.sub/.mul` 另立 F-45-ii
+
+### 35.1 门 F45FACE 修前登记（bin `b71f9f41…`，13 形，`c032_f45_face_tmp.tsv`）
+
+★判据是 **`on_eq_off`**（DCE 有没有改变行为），不是「与 PHP 等值」——后者另有独立缺陷面。
+
+| 形 | 面 | 修前读数 | on_eq_off | 与 PHP | 归因 |
+|---|---|---|---|---|---|
+| p01 `$a=1; $a / 0;` | 未捕获除零 | `DIFF_BOTH_WRONG` | **no** | no | F-45 |
+| p02 `$a=1; $a % 0;` | 未捕获取模零 | `DIFF_BOTH_WRONG` | **no** | no | F-45 |
+| p03 `$a=1.0; $a / 0.0;` | ★float 也抛（否证我「浮点除零返 INF」预设） | `DIFF_BOTH_WRONG` | **no** | no | F-45 |
+| p04 `$x=0; $a=7; $a / $x;` | 变量实参版 | `DIFF_BOTH_WRONG` | **no** | no | F-45 |
+| p05 `try{$c = 1/0;}catch` | 控制臂（结果被使用） | `EQUAL_BOTH_MATCH_PHP` | yes | **yes** | ⇒ 修复不扩大行为面 |
+| p06 `$a=0; $a ** -1;` | PHP 只给 **Deprecated** | `EQUAL_BOTH_RED` | yes | no | 独立型（诊断未实现），★不入本面 |
+| p07 `$b=strlen("xy")-2; $a / $b;` | ★零由**运行时算出**（排除常量折叠说） | `DIFF_BOTH_WRONG` | **no** | no | F-45 |
+| p08 零次循环内 `$a / 0;` | ★**LICM 对偶风险守卫臂** | `EQUAL_BOTH_MATCH_PHP` | yes | **yes** | 保住指令不会被提升到循环外造出假异常 |
+| p09 `try{1 % 0;}catch` | 可捕获取模 | `DIFF_DCE_SIDE_WRONG` | **no** | no(on)/**yes(off)** | ★off 侧与 PHP **逐字节等值** ⇒ 落地即完全收敛 |
+| p10 `try{1 / 0;}catch` | 可捕获除法 | `DIFF_DCE_SIDE_WRONG` | **no** | no/**yes** | 同上 |
+| p11 `try{$a + 1;}catch`（`$a="abc"`） | 算术 TypeError | `DIFF_BOTH_WRONG` | **no** | no/**no** | ★**F-45-ii**：AOT 消息文本对但 **try/catch 接不住**（Zig error 外逸 ⇒ F-39 族） |
+| p12 `try{$a * 1;}catch` | 同上 | `DIFF_BOTH_WRONG` | **no** | no/no | F-45-ii |
+| p13 `$a=[]; $a % 1;` | 数组操作数 | `EQUAL_BOTH_RED` | yes | no | ★**F-46**（两臂都不抛 ⇒ 与 DCE 无关，是操作数类型检查缺数组） |
+
+计数（由 13 行明细逐行数得）：**`on_eq_off=no` 共 9 枚**＝p01 p02 p03 p04 p07 p09 p10 p11 p12；**`on_eq_off=yes` 共 4 枚**＝p05 p06 p08 p13。
+★**本门自己的 `F45FACE_DONE` 行没有打印** —— 我在该门跑动期间又去改它的头部注释（第 14 臂与 p11/p12 语义），bash 按字节偏移惰性读脚本 ⇒ 汇总块被截成 `syntax error near unexpected token )`（规则 48(a) 的现形）。⇒ 明细可信（崩溃前已写盘），汇总行不可信，本表按明细重算。
+★p14（加宽集的 LICM 守卫臂）是登记之后补的，其修前态已用 `--aot-disable-pass=dce` 单独实测：只打 `TAIL`，与 p08 同结论。
+★**落地后的预测判据（本批守卫集只含 `.div/.mod`）**：9 枚 lost 应剩 **2 枚**（p11/p12，按 §35.2 属 F-45-ii 不计收口），preserved 由 4 → **11**；p09/p10 还要额外满足「与 PHP 逐字节等值」。对不上即为落地不彻底，禁按「大部分转绿」放行。
+
+### 35.2 ★由 p11/p12 得出的**收窄决定**（这条是本批真正的判断，不是照单全收）
+
+- 我一度把守卫集加宽到 `.add/.sub/.mul`（因为它们遇非法操作数也抛 `TypeError: Unsupported operand types: string + int`，实测三形一致）。
+- 但 c1/c2 对照实测：**同样的语句在 AOT 里接不住** —— AOT 打 `Fatal error: Uncaught TypeError …`（消息文本与 PHP 全等，却没进 `catch (TypeError)`），而 `.div/.mod` 的 `DivisionByZeroError` **能**被 `catch` 正确接住（`CAUGHT-DBZE|Modulo by zero` == PHP）。
+- ⇒ 保住 `.add/.sub/.mul` 的效果只是「静默 ⇒ 不可捕获的 Fatal」：**不算收敛**，且给「本来靠 DCE 删掉才通过的语料脚本」新增死亡风险（违规则 30「修复不得自造回归」）。
+- ⇒ 本批守卫集＝`.div, .mod`（保住即逐字节收敛，p09/p10 为证）；`.add/.sub/.mul` 立为 **F-45-ii**，排在 F-39（304 处 `return error.X` 外逸族）之后收口。p11/p12 因此只要求 `on_eq_off=yes`，**不要求等于 PHP**。
+- ★同一轮排除的还有：`.pow`（PHP 8.5.8 只给 Deprecated＋INF）、位运算/移位/取负（数组操作数两臂都不抛 ⇒ 属 **F-46**，另立）。
+
+### 35.3 落地内容与门 AB 的语料分母（★已复跑完毕，读数见 §35.6 末行与 §35.8）
+
+- 代码改动：`optimizer.zig` DCE Phase 3 守卫 `:2793` 追加 `and !self.isRaisableArithmetic(inst)` + 新增该谓词（★**不改** `hasSideEffects` 本体 ⇒ LICM `:996`、内联器 `:4594`、CSE `:5278` 三枚消费者行为不动）。
+- ★门 AB 首轮把 f119/f175 报成 `on_eq_off=no` ⇒ 逐行看差异**只有时间戳**（`05:22:51` vs `05:23:05`）⇒ 归一加 `DATETIME`/`UNIXTS` 折叠后两枚转 `equal` ⇒ **F-45 语料暴露实测为 0**；同轮 f124 的 `COMPILE_FAIL` 属**关 DCE 那侧** `error: unreachable code`（默认档正常），非基线缺陷。
+- ★我自己 11 分钟前刚写下「两个门不得共用输出路径」，转头就因内层门还没接 `TSV_OUT` 而把 68 行语料表截成 2 行 ⇒ 已补内层 `TSV_OUT` 支持并整表重跑（本表读数以重跑为准，见下）。
+- 语料分母（归一修复后重跑，实测）：**`AB_DONE equal=67 diff=0 dce_only_red=0 both_red=1 compile_fail=1 bad_probe=0`** ⇒ F-45 语料暴露 **0**（详表 §35.6 末行）。
+
+### 35.4 ★修后实测（新二进制 `d824ad999d10ec232255999d8edddfad`）
+
+**门 F45FACE（14 臂，`c032_f45_face_tmp.tsv`）**：`on_eq_off=no` 由修前 **9 → 2**，且剩下的 2 枚正是按定义**不计收口**的 p11/p12（`.add/.mul`＝F-45-ii）。逐枚：
+
+| 臂 | 修前 | 修后 | 判定 |
+|---|---|---|---|
+| p01 / p02 / p03 / p04 / p07（语句位除零、未捕获） | `DIFF_BOTH_WRONG`（`on_eq_off=no`） | `EQUAL_BOTH_RED`（**`on_eq_off=yes`**，≠PHP） | ★F-45 收口（异常回来了）；≠PHP 的残余属**未捕获上报文本**面（F-39-ii，门 Y 的 y4/y8/y9/y10 同族），禁算进本面也禁当成新红 |
+| **p09 / p10（可捕获形）** | `DIFF_DCE_SIDE_WRONG`（`no`） | **`EQUAL_BOTH_MATCH_PHP`**（`yes` ∧ **=PHP**） | ★**逐字节收敛**——落地前写死的硬判据，没让"只做到两侧相等"蒙混 |
+| p05（控制臂：结果被使用） | `EQUAL_BOTH_MATCH_PHP` | 不变 | ⇒ 修复没扩大行为面 |
+| p08 / p14（LICM 对偶风险守卫臂：零次循环内 `$a / 0;`、`$a + 1;`） | `EQUAL_BOTH_MATCH_PHP` | **不变** | ★保住指令未被提升到循环外造出 PHP 没有的异常（加宽前后各测一枚） |
+| p06（`0 ** -1`） | `EQUAL_BOTH_RED` | 不变 | 「诊断未实现」独立型，未纳集（有意的） |
+| p13（`[] % 1`） | `EQUAL_BOTH_RED` | 不变 | **F-46** 未被本批掩盖也没被误收（反面臂起作用） |
+
+**门 Y**：`12 形 same=5 diff=5 zig_escape=1 compile_fail=2 bad_probe=0` @44s ⇒ ★注册红由六枚降为五枚 **`y2 y4 y8 y9 y10`**（**`y7` 转 SAME**），`cf` 仍 `y1 y3`。与落地前写在 §35.3 的预测逐项一致（不是事后对齐）。
+
+### 35.5 ★本轮又抓到并修掉的三枚自造工具错（都要留档，不许静默改）
+
+| # | 错 | 症状 | 修法 |
+|---|---|---|---|
+| 1 | **在门跑动期间编辑该门脚本**（规则 48(a) 现形） | bash 按字节偏移惰性读文件 ⇒ 汇总块被截成 `syntax error near unexpected token )`，`F45FACE_DONE` 整块没打印（13 行明细在崩溃前已写盘 ⇒ 明细可用，汇总行不可用） | 明细手算计数代替；此后：改判据/加臂一律在门**未跑**时做，或在链外单独重跑 |
+| 2 | 汇总 awk **列取错 + `NR>1` 吃首行** | `lost` 恒 0（用 `$4` 而 `on_eq_off=` 在 `$3`）、`both_red` 少 1（`NR>1` 跳表身第一枚；本门 TSV **无表头**） | 改 `$3=="on_eq_off=no"` 等精确列匹配并去掉 `NR` 条件；表头存在与否在注释里写清 |
+| 3 | 归一不折叠**时间戳**（规则 49） | 门 AB 首轮把 f119/f175 报成语料暴露，实际两臂差异**只有 `date()` 输出**（相差 14 秒） | 加 `DATETIME`/`UNIXTS` 折叠 ⇒ 两枚转 equal；⇒ 差分门的归一必须先覆盖宪法 §七.5/6/7 的「不算差异」清单 |
+
+### 35.6 资产登记（R-161 代次）
+
+| 资产 | md5 | 说明 |
+|---|---|---|
+| `src/aot/optimizer.zig` | **`ba0e0f579518908e030fc09ca994147f`** | R-161 增量 `+19/−1`（谓词 + DCE 守卫）；R-158b 的 `e720145e…` 作废 |
+| `zig-out/bin/php-interpreter` | **`d824ad999d10ec232255999d8edddfad`** | 改 optimizer ⇒ 必须重建；R-158b/R-159 的 `b71f9f41…` 作废 |
+| 门 AB `c031_dce_ab_gate_tmp.sh` | `17d3cbe3dd9150ccee99e2f936486c53` | 归一加时间戳折叠 + 接 `TSV_OUT`；表身 `c031_dce_ab_tmp.tsv` |
+| 门 F45FACE `c032_f45_face_gate_tmp.sh` | `5eb4c077eb524764f885eddaa12f6524` | 14 臂；汇总列已修正；表身 `c032_f45_face_tmp.tsv` |
+| 门 Y `c024_zig_error_escape_tmp.sh` | `1b23d3e81dc5a85b10990dc7643891b6` | R-161 改档（y7 回收 ⇒ 红集 `y2 y4 y8 y9 y10`） |
+| 链 `c033_r161_acceptance_chain_tmp.sh` | `5a7471ec67a07a370c263629aa4f5bd6` | 21 腿（新增 F45FACE 腿） |
+| 语料分母（门 AB 重跑，归一修复后） | 门自己打的 DONE：**`AB_DONE equal=67 diff=0 dce_only_red=0 both_red=1 compile_fail=1 bad_probe=0`**；表身 68 行 = `66 EQUAL_BOTH_MATCH_PHP + 1 EQUAL_BOTH_RED(f004) + 1 COMPILE_FAIL(f124，失败在**关 DCE 那侧**的 `unreachable code`)` | ★**F-45 语料暴露 = 0**（`on_eq_off=no` 计数 0；`diff=0`）。★两枚旁支都不是 F-45：f004 是主回归里唯一 SKIP（PHP 自身 exit=255），f124 只在关掉 DCE 时编不过 ⇒ 属"关优化"侧的既存现象 |
+
+### 35.7 ★指令级删除站点的逐条审计（规则 39：共享谓词必须**逐链**声明入口函数 + 实测臂）
+
+F-45 的根在 `hasSideEffects`，而这枚谓词被 4 处消费、全仓共有 **6 处** `block.instructions.orderedRemove` ⇒ 只补 DCE 一处是否够？逐条读实文 + 用门 F45FACE 的臂复证（行号为 R-161 代次实测）：
+
+| 站点 | 所在 pass | 会不会二次犯 F-45 | 证据 |
+|---|---|---|---|
+| `:2798` | `eliminateDeadCodeInFunction` Phase 3 | ★**会，且就是本面** | 已加守卫 `and !self.isRaisableArithmetic(inst)`；门 F45FACE `on_eq_off=no` 由 9 → 2（剩 2 枚＝故意不收的 F-45-ii） |
+| `:1095` | `optimizeLoop`（LICM）经 `removeInstructionFromBlock` | **不会**——它是**搬移**：先 `orderedRemove` 再 `pre_header.instructions.append(inst)` | 实测 p08（零次循环内 `$a / 0;`）与 p14（同形 `$a + 1;`）：默认档与 `--aot-disable-pass=dce`（＝保住指令的代理）**两侧都只打 TAIL** ⇒ 没造出 PHP 没有的异常。★但 LICM 的可提升判定 `:996` 同样走 `hasSideEffects` ⇒ 「把可抛运算提升到零次循环外」理论上是风险面，本批不改该谓词（甲型才改）⇒ 留作观察项，两枚臂常驻可抓 |
+| `:2917`–`:2971`（6 枚） | `eliminateRCEllisionInFunction` | **不会**——删的是 `retain`/`release` 配对，不是运算 | 站点上下文全是 `.retain/.release`；且 `hasSideEffects` 把它们标 **true**（`:3298` 实测）⇒ 本就不进"纯"集 |
+| `:4137` | `eliminateBoxUnboxInFunction` | **不会（有条件）**——只在 `box.from_type.eql(unbox.to_type)` 时消除 ⇒ 类型已匹配该 `unbox` 不抛 | 实文 `if (b.from_type.eql(op.to_type))` 后才 `replaceRegisterUsage` + 删。★记一处**谓词不一致**：`mayRaiseException:3316`（★行号已按 R-161 代复测，旧记 `:3294` 因本批插行下移） 把 `.cast/.type_check/.unbox` 列为可抛，而 `hasSideEffects` 判 false ⇒ 类型相等时不可抛，本批不动，列为观察项 |
+| `:4467` | `simplifySinglePredecessorPhiNodes` | **不会**——化简单前驱 PHI（转发），不删运算 | 站点仅处理 `.phi` |
+| `:4812` | `inlineFunction` | **不会**——删的是 `.call` 本身，紧接 `block.instructions.insert` 把克隆体插回 | 实文 `orderedRemove(inst_index); destroy(call_inst); … insert(…)`；★默认档 `function_inlining=false`（`:82/:132/:209`，仅 `:153` 等档 true）⇒ 语料走不到这条链（AOT-CODEGEN-007 已记） |
+
+⇒ 结论：**本批只补 DCE 一处即闭合 F-45**（实测支持：9 枚红收 7 枚，剩 2 枚是刻意排除的 F-45-ii）。同时留下两枚**如实登记的观察项**：① LICM 提升可抛运算；② `mayRaiseException:3316` 与 `hasSideEffects:3261` 对 `.cast/.type_check/.unbox` 的口径互相矛盾。二者各自需要自己的实测臂 ⇒ 不在本批顺手改（规则 31/39）。
+
+### 35.8 ★R-161 验收链 21 腿读数（`R161_CHAIN_START 2026-10-14 14:02:04 bin_md5=d824ad99… tpl_md5=6d520849…` → `CHAIN_END 15:09:59`，**4075 s**；首尾**二进制与模板 md5 各同值** ⇒ 链内零代次漂移）
+
+| 腿 | DONE 行读数（实测，非预估） | wall | 判读 |
+|---|---|---|---|
+| buildtest | rc=0 | 6 s | 缓存档（R-156/158b/159 为 5/8/4 s 同量级） |
+| **F45FACE** | `F45FACE_DONE shapes=14 raise_lost(on_eq_off=no)=2 preserved(on_eq_off=yes)=12 both_match_php=5 both_red_not_match_php=7` | 108 s | ★本批主门：`raise_lost` 与链前单跑（§35.4）**逐枚同值**＝p11/p12；`preserved=12` 且 `both_match_php=5` ⇒ p09/p10 收敛保持。★链日志该行取到的是内层 `AB_DONE`（见下方取证更正） |
+| **Y** | `shapes=12 same=5 diff=5 zig_escape=1 compile_fail=2 bad_probe=0 residue=0` | 44 s | ★等值 R-161 改档：红集 `y2 y4 y8 y9 y10`（`y7` 保持 SAME）、`cf=y1 y3`、桶和 5+5+2=12 核对通过 |
+| ZFACES | `shapes=10 same=9 diff=1 dangling=0 compile_fail=0 bad_probe=0` | 38 s | 等值（残红 `z2`＝F-44，未触碰） |
+| ZCENSUS | `total=68 dangling=0 ok=68 other=0` | 787 s | 等值 ⇒ 保住死指令未破坏任何语料的 IR 合法性 |
+| X / V / W / T | `9→8/1` @40s ／ `29→19/10` @122s ／ `20→7/13` @75s ／ `22→16/5 cf=1` @89s | — | 全部等值注册档 |
+| P | `shapes=78 same=73 diff=5 cf=0 bad_probe=0` | 314 s | 等值 R-158b 档（红 `v2 i1 i2 f12 f34`）⇒ ★F-45 未把任何内省臂打红 |
+| S | `shapes=47 same=47 diff=0` | 189 s | 等值（判据即 `diff=0`） |
+| M / N / O | `19 red=0 green=19` @70s ／ `7 red=0` @24s ／ `6 red=0` @21s | — | 等值 |
+| D8 | `shapes=14 defect_red=0 guard_same=14` | 50 s | 等值 |
+| Q / R | `same=5 expect_fail=0 unexpected_fail=0` @22s ／ `same=8 diff=1 terminate_lost=0` @38s | — | 等值 |
+| U | 无 `*_DONE` ⇒ 按列聚合 **75 行 = `SAME 51 / COMPILE_FAIL 22 / BAD_PROBE_PHP 2`** | 206 s | ★等值 §26.2 注册档（`51/22/2` 逐桶同） |
+| B | `entries=497 distinct=464 dup_rows=33 diff_impl=3 field_diff=0 identical=30` | 2 s | 等值 ⇒ 零地图漂移（本批不动 `builtin_map`） |
+| regression | `Total 68 / Pass 67 / Fail(Compile·Runtime·Diff) 全 0 / Skip 1`；`## 失败明细` 仅 `f004 … SKIP` 一行 | 787 s（报表 mtime `14:52:37`） | 回收 0 枚、新增红 0 枚（规则 27 取明细行存在性） |
+| shadow | `C010_SHADOW_DONE total=68 same=0 diff=68 miss=0 invalid=0` | 1042 s | 对照冻结前缀的常态，无 miss/invalid |
+| shadowcol | `SHADOWCOL_DONE gen=r161 rows=68 col_md5=f19fb070ba1b86c34f02b3883de8e4dd` ＝ r159/r158b 列**同值** ⇒ **`changed_rows=0 col_identical=yes`** | — | ★自 r148b 起**第 9 代同值**：落地前我预留的「合法漂移」出口**没有触发**——保住 dead `.div/.mod` 在 68 语料内一次都没改变 `main.zig` ⇒ 与门 AB 的 `equal=67 diff=0`（暴露 0）互相印证，不需要逐枚归因 |
+| 残留 | 各腿 `repo_build_residue=0` / `bad_probe=0`；`.php` 原件零删除 | — | 合规 |
+
+★**规则 28 双判**：① 末腿 `R161_CHAIN_DONE`（日志第 28 行）；② 主回归报表 mtime `14:52:37` 落在该腿窗口内且晚于其开跑时刻（链首 14:02:04 + 前 19 腿 Σ2245 s = 14:39:29）。两判同时成立 ⇒ 读数可用，不是轮询假象。
+
+★**取证方式缺陷（本轮抓到并当场修，登记不静默改）**：链脚本 `run_gate` 用 `grep … | head -1` 取 DONE 行（`c028` 起引入、`c033` 照抄），凡**门内部再套一层门**的腿（F45FACE 内嵌门 AB）就会把**内层**的 `AB_DONE` 当成该腿读数写进链日志。⇒ 已把 `c033`/`c028` 两处统一改为 `tail -1`，脚本 md5 随之作废重登（下表）；本批 F45FACE 腿的真实读数是从腿文件 `/tmp/r161_F45FACE.out` 第 2 行取回并逐枚核对的，链日志那一行只是显示层缺陷，不影响判定。
+
+### 35.9 资产 md5 刷新（§35.6 的两行作废）
+
+| 资产 | 旧 md5（作废） | 新 md5 |
+|---|---|---|
+| 链 `c033_r161_acceptance_chain_tmp.sh` | `5a7471ec67a07a370c263629aa4f5bd6` | **`f6fedf6db9d739b999048df0ba62df42`** |
+| 链 `c028_r159_acceptance_chain_tmp.sh` | （未单登） | **`6fa76c2af4cfd0c19a059d4238d4e8af`** |
+
+⇒ `src/` 侧资产未变：`optimizer.zig` 仍 `ba0e0f579518908e030fc09ca994147f`、二进制仍 `d824ad999d10ec232255999d8edddfad`、模板仍 `6d520849c9a7eab50082c62e924662dd`。R-161 至此**验收闭合**。
+
+## 36. R-160（2026-10-14）：F-41 **丙型**落地 —— 编译失败后自解析生成码，把裸 Zig arity 错翻译成可读诊断
+
+### 36.1 先取证：生成码到底长什么样（本轮实测，非推算）
+
+| 形 | PHP 源 | 生成码调用点 | Zig 原始报错 | helper 签名（运行时库实文） |
+|---|---|---|---|---|
+| a1 | `strlen()` | `reg_0 = try runtime.php_strlen();` | `main.zig:57:24: error: expected 1 argument(s), found 0` | `php_strlen(str: Value)`＝1 |
+| a2 | `intdiv(1)` | `runtime.php_intdiv(reg_0)` | `expected 2 argument(s), found 1` | `php_intdiv(dividend, divisor)`＝2 |
+| a3 | `array_pop()` | `runtime.php_array_pop(runtime.runtime_allocator)` | `expected 2, found 1` | `php_array_pop(arr: Value, allocator)`＝2 |
+| a4 | `substr("abc")` | `runtime.php_substr(reg_0, runtime.runtime_allocator)` | `expected 4, found 2` | `php_substr(str, start, length, allocator)`＝4 |
+| a5 | `strpos("ab")` | `runtime.php_strpos(reg_0)` | `expected 3, found 1` | `php_strpos(haystack, needle, offset)`＝3 |
+| a6 | `str_replace("a","b")` | `runtime.php_str_replace(reg_0, reg_1, alloc)` | `expected 5, found 3` | `php_str_replace(search, replace, subject, count_out, allocator)`＝5 |
+| a12 | `implode(",")` | `runtime.php_implode(reg_0, alloc)` | `expected 3, found 2` | `php_implode(...)`＝3 |
+| **a7** | `json_decode()` | `runtime.php_json_decode(&[_]runtime.Value{}, alloc)` | ★**无报错，编译通过** | 切片形参 `args: []const Value` ⇒  arity 面在**运行期**才现形 |
+
+⇒ 发射器把 PHP 实参**按位**填进固定形参（末尾自动补 `allocator`，`count_out` 这类输出槽由发射器决定），少填就是 **Zig 硬错** ⇒ 编译产物不存在、rc=1、且报错只指生成码。
+
+### 36.2 门 AC 修前登记（永久侧门 `c034_arity_canary_gate_tmp.sh`，12 臂 ⇒ 建门轮）
+
+`C034AC_DONE arms=12 compile_fail=7 ran=5 same=2 diff=3 canary=0 bare_symbol=7 zig_raw_arity_err=7 bad_probe=0 repo_build_residue=0` @23 s（表身 `c034_arity_canary_tmp.tsv`，快照 `/tmp/c034_prefix_baseline_snapshot.tsv`）。
+七枚 `compile_fail` ＝ **a1 a2 a3 a4 a5 a6 a12**（逐臂 `canary=no zig_raw=yes bare=yes`）；`ran=5` ＝ a7/a10/a11 三枚 `RUN_DIFF` + a8/a9 两枚 `RUN_SAME`。
+
+★**判据是 `canary`（我们自己的诊断行），不是「与 PHP 等值」**——丙型不改变 `compile_fail` 这一事实：改变它需要 arity 真值表＝甲型。
+
+### 36.3 ★建门轮否证了我自己的两条预估（都要留档）
+
+1. **a12 `implode(",")` 预估为反面臂 ⇒ 实测是第七枚定长形参站点**（`php_implode` 3 形参 vs 生成码 2 实参 ⇒ `expected 3, found 2`）。
+   我原先按「PHP 侧它 arity 够、只是类型不符（`TypeError`）」推它不该进本面——**发射侧的形参数与 PHP 的必填数是两回事**，
+   前者才是 Zig 报错的依据。⇒ 金丝雀覆盖面由预估 6 枚升为**实测 7 枚**。
+2. **「`repo_build_residue=7` ⇒ 失败编译泄漏临时目录」的怀疑被证伪**：那 7 枚全是我自己前面用 `ZIGPHP_AOT_KEEP_TEMP=1` 手工取证留下的目录
+   （`deinit:1523-1531` 只在 `KEEP_TEMP` 未设时才 `deleteTree`）。清理后重跑 ⇒ `residue=0`。
+   ⇒ 教训：**residue 旗标报警时先数自己留了几个**，别急着给编译器立新缺陷（本轮如果我直接登记「失败泄漏目录」就是假缺陷工单）。
+
+### 36.4 落地内容（只动 `native_linker.zig` 的**失败分支**，`+246/−0`，不改任何生成码文本）
+
+| 件 | 位置 | 作用 |
+|---|---|---|
+| 调用钩子 | `invokeZigCompilerSingleStep` 的 `.exited code != 0` 分支，`deleteStaleProduct` 之前（`:32993`） | 只在**终局编译失败**时跑；成功路径零成本（不新增读盘、不新增分支） |
+| `reportBuiltinArityCanary` | `:33182` 起 | 读临时目录里的 `main.zig` + `runtime_lib.zig`，扫出「调用实参数 ≠ helper 形参数」的站点并打印诊断 |
+| `collectRuntimeHelperArity` | 同段 | 从运行时库扫 `pub fn php_*(` ⇒ **形参数直接来自 Zig 的判据同源**，不建第二份真值表 |
+| `scanTopLevelList` | 同段 | 括号/方括号/花括号平衡 + 字符串与注释感知的顶层条目计数；**不可靠即返回 null ⇒ 放弃这条诊断** |
+| `parseEmittedSourceLocation` | 同段 | 从生成码的 `setSourceLocation("<php 路径>", N)` 游标取**用户 PHP 源码位置** |
+| 反面自证 |  hits==0 时打 `AOT: 未发现…`（★**故意不带** `AOT-ARITY:` 前缀） | 门 AC 的 a13 靠这条不被 grep 命中来证明「非 arity 失败不会被误报」 |
+
+★三条已裁口径落进代码注释（§32.8/§33.4）：① 不建 arity 表；② 不碰子进程管道（Zig 诊断照旧 inherit 透传）；③ 宁可沉默也不骗人。
+
+### 36.5 实测输出（修后，二进制 `fe5d70d4…`）
+
+```
+main.zig:57:24: error: expected 1 argument(s), found 0
+AOT-ARITY: [1] PHP 内置函数 strlen() 的调用在生成码里传了 0 个实参（已含自动补上的 allocator/输出槽），
+           而运行时实现 php_strlen 声明 1 个形参 ⇒ 实参数与该实现不符，AOT 在生成码阶段就编不过
+           （PHP 侧同形为 ArgumentCountError；精确必填参数数属甲型工作）｜源码 /private/tmp/r160_probe/a1.php:2
+```
+★措辞刻意写成「生成码里传了 N 个实参（含自动补的 allocator/输出槽）」而非「PHP 少写 N 个」——
+`substr("abc")` 的诊断里 N=2 而 PHP 只写了 1 个实参，措辞若不区分就会误导用户（第一版就是这样，已改）。
+
+### 36.6 ★覆盖面与诚实边界（丙型**不解决**的部分要写清）
+
+| 面 | 实测 | 丙型后仍在？ |
+|---|---|---|
+| 直调定长形参 helper（a1..a6/a12） | 7 枚编译失败 ⇒ 现全带可读诊断 | ✅ 收口（诊断面） |
+| **切片形参 helper**（a7 `json_decode()`） | 编译通过、运行期才炸 ⇒ `RUN_DIFF` | ❌ **不解决**（无 Zig 失败可挂诊断）⇒ 属甲型＋运行期守卫 |
+| 用户函数/方法少传参（a10 `u()`／a11 `C13AC::m()`） | 走运行时 args 数组，`RUN_DIFF` | ❌ 不在此面（机制不同，且 PHP 消息是 `Too few arguments to function`） |
+| min=0 的合法形（a8 `array_merge()`） | `RUN_SAME` | ✅ 恒绿＝过度拒绝守卫臂（若它变红即说明我把扫描写宽了） |
+helper 签名登记率实测 **539/539**（`grep -c "^pub fn php_"` ＝ 539；因 `comptime/anytype/type/...` 被排除 **0** 枚）⇒ 覆盖面没有隐性折损。
+
+### 36.7 本轮三枚工具自纠（登记，不静默改）
+
+1. **marker 前缀会被自己的"未发现"行假亮**：负向说明行若也带 `AOT-ARITY:`，门 AC 的 `canary` 就会在任何一次无关编译失败上都计数 ⇒ 改成 `AOT:`。
+2. **注释里的同名文本**：生成码每条指令前有 `// <php 文件>:<行>` 注释，扫描器若不排除注释就可能把注释片段读成调用点 ⇒ 现回退到行首，途中见 `//` 即放弃该处（只跳一字节继续扫，不漏后续真调用）。
+3. **链脚本传多环境变量的坑**：`run_gate` 的第 4 参是 `env $4`（不加引号），`ONLY=a1 a2 …` 会被拆成「ONLY=a1」＋命令「a2」⇒ 直接取消 AC12 腿，改由 AC 的 13 臂 TSV **去掉 a13 行**推 12 臂口径（a13 只贡献 `compile_fail+1`、`bare_symbol+1`）。
+
+### 36.8 R-160 验收链读数（21 腿，`16:16:30 → 17:26:23`，**4193 s**；首尾 `bin_md5=fe5d70d4…`／`tpl_md5=6d520849…` 各同值）
+
+| 腿 | DONE 行／聚合读数 | wall | 判读 |
+|---|---|---|---|
+| buildtest | rc=0 | 1 s | 缓存档 |
+| **AC** | `C034AC_DONE arms=13 compile_fail=8 ran=5 same=2 diff=3 canary=7 bare_symbol=8 zig_raw_arity_err=7 bad_probe=0 residue=0` | 25 s | ★**本批主判据**：`canary=7` ＝ 七枚定长形参站点（a1–a6+a12）；`compile_fail=8`＝那七枚 + a13（a13 按设计就该失败）；`zig_raw=7` 未变 ⇒ 子进程管道没被我动过 |
+| F45FACE | `F45FACE_DONE shapes=14 raise_lost(on_eq_off=no)=2 preserved=12 both_match_php=5 both_red_not_match_php=7` | 106 s | ★**R-161 复证**：残红恰 2（p11/p12＝故意不收的 F-45-ii）；★本腿 DONE 行第一次直接显示外层（`tail -1` 生效） |
+| Y | `shapes=12 same=5 diff=5 zig_escape=1 compile_fail=2 bad_probe=0` | 44 s | 等值注册档（红 `y2 y4 y8 y9 y10`、`cf=y1 y3`）⇒ ★丙型**不该**让 y1/y3 转绿，实测确实没转 |
+| ZFACES | 链日志只打 `tsv=` ⇒ 表身聚合 `10 行 = SAME 9 / DIFF 1`（唯一红 `z2`＝F-44） | 38 s | 等值（★见下方取证更正：**`tail -1` 也不通用**） |
+| ZCENSUS | 表身聚合 `68 行 = OK 68`（`dangling` 命中 0） | 824 s | 等值 ⇒ 语料 IR 合法性未受本批影响 |
+| X / V / W / T | `9→8/1` @42s ／ `29→19/10` @128s ／ `20→7/13` @79s ／ `22→16/5 cf=1` @93s | — | 全部等值注册档 |
+| P | `shapes=78 same=73 diff=5 cf=0 bad_probe=0` | 327 s | 等值（红 `v2 i1 i2 f12 f34`） |
+| S | `shapes=47 same=47 diff=0` | 198 s | 等值 |
+| M / N / O / D8 | `19 red=0 green=19` ／ `7 red=0` ／ `6 red=0` ／ `defect_red=0 guard_same=14` | 73/25/22/52 s | 等值 |
+| Q / R | `same=5 unexpected_fail=0` ／ `same=8 diff=1 terminate_lost=0` | 23/41 s | 等值 |
+| U | 无 `*_DONE` ⇒ 按列聚合 **75 行 = `SAME 51 / COMPILE_FAIL 22 / BAD_PROBE_PHP 2`**（★桶和=行数已核对） | 214 s | 等值 §26.2 注册档 |
+| B | `entries=497 distinct=464 dup_rows=33 diff_impl=3 field_diff=0 identical=30` | 2 s | 等值 ⇒ 零地图漂移（本批不动 `builtin_map`） |
+| regression | `Total 68 / Pass 67 / Fail(Compile·Runtime·Diff) 全 0 / Skip 1`；`## 失败明细` 仅 `f004 … SKIP` 一行 | 794 s（报表 mtime `17:09:01`） | 回收 0、新增红 0（规则 27） |
+| shadow | `C010_SHADOW_DONE total=68 same=0 diff=68 miss=0 invalid=0` | 1042 s | 对照冻结前缀常态，无 miss/invalid |
+| shadowcol | `SHADOWCOL_DONE gen=r160 rows=68 col_md5=f19fb070ba1b86c34f02b3883de8e4dd` ＝ r161 列同值 ⇒ **`changed_rows=0 col_identical=yes`** | — | ★**落地前写死的硬判据达成**：自 R-148b 起**第 10 代同值** ⇒ 本批确实零发射改动（诊断只在失败分支）；若非 0 就说明我把守卫写进了发射路径 |
+| 链尾 | `R160_CHAIN_END 17:26:23 ELAPSED=4193s` + `R160_CHAIN_DONE` | — | 规则 28 双判：DONE 行 ∧ 报表 mtime `17:09:01` 晚于该腿开跑（前 19 腿 Σ≈2331s→16:55:01）；首尾二进制同值 ⇒ 链内零代次漂移 |
+
+★**取证更正（第 2 版，覆盖 §35.8 的口径）**：链日志的 DONE 选取 `head -1` 与 `tail -1` **都不通用**——
+门 ZFACES 先打 `ZFACE_DONE shapes=…`、后打 `ZFACE_DONE tsv=…`，所以 `tail -1`（我在 §35.8 建议的修法）反而把这腿的数字吃掉了。
+⇒ 正确口径＝**按内容取**：`grep -E '_DONE (shapes|arms|total)='`，取不到再回退表身列聚合。
+本轮已实测：ZFACES/ZCENSUS 两腿的表身聚合与注册档逐枚同值（`10=9/1`、`68 OK`），显示层缺陷不影响判定。
+
+
+链前（链外单跑）已登记的判据，与上表逐项对照：
+- 门 AC 13 臂 `compile_fail=8 ran=5 same=2 diff=3 canary=7 bare_symbol=8 zig_raw_arity_err=7 residue=0` @25 s；
+  链内首跑（腿 AC）**同值**；12 臂口径由 TSV 去 a13 推得＝`cf=7 canary=7 bare=7 zig_raw=7` ⇒ 与修前仅 `canary 0→7` 之差。
+- 影子判据：**必须 `changed_rows=0`**（本批不改发射文本）；非 0 即说明我把改动写进了发射路径 ⇒ 回看并停止。
+- 门 F45FACE / 门 Y 须复证 R-161 档（`raise_lost=2`；`same=5 diff=5 zig_escape=1 cf=2`——y1/y3 仍只是 `cf`，因丙型不改 rc）。
+
+## 37. R-160b 备料轮（2026-10-14，只读，零 `src/` 改动）：★甲型的**前置测量**做完 —— 结论是 `fn_table` 的错值**今天就是 tree/fast 模式的活缺陷**
+
+老铁裁「丙 → 甲」时附带条件：**甲开工前先把「改表对其他模式的行为影响」量出来**（§32.8）。本轮就是那枚测量，
+并且它改写了甲型的形态：不是「再建一份 AOT arity 真值」，而是「**`fn_table` 已经被一枚中央守卫消费了**」。
+
+### 37.1 现有机制（实文，非推测）
+
+`src/runtime/stdlib.zig:24-47 callBuiltinFast` ⇒ `fn_dispatch.lookup(name)` → **`fn_dispatch.validateArgs(id, args.len)`** →
+`TooFewArguments/TooManyArguments` 时取 `fn_dispatch.getMeta(id).?` 的 `meta.min_args / max_args` 造 `ArgumentCountError`；
+`meta` 即 `src/runtime/fn_table.zig`（该文件 `:8` 自述「min_args/max_args 与 stdlib.zig 中注册的值一致」，`:46 min_args: u8`）。
+⇒ **AOT 完全不经过这条链**（发射器直调 `runtime.php_X(...)` ⇒ Zig 编译期硬错）；**tree/fast 经过**；**bytecode 未经**（§37.2 证）。
+
+### 37.2 十形跨模式矩阵（PHP 8.5.8 为真值；tree/bytecode/fast 实测；★AOT 侧本轮**未测**——链跑动中禁并发编译，规则 35）
+
+| # | 探针 | PHP 8.5.8 | tree | bytecode | fast |
+|---|---|---|---|---|---|
+| 1 | `array_merge()` | ✅ 返回 `[]` | ★**ArgumentCountError**（过度拒绝） | ✅ `[]` | ★**ArgumentCountError** |
+| 2 | `array_push($a)` | ✅ 返回 2 | ★ArgumentCountError | `NULL` | ★ArgumentCountError |
+| 3 | `array_diff($a)` | ✅ 合法 | ★ArgumentCountError | `NULL` | ★ArgumentCountError |
+| 4 | `implode($a)` | ✅ `'12'` | ★ArgumentCountError | `NULL` | ★ArgumentCountError |
+| 5 | `array_unshift($a)` | ✅ | ★ArgumentCountError | `NULL` | ★ArgumentCountError |
+| 6 | `parse_str("a=1")` | ★Fatal ArgumentCountError（min=2） | **放行** `true`（该拒不拒） | `NULL` | **放行** `true` |
+| 7 | `mktime()` | ★Fatal ArgumentCountError（min=1） | **放行**时间戳 | `NULL` | **放行**时间戳 |
+| 8 | `get_class_methods()` | ★Fatal ArgumentCountError | **放行** `false` | `NULL` | **放行** `false` |
+| 9 | `str_replace("a","b")` | ★Fatal ArgumentCountError | ArgumentCountError ✅ | `NULL` | ArgumentCountError ✅ |
+| 10 | `preg_match("x",$s)` | ✅（另有分隔符告警面，属门 S 族） | ✅ | ✅ | ✅ |
+
+★**两参对照臂**（证明这些函数在三模式都**已实现**，`NULL` 不等于"未实现"）：
+`implode(",",$a)`／`array_merge([1],[2])`／`array_push($a,9)`／`array_diff([1,2],[1])` ⇒ 三模式与 PHP **逐枚相同**（`1,2 / 2 / 3 / 1`）。
+★附带一枚**非 arity** 的另一模式崩溃（只登记不修，属 §五.3 需明示的范围）：`fast` 模式跑该对照臂时
+`panic: integer overflow  src/runtime/fast_vm.zig:763 printValue` ⇒ 新立 **F-49**。
+
+### 37.3 结论（四条，全部由上表实测支撑）
+
+1. **`fn_table` 的 10 枚错值不是「AOT 的远端问题」，而是 tree/fast 当前的活缺陷**：
+   **5 枚过度拒绝**（#1–#5，PHP 合法的调用在 tree/fast 抛 `ArgumentCountError`）＋**3 枚该拒不拒**（#6–#8，PHP fatal 而 tree/fast 静默放行）。
+   ⇒ 我原先隐含的「改表只影响 AOT」**被实测否证**。
+2. **bytecode 模式完全不查 arity**：10 枚里 8 枚直接 `NULL`（两参对照臂却全对）⇒ 既不拒绝也不报错，是**第三枚独立面孔**（新立 **F-48**）。
+3. **守卫的消息文本本身不合 PHP**（新立 **F-47**）：tree 打
+   `Uncaught ArgumentCountError: array_merge() expects 1 arguments, 0 given in builtin:0`
+   ——缺 `at least/exactly` 区分、缺单复数（`1 arguments`）、位置写死 `builtin:0`（丢源码行号）。
+   ⇒ 甲型只补表不修消息，tree/fast 就从「拒错」变成「拒错但换个说法」。
+4. **甲型的成本结构因此重排**：便宜路径是**让 AOT 也走同一枚中央守卫**（发射期用 `fn_table` 的 `min_args` 校验并补 `ArgumentCountError`），
+   而不是再建一张表；但前置是先把表修对（§33.3 的 165 缺失 + 10 冲突），而**修表必然改动 tree/fast 行为**
+   ⇒ 需老铁明示「是否一并修解释器/字节码模式」（宪法 §五.3/§六.6），我不擅改。
+
+### 37.4 待老铁裁决的甲型三态（本轮零推进）
+
+| 选项 | 内容 | 跨模式影响 |
+|---|---|---|
+| 甲‑1 | 只修表 + **只让 AOT 消费**新表（tree/fast 仍读旧值） | 零跨模式行为变化，但双表并存违 DRY，且 tree/fast 的 8 枚缺陷原地保留 |
+| 甲‑2（推荐） | 修表 + tree/fast/bytecode/AOT **全走同一枚守卫** | ★一次性消 8 枚跨模式缺陷＋面 2/面 3，但**必须重冻解释器侧基线**并新开跨模式差分门 |
+| 甲‑3 | 先只修 F-47 消息文本（不动 min/max） | 最小，但把「错的拒绝」留着 |
+
+### 37.5 ★AOT 列补测完成（R-160c，资产 `r160c_aot_arity_matrix_tmp.sh`，表身 `r160c_aot_arity_matrix_tmp.tsv`）
+
+`R160C_DONE shapes=10 compile_fail_canary=5 compile_fail_quiet=0 same=4 diff=1 bad_probe=0` @24 s。全五列矩阵：
+
+| 形 | 探针 | PHP 8.5.8 | tree | bytecode | fast | **AOT（当代 `fe5d70d4…`）** |
+|---|---|---|---|---|---|---|
+| m1 | `array_merge()` | ✅ `[]` | ✗ 过度拒绝 | ✅ | ✗ 过度拒绝 | ★**与 PHP 等值**（切片形参 ⇒ 编译通过） |
+| m2 | `array_push($a)` | ✅ 2 | ✗ | ✗ NULL | ✗ | ★**与 PHP 等值** |
+| m3 | `array_diff($a)` | ✅ | ✗ | ✗ NULL | ✗ | ★**与 PHP 等值** |
+| m4 | `implode($a)` | ✅ `'12'` | ✗ | ✗ NULL | ✗ | ✗ **编译失败**（带金丝雀，`expected 3, found 2`） |
+| m5 | `array_unshift($a)` | ✅ | ✗ | ✗ NULL | ✗ | ★**与 PHP 等值** |
+| m6 | `parse_str("a=1")` | ✦Fatal ACError | ✗ 放行 | ✗ NULL | ✗ 放行 | ✗ **编译失败**（带金丝雀） |
+| m7 | `mktime()` | ✦Fatal ACError | ✗ 放行 | ✗ NULL | ✗ 放行 | ✗ **编译失败**（带金丝雀，`expected 6, found 0`） |
+| m8 | `get_class_methods()` | ✦Fatal ACError | ✗ 放行 | ✗ NULL | ✗ 放行 | ✗ **编译失败**（带金丝雀） |
+| m9 | `str_replace("a","b")` | ✦Fatal ACError | ✅ 拒绝 | ✗ NULL | ✅ 拒绝 | ✗ **编译失败**（方向对、形态错：不可捕获） |
+| m10 | `preg_match("x",$s)` | ✅ `false`＋分隔符 Warning | ✅ | ✅ | ✅ | ✗ **AOT_DIFF**（见 §37.7，非 arity） |
+
+### 37.6 ★这列数据把甲型的**顺序**钉死了（不是口径，是顺序）
+
+1. **AOT 的拒绝面与 tree/fast 的拒绝面几乎不相交**：tree/fast 过度拒绝的 5 枚里，AOT 只对 `implode($a)` 一枚失败，
+   另 **4 枚（m1/m2/m3/m5）AOT 今天与 PHP 逐字节等值**——因为那几个 helper 是**切片形参**（`[]const Value`），发射器不会少填。
+2. ⇒ **「先把 AOT 接到 `fn_table` 上」会当场把 4 枚绿形变成红**（违规则 30「修复不得自造回归」）。
+   所以甲型的**唯一安全顺序**是：**先修表的 165 缺失 + 10 冲突，再谈让谁消费它**；§37.3-4 那句「前置是先把表修对」由推断升为**实测**。
+3. AOT 该拒而拒得不对的 4 枚（m6–m9）＝「PHP 是可捕获 `ArgumentCountError`，AOT 是无产物编译失败」⇒ 甲型真正的**收敛证据**必须是这四枚从 `COMPILE_FAIL` 变成 `CAUGHT|ArgumentCountError|<message>`，**不能**拿「诊断变可读」当收敛（丙型已把诊断面做掉，两回事）。
+4. `compile_fail_quiet=0` ⇒ 本批十形里没有「编译失败但金丝雀沉默」的 ⇒ 丙型的覆盖面在这组样本内不缺（★不代表普遍成立，切片面与用户函数面另论）。
+
+### 37.7 顺手实测的新面孔（非 arity，登记待裁决）：**F-50** `preg_match` 缺**分隔符校验**且返回**错值**
+
+| 臂 | PHP 8.5.8 | AOT |
+|---|---|---|
+| `preg_match("/b/", "abc")`（控制臂，合法模式） | `1` | `1` ✅ |
+| `preg_match("b", "abc")`（无分隔符） | `Warning: preg_match(): Delimiter must not be alphanumeric, backslash, or NUL byte` ＋ **`false`** | **`1`**，且**零告警** |
+
+⇒ 不只是缺 Warning，**返回值也是错的**（PHP 判定模式非法 ⇒ `false`；AOT 当成匹配成功 ⇒ `1`）⇒ 静默错值面。
+门 S（PCRE flags/offset，47 臂 `diff=0`）**抓不到这一形**（它没有无分隔符臂）⇒ 修法＝门 S 扩臂后按 PHP 口径补校验；属 AOT 面，可自办，待排。
+
+★本轮零 `src/` 改动；探针与产物已删（`/tmp/r160c*`）。
+
+
+### 36.9 资产登记（R-160 代次）
+
+| 资产 | md5 | 说明 |
+|---|---|---|
+| `src/aot/native_linker.zig` | **`9eb19280e01eea3740dea1ffa00bddbb`** | ＋246/−0（金丝雀 6 枚私有函数 + 失败分支一行调用） |
+| `src/aot/optimizer.zig` | `ba0e0f579518908e030fc09ca994147f` | ★未变（R-161 值保持） |
+| `src/aot/runtime_lib_template.zig` | `6d520849c9a7eab50082c62e924662dd` | ★未变（只被**读**取签名） |
+| `zig-out/bin/php-interpreter` | **`fe5d70d42745ab8e3fddc8a66139d6b6`** | 改 `native_linker` ⇒ 必须重建；R-161 的 `d824ad99…` 作废 |
+| 门 AC `c034_arity_canary_gate_tmp.sh` | **`87d4c39b37811aaf2fa70901a097cbd9`** | 13 臂永久侧门；表身 `c034_arity_canary_tmp.tsv`（**无表头**）；★建门轮中途曾以 `f2146a28…` 登记 12 臂修前档，其后加 a13＋改归一折叠 ⇒ 该值作废，修前读数已在 §36.2 逐枚落表 |
+| 链 `c035_r160_acceptance_chain_tmp.sh` | **`9151aeca615c1a5475a13a0d2cb3bb6e`** | ★链后按 §36.8 取证更正改为**按内容取 DONE**（旧值 `78a9755b…` 作废；作废前的读数已逐腿用表身/腿文件复核，判定不受影响） |
+| 影子 new-side 列 | `c010_shadow_newside_r160_tmp.txt`（表身 md5 `f19fb070…`） | ★第 10 代同值，作 R-161 后续代的 BASE |
+
+
+
+
+## 38. R-163（2026-10-14）：F-50 落地 —— `preg_*` 补齐 PHP 的分隔符/修饰符校验（纯模板改动）
+
+### 38.1 ★先测口径再动手：PHP 8.5.8 的完整校验规则（资产 `c036_preg_delimiter_gate_tmp.sh` 的注释即本表）
+
+| 形态 | PHP 的告警文本 | PHP 的返回值 | `$matches` 出参 |
+|---|---|---|---|
+| `""`／`" "`（空或仅空白） | `{fn}(): Empty regular expression` | false | **不写**（保留调用者预置值） |
+| 首字符是字母/数字/`\`/NUL（`"b"`、`"abc"`、`"\a\"`） | `{fn}(): Delimiter must not be alphanumeric, backslash, or NUL byte` | false | 不写 |
+| 开括号 `(`/`[`/`{`/`<` 作分隔符 ⇒ 找**配对**闭括号，同名可嵌套 | 正常匹配（`(a)`→1、`(a(b))`→`ab`、`((a))`→`a`） | 1 | 正常填 |
+| 开括号找不到配对闭括号（`"(a]"`） | `{fn}(): No ending matching delimiter ')' found` | false | 不写 |
+| 非括号分隔符找不到结束符（`"/a"`、`"/"`、`"#a|"`） | `{fn}(): No ending delimiter '/' found` | false | 不写 |
+| **闭括号单独作分隔符**（`)a)`） | ★**合法**（⇒ 配对规则只对开括号生效） | 1 | 正常填 |
+| 结束符后有空白（`"/a/ "`） | ★**合法**（空白即终止修饰符扫描） | 1 | 正常填 |
+| 非法修饰符（`"/a/g"`、`"/a/i/"`） | `{fn}(): Unknown modifier 'g'` | false | 不写 |
+
+★**合法修饰符集合＝实测 13 枚**：`i m s x n u r A D J S U X`（逐字符扫 a–zA–Z 实测，`error_get_last()` 会残留 ⇒ 必须用 `set_error_handler` 逐轮清零才测得准；第一版用 `error_get_last` 得出「全部 UNKNOWN」的**假结论**，已作废重测）。
+★**家族返回值**（非法模式下实测）：`preg_match`/`preg_match_all`/`preg_split`/`preg_grep` ⇒ **false**；`preg_replace`/`preg_filter`/`preg_replace_callback` ⇒ **null**。
+★**数组实参** ⇒ PHP **逐元素告警**（2 元素 ⇒ 2 条 Warning）且 `preg_replace/preg_filter` 返回**空数组**（不是 null）。
+
+### 38.2 门 PD 修前登记（17 臂，md5 `f2d1ec987a096d52b90d55de898e7b2c`）
+
+`C036PD_DONE arms=17 same=7 diff=10 compile_fail=0 bad_probe=0 repo_build_residue=0` @66 s（表身 `c036_preg_delimiter_tmp.tsv`）。
+红 10 枚 ＝ pd1–pd8（四告警形 × 函数族）＋ ★**pd11 `(a)`／pd12 `{a}`**。
+
+### 38.3 ★建门轮否证了我自己的两条预估（都要留档）
+
+1. **预估「pd11/pd12 是恒绿守卫臂」⇒ 实测是红**：`(a)`/`{a}` 两侧都无告警但值不同（PHP `1`，AOT `0`）
+   ⇒ 旧解析器把 `([{` 一律当"深度"、只按**同名字符**找结束符，于是 `(a)` 扫到末尾找不到 `(` ⇒ body 变成 `a)` ⇒ 编译失败静默降级。
+   ⇒ 本批覆盖面因此多出**「成对分隔符从未支持」**一枚（我原本只打算补校验）。
+2. **预估「缺校验只在 `preg_match`」⇒ 实测全族都缺**：`preg_split`（`'b'`→按空模式逐位切出 5 段）、`preg_match_all`（→4 次空匹配）、`preg_replace`/`preg_filter`（→返回原串）都静默放行。
+   ⇒ 修复面必须是共享解析器 `parsePHPRegexPattern` ＋ **11 枚调用站点**，不是单点。
+3. ★另登记一枚**死码**：`php_preg_replace`（`:27284`，手写非 PCRE 实现，`pat.len < 3` 就直接原样返回）**全仓零引用**
+   （`grep -n "php_preg_replace\b"` 只命中定义行；`builtin_map` 的 `preg_replace` 两枚条目都指向 legacy `preg_replace`）
+   ⇒ 按宪法 §六.3 **不删**，登记为「已知无引用实现，勿误当活路径修」。
+
+### 38.4 落地内容（纯 `runtime_lib_template.zig`，二进制不重建）
+
+| 件 | 位置 | 内容 |
+|---|---|---|
+| 口径注释块 | `:10681` 前 | 把 §38.1 的实测规则写进代码注释（禁凭 PCRE 文档推测） |
+| `PatternIssue` 枚举 | `:10694` | `none/empty/bad_delimiter/no_end_delimiter/no_end_matching_delimiter/unknown_modifier` |
+| `ParsedPattern` 扩字段 | `:10701` | `issue` + `issue_char`（告警文本要回显那个字符） |
+| `php_regex_valid_modifiers` | `:10712` | ★实测 13 枚集合 |
+| `pairedCloseDelimiter` | `:10723` | `(`→`)`、`[`→`]`、`{`→`}`、`<`→`>`，其它 ⇒ 0 |
+| `emitRegexPatternWarning` | `:10732` | 用 `[256]u8` 固定缓冲 `bufPrint` 拼 PHP 口径文本后 `emitWarning`（★不分配、热路径零成本） |
+| `parsePHPRegexPattern` 重写 | `:10750` 起 | 前导空白→空判定；首字符合法性；**只对开括号做配对扫描**（含同名嵌套深度）；转义跳过；修饰符逐个校验后空白终止 |
+| 11 枚调用站点 | `preg_match`/`preg_match_with_matches`/`preg_match_all`/`preg_replace`/`preg_filter`×2/`preg_split`/`preg_grep`/`php_preg_match`/`php_preg_match_all`/`php_preg_replace_callback` | `if (parsed.issue != .none) { emit…; return false|null; }`；数组循环内那枚按 PHP 的逐元素语义 `continue` |
+
+★**自纠一枚（落地当场）**：删掉 `_ = matches_ref;` 之前先加了写盘，`zig build-exe` 报
+`runtime_lib.zig:10840:9: error: pointless discard of function parameter` ⇒ 20 臂全部 `compile_fail`、门跑飞（9 s 就"跑完"是**假信号**）。
+⇒ 教训：**模板改动的编译验证只发生在 AOT 产物编译**（F-38 已记 `zig build test` 不覆盖模板），所以**落地后必须先单跑一枚门**再谈验收链；本轮门 PD 的 `compile_fail=20` 就是那枚探针。
+
+### 38.5 ★修后实测（模板 `7bfee93178e59bd83c405e4775a80673`，二进制仍 `fe5d70d4…`）
+
+`C036PD_DONE arms=20 same=18 diff=2 compile_fail=0 bad_probe=0 repo_build_residue=0` @79 s。
+原 17 臂**全绿**（`same=15 diff=0` 于旧臂集；`pd11`/`pd12` 成对分隔符转绿、`pd1`–`pd8` 四告警形逐字节收敛含消息文本与 `false`/`null` 之分）；
+新增 3 臂里的 `pd19`（合法模式覆盖预置值）绿，`pd18`/`pd20` 红 ⇒ 见 §38.6。
+
+### 38.6 新立 **F-53**（本批落地才现形，登记不掩盖）
+
+`$m = array('pre'); preg_match("b", $s, $m);` ⇒ PHP **保留** `['pre']`（实测），AOT 给**空数组** ⇒ `count($m)` 由 1 变 0。
+★根因不在本批改动：AOT 的**按引用实参槽位不从调用者变量初始化**（REF-004/F-13 同族），所以早退支要么留 null（`count(null)` ⇒ 直接 `TypeError` rc=255，比 PHP 更糟）要么装空数组。
+⇒ 本批取**装空数组**（与本文件既有早退支一致，且对最常见形态 `[]`/`null` 预置与 PHP 同值），并把「保留非空预置值」这一残差单列 F-53。
+★同族观察项（不在本批修）：合法但**语义未实现**的修饰符 `n u r A D J S U X` 仍按"接受但不映射选项"处理 ⇒ 需要一枚 PHP-vs-AOT 的修饰符语义门才能定级（本批未测 ⇒ 不作"已支持"声明）。
+
+### 38.7 R-163 验收链读数（21 腿）——★待 `R163_CHAIN_DONE` 后按 `c037_r163_acceptance_chain_tmp.log` 逐腿填，禁预估
+
+判据（落地前写好）：门 PD `same=18 diff=2` 且红恰为 pd18/pd20；★门 S（47 臂 `diff=0`）必须仍 `diff=0`（本批改的就是它下游的解析器）；
+门 AC/F45FACE/Y/Z* 等值注册档；主回归 Pass 67/Skip 1；影子 `changed_rows=0`（★规则 29：影子只哈希 `main.zig`，本批运行面证据是门 PD＋门 S＋主回归，不是影子）。

@@ -2790,7 +2790,10 @@ pub const IROptimizer = struct {
                 if (inst.result) |result| {
                     if (!self.used_registers.contains(result.id)) {
                         // Check if instruction has side effects
-                        if (!self.hasSideEffects(inst)) {
+                        // ★F-45：可抛出算术指令即使结果被丢弃也不删——语句位 `$a / 0;` 的**唯一作用**
+                        //   就是抛 DivisionByZeroError，删掉等于把 PHP 的异常静默吞掉（乙型：只挡语句位，
+                        //   不改 hasSideEffects 本体 ⇒ LICM(:996)/内联器(:4594)/CSE(:5278) 行为不动）
+                        if (!self.hasSideEffects(inst) and !self.isRaisableArithmetic(inst)) {
                             // Remove dead instruction
                             _ = block.instructions.orderedRemove(i);
                             inst.deinit(self.allocator);
@@ -3233,6 +3236,25 @@ pub const IROptimizer = struct {
             },
             .br, .unreachable_ => {},
         }
+    }
+
+    /// ★F-45：PHP 侧会抛、且**本仓发射出的抛出今天就可被 catch 接住**的算术指令。
+    /// 它们不写内存、不改全局 ⇒ `hasSideEffects` 判 false，但「结果被丢弃」不等于「可以删」：
+    /// 语句位的 `$a / 0;`、`$a % 0;` 在 PHP 抛可捕获的 DivisionByZeroError，被删就变成静默继续执行。
+    /// 集合按实测定（`--aot-disable-pass=dce` 当修后代理逐枚复证）：
+    ///   `.div` ⇒ `DivisionByZeroError: Division by zero`  `.mod` ⇒ `…: Modulo by zero`
+    ///   ★两枚的捕获形与 PHP **逐字节等值**（门 F45FACE 的 p09/p10 实测 off 侧 == PHP）⇒ 保住即收敛。
+    /// ★刻意排除 `.add/.sub/.mul`：它们的 `TypeError: Unsupported operand types: string + int` 今天走
+    ///   **Zig error 外逸**（消息文本对，但 try/catch 接不住 ⇒ 属 F-39 族）。保住它们只把「静默」变成
+    ///   「不可捕获的 Fatal」，既不算收敛又可能打死当前通过的语料脚本 ⇒ 另立 F-45-ii，等 F-39 后再收。
+    /// ★同样排除 `.pow`（PHP 8.5.8 对 `0 ** -1` 只给 Deprecated 并返回 INF，AOT 两臂都不抛）、
+    ///   位运算/移位/取负（数组操作数时 AOT **两侧都不抛** ⇒ 属 F-46「操作数类型检查缺数组」，与本面正交）。
+    fn isRaisableArithmetic(self: *const Self, inst: *const Instruction) bool {
+        _ = self;
+        return switch (inst.op) {
+            .div, .mod => true,
+            else => false,
+        };
     }
 
     /// Check if an instruction has side effects

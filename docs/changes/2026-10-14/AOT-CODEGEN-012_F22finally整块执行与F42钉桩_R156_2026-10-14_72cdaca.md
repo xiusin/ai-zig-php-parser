@@ -184,7 +184,7 @@ flowchart TB
 
 | 编号 | 面 | 状态 |
 |---|---|---|
-| F-42 | `optimizer.zig:3361` 删不可达块不回写 `.index`、不修引用、destroy 对象 ⇒ `native_linker:18020` panic；cond_br/phi/环检测比较共用同一陈旧域 ⇒ 范围内即静默跳错块 | 归因完成（工单 §30.6/§30.6.1）；修法＝扩用既有 `fixupDanglingPhiReferences`；R-158b 单独一轮，先 `--verbose` 量分母 |
+| F-42 | `optimizer.zig:3361` 删不可达块不回写 `.index`、不修引用、destroy 对象 ⇒ `native_linker:18020` panic；cond_br/phi/环检测比较共用同一陈旧域 ⇒ 范围内即静默跳错块 | ★**本行的「不回写 `.index`」口径已被 R-158c 实测否证**（`analysis.zig:273-275 rebuildCFG` 一直统一重编号，且三枚删块站点都随后调它）；肇事站点也不是 `:3361` 而是 trampoline `:4336`。正解、三面判定与门 Z 读数见工单 **§31**（本段原文按当轮认知保留，不作静默改写） |
 | F-36（改判后） | `file`/`line` 由 `setException` 惰性注入 ⇒ 构造后未抛出的异常对象取不到位置 | 待修（纯模板）；已从 F-30 清单移除 |
 | F-43 | 内部 helper 登记进 `builtin_map` ⇒ 泄漏成 PHP 可见函数名（`function_exists("php_bool_or")` AOT=true） | 与 F-4 同族，待裁决 |
 | F-33 第 2 批 | 接口判定 `implementsInterface("Countable")` + 内建 `interfaces` 表 | 与 F-3 同批；门 X `x4` 常驻 |
