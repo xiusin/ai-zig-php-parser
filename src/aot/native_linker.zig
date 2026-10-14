@@ -4395,6 +4395,11 @@ pub const NativeLinker = struct {
         .{ "php_get_class_constant_dynamic", bi(.{ .runtime_name = "php_get_class_constant_dynamic", .needs_allocator = true, .may_raise = true }) },
 
         .{ "php_bool_or", bi(.{ .runtime_name = "php_bool_or", .needs_allocator = false, .may_raise = false }) },
+        // AOT-CODEGEN-012 F-22 的 `php_restoreException` **故意不登记**：
+        // builtin_map 的键会被发射成 `aot_registered_functions`（`function_exists` 的数据源），
+        // 登记一条就等于改每一个 main.zig（影子全量漂移）还顺手多出一个 PHP 可见函数名。
+        // 未登记的 `php_*` 名走默认路径即为所需语义：`functionMayRaise` 默认 true（调用后走 hasException 路由）、
+        // `functionNeedsAllocator` 默认 false（助手函数不收 allocator）⇒ 无需条目即可正确发射。
         .{ "php_property_array_push_with_obj", bi(.{ .runtime_name = "php_property_array_push_with_obj", .needs_allocator = false }) },
         .{ "php_property_array_set_with_obj", bi(.{ .runtime_name = "php_property_array_set_with_obj", .needs_allocator = false }) },
 

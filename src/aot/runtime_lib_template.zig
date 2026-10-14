@@ -11938,6 +11938,14 @@ fn naturalCompare(s1: []const u8, s2: []const u8, case_insensitive: bool) i64 {
 // 数组函数
 // ============================================================================
 
+/// count() 报错消息里的类型名口径（PHP 8.5.8 实测，门 X 的 x6/x9 为据）：
+/// bool 打印字面量 `true`/`false`（不是 `bool`）、资源打印 `resource`，其余沿用通用名表。
+fn countArgTypeName(v: Value) []const u8 {
+    if (v.isBool()) return if (v.asBool()) "true" else "false";
+    if (v.isResource()) return "resource";
+    return phpGetValueTypeName(v);
+}
+
 /// count - 获取数组元素数量
 /// count() - 计算数组元素个数
 /// @param arr 要计数的数组
@@ -11953,7 +11961,15 @@ pub fn php_count(arr: Value, mode: Value) !Value {
         }
     }
 
-    if (!arr.isArray()) return Value.initInt(0);
+    // AOT-CODEGEN-012 F-33 第一批：非数组且无 count() 可调 ⇒ PHP 抛 TypeError（旧写法静默返 0 是 fail-open）
+    // 「有 count() 但未实现 Countable」这一格仍走上面的方法分支 ⇒ 与真值不符，留作门 X 的注册红 x4，
+    // 待 F-3 的内建接口表补齐后再切 implementsInterface("Countable") 判定。
+    if (!arr.isArray()) {
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "count(): Argument #1 ($value) must be of type Countable|array, {s} given", .{countArgTypeName(arr)}) catch
+            "count(): Argument #1 ($value) must be of type Countable|array, unknown given";
+        return throwThrowable("TypeError", msg, runtime_allocator);
+    }
 
     const mode_int = if (mode.isInt()) mode.asInt() else 0;
     const php_arr = arr.asArray();
@@ -21812,6 +21828,22 @@ pub fn clearException() void {
         current_exception = Value.initNull();
         has_exception = false;
     }
+}
+
+/// finally 体执行完后放回「进入 finally 时已 pending」的异常（AOT-CODEGEN-012 F-22）。
+/// 进入 finally 前 IR 发 `peek_exception`（自带 retain ⇒ saved 自持一份引用）+ `clear_exception`，
+/// 这样体内每条语句都能正常跑完（PHP 语义：finally 必须整块执行完才传播），块尾再交还。
+/// 三个分支的所有权要与发射器的「调用后 hasException() ⇒ 清理并 release 该寄存器」路径配平：
+///   · saved 为 null ⇒ 进入时无 pending 异常，且调用后检查为假 ⇒ 寄存器不会被清理，故不持任何引用
+///   · 已有 pending ⇒ 体内新抛优先（PHP 语义）⇒ **不碰引用**，寄存器那份交给发射器的清理路径 release
+///   · 否则 ⇒ 先 retain 一份交全局（setException 收走所有权），此后调用后检查为真，
+///     发射器清掉寄存器自己那份 ⇒ 各持一份，既不泄漏也不双释放
+/// 返回 `!void` 是 `may_raise = true` 的要求（发射出的语句形如 `_ = try runtime.php_restoreException(…)`）。
+pub fn php_restoreException(saved: Value) !void {
+    if (saved.isNull()) return;
+    if (has_exception) return;
+    _ = saved.retain();
+    setException(saved);
 }
 
 /// 抛出异常

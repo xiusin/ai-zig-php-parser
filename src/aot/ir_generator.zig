@@ -3551,11 +3551,25 @@ pub const IRGenerator = struct {
         // Generate finally clause if present
         if (try_data.finally_clause) |finally_idx| {
             self.setCurrentBlock(finally_block.?);
+            // ★AOT-CODEGEN-012 F-22：进入 finally 前摘走 pending 异常（peek_exception 自带 retain），
+            //   块尾交还。不摘的话，体内第一条语句的后置 hasException() 路由会把「try 里已抛的异常」
+            //   当成本体新抛 ⇒ finally 只跑第一条语句就跳走（PHP 是整块跑完再传播）。
+            const saved_ex_reg = try self.emitWithResult(.{ .peek_exception = {} }, .php_value);
+            _ = try self.emit(.clear_exception, null);
             const finally_node = self.getNode(finally_idx);
             if (finally_node != null and finally_node.?.tag == .finally_clause) {
                 try self.generateStatement(finally_node.?.data.finally_clause.body);
             }
             if (!self.isBlockTerminated()) {
+                // 能走到这里说明体内没有新抛（新抛会在抛出点路由出去）⇒ 交还是安全的：
+                // php_restoreException 自己分三分支（null 无操作 / 已有新异常则释放 saved / 否则 setException）
+                const restore_args = try self.allocator.alloc(Register, 1);
+                restore_args[0] = saved_ex_reg;
+                _ = try self.emit(.{ .call = .{
+                    .func_name = "php_restoreException",
+                    .args = restore_args,
+                    .return_type = .void,
+                } }, null);
                 self.setTerminator(.{ .br = exit_block });
             }
         }

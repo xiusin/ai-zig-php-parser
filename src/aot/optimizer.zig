@@ -4333,10 +4333,39 @@ pub const IROptimizer = struct {
 
         try self.expandPhiIncomingForRemovedBlock(target, block, block.predecessors.items);
 
+        // ★F-42：本块可能正是别的块的 exception_handler（try{}finally{} 无 catch 子句时空 catch 块
+        // 就是这种「零指令 + 一跳」）。上面只改道前驱的**终结符**、expandPhi 只管 PHI，而
+        // rebuildCFG 只重编号活块 .index、从不改写 exception_handler 本身
+        // ⇒ 不改道就留下悬垂 handler，发射端 native_linker 会读已释放块的 .index。
+        self.redirectExceptionHandlerRef(func, block, target);
+
         _ = func.blocks.orderedRemove(i.*);
         block.deinit();
         self.allocator.destroy(block);
         return true;
+    }
+
+    /// 把所有 `exception_handler == removed` 的块改道到 `replacement`。
+    /// 只用于被释放块是「零指令 + 无条件 `.br` 到 replacement」的中转块（前置由
+    /// tryRemoveTrampolineBlock 的指令数/终结符形状判定保证）：进入它与直接进入 replacement
+    /// 逐位等价，故改道不丢语义。必须扫**全函数块表**而非 removed.predecessors——
+    /// createBlock（ir_generator.zig:535-539）会给 try 作用域内每一枚新建块继承同一个 catch 块，
+    /// 而这里已把前驱的终结符改道掉，那些块不再是 removed 的前驱。
+    fn redirectExceptionHandlerRef(self: *Self, func: *Function, removed: *BasicBlock, replacement: *BasicBlock) void {
+        _ = self;
+        for (func.blocks.items) |b| {
+            if (b == removed) continue;
+            if (b.exception_handler) |h| {
+                if (h != removed) continue;
+                // ★改道目标可能就是块自己：ir_generator:535-539 连 finally 块也继承了本层 catch，
+                // 于是「finally 的 handler = 本层空 catch，catch 一跳回到 finally」会被改道成自环。
+                // 自环 handler 在这套 IR 里没有合法含义——rebuildCFG 建边时刻意排除它
+                // （analysis.zig:316 `handler != block`）⇒ 不在这里造出来，置 null 让异常按既存
+                // 上送链冒到调用方/入口。（门 Z 实测：z2 的 "F34 FIN" 打两遍**不是**本条造成的，
+                // 造成它的是 exit_block 也继承了本层 catch ⇒ 另立 F-44。）
+                b.exception_handler = if (b == replacement) null else replacement;
+            }
+        }
     }
 
     fn tryMergeBlockWithSingleSuccessor(self: *Self, func: *Function, block: *BasicBlock) !bool {
