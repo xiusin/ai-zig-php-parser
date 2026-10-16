@@ -6463,6 +6463,295 @@ fn throwCannotIncDecError(val: Value, action: []const u8) Value {
     return Value.initNull();
 }
 
+/// ★F-62（R-172 乙型）：内置函数**数值形参**的参数类型校验＝PHP 的**第四套措辞**（不是操作数措辞）。
+///   逐枚实测口径（真值资产 `/tmp/r172/f62_param_truth{,2,3,4}_tmp.php` 与 `f62_names_tmp.php`）：
+///   · 对象**一律拒**且 given 用**类名**——带 `__toString` 的也拒（实测 `abs($b)` ⇒ `Bar given`，而 `bcadd($b,"1")` 却静默转成 '6'
+///     ⇒ string 形参要的是「stringable 感知」拒绝，另立 F-62b，本 helper 只管数值形参）；array ⇒ `array given`；
+///   · 字符串只接受**完整数值串**（`"5"`／`"+5"`／`" 5 "`／`"5.0"`／`"1e3"`），**前导数值串拒**（`"5abc"`、`"0x1A"` ⇒ `string given`）
+///     ⇒ 与二元算术的宽松口径（`tryAsIntLoose`，R-171）**刻意相反**，两者不可合并；
+///   · bool 静默强转（`abs(true)`=int 1、`sqrt(true)`=1.0）；null ⇒ `Deprecated: <fn>(): Passing null to parameter #N ($p) of type <T> is deprecated`
+///     后按 0 继续（实测 `abs(null)`=int 0、`sqrt(null)`=0.0、`exp(null)`=1.0）；
+///   · `int` 形参吃 float：整值且在 i64 域内 ⇒ 静默；非整值 ⇒ `Deprecated: Implicit conversion from float 5.9 to int loses precision` 后**向零截断**
+///     （实测 `intdiv(-5.9,2)`=int -2）；NAN/INF/越界（`1e19`）⇒ `TypeError …, float given`；
+///   · `int` 形参吃数值串：整值语法 ⇒ int；非整值 ⇒ 同句式但写作 `float-string "5.5"`（★带引号的原文，与 float 版**不同**）；越界（`"1e19"`）⇒ `string given`；
+///   · `float` 形参吃 int ⇒ 静默加宽。
+const NumParamKind = enum { int_param, float_param, num_param };
+
+fn numParamExpectedText(kind: NumParamKind) []const u8 {
+    return switch (kind) {
+        .int_param => "int",
+        .float_param => "float",
+        .num_param => "int|float",
+    };
+}
+
+/// 通用参数类型校验措辞：`<fn>(): Argument #N ($p) must be of type <T>, <given> given`
+/// 置 TypeError 并返回 null ⇒ 调用方 `orelse return Value.initNull()`，让发射器的 hasException 路由接手。
+fn rejectParamType(
+    fn_name: []const u8,
+    arg_no: usize,
+    param_name: []const u8,
+    expected: []const u8,
+    val: Value,
+) ?Value {
+    var buf: [512]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        &buf,
+        "{s}(): Argument #{d} (${s}) must be of type {s}, {s} given",
+        .{ fn_name, arg_no, param_name, expected, operandTypeName(val) },
+    ) catch "TypeError";
+    _ = throwThrowable("TypeError", msg, runtime_allocator) catch {};
+    return null;
+}
+
+/// 去掉首尾空白（与 `isNumericString`／`numericPrefixLength` 的空白容忍保持一致）
+fn trimNumericWhitespace(data: []const u8) []const u8 {
+    var start: usize = 0;
+    while (start < data.len and std.ascii.isWhitespace(data[start])) : (start += 1) {}
+    var end = data.len;
+    while (end > start and std.ascii.isWhitespace(data[end - 1])) : (end -= 1) {}
+    return data[start..end];
+}
+
+/// 完整整数语法（允许首尾空白与前导 `+`/`-`）⇒ i64；非整语法或越界 ⇒ null
+fn strictIntFromTrimmed(data: []const u8) ?i64 {
+    const t = trimNumericWhitespace(data);
+    if (t.len == 0) return null;
+    var i: usize = 0;
+    if (t[0] == '+' or t[0] == '-') i = 1;
+    if (i >= t.len) return null;
+    for (t[i..]) |c| {
+        if (c < '0' or c > '9') return null;
+    }
+    return std.fmt.parseInt(i64, t, 10) catch null;
+}
+
+/// 数值前缀的 PHP 口径值：前缀是整语法 ⇒ int，含 `.`／指数 ⇒ float（与 R-171 二元算术的结果类型口径同源）
+fn numericPrefixValue(data: []const u8) ?Value {
+    const len = numericPrefixLength(data);
+    if (len == 0) return null;
+    const t = trimNumericWhitespace(data[0..len]);
+    if (std.mem.indexOfScalar(u8, t, '.') != null or std.mem.indexOfScalar(u8, t, 'e') != null or
+        std.mem.indexOfScalar(u8, t, 'E') != null)
+    {
+        return Value.initFloat(std.fmt.parseFloat(f64, t) catch 0.0);
+    }
+    return Value.initInt(std.fmt.parseInt(i64, t, 10) catch 0);
+}
+
+fn emitDeprecatedPassingNull(
+    fn_name: []const u8,
+    arg_no: usize,
+    param_name: []const u8,
+    type_text: []const u8,
+) void {
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        &buf,
+        "{s}(): Passing null to parameter #{d} (${s}) of type {s} is deprecated",
+        .{ fn_name, arg_no, param_name, type_text },
+    ) catch return;
+    emitDeprecated(msg);
+}
+
+/// `int` 形参吃**非整值 float-string** 的措辞：`Implicit conversion from float-string "5.5" to int loses precision`
+/// （★与 `emitDeprecatedFloatToInt` 的 float 版差在 `float-string "<原文>"` 这一段，实测不可混用）
+fn emitDeprecatedFloatStrToInt(s: []const u8) void {
+    var buf: [320]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        &buf,
+        "Implicit conversion from float-string \"{s}\" to int loses precision",
+        .{s},
+    ) catch return;
+    emitDeprecated(msg);
+}
+
+/// float／数值串 → i64 的 `int` 形参口径：通过返回强转值；越界或非有限返回 null 交调用方拒；非整值就地打 Deprecated 后向零截断
+fn intParamFromFloat(f: f64) ?i64 {
+    if (!std.math.isFinite(f)) return null;
+    const min_f: f64 = @floatFromInt(std.math.minInt(i64));
+    const max_f: f64 = @floatFromInt(std.math.maxInt(i64));
+    if (f > max_f or f < min_f) return null;
+    if (@floor(f) != f) {
+        emitDeprecatedFloatToInt(f);
+        return @intFromFloat(@trunc(f));
+    }
+    return @intFromFloat(f);
+}
+
+/// 内置数值形参的**校验＋强转**。通过 ⇒ 返回 PHP 口径的 int／float Value（Deprecated 已就地打出）；
+/// 不通过 ⇒ 置 TypeError 并返回 null。
+/// `null_type`＝`Passing null` 消息里的类型文本，多数函数与 `expected` 相同，仅 `number_format` 的 `$num`
+/// 不同（实测其 TypeError 写 `int|float` 而 Passing-null 写 `float`）⇒ 由调用点显式给出，不内置推断。
+fn requireNumParamAs(
+    fn_name: []const u8,
+    arg_no: usize,
+    param_name: []const u8,
+    kind: NumParamKind,
+    val: Value,
+    null_type: ?[]const u8,
+) ?Value {
+    const expected = numParamExpectedText(kind);
+    const is_int_kind = kind == .int_param;
+
+    if (val.isInt()) return val;
+
+    if (val.isFloat()) {
+        if (!is_int_kind) return val;
+        const i = intParamFromFloat(val.asFloat()) orelse
+            return rejectParamType(fn_name, arg_no, param_name, expected, val);
+        return Value.initInt(i);
+    }
+
+    if (val.isBool()) return Value.initInt(if (val.asBool()) 1 else 0);
+
+    if (val.isNull()) {
+        emitDeprecatedPassingNull(fn_name, arg_no, param_name, null_type orelse expected);
+        return Value.initInt(0);
+    }
+
+    if (val.isString()) {
+        const s = val.asString();
+        const data = s.data[0..s.length];
+        if (!isNumericString(data)) return rejectParamType(fn_name, arg_no, param_name, expected, val);
+        if (strictIntFromTrimmed(data)) |i| return Value.initInt(i);
+        const t = trimNumericWhitespace(data);
+        const f = std.fmt.parseFloat(f64, t) catch
+            return rejectParamType(fn_name, arg_no, param_name, expected, val);
+        if (!is_int_kind) return Value.initFloat(f);
+        // `int` 形参吃非整值语法的数值串：越界／非有限 ⇒ `string given`；非整值 ⇒ float-string Deprecated 后向零截断
+        const min_f: f64 = @floatFromInt(std.math.minInt(i64));
+        const max_f: f64 = @floatFromInt(std.math.maxInt(i64));
+        if (!std.math.isFinite(f) or f > max_f or f < min_f) {
+            return rejectParamType(fn_name, arg_no, param_name, expected, val);
+        }
+        if (@floor(f) != f) {
+            emitDeprecatedFloatStrToInt(t);
+            return Value.initInt(@intFromFloat(@trunc(f)));
+        }
+        return Value.initInt(@intFromFloat(f));
+    }
+
+    // array／object／其余 ⇒ 拒（对象给类名，见 `operandTypeName`）
+    return rejectParamType(fn_name, arg_no, param_name, expected, val);
+}
+
+fn requireNumParam(
+    fn_name: []const u8,
+    arg_no: usize,
+    param_name: []const u8,
+    kind: NumParamKind,
+    val: Value,
+) ?Value {
+    return requireNumParamAs(fn_name, arg_no, param_name, kind, val, null);
+}
+
+/// **可选**数值形参（PHP 侧带默认值，如 `round` 的 `$precision`、`number_format` 的 `$decimals`）。
+/// ★门 BLT b72 实测：省略的可选形参在本运行时的调用约定里同样是 **null**（发射器补空参的形态），
+///   与显式 null 无从区分 ⇒ 若在此打 Passing-null Deprecated，`round(null)` 会替没写的 `$precision` 多印一行，
+///   语料里 `number_format($x)`／`round($x)` 这类省略写法（round 12 处、number_format 25 处）会整片多输出。
+///   ⇒ 可选形只做**类型拒**（对象／array／坏串 ⇒ TypeError），null 与 missing 一律当「未提供」原样透传、不打 Deprecated。
+///   代价留字：显式 `round(1.5, null)` 的 `#2 ($precision)` Deprecated 本实现不发（PHP 发），属可登记的措辞缺口，不是静默错值。
+fn requireOptionalNumParam(
+    fn_name: []const u8,
+    arg_no: usize,
+    param_name: []const u8,
+    kind: NumParamKind,
+    val: Value,
+) ?Value {
+    if (val.isNull() or val.isMissing()) return val;
+    return requireNumParamAs(fn_name, arg_no, param_name, kind, val, null);
+}
+
+/// `array_sum`／`array_product`／`max`／`min` 的容器形参：非数组 ⇒ `<fn>(): Argument #N ($p) must be of type array, <类名> given`
+fn requireArrayParam(fn_name: []const u8, arg_no: usize, param_name: []const u8, val: Value) ?Value {
+    if (val.isArray()) return val;
+    return rejectParamType(fn_name, arg_no, param_name, "array", val);
+}
+
+/// ★F-62 元素族（c 段）：`array_sum`／`array_product` 的**元素级**口径（真值 `/tmp/r172/f62_param_truth3_tmp.php`）：
+///   · int／float ⇒ 原样计入；bool／null ⇒ **静默**计入 1／0；
+///   · 完整数值串 ⇒ 按 int／float 语法计入；**前导数值串** ⇒ `Warning: A non-numeric value encountered` 后计入前缀（实测 `array_sum([1,"5a",2])`=8）；
+///   · 非数值串 ⇒ `Warning: <fn>(): Addition|Multiplication is not supported on type string` 后**计入 0**（实测 `array_product([2,"abc"])`=0）；
+///   · array／object ⇒ 同句式（`on type array`／`on type <类名>`）但**整枚跳过**（实测 `array_product([2,[1]])`=2、`array_sum([1,$o,2])`=3）。
+///   ★这一族 PHP **只 Warning 不抛**，把它改成抛异常就是 over-fatal（与 R-155 的 count() 面同型陷阱）。
+const ArrayNumElem = union(enum) { use: Value, skip: void };
+
+fn classifyArrayNumElem(fn_name: []const u8, action: []const u8, val: Value) ArrayNumElem {
+    if (val.isInt() or val.isFloat()) return .{ .use = val };
+    if (val.isBool()) return .{ .use = Value.initInt(if (val.asBool()) 1 else 0) };
+    if (val.isNull()) return .{ .use = Value.initInt(0) };
+
+    if (val.isString()) {
+        const s = val.asString();
+        const data = s.data[0..s.length];
+        if (isNumericString(data)) {
+            if (strictIntFromTrimmed(data)) |i| return .{ .use = Value.initInt(i) };
+            const t = trimNumericWhitespace(data);
+            return .{ .use = Value.initFloat(std.fmt.parseFloat(f64, t) catch 0.0) };
+        }
+        if (numericPrefixValue(data)) |pv| {
+            emitWarning("A non-numeric value encountered");
+            return .{ .use = pv };
+        }
+        arrayElementNotSupported(fn_name, action, "string");
+        return .{ .use = Value.initInt(0) };
+    }
+
+    if (Value_isObject(val)) {
+        arrayElementNotSupported(fn_name, action, operandTypeName(val));
+        return .skip;
+    }
+    if (val.isArray()) {
+        arrayElementNotSupported(fn_name, action, "array");
+        return .skip;
+    }
+    // 其余（指针等）按跳过处理，与 array 同句式
+    arrayElementNotSupported(fn_name, action, valueTypeName(val));
+    return .skip;
+}
+
+fn arrayElementNotSupported(fn_name: []const u8, action: []const u8, type_text: []const u8) void {
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        &buf,
+        "{s}(): {s} is not supported on type {s}",
+        .{ fn_name, action, type_text },
+    ) catch return;
+    emitWarning(msg);
+}
+
+/// ★F-62 比较族（d 段）：object 与数值比较 ⇒ `Notice: Object of class <X> could not be converted to int|float`
+/// 后 PHP 把对象当 **1**（对 int）／**1.0**（对 float）继续。实测措辞随另一侧类型变（`$o > 0.5` 印 `to float`）。
+fn emitObjectToNumberNotice(val: Value, target: []const u8) void {
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        &buf,
+        "Object of class {s} could not be converted to {s}",
+        .{ operandTypeName(val), target },
+    ) catch return;
+    emitNotice(msg);
+}
+
+/// `Notice` 诊断（模板此前只有 Warning／Deprecated；比较族是第一条 Notice 站点）
+fn emitNotice(msg: []const u8) void {
+    if (isErrorSuppressed()) return;
+    var ebuf: [1024]u8 = undefined;
+    const emsg = std.fmt.bufPrint(
+        &ebuf,
+        "PHP Notice:  {s} in {s} on line {d}\n",
+        .{ msg, src_file, src_line },
+    ) catch "";
+    fileWriteAll(2, emsg);
+    var buf: [1024]u8 = undefined;
+    const smsg = std.fmt.bufPrint(
+        &buf,
+        "\nNotice: {s} in {s} on line {d}\n",
+        .{ msg, src_file, src_line },
+    ) catch "";
+    fileWriteAll(1, smsg);
+}
+
 /// 获取 Value 的 PHP 类型名称
 fn valueTypeName(v: Value) []const u8 {
     if (v.isNull()) return "null";
@@ -7061,6 +7350,31 @@ fn phpCompare(lhs: Value, rhs: Value) i2 {
         return 0;
     }
 
+    // Rule 2b（★F-62 d 段，R-172）：object 与**数值**比较 ⇒ PHP 先打 Notice，再把对象当 **1**（另一侧为 int）／**1.0**（另一侧为 float）继续。
+    //   实测：`$o > 0`＝true、`$o == 1`＝true、`$o == 2`＝false、`$o <=> 2`＝-1、`1 < $o`＝false、`$o >= 1`＝true、`$o <= 0`＝false，
+    //   而 `$o > 0.5`＝true 且措辞换成 `could not be converted to float` ⇒ 措辞随另一侧类型，见 `emitObjectToNumberNotice`。
+    //   ★必须排在 Rule 2 之后：`$o > true` 走 bool 比较且**无 Notice**（实测 false）。
+    if (Value_isObject(lhs) and (rhs.isInt() or rhs.isFloat())) {
+        emitObjectToNumberNotice(lhs, if (rhs.isFloat()) "float" else "int");
+        const r = rhs.toFloat();
+        if (@as(f64, 1) < r) return -1;
+        if (@as(f64, 1) > r) return 1;
+        return 0;
+    }
+    if (Value_isObject(rhs) and (lhs.isInt() or lhs.isFloat())) {
+        emitObjectToNumberNotice(rhs, if (lhs.isFloat()) "float" else "int");
+        const l = lhs.toFloat();
+        if (l < @as(f64, 1)) return -1;
+        if (l > @as(f64, 1)) return 1;
+        return 0;
+    }
+
+    // Rule 2c（同段）：object vs string／array ⇒ **对象恒大于**且**无 Notice**。
+    //   实测：`$o > "abc"`＝true、`"abc" > $o`＝false、`$o > [1]`＝true、`[1] > $o`＝false、`$o <=> "a"`＝1、`$o <=> [1]`＝1、`$o == ""`＝false
+    //   ⇒ 与下面 Rule 7「array 恒大于非 array」相冲，本支必须先拦截 object 那一侧。
+    if (Value_isObject(lhs) and (rhs.isString() or rhs.isArray())) return 1;
+    if (Value_isObject(rhs) and (lhs.isString() or lhs.isArray())) return -1;
+
     // Rule 3: int vs int
     if (lhs.isInt() and rhs.isInt()) {
         const l = lhs.asInt();
@@ -7193,6 +7507,10 @@ pub fn php_ge(lhs: Value, rhs: Value) !Value {
 /// Spaceship 运算符 (<=>)
 /// 返回 -1 (lhs < rhs), 0 (lhs == rhs), 1 (lhs > rhs)
 pub fn php_spaceship(lhs: Value, rhs: Value) !Value {
+    // ★F-62（R-172）：本函数自成一套分支，object 操作数会落到末路 `toFloat()`（对象⇒0）⇒ 与 `<`/`>` 族**不同口径**：
+    //   实测 `$o <=> 1`＝int 0 且带 `Notice: Object of class Foo could not be converted to int`，旧写法给 -1 且无 Notice（门 BLT b119）。
+    //   object 参与比较的规则在本模板里只有一份（`phpCompare` 的 Rule 2b／2c）⇒ 这里直接交它，避免第二套实现漂移。
+    if (Value_isObject(lhs) or Value_isObject(rhs)) return Value.initInt(@intCast(phpCompare(lhs, rhs)));
     if (lhs.isInt() and rhs.isInt()) {
         const l = lhs.asInt();
         const r = rhs.asInt();
@@ -12907,24 +13225,33 @@ pub fn php_abs(val: Value) !Value {
     //      那面属 F-62，本轮不关）。
     //   ② 越界：`abs(PHP_INT_MIN)` 在 PHP 是 **float**，旧写法在 i64 上 `-i` **回绕** ⇒ 实测 AOT 返回
     //      `integer -9223372036854775808`（连符号都错）。与 `php_neg` 已有的 minInt 处理保持同形。
-    if (tryAsInt(val)) |i| {
+    //   ★F-62（R-172）：入口先过**参数类型校验**（第四套措辞），通过则拿到 PHP 口径的 int／float 值再走原逻辑。
+    //   旧注释里「刻意不用二元算术的宽松判据」那句现在由 helper 落实（`abs('5abc')`／`abs('0x10')` ⇒ TypeError）。
+    const v = requireNumParam("abs", 1, "num", .num_param, val) orelse return Value.initNull();
+    if (tryAsInt(v)) |i| {
         if (i == std.math.minInt(i64)) return Value.initFloat(-@as(f64, @floatFromInt(i)));
         return Value.initInt(if (i < 0) -i else i);
     }
-    const f = val.toFloat();
+    const f = v.toFloat();
     return Value.initFloat(@abs(f));
 }
 
 /// sqrt - 平方根
 pub fn php_sqrt(val: Value) !Value {
-    return Value.initFloat(@sqrt(val.toFloat()));
+    const v = requireNumParam("sqrt", 1, "num", .float_param, val) orelse return Value.initNull();
+    return Value.initFloat(@sqrt(v.toFloat()));
 }
 
 /// round - 四舍五入 (支持3参数: value, precision, mode)
 /// mode: 0=PHP_ROUND_HALF_UP(default), 1=PHP_ROUND_HALF_DOWN, 2=PHP_ROUND_HALF_EVEN, 3=PHP_ROUND_HALF_ODD
 pub fn php_round(val: Value, precision_val: Value, mode_val: Value) !Value {
-    const num = val.toFloat();
-    const precision = if (precision_val.isNull()) 0 else @as(i32, @intCast(precision_val.toInt()));
+    // ★F-62（R-172）：`$num` 是 int|float、`$precision` 是 int ⇒ 各过一遍参数校验。
+    //   `$mode` 的期望类型是 `RoundingMode|int`，且非法值走的是 **ValueError**（实测 `round(1.5,2,123)`
+    //   ⇒ `round(): Argument #3 ($mode) must be a valid rounding mode (RoundingMode::*)`）⇒ 另立 F-62d，本轮不碰。
+    const v = requireNumParam("round", 1, "num", .num_param, val) orelse return Value.initNull();
+    const pv = requireOptionalNumParam("round", 2, "precision", .int_param, precision_val) orelse return Value.initNull();
+    const num = v.toFloat();
+    const precision = if (pv.isNull()) 0 else @as(i32, @intCast(pv.toInt()));
     const mode = if (mode_val.isNull()) @as(i64, 0) else mode_val.toInt();
 
     const multiplier = std.math.pow(f64, 10.0, @floatFromInt(precision));
@@ -12962,12 +13289,14 @@ pub fn php_round(val: Value, precision_val: Value, mode_val: Value) !Value {
 
 /// floor - 向下取整
 pub fn php_floor(val: Value) !Value {
-    return Value.initFloat(@floor(val.toFloat()));
+    const v = requireNumParam("floor", 1, "num", .num_param, val) orelse return Value.initNull();
+    return Value.initFloat(@floor(v.toFloat()));
 }
 
 /// ceil - 向上取整
 pub fn php_ceil(val: Value) !Value {
-    return Value.initFloat(@ceil(val.toFloat()));
+    const v = requireNumParam("ceil", 1, "num", .num_param, val) orelse return Value.initNull();
+    return Value.initFloat(@ceil(v.toFloat()));
 }
 
 /// min - 最小值
@@ -12975,6 +13304,9 @@ pub fn php_ceil(val: Value) !Value {
 pub fn php_max(args: []const Value) !Value {
     if (args.len == 0) return Value.initInt(0);
     if (args.len == 1) {
+        // ★F-62（R-172）：单参数形 PHP 要求 array（实测 `max($o)` ⇒ `max(): Argument #1 ($value) must be of type array, Foo given`、
+        //   `max(5)` ⇒ 同句式 `int given`），旧写法把标量／对象原样返回 ⇒ 静默放行。
+        _ = requireArrayParam("max", 1, "value", args[0]) orelse return Value.initNull();
         // 单参数：如果是数组，返回数组最大值
         if (args[0].isArray()) {
             const arr = args[0].asArray();
@@ -13005,6 +13337,8 @@ pub fn php_max(args: []const Value) !Value {
 pub fn php_min(args: []const Value) !Value {
     if (args.len == 0) return Value.initInt(0);
     if (args.len == 1) {
+        // ★F-62（R-172）：同 `max`，实测 `min(5)` ⇒ `min(): Argument #1 ($value) must be of type array, int given`。
+        _ = requireArrayParam("min", 1, "value", args[0]) orelse return Value.initNull();
         // 单参数：如果是数组，返回数组最小值
         if (args[0].isArray()) {
             const arr = args[0].asArray();
@@ -13012,7 +13346,9 @@ pub fn php_min(args: []const Value) !Value {
 
             var min_val = arr.elements.packed_values.items[0];
             for (arr.elements.packed_values.items[1..]) |val| {
-                if (phpCompare(val, min_val) < 0) {
+                // ★F-62（R-172）：同值并列 PHP 取**后者**，而 max 取**前者**（实测 `min($o,1)`＝int 1、`min(1,$o)`＝Foo、
+                //   `max($o,1)`＝Foo、`max(1,$o)`＝int 1；对象按 1 参与 ⇒ 三枚都是并列情形）⇒ 这里用 `<= 0` 替换旧 `< 0`。
+                if (phpCompare(val, min_val) <= 0) {
                     min_val = val;
                 }
             }
@@ -13021,10 +13357,10 @@ pub fn php_min(args: []const Value) !Value {
         return args[0];
     }
 
-    // 多参数：找最小值（使用 PHP 比较语义）
+    // 多参数：找最小值（使用 PHP 比较语义，同值并列取后者 ⇒ 见上方 `<= 0` 的实测口径）
     var min_val = args[0];
     for (args[1..]) |val| {
-        if (phpCompare(val, min_val) < 0) {
+        if (phpCompare(val, min_val) <= 0) {
             min_val = val;
         }
     }
@@ -13033,54 +13369,65 @@ pub fn php_min(args: []const Value) !Value {
 
 /// sin - 正弦
 pub fn php_sin(val: Value) !Value {
-    return Value.initFloat(@sin(val.toFloat()));
+    const num = requireNumParam("sin", 1, "num", .float_param, val) orelse return Value.initNull();
+    return Value.initFloat(@sin(num.toFloat()));
 }
 
 /// cos - 余弦
 pub fn php_cos(val: Value) !Value {
-    return Value.initFloat(@cos(val.toFloat()));
+    const num = requireNumParam("cos", 1, "num", .float_param, val) orelse return Value.initNull();
+    return Value.initFloat(@cos(num.toFloat()));
 }
 
 /// tan - 正切
 pub fn php_tan(val: Value) !Value {
-    return Value.initFloat(@tan(val.toFloat()));
+    const num = requireNumParam("tan", 1, "num", .float_param, val) orelse return Value.initNull();
+    return Value.initFloat(@tan(num.toFloat()));
 }
 
 /// asin - 反正弦
 pub fn php_asin(val: Value) !Value {
-    return Value.initFloat(std.math.asin(val.toFloat()));
+    const num = requireNumParam("asin", 1, "num", .float_param, val) orelse return Value.initNull();
+    return Value.initFloat(std.math.asin(num.toFloat()));
 }
 
 /// acos - 反余弦
 pub fn php_acos(val: Value) !Value {
-    return Value.initFloat(std.math.acos(val.toFloat()));
+    const num = requireNumParam("acos", 1, "num", .float_param, val) orelse return Value.initNull();
+    return Value.initFloat(std.math.acos(num.toFloat()));
 }
 
 /// atan - 反正切
 pub fn php_atan(val: Value) !Value {
-    return Value.initFloat(std.math.atan(val.toFloat()));
+    const num = requireNumParam("atan", 1, "num", .float_param, val) orelse return Value.initNull();
+    return Value.initFloat(std.math.atan(num.toFloat()));
 }
 
 /// atan2 - 两个参数的反正切
 pub fn php_atan2(y: Value, x: Value) !Value {
-    return Value.initFloat(std.math.atan2(y.toFloat(), x.toFloat()));
+    const yy = requireNumParam("atan2", 1, "y", .float_param, y) orelse return Value.initNull();
+    const xx = requireNumParam("atan2", 2, "x", .float_param, x) orelse return Value.initNull();
+    return Value.initFloat(std.math.atan2(yy.toFloat(), xx.toFloat()));
 }
 
 /// sinh - 双曲正弦
 pub fn php_sinh(val: Value) !Value {
-    const x = val.toFloat();
+    const num = requireNumParam("sinh", 1, "num", .float_param, val) orelse return Value.initNull();
+    const x = num.toFloat();
     return Value.initFloat((std.math.exp(x) - std.math.exp(-x)) / 2.0);
 }
 
 /// cosh - 双曲余弦
 pub fn php_cosh(val: Value) !Value {
-    const x = val.toFloat();
+    const num = requireNumParam("cosh", 1, "num", .float_param, val) orelse return Value.initNull();
+    const x = num.toFloat();
     return Value.initFloat((std.math.exp(x) + std.math.exp(-x)) / 2.0);
 }
 
 /// tanh - 双曲正切
 pub fn php_tanh(val: Value) !Value {
-    const x = val.toFloat();
+    const num = requireNumParam("tanh", 1, "num", .float_param, val) orelse return Value.initNull();
+    const x = num.toFloat();
     const ex = std.math.exp(x);
     const emx = std.math.exp(-x);
     return Value.initFloat((ex - emx) / (ex + emx));
@@ -13153,22 +13500,29 @@ pub fn php_octdec(val: Value) !Value {
 
 /// log - 自然对数
 pub fn php_log(val: Value) !Value {
-    return Value.initFloat(@log(val.toFloat()));
+    // ★F-62（R-172）：PHP 的 `log($num, $base = M_E)` 是两枚 float 形参，本实现只接一枚 ⇒ `$base` 面属 arity 缺口（另立 F-62e）。
+    const num = requireNumParam("log", 1, "num", .float_param, val) orelse return Value.initNull();
+    return Value.initFloat(@log(num.toFloat()));
 }
 
 /// log10 - 以10为底的对数
 pub fn php_log10(val: Value) !Value {
-    return Value.initFloat(@log10(val.toFloat()));
+    const num = requireNumParam("log10", 1, "num", .float_param, val) orelse return Value.initNull();
+    return Value.initFloat(@log10(num.toFloat()));
 }
 
 /// log2 - 以2为底的对数
 pub fn php_log2(val: Value) !Value {
-    return Value.initFloat(@log2(val.toFloat()));
+    // 注：PHP 8.5.8 无 `log2()`（实测 `Call to undefined function log2()`）⇒ 本函数是 AOT 侧多出的实现，
+    //   这里只按同族口径补校验以保持入口一致，**不**与 PHP 对表（对表面属 F-62e 的「多余内置」登记）。
+    const num = requireNumParam("log2", 1, "num", .float_param, val) orelse return Value.initNull();
+    return Value.initFloat(@log2(num.toFloat()));
 }
 
 /// exp - e的x次方
 pub fn php_exp(val: Value) !Value {
-    return Value.initFloat(@exp(val.toFloat()));
+    const num = requireNumParam("exp", 1, "num", .float_param, val) orelse return Value.initNull();
+    return Value.initFloat(@exp(num.toFloat()));
 }
 
 /// pow - 幂运算
@@ -13181,21 +13535,29 @@ pub fn php_pow_func(base: Value, exponent: Value) !Value {
     //   实测 `pow(2,63)` AOT 给 `integer -9223372036854775808`、`pow(10,19)` 给 `integer -8446744073709551616`，
     //   而 PHP 两者都给 float（b27/b28）。`php_pow` 用 `@mulWithOverflow` 溢出即转 float ⇒ 正确。
     //   ⇒ 修法＝**委托 `php_pow`**（同一语义只留一份实现，DRY；不在此重抄检查与溢出逻辑）。
+    //   ★F-62 侧：`pow()` 的形参消息**不走**参数校验措辞，实测仍是 `Unsupported operand types: Foo ** int`
+    //   ⇒ 本函数**不加** `requireNumParam`，交给 `php_pow` 的操作数检查（加了就变成两套措辞）。
     return php_pow(base, exponent);
 }
 
 /// fmod - 浮点数取模（结果符号与被除数相同，匹配 C/PHP fmod）
 pub fn php_fmod(x: Value, y: Value) !Value {
-    const xv = x.toFloat();
-    const yv = y.toFloat();
+    const xx = requireNumParam("fmod", 1, "num1", .float_param, x) orelse return Value.initNull();
+    const yy = requireNumParam("fmod", 2, "num2", .float_param, y) orelse return Value.initNull();
+    const xv = xx.toFloat();
+    const yv = yy.toFloat();
     if (yv == 0.0) return Value.initFloat(std.math.nan(f64));
     return Value.initFloat(xv - yv * @trunc(xv / yv));
 }
 
 /// intdiv - 整数除法
 pub fn php_intdiv(dividend: Value, divisor: Value) !Value {
-    const a = dividend.toInt();
-    const b = divisor.toInt();
+    // ★F-62（R-172）：`$num1`／`$num2` 都是 **int** 形参 ⇒ 校验必须**先于**除零与 minInt/-1 判定
+    //   （实测 `intdiv($o, 0)` ⇒ 参数类型错而非 DivisionByZeroError；`intdiv(5, null)` ⇒ 先 Passing-null Deprecated 再 DivisionByZeroError）。
+    const dv = requireNumParam("intdiv", 1, "num1", .int_param, dividend) orelse return Value.initNull();
+    const iv = requireNumParam("intdiv", 2, "num2", .int_param, divisor) orelse return Value.initNull();
+    const a = dv.asInt();
+    const b = iv.asInt();
     if (b == 0) {
         // 旧写法 `return error.DivisionByZero` 是 Zig error 外逸（门 Y y5：打 `error: DivisionByZero`
         // 且 rc=1，未捕获面连后续语句都不跑）；PHP 侧是可捕获 DivisionByZeroError。
@@ -13213,16 +13575,23 @@ pub fn php_intdiv(dividend: Value, divisor: Value) !Value {
 }
 
 /// fdiv - 浮点除法（PHP 8.0+，除以零返回 INF/NAN）
-pub fn php_fdiv(dividend: Value, divisor: Value) Value {
-    const a = dividend.toFloat();
-    const b = divisor.toFloat();
-    // fdiv 不抛出异常，除以零返回 INF/-INF/NAN
+/// ★F-62（R-172）：签名由 `Value` 改为 `!Value` 以承载参数类型校验 ⇒ 发射器侧的
+///   `builtin_map["fdiv"].may_raise` 必须同批由 false 翻成 true（`native_linker.zig:4312`），
+///   否则生成码既不带 `try` 也不带 hasException 路由 ⇒ 编译不过／异常丢失。
+pub fn php_fdiv(dividend: Value, divisor: Value) !Value {
+    const dv = requireNumParam("fdiv", 1, "num1", .float_param, dividend) orelse return Value.initNull();
+    const iv = requireNumParam("fdiv", 2, "num2", .float_param, divisor) orelse return Value.initNull();
+    const a = dv.toFloat();
+    const b = iv.toFloat();
+    // fdiv 的除零不抛异常，返回 INF/-INF/NAN
     return Value.initFloat(a / b);
 }
 
 /// hypot - 计算直角三角形斜边长度
 pub fn php_hypot(x: Value, y: Value) !Value {
-    return Value.initFloat(std.math.hypot(x.toFloat(), y.toFloat()));
+    const xx = requireNumParam("hypot", 1, "x", .float_param, x) orelse return Value.initNull();
+    const yy = requireNumParam("hypot", 2, "y", .float_param, y) orelse return Value.initNull();
+    return Value.initFloat(std.math.hypot(xx.toFloat(), yy.toFloat()));
 }
 
 /// base_convert - 在任意进制之间转换数字
@@ -13271,13 +13640,15 @@ pub fn php_gc_enabled() Value {
 
 /// deg2rad - 角度转弧度
 pub fn php_deg2rad(degrees: Value) !Value {
-    const rad = degrees.toFloat() * std.math.pi / 180.0;
+    const dv = requireNumParam("deg2rad", 1, "num", .float_param, degrees) orelse return Value.initNull();
+    const rad = dv.toFloat() * std.math.pi / 180.0;
     return Value.initFloat(rad);
 }
 
 /// rad2deg - 弧度转角度
 pub fn php_rad2deg(radians: Value) !Value {
-    const deg = radians.toFloat() * 180.0 / std.math.pi;
+    const rv = requireNumParam("rad2deg", 1, "num", .float_param, radians) orelse return Value.initNull();
+    const deg = rv.toFloat() * 180.0 / std.math.pi;
     return Value.initFloat(deg);
 }
 
@@ -22867,7 +23238,10 @@ pub fn php_array_search(needle: Value, haystack: Value, strict: Value) !Value {
 
 /// array_sum - 计算数组元素的总和（packed int 快速路径 + SIMD 向量化）
 pub fn php_array_sum(arr: Value) !Value {
-    if (!arr.isArray()) return Value.initInt(0);
+    // ★F-62（R-172 c 段）：实参非数组 ⇒ 参数类型校验（实测 `array_sum(5)` ⇒
+    //   `array_sum(): Argument #1 ($array) must be of type array, int given`、`array_sum($o)` ⇒ 同句式 `Foo given`），
+    //   旧写法静默返回 0。
+    _ = requireArrayParam("array_sum", 1, "array", arr) orelse return Value.initNull();
 
     const php_arr = arr.asArray();
 
@@ -22894,12 +23268,21 @@ pub fn php_array_sum(arr: Value) !Value {
 
     var it = php_arr.elements.iterator();
     while (it.next()) |entry| {
-        const val = entry.value_ptr.*;
-        if (val.isFloat()) {
-            has_float = true;
-            sum_float += val.asFloat();
-        } else {
-            sum_int += val.toInt();
+        // ★元素级口径（`classifyArrayNumElem`）：array／object ⇒ Warning 后**整枚跳过**；
+        //   非数值串 ⇒ Warning 后**计入 0**；前导数值串 ⇒ `A non-numeric value encountered` 后计入前缀；
+        //   bool／null ⇒ 静默计入 1／0；数值串 ⇒ 按 int／float 语法计入（实测 `array_sum(["1e3"])`＝double 1000.0，
+        //   旧写法用 `toInt()` 把它落成 int 1000 ⇒ 结果类型错）。
+        const classified = classifyArrayNumElem("array_sum", "Addition", entry.value_ptr.*);
+        switch (classified) {
+            .skip => {},
+            .use => |v| {
+                if (v.isFloat()) {
+                    has_float = true;
+                    sum_float += v.asFloat();
+                } else {
+                    sum_int += v.asInt();
+                }
+            },
         }
     }
 
@@ -22942,7 +23325,8 @@ fn fastPackedIntSum(items: []const Value) i64 {
 
 /// array_product - 计算数组元素的乘积
 pub fn php_array_product(arr: Value) !Value {
-    if (!arr.isArray()) return Value.initInt(0);
+    // ★F-62（R-172 c 段）：同 `array_sum`，非数组实参 ⇒ 参数类型校验（实测 `array_product(5)` ⇒ `int given`）。
+    _ = requireArrayParam("array_product", 1, "array", arr) orelse return Value.initNull();
 
     const php_arr = arr.asArray();
     if (php_arr.count() == 0) return Value.initInt(1);
@@ -22951,8 +23335,16 @@ pub fn php_array_product(arr: Value) !Value {
     var it = php_arr.elements.iterator();
 
     while (it.next()) |entry| {
-        const val = entry.value_ptr.*;
-        product *= val.toFloat();
+        // ★元素级口径与 `array_sum` 同一 helper（措辞换成 `Multiplication`）：
+        //   实测 `array_product([2, [1]])`＝2（array **跳过**）、`array_product([2, "abc"])`＝0（非数值串**计入 0**）、
+        //   `array_product([2, "5a"])`＝10（前导数值串：Warning 后计入 5）。
+        const classified = classifyArrayNumElem("array_product", "Multiplication", entry.value_ptr.*);
+        switch (classified) {
+            .skip => {},
+            .use => |v| {
+                product *= v.toFloat();
+            },
+        }
     }
 
     // 如果结果是整数，返回整数
@@ -24817,8 +25209,14 @@ pub fn php_strripos(haystack: Value, needle: Value, offset: Value) !Value {
 
 /// number_format - 格式化数字
 pub fn php_number_format(number: Value, decimals: Value, dec_point: Value, thousands_sep: Value, allocator: Allocator) !Value {
-    const num = number.toFloat();
-    const dec: usize = @intCast(@max(0, decimals.toInt()));
+    // ★F-62（R-172）：`$num` 的 TypeError 文本实测是 `int|float`，而它的 Passing-null 文本实测是 `float`
+    //   （`number_format(): Passing null to parameter #1 ($num) of type float is deprecated`）⇒ 用 `requireNumParamAs` 显式给出。
+    //   `$decimals` 是 int；`$decimal_separator`／`$thousands_separator` 期望 `?string`（实测措辞）⇒ 与 bc 族同属
+    //   「stringable／nullable-string」那道，另立 F-62b，本轮不碰 #3/#4。
+    const nv = requireNumParamAs("number_format", 1, "num", .num_param, number, "float") orelse return Value.initNull();
+    const dv = requireOptionalNumParam("number_format", 2, "decimals", .int_param, decimals) orelse return Value.initNull();
+    const num = nv.toFloat();
+    const dec: usize = @intCast(@max(0, dv.toInt()));
     const dp: u8 = if (dec_point.isString() and dec_point.asString().data.len > 0)
         dec_point.asString().data[0]
     else

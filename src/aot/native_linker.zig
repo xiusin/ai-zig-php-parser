@@ -4309,7 +4309,7 @@ pub const NativeLinker = struct {
         .{ "exp", .{ .runtime_name = "php_exp", .needs_allocator = false } },
         .{ "fmod", .{ .runtime_name = "php_fmod", .needs_allocator = false } },
         .{ "intdiv", .{ .runtime_name = "php_intdiv", .needs_allocator = false } },
-        .{ "fdiv", bi(.{ .runtime_name = "php_fdiv", .needs_allocator = false, .may_raise = false }) },
+        .{ "fdiv", bi(.{ .runtime_name = "php_fdiv", .needs_allocator = false, .may_raise = true }) },
         .{ "hypot", .{ .runtime_name = "php_hypot", .needs_allocator = false } },
         .{ "deg2rad", .{ .runtime_name = "php_deg2rad", .needs_allocator = false } },
         .{ "rad2deg", .{ .runtime_name = "php_rad2deg", .needs_allocator = false } },

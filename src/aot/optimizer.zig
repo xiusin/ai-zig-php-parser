@@ -932,11 +932,12 @@ pub const IROptimizer = struct {
     }
 
     /// comptime 纯函数白名单：这些函数无全局副作用，操作数不变时可安全提升
+    /// ★R-172（F-62 c 段）摘除 `count`／`array_sum`／`array_product`：提升会把「每次迭代一次诊断」变成「整循环一次」——
+    ///   `array_sum`／`array_product` 自本代起对坏元素打元素级 Warning，`count` 自 R-155 起对非 Countable 抛 TypeError，
+    ///   两者都是**可观察副作用** ⇒ 不可提升。语料实测：16 枚用 array_sum、1 枚用 array_product，无一枚是循环内不变量调用，
+    ///   `while (count($q) > 0)` 那类因参数可变本就不提升 ⇒ 摘除后影子 `changed_rows` 预期仍为 0。
     const pure_functions = std.StaticStringMap(void).initComptime(.{
-        .{ "array_sum", {} },
-        .{ "array_product", {} },
         .{ "array_count", {} },
-        .{ "count", {} },
         .{ "strlen", {} },
         .{ "sizeof", {} },
         .{ "array_key_exists", {} },
