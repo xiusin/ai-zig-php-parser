@@ -5691,6 +5691,33 @@ fn tryAsInt(val: Value) ?i64 {
 }
 
 /// 加法运算（PHP语义）
+/// ★F-55（R-171）：**二元算术**专用的宽松判据。
+/// 实测 PHP 8.5.8 对 `+ - * / % **` 与 `pow()` 的结果类型由**数字前缀的字面语法**决定，
+/// 且**允许尾部垃圾与首尾空白**（此时另由 `emitArithmeticStringWarningIfNeeded` 打
+/// `Warning: A non-numeric value encountered`，本函数不管警告）：
+///   `'5abc' + 2` = **int 7**、`' 5' + 1` = int 6、`'5 ' + 1` = int 6、`'0x10' + 1` = int 1（前缀只吃到 `0`）
+///   `'5.5abc' + 2` = double 7.5、`'5e2' + 1` = double 501.0、`'5.0' + 1` = double 6.0（★有 `.`／指数就是 float，与数值是否为整无关）
+/// 越界（`parseInt` 失败）⇒ 返回 null ⇒ 走 float 路（实测 `'99999999999999999999' + 1` = double）
+/// ★与 `tryAsInt`（严格：整串必须是 `^[+-]?\d+$`）**刻意并存**：内置函数的形参走的是**严格**口径
+///   （实测 `abs(' 5')` = int 5 但 `abs('5abc')`、`abs('0x10')` 直接 `TypeError`）⇒ 不可把两者合并。
+fn tryAsIntLoose(val: Value) ?i64 {
+    if (val.isString()) {
+        const s = val.asString();
+        const data = s.data[0..s.length];
+        var i: usize = 0;
+        while (i < data.len and std.ascii.isWhitespace(data[i])) : (i += 1) {}
+        var end = i;
+        if (end < data.len and (data[end] == '+' or data[end] == '-')) end += 1;
+        const first_digit = end;
+        while (end < data.len and data[end] >= '0' and data[end] <= '9') : (end += 1) {}
+        if (end == first_digit) return null; // 没有数字前缀，或前缀以 `.`／指数开头 ⇒ 交浮点路
+        // 前缀之后若紧跟 `.`／`e`／`E` 则是 float 语法
+        if (end < data.len and (data[end] == '.' or data[end] == 'e' or data[end] == 'E')) return null;
+        return std.fmt.parseInt(i64, data[i..end], 10) catch null;
+    }
+    return tryAsInt(val);
+}
+
 pub fn php_add(lhs: Value, rhs: Value) !Value {
     // 数组联合运算：$a + $b（保留左侧值，右侧不存在的键才加入）
     if (lhs.isArray() and rhs.isArray()) {
@@ -5702,8 +5729,9 @@ pub fn php_add(lhs: Value, rhs: Value) !Value {
         return throwUnsupportedOperandError(lhs, rhs, "+");
     }
     // PHP 类型推导：int/bool/null/整数字符串 之间运算 → int
-    if (tryAsInt(lhs)) |a| {
-        if (tryAsInt(rhs)) |b| {
+    // ★F-55（R-171）：二元算术用**宽松**前缀判据（实测 `'5abc' + 2` 在 PHP 是 int 7，AOT 旧落 float 得 7.0）
+    if (tryAsIntLoose(lhs)) |a| {
+        if (tryAsIntLoose(rhs)) |b| {
             const result = @addWithOverflow(a, b);
             if (result[1] != 0) {
                 return Value.initFloat(@as(f64, @floatFromInt(a)) + @as(f64, @floatFromInt(b)));
@@ -5725,8 +5753,9 @@ pub fn php_sub(lhs: Value, rhs: Value) !Value {
     if (!checkArithmeticOperand(lhs) or !checkArithmeticOperand(rhs)) {
         return throwUnsupportedOperandError(lhs, rhs, "-");
     }
-    if (tryAsInt(lhs)) |a| {
-        if (tryAsInt(rhs)) |b| {
+    // ★F-55（R-171）：二元算术用**宽松**前缀判据（实测 `'5abc' + 2` 在 PHP 是 int 7，AOT 旧落 float 得 7.0）
+    if (tryAsIntLoose(lhs)) |a| {
+        if (tryAsIntLoose(rhs)) |b| {
             const result = @subWithOverflow(a, b);
             if (result[1] != 0) {
                 return Value.initFloat(@as(f64, @floatFromInt(a)) - @as(f64, @floatFromInt(b)));
@@ -5936,8 +5965,9 @@ pub fn php_mul(lhs: Value, rhs: Value) !Value {
     if (!checkArithmeticOperand(lhs) or !checkArithmeticOperand(rhs)) {
         return throwUnsupportedOperandError(lhs, rhs, "*");
     }
-    if (tryAsInt(lhs)) |a| {
-        if (tryAsInt(rhs)) |b| {
+    // ★F-55（R-171）：二元算术用**宽松**前缀判据（实测 `'5abc' + 2` 在 PHP 是 int 7，AOT 旧落 float 得 7.0）
+    if (tryAsIntLoose(lhs)) |a| {
+        if (tryAsIntLoose(rhs)) |b| {
             const result = @mulWithOverflow(a, b);
             if (result[1] != 0) {
                 return Value.initFloat(@as(f64, @floatFromInt(a)) * @as(f64, @floatFromInt(b)));
@@ -5959,8 +5989,11 @@ pub fn php_div(lhs: Value, rhs: Value) !Value {
         return throwUnsupportedOperandError(lhs, rhs, "/");
     }
     // PHP 将 null/bool 视为整数参与整除判断
-    const lhs_is_int = lhs.isInt() or lhs.isNull() or lhs.isBool();
-    const rhs_is_int = rhs.isInt() or rhs.isNull() or rhs.isBool();
+    // ★F-55（R-171）：这里原来只看 `isInt/isNull/isBool` ⇒ `'6' / 2` 落 float 得 `3.0`，
+    //   而 PHP 按**字面语法**判定：`6/2`＝int 3、`'6'/2`＝int 3、`'6.0'/2`＝double 3.0、`5/2.5`＝double 2.0。
+    //   整除与 INT48 范围的判断保持原样（下面的 `@mod` 与范围检查一字未动）。
+    const lhs_is_int = tryAsIntLoose(lhs) != null;
+    const rhs_is_int = tryAsIntLoose(rhs) != null;
     if (lhs_is_int and rhs_is_int) {
         const a = lhs.toInt();
         const b = rhs.toInt();
@@ -6816,14 +6849,20 @@ fn emitDeprecatedFloatToInt(f: f64) void {
 
 /// 幂运算（PHP语义：两 int 操作数且结果不溢出 i64 时返回 int）
 pub fn php_pow(base: Value, exp: Value) !Value {
+    // ★F-55（R-171）：`**` 与 `pow()` 此前**漏发** `A non-numeric value encountered`（门 NST n15 实测：
+    //   PHP 侧两行 Warning 齐全，AOT 只给了正确的值 `25` 却没有警告），而 add/sub/mul/div/mod 都发了。
+    //   次序照 PHP：先警告、再操作数类型检查。
+    emitArithmeticStringWarningIfNeeded(base);
+    emitArithmeticStringWarningIfNeeded(exp);
     // ★F-46（R-165）：幂运算同样要过操作数类型检查（实测 `[1] ** 2` ⇒ `array ** int`、`2 ** [1]` ⇒ `int ** array`）
     if (!checkArithmeticOperand(base) or !checkArithmeticOperand(exp)) {
         return throwUnsupportedOperandError(base, exp, "**");
     }
     // 两 int 操作数：尝试整數幂
-    if (base.isInt() and exp.isInt()) {
-        const b = base.asInt();
-        const e = exp.asInt();
+    // ★F-55（R-171）：旧条件 `base.isInt() and exp.isInt()` ⇒ `'5' ** 2` 落 float 得 `25.0`（PHP 是 int 25）。
+    //   改走宽松前缀判据，且**必须用判据解析出的值**——原来的 `base.asInt()` 对字符串寄存器是 NaN-boxing 兜底（读成 0）。
+    if (tryAsIntLoose(base)) |b| {
+        if (tryAsIntLoose(exp)) |e| {
         // 负指数 → 浮点
         if (e < 0) {
             return Value.initFloat(std.math.pow(f64, @as(f64, @floatFromInt(b)), @as(f64, @floatFromInt(e))));
@@ -6831,6 +6870,11 @@ pub fn php_pow(base: Value, exp: Value) !Value {
         // 0^0 = 1, 0^n = 0
         if (e == 0) return Value.initInt(1);
         if (b == 0) return Value.initInt(0);
+        // ★R-170 边界：下面的逐次乘法只靠「溢出」退出，而 |b| == 1 **永不溢出**
+        //   ⇒ `1 ** 1000000000000`／`(-1) ** 1000000000000` 会循环一万亿次（挂死）。
+        //   |b| >= 2 时最多 63 步即溢出，所以下面的循环本身是有界的；只需把 ±1 提前收掉（PHP 亦为 int 1/±1）。
+        if (b == 1) return Value.initInt(1);
+        if (b == -1) return Value.initInt(if (@mod(e, 2) == 0) @as(i64, 1) else @as(i64, -1));
         // 逐次乘法 + 溢出检测
         var result: i64 = 1;
         var i: i64 = 0;
@@ -6843,6 +6887,7 @@ pub fn php_pow(base: Value, exp: Value) !Value {
             result = mul_res[0];
         }
         return Value.initInt(result);
+        }
     }
     const b = base.toFloat();
     const e = exp.toFloat();
@@ -12855,8 +12900,15 @@ pub fn php_array_is_list(arr: Value) Value {
 
 /// abs - 绝对值
 pub fn php_abs(val: Value) !Value {
-    if (val.isInt()) {
-        const i = val.asInt();
+    // ★F-55（R-171）两处：
+    //   ① 结果类型：PHP 的 `abs` 对整数字面量形给 int（实测 `abs('5')`=int 5、`abs(true)`=int 1、`abs(null)`=int 0），
+    //      对 float 语法给 double（`abs('-5.0')`=5.0）⇒ 这里用**严格** `tryAsInt`；
+    //      ★刻意**不用**二元算术的宽松判据：内置形参是严格口径（`abs('5abc')`／`abs('0x10')` 在 PHP 直接 TypeError，
+    //      那面属 F-62，本轮不关）。
+    //   ② 越界：`abs(PHP_INT_MIN)` 在 PHP 是 **float**，旧写法在 i64 上 `-i` **回绕** ⇒ 实测 AOT 返回
+    //      `integer -9223372036854775808`（连符号都错）。与 `php_neg` 已有的 minInt 处理保持同形。
+    if (tryAsInt(val)) |i| {
+        if (i == std.math.minInt(i64)) return Value.initFloat(-@as(f64, @floatFromInt(i)));
         return Value.initInt(if (i < 0) -i else i);
     }
     const f = val.toFloat();
@@ -13121,20 +13173,15 @@ pub fn php_exp(val: Value) !Value {
 
 /// pow - 幂运算
 pub fn php_pow_func(base: Value, exponent: Value) !Value {
-    if (base.isInt() and exponent.isInt()) {
-        const b = base.asInt();
-        const e = exponent.asInt();
-        if (e >= 0 and e < 64) {
-            // 整数幂运算
-            var result: i64 = 1;
-            var i: i64 = 0;
-            while (i < e) : (i += 1) {
-                result *= b;
-            }
-            return Value.initInt(result);
-        }
-    }
-    return Value.initFloat(std.math.pow(f64, base.toFloat(), exponent.toFloat()));
+    // ★F-59 的漏网面（R-170）：`$a ** $b` 走 `php_pow`，而内置函数形式 `pow($a, $b)` 走的是这里
+    //   （`native_linker.zig:4288` 把内置名 `pow` 映射到 `php_pow_func`）。旧体**没有操作数检查**，
+    //   末路直接 `std.math.pow(f64, toFloat(), toFloat())` ⇒ `pow($o,2)`/`pow([1],2)`/`pow("abc",2)` 静默给 0.0/1.0；
+    //   而 PHP 两种写法**同一措辞** `Unsupported operand types: Foo ** int`（门 BLT b17/b21/b22/b23，对照臂 b26 `2 ** [1]` 已绿）。
+    //   旧体还有第二处错：`0 <= e < 64` 用**无溢出检测**的逐次乘法 ⇒ 有符号回绕，
+    //   实测 `pow(2,63)` AOT 给 `integer -9223372036854775808`、`pow(10,19)` 给 `integer -8446744073709551616`，
+    //   而 PHP 两者都给 float（b27/b28）。`php_pow` 用 `@mulWithOverflow` 溢出即转 float ⇒ 正确。
+    //   ⇒ 修法＝**委托 `php_pow`**（同一语义只留一份实现，DRY；不在此重抄检查与溢出逻辑）。
+    return php_pow(base, exponent);
 }
 
 /// fmod - 浮点数取模（结果符号与被除数相同，匹配 C/PHP fmod）
