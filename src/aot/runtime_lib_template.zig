@@ -5699,7 +5699,7 @@ pub fn php_add(lhs: Value, rhs: Value) !Value {
     emitArithmeticStringWarningIfNeeded(lhs);
     emitArithmeticStringWarningIfNeeded(rhs);
     if (!checkArithmeticOperand(lhs) or !checkArithmeticOperand(rhs)) {
-        emitUnsupportedOperandError(lhs, rhs, "+");
+        return throwUnsupportedOperandError(lhs, rhs, "+");
     }
     // PHP 类型推导：int/bool/null/整数字符串 之间运算 → int
     if (tryAsInt(lhs)) |a| {
@@ -5723,7 +5723,7 @@ pub fn php_sub(lhs: Value, rhs: Value) !Value {
     emitArithmeticStringWarningIfNeeded(lhs);
     emitArithmeticStringWarningIfNeeded(rhs);
     if (!checkArithmeticOperand(lhs) or !checkArithmeticOperand(rhs)) {
-        emitUnsupportedOperandError(lhs, rhs, "-");
+        return throwUnsupportedOperandError(lhs, rhs, "-");
     }
     if (tryAsInt(lhs)) |a| {
         if (tryAsInt(rhs)) |b| {
@@ -5871,6 +5871,8 @@ pub fn php_increment(val: Value) !Value {
         }
         return perlStringIncrement(val);
     }
+    // ★F-59（R-169）：对象走自己的措辞，**不能**落到 `php_add`（那边现在也拒对象，但措辞是 `Foo + int`，不是 PHP 的 `Cannot increment Foo`）
+    if (Value_isObject(val)) return throwCannotIncDecError(val, "increment");
     return try php_add(val, Value.initInt(1));
 }
 
@@ -5907,11 +5909,15 @@ pub fn php_decrement(val: Value) !Value {
         // 非数字字符串：递减是 no-op
         return val;
     }
+    // ★F-59（R-169）：同 `php_increment`——对象必须走 `Cannot decrement <类名>`，不能落到 `php_sub` 的算术措辞上
+    if (Value_isObject(val)) return throwCannotIncDecError(val, "decrement");
     return try php_sub(val, Value.initInt(1));
 }
 
 /// Negate a value (unary minus)
 pub fn php_neg(val: Value) !Value {
+    // ★F-46（R-165）：数组／非数字字符串取负在 PHP 是可捕获 TypeError（实测 `-[1]` ⇒ `array * int`）
+    if (!checkArithmeticOperand(val)) return throwNegateOperandError(val);
     if (val.isInt()) {
         const a = val.asInt();
         // i64 最小值取负会溢出
@@ -5928,7 +5934,7 @@ pub fn php_mul(lhs: Value, rhs: Value) !Value {
     emitArithmeticStringWarningIfNeeded(lhs);
     emitArithmeticStringWarningIfNeeded(rhs);
     if (!checkArithmeticOperand(lhs) or !checkArithmeticOperand(rhs)) {
-        emitUnsupportedOperandError(lhs, rhs, "*");
+        return throwUnsupportedOperandError(lhs, rhs, "*");
     }
     if (tryAsInt(lhs)) |a| {
         if (tryAsInt(rhs)) |b| {
@@ -5950,7 +5956,7 @@ pub fn php_div(lhs: Value, rhs: Value) !Value {
     emitArithmeticStringWarningIfNeeded(lhs);
     emitArithmeticStringWarningIfNeeded(rhs);
     if (!checkArithmeticOperand(lhs) or !checkArithmeticOperand(rhs)) {
-        emitUnsupportedOperandError(lhs, rhs, "/");
+        return throwUnsupportedOperandError(lhs, rhs, "/");
     }
     // PHP 将 null/bool 视为整数参与整除判断
     const lhs_is_int = lhs.isInt() or lhs.isNull() or lhs.isBool();
@@ -5984,19 +5990,13 @@ pub fn php_mod(lhs: Value, rhs: Value) !Value {
     emitArithmeticStringWarningIfNeeded(lhs);
     emitArithmeticStringWarningIfNeeded(rhs);
     if (!checkArithmeticOperand(lhs) or !checkArithmeticOperand(rhs)) {
-        emitUnsupportedOperandError(lhs, rhs, "%");
+        return throwUnsupportedOperandError(lhs, rhs, "%");
     }
     // PHP 8.1+: float→int 隐式转换精度丢失时输出 Deprecated
-    if (lhs.isFloat()) {
-        const f = lhs.asFloat();
-        const i: f64 = @floatFromInt(lhs.toInt());
-        if (f != i) emitDeprecatedFloatToInt(f);
-    }
-    if (rhs.isFloat()) {
-        const f = rhs.asFloat();
-        const i: f64 = @floatFromInt(rhs.toInt());
-        if (f != i) emitDeprecatedFloatToInt(f);
-    }
+    // ★R-167（F-58）：这两段逐字节抽出为 `emitFloatToIntDeprecatedIfNeeded`，与位运算族共用同一口径（DRY），
+    //   形为不变（门 OPS 的 o4/o9/g8 与门 MSR 的 m12/g8 同时守护这条回边）。
+    emitFloatToIntDeprecatedIfNeeded(lhs);
+    emitFloatToIntDeprecatedIfNeeded(rhs);
     const a = lhs.toInt();
     const b = rhs.toInt();
     if (b == 0) {
@@ -6004,6 +6004,199 @@ pub fn php_mod(lhs: Value, rhs: Value) !Value {
         return Value.initNull();
     }
     return Value.initInt(@rem(a, b));
+}
+
+/// ★F-58（R-167）：位运算／移位／取反族的**操作数类型名**。
+/// 实测 PHP 在操作数消息里用**类名**而不是 "object"：`1 & new stdClass()` ⇒ `stdClass & int`、
+/// `~new stdClass()` ⇒ `Cannot perform bitwise not on stdClass`。
+/// ⇒ 不能直接用 `valueTypeName`（它对对象返回 "object"，那是别处消息的口径，改动它会波及全族 ⇒ 规则 30）。
+fn operandTypeName(v: Value) []const u8 {
+    if (Value_isObject(v)) return Value_asObject(v).class_name;
+    return valueTypeName(v);
+}
+
+/// ★F-58：float 参与整数语义运算时的 Deprecated 诊断（`%` 与位运算族同口径，从 `php_mod` 的内联形
+///   抽成 helper 供本族复用；判据仍是「转整后回浮不等」＝精度丢失）。
+fn emitFloatToIntDeprecatedIfNeeded(v: Value) void {
+    if (!v.isFloat()) return;
+    const f = v.asFloat();
+    const i: f64 = @floatFromInt(v.toInt());
+    if (f != i) emitDeprecatedFloatToInt(f);
+}
+
+const BitOpKind = enum { bit_and, bit_or, bit_xor, shl, shr };
+
+/// 二元位运算/移位的操作数错误。★实测两条措辞口径（照抄，不自创）：
+///   · 对象**恒排在前面**：`new Foo() & 1` 与 `1 & new Foo()` 都印 `Foo & int`；
+///   · array/string 用自然顺序：`[1] & 2` ⇒ `array & int`，`2 & [1]` ⇒ `int & array`。
+/// （另注：PHP 自身在 `1 & (array)1` 这一支上印成 `array & int`，与字面数组相反 ⇒ 属 PHP 侧不一致，
+///   本实现按字面数组的自然顺序口径，不复刻该反常。见工单 §41.6。）
+fn throwBitwiseOperandError(lhs: Value, rhs: Value, op: []const u8) Value {
+    const swap = Value_isObject(rhs) and !Value_isObject(lhs);
+    const first: Value = if (swap) rhs else lhs;
+    const second: Value = if (swap) lhs else rhs;
+    var buf: [512]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        &buf,
+        "Unsupported operand types: {s} {s} {s}",
+        .{ operandTypeName(first), op, operandTypeName(second) },
+    ) catch "Unsupported operand types";
+    _ = throwThrowable("TypeError", msg, runtime_allocator) catch {};
+    return Value.initNull();
+}
+
+/// ★F-58：一元 `~` 的操作数错误，消息族不同：`Cannot perform bitwise not on <X>`。
+/// 实测 <X> 口径：array⇒"array"、null⇒"null"、bool⇒**值文本 "true"/"false"**、对象⇒类名。
+fn throwBitNotError(v: Value) Value {
+    const kind: []const u8 = if (v.isBool()) (if (v.asBool()) "true" else "false") else operandTypeName(v);
+    var buf: [512]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "Cannot perform bitwise not on {s}", .{kind}) catch "Cannot perform bitwise not";
+    _ = throwThrowable("TypeError", msg, runtime_allocator) catch {};
+    return Value.initNull();
+}
+
+/// ★F-58：负移位计数 ⇒ 可捕获 `ArithmeticError: Bit shift by negative number`（实测 `1 << -1`、`8 >> -1`）。
+fn throwBitShiftNegativeError() Value {
+    _ = throwThrowable("ArithmeticError", "Bit shift by negative number", runtime_allocator) catch {};
+    return Value.initNull();
+}
+
+const ByteBitOp = enum { byte_and, byte_or, byte_xor };
+
+/// ★F-58：string × string 的逐字节位运算（**PHP 合法**运算，当前 AOT 一律给 int 0）。
+/// 实测 8.5.8 的长度口径：`&`／`^` 结果长度取**较短者**；`|` 取**较长者**并把短者右侧补 `\0`。
+///   `"abcdef" & "abc"` = "abc"(len 3)、`"ab" ^ "abc"` = 两枚 NUL、`"ab" | "a"` = "ab"(len 2)。
+fn bitwiseStringResult(lhs: Value, rhs: Value, op: ByteBitOp) !Value {
+    const l = lhs.asString();
+    const r = rhs.asString();
+    const lb = l.data[0..l.length];
+    const rb = r.data[0..r.length];
+    const n: usize = if (op == .byte_or) @max(lb.len, rb.len) else @min(lb.len, rb.len);
+    const buf = try runtime_allocator.alloc(u8, n);
+    errdefer runtime_allocator.free(buf);
+    for (buf, 0..) |*slot, i| {
+        const x: u8 = if (i < lb.len) lb[i] else 0;
+        const y: u8 = if (i < rb.len) rb[i] else 0;
+        slot.* = switch (op) {
+            .byte_and => x & y,
+            .byte_or => x | y,
+            .byte_xor => x ^ y,
+        };
+    }
+    return Value.initString(try PHPString.init(runtime_allocator, buf));
+}
+
+/// ★F-58（R-167）：位运算/移位族的统一实现，取代发射器里的裸 Zig 整数运算。
+/// 收口的五面（全部实测定档，门 MSR b1..b46）：
+///   ① 操作数类型检查（array／无数字前缀字符串／对象 ⇒ 可捕获 TypeError，消息带运算符与真实类型名）
+///   ② string × string 逐字节（返回 **string**，连 `'5' & '3'` 都是字符串 "1" 而非 int 1）
+///   ③ 有数字前缀的非数字串 ⇒ 先 `A non-numeric value encountered` Warning（与算术族同口径，复用
+///      `emitArithmeticStringWarningIfNeeded` + `checkArithmeticOperand`，不另造窄判据 ⇒ 规则 30）
+///   ④ float ⇒ Deprecated 隐式转整
+///   ⑤ 移位计数：负数 ⇒ ArithmeticError；≥64 ⇒ shl 得 0、shr 得符号填充；shl 走 i128 截断复刻位回绕
+fn php_bitwise(lhs: Value, rhs: Value, kind: BitOpKind) !Value {
+    // ② string × string 先判：`"abc" << 2` 这类移位**不**逐字节，实测走数值路径 ⇒ 抛 `string << int`
+    if (lhs.isString() and rhs.isString()) {
+        const byte_op: ?ByteBitOp = switch (kind) {
+            .bit_and => .byte_and,
+            .bit_or => .byte_or,
+            .bit_xor => .byte_xor,
+            .shl, .shr => null,
+        };
+        if (byte_op) |bb| return bitwiseStringResult(lhs, rhs, bb);
+    }
+
+    const symbol: []const u8 = switch (kind) {
+        .bit_and => "&",
+        .bit_or => "|",
+        .bit_xor => "^",
+        .shl => "<<",
+        .shr => ">>",
+    };
+
+    // ① 对象在此**提前**进操作数错误：不是因为 `checkArithmeticOperand` 放行对象（R-169 起它也拒对象），
+    //   而是位运算族的消息口径是「对象恒排前」（`1 & new Foo()` ⇒ `Foo & int`），
+    //   与算术族的自然顺序不同 ⇒ 必须走 `throwBitwiseOperandError`，不能落到下面的通用检查上（R-167 门 MSR b26/b27）。
+    if (Value_isObject(lhs) or Value_isObject(rhs)) return throwBitwiseOperandError(lhs, rhs, symbol);
+
+    // ③ 数值路径：与算术族共用口径
+    emitArithmeticStringWarningIfNeeded(lhs);
+    emitArithmeticStringWarningIfNeeded(rhs);
+    if (!checkArithmeticOperand(lhs) or !checkArithmeticOperand(rhs)) {
+        return throwBitwiseOperandError(lhs, rhs, symbol);
+    }
+
+    // ④ float ⇒ Deprecated
+    emitFloatToIntDeprecatedIfNeeded(lhs);
+    emitFloatToIntDeprecatedIfNeeded(rhs);
+
+    const a = lhs.toInt();
+    const b = rhs.toInt();
+    return switch (kind) {
+        .bit_and => Value.initInt(a & b),
+        .bit_or => Value.initInt(a | b),
+        .bit_xor => Value.initInt(a ^ b),
+        .shl => shiftLeftValue(a, b),
+        .shr => shiftRightValue(a, b),
+    };
+}
+
+/// ⑤ 实测 `1 << 64` = 0、`PHP_INT_MAX << 1` = -2（位回绕）、`1 << -1` ⇒ ArithmeticError
+fn shiftLeftValue(a: i64, count: i64) Value {
+    if (count < 0) return throwBitShiftNegativeError();
+    if (count >= 64) return Value.initInt(0);
+    const widened: i128 = a;
+    return Value.initInt(@truncate(widened << @intCast(castShift(count))));
+}
+
+/// ⑤ 实测 `-1 >> 64` = -1（符号填充）、`8 >> 65` = 0、`-8 >> 1` = -4；Zig 的 `>>` 对有符号数即算术右移
+fn shiftRightValue(a: i64, count: i64) Value {
+    if (count < 0) return throwBitShiftNegativeError();
+    if (count >= 64) return Value.initInt(if (a < 0) @as(i64, -1) else 0);
+    return Value.initInt(a >> @intCast(castShift(count)));
+}
+
+/// 计数已在上游保证 `0 <= count < 64` ⇒ 这里的 @intCast 恒安全（集中一处，避免两条分支各写一遍范围判断）
+fn castShift(count: i64) u6 {
+    return @intCast(count);
+}
+
+pub fn php_bit_and(lhs: Value, rhs: Value) !Value {
+    return php_bitwise(lhs, rhs, .bit_and);
+}
+
+pub fn php_bit_or(lhs: Value, rhs: Value) !Value {
+    return php_bitwise(lhs, rhs, .bit_or);
+}
+
+pub fn php_bit_xor(lhs: Value, rhs: Value) !Value {
+    return php_bitwise(lhs, rhs, .bit_xor);
+}
+
+pub fn php_shl(lhs: Value, rhs: Value) !Value {
+    return php_bitwise(lhs, rhs, .shl);
+}
+
+pub fn php_shr(lhs: Value, rhs: Value) !Value {
+    return php_bitwise(lhs, rhs, .shr);
+}
+
+/// ★F-58：一元 `~`。实测三处与二元族**不同**，故独立成支：
+///   · string（含数字串）**一律**逐字节取反并返回 **string**（`~"abc"`、`~'5'` 都是字符串）
+///   · null／bool 也拒（二元族接受）⇒ `Cannot perform bitwise not on null`／`... on true`
+///   · 只有 int／float 进数值路径（float 先 Deprecated）
+pub fn php_bit_not(val: Value) !Value {
+    if (val.isString()) {
+        const s = val.asString();
+        const src = s.data[0..s.length];
+        const buf = try runtime_allocator.alloc(u8, src.len);
+        errdefer runtime_allocator.free(buf);
+        for (buf, 0..) |*slot, i| slot.* = ~src[i];
+        return Value.initString(try PHPString.init(runtime_allocator, buf));
+    }
+    if (!val.isInt() and !val.isFloat()) return throwBitNotError(val);
+    emitFloatToIntDeprecatedIfNeeded(val);
+    return Value.initInt(~val.toInt());
 }
 
 /// 检查字符串是否为 PHP 数字字符串
@@ -6073,12 +6266,19 @@ fn emitArithmeticStringWarningIfNeeded(v: Value) void {
 
 /// 检查 Value 是否可参与算术运算（PHP 8.x）
 /// PHP 8.x: 无数字前缀的字符串参与算术运算时抛 TypeError
+/// ★F-59（R-169，门 OBJ 逐枚实测）：对象同样**不能**参与算术，且**带 `__toString` 也一样抛**
+///   （`Strable + 1` ⇒ `Unsupported operand types: Strable + int`）。
+///   ★我先前担心的 DateInterval 特例经实测**不存在**：`$d1 - $d2`（DateTime − DateTime）在 PHP 8.5.8 就是抛
+///   `Unsupported operand types: DateTime - DateTime`（取差要靠 `diff()`）⇒ 「对象一律拒」就是 PHP 正确行为。
+///   改前的症状是对象被 NaN-boxing 兜底成 0.0 ⇒ `$o + 1` 静默得 **float 1.0**（门 OBJ o1..o9/o11..o15 十七枚红）。
 fn checkArithmeticOperand(v: Value) bool {
     // 字符串：只有有数字前缀的才是合法算术操作数
     if (v.isString()) {
         const str = v.asString().data[0..v.asString().length];
         return hasNumericPrefix(str);
     }
+    // ★F-59：对象不能参与算术运算（PHP 抛可捕获 TypeError，措辞用**类名**）
+    if (Value_isObject(v)) return false;
     // 数组不能参与算术运算（会抛TypeError）
     return !v.isArray();
 }
@@ -6177,49 +6377,57 @@ pub fn emitUndefinedVariableWarning(name: []const u8) void {
     fileWriteAll(1, wmsg);
 }
 
-/// 输出 Unsupported operand types TypeError 并终止
-fn emitUnsupportedOperandError(
-    lhs: Value,
-    rhs: Value,
-    op: []const u8,
-) noreturn {
-    const ltype = valueTypeName(lhs);
-    const rtype = valueTypeName(rhs);
-    // PHP 输出顺序：先 stderr，再 stdout
-    var ebuf: [1024]u8 = undefined;
-    const emsg = std.fmt.bufPrint(
-        &ebuf,
-        "PHP Fatal error:  Uncaught TypeError: Unsupported" ++
-            " operand types: {s} {s} {s} in {s}:{d}\n" ++
-            "Stack trace:\n#0 {{main}}\n" ++
-            "  thrown in {s} on line {d}\n",
-        .{
-            ltype,    op,       rtype,
-            src_file, src_line, src_file,
-            src_line,
-        },
-    ) catch {
-        std.process.exit(255);
-    };
-    fileWriteAll(2, emsg);
-    var buf: [1024]u8 = undefined;
+/// ★F-46（R-165）：操作数类型错误改为**可捕获**的 TypeError。
+/// 旧实现是 `noreturn` + `std.process.exit(255)`：消息文本本来就对，但**绕过了整条异常路由**
+/// ⇒ `try { [1] + 2; } catch (TypeError)` 永远接不住（门 OPS 的 12 枚 `aot_exit255=yes` 臂就是它）。
+/// 现形与 `php_intdiv` 的 R-159 先例同构：置 `throwThrowable` 后返回 null，由调用点的
+/// `hasException()` 路由去 catch／未捕获上报（未捕获文本面另有 F-39-ii，不在本面）。
+fn throwUnsupportedOperandError(lhs: Value, rhs: Value, op: []const u8) Value {
+    var buf: [512]u8 = undefined;
+    // ★F-59（R-169）：算术族的消息口径＝**自然顺序 ＋ 类名**（实测 `1 + new Foo()` ⇒ `int + Foo`、
+    //   `new Foo() + 1` ⇒ `Foo + int`）⇒ 这里把 `valueTypeName`（对象给 "object"）换成 `operandTypeName`。
+    //   ★与位运算族**不同**：那族是「对象恒排前 ＋ 类名」（`throwBitwiseOperandError`），两套不合并。
+    //   `valueTypeName` 的其余调用点（`count()` 的 "must be of type array, object given" 等）措辞本来就是 "object" ⇒ **不动**。
     const msg = std.fmt.bufPrint(
         &buf,
-        "\nFatal error: Uncaught TypeError: Unsupported" ++
-            " operand types: {s} {s} {s} in {s}:{d}\n" ++
-            "Stack trace:\n#0 {{main}}\n" ++
-            "  thrown in {s} on line {d}\n",
-        .{
-            ltype,    op,       rtype,
-            src_file, src_line, src_file,
-            src_line,
-        },
-    ) catch {
-        fileWriteAll(1, "\nFatal error: TypeError\n");
-        std.process.exit(255);
-    };
-    fileWriteAll(1, msg);
-    std.process.exit(255);
+        "Unsupported operand types: {s} {s} {s}",
+        .{ operandTypeName(lhs), op, operandTypeName(rhs) },
+    ) catch "Unsupported operand types";
+    // 置异常失败只可能是分配失败：此时仍然返回 null，绝不回退成 exit(255)（那就退回旧缺陷形态）
+    _ = throwThrowable("TypeError", msg, runtime_allocator) catch {};
+    return Value.initNull();
+}
+
+/// ★一元取负的操作数面：PHP 的措辞是 `{type} * int`（实测 `-[1]` ⇒ `Unsupported operand types: array * int`），
+/// 照抄该措辞，不自创 "array * -1" 之类的形式。
+fn throwNegateOperandError(val: Value) Value {
+    var buf: [512]u8 = undefined;
+    // ★F-59（R-169）：同样改走 `operandTypeName` ⇒ 实测 `-$o` ⇒ `Unsupported operand types: Foo * int`（类名）。
+    const msg = std.fmt.bufPrint(
+        &buf,
+        "Unsupported operand types: {s} * int",
+        .{operandTypeName(val)},
+    ) catch "Unsupported operand types";
+    // 置异常失败只可能是分配失败：此时仍然返回 null，绝不回退成 exit(255)（那就退回旧缺陷形态）
+    _ = throwThrowable("TypeError", msg, runtime_allocator) catch {};
+    return Value.initNull();
+}
+
+/// ★F-59（R-169）：增量/自减对**对象**用的是**第三套措辞**（实测四形 pre/post 同文本）：
+///   `++$o`／`$o++` ⇒ `Cannot increment Foo`；`--$o`／`$o--` ⇒ `Cannot decrement Foo`（都是可捕获 TypeError）。
+///   类型名同样取**类名**（走 `operandTypeName`）。
+///   ★必要性有实测证据：只改 `checkArithmeticOperand` 而不在 `php_increment/php_decrement` 末路拦对象时，
+///   这五形会被通用算术检查接成 `Unsupported operand types: Foo + int`＝**把一种错换成另一种错**
+///   （门 OBJ 中间态实测 i1..i5 全为此形）。
+fn throwCannotIncDecError(val: Value, action: []const u8) Value {
+    var buf: [512]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        &buf,
+        "Cannot {s} {s}",
+        .{ action, operandTypeName(val) },
+    ) catch "Cannot increment";
+    _ = throwThrowable("TypeError", msg, runtime_allocator) catch {};
+    return Value.initNull();
 }
 
 /// 获取 Value 的 PHP 类型名称
@@ -6608,6 +6816,10 @@ fn emitDeprecatedFloatToInt(f: f64) void {
 
 /// 幂运算（PHP语义：两 int 操作数且结果不溢出 i64 时返回 int）
 pub fn php_pow(base: Value, exp: Value) !Value {
+    // ★F-46（R-165）：幂运算同样要过操作数类型检查（实测 `[1] ** 2` ⇒ `array ** int`、`2 ** [1]` ⇒ `int ** array`）
+    if (!checkArithmeticOperand(base) or !checkArithmeticOperand(exp)) {
+        return throwUnsupportedOperandError(base, exp, "**");
+    }
     // 两 int 操作数：尝试整數幂
     if (base.isInt() and exp.isInt()) {
         const b = base.asInt();

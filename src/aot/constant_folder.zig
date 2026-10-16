@@ -164,11 +164,24 @@ fn foldBitwise(lhs: ConstantValue, rhs: ConstantValue, op: BitOp) FoldResult {
     return .cannot_fold;
 }
 
+/// ★F-58（R-167）：PHP 的移位计数语义**不是** C 的 `& 63` 掩码（实测 8.5.8 逐枚取证）：
+///   `1 << 64` = 0、`8 >> 65` = 0、`-1 >> 64` = -1（符号填充）、`PHP_INT_MAX << 1` = -2（位回绕），
+///   而 `1 << -1`／`8 >> -1` 抛**可捕获**的 `ArithmeticError: Bit shift by negative number`。
+///   旧实现 `@intCast(@mod(rhs.int, 64))` 三条全错；且负计数时 `@intCast` 到 `u6` 是**越界转换**
+///   （安全构建可 panic，非安全构建取低 6 位 ⇒ 实测 `1 << -1` 静默得 `1 << 63`）。
+///   ⇒ 负计数**不折叠**，把指令留给运行时的 `php_shl/php_shr` 去抛（DCE 已不再删语句位的它，见 F-58 更正④）。
 fn foldShift(lhs: ConstantValue, rhs: ConstantValue, op: ShiftOp) FoldResult {
     if (lhs == .int and rhs == .int) {
-        const shift_amt: u6 = @intCast(@mod(rhs.int, 64));
+        if (rhs.int < 0) return .cannot_fold;
+        if (rhs.int >= 64) {
+            // 计数 ≥64：shl 恒 0；shr 按被移数符号填充（`-1 >> 64` = -1、`8 >> 65` = 0）
+            const fill: i64 = if (op == .shl) 0 else if (lhs.int < 0) -1 else 0;
+            return .{ .folded = .{ .int = fill } };
+        }
+        const shift_amt: u6 = @intCast(rhs.int);
         return .{ .folded = .{ .int = switch (op) {
-            .shl => lhs.int << shift_amt,
+            // shl 经 i128 中间量再截断，复刻 PHP 的位回绕（`PHP_INT_MAX << 1` = -2）而非溢出诊断
+            .shl => @truncate(@as(i128, lhs.int) << shift_amt),
             .shr => lhs.int >> shift_amt,
         } } };
     }

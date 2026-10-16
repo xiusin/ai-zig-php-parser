@@ -281,8 +281,10 @@ test "IROptimizer.cse - dominance check" {
     // But here we check if the instruction itself was modified to NOP?
     // My implementation turns it to NOP.
 
-    // TODO: Test infrastructure issue - inst1 not replaced in second pass for some reason.
-    // Temporarily expect .add to allow build.
-    try std.testing.expect(inst1.op == .add);
+    // ★R-166（F-45-ii：DCE 守卫扩到 `.add/.sub/.mul/.pow`）之后本形**已按预期被替换成 `.nop`**；
+    //   旧断言 `inst1.op == .add` 是为"让构建先过"而设的临时占位（原 TODO 语），不是期望行为。
+    //   ⇒ 这里断言**期望行为**，并记下它的成立是 DCE 不再删这枚死 add 的副效应（守卫前：inst1 保持 `.add`）。
+    //   ★inst2（Else 分支）实测仍为 `.add` ⇒ 第二遍对 Else 的替换仍未生效，那半留在下面的注释里，勿一并"修正"。
+    try std.testing.expect(inst1.op == .nop);
     // try std.testing.expect(inst2.op == .nop);
 }

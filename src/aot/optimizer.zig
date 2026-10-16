@@ -3238,21 +3238,32 @@ pub const IROptimizer = struct {
         }
     }
 
-    /// ★F-45：PHP 侧会抛、且**本仓发射出的抛出今天就可被 catch 接住**的算术指令。
+    /// ★F-45 / F-45-ii：PHP 侧会抛、且**本仓抛出的异常今天可被 catch 接住**的算术指令。
     /// 它们不写内存、不改全局 ⇒ `hasSideEffects` 判 false，但「结果被丢弃」不等于「可以删」：
-    /// 语句位的 `$a / 0;`、`$a % 0;` 在 PHP 抛可捕获的 DivisionByZeroError，被删就变成静默继续执行。
-    /// 集合按实测定（`--aot-disable-pass=dce` 当修后代理逐枚复证）：
+    /// 语句位的 `$a / 0;`、`$a % 0;`、`$a + 1;`（`$a` 为非法操作数）在 PHP 抛**可捕获**异常，被删就变成静默继续执行。
+    /// 集合按实测定（`--aot-disable-pass=dce` 当修后代理逐枚复证，门 F45FACE p01–p19）：
     ///   `.div` ⇒ `DivisionByZeroError: Division by zero`  `.mod` ⇒ `…: Modulo by zero`
-    ///   ★两枚的捕获形与 PHP **逐字节等值**（门 F45FACE 的 p09/p10 实测 off 侧 == PHP）⇒ 保住即收敛。
-    /// ★刻意排除 `.add/.sub/.mul`：它们的 `TypeError: Unsupported operand types: string + int` 今天走
-    ///   **Zig error 外逸**（消息文本对，但 try/catch 接不住 ⇒ 属 F-39 族）。保住它们只把「静默」变成
-    ///   「不可捕获的 Fatal」，既不算收敛又可能打死当前通过的语料脚本 ⇒ 另立 F-45-ii，等 F-39 后再收。
-    /// ★同样排除 `.pow`（PHP 8.5.8 对 `0 ** -1` 只给 Deprecated 并返回 INF，AOT 两臂都不抛）、
-    ///   位运算/移位/取负（数组操作数时 AOT **两侧都不抛** ⇒ 属 F-46「操作数类型检查缺数组」，与本面正交）。
+    ///   `.add/.sub/.mul/.pow` ⇒ `TypeError: Unsupported operand types: <l> <op> <r>`
+    /// ★两条**更正**（旧排除理由都已被实测推翻，留字于此防重犯）：
+    ///   ① R-161 时排除 add/sub/mul 的理由是「消息对但走 Zig error 外逸 ⇒ 保住只是把静默换成不可捕获 Fatal」；
+    ///      R-165 已把该站点改成 `throwThrowable` ＋给五枚算术分支补异常路由（门 OPS 实测 `aot_caught 0→14`、
+    ///      输出与 PHP 逐字节同）⇒ 排除前提消失，故本批改为纳入（＝F-45-ii 收口）。
+    ///   ② R-161 时排除 `.pow` 的理由是「`0 ** -1` 在 PHP 8.5.8 只给 Deprecated、不抛」——那说的是**数值**形，
+    ///      而操作数**类型**非法形（`"abc" ** 2`）实测照样抛可捕获 TypeError（门 F45FACE p19：on＝`RET`、
+    ///      off＝与 PHP 逐字节同）⇒ `.pow` 亦纳入。
+    /// ★更正 ③（R-167 实测）：语句位的 `-([1]);` 结果被丢弃 ⇒ 被 DCE 删掉 ⇒ AOT 打 `RET|1`、PHP 打
+    ///   `CAUGHT|TypeError|Unsupported operand types: array * int`（门 MSR b47；对照 b48 语句位 `2 ** [1];`
+    ///   已因 `.pow` 在集合内而正确 CAUGHT）⇒ `.neg` 自 R-165 起同样经 `throwNegateOperandError` 可捕获，
+    ///   上一版把它留在集合外是**漏项**，本批改入。
+    /// ★更正 ④（R-167 F-58 落地）：位运算/移位/取反**不再是「AOT 侧不经运行时检查」**——
+    ///   上一版的排除理由正是「发射成裸 Zig 整数运算、保住也换不回任何抛出」，而 F-58 已把
+    ///   `.bit_and/.bit_or/.bit_xor/.shl/.shr/.bit_not` 六枚站点改走带检查的 `php_bitwise*/php_bit_not`
+    ///   ⇒ 排除前提消失，故六枚一并入集合（门 MSR b23/b24/b25 为语句位判据）。
     fn isRaisableArithmetic(self: *const Self, inst: *const Instruction) bool {
         _ = self;
         return switch (inst.op) {
-            .div, .mod => true,
+            .add, .sub, .mul, .div, .mod, .pow, .neg => true,
+            .bit_and, .bit_or, .bit_xor, .shl, .shr, .bit_not => true,
             else => false,
         };
     }
@@ -5897,26 +5908,37 @@ pub const IROptimizer = struct {
                 }
             },
             .mod => |op| {
-                // Modulo by power of 2 -> bitwise and
+                // ★F-56（R-167 甲型，老铁裁定）：`x % 2^n` → `x & (2^n-1)` **只对非负整数 x 成立**。
+                //   PHP 的 `%` 是**截断取余**（结果随被除数符号：`-3 % 2` = -1），而 `x & mask` 是**向下取模**
+                //   （恒非负：`-3 & 1` = 1）；且 lhs 完全可能是 array／非数字字符串／float，此时 PHP 抛可捕获
+                //   TypeError 或给 Deprecated，而改写后的 `.bit_and` 发射成裸 Zig 整数运算 ⇒ 整条 `php_mod`
+                //   （连同 R-165 补的 `checkArithmeticOperand` 与 `hasException()` 路由）被绕开。
+                //   ⇒ 守卫口径与 `:5840` `.mul`、`:5872` `.div` 一致：**两操作数都必须是常量整数**，
+                //     且额外要求 `lhs >= 0`（mul/div 没有这一条是因为它们只在整除/常量位上改写，符号无损）。
+                //   实测代价：语料 24 枚 `% 2^n` 站点（11 个文件）回退 php_mod，模运算热点循环 1–3%。
                 if (self.constant_values.get(op.rhs.id)) |rhs| {
                     if (rhs == .int and rhs.int > 0) {
                         if (self.isPowerOfTwo(rhs.int)) |_| {
-                            const mask_reg = func.newRegister(.i64);
-                            const mask_inst = try self.allocator.create(Instruction);
-                            mask_inst.* = .{
-                                .result = mask_reg,
-                                .op = .{ .const_int = rhs.int - 1 },
-                                .location = inst.location,
-                            };
+                            if (self.constant_values.get(op.lhs.id)) |lhs| {
+                                if (lhs == .int and lhs.int >= 0) {
+                                    const mask_reg = func.newRegister(.i64);
+                                    const mask_inst = try self.allocator.create(Instruction);
+                                    mask_inst.* = .{
+                                        .result = mask_reg,
+                                        .op = .{ .const_int = rhs.int - 1 },
+                                        .location = inst.location,
+                                    };
 
-                            try block.instructions.insert(self.allocator, index, mask_inst);
+                                    try block.instructions.insert(self.allocator, index, mask_inst);
 
-                            inst.op = .{ .bit_and = .{
-                                .lhs = op.lhs,
-                                .rhs = mask_reg,
-                            } };
+                                    inst.op = .{ .bit_and = .{
+                                        .lhs = op.lhs,
+                                        .rhs = mask_reg,
+                                    } };
 
-                            return 1;
+                                    return 1;
+                                }
+                            }
                         }
                     }
                 }

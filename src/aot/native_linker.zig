@@ -19828,6 +19828,23 @@ pub const NativeLinker = struct {
         try writer.writeAll("        }\n");
     }
 
+    /// ★F-58（R-167）：**块级（4 空格缩进）抛出站点**后的异常路由，供位运算/移位/取反六枚站点复用。
+    /// 生成的代码与 `.add/.sub/.mul/.div/.mod/.pow/.neg` 七处既有内联形**逐字节同构**（那里保持原样不动，
+    /// 免得把无关的发射器重排混进本轮）；缺了这段的后果见 F-57：异常要延到下一条被检查的指令才路由，
+    /// 实测症状是「错误之后的语句先被执行、RET 与 CAUGHT 都打」。
+    fn emitThrowSiteRouting(self: *Self, writer: anytype) !void {
+        try writer.writeAll("    if (runtime.hasException()) {\n");
+        try writer.writeAll("        @branchHint(.unlikely);\n");
+        try self.generateCleanupCode(writer);
+        if (self.current_exception_handler) |handler_idx| {
+            try writer.print("        current_block = {d};\n", .{handler_idx});
+            try writer.writeAll("        continue;\n");
+        } else {
+            try writer.writeAll("        return error.RuntimeError;\n");
+        }
+        try writer.writeAll("    }\n");
+    }
+
     /// 生成指令（简化版）
     fn generateInstructionSimple(self: *Self, code: *std.ArrayList(u8), inst: *const IR.Instruction) !void {
         @setEvalBranchQuota(10000); // 增加编译时求值限制
@@ -20642,6 +20659,18 @@ pub const NativeLinker = struct {
                         }
                     }
                 }
+                // ★F-46/F-57（R-165）：算术 binop 现在会抛可捕获的 TypeError ⇒ 必须与 .div/.mod 同形补一枚路由检查，
+                //   否则异常要延到下一条被检查的指令才路由（实测症状：错误之后的语句先被执行、RET 与 CAUGHT 都打）。
+                try writer.writeAll("    if (runtime.hasException()) {\n");
+                try writer.writeAll("        @branchHint(.unlikely);\n");
+                try self.generateCleanupCode(writer);
+                if (self.current_exception_handler) |handler_idx| {
+                    try writer.print("        current_block = {d};\n", .{handler_idx});
+                    try writer.writeAll("        continue;\n");
+                } else {
+                    try writer.writeAll("        return error.RuntimeError;\n");
+                }
+                try writer.writeAll("    }\n");
             },
             .sub => |op| {
                 if (inst.result) |reg| {
@@ -20737,6 +20766,18 @@ pub const NativeLinker = struct {
                         }
                     }
                 }
+                // ★F-46/F-57（R-165）：算术 binop 现在会抛可捕获的 TypeError ⇒ 必须与 .div/.mod 同形补一枚路由检查，
+                //   否则异常要延到下一条被检查的指令才路由（实测症状：错误之后的语句先被执行、RET 与 CAUGHT 都打）。
+                try writer.writeAll("    if (runtime.hasException()) {\n");
+                try writer.writeAll("        @branchHint(.unlikely);\n");
+                try self.generateCleanupCode(writer);
+                if (self.current_exception_handler) |handler_idx| {
+                    try writer.print("        current_block = {d};\n", .{handler_idx});
+                    try writer.writeAll("        continue;\n");
+                } else {
+                    try writer.writeAll("        return error.RuntimeError;\n");
+                }
+                try writer.writeAll("    }\n");
             },
             .mul => |op| {
                 // std.debug.print("generateInstructionSimple: mul reg_{d} = reg_{d} * reg_{d}\n", .{ if (inst.result) |r| r.id else 999, op.lhs.id, op.rhs.id });
@@ -20833,6 +20874,18 @@ pub const NativeLinker = struct {
                         }
                     }
                 }
+                // ★F-46/F-57（R-165）：算术 binop 现在会抛可捕获的 TypeError ⇒ 必须与 .div/.mod 同形补一枚路由检查，
+                //   否则异常要延到下一条被检查的指令才路由（实测症状：错误之后的语句先被执行、RET 与 CAUGHT 都打）。
+                try writer.writeAll("    if (runtime.hasException()) {\n");
+                try writer.writeAll("        @branchHint(.unlikely);\n");
+                try self.generateCleanupCode(writer);
+                if (self.current_exception_handler) |handler_idx| {
+                    try writer.print("        current_block = {d};\n", .{handler_idx});
+                    try writer.writeAll("        continue;\n");
+                } else {
+                    try writer.writeAll("        return error.RuntimeError;\n");
+                }
+                try writer.writeAll("    }\n");
             },
             .div => |op| {
                 if (inst.result) |reg| {
@@ -21081,42 +21134,80 @@ pub const NativeLinker = struct {
                         },
                     }
                 }
+                // ★F-46/F-57（R-165）：算术 binop 现在会抛可捕获的 TypeError ⇒ 必须与 .div/.mod 同形补一枚路由检查，
+                //   否则异常要延到下一条被检查的指令才路由（实测症状：错误之后的语句先被执行、RET 与 CAUGHT 都打）。
+                try writer.writeAll("    if (runtime.hasException()) {\n");
+                try writer.writeAll("        @branchHint(.unlikely);\n");
+                try self.generateCleanupCode(writer);
+                if (self.current_exception_handler) |handler_idx| {
+                    try writer.print("        current_block = {d};\n", .{handler_idx});
+                    try writer.writeAll("        continue;\n");
+                } else {
+                    try writer.writeAll("        return error.RuntimeError;\n");
+                }
+                try writer.writeAll("    }\n");
             },
             .shl => |op| {
+                // ★F-58（R-167）：旧形是 `@truncate(@as(i128, reg_x.toInt()) << @as(u7, @intCast(@min(63, @max(0, reg_y.toInt())))))`
+                //   ⇒ 裸 Zig 整数运算：无操作数类型检查、无负计数 ArithmeticError、计数钳位口径也不同于 PHP，
+                //   且缺 alloca 解引用。改走带检查的 `runtime.php_shl` ＋ 抛出站点路由。
                 if (inst.result) |reg| {
-                    try writer.print("    reg_{d} = runtime.Value.initInt(@truncate(@as(i128, reg_{d}.toInt()) << @as(u7, @intCast(@min(63, @max(0, reg_{d}.toInt()))))));\n", .{ reg.id, op.lhs.id, op.rhs.id });
+                    try self.writeRegAssignmentPrefix(writer, reg.id);
+                    try writer.writeAll("try runtime.php_shl(");
+                    try self.writePhpValueExpr(writer, .php_value, op.lhs.id);
+                    try writer.writeAll(", ");
+                    try self.writePhpValueExpr(writer, .php_value, op.rhs.id);
+                    try writer.writeAll(");\n");
+                    try self.emitThrowSiteRouting(writer);
                 }
             },
             .shr => |op| {
+                // ★F-58（R-167）：同 `.shl`，旧形 `reg_x.toInt() >> @as(u6, …)` 无检查、无负计数诊断。
                 if (inst.result) |reg| {
-                    try writer.print("    reg_{d} = runtime.Value.initInt(reg_{d}.toInt() >> @as(u6, @intCast(@min(63, @max(0, reg_{d}.toInt())))));\n", .{ reg.id, op.lhs.id, op.rhs.id });
+                    try self.writeRegAssignmentPrefix(writer, reg.id);
+                    try writer.writeAll("try runtime.php_shr(");
+                    try self.writePhpValueExpr(writer, .php_value, op.lhs.id);
+                    try writer.writeAll(", ");
+                    try self.writePhpValueExpr(writer, .php_value, op.rhs.id);
+                    try writer.writeAll(");\n");
+                    try self.emitThrowSiteRouting(writer);
                 }
             },
             .bit_and => |op| {
+                // ★F-58（R-167）：旧形 `reg_x.toInt() & reg_y.toInt()` ⇒ array/非数字串静默给垃圾，
+                //   且 PHP 合法的 string × string 逐字节运算被算成 int 0。改走 `runtime.php_bit_and`。
                 if (inst.result) |reg| {
-                    const alloca_regs = self.current_alloca_regs orelse unreachable;
-                    const lhs_deref = if (alloca_regs.contains(op.lhs.id)) ".*" else "";
-                    const rhs_deref = if (alloca_regs.contains(op.rhs.id)) ".*" else "";
-                    const result_deref = if (alloca_regs.contains(reg.id)) ".*" else "";
-                    try writer.print("    reg_{d}{s} = runtime.Value.initInt(reg_{d}{s}.toInt() & reg_{d}{s}.toInt());\n", .{ reg.id, result_deref, op.lhs.id, lhs_deref, op.rhs.id, rhs_deref });
+                    try self.writeRegAssignmentPrefix(writer, reg.id);
+                    try writer.writeAll("try runtime.php_bit_and(");
+                    try self.writePhpValueExpr(writer, .php_value, op.lhs.id);
+                    try writer.writeAll(", ");
+                    try self.writePhpValueExpr(writer, .php_value, op.rhs.id);
+                    try writer.writeAll(");\n");
+                    try self.emitThrowSiteRouting(writer);
                 }
             },
             .bit_or => |op| {
+                // ★F-58（R-167）：同 `.bit_and`，走 `runtime.php_bit_or`（string × string 取**较长者**并补 NUL）。
                 if (inst.result) |reg| {
-                    const alloca_regs = self.current_alloca_regs orelse unreachable;
-                    const lhs_deref = if (alloca_regs.contains(op.lhs.id)) ".*" else "";
-                    const rhs_deref = if (alloca_regs.contains(op.rhs.id)) ".*" else "";
-                    const result_deref = if (alloca_regs.contains(reg.id)) ".*" else "";
-                    try writer.print("    reg_{d}{s} = runtime.Value.initInt(reg_{d}{s}.toInt() | reg_{d}{s}.toInt());\n", .{ reg.id, result_deref, op.lhs.id, lhs_deref, op.rhs.id, rhs_deref });
+                    try self.writeRegAssignmentPrefix(writer, reg.id);
+                    try writer.writeAll("try runtime.php_bit_or(");
+                    try self.writePhpValueExpr(writer, .php_value, op.lhs.id);
+                    try writer.writeAll(", ");
+                    try self.writePhpValueExpr(writer, .php_value, op.rhs.id);
+                    try writer.writeAll(");\n");
+                    try self.emitThrowSiteRouting(writer);
                 }
             },
             .bit_xor => |op| {
+                // ★F-58（R-167）：同 `.bit_and`，走 `runtime.php_bit_xor`（string × string 取较短者）。
                 if (inst.result) |reg| {
-                    const alloca_regs = self.current_alloca_regs orelse unreachable;
-                    const lhs_deref = if (alloca_regs.contains(op.lhs.id)) ".*" else "";
-                    const rhs_deref = if (alloca_regs.contains(op.rhs.id)) ".*" else "";
-                    const result_deref = if (alloca_regs.contains(reg.id)) ".*" else "";
-                    try writer.print("    reg_{d}{s} = runtime.Value.initInt(reg_{d}{s}.toInt() ^ reg_{d}{s}.toInt());\n", .{ reg.id, result_deref, op.lhs.id, lhs_deref, op.rhs.id, rhs_deref });
+                    try self.writeRegAssignmentPrefix(writer, reg.id);
+                    try writer.writeAll("try runtime.php_bit_xor(");
+                    try self.writePhpValueExpr(writer, .php_value, op.lhs.id);
+                    try writer.writeAll(", ");
+                    try self.writePhpValueExpr(writer, .php_value, op.rhs.id);
+                    try writer.writeAll(");\n");
+                    try self.emitThrowSiteRouting(writer);
                 }
             },
             .nop => {},
@@ -21998,6 +22089,18 @@ pub const NativeLinker = struct {
                         }
                     }
                 }
+                // ★F-46/F-57（R-165）：算术 binop 现在会抛可捕获的 TypeError ⇒ 必须与 .div/.mod 同形补一枚路由检查，
+                //   否则异常要延到下一条被检查的指令才路由（实测症状：错误之后的语句先被执行、RET 与 CAUGHT 都打）。
+                try writer.writeAll("    if (runtime.hasException()) {\n");
+                try writer.writeAll("        @branchHint(.unlikely);\n");
+                try self.generateCleanupCode(writer);
+                if (self.current_exception_handler) |handler_idx| {
+                    try writer.print("        current_block = {d};\n", .{handler_idx});
+                    try writer.writeAll("        continue;\n");
+                } else {
+                    try writer.writeAll("        return error.RuntimeError;\n");
+                }
+                try writer.writeAll("    }\n");
             },
             .clone => |op| {
                 if (inst.result) |reg| {
@@ -22005,17 +22108,17 @@ pub const NativeLinker = struct {
                 }
             },
             .bit_not => |op| {
+                // ★F-58（R-167）：旧形 `runtime.Value.initInt(~reg_x.toInt())`（另有三个按 `operand.type_`
+                //   分支的同构写法）⇒ array/null/bool/对象全都静默算成整数，PHP 合法的 string 逐字节取反
+                //   （返回 string）也被算成 int，且 float 的 Deprecated 丢失。
+                //   实测本发射器里寄存器一律是 `Value`（旧 `.bit_and` 支就直接调 `.toInt()`），
+                //   故原先按 `operand.type_` 分三档的写法在这里没有实际差别 ⇒ 统一走 `runtime.php_bit_not`。
                 if (inst.result) |reg| {
-                    const operand_type_tag = @as(std.meta.Tag(IR.Type), op.operand.type_);
-
-                    // 所有寄存器都声明为 Value，所以总是返回 Value
-                    if (operand_type_tag == .php_value) {
-                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initInt(~reg_{d}.toInt());\n", .{op.operand.id});
-                    } else if (operand_type_tag == .i64) {
-                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initInt(~reg_{d});\n", .{op.operand.id});
-                    } else {
-                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initInt(~reg_{d}.toInt());\n", .{op.operand.id});
-                    }
+                    try self.writeRegAssignmentPrefix(writer, reg.id);
+                    try writer.writeAll("try runtime.php_bit_not(");
+                    try self.writePhpValueExpr(writer, .php_value, op.operand.id);
+                    try writer.writeAll(");\n");
+                    try self.emitThrowSiteRouting(writer);
                 }
             },
             .not => |op| {
