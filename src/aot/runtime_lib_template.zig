@@ -7187,7 +7187,13 @@ fn castIntArgWithWarn(arg: Value) i64 {
 fn emitDeprecatedFloatToInt(f: f64) void {
     // 警告信息中使用完整精度（PHP serialize_precision），不是 echo 的 precision=14
     var fbuf: [64]u8 = undefined;
-    const fstr = std.fmt.bufPrint(&fbuf, "{d}", .{f}) catch "?";
+    // ★F-69：`{d}` 把 NAN 印成**小写** `nan`，而 PHP 8.5.8 实测发大写原词 `NAN`（`INF`／`-INF` 同理）
+    //   ⇒ 非有限值改走序列化口径（`renderFloatPHP` 对非有限直接返回 `NAN`／`INF`／`-INF`）。
+    //   有限值**仍用 `{d}`**：它就是最短往返十进制，且界内非整值（如 `2.5`）的既有语料读数逐字不能动。
+    const fstr = if (std.math.isFinite(f))
+        std.fmt.bufPrint(&fbuf, "{d}", .{f}) catch "?"
+    else
+        phpFormatFloatSerialize(&fbuf, f, false, true);
     // PHP 输出顺序：先 stderr，再 stdout
     var err_buf: [512]u8 = undefined;
     const stderr_msg = std.fmt.bufPrint(
