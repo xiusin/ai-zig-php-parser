@@ -3418,7 +3418,7 @@ pub const NativeLinker = struct {
                     if (prop.default_value) |dv| {
                         switch (dv.op) {
                             .const_int => |v| try writer.print("runtime.Value.initInt({d})", .{v}),
-                            .const_float => |v| try writer.print("runtime.Value.initFloat({d})", .{v}),
+                            .const_float => |v| try writeFloatValueExpr(writer, v),
                             .const_bool => |v| try writer.writeAll(if (v) "runtime.Value.initBool(true)" else "runtime.Value.initBool(false)"),
                             .const_null => try writer.writeAll("runtime.Value.initNull()"),
                             .const_string => |sid| try writer.print(
@@ -3457,7 +3457,7 @@ pub const NativeLinker = struct {
                         if (prop.default_value) |dv| {
                             switch (dv.op) {
                                 .const_int => |v| try writer.print("runtime.Value.initInt({d})", .{v}),
-                                .const_float => |v| try writer.print("runtime.Value.initFloat({d})", .{v}),
+                                .const_float => |v| try writeFloatValueExpr(writer, v),
                                 .const_bool => |v| try writer.writeAll(if (v) "runtime.Value.initBool(true)" else "runtime.Value.initBool(false)"),
                                 .const_null => try writer.writeAll("runtime.Value.initNull()"),
                                 .const_string => |sid| try writer.print(
@@ -3488,7 +3488,7 @@ pub const NativeLinker = struct {
                     if (prop.default_value) |dv| {
                         switch (dv.op) {
                             .const_int => |v| try writer.print("runtime.Value.initInt({d})", .{v}),
-                            .const_float => |v| try writer.print("runtime.Value.initFloat({d})", .{v}),
+                            .const_float => |v| try writeFloatValueExpr(writer, v),
                             .const_bool => |v| try writer.writeAll(if (v) "runtime.Value.initBool(true)" else "runtime.Value.initBool(false)"),
                             .const_null => try writer.writeAll("runtime.Value.initNull()"),
                             .const_string => |sid| try writer.print(
@@ -3514,7 +3514,7 @@ pub const NativeLinker = struct {
                         if (prop.default_value) |dv| {
                             switch (dv.op) {
                                 .const_int => |v| try writer.print("runtime.Value.initInt({d})", .{v}),
-                                .const_float => |v| try writer.print("runtime.Value.initFloat({d})", .{v}),
+                                .const_float => |v| try writeFloatValueExpr(writer, v),
                                 .const_bool => |v| try writer.writeAll(if (v) "runtime.Value.initBool(true)" else "runtime.Value.initBool(false)"),
                                 .const_null => try writer.writeAll("runtime.Value.initNull()"),
                                 .const_string => |sid| try writer.print(
@@ -3634,7 +3634,11 @@ pub const NativeLinker = struct {
                         if (ec.value) |cv| {
                             switch (cv) {
                                 .int => |v| try writer.print("        try enum_obj.setProperty(\"value\", runtime.Value.initInt({d}));\n", .{v}),
-                                .float => |v| try writer.print("        try enum_obj.setProperty(\"value\", runtime.Value.initFloat({d}));\n", .{v}),
+                                .float => |v| {
+                                    try writer.writeAll("        try enum_obj.setProperty(\"value\", ");
+                                    try writeFloatValueExpr(writer, v);
+                                    try writer.writeAll("));\n");
+                                },
                                 .string => |s| {
                                     const escaped_val = try self.escapeString(s);
                                     defer self.allocator.free(escaped_val);
@@ -3697,7 +3701,7 @@ pub const NativeLinker = struct {
                 if (prop.default_value) |dv| {
                     switch (dv.op) {
                         .const_int => |v| try writer.print("runtime.Value.initInt({d})", .{v}),
-                        .const_float => |v| try writer.print("runtime.Value.initFloat({d})", .{v}),
+                        .const_float => |v| try writeFloatValueExpr(writer, v),
                         .const_bool => |v| try writer.writeAll(if (v) "runtime.Value.initBool(true)" else "runtime.Value.initBool(false)"),
                         .const_null => try writer.writeAll("runtime.Value.initNull()"),
                         .const_string => |sid| try writer.print(
@@ -3717,7 +3721,7 @@ pub const NativeLinker = struct {
                 if (prop.default_value) |dv| {
                     switch (dv.op) {
                         .const_int => |v| try writer.print("runtime.Value.initInt({d})", .{v}),
-                        .const_float => |v| try writer.print("runtime.Value.initFloat({d})", .{v}),
+                        .const_float => |v| try writeFloatValueExpr(writer, v),
                         .const_bool => |v| try writer.writeAll(if (v) "runtime.Value.initBool(true)" else "runtime.Value.initBool(false)"),
                         .const_null => try writer.writeAll("runtime.Value.initNull()"),
                         .const_string => |sid| try writer.print(
@@ -3978,6 +3982,12 @@ pub const NativeLinker = struct {
         needs_allocator: bool,
         may_raise: bool = true,
         ref_params: []const u8 = &[_]u8{}, // indices of reference parameters (1-based for optional params)
+        /// ★F-75：该 handler 的**位置形参总数**（不含 `allocator`）。`0` ＝ 未声明 ⇒ 发射器完全不介入（旧行为）。
+        ///   声明后，通用尾支会在 `op.args.len` 落在 [必填数, handler_params) 区间时逐个补 `optional_defaults[i]`。
+        handler_params: u8 = 0,
+        /// PHP 的可选形参缺省值，**按位**给出 Zig 表达式文本（长度＝可选参个数，从尾部数）。
+        /// ★不可一律补 `null`：`int $base = 10`／`bool $strict = false` 补 null 会改变行为（R-172 的「省略形参到达时为 null」同族教训）。
+        optional_defaults: []const []const u8 = &.{},
     };
 
     fn builtinInfo(func_name: []const u8) ?BuiltinInfo {
@@ -4017,13 +4027,13 @@ pub const NativeLinker = struct {
         .{ "constant", bi(.{ .runtime_name = "php_constant_get", .needs_allocator = true }) },
         .{ "get_defined_constants", bi(.{ .runtime_name = "php_get_defined_constants", .needs_allocator = true }) },
 
-        .{ "class_exists", bi(.{ .runtime_name = "php_class_exists", .needs_allocator = true }) },
-        .{ "enum_exists", bi(.{ .runtime_name = "php_enum_exists", .needs_allocator = true }) },
-        .{ "interface_exists", bi(.{ .runtime_name = "php_interface_exists", .needs_allocator = true }) },
-        .{ "trait_exists", bi(.{ .runtime_name = "php_trait_exists", .needs_allocator = true }) },
+        .{ "class_exists", bi(.{ .runtime_name = "php_class_exists", .needs_allocator = true, .handler_params = 2, .optional_defaults = &.{"runtime.Value.initBool(true)"} }) },
+        .{ "enum_exists", bi(.{ .runtime_name = "php_enum_exists", .needs_allocator = true, .handler_params = 2, .optional_defaults = &.{"runtime.Value.initBool(true)"} }) },
+        .{ "interface_exists", bi(.{ .runtime_name = "php_interface_exists", .needs_allocator = true, .handler_params = 2, .optional_defaults = &.{"runtime.Value.initBool(true)"} }) },
+        .{ "trait_exists", bi(.{ .runtime_name = "php_trait_exists", .needs_allocator = true, .handler_params = 2, .optional_defaults = &.{"runtime.Value.initBool(true)"} }) },
         .{ "method_exists", bi(.{ .runtime_name = "php_method_exists", .needs_allocator = false }) },
         .{ "property_exists", bi(.{ .runtime_name = "php_property_exists", .needs_allocator = false }) },
-        .{ "is_subclass_of", bi(.{ .runtime_name = "php_is_subclass_of", .needs_allocator = false }) },
+        .{ "is_subclass_of", bi(.{ .runtime_name = "php_is_subclass_of", .needs_allocator = false, .handler_params = 3, .optional_defaults = &.{"runtime.Value.initBool(true)"} }) },
         .{ "is_a", bi(.{ .runtime_name = "php_is_a", .needs_allocator = false }) },
         .{ "class_alias", bi(.{ .runtime_name = "php_class_alias", .needs_allocator = false }) },
         .{ "class_uses", bi(.{ .runtime_name = "php_class_uses", .needs_allocator = true }) },
@@ -4417,7 +4427,7 @@ pub const NativeLinker = struct {
         .{ "ctype_graph", bi(.{ .runtime_name = "php_ctype_graph", .needs_allocator = false, .may_raise = false }) },
 
         // 网络函数
-        .{ "getenv", bi(.{ .runtime_name = "php_getenv", .needs_allocator = true }) },
+        .{ "getenv", bi(.{ .runtime_name = "php_getenv", .needs_allocator = true, .handler_params = 2, .optional_defaults = &.{"runtime.Value.initBool(false)"} }) },
         .{ "gethostbyname", bi(.{ .runtime_name = "php_gethostbyname", .needs_allocator = true }) },
         .{ "gethostname", bi(.{ .runtime_name = "php_gethostname", .needs_allocator = true }) },
         .{ "parse_url", bi(.{ .runtime_name = "php_parse_url", .needs_allocator = true }) },
@@ -19054,6 +19064,34 @@ pub const NativeLinker = struct {
         return false;
     }
 
+    /// ★F-75：内建调用的实参拼装＝`writeValueArgs` ＋ **声明式可选参补齐**。
+    ///   旧状：模板 handler 是定长形参（Zig 无默认形参），可选参只在发射器里按名字手工补/裁
+    ///   （`php_strstr`/`php_hash_pbkdf2`/`php_file_put_contents`/`php_str_word_count` 四处；其中 `file_put_contents`
+    ///   的 `@min(args,2)` 是**静默丢参**）。未被点名的内建多传一参 ⇒ `expected N argument(s), found N+1` ⇒ 合法 PHP 编不过（实测 49 枚）。
+    ///   ⇒ 补齐条件刻意收紧：`handler_params` 未声明 ⇒ 不介入；实参数少于可选段起点（必填参没给齐）⇒ 不介入，
+    ///     留给既有 arity 诊断（F-41 丙型）报可读错误，绝不替用户臆造必填实参。
+    fn writeBuiltinArgs(
+        self: *Self,
+        writer: anytype,
+        args: []const IR.Register,
+        func_name: []const u8,
+    ) !void {
+        try self.writeValueArgs(writer, args);
+        const info = builtinInfo(func_name) orelse return;
+        const total: usize = info.handler_params;
+        if (total == 0 or args.len == 0 or args.len >= total) return;
+        const opt_from: usize = total - @min(total, info.optional_defaults.len);
+        if (args.len < opt_from) return;
+        var i: usize = args.len;
+        while (i < total) : (i += 1) {
+            // ★循环只在 `i ≥ args.len ≥ opt_from` 时进入 ⇒ 补齐位必有对应缺省文本；
+            //   原先这里还带一个「越界则补 initNull()」的兜底分支，既不可达又读起来像"缺省会补 null"
+            //   （补 null 会改变行为，正是 R-172 踩过的形态）⇒ 工单 §53.4/#89 删除。
+            try writer.writeAll(", ");
+            try writer.writeAll(info.optional_defaults[i - opt_from]);
+        }
+    }
+
     fn writeValueArgs(
         self: *Self,
         writer: anytype,
@@ -19891,7 +19929,9 @@ pub const NativeLinker = struct {
                     if (self.regMayHeap(reg.id)) {
                         try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
                     }
-                    try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initFloat({d});\n", .{val});
+                    try self.writeRegAssignmentPrefix(writer, reg.id);
+                    try writeFloatValueExpr(writer, val);
+                    try writer.writeAll(";\n");
                 }
             },
             .const_bool => |val| {
@@ -23016,7 +23056,7 @@ pub const NativeLinker = struct {
                                             }
                                         }
                                         try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeBuiltinArgs(writer, op.args, op.func_name);
                                         try writer.writeAll(", runtime.runtime_allocator);\n");
                                     }
                                     // COW store-back: 原地排序函数返回排序后的数组，需写回第一个参数寄存器
@@ -23431,7 +23471,7 @@ pub const NativeLinker = struct {
                                     } else {
                                         try self.writeRegAssignmentFmt(writer, reg.id, "runtime.{s}(", .{runtime_name});
                                     }
-                                    try self.writeValueArgs(writer, op.args);
+                                    try self.writeBuiltinArgs(writer, op.args, op.func_name);
                                     try writer.writeAll(");\n");
                                 }
                             }
@@ -23596,7 +23636,7 @@ pub const NativeLinker = struct {
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
                                 } else if (op.args.len > 0) {
                                     try writer.print("    _ = try runtime.{s}(", .{runtime_name});
-                                    try self.writeValueArgs(writer, op.args);
+                                    try self.writeBuiltinArgs(writer, op.args, op.func_name);
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
                                 } else {
                                     try writer.print("    _ = try runtime.{s}(runtime.runtime_allocator);\n", .{runtime_name});
@@ -23639,7 +23679,7 @@ pub const NativeLinker = struct {
                                     } else {
                                         try writer.print("    _ = runtime.{s}(", .{runtime_name});
                                     }
-                                    try self.writeValueArgs(writer, op.args);
+                                    try self.writeBuiltinArgs(writer, op.args, op.func_name);
                                     try writer.writeAll(");\n");
                                 }
                             }
@@ -32591,7 +32631,11 @@ pub const NativeLinker = struct {
     fn writeConstantValueCode(self: *Self, writer: anytype, value: IR.TypeDef.ConstantValue, var_name: []const u8) !void {
         switch (value) {
             .int => |v| try writer.print("        const {s} = runtime.Value.initInt({d});\n", .{ var_name, v }),
-            .float => |v| try writer.print("        const {s} = runtime.Value.initFloat({d});\n", .{ var_name, v }),
+            .float => |v| {
+                try writer.print("        const {s} = ", .{var_name});
+                try writeFloatValueExpr(writer, v);
+                try writer.writeAll(";\n");
+            },
             .string => |s| {
                 const escaped = try self.escapeString(s);
                 defer self.allocator.free(escaped);
@@ -32631,7 +32675,7 @@ pub const NativeLinker = struct {
     fn writeConstantValueInlineDepth(self: *Self, writer: anytype, value: IR.TypeDef.ConstantValue, counter: *u32) !void {
         switch (value) {
             .int => |v| try writer.print("runtime.Value.initInt({d})", .{v}),
-            .float => |v| try writer.print("runtime.Value.initFloat({d})", .{v}),
+            .float => |v| try writeFloatValueExpr(writer, v),
             .string => |s| {
                 const escaped = try self.escapeString(s);
                 defer self.allocator.free(escaped);
@@ -32723,6 +32767,21 @@ pub const NativeLinker = struct {
             try writer.print("\"{s}\"", .{escaped_pn});
         }
         try writer.writeAll("}");
+    }
+
+    /// 发射 `runtime.Value.initFloat(<字面量>)`。
+    /// ★F-67-a：原先各处直接以 `{d}` 打 f64 ⇒ 整值浮点在 Zig 源码里成为**整数令牌**（`1e23`/`1e308`/`DBL_MAX`
+    ///   报 `type 'f64' cannot represent integer value`）、`-0.0` 成为 `-0`（`integer literal '-0' is ambiguous`）、
+    ///   ±INF 成为裸 `inf`（`use of undeclared identifier`）——三者都令**合法 PHP 编译失败**而非运行期差值。
+    ///   无小数点时补 `.0` 令其保持浮点令牌：实测 `std.fmt.parseFloat` 对 19 枚样本（含 ±0.0、`5e-324`、
+    ///   `1e308`、`DBL_MAX`、`1e-320`）逐位回读等价 ⇒ 值不变、只有文本变；非有限值走 `std.math` 常量。
+    fn writeFloatValueExpr(writer: anytype, v: f64) !void {
+        if (std.math.isNan(v)) return writer.writeAll("runtime.Value.initFloat(std.math.nan(f64))");
+        if (std.math.isInf(v)) return writer.print("runtime.Value.initFloat({s}std.math.inf(f64))", .{if (v > 0) "" else "-"});
+        // `{d}` 展开的理论上界 342 字符（`0.` + 323 个零 + 17 位有效），实测最长 326
+        var buf: [512]u8 = undefined;
+        const txt = try std.fmt.bufPrint(&buf, "{d}", .{v});
+        try writer.print("runtime.Value.initFloat({s}{s})", .{ txt, if (std.mem.indexOfScalar(u8, txt, '.') == null) ".0" else "" });
     }
 
     fn escapeString(self: *Self, str: []const u8) ![]const u8 {

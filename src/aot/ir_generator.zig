@@ -69,6 +69,27 @@ const VarUsageEntry = struct {
 
 
 /// IR Generator - converts AST to SSA-form IR
+/// F-69／F-76：编译期把 float 求值成 i64 的**值型**规则（与模板 `floatToIntPHP` 同一条 PHP 语义；
+/// 规格与逐位等价证明＝工单 §56 ＋ 资产 `c069_float_to_int_equiv_tmp.zig`：430 枚真值 bad_val=0）。
+///   ★原先 `generateSwitchStmt` 对 float 型 case 标签直接 `@intFromFloat(val)` **无范围守卫** ⇒ 越界／NAN 标签
+///     在编译期就是 Zig 非法行为；实测 `switch ($v) { case 1e19: … }` 令**编译器自身 Abort trap: 6**（工单 §63.4）。
+///   ★三条区制：界内 `[-2^63, 2^63)` 向零截断；界外取该 double 整数值的 mod 2^64 补码回绕（**没有**"≥2^64 归零"
+///     这条区制，`2^65`/`1e308` 给 0 只是"恰为 2^64 整数倍"的自然结果）；用 IEEE 位型算，全程不碰越界 `@intFromFloat`。
+///   ★这里**绝不**发 PHP 诊断——告警属执行期，编译期只借值型规则。
+fn phpFloatToInt(f: f64) i64 {
+    const two_pow_63: f64 = @floatFromInt(std.math.maxInt(i64));
+    if (f >= -two_pow_63 and f < two_pow_63) return @intFromFloat(f);
+    const bits: u64 = @bitCast(f);
+    const exp11: u32 = @intCast((bits >> 52) & 0x7FF);
+    if (exp11 == 0) return 0; // 次正规到不了这里（必在界内），防御性归零
+    const m: u128 = @as(u128, (1 << 52) | (bits & ((@as(u64, 1) << 52) - 1)));
+    const s: i32 = @as(i32, @intCast(exp11)) - 1075; // = (exp11 - 1023) - 52
+    if (s >= 64) return 0; // m << s 的低 64 位必为 0 ⇒ INF／NAN（exp11＝2047）自然落到这里
+    const low: u64 = if (s <= 0) @truncate(m) else @truncate(m << @intCast(s));
+    const wrapped: u64 = if (bits >> 63 == 1) (~low) +% 1 else low;
+    return @bitCast(wrapped);
+}
+
 pub const IRGenerator = struct {
     allocator: Allocator,
     /// Current IR module being generated
@@ -3196,7 +3217,7 @@ pub const IRGenerator = struct {
                 if (c.int_val) |val| {
                     break :blk val;
                 } else if (c.float_val) |val| {
-                    break :blk @intFromFloat(val);
+                    break :blk phpFloatToInt(val); // ★F-76：原先此处 `@intFromFloat(val)` 无守卫 ⇒ 越界标签令编译器 Abort trap
                 } else if (c.bool_val) |val| {
                     break :blk if (val) 1 else 0;
                 } else {

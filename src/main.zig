@@ -748,7 +748,10 @@ fn runAOTCompilation(allocator: std.mem.Allocator, io: std.Io, cwd_dir: std.Io.D
                 std.debug.print("Parse error: {s}\n", .{error_item.msg});
             }
         }
-        return;
+        // ★F-72（工单 §57）：本函数对「编译期诊断失败」早已 `return error.CompilationFailed`（见下方 :852 一处），
+        //   而这两条解析失败支原先 `return;` ⇒ 明明印了错误却以 rc=0 退出 ⇒ 脚本化调用把解析失败当成功。
+        //   刻意**不**把 rc 对齐成 PHP 运行期的 255：那是执行进程的口径，这里是编译 CLI。
+        return error.CompilationFailed;
     };
 
     // AOT-CODEGEN-011 R-135：parse 期非致命 Deprecated 诊断（仅 AOT 编译入口打印；
@@ -770,7 +773,8 @@ fn runAOTCompilation(allocator: std.mem.Allocator, io: std.Io, cwd_dir: std.Io.D
     }
     if (first_fatal) |first_err| {
         std.debug.print("Error: Parse error: {s} on line {d}\n", .{ first_err.msg, first_err.line });
-        return;
+        // ★F-72：同上，解析期有致命诊断 ⇒ 编译失败，不许 rc=0。
+        return error.CompilationFailed;
     }
 
     if (options.verbose) {

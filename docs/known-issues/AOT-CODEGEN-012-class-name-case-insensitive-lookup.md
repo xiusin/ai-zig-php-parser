@@ -3,7 +3,28 @@
 **问题 ID**: AOT-CODEGEN-012
 **优先级**: **P1**（合法 PHP 跨大小写类使用即命中；同族缺陷 = AOT-CODEGEN-010 §8 #6 函数名 CI，R-124/R-127 已修）
 **性质**: 运行期类表查名（`runtime_lib_template.zig findClass` 精确匹配 + `php_instanceof` 直接名比较）⇒ **仅 AOT**（解释器/字节码的类表为独立实现，本单不涉）
-**状态**: **R-1/R-2/R-3/R-131/R-132/R-136/R-137a/R-138/R-141/R-142/R-143/R-144/R-145/R-146/R-147/R-148/R-148b/R-149/R-150/R-151/R-151b/R-154/R-155/R-156/R-158b/R-159/R-160/R-161/R-163/R-165/R-166/R-167/R-169/R-170/R-171/R-172 已落地并验收；★R-167（F-56 **改定**＋新立并落地 **F-58**，老铁裁「甲型」＋「位运算族本轮一并修」）主门 MSR 建门即 **74 臂**、修前注册红 **48**（F-56 的 14 ＝面 A 类型旁路 6／面 B 负数静默错值 6／面 C float Deprecated 丢失 2；F-58 的 34 ＝操作数检查旁路 9／string×string 合法逐字节 5／诊断与移位计数 7／语句位 DCE 3／对象 3／一元 `~` 7），落地后 **`same=74 diff=0 aot_caught 0→28`**；★**§39.3/§40.4 的「常量折叠绕过检查」是被实测否证的旧归因**——`foldMod` 只在 `.int ∧ .int` 折，真凶是 `optimizer.zig:5903` 强度削减 `.mod` 臂**只查 rhs 不查 lhs**，把 `% 2^n` 改写成 `& (2^n-1)` ⇒ 发射成裸 Zig 运算、整条 php_mod（含 R-165 的检查＋路由）被绕开；因果对照臂 c1（`$a % $m`，m=2）绿 vs m7（`$a % 2`）红 把肇因锁死，c4（`-3 % 2` 两侧皆字面量）绿 反证折叠无辜；★**面 B「`-3 % 2` AOT=1／PHP=-1」是连异常都没有的纯静默错值**（截断取余 vs 向下取模），故守卫比 `.mul/.div` 多一条 `lhs >= 0`；F-58 侧另收 6 枚发射站点（`.shl/.shr/.bit_and/.bit_or/.bit_xor/.bit_not`）＋`foldShift` 的 C 风格 `@mod(rhs,64)` 掩码（`1 << 64` 应 0、负计数应抛 ArithmeticError，且旧写的 `@intCast` 到 u6 是越界转换）＋`isRaisableArithmetic` 补 `.neg`（**R-166 漏项**，b47 实测）与位运算六枚；★PHP 实测口径三条照抄不改：string × string **合法**（`&`/`^` 取较短者、`|` 取较长者补 NUL，`'5' & '3'` 是字符串 "1" 而非 int）、对象操作数**恒排前且用类名**（`1 & new Foo()` ⇒ `Foo & int`，故新增 `operandTypeName` 而**不动** `valueTypeName`）、一元 `~` 自成一支（`Cannot perform bitwise not on <X>`，bool 用值文本 "true"/"false"、**null/bool 也拒**）；★`1 & (array)1` 与 `1 & [1]` 的 PHP 自身措辞不一致**不复刻**，按字面数组自然顺序；★语料暴露普查＝位运算 ∪ `% 2^n` **35 枚**（bit_only 24／modpow_only 2／both 9／neither 33，桶和 68 自证）⇒ 本批改了发射器，影子 `changed_rows` **预期非 0**，归因判据「变化集 ⊆ 这 35 枚」；★性能实测：甲型成本＝A(`$i%2` 走 `&`) vs C(`$i%6` 走 php_mod＋内联常量) 中位 456/461 ms（ReleaseFast ≈1%）、1554/1588 ms（ReleaseSmall ≈2.2%），B(`$i%$m`) 的 +12% 来自 `getGlobalVar` 不是 php_mod；位运算热点修前基准 2119 ms 由链内 PERF 腿复测；★新立 **F-59**（算术族对**对象**完全放行＝`checkArithmeticOperand` 只拒无数字前缀串与 array，对象直接通过 ⇒ `$o + 1` 既不抛也无类名）与 **F-58-b**（`&=` 等复合赋值的结果寄存器被 `ir_generator:5083` 声明为 `.i64`，而 F-58 后 string×string 返回 string ⇒ 下游按 `.asInt()` 消费是潜在类型误读，**尚无运行期红证**）；★自我更正五条留字（§41.7）：门 DIFF 行 printf 少传 `$arc`；臂表表达式参数用双引号 ⇒ `set -u` 下整条门在第 45 臂崩掉；为改表头写的 python 用非唯一短语定位行区间，**删掉门脚本 153 行**（三个探针函数＋m/c/g＋b1..b35），靠「重建后同一子集 26 行逐字节 diff 为空」复证复建成功；`rm` 与 `md5` 并写一条（违规则 47，目标均为本会话 /tmp 草稿）；语句位取负此前无臂覆盖。资产：`optimizer.zig` `0eca28756912214892675ba8c4232d07`／`constant_folder.zig` `14c9fe6b958c98a21a057efea9625807`／`native_linker.zig` `1b70d7ad9fa6187a4b5d2c4a291a0dc4`／模板 `85747609374d54581ea9b46914e318fd`／二进制 `c514f194f274857bae241184e0fa2c9c`（`1ebb5a8b…` 作废）／门 MSR 脚本 `68a3cfb4d2fe1f91dc91ac89014504af`、修前表身 `acac0cf19bbbd6f87892a8c830945616`、修后表身 `27d013deffc0a9976bf9bc0e26268a1d`；★OPS 门**改档**：`same=23 diff=3`（红 o5/o14/g4）⇒ 期望 `same=25 diff=1`（残红只剩 g4＝F-55），按纪律不改已入库门头注释，改档登记于 §41.8；详见 §41）；★R-172（**F-62 落地＝乙型「模板内集中 helper」＋全数值族＋c／d 两段一并修**，§46）：老铁三裁＝「乙／全数值族／c＋d 全修」。
+**状态**: **R-1/R-2/R-3/R-131/R-132/R-136/R-137a/R-138/R-141/R-142/R-143/R-144/R-145/R-146/R-147/R-148/R-148b/R-149/R-150/R-151/R-151b/R-154/R-155/R-156/R-158b/R-159/R-160/R-161/R-163/R-165/R-166/R-167/R-169/R-170/R-171/R-172/R-173/R-173b/R-174 已落地并验收；★R-167（F-56 **改定**＋新立并落地 **F-58**，老铁裁「甲型」＋「位运算族本轮一并修」）主门 MSR 建门即 **74 臂**、修前注册红 **48**（F-56 的 14 ＝面 A 类型旁路 6／面 B 负数静默错值 6／面 C float Deprecated 丢失 2；F-58 的 34 ＝操作数检查旁路 9／string×string 合法逐字节 5／诊断与移位计数 7／语句位 DCE 3／对象 3／一元 `~` 7），落地后 **`same=74 diff=0 aot_caught 0→28`**；★**§39.3/§40.4 的「常量折叠绕过检查」是被实测否证的旧归因**——`foldMod` 只在 `.int ∧ .int` 折，真凶是 `optimizer.zig:5903` 强度削减 `.mod` 臂**只查 rhs 不查 lhs**，把 `% 2^n` 改写成 `& (2^n-1)` ⇒ 发射成裸 Zig 运算、整条 php_mod（含 R-165 的检查＋路由）被绕开；因果对照臂 c1（`$a % $m`，m=2）绿 vs m7（`$a % 2`）红 把肇因锁死，c4（`-3 % 2` 两侧皆字面量）绿 反证折叠无辜；★**面 B「`-3 % 2` AOT=1／PHP=-1」是连异常都没有的纯静默错值**（截断取余 vs 向下取模），故守卫比 `.mul/.div` 多一条 `lhs >= 0`；F-58 侧另收 6 枚发射站点（`.shl/.shr/.bit_and/.bit_or/.bit_xor/.bit_not`）＋`foldShift` 的 C 风格 `@mod(rhs,64)` 掩码（`1 << 64` 应 0、负计数应抛 ArithmeticError，且旧写的 `@intCast` 到 u6 是越界转换）＋`isRaisableArithmetic` 补 `.neg`（**R-166 漏项**，b47 实测）与位运算六枚；★PHP 实测口径三条照抄不改：string × string **合法**（`&`/`^` 取较短者、`|` 取较长者补 NUL，`'5' & '3'` 是字符串 "1" 而非 int）、对象操作数**恒排前且用类名**（`1 & new Foo()` ⇒ `Foo & int`，故新增 `operandTypeName` 而**不动** `valueTypeName`）、一元 `~` 自成一支（`Cannot perform bitwise not on <X>`，bool 用值文本 "true"/"false"、**null/bool 也拒**）；★`1 & (array)1` 与 `1 & [1]` 的 PHP 自身措辞不一致**不复刻**，按字面数组自然顺序；★语料暴露普查＝位运算 ∪ `% 2^n` **35 枚**（bit_only 24／modpow_only 2／both 9／neither 33，桶和 68 自证）⇒ 本批改了发射器，影子 `changed_rows` **预期非 0**，归因判据「变化集 ⊆ 这 35 枚」；★性能实测：甲型成本＝A(`$i%2` 走 `&`) vs C(`$i%6` 走 php_mod＋内联常量) 中位 456/461 ms（ReleaseFast ≈1%）、1554/1588 ms（ReleaseSmall ≈2.2%），B(`$i%$m`) 的 +12% 来自 `getGlobalVar` 不是 php_mod；位运算热点修前基准 2119 ms 由链内 PERF 腿复测；★新立 **F-59**（算术族对**对象**完全放行＝`checkArithmeticOperand` 只拒无数字前缀串与 array，对象直接通过 ⇒ `$o + 1` 既不抛也无类名）与 **F-58-b**（`&=` 等复合赋值的结果寄存器被 `ir_generator:5083` 声明为 `.i64`，而 F-58 后 string×string 返回 string ⇒ 下游按 `.asInt()` 消费是潜在类型误读，**尚无运行期红证**）；★自我更正五条留字（§41.7）：门 DIFF 行 printf 少传 `$arc`；臂表表达式参数用双引号 ⇒ `set -u` 下整条门在第 45 臂崩掉；为改表头写的 python 用非唯一短语定位行区间，**删掉门脚本 153 行**（三个探针函数＋m/c/g＋b1..b35），靠「重建后同一子集 26 行逐字节 diff 为空」复证复建成功；`rm` 与 `md5` 并写一条（违规则 47，目标均为本会话 /tmp 草稿）；语句位取负此前无臂覆盖。资产：`optimizer.zig` `0eca28756912214892675ba8c4232d07`／`constant_folder.zig` `14c9fe6b958c98a21a057efea9625807`／`native_linker.zig` `1b70d7ad9fa6187a4b5d2c4a291a0dc4`／模板 `85747609374d54581ea9b46914e318fd`／二进制 `c514f194f274857bae241184e0fa2c9c`（`1ebb5a8b…` 作废）／门 MSR 脚本 `68a3cfb4d2fe1f91dc91ac89014504af`、修前表身 `acac0cf19bbbd6f87892a8c830945616`、修后表身 `27d013deffc0a9976bf9bc0e26268a1d`；★OPS 门**改档**：`same=23 diff=3`（红 o5/o14/g4）⇒ 期望 `same=25 diff=1`（残红只剩 g4＝F-55），按纪律不改已入库门头注释，改档登记于 §41.8；详见 §41）；★R-173（**F-63 改定＝浮点→字符串其实有两套口径**，§47）：原登记名「大浮点记法」范围被实测否证——`echo`/`(string)`/插值/`print_r`/`http_build_query` 走**显示口径**（`precision=14`，科学切换 `exp>=14 或 exp<=-5`），
+而 `var_dump`/`var_export`/`json_encode`/`debug_zval_dump` 走**序列化口径**（`serialize_precision=-1`＝**最短往返**，切换 `exp>=17`，`.0` **只有 var_export 补**，`json` 用**小写 e** 且 INF/NAN 让整个 encode 返回 false）；
+★Zig 0.16 的 `{d}`/`{e}`/`{}` 实测是「最短位直出」而非 PHP 的 14 位口径 ⇒ 正解是自写「取最短位＋按口径舍入」，且**平分必须取偶**（glibc `%.14G`）：Zig 的 `precision=13` 是 half-away，会把 `123456789012345.0` 舍成 `…35E+14`（PHP 是 `…34`）；
+★而「最短位末位是 5」**不等于真平分**（门 t6 实测：`0.0000123456789012345` 小量值 ulp 远细于第 15 位单位，真值偏上）⇒ 只有恰 15 位时用 **f128 与精确中点比大小**，真相等才取偶；
+落地＝单点核心 `renderFloatPHP`＋`phpFormatFloat`(显示)/`phpFormatFloatSerialize`(序列化) 两支，**11 处站点全部接线**（本仓原有 7 套并行实现：`php_var_dump` 的 `float({})`、`exportValue` 手写 `e→E`、两处 `json*`、两处 `asFloat()` 直出 `{d}`）；
+★结构上顺带根除 `NoSpaceLeft`（极值一律走科学计数支 ⇒ `[64]u8` 不再被 300 位小数撑爆）与 `number-vs-string` 比较的二次舍入面；
+主门 FLT（新永久门 `c052`，68 臂，一臂过七条输出路径）修前 `same=32 diff=24` ⇒ 终档 **`same=59 diff=4 compile_fail=5`**，F-63 自身**注册红清零**；★连带把 **BLT 由 `126/3` 改档为 `128/1`**（关 b27/b28）与 **NST 由 `31/1` 改档为 `32/0`**（关 n31，继 OPS 之后第二道零注册红的数值门）；
+纯模板轮 ⇒ 二进制仍 `bdd3af32…`、链 `c053`（30 腿 7570s，26/28 腿逐字同）＋R-173b 复测（FLT 全档不变、主回归 `Pass 67/Skip 1`、影子 `changed_rows=0`）；
+本批自我更正三条：① t6 平分推定被自己臂否证；② 改 ① 时把「15 位后还有非零」误判成舍去 ⇒ **b6/c5/c6 由绿转红**（全量复跑才现形，已回绿且未动任何原红臂）；③ 冒烟两次被 **F-67**（浮点字面量发射成整数记法 ⇒ 合法 PHP 编译失败，5 枚 compile_fail）打断，一度误疑新代码；
+新登记 **F-67 / F-66 / F-69 / F-70 / F-71**（含 F-71b `debug_zval_dump` 数组体与 refcount、F-71c `http_build_query` 键编码与嵌套形制），`phpStripTrailingZeros` 自本代起零调用者（按 §六.3 保留待点头）。
+★R-174（**F-67 落地＝浮点常量的发射形态收口到单点 helper**，§48）：根因不在数值也不在显示，而在**发射成 Zig 源码时丢了浮点身份**——十处站点写 `initFloat({d})`，而 Zig 的 `{d}` 对 f64 输出「最短位、永不带 E」⇒ 整值浮点成为**整数令牌**（`1e23`/`1e308`/`DBL_MAX` ⇒ `type 'f64' cannot represent integer value`，阈值实测 1e22 可表／1e23 不可表）、`-0.0` ⇒ `integer literal '-0' is ambiguous`、±INF ⇒ `use of undeclared identifier 'inf'`，三者全是「**合法 PHP 编不过**」。
+表示法选型先测 Zig 真值再定：`{d}` 文本无点则补 `.0`，`std.fmt.parseFloat` 对 **19 枚**（含 ±0.0／`5e-324`／`1e308`／`DBL_MAX`／`1e-320`）**逐位回读 fails=0** ⇒ 值不变只有文本变；否决全量 `@bitCast`（生成码不可读＋全体浮点都漂）与条件式补点（要重实现 53 位可表性，脆弱）。
+落地＝新增 `writeFloatValueExpr(writer, v)`（**注意 Zig 0.16：未使用的形参是编译错误**，首版带 `self` 直接构建失败）＋改 10 处站点（`:3421/3460/3491/3517/3700/3720` 属性默认值、`:3637` enum、`:19894` `.const_float` 指令、`:32594/32644` 类与接口常量）；`initInt({d})` 的 7 处**无此问题**（靶型 i64，Zig 接受 `-9223372036854775808` 字面量）。
+新永久侧门 **LIT**（`c054`，42 臂，载荷＝`var_export|gettype|bin2hex(pack("d"))` **逐位**，分桶含 `compile_fail` 与 `parse_fail`）：修前 `same=13 diff=7 compile_fail=19 parse_fail=3` ⇒ 修后 `same=31 diff=8 compile_fail=0 parse_fail=3`；★连带 **FLT 改档** `compile_fail 5→0、same 59→64、diff 身份一枚未动`。
+★**暴露非引入**：门臂 b4 从「编不过」变「编得过却 rc=255」⇒ 新立 **F-74**（trait 带**静态属性** ⇒ 运行期 `Cannot redeclare trait`；隔离三形证明与浮点无关；语料 trait **0 枚**）；b11/b12 揭示 **F-73**（属性默认值走 `tryMakeConstInstruction` 纯语法白名单，表达式形态返回 null ⇒ `native_linker` 三叉的 `else ⇒ initNull()` 被误命中，**静默 NULL 而 `has_default` 仍 true**；参数默认值/类常量走 IR 折叠故正常）。
+★新立**待裁决（共享层）**：**F-67-b**（`parser.zig:3151/3160` 把超 `PHP_INT_MAX` 的整数字面量**饱和**成 maxInt，PHP 转 float ⇒ 能编能跑、静默错值；★实测 **PHP 自己的口径按进制不一致**：传统八进制全 7 饱和、`0200…0`/hex/bin/十进制转 float ⇒ 禁一处通用规则）、**F-67-c**（`.5`/`5.`/`.5e3` 被词法拒，且 `5.e3` 被误读成 `5 . e3` ⇒ Warning＋字符串 '5'）、**F-72**（AOT parse 失败 **rc=0**，PHP=255）。
+★**F-62f/F-69/F-70 三项已在同轮完成只读备料**：静态普查门 `c060`（`entries=497 distinct=464 guarded=31 unguarded=91`，含假阳性族清单）、float→int 三区制真值表 `c059`（24 例绿）、`number_format` 舍入规则**推导完成**（候选 F＝「最短表示优先、小数位不足回退精确展开」+half-up，52/52 ＋ 394/400；残差 6 枚全在**重建段**，见 §49/§50）。
+本批动了发射器 ⇒ 二进制换代次 `bdd3af32…`→**`a9eaef5e…`**；影子判据由 `changed_rows=0` 改为「**逐枚可解释**」：`changed_rows=6`，身份与词法器静态预测（`c061`）**完全一致**（f010/f036/f072/f104/f124/f163，其余 62 枚逐字节不变）；主回归 `Pass 67/Skip 1/Fail_* 0`、26 腿与 R-173b 档逐字同。
+★流程自纠两条（§48.8.1）：链包装脚本用 `tail` 收尾把 `timeout 7200` 的掐断遮成 `exit 0` ⇒ 判据只认链自身的 `*_CHAIN_DONE`；`timeout` 只掐父脚本、孤儿子进程继续跑完 ⇒ 补跑重腿前先 `pgrep` 判活（本轮因此省下 18 分钟），且属主进程活着时**绝不删** `.zigphp_aot_build_<pid>`。
+资产：`native_linker.zig` **`5ab4d501eb9f9c090d6dc7184c2bb955`**、模板 `22762f83…`（未变）、二进制 **`a9eaef5e…`**、门 LIT 脚本 `e018bb60d20d828101b97e0425bb1326`、链脚本 `691521cf…`、**新影子基线列 `c010_shadow_newside_r174_tmp.txt`（表身 `351bc834…`，前代 `f5f2bf5e…` 作废）**；详见 §48–§52。
+
+★R-172（**F-62 落地＝乙型「模板内集中 helper」＋全数值族＋c／d 两段一并修**，§46）：老铁三裁＝「乙／全数值族／c＋d 全修」。
 只读核查先把甲型否掉——`BuiltinInfo` 只有 `runtime_name/needs_allocator/may_raise/ref_params` 四字段（`native_linker.zig:3976`），且 **AOT 根本没有动态内置分发**（发射期静态解析，未知名直接 `undefined function`）
 ⇒ 中央发射校验与「在被调函数体内校验」**覆盖面等价**，而甲型要改 664KB 发射器并造新代次；模板里虽已有同措辞的 `php_check_param_type:6519`，但它对对象印 `object` ⇒ 新建 `rejectParamType` 走 `operandTypeName` 印**类名**，**不动**那 9 处本来正确的措辞。
 主门 BLT 由 28 臂扩到 **129 臂**，修前 **same=44 diff=85**（A 段 **39/39 全红**＝数值内置根本没有参数类型校验；B 段 5/5＝Passing-null Deprecated 整条缺失；C 段 23 枚合法强转守卫里只红 3；D 段 11/19；E 段 12/15）
@@ -17,7 +38,7 @@ E 段 object vs int ⇒ Notice 后按 **1**、vs float ⇒ 同句式 `to float` 
 `optimizer.zig:935` 的 LICM 纯函数名单摘除 `count`／`array_sum`／`array_product`（提升会把「每迭代一次诊断」变成「整循环一次」）
 ⇒ 影子判据由「纯模板轮必须 0」改为「**实测预期 0，若非 0 必须逐枚归因到这两张表**」（语料 `fdiv` 0 枚；`array_sum` 16／`min` 9／`max` 8／`number_format` 9 枚文件里无一是循环内不变量调用）。
 四条自我更正**全部由门内实测抓回**（① `?Value` helper 当语句用 ⇒ 生成码 `value ignored`，`_ =` 补 4 站点；② **省略的可选形参在本运行时同样是 null** ⇒ 新增 `requireOptionalNumParam`，代价是显式 `round(1.5,null)` 的 `#2` Deprecated 不发，留字 F-62b；③ `min`/`max` 同值并列**取法不对称**（并列时 min 取后者、max 取前者，八臂矩阵实测）⇒ `php_min` 两支 `< 0`→`<= 0`；④ `php_spaceship` 自成一套实现 ⇒ object 落末路 `toFloat()`，交回 `phpCompare`——★「同一语义存在第二／第三套实现」已是**第三次**撞上）；
-新登记 F-62b／F-62d／F-62e／F-65／F-61c 扩，性能成本（25 处入口各加一次校验）**本批未测** ⇒ 留字不报估算值。
+新登记 F-62b／F-62d／F-62e／F-65／F-61c 扩，性能成本（26 个内置／33 处形参校验各加一次）**本批未测** ⇒ 留字不报估算值。
 ★R-171（**F-55 落地＝算术结果的 int／float 分叉按 PHP「字面语法」收口**，§45）：实测钉死规则——结果类型由**字面语法**而非「数值是否为整」决定：`'5'+1`=int 6 但 `'5.0'+1`=**double 6.0**；`6/2`=int 3、`5/2`=double 2.5、`'6'/2`=int 3、`5/2.5`=double 2.0；`'5abc' + 2`=**int 7**（配非数字串 Warning）、`'5e2'+1`=double、`'0x10'+1`=int 1、越界串⇒float。★同时实测到**两套口径不能合并**：二元算术看**数字前缀**（尾随垃圾/首尾空白都容忍并打 Warning），而内置形参是**严格 `is_numeric`**（`abs('5abc')`、`abs('0x10')` 在 PHP 直接 TypeError）⇒ 新增 `tryAsIntLoose`、**保留** `tryAsInt` 给 abs，两者并存。四处缺口逐一坐实：R1 `php_pow`/`php_abs`/`php_div` 根本没用整数字面量判据（⇒ `'6'/2`、`'5'**2`、`abs('5')` 全落 float）；R2 `tryAsInt` 判据偏窄＝**门 OPS 唯一残红 g4 的真身**；R3 `abs(PHP_INT_MIN)` 在 i64 上 `-i` **回绕** ⇒ AOT 返回 `integer -9223372036854775808`（值与符号皆错，PHP 是 float）；R4 附带揪出 `php_pow` 整条**漏发** `A non-numeric value encountered`（值对警告缺，NST n15）。★`php_pow` 改 int 路径时**必须改用判据解析出的值**——旧写法对字符串寄存器调 `asInt()` 会被 NaN-boxing 兜底读成 0。门 NST（新建 32 臂，`a728ed98…`）：修前 `same=14 diff=18` ⇒ 落地后 **`same=30 diff=2`**，残红恰是两枚**已登记的交叉面**（n9＝F-62、n31＝F-63 记法，类型本身已修对 ⇒ 我为此另加只报 `gettype` 的 n32 作真验收臂）。★**改档达成：门 OPS 自本批起 `same=26 diff=0`＝零注册红**，是本工单第一道完全全绿的操作数门；BLT 同步 `11/17 → 13/15`。28 腿链 6805 s 全 rc=0：OBJ/ABS/MSR/F45FACE/PD/S/AC/AB/CENSUS/U/B/ZCENSUS 与 R-170 **逐字等值**（守卫未被改宽），主回归 Pass 67/Skip 1 零回归，影子 **`changed_rows=0`**＝连续第三个发射中性的纯模板轮。；★R-170（**F-59 的漏网面＝`pow()` 与 `**` 是两条实现**，§44）：R-169 我写过「`pow($o,2)` 与 PHP 逐字节同」——那是一句**只测了 PHP 侧＋只读了一行 `wrapBuiltin_pow`** 的未验证断言，被新门 BLT 的同源对照臂打回（`2 ** [1]` b26 绿／`pow($o,2)` b17 红）。真因＝内置名表 `native_linker.zig:4288` 把 `pow` 映射到 **另一个函数 `php_pow_func`**，该体**无操作数检查**（对象/数组/非数字串静默给 float）且整数幂**无溢出检测**⇒ 实测 `pow(2,63)` 得 **integer −9223372036854775808**、`pow(10,19)` 得 −8446744073709551616（PHP 两者皆 float）＝P0 级静默错值。修法＝`php_pow_func` **委托 `php_pow`**（同一语义只留一份，`@mulWithOverflow` 溢出转 float）；★委托前必须先补 `b == ±1` 早退——`php_pow` 的逐次乘法只靠溢出退出而 `|b|==1` 永不溢出 ⇒ `1 ** 10^12` 无界，不补就是**把挂死从 `**` 扩到 `pow()`**（修后四形瞬时返回且与 PHP 逐字同）。门 BLT 28 臂：修前 `same=7 diff=21`（快照 `903f50a7…`）⇒ 落地后 `same=11 diff=17`（`626bd9d7…`），关掉的恰是 pow 族 6 枚（b17/b21/b22/b23 措辞＋b27/b28 回绕），残红 17 枚**全部先前已登记**（F-62 13／F-55 2／★新立 **F-63** 2＝大浮点**记法**不合 PHP：`9.223372036854776E+18` vs `9223372036854776000.0`，值对写法错，**不属** §七.7 的末位精度豁免）。26 腿链 7102 s 全 rc=0：三族门等值、主回归 Pass 67/Skip 1、**影子 `changed_rows=0`**（连续第二个纯模板轮达标）；R-169 产出的三重自保首次全链生效。★可复用普查结论：**收口任何「既是运算符又是内置函数」的面之前，必须查 `native_linker` 的内置名表**（`abs/min/max/intdiv/sqrt/fdiv/array_sum/array_product` 目标函数体内检查命中数全为 0），但 `array_sum/array_product/max/min/比较` 在 PHP 侧是 **Warning/Notice ＋返回值**、**绝不可加抛**（同 R-155 `count()` 的 over-fatal 陷阱）；★R-169（F-59 落地，老铁裁「本轮直接修」＝**纯模板轮**，§43）：算术族**拒绝对象操作数**（`checkArithmeticOperand` 旧写只拒「无数字前缀串」与 array ⇒ **对象直接通过**，被 NaN-boxing 兜底成 `0.0`，`$o + 1` 静默得 **float 1.0**、`$o / 0` 还抢先报 `DivisionByZeroError`）＋操作数消息改用 **类名**（新增走 `operandTypeName`，算术族保**自然顺序** `int + Foo`，与位运算族「对象恒排前」**不合并**；`valueTypeName` 其余 9 处调用点逐字不动）＋增量族**第三套措辞**（`php_increment/php_decrement` 末路拦对象 ⇒ `Cannot increment|decrement <类名>`）。★两条先验判断被实测否证：① 我担心 `DateTime - DateTime` 是 DateInterval 合法差、blanket 拒绝会 over-fatal ⇒ 实测 **PHP 自己就抛** `Unsupported operand types: DateTime - DateTime`；② 只改算术检查会让 `$o++` 抛成 `Foo + int`＝**把一种错换成另一种错**，该中间态被**单独量出来**（门 OBJ 11 臂档 `same=4 diff=7`）后才补增量守卫（R-165 半修教训的正面执行）。门 OBJ 建门 24 臂修前红 **17**（对象算术 15＋语句位 2）⇒ 落地后 35 臂 **`same=33 diff=2`**，残红**恰好只有**登记的 F-61 两枚（i8 bool 增量缺 Warning、i11 数组增量措辞）；守卫臂 o18..o24 含「拼接 `$s . "x"` 仍合法」「`null+1`/`true+1` 仍不抛」「`$o & 1` 措辞未被改坏」全绿。★波及面**穷举核实**：全模板内 `php_add/php_sub/...` 的调用者只有 `php_increment/php_decrement` 末路与 `pow()` 内置（`array_sum/array_product` 是内联累加、不经 `php_add/php_mul`）⇒ 不会把它们从「返回值」推成「抛异常」。★验收**分两段**（环境事故）：`c045` 前 12 腿达标后在 ZCENSUS 被 **ENOSPC** 打断，其后 13 腿 `rc=1 wall=0s`、regression 未跑、shadowcol 自行 `ASSERT_FAIL`（规则 29 的断言正确地拒绝出假差值）；`c046` 补跑 17 腿（10:08:46→11:13:42，3896 s）全 rc=0 ⇒ 合并读数为ABS 26/26、MSR 74/74、F45FACE 12/7、OPS 25/1、PD 18/2、S 47/47、AB/U/B/ZCENSUS 与 R-167 逐字同、**主回归 Pass 67/Skip 1 零回归**、**影子 `changed_rows=0 col_identical=yes`**（纯模板轮预言达成 ⇒ 不重冻、不归因）。★纪律产出两条：链必须做**磁盘前置断言**（ENOSPC 下失败腿长得跟真失败一样：`rc=1 wall=0s`），且**任一腿非 0 立即停链**；仓库根 `.zig-cache` 在同一点整目录消失，**非我删除、原因不做无据归因**，代次一致性改由 md5 断言承担。★新立 **F-61**（增量族数组措辞＋bool 增量 Warning）与 **F-62**（内置数值形参的**第四套措辞** `<fn>(): Argument #N ($name) must be of type <T>, Foo given`；`array_sum/array_product` 对对象**只 Warning 不抛**并返回 0/1；`max/min/比较` 走 Notice），门已建 `c047_builtin_numeric_object_gate_tmp.sh`（20 臂）待跑。；★R-168（**零 `src/` 改动的取证轮**，§42）：新建永久侧门 **ABS**（`c043_bit_assign_gate_tmp.sh`，26 臂）把 §41.9 挂出的 **F-58-b 打到证伪**⇒ 实测 **26/26 全绿**（复合赋值 `&= |= ^= <<= >>=` 的 string 写回、string 结果被 `> 0`／`strlen`／`(int)`／拼接／`+1`／`===`／真值判定／数组键／循环内 共 20 枚消费位、int×int 五枚守卫、`~` 三枚，以及 a21..a26 六枚**复合赋值抛出面**＝`CAUGHT` 且 `RET` 缺席且 `tail` 照打 ⇒ 站点＋路由＋「抛出后写回不执行」三件事同证）。机制两条读实：① `Value.asInt()` 是**全函数**（NaN-boxing 三级试完最后 `return 0`，`asBool` 直接读 `(val & 0x1)`）⇒ 本仓「声明类型 vs 实装值」的风险**探不到 panic，只能靠逐字节差分**；② 位运算结果寄存器**没有任何消费点插 `.asInt()`**（落地时保留 Value 形态赋值，`writePhpValueExpr` 对任何标签都只打印 `reg_N`）⇒ `.i64` 声明在此只是元数据 ⇒ **F-58-b 撤销**，门留作永久守卫。★F-60 定价补齐关键一块：同代同档同调用数实测 `php_bit_and ≈ php_add`（1583 vs 1597 ms）⇒ **R-167 的位运算 +32% 不是「位运算比算术贵」，而是位运算第一次付了算术在 R-165/166 已经付过的钱**⇒ 直接推论＝**快路不能只对位运算开**，否则等于重审已批准的算术代价；★唯一仍缺的数＝语料级稀释比，且**拒绝用估算代替**：主回归报表**无耗时列**、影子 old 侧 `be305cfa…` 是 R-145 代（隔四代发射变更，非同一代对照）⇒ 同代修前二进制需 `git worktree add --detach df31715` 独立构建（会写 `.git/worktrees`）⇒ **已请示，未擅动**）；★**F-60 已由老铁裁定为「乙：接受现状，不做快路」**（依据 §42.3 实测 `php_bit_and ≈ php_add` ⇒ 快路只会造成算术/位运算口径分裂），该项**关闭**，不再占用裁决队列；★R-166（F-45-ii 收口＝DCE 守卫由 `.div/.mod` 扩到 `.add/.sub/.mul/.pow`）已闭合（门 F45FACE 扩到 19 臂 ⇒ `raise_lost 4→0`、p11/p12/p15/p19 与 PHP 逐字节同、原 12 臂逐字不变；★新增门 AB 语料分母腿实测 `diff=0` ⇒ 语料行为暴露 0；影子 `changed_rows=0` 比预留的"允许合法非 0"更强；★副产物＝修掉 `test_loop_unroll.zig:286` 那枚"Temporarily expect .add to allow build"占位断言，本批一改它就红，实测 `inst1` 现在真的是 `.nop`＝该测试原本期望的行为；教训＝**改优化器必须前置跑 `zig build test` 再开链**，本批首开链就在 buildtest 腿 rc=1 才撞上，已停链重开）；★R-165（F-46 甲型＝抛出站点改可捕获 TypeError **＋** 给 `.add/.sub/.mul/.pow/.neg` 补异常路由，两处缺一不可）已落地、25 腿链进行中（门 OPS 修前 `same=9 diff=17 aot_caught=0 aot_exit255=12` ⇒ 修后 `same=23 diff=3 aot_caught=14 aot_exit255=0`，3 枚残红身份逐枚可归因＝o5/o14 属 **F-56** 字面量 `%` 常量折叠绕过、g4 属 **F-55** 结果类型；★原登记「缺数组检查」是**误诊**——`checkArithmeticOperand:6076` 早已拒数组，真因是 `emitUnsupportedOperandError:6181` 的 `noreturn`+`exit(255)` 绕过路由；★半修态（只改抛出、不补路由）实测会多打 `RET|` 且未捕获形从"立即终止"变"继续跑"＝自造回归 ⇒ 已还原复验后再按甲型重落；★本批**改了发射器** ⇒ 影子 `changed_rows` 允许合法非 0，与 R-158b…R-163 那串"第 N 代同值"批不同）；★R-163（F-50 `preg_*` 分隔符/修饰符校验，**纯模板**）**已落地并 21 腿验收闭合**（链 `17:54:22→19:07:46` 4404 s、影子 `changed_rows=0`＝第 **11** 代发射同值、★门 S 47 臂仍 `diff=0`（本批改的就是它下游解析器）、主回归 Pass 67/Skip 1＝F-50 语料暴露 0；门 PD 修前 17 臂 `same=7 diff=10` ⇒ 修后 20 臂 `same=18 diff=2`，旧 17 臂全绿、红恰为新登记的 **F-53** 两枚；★建门轮两条预估被实测否证——成对分隔符 `(a)`/`{a}` 从未支持、缺校验面覆盖整个 preg 家族而非只 `preg_match`；合法修饰符集合＝**实测 13 枚** `imsxnurADJSUX`（第一版用 `error_get_last()` 得出"全部 UNKNOWN"的假结论，必须 `set_error_handler` 逐轮清零才测得准）；落地当场因 `_ = matches_ref;` 变成 pointless discard 导致 20 臂全 `compile_fail`，是「模板改动只有 AOT 产物编译才验得住」（F-38）的现形）；★R-160（F-41 丙型「arity 金丝雀」）**验收闭合**（§36：链 `16:16:30→17:26:23` 共 4193 s、影子 `changed_rows=0`＝自 R-148b 起**第 10 代发射同值**、门 AC `canary 0→7` 而 `compile_fail`/`zig_raw` 逐枚未动；★丙型**不解决**切片形参面（`json_decode()` 编译通过、运行期才炸）与用户函数/方法面，那三面属甲型）；★R-160b/R-160c（§37）＝甲型前置测量**已闭环**：`stdlib.zig:24-47` 早已用 `fn_table` 的 min/max 做中央校验（tree/fast 走、AOT 与 bytecode 不走）⇒ 表的 10 枚错值**今天就是 tree/fast 的活缺陷**（5 枚过度拒绝＋3 枚该拒不拒），而 **AOT 列补测否证了「把 AOT 接上表」的可行性顺序**——那 5 枚里 AOT 只对 `implode($a)` 失败，另 4 枚（`array_merge()`/`array_push($a)`/`array_diff($a)`/`array_unshift($a)`）AOT 与 PHP 逐字节等值（切片形参）⇒ **先修表再谈消费**，否则当场造 4 枚新红（违规则 30）；新立 **F-47/F-48/F-49**（全属非 AOT，待明示）＋ **F-50**（`preg_match("b",$s)` 缺分隔符校验且**返回错值 1 而非 false**，门 S 无臂可抓 ⇒ R-163 自办））（链 `16:16:30→17:26:23` 4193s，影子 `changed_rows=0`＝自 R-148b 起**第 10 代发射同值**；门 AC 13 臂 `compile_fail=8 canary=7 zig_raw=7`，12 臂口径与修前仅 `canary 0→7` 之差；门 F45FACE/Y 复证 R-161 档全等值；主回归 Pass 67/Skip 1；helper 签名登记率 **539/539**、`comptime/anytype/...` 排除 0 枚；★建门轮两条预估被实测否证——a12 `implode(",")` 其实是第 7 枚定长形参站点、`residue=7` 是我自己 KEEP_TEMP 留下的而非编译器泄漏；★丙型**不解决**切片形参面（a7 `json_decode()` 编译通过、运行期才炸）与用户函数/方法面（a10/a11），那三面属甲型＋运行期守卫）（★R-161=F-45（乙型）：DCE Phase 3 守卫追加「可抛出算术指令结果被丢弃也不删」+ 新谓词 `isRaisableArithmetic`（★按实测**只含 `.div`/`.mod`**）⇒ 门 F45FACE `on_eq_off=no` **9→2**（剩 p11/p12＝故意不收的 `.add/.mul`＝**F-45-ii**，其 TypeError 今天不可捕获⇒属 F-39 族）、p09/p10 **与 PHP 逐字节等值**；门 Y `y7` 回收 ⇒ 改档 `same=5 diff=5 zig_escape=1 cf=2`，红集降为 `y2 y4 y8 y9 y10`；★语料暴露实测 **0**（门 AB 折叠 `DATETIME` 后 `equal=67 diff=0`；首轮 f119/f175 系时间戳**假红**）；★新立 **F-46**（数组操作数的算术 TypeError **两臂都不抛**＝操作数类型检查缺数组，与 DCE 正交）；新资产＝门 AB＋门 F45FACE（14 臂，判据 `on_eq_off`）＋21 腿链；★R-160（F-41 丙型）方案已定：失败后自解析生成码报可读 arity 诊断（不碰子进程管道、不建 arity 表），甲型随后／★R-159=F-37：`php_intdiv` 两枚站点由「Zig error 外逸 / `@divTrunc` 静默回绕」改为可捕获 `DivisionByZeroError`/`ArithmeticError`（**纯模板**、不重建二进制、`builtin_map` 不动）⇒ 门 Y `y5 y6` 转绿、改档 **12 形 `same=4 diff=6 zig_escape=1 compile_fail=2`**，★门 Y **首次入链**（R-155/156/158b 三链均无 Y）；★修门轮否证旧口径「y7=`1 % 0` 是同族已正确先例」——`printf` 里裸 `%` 把探针静默截成 `1`，该臂从未测过取模 ⇒ 改转义口径后 y7 转真红并**新立 F-45**（结果被丢弃的 `%`/`/` 语句被 DCE 整条消除，A/B `--aot-disable-pass=dce`/`--aot-max-iterations=0` 两支复现 CAUGHT，待裁决）；★另登记一次资产事故：误写 `rm` 删掉未入库的门 Y 脚本，靠删除前 TSV 快照**逐臂字段比对**复验重建（除 ELAPSED 外全等）；模板锚点自 `:12811` 起 **+10**（§32.6 换算表）／★R-158b=F-42：`tryRemoveTrampolineBlock` 释放快转块前改道 `exception_handler`（`optimizer.zig` +29/−0）⇒ **门 Z** 面孔门 `dangling 6→0`、门 P `compile_fail 2→0`（`f35` 转绿、`f34` 转为语义红 ⇒ **新立 F-44**：`ir_generator.zig:3744 redirectThroughFinally` 在 finally 体内 throw 时把整个 finally 体重发一份；A/B 关 cfg_cleanup 实测仍双打 ⇒ 属暴露非引入，待裁决）；同时**否证 §30.6 两条口径**——「`.index` 陈旧」（`analysis.zig:273-275 rebuildCFG` 一直统一重编号）与「用 `Dead blocks removed` 当分母」（旗标只由三枚删块站点之一 `:3364` 递增，恰好漏掉肇事的 trampoline 面）；门 Z 全语料普查 `total=68 dangling=0 ok=68` ⇒ 语料对本族零暴露）／★R-156=F-22：门 P 注册红 `f26` 已回收，现行门 P = **78 形 `same=72 diff=4 compile_fail=2`**，四枚红 `v2 i1 i2 f12` + 两枚既存 panic 臂 `f34 f35`=新立 F-42；同时改判 F-36（与 Error 支无关，真机制＝file/line 在 setException 惰性注入 ⇒ 未抛出的异常对象取不到位置）并新立 F-43（`function_exists("php_bool_or")` AOT=true ⇒ helper 登记泄漏成 PHP 可见函数名，与 F-4 同族））**（R-138 = 内省枚举族八项落地 + 永久侧门 P 建成，2026-10-12，详见 §12；R-141/142/143 = F-8a 参数默认值面、F-12/F-12b 参数名面，详见 §14–§16；**R-144 = F-5/F-7 PCRE flags/offset 全族收口 + 新立并修复 F-13（`preg_match` 实参 ≥4 时引用装填丢失），详见 §17**）。⚠️ **§10 的 R-137b/R-137c 记录为假阳性**（抛出支从未入库，已由 R-138 重落，更正见 §10 内联与 §12.0）。**门 P 现行读数（R-149 定档）= **76 形 `same=71 diff=5`**，5 枚恰为注册红 `v2/i1/i2/f12/f26`（F-8b／F-3×2／F-18 漏报／**F-22 多语句 finally**）；**f33（原 F-23）已由 R-149 的 F-24c 转绿**——它不是独立缺陷，而是「`extends`/`implements` 父名被解析两次」的症状（工单 §22）；新建**门 T**（R-150 定档 **19 形**，F-24 族：7 枚注册红 `t2 t8 t9 t11 t12 t13 t19` + 1 枚注册 compile_fail `t17`；F-24a/t1·t4·t5·t14 与 F-24b/t6 已转绿，另新立 F-24e 与 F-25）；**F-21 六枚臂（f15 f17 f19 f20 f21 f23）已由 R-148 全部转绿**，catch 类型名解析六枚臂（f27–f32）同批转绿；其「嵌套外溢」旧措辞作废（真根因＝单臂 catch 不建派发块，见 §21.1）；**r10 与 n15 已分别由 R-146／R-145 转绿，f14（F-20 handler 倒灌）由 R-147 转绿**；**n15 = F-1 已于 R-145 转绿**，其守卫移交 F 组 f1…f13（合法性矩阵，全部 PHP 8.5.8 实测）。R-144 轮为 39 形 `same=34 diff=5`（历史快照）；R-138 建成代次为 35 形 `same=31 diff=4`（见 §12.7，仅作历史快照）。**门 S 现行读数（R-144 建成轮）= 47 形 `same=47 diff=0`，判据即 `diff=0`（本门无注册红）**，修复前 30 形 `same=9 diff=21`（§17.1/§17.5）。门 M 19 形 `red=0 green=19`、门 D8 14/14、门 N 7/7、门 O 6/6、门 Q `same=5`、门 R `same=8 diff=1`、普查门 B `diff_impl=3`；`zig build test` 21/21 & 326/326；主回归 **13:38:37（R-149 代）Total 68 / Pass 67 / Fail(Compile·Runtime·Diff) 0 / Skip 1**，且影子 vs R-148b 列 **`changed_rows=0`**（F-24c 与 F-24a/b 均语料发射中性实测：影子 vs R-148b、vs R-149 两次 `changed_rows=0`）（★R-148a 代曾掉到 Pass 66：本批自造的 `f006 catch (\Throwable)` 回归，已由 `resolveClassName` 收口复证，见 §21.9/§21.10）（失败明细仅 1 行 `f004 SKIP` ⇒ 回收枚 0；判据取明细行存在性而非汇总数，见 [[feedback-aot-regression-rules]] 规则 27）；影子 `total=68 same=0 diff=68 miss=0 invalid=0` @1037s，且 **new-side 列相对 R-144 代 `changed_rows=68 / unchanged=0`** ⇒ R-145 因入口守卫进入每个 `main.zig`，**是一次彻底的影子重冻事件**（前缀 `be305cfa` 须在「提交」时按当代次重冻）。**当前代次（R-149 定档）**：`ir_generator.zig` **`f3d13cb82395d945d2a246b2158589ea`**（R-149 F-24c；R-148b 值 `81dffec5…` 作废）／`optimizer.zig` `6cffa137…`（R-147）／二进制 **`1abad89e2166d15e32fc304e2d071c28`**／门 P 脚本 **`cb1a622797cc7b0519f38dc1f8ca3bb1`**（76 形）／影子基线列 `c010_shadow_newside_r148b_tmp.txt`（表身 `f19fb070…`，R-147/R-148a 两列并存）；旧值 `8b5c65a1…`／`bbff3b4a…`／`001bc245…`／`8dae7b2b…`／`eab47607…`／`37a86a66…` 作废。原「R-147 定档」：`runtime_lib_template.zig` `4ff0befc7c5b50d4fcfb8b1fd1f057e7`（R-147 未变）／`native_linker.zig` `49a3da31660fef4963b8eb50d7587987`（未变）／`ir_generator.zig` `0242d8b5a960a8b8e06b063494f6ec23`（未变）／**`optimizer.zig` `6cffa137f766bdd2a13769c7ba3314b5`（本轮新增守卫）**／二进制 `8b5c65a1f34af70977e73e6c4dea2bd7`（**R-147 改优化器 ⇒ 已重建**，`fec549b26ab4d58f77bfa5316f61445e` 作废）／门 P 脚本 `eab47607d8d4d02979ed17dcdc76bb3b`／门 S 脚本 `f3c2c9e6b1a319cd76a297217212fb54`（未变）；影子 new-side 整列已落盘 `fuzzy_scripts_720/tmp/c010_shadow_newside_r147_tmp.txt`（68 行，表身 md5 `628aa13b3778359d1210c6800901f687`）；原 `3d5c0c8aa86954d389f533c1b1c184e9`（门 P 39/57 形代）；本批中途代次 `0b9cf3a7…`/`d40ee9a9…` 与 R-144 轮 `5c0ecf42…`/`86174723…`、R-145 中途轮 `67a60675…`（模板）与门 P `5904939b…`、R-144 轮 `5c0ecf42…`/`86174723…`、R-138 轮 `b356e19e…` 均作废（见规则 25）。**待裁决**：F-3（门 P 注册红 i1/i2）；F-1 已落地（R-145，§18）、F-2 已落地（R-146，§19）；**待裁决 F-25 修法（甲 改模板捕获名⇒全 68 枚漂移需重冻／乙 只给撞名用户函数改 Zig 符号⇒零漂移、建议／丙 甲+乙）**；**新增 F-29「类声明提前登记」（R-153 归因）＝F-24d 的硬前置：AOT 启动期一次性登记所有类，PHP 在声明语句执行处登记（d8/d9 实测 `class_exists` PHP=n／AOT=y）⇒ 直接在登记处加「父类缺失即 fatal」会把 PHP 不报错的场景变成 over-fatal，两者必须一起排；语料面：未解析父/接口引用 0 枚、作用域内类声明 0 枚 ⇒ 双双看不见**；F-27 第 1 层（属性位）已落地（R-151b，§25.3）⇒ **R-154 更正：类型检查实为三条互不复用的链，R-151b 只收了属性位**（形参位 v9/v27/v28、`instanceof` 位 v5/v6 由 R-154 落地；返回值位的「绿」被证伪为新立 F-35，见 §28.2/§28.9）；F-28 已随 R-154 落地，并新建永久侧门 **门 V**（定档 **29 形 `same=18 diff=11 compile_fail=0 bad_probe=0`** @122s，登记轮修前 `same=10 diff=19`）；F-24d（t9/t11）待修；**★R-154 新立六张面孔（全部未修、待裁决，§28.4–§28.9）＝F-30：PHP 8.5.8 实测 `Error` **不再继承** `Exception`（`is_subclass_of('TypeError','Exception')=false`、`get_parent_class('Error')=false`），AOT 仍按旧层级过度捕获 ⇒ 跨切面／F-31：`throwException:21822` 把异常置成**字符串**伪值 ⇒ `catch` 永不命中且 fatal 文本类名错，调用点实测 **17 枚**，逐枚须先测真值异常类别／F-32：`PHPObject.toString:19437` 无 `__toString` 时 fail-open 返类名／F-33：`count()` 对非 Countable 返 0（语料高频，改前必须普查）／F-34：`spl_object_id()` 对闭包返 0／F-35：返回值类型位**完全不校验**（`: object` 返回 `int` 静默放行）；**★R-155（§29）＝门 W（20 形 `same=7 diff=13`）与门 X（9 形）建成 ⇒ 实测否证我自己提的「`php_count` 需补解引用」前置（x1/x2/x3 引用三形本就与真值等值 ⇒ 引用在载入侧已解）；F-33 第一批已落地（`php_count` 非 Countable ⇒ `throwThrowable("TypeError", …)` + 专用 helper `countArgTypeName`）⇒ 门 X `x6`/`x9` 转绿且 `x4` 按 §28.7.2 **设计留红**（接口判定须与 F-3 内建接口表同批，否则打红 `SplFixedArray`/`ArrayObject`）、门 V `v15` 转绿（`18/11`→`19/10`）；另新立 F-36（`new Error(...)->getFile()` 为空而 `new Exception(...)` 非空 ⇒ **Error 根与 Exception 根不等价**，「搬根」必须含构造期属性初始化）／F-37（`intdiv(1,0)` 打印 `error: DivisionByZero` 且 **rc=1** ⇒ Zig error 外逸，属 F-9/R-145「未捕获必须 PHP 风格 fatal + rc=255」族的漏网站点，门 R 现有臂抓不到）／F-38（`zig build test-aot` **6 处编译错误**全在 `test {}` 块内 ⇒ AOT 单测步骤长期失编译；运行期模板的编译验证实际由 AOT 产品编译承担，旧「`zig build test` 覆盖模板」口径作废，见 §28.13.2）**；**F-20（f14，P1，try 前语句异常被无关 catch 吞）已落地（R-147，§20.2–§20.3）＋**F-21（六枚臂 f15 f17 f19 f20 f21 f23）已落地（R-148/R-148b，§21：根因＝单臂 catch 不建派发块 + 末臂 else 落点；含本批自造的 `\Throwable` 回归收口）**＋**新立 F-22（f26，多语句 finally 与 pending 异常共存，属暴露非引入）与 F-23（f33，命名空间用户类 `extends \Exception` 后内建方法整族丢失，前缀 `be305cfa` 证非本批引入）待归因****＋F-4 去重（删代码，§17.7 记「裸侧未动」的理由）／F-6（`debug_backtrace`）／F-8b（设计分叉，§14.4）／F-10（删功能，登于 013）／**F-13b、F-14、F-15（§17.7）**／**F-16（入口未捕获异常上报，R-145 已修，§18.3）、F-17（trait 名限定的 Deprecated 文本，§18.7）**；F-5/F-7/F-12/F-12b 已落地；**F-11 未登记（编号保留，勿误读为存在该项）**。门 M 终态 **17 形 `red=0 green=17`**（链 XI 同口径全绿：影子 68/68、主回归 Pass 67/Skip 1、门 D8/H/H2/I/E/F/G 注册值保持，2026-10-11 07:05:35 报表）：门 M `red=5→0 green=3→8 compile_fail=0 bad_probe=0 residue=0`（链 VIII 同口径全绿：影子 68/68 零漂移、主回归 Pass 67/Skip 1、门 D8/H/H2/I/E/F/G 与 R-127 代注册值一致；二进制随链 VIII 代 `5c436e9e…` 后续树，runtime 模板不改变解释器二进制 md5）；落地含两处自纠（php_instanceof 重写误删 Throwable 块 ⇒ 补回；伪接口比较 eqlIgnoreCase ⇒ `instanceof stringable` 双拼写 ✅）；变更文档 `docs/changes/2026-10-11/AOT-CODEGEN-012_类名族CI_R128_2026-10-11_fbe6382a.md`
 **发现日期**: 2026-10-11（R-127 收尾轮顺带取证；与函数名 CI 同族，PHP 类名本不区分大小写）
 **触发档**: 默认档（`--compile --no-debug-info`）
@@ -3530,14 +3551,14 @@ vs string／vs array ⇒ **无 Notice 且对象恒大于**（`$o > "abc"`、`$o 
 ★终档残红 3 枚**全是先前已登记**面：b5＝**F-62b**（bc 族 string 形参要 stringable 感知）、b27/b28＝**F-63**（大浮点记法）。
 本批关闭 **82** 枚；`compile_fail=0 zig_escape=0 bad_probe=0 residue=0`，`aot_caught=53`（＝53 枚臂里 PHP 抛的异常在 AOT 侧同样**可捕获**）。
 
-### 46.4 落地清单（模板 helper 12 枚 ＋ 入口 25 处 ＋ 元素族 2 处 ＋ 比较族 3 处 ＋ 表位 2 行）
+### 46.4 落地清单（模板 helper **18 枚** ＋ 数值形参入口 **26 个内置／33 处** ＋ 容器形参校验 **4 处** ＋ 元素族 2 处 ＋ 比较族 3 处 ＋ 表位 2 行；计数由 `grep -o 'require…NumParam…("'` 逐条数出，非估算）
 
 | # | 位置 | 改动 |
 |---|---|---|
 | 1 | 模板新增 `NumParamKind`／`numParamExpectedText`／`rejectParamType`／`trimNumericWhitespace`／`strictIntFromTrimmed`／`numericPrefixValue`／`emitDeprecatedPassingNull`／`emitDeprecatedFloatStrToInt`／`intParamFromFloat`／`requireNumParamAs`／`requireNumParam`／`requireOptionalNumParam`／`requireArrayParam` | 单一实现承载第四套措辞（对象⇒类名走 `operandTypeName`），**不动** `php_check_param_type`／`valueTypeName` |
 | 2 | 模板新增 `ArrayNumElem`／`classifyArrayNumElem`／`arrayElementNotSupported` | c 段元素级三分类（计入／计入 0／跳过），sum 与 product 共用 |
 | 3 | 模板新增 `emitNotice`／`emitObjectToNumberNotice` | d 段：本模板第一处 `Notice:` 站点（此前只有 Warning／Deprecated，`Notice` 只出现在 `E_USER_NOTICE` 标签里） |
-| 4 | 入口 ×25：`abs sqrt floor ceil round(×2) intdiv(×2) fdiv(×2) fmod(×2) exp log log10 log2 sin cos tan asin acos atan atan2(×2) sinh cosh tanh hypot(×2) deg2rad rad2deg number_format(×2)` | 每处一行 `const x = requireNumParam(...) orelse return Value.initNull();`，把校验后的 **int／float** 值喂回原逻辑 ⇒ 顺带把「字符串寄存器被 `asInt()` 读成 0」这类误读挡在入口 |
+| 4 | 入口 ×26 函数／33 处形参：`abs sqrt floor ceil round(×2) intdiv(×2) fdiv(×2) fmod(×2) exp log log10 log2 sin cos tan asin acos atan atan2(×2) sinh cosh tanh hypot(×2) deg2rad rad2deg number_format(×2)` | 每处一行 `const x = requireNumParam(...) orelse return Value.initNull();`，把校验后的 **int／float** 值喂回原逻辑 ⇒ 顺带把「字符串寄存器被 `asInt()` 读成 0」这类误读挡在入口 |
 | 5 | `php_array_sum`／`php_array_product` | 容器形参 `requireArrayParam` ＋ 循环体改走 `classifyArrayNumElem`；★`array_sum` 的 `all_int` SIMD 快速路（`fastPackedIntSum`）**保留不动**（纯 int 无诊断可省） |
 | 6 | `php_max`／`php_min` | 单参非数组 ⇒ TypeError；`php_min` 两支 `< 0` ⇒ **`<= 0`**（并列取后者） |
 | 7 | `phpCompare` Rule 2b／2c | object vs 数值 ⇒ Notice＋按 1／1.0；object vs string／array ⇒ 恒大于且无 Notice（★必须排在旧 Rule 7「array 恒大于非 array」之前） |
@@ -3564,9 +3585,9 @@ vs string／vs array ⇒ **无 Notice 且对象恒大于**（`$o > "abc"`、`$o 
 | **F-62e** | arity／多余内置 | `log($num, $base)` 的 `$base` AOT 未实现；`log2()` 在 PHP 8.5.8 **不存在**（`Call to undefined function log2()`）而 AOT 有 `php_log2`；`max()`／`min()` 零参数 PHP 抛 `ArgumentCountError`，AOT 返回 0 | 属 arity／内置名表，不属参数类型校验族 |
 | **F-65** | 精度形参的溢出与 UB | PHP 实测 `round(1.5, PHP_INT_MAX)`=1.5、`round(1.5,-3000000000)`=0.0、`number_format(1,3000000000)` 直接**内存耗尽 Fatal**；AOT 侧 `@as(i32,@intCast(precision))` 对超出 i32 的 int 是越界转换，`for (0..dec) pow10 *= 10` 对大 dec 是长循环＋u64 回绕 | ★**存量**风险（旧写法同样存在，本批只是首次把它量出**未测运行证据**的定性观察 ⇒ 按纪律标注为读码结论），修它要先定 PHP 的短路口径，不夹带进本批 |
 | **F-61c** 扩 | object vs object 的比较 | `$o <=> $b` 与 `$b <=> $o` 在 PHP **两个方向都印 1**（不稳定），`$o == $o` 恒 true、不同实例 `==` false；AOT 走末路 `toFloat()` ⇒ 恒相等 | 复刻需先确定 AOT 的对象身份序规则，且 PHP 侧本身不自洽 ⇒ 不复刻 |
-| 性能 | 25 个入口各加一次校验 | ★**本批未测**（链内无 PERF 腿；R-167 的教训是「估算值不得当结论写」）⇒ 后续轮补 `abs`／`intdiv`／`array_sum` 热点基准，与 R-167 位运算族的 +32% 同档对照 | 不测就不写数，留字待测 |
+| 性能 | 26 个内置（33 处形参校验）各加一次 | ★**本批未测**（链内无 PERF 腿；R-167 的教训是「估算值不得当结论写」）⇒ 后续轮补 `abs`／`intdiv`／`array_sum` 热点基准，与 R-167 位运算族的 +32% 同档对照 | 不测就不写数，留字待测 |
 
-★**F-62 覆盖面边界普查**（收尾只读核查，脚本内联于本节复测口径；结论＝本批「全数值族」只覆盖到**数学/三角/对数/幂/格式化**那 30 个入口，另有 **76 个内置**体内是 `toInt()/toFloat()` 而**无任何校验**）：
+★**F-62 覆盖面边界普查**（收尾只读核查，脚本内联于本节复测口径；结论＝本批「全数值族」只覆盖到**数学/三角/对数/幂/格式化**那 26 个内置（33 处形参校验），另有 **76 个内置**体内是 `toInt()/toFloat()` 而**无任何校验**）：
 下表全部**实测**（`/tmp/r172/f62_family_tmp.php`），登记为 **F-62f**，措辞与参数名一并钉死，供下批纯机械补入口：
 
 | 内置 | PHP 8.5.8 实测 | 归属 |
@@ -3586,3 +3607,836 @@ vs string／vs array ⇒ **无 Notice 且对象恒大于**（`$o > "abc"`、`$o 
 
 ★三条负证据尤其要留字：`intval`／`floatval`／`sprintf` 在 PHP 里吃对象**照样返回**（对象按 1 参与，与 d 段同源），
 ⇒ 将来做 F-62f 时**不可**把它们当成「数值内置」一并加校验，否则就是把合法 PHP 打成 Fatal。
+
+### 46.7 验收链 `c051_r172_acceptance_chain_tmp.sh`（脚本 md5 `948ca440ce015304e31d0c76c4f638df`；29 腿含 buildtest）
+
+`R172_CHAIN_START 18:31:11 bin_md5=bdd3af32… tpl_md5=af81be0f… avail_gib=63` ⇒ `R172_CHAIN_END 20:32:10 ELAPSED=7259s`，
+全腿 `rc=0`；三重自保（`GENERATION_ASSERT_FAIL` 断言代次＝`bdd3af32…`、每腿前 `DISK_ABORT` ≥8 GiB、任一腿非 0 即 `LEG_FAIL` 停链）全程未触发；`repo_build_residue=0`、`bad_probe=0`、语料 `pass/*.php` 68 枚完整。
+
+**★跨代逐腿对照（R-171 档 `c050` vs 本批 `c051`，剔除 ELAPSED/wall 抖动）：28 枚可比腿里 26 枚 DONE 行逐字相同，只有 2 枚有差，且都是本批预期差。**
+
+| 腿 | R-171 档 | R-172 实测 | 判定 |
+|---|---|---|---|
+| **BLT（本批主门）** | `arms=28 same=13 diff=15 aot_caught=7` | `arms=129 same=126 diff=3 aot_caught=53 zig_escape=0 compile_fail=0 bad_probe=0 @577s` | ★差＝**扩臂 28→129 ＋ 关闭 82 枚**；链内读数与链外终档 `ef05fa3f…` **逐字段同**（可复证） |
+| **NST** | `arms=32 same=30 diff=2`（n9＝F-62、n31＝F-63） | `arms=32 same=31 diff=1 aot_caught=2` | ★**改档**：n9（`abs('5abc')` 该抛而 AOT 给 5.0）由本批 F-62 关闭 ⇒ 本批之后 NST 注册红**只剩 n31**（F-63 记法） |
+| OBJ / ABS / MSR | `35 33/2` ／ `26 26/0` ／ `74 74/0 aot_caught=28` | 逐字同 | 零扰动（R-169/R-168/R-167 三族的口径未被本批改宽或改窄） |
+| F45FACE / OPS / PD / S / AC | `raise_lost=0 preserved=19 both_match_php=12` ／ `26 26/0` ／ `20 18/2` ／ `47 47/0` ／ `13 cf=8 canary=7 bare_symbol=8 zig_raw=7` | 逐字同 | 零扰动（PD 的 2 枚＝F-53 恒红；OPS 自 R-171 起无注册红） |
+| AB / CENSUS / Y / ZFACES | 68 行＝`EQUAL_BOTH_MATCH_PHP 66 ＋ EQUAL_BOTH_RED 1(f004) ＋ COMPILE_FAIL 1(f124)` ／ `68=24+2+9+33` ／ `12 same=5 diff=5 zig_escape=1 cf=2` ／ `10 same=9 diff=1 dangling=0` | 逐字同（AB wall=1608s vs 1607s） | ★DCE 语料分母不变＝本批没有把任何「可观察行为」交给 DCE 摆动；Y 的 `zig_escape=1` 身份未变（未新增 Zig 外逸） |
+| ZCENSUS / X / V / W / T / P / M / N / O / D8 / Q / R / U / B | 各自注册档（含 B：`entries=497 distinct=464 dup_rows=33 diff_impl=3 field_diff=0 identical=30`） | 逐字同 | 零扰动 |
+| **regression** | `rc=0 wall≈800s Total 68 / Pass 67 / Skip 1` | `rc=0 wall=800s report_mtime=2026-10-16 20:14:31`；`Total 68 / Pass 67 / Skip 1` | ★本批给 26 个内置加了校验、又动了 LICM 名单 ⇒ 语料**零回归**（口径若偏严，这里第一个红） |
+| **shadow / shadowcol** | `68 same=0 diff=68` ／ `gen=r171 col_md5=f5f2bf5e… = base(r170) ⇒ changed_rows=0` | `68 same=0 diff=68 miss=0 invalid=0` ／ **`gen=r172 rows=68 col_md5=f5f2bf5e… base(r171) 同值 ⇒ changed_rows=0 col_identical=yes`** | ★★**本批重编译了编译器，仍测得发射中性**：`fdiv` 翻 `may_raise`（语料 0 处调用）＋ LICM 摘 `count/array_sum/array_product`（语料里无一是循环内不变量调用）两笔改动**没有改变任何一枚 `main.zig` 的字节** ⇒ 「实测预期 0」兑现，本批**无需**逐枚反证归因（若非 0 才需要，规则 53） |
+
+★**资产**：BLT 脚本 `12ae49834c8426d5ec9a2868cd94835c`（129 臂）；三段表身 修前 `398300fa013fbce51f82f11c20a9c901`、首落 `0c63a1fc006b02985aeef9e975e00876`、终档 `ef05fa3f9efba7aaee23effce8439bb5`；
+扩臂前的 28 臂脚本快照 `c047_gate_28arm_pre_R172_snapshot_tmp.sh`（用于自证 b1–b28 逐字未改）；
+模板 md5 `af81be0f20bedcee6825088f68f8660f`（`15b9d494…` 作废）、`native_linker.zig` `dde7217be125d0d8a6faebd8d2715412`、`optimizer.zig` `36f354f49be053bb8c70b29f7fa7538a`；二进制代次 `c514f194…` ⇒ **`bdd3af326d3c59d2bbd0bdf25b07afec`**；
+真值资产 `/tmp/r172/{f62_param_truth,f62_param_truth2,f62_param_truth3,f62_param_truth4,f62_names,f62_names2,f62_edge,f62_tiebreak,f62_family}.php`；影子列 `c010_shadow_newside_r172_tmp.txt`（表身 `f5f2bf5e…`，与 r169/r170/r171 同值 ⇒ 第四代发射中性）。
+
+★**真值资产已转入仓内永久件**（`/tmp` 会被回收，本批口径以仓内副本为准，`php -l` 十枚全过）：
+`fuzzy_scripts_720/tmp/c047_truth_param_tmp.php`（weak 强转矩阵，md5 `e5fdc4b2…`）、`…_param_truth2_tmp.php`（int 形参吃 float／string 形参／元素面，`616360cc…`）、
+`…_param_truth3_tmp.php`（元素贡献 vs 跳过＋比较族「对象算 1」，`7f757e3c…`）、`…_param_truth4_tmp.php`（正反序／`__toString`／越界 float，`1c170370…`）、
+`…_names_tmp.php`（**全族参数名与期望类型字面量**，`084b25e8…`）、`…_names2_tmp.php`（max/min 容器形参与 Passing-null 逐函数文本，`4774fa5c…`）、
+`…_edge_tmp.php`（`intdiv("1e19",2)` 等边界，`d816a455…`）、`…_tiebreak_tmp.php`（**同值并列八臂矩阵**，`523968e8…`）、
+`…_family_tmp.php`（★F-62f 覆盖面普查＋三条负证据，`257ef684…`）、`…_prec_tmp.php`（F-65 精度形参的 PHP 侧实测，`d480870e…`）。
+
+---
+
+## 47. R-173（2026-10-16）：F-63 **改定**＝浮点→字符串其实是**两套口径**，且仓内有**五套**实现
+
+老铁裁「继续推进」⇒ 本接续轮取 F-62 之后唯一残存在永久门里的注册红 **F-63**。取证后**原登记名的范围被实测否证**：
+它写的是「大浮点数科学计数法记法不合 PHP」，而真值是**两套完全不同的口径**＋**一条与记法无关的 14 位舍入错**＋**三处与 F-63 无关的交叉面**。
+
+### 47.1 ★F-63 名字改定：显示口径（precision=14）与序列化口径（serialize_precision=-1 最短往返）是两套规则
+
+真值资产 `fuzzy_scripts_720/tmp/c052_truth_float_matrix_tmp.php`（37 个值 × 7 条输出路径逐枚实测，PHP 8.5.8，ini 默认 `precision=14`／`serialize_precision=-1`）：
+
+| 路径 | 口径 | 科学计数切换点（`exp = floor(log10|f|)`） | 尾数位数 | 整值补 `.0` | 特值 |
+|---|---|---|---|---|---|
+| `echo`／`print`／`(string)`／插值／`print_r`／`sprintf('%s'/'%G')` | **显示** `%.*G`@14 | **`exp ≥ 14` 或 `exp ≤ -5`** | 14 位有效后**去尾零、至少保留一位小数**（`1e14`⇒`1.0E+14`） | **不补**（`echo 1.0`⇒`1`） | `INF`/`-INF`/`NAN` 大写；`-0.0`⇒`-0` |
+| `var_dump` | **序列化**（最短往返） | **`exp ≥ 17` 或 `exp ≤ -5`**（`1e16`⇒小数、`1e17`⇒科学） | 最短能往返的位数（`1/3`⇒16 位 `0.3333333333333333`；`0.1+0.2`⇒**17 位** `0.30000000000000004`） | **不补**（`float(0)`／`float(100000000000000)`） | `float(INF)`／`float(NAN)` 大写 |
+| `var_export` | 序列化 | 同上 | 同上 | **补**（`0.0`／`1.0`／`100000000000000.0`／`12345678901234568.0`） | `INF`／`NAN` 大写 |
+| `json_encode` | 序列化 | 同上 | 同上 | 不补 | **小写 `e`**（`1.0e+17`／`1.0e-5`）；INF/-INF/NAN ⇒ **`json_encode` 返回 false**（渲染成空串） |
+
+★**三条最容易踩的分叉**（全部实测，逐条落进本门）：① 序列化阈值比显示**宽 3 位**（17 vs 14）；② `.0` 后缀**只有 var_export 补**；③ json 用**小写 e** 且非有限值返回 false。
+★`print_r` 属**显示**口径（实测 `print_r(0.1+0.2)`=`0.3`、`print_r(1e14)`=`1.0E+14`）⇒ 不可顺手划进序列化族。
+
+### 47.2 为什么必须自己写：Zig 0.16 的浮点格式化**不是最短往返**
+
+`/tmp/zflt/main.zig` 逐值实测（30 值 × `{d}`／`{e}`／`{}`）：三种格式符都是「**16 位有效＋去尾零**」——
+`{d}` 把 `0.1+0.2` 打成 `0.3`（PHP 序列化口径要 `0.30000000000000004`），`{}` 把 `1e19` 打成 `10000000000000000000`（无 E）
+⇒ **换格式符修不掉**，必须「逐位数试算＋回读比较」求最短往返；而显示口径的 14 位也不能靠 `{d:.13}` 套在 `f/10^exp` 上（**二次舍入**，见 §47.4 的 b5）。
+
+### 47.3 ★仓内现有**五套**浮点→字符串实现（本门按路径判定归属）
+
+| 实现 | 站点 | 现状 |
+|---|---|---|
+| `phpFormatFloat`（自称模拟 `%.*G`，`PHP_PRECISION=14`） | `:7654`；被 `php_echo:7835`、`(string)` 强转 `:2894`、`phpCompare` 的 number-vs-string 两支 `:7404/:7425` 使用 | 阈值判据对，**但尾数走 `f/10^exp` 再 `{d:.13}` ⇒ 二次舍入**（b5 实测 AOT `1.2345678901235E+14` vs PHP `1.2345678901234E+14`） |
+| `php_var_dump` 的 `float({})` | `:7883` | Zig general ⇒ **永不出 E**、`inf/nan` **小写**、16 位上限 |
+| `exportValue`（var_export） | `:8215` 段 | `{d}`＋手写 `e→E` 换算 ⇒ **永不出 E**（阈值缺失）、`.0` 规则对 |
+| `php_json_encode` | 自带浮点支 | 同上，且非有限值**没返回 false** |
+| `php_sprintf` | `:27485` | 显式精度路径（不该被本批动），但实测出交叉面（见 §47.5） |
+
+★同一语义**五套实现**＝第四次撞上「第二套／第三套实现」母题（R-170 `pow` vs `**`、R-172 `spaceship` vs `<`、R-167 强度削减绕开 `php_mod`）⇒ 本批正解是**收敛成一套核心算法＋两种口径包装＋样式位**，而不是再补第五套的一半。
+
+### 47.4 永久侧门 FLT 建成与修前注册档（`c052_float_format_gate_tmp.sh`，md5 `5abc4c687558c62ee585502928df7d41`）
+
+61 臂、每臂把**同一个值过全部六条路径**（`echo`／`(string)`／插值／`var_dump`／`var_export`／`print_r`／`json_encode`）做逐字节对表；容器递归面另用 4 枚（var_dump/var_export/print_r/json 各有一条数组支）。
+建门预检：`AOT_BIN=/bin/false` 全 61 臂 `bad_probe=0`（先证臂体合法，再谈读数——R-155 口径）。
+
+修前 **`arms=61 same=32 diff=24 compile_fail=5 aot_caught=0 zig_escape=0 bad_probe=0 residue=0 @218s`**，表身 `c052_flt_prefix61_R173_snapshot_tmp.tsv` = `16bf61778941e72d0395aa1f3f619c6d`。
+逐枚按**路径**归因（用标签切列，不靠肉眼比长串）：
+
+| 桶 | 臂 | 实测症状 |
+|---|---|---|
+| **F-63a 序列化缺 E 切换** | b7 b8 b9 b10 c2 c3 c4 d3 d4 d5 f1 f2 f3 f5 h1 h2（16） | `1e17`/`1e19`/`2**63`/`1e-5`… 在 `var_dump`/`var_export`/`json` 三处全出**长小数**（`float(100000000000000000)`、`100000000000000000.0`、`100000000000000000`），PHP 出 `1.0E+17`／`1.0e+17` |
+| **F-63b 序列化 17 位最短往返** | h1 h2（与上重叠，症状独立） | `float(0.30000000000000004)` 两侧**已同**（Zig 16 位在个别值上巧合等值），但 `1/3`、`9.223372036854776E+18` 靠运气 ⇒ 本批改成正解，h1/h2 同时是这条的验收臂 |
+| **F-63c 显示口径二次舍入** | b5（1） | `123456789012345.0` 的 14 位显示 PHP `1.2345678901234E+14`／AOT `1.2345678901235E+14`（先除幂再 `.13` ⇒ 双舍） |
+| **F-63d 特值大小写与 json 的 false** | e2 e3 e6（3） | `float(inf)`／`float(-inf)` 小写；`json_encode(INF)` AOT 出 `inf`／PHP 返回 false（探针里渲染空串）。`0.0 ** -1` 的 INF 同面（e6） |
+| **F-63e 缓冲区** | d6（1） | `var_dump(1e-300)` AOT 出 **`error: NoSpaceLeft`**（64 字节放不下 300 位小数）⇒ 后果是整条后续输出丢失，不只是记法错 |
+| ★登记**不修**（交叉面，见 §47.5） | e4（F-66）、g3（F-69）、g4（F-70） | e4＝NAN 串化的四条路径 Warning；g3＝`sprintf("%d", 1.0e19)` 的越界与 `Warning: The float … is not representable as an int`；g4＝`number_format(123456789012345.6, 2)` 的**十进制舍入 vs 二进制精确值**（`…345.59` vs AOT `…345.60`） |
+| ★登记**不修**（编译器面） | b11 b12 e1 e5 f7（5 枚 `compile_fail`） | 见 **F-67** |
+
+### 47.5 本批新立四枚（全部**实测**，非读码推定）
+
+| ID | 面 | 实测证据 | 归属与批次 |
+|---|---|---|---|
+| **F-67** | **浮点字面量与常量幂运算的生成码缺陷＝合法 PHP 编译失败**（P0 级） | `1.0e100`／`1.0e308`／`-9.223372036854776e18` ⇒ `error: type 'f64' cannot represent integer value '1000000000…'`（字面量被当**整数**发射）；`-0.0` ⇒ `error: integer literal '-0' is ambiguous`；`1.0e308 * 10` ⇒ `error: use of undeclared identifier 'inf'` | ★**不属 F-63**（那是格式化，这是发射/常量路径），且修它在 `ir_generator`/`native_linker` ⇒ 换代次 ⇒ 独立轮。语料暴露实测：68 枚里只有 `f051` 含 `-2.5e-3`（exp -3，属两口径都出小数的一致区）⇒ 语料**零命中**，主回归看不见它，只能靠门臂 |
+| **F-66** | NAN→字符串的**四条路径告警** | PHP 在 `echo`／`(string)`／插值／`print_r` 都打 `Warning: unexpected NAN value was coerced to string`，而 `var_dump`／`var_export`／`json_encode` **不打** | 措辞族独立；e4 常驻红，禁算进 F-63 收敛 |
+| **F-69** | float→int 越界的告警与回绕 | `sprintf("%d", 1.0e19)` PHP 打 `Warning: The float 1.0E+19 is not representable as an int, cast occurred`；AOT 侧同一站点给 `G1\|-9223372036854775808`（**静默回绕**） | 与 F-65 同区（越界），独立批次 |
+| **F-70** | `number_format` 的舍入口径 | `number_format(123456789012345.6, 2)` ⇒ PHP `123,456,789,012,345.59`（按**二进制精确值** …345.594 舍）／AOT `…345.60`（按十进制字符串舍） | ★与 F-62 的 `number_format` 入口**正交**：本批只加了形参校验，没动舍入算法；语料 `number_format` 9 枚文件 25 处调用 ⇒ 修它必须先扩门 |
+
+★**本轮两条自我更正**（写在落地前，不事后补）：① 我原打算把 F-63 当「只改序列化侧 E 记法」的小批，实测后它是**两套口径＋二次舍入＋缓冲区＋特值大小写＋json 的 false** 五件事，且必须先解决「Zig 不是最短往返」；
+② 我把 g3/g4 设计成「不该被动」的守卫臂，**建门即红** ⇒ 按 R-165/166 的先例改判为**交叉面**（F-69/F-70）而非本批承诺面，绝不为凑绿把它们并入 F-63。
+
+### 47.6 落地清单（**纯模板**，二进制仍 `bdd3af32…` ⇒ 判据回到「影子必须 `changed_rows=0`」）
+
+| # | 位置 | 改动 |
+|---|---|---|
+| 1 | 模板 `renderFloatPHP` ＋ `pow10F128` ＋ `FloatFmtKind` | 单点核心：`std.fmt.float.render(.scientific, .precision=null)` 取**最短往返位**＋十进制指数 ⇒ 按口径各自决定科学/小数、位数、`.0`、`E`/`e` |
+| 2 | 同上，显示口径舍入支 | 舍到 14 位：一般按第 15 位方向；**仅当最短位恰为 15 位且第 15 位是 5** 时用 `f128` 与精确中点 `(D14+0.5)×10^(exp-13)` 比大小，真相等才取偶 |
+| 3 | `phpFormatFloat` | 变薄成 `.display` 包装（签名与 4 处调用点**不动**：`php_echo`／`(string)`／`phpCompare` 两支） |
+| 4 | 新增 `phpFormatFloatSerialize(buf, f, dot_zero, upper_e)` | 序列化口径的唯一入口 |
+| 5 | `php_var_dump` 浮点支 | `float({})`（Zig general）⇒ 走核心，`dot_zero=false`、大写 E；缓冲 `64→96` |
+| 6 | `exportValue` 浮点支 | 删 `{d}`＋手写 `e→E` 那 30 行 ⇒ 一行走核心，`dot_zero=true`（`.0` 规则核心里给） |
+| 7 | `jsonEncodeValue` ＋ `jsonEncodeValuePretty` 浮点支 | 走核心（小写 `e`、不补 `.0`）；★`isNan/isInf` ⇒ `return error.JsonInfOrNan` |
+| 8 | `php_json_encode` | 两枚调用点 `catch` 该 error ⇒ **返回 `bool false`**（实测 PHP：顶层与嵌套都 false，`JSON_PARTIAL_OUTPUT_ON_ERROR` 也救不回来） |
+| 9 | `printValue`（`print_r`）**不动** | 实测 `print_r` 属**显示**口径（`print_r(0.1+0.2)`=`0.3`、`print_r(1e14)`=`1.0E+14`）⇒ 继续用 `.display` |
+| 10 | 门 FLT 扩 `t1..t6`（平分取偶六枚）＋ `c5/c6` 复测 | 见 §47.7 的自纠 |
+
+★**F-63e（`NoSpaceLeft`）是由结构消掉的**：极值一律走科学计数支，十进制支的位数被两个阈值（14／17）锁住 ⇒ 旧写 `[64]u8` 塞 300 位小数的路径不再存在（门 d6 实测转绿，且不再需要扩大缓冲）。
+★`phpStripTrailingZeros` 自本批改后**零调用者**（原唯一使用者是旧 `phpFormatFloat`）⇒ 按 §六.3「删代码须点头」**保留不动**，在此登记为新增无引用件（同 `php_preg_replace` 先例）。
+
+### 47.7 ★本批自我更正两条：其中一条是**我自己改出来的回归**
+
+| # | 事件 | 抓到方式 | 处置 |
+|---|---|---|---|
+| ① | 第一版把「最短位末位是 5」一律当**真平分**处理（以为 15 位串能回读即蕴含十进制精确）⇒ `0.0000123456789012345` 这类**小量值**（ulp 远细于第 15 位单位）被错误舍去，PHP 是**入** | 门 FLT **t6**（修后仍红） | 改成「只有 `nd==15` 才需要判向，且用 `f128` 与精确中点比大小；真相等才取偶」。推错的地方当场写在 §47.6 第 2 行的注释里，**不留“显然”字样** |
+| ② | 改 ① 时把舍入基线写成 `d15 > '5'` ⇒ **第 15 位恰为 5 且后面还有非零位**（最短位数 ≥16）该入的三支全被舍去：`b6 123456789012345.6`、`c5 12345678901234567.0`、`c6 1234567890123456.0` **由绿转红** | 门 FLT 全量复跑（修后终档首次读出 `diff=7` 时才现形——**这 3 枚修前是绿的**，与注册红集对比即暴露） | 基线改回 `d15 >= '5'`（注释补上「最短位末尾必非零」这条依据）⇒ 复跑 `diff=4`，三枚回绿，且**未动**任何修前已红的臂 |
+| ③ | 冒烟脚本被 **F-67** 两次打断（`-0.0` 与 `1e308` 字面量根本编译不过）⇒ 一度以为是我新代码的问题 | `zig build-exe` 报错原文直取 | 改测试写法（`$z=0.0; $nz=-$z;` 走运行期负零）；同时把 F-67 从「顺带发现」升格为独立条目并写死「`compile_fail` 桶必须恒等于 5」 |
+
+★**e6 的收敛口径要按路径拆**：它修前同时中两枪（`float(inf)` 小写 ＋ 缺 `Deprecated: Power of base 0 and negative exponent is deprecated`），本批关掉前者、后者属**幂运算数值诊断**族（与门 F45FACE 的 `p06` 恒红同一条）⇒ **e6 仍记为红**，但不算 F-63 未收。e4 同理（格式面已全对，只剩 F-66 的四条 NAN 告警）。
+
+### 47.8 门 FLT 三段读数（脚本 md5 `9164d0c253434762f77e292e3d480080`，67 臂）
+
+| 阶段 | DONE 行 | 表身 md5 |
+|---|---|---|
+| 修前注册（61 臂） | `arms=61 same=32 diff=24 compile_fail=5 bad_probe=0 residue=0 @218s` | `16bf61778941e72d0395aa1f3f619c6d` |
+| 首落（含我自造的 3 枚回归，67 臂） | `same=55 diff=7 compile_fail=5 @238s`（红＝b6 c5 c6 e4 e6 g3 g4） | `31e1a2501193b7b5051d77d18b4988fb` |
+| **终档** | **`arms=67 same=58 diff=4 compile_fail=5 aot_caught=0 zig_escape=0 bad_probe=0 residue=0 @239s`** | **`fdc30fe48e26d242a3cbeec0bf4b6231`** |
+
+★**收敛计数口径**（防把「臂数变化」混进收敛）：修前 24 枚红 ⇒ 终档 4 枚 ⇒ **关闭 20 枚**（b5 b7 b8 b9 b10 c2 c3 c4 d3 d4 d5 d6 e2 e3 f1 f2 f3 f5 h1 h2）；
+残红 4 枚**全部先前已登记且非 F-63**＝e4（F-66 NAN 告警）、e6（幂运算 Deprecated 缺失，与 p06 同条）、g3（F-69 float→int 越界）、g4（F-70 `number_format` 舍入）；
+`compile_fail` 恒 5＝F-67；新增 `t1..t6` 六枚是**修后**加的 tie/守卫臂，全部 SAME，**不计入收敛**。
+模板 md5 演进 `af81be0f…` ⇒ `81d0c485…` ⇒ **`36a621c88c7d720cdf7d0da3736147a8`**（终档）；二进制不变。
+
+### 47.9 验收链 `c053_r173_acceptance_chain_tmp.sh`（脚本 md5 `4ac4693f7096af0ed80d96fd4ebf85eb`；30 腿含 buildtest）
+
+`R173_CHAIN_START 21:37:56 bin_md5=bdd3af32… tpl_md5=36a621c8… avail_gib=56` ⇒ `R173_CHAIN_END 23:44:06 ELAPSED=7570s`，全腿 `rc=0`；
+三重自保全程未触发；★链首尾 `bin_md5` **同为 `bdd3af32…`** ⇒ 「本批只改模板」由实测闭合（不是声明）。
+
+**跨代逐腿对照（R-172 档 `c051` vs 本批 `c053`，剔除时间字段）：28 枚可比腿里 26 枚 DONE 逐字相同，2 枚有差且都是本批预期收益。**
+
+| 腿 | R-172 | R-173 | 判定 |
+|---|---|---|---|
+| **FLT（新腿，本批主门）** | — | `arms=67 same=58 diff=4 compile_fail=5 aot_caught=0 zig_escape=0 bad_probe=0 @239s` | 与链外终档 `fdc30fe4…` 逐字段同（可复证）；`compile_fail` 恒 5＝F-67 |
+| **BLT** | `arms=129 same=126 diff=3`（红 b5/b27/b28） | `arms=129 same=128 **diff=1**` | ★本批顺带关掉 **b27/b28**（`var_export(pow(2,63))`／`var_export(pow(10,19))` 的记法面）⇒ 本门注册红只剩 **b5（F-62b）**，R-172 改档作废，现档以本行为准 |
+| **NST** | `same=31 diff=1`（红 n31） | **`same=32 diff=0`** | ★**n31 关闭 ⇒ NST 自本代起零注册红**（继 OPS 之后第二道全绿的操作数/数值门 ⇒ 今后它转红必是真回归） |
+| OBJ / ABS / MSR / F45FACE / OPS / PD / S / AC | `33/2`、`26/26`、`74/74`、`raise_lost=0 preserved=19 both_match_php=12`、`26/26/0`、`18/2`、`47/47`、`cf=8 canary=7 bare=8 zig_raw=7` | 逐字同 | 零扰动 |
+| AB / CENSUS / Y / ZFACES / ZCENSUS / X / V / W / T / P / M / N / O / D8 / Q / R / U / B | 各自注册档（AB `wall=1608→1607s`；AB 分桶 `66 EQUAL_BOTH_MATCH_PHP + 1 EQUAL_BOTH_RED(f004) + 1 COMPILE_FAIL(f124)`；B `entries=497 distinct=464 dup_rows=33 diff_impl=3 identical=30`） | 逐字同 | 零扰动：★`AB` 等值同时说明**新的浮点核心没有被 DCE 摆动改变任何可观察行为** |
+| **regression** | `Total 68 / Pass 67 / Skip 1` | `rc=0 wall=798s report_mtime=23:26:31`；`Total 68 / Pass 67 / Skip 1` | ★本批改的是**所有浮点输出共用的格式化器**，且语料 `var_export` 107 处／`json_encode` 105 处 ⇒ 零回归是最要紧的一条 |
+| **shadow / shadowcol** | `changed_rows=0`（`f5f2bf5e…`） | `68 same=0 diff=68 miss=0 invalid=0`；**`gen=r173 col_md5=f5f2bf5e… = base(r172) ⇒ changed_rows=0 col_identical=yes`** | 第五代发射中性（规则 29：影子只哈希 `main.zig` ⇒ 本批运行面证据是 FLT＋BLT＋NST＋主回归，影子只证「发射器没动」） |
+
+### 47.10 R-173b 加封（同轮后续）：**F-71** 两处未接线站点 ＋ m1 臂的先建后修
+
+★先更正 §47.3 的计数：「五套实现」是**低估**。收尾按「`asFloat()` 落进任何 print/bufPrint/writeAll/appendSlice」重扫，浮点→字符串的**输出站点共 11 处**，其中两处从来没接任何格式化器：
+
+| 站点 | 旧写法 | PHP 实测口径 | 归属 |
+|---|---|---|---|
+| `php_http_build_query` `:25041` | `print("{d}", asFloat())` 且**只给字符串做 URL 编码** | 值是 `(string)` 口径＝**显示**口径，且一律编码 ⇒ `a=1.0E%2B19`、`a=0.3`、`a=1.0E-5` | **F-71①**（两因同臂：口径＋编码） |
+| `php_debug_zval_dump` `:25742` | `bufPrint("float({d})\\n")` | 与 `var_dump` 同属**序列化**口径：`float(1.0E+19)`、`float(0.30000000000000004)` | **F-71②**（仅浮点那一行） |
+
+**先臂后刀**：门 FLT 加 `m1`（七枚值过 `http_build_query`）⇒ 修前 `DIFF`（AOT `Q0=a=10000000000000000000`、`Q1=a=0.30000000000000004`、`Q2=a=0.00001` vs PHP `a=1.0E%2B19`、`a=0.3`、`a=1.0E-5`）⇒ 落地后 `SAME`。
+★m1 一处症状**两处因**（口径＋编码）⇒ 抽出 `urlEncodeQueryComponent`，浮点先按显示口径格式化、再走与字符串同一支编码器；只格式化不编码仍关不掉臂（第一版就是这么暴露的：`compile_fail=6`，`error: expected type '*Io.Writer'` —— 本文件 `anytype` writer 的既有惯例是**传指针** `&aw.writer`，见 `exportValue(&aw.writer, …)`，改指针后 `m1 SAME`）。
+
+★**两处刻意的边界**（都不是漏做）：
+① `debug_zval_dump` **不设臂** —— 它的数组体只印 `refcount(1){}`、引用计数面整体未忠实，混进 F-63 会污染判据（规则 31）⇒ 只接浮点那一行，其余登记 **F-71b**；
+② `http_build_query` 的**键不编码、嵌套形制（`a[b]=…`）未实现** —— 属同函数的另一面，本批不动，登记 **F-71c**。
+
+**R-173b 复测**（`/tmp/r173b_verify.log`，`00:05:02 → 00:35:52`；★为什么只跑三件，见下一段）：
+
+| 件 | 实测 |
+|---|---|
+| 门 FLT 终档（68 臂） | `arms=68 same=59 diff=4 compile_fail=5 aot_caught=0 zig_escape=0 bad_probe=0 residue=0 @234s`；残红身份**不变**（e4/e6/g3/g4），`compile_fail` 回到 5＝只剩 F-67 |
+| 主回归 | `rc=0 report_mtime=2026-10-17 00:18:17`；`Total 68 / Pass 67 / Skip 1` ⇒ 零退化 |
+| 影子 | `C010_SHADOW_DONE total=68 same=0 diff=68 miss=0 invalid=0 @1055s`；`SHADOWCOL_DONE gen=r173b col_md5=f5f2bf5e… = base(r173) 同值 ⇒ changed_rows=0 col_identical=yes` |
+
+★**为什么 R-173b 不再跑整条 29 腿链**（把取舍写清，免得日后被当偷懒）：改动只落在 `php_http_build_query`／`php_debug_zval_dump` 两个函数体，实测二者在模板内**零内部调用者**（`grep -c "php_http_build_query("`＝1＝定义本身，`php_debug_zval_dump` 同），两枚内置的语料暴露＝ `http_build_query` 1 枚文件 1 处、`debug_zval_dump` 0 处；
+其余 24 道门的域（操作数类型／preg／反射／异常派发／类名查找／DCE）不可能被这两个函数体触达 ⇒ 由「FLT 全 68 臂读数不变 ＋ 主回归零退化 ＋ 影子 `changed_rows=0`」三件实测兜住。
+代次：模板 `36a621c8…` ⇒ **`22762f83605c56a324345c7969bea9cf`**；二进制仍 `bdd3af326d3c59d2bbd0bdf25b07afec`；门脚本 `c052` 由 `9164d0c2…` ⇒ `4446635d46d0664da9c9ed864afe4c50`（68 臂）；终档表身 `c052_flt_postfix68_R173b_snapshot_tmp.tsv` = `1ce850d100021f9b370c73c5e27497bb`。
+
+### 47.11 本工单浮点/数值相关门的**新注册档**（自本代起生效）
+
+| 门 | 新档 | 注册红 | 说明 |
+|---|---|---|---|
+| **FLT** | `arms=68 same=59 diff=4 compile_fail=5` | e4＝F-66、e6＝幂运算 Deprecated（与 F45FACE p06 同条）、g3＝F-69、g4＝F-70；`compile_fail` 恒 5＝F-67 | ★F-63 自身已无注册红；今后 FLT 出现**新身份**的红才是回归 |
+| **BLT** | `arms=129 same=128 diff=1` | 仅 **b5**（F-62b bc／`?string` 形参的 stringable 面） | R-172 的 `126/3` 作废（b27/b28 由本批关闭） |
+| **NST** | `arms=32 same=32 diff=0` | **无** | ★继 OPS 之后第二道零注册红的数值门 ⇒ 它一转红必是真回归 |
+
+## 48. R-174（2026-10-17）：F-67 落地＝浮点常量的**发射形态**，并长出 F-73／F-74 两枚新面孔
+
+### 48.1 归因：坏的不是数值也不是显示，而是**发射成 Zig 源码时丢了浮点身份**
+
+`native_linker.zig` 的十处站点统一写成 `runtime.Value.initFloat({d})`。Zig 的 `{d}` 对 f64 输出**最短可往返十进制、且永不带 E**（实测见 48.2），于是：
+
+| 输入 | `{d}` 文本 | Zig 侧结果 | 实测报错 |
+|---|---|---|---|
+| `1e22` | `10000000000000000000` | 整数令牌，但**可精确表** ⇒ 接受 | 无（这是语料/守卫区，容易误判为「没问题」） |
+| `1e23` | `100000000000000000000000` | 整数令牌不可精确表 ⇒ **拒** | `type 'f64' cannot represent integer value '100000000000000000000000'` |
+| `1e308` | 309 位整数令牌 | 同上 | 同上报错（`-1e308` 亦同） |
+| `-0.0` | `-0` | `-0` 整数令牌有歧义 | `integer literal '-0' is ambiguous` |
+| `1e400`（PHP 解析成 INF） | `inf` | 裸标识符 | `use of undeclared identifier 'inf'` |
+| `1.7976931348623157e308` | 309 位整数令牌 | 同 `1e308` | 同上报错 |
+
+⇒ 三者全部表现为 **`--compile` rc=1 且无产物**，即「**合法 PHP 编不过**」，与运行期无关。阈值实测落在 **1e22 可表／1e23 不可表**（`10^k` 需 `5^k` 落在 53 位尾数内）。
+
+最小复现（10 形一次性扫面，`/tmp/f67/l*.php`、`m*.php`，本轮已并入门 LIT 故不入库）：`0.0` 绿／`-0.0` 编不过／`1e308` 编不过／`1e19` 绿／`1.5e3` 绿／`0.5e-3` 绿／**`.5` 与 `5.` 是 parse 失败**（→ F-67-c）／`-1e308` 编不过／`1e-320` 绿。
+
+### 48.2 表示法选型：先测 Zig 真值，再定修法（禁凭格式符语义推测）
+
+一次性探针 `zrt.zig`（结论入档，代码不入库）对 **19 枚**取值做「`{d}` 文本（无点则补 `.0`）→ `std.fmt.parseFloat` 回读 → 比 bits」：**`fails=0`**。含 `-0.0`（`8000000000000000` 符号保住了）、`5e-324`（最小 denormal）、`1e308`、`DBL_MAX`、`1e-320`、`0.1`、`2^53+1`。
+
+同批实测的 `{d}` 文本长度：`1e19`⇒20、`1e23`⇒24、`1e308`⇒309、`-1e308`⇒310、`1e-320`⇒322、`5e-324`⇒326、`inf`⇒3、`nan`⇒3。⇒ 理论上界按「`0.` + 323 零 + 17 位有效」＝**342** 取，缓冲区给 512。
+
+否决的备选：**全量 `@bitCast`** 会让每一个浮点常量都漂且生成码不可读；**条件式补点**（只在 Zig 会拒时才补）需要重新判「整数令牌可否精确表」＝把 53 位可表性再实现一遍，脆弱。⇒ 采**无条件补 `.0`**：文本一致性好，代价是生成码出现可测漂移（由影子列逐枚归因）。
+
+### 48.3 落地形态＝单点 helper（DRY，十处站点一次收口）
+
+新增 `writeFloatValueExpr(writer, v)`（`native_linker.zig`，紧邻 `escapeString`）：`isNan`⇒`std.math.nan(f64)`；`isInf`⇒`±std.math.inf(f64)`；否则 `{d}` 文本，无 `.` 则补 `.0`。站点改写清单（**10 处**）：`:3421/:3460/:3491/:3517`（类实例/静态属性默认值）、`:3700/:3720`（trait 两形）、`:3637`（enum 值，PHP 禁 float backing ⇒ 合法 PHP 不可达，仍一并收口但**不留臂**）、`:19894`（`.const_float` 指令，含 `writeRegAssignmentPrefix` + `";\n"` 保持原赋值形态）、`:32594/:32644`（`writeConstantValueCode`/`InlineDepth`，类与接口常量路径）。
+
+★**Zig 0.16 踩点**：helper 首版写成 `fn writeFloatValueExpr(self: *Self, …)` 而体内未用 `self` ⇒ `error: unused function parameter`，构建直接失败。⇒ 本仓构建配置里**未使用的形参是编译错误**（与 R-142 那条「用了 `self` 却留 `_ = self;` 报 pointless discard」同族对称）：形参只能声明真要用的。
+
+★**同族疑点已由读码＋既有实测排除**（不必留臂）：`initInt({d})` 的 7 处站点**没有**对应问题——`Value.initInt` 的靶型是 `i64`，而 Zig 在**期望类型已知**时接受 `-9223372036854775808` 字面量（模板自身 `:8501` 就是这一形且历代 AOT 编译通过；门 Y y6 用 `PHP_INT_MIN` 实测可运行）。⇒ 浮点侧坏的原因是「整数令牌→f64 需要**精确可表**」，整数侧不存在该约束。
+
+### 48.4 永久侧门 LIT 建成（42 臂，`c054_float_literal_gate_tmp.sh`，md5 `e018bb60d20d828101b97e0425bb1326`）
+
+每臂载荷＝`var_export|gettype|bin2hex(pack("d",(float)$v))` ⇒ **同时钉住显示、类型、位型**。★只验「编得过」或只验「显示对」都抓不住本族（`{d}` 在可精确表区值本就对 ⇒ 必须靠位型）。分桶**含 `compile_fail` 与 `parse_fail` 两枚独立桶**（门 T 的教训）。
+
+| 代次 | 读数 | 非绿臂 |
+|---|---|---|
+| 修前（`bdd3af32…`） | `arms=42 same=13 diff=7 compile_fail=19 parse_fail=3 @78s` | compile_fail＝a1–a8 + b1–b10,b13；parse_fail＝d1–d3；diff＝b11 b12 c1 c2 c3 c4 d4 |
+| 修后（本批） | `arms=42 same=31 diff=8 compile_fail=0 parse_fail=3 @140s` | parse_fail＝d1–d3；diff＝**b4** b11 b12 c1 c2 c3 c4 d4 |
+
+⇒ 面孔 A 的 19 枚编译失败**全数收口且逐位等价**（a5 的 `0000000000000080`、a6/a7 的 `…f07f/…f0ff`、a8 DBL_MAX、a9 最小 denormal 全 SAME）。
+
+### 48.5 ★F-74（P1，**暴露非引入**）：trait 带**静态属性** ⇒ 运行期 `Cannot redeclare trait`
+
+b4 从「编不过」变「编得过却 rc=255」。隔离实测三形（与浮点**完全无关**）：`trait T9 { public static $s = 9; } class C9 { use T9; } echo C9::$s;` ⇒ AOT `PHP Fatal error: Cannot redeclare trait T9 (previously declared in …)`＋rc=255，PHP 给 `9`；同 trait 改成**实例属性** ⇒ SAME；两个类 `use` 同一带静态属性的 trait ⇒ 同样致命。⇒ 触发条件＝「trait 声明静态属性」，与 `use` 的类个数无关。
+**语料暴露 0**（`grep -rlE 'trait [A-Za-z_]' fuzzy_scripts_720/pass/*.php` ⇒ **0 枚**）⇒ 68 全绿对该族零保护，只能靠门臂。修复点未定位（候选＝trait meta 注册块被发射两次，需 KEEP_TEMP 数生成码里的注册调用次数）。
+
+### 48.6 ★F-73（P1）：属性默认值只有「字面量白名单」，表达式形态被 **fail-open 兜底成 NULL**
+
+b11/b12（`public $p = -0.0;`）修前就**能编过**，但读回 `NULL`（`var_export`=NULL、`gettype`=NULL、bits=`0000000000000000`）。机制取证＝48.3 那些 switch 的最后一支 `else => try writer.writeAll("runtime.Value.initNull()")`，而**同一行仍写 `.has_default = true`** ⇒ 反射/`isset` 声称有默认值、值却是 null。
+四形对照（一次性扫面，已并入 b11/b12 常驻）：**属性默认值**面 `-5.0`／`-5`／`5*2`／`+1.0`／`PHP_INT_MIN` **全部 NULL**；**参数默认值**面 `-5.0` ⇒ SAME；**类常量**面 `-5.0` ⇒ SAME。⇒ 后两径走 `.const_float` 指令（一元/二元已在 IR 折叠），属性路径只认 `const_*`/`array_new`/`const_array` ⇒ **缺同一层折叠**。
+**语料暴露 0**：类体属性声明 **489** 站点（含类型声明形态），其中默认值以 `-`/`~`/`!`/大写常量开头者 **0 枚**（实测）。修法＝在属性默认值处复用参数默认值的折叠（或让 `else` 支改成编译期报错而非静默 null）——后者涉及「fail-open→fail-closed」的取向，**须先问**。
+
+### 48.7 待裁决（跨模式）：F-67-b 大整数字面量饱和、F-67-c `.5`/`5.` 词法、F-72 parse 失败 rc=0
+
+- **F-67-b（c1–c4，红）**：`src/compiler/parser.zig:3151/3160` `std.fmt.parseInt(i64, …) catch |err| switch (err) { error.Overflow => std.math.maxInt(i64) }` ⇒ AOT 对 `99999999999999999999`/`12345678901234567890123`/`0xFFFFFFFFFFFFFFFFFF`/`9223372036854775808` 一律给 `9223372036854775807`＋`integer`，PHP 给 `1.0E+20`/`1.2345678901234568E+22`/`4.722366482869645E+21`/`9.223372036854776E+18` 且 `double`。⇒ **能编能跑、静默给错值**，比编译失败更危险。★关键约束（本轮新测）：**PHP 自己的溢出口径按进制不一致**——`0777777777777777777777` ⇒ `int(9223372036854775807)`（**饱和**，故 c5 意外 SAME），而 `02000000000000000000000` ⇒ `float(1.8446744073709552E+19)`、`0b1…(67 个 1)` ⇒ `float(3.68934881474191E+19)`、十进制/hex ⇒ float。⇒ 修复必须**逐进制**照抄，禁一处通用规则；待扩臂 c9＝`02000000000000000000000`（现门内缺，链跑动期间不改门）。修复点在**共享 parser** ⇒ 会同时改解释器/VM/bytecode 面 ⇒ §五.2 必须先问。
+- **F-67-c（d1–d4，红）**：`.5`／`5.`／`.5e3` ⇒ `Error: Parse error: Unexpected token in expression`（PHP 分别 `0.5`/`5.0`/`500.0`）；**d4 更坏**：`5.e3` AOT 不报错而读成 `5 . e3` 串接 ⇒ `Warning: Undefined variable e3` ＋ **字符串 `'5'`**（PHP＝`5000.0` double）＝误接受型静默错值。同样在共享词法 ⇒ 待裁决。
+- **F-72（新立，观测）**：AOT 侧 parse 失败 **rc=0**（d1–d3 实测 `rc=0` 且有错误文本），PHP 侧 parse 失败 rc=255 ⇒ 脚本化调用会把解析失败当成功。
+
+### 48.8 验收链（`c055_r174_acceptance_chain_tmp.sh`，md5 `691521cf…`）
+
+★本批动发射器 ⇒ 影子判据从 `changed_rows=0` 改为「**漂移枚数逐枚可解释**」：静态预测上界＝字面含 `N.0` 形态的 **14 枚**文件（f006/f010/f032/f034/f036/f051/f072/f087/f104/f124/f161/f163/f164/f175），实际漂移必为其子集（串内如 `192.168.1.0` 不计）。
+（链各腿读数与 FLT 改档、主回归、影子 changed_rows 逐枚归因——**已于 2026-10-17 03:17 实跑回填**，见下）
+
+**主门 LIT（42 臂）**：修前 `same=13 diff=7 compile_fail=19 parse_fail=3 @78s` ⇒ 修后 `same=31 diff=8 compile_fail=0 parse_fail=3 @138s`（链内复跑与独立复跑同值）。
+⇒ **19 枚编译失败全数收口**；8 枚 diff 身份＝`b4`(F-74) `b11 b12`(F-73) `c1 c2 c3 c4`(F-67-b) `d4`(F-67-c)；`parse_fail` 恒 3＝`d1 d2 d3`(F-67-c)。
+
+**FLT 改档（关键连带收益）**：R-173b 档 `arms=68 same=59 diff=4 compile_fail=5` ⇒ 本代 `arms=68 same=64 diff=4 compile_fail=0`
+＝**恰好 +5 same、compile_fail 清零、diff 身份一枚未动**（e4＝F-66、e6＝幂运算 Deprecated、g3＝F-69、g4＝F-70）⇒ 那 5 枚原 F-67 臂不仅开始编译，且**显示口径也逐字对上 PHP**。
+
+**其余 26 腿与 R-173b/R-173 档逐字相同**（无一枚位移）：BLT `129→128/1`、NST `32/0`、OBJ `35→33/2`、ABS `26/0`、MSR `74/0`、F45FACE `shapes=19 raise_lost=0 preserved=19 both_match_php=12`、OPS `26/0`、PD `20→18/2`、S `47/47`、AC `arms=13 compile_fail=8 ran=5 same=2 diff=3 canary=7`、CENSUS `total=68 bit_only=24 modpow_only=2 both=9 neither=33`、Y `12→5/5 zig_escape=1 compile_fail=2`、ZFACES `10→9/1 dangling=0`、ZCENSUS `total=68 dangling=0 ok=68`、X `9→8/1`、V `29→19/10`、W `20→7/13`、T `22→16/5 compile_fail=1`、P `78→73/5`、M `19 red=0`、N `7 red=0`、O `6 red=0`、D8 `defect_red=0 guard_same=14`、Q `same=5 expect_fail=0 unexpected_fail=0`、R `9→8/1 terminate_lost=0`、B `entries=497 distinct=464 dup_rows=33 diff_impl=3 identical=30`；`zig build test` rc=0。
+（U 腿无 DONE 计数行，仍按列聚合读取，与前代同态。）
+
+**主回归**（report_mtime 2026-10-17 02:59:51）：`Total 68 / Pass 67 / Fail(Compile·Runtime·Diff) 0 / Skip 1` ⇒ 与 R-173b 完全同档，**回收 0 枚、新红 0 枚**。
+
+**影子与漂移归因（本批的判据从 `changed_rows=0` 换成「逐枚可解释」）**：
+`C010_SHADOW_DONE total=68 same=0 diff=68 miss=0 invalid=0 @1056s` ⇒ `SHADOWCOL_DONE gen=r174 rows=68 changed_rows=6 col_identical=no`
+新列 `fuzzy_scripts_720/tmp/c010_shadow_newside_r174_tmp.txt`（表身 md5 `351bc834…`，前代 `f5f2bf5e…` 作废，**下轮基线取此列**）。
+漂移 6 枚的身份与**词法器静态预测（`c061` 资产）完全一致**，且其余 62 枚逐字节不变：
+
+| 脚本 | 前代 md5 | 本代 md5 | 触发 token（角色） |
+|---|---|---|---|
+| f010_oop_singleton_registry_di | `3ba9d3f3…` | `5ce18fcf…` | `25.00`（实参/默认值位） |
+| f036_strategy_dynamic_pricing | `e6ce483e…` | `a14e64bb…` | `10.00/25.00/5.00/1.0` ×4 |
+| f072_type_inference_hindley_milner | `38c49e2c…` | `24725155…` | `3.0`（普通表达式） |
+| f104_game_engine_ecs_collision_render | `424c6f06…` | `71d63a02…` | `1.0` |
+| f124_container_orchestrator_pod_service_autoscale | `19915443…` | `5fa88abe…` | `4.0`（**属性默认值站点**）＋ `70.0` |
+| f163_event_driven_dispatch_bus | `e45fcea2…` | `50758230…` | `0.0` ×2 |
+
+⇒ 全部由「整值浮点常量的发射文本 `initFloat(N)` → `initFloat(N.0)`」解释，值逐位不变（LIT a 组位型已独立证明）；
+既无多出（⇒ 没有意外的「折叠后整值化」路径被激活）也无缺失（⇒ 11 处 token 全部真实发射，未被 DCE/内联吃掉）⇒ **归因闭合**。
+★f124 一枚同时命中**属性默认值站点**（`4.0`）与指令站点，是本轮唯一触及类注册发射路径的语料证据。
+
+### 48.8.1 ★本轮两条流程自纠（已同步进 [[feedback-aot-regression-rules]]）
+
+① **链包装脚本把失败遮成了成功**：我用 `timeout 7200 bash chain > out; echo chain_exit=$?; tail -3 log` 起链——最外层 `tail` 成功 ⇒ 后台任务报 `exit 0`，**掩盖了 `timeout` 在 03:10:34 掐掉链**这一事实（`R174_CHAIN_END` 缺失）。⇒ 判据必须看**日志里有没有链自身的 `*_CHAIN_DONE` 行**，不能信包装命令的退出码；起链的预算要按「历史耗时 + 冗余」给（本轮链体实际需要 ≈7900s > 7200s）。
+② **`timeout` 只掐父脚本，不影响孤儿子进程**：影子腿的 `c010_shadow_main_md5_tmp.sh` 在父链被杀后**继续跑完**（02:59 起，03:17 自然结束，`C010_SHADOW_DONE … @1056s`，并自清残留＝0）。⇒ 因此**不要**急着补跑重腿：先 `pgrep` 判活，若仍在跑就等它完成再取其 TSV（本轮因此省下 18 分钟重复编译）；同时**残留目录 `.zigphp_aot_build_<pid>` 在属主进程仍活着时绝不能删**。
+
+### 48.9 代次（R-174）
+
+`native_linker.zig` `49a3da31…`→**`5ab4d501eb9f9c090d6dc7184c2bb955`**；模板 `22762f83605c56a324345c7969bea9cf`（未变，R-173b 代）；`ir_generator.zig`/`optimizer.zig` 未变；二进制 `bdd3af32…`→**`a9eaef5e905173b0a5407040ed5c00eb`**；门 LIT 脚本 `e018bb60d20d828101b97e0425bb1326`（新建）；链脚本 `691521cfafa07e176e6f0bcce0bbe1ec`；影子前代基线＝`c010_shadow_newside_r173b_tmp.txt`（表身 `357f760d…`，与 r170/r173 列同 md5＝连续多代发射中性）。
+
+## 49. R-174b（2026-10-17，链跑动期间的**只读备料**）：F-70 `number_format` 舍入口径——三条候选规则已各自被反例否证
+
+★本轮**未动 `src/`**（规则 35/46：链跑动期间禁改源码、禁并发 AOT 编译）⇒ 以下全部来自**系统 PHP 实测** ＋ **代码阅读**；AOT 侧行为**尚未实测**，留给门 NFM。
+
+### 49.1 AOT 现算法（读码，未实测）
+
+`php_number_format` 走「**缩放后取整**」：`scaled = num * pow10(dec)` ⇒ `@intFromFloat(std.math.round(scaled))` ⇒ 再 `/ pow10` 拆整数/小数部分。三处结构性问题：
+1. `num * 10^dec` 本身引入一次**额外舍入**（double 乘法的最近舍入），与 PHP 的口径无关 ⇒ 偏离方向随样本而变（**不是单调偏差**）。
+2. `@intFromFloat` 的靶是 `i64` ⇒ 大值（如 `1e308`、甚至 `1e17 × 10^2`）越界即 **UB/trap**；PHP 侧 `number_format(1e308, 0)` 是 **411 字符**（含千分位）的精确展开 ⇒ 两者根本不在一个量级上。
+3. `pow10` 是 `u64` 累乘 ⇒ `dec ≥ 20` 溢出（与已登记的 **F-65** 同区）。
+
+### 49.2 真值资产（`fuzzy_scripts_720/tmp/c056_truth_number_format_tmp.php`，31 例自带断言，实测 `TRUTH_MATRIX_OK`）
+
+★**约束三角**＝任何候选规则必须同时满足这三枚，而它们**互相排斥**：
+
+| 输入 | `number_format(…, 2)` PHP 实值 | 最短十进制表示 | `%.3f`（glibc 正确舍入） | 精确二进制展开 |
+|---|---|---|---|---|
+| `1.005` | **`1.01`** | `1.005` ⇒ tie ⇒ up ✓ | `1.005` ⇒ tie ⇒ up ✓ | `1.00499999999999989…` ⇒ d3=4 ⇒ down ✗ |
+| `1.004999999999999` | **`1.00`** | `1.004999999999999` ⇒ d3=4 ⇒ down ✓ | `1.005` ⇒ 会误判 up ✗ | d3=4 ⇒ down ✓ |
+| `123456789012345.6` | **`123,456,789,012,345.59`** | `…345.6` ⇒ 视作 `.60` ⇒ 误判 up ✗ | `…345.594` ⇒ d3=4 ⇒ down ✓ | d3=4 ⇒ down ✓ |
+
+⇒ **已否证的三条候选**：① 「`%.{N+1}f` 后再半进」被第 2 枚否证；② 「只看最短往返十进制」被第 3 枚否证；③ 「只看精确展开」被第 1 枚否证。⇒ 正解必然是**某种带阈值/回退的复合规则**（我原先猜的「PHP 按二进制精确值舍」已被第 1 枚直接否证）。
+⇒ 下一轮第一步＝**扫参求转折**：固定 `N`、把有效位数从 4 推到 18（`1.005`／`12.005`／`123.005`／…／`123456789012345.005`）＋ 固定值扫 `N`，定位口径在「第几位」换轨，再据此实现。**禁先写代码。**
+
+其余实测口径（可直接进门臂）：`number_format(INF,2)` ⇒ **`inf`**、`NAN` ⇒ **`nan`**（小写，非异常）；`-0.0` ⇒ `0.00`（**无负号**）；`decimals` 为负 ⇒ 按 0 位（`number_format(1.234,-1)`＝`0`）；`1e308` 的整数展开带千分位长 **411**；`round()` 四模式互不相同（`2.5`⇒UP 3／DOWN 2／EVEN 2／ODD 3；`1.005@2`⇒UP 1.01／DOWN 1／EVEN 1／ODD 1.01）⇒ 证明 `number_format` 用的是 **HALF_UP**，不可与 printf 的 ties-to-even 混用。
+
+**语料暴露**（工单 §47.5 已测）：`number_format` 9 枚文件 **25 处**调用 ⇒ 是本工单当前**语料暴露最大**的一枚未修面；但 25 处是否落在分歧区**未测**（需门 NFM 的语料普查臂）。
+
+### 49.3 落地前置（下一轮的顺序，勿颠倒）
+
+① 扫参定规则 → ② 建永久侧门 NFM（含 `round()` 四模式 × 约束三角 × 大值展开 × INF/NAN × 负 decimals，并加一枚**语料普查臂**数 25 处调用的分歧命中）→ ③ 与 F-65（`decimals` 越界／长循环）**同批设计**，因为正解都要用到「精确十进制展开」这套底座 → ④ 实现可能需要 `src/runtime/bigdecimal.zig`（AGENTS §十一 登记的 bcmath 蓝本）作取用参考，**先核对依赖闭包**再动。
+
+### 49.4 ★规则推导完成（半枚门票已拿到）：`number_format` 的 tie 判定＝「最短表示优先，位数不足回退精确展开」
+
+实验资产（**只跑系统 PHP**，可在链跑动期间复测）：
+`fuzzy_scripts_720/tmp/c057_derive_number_format_rule_tmp.php`（八条候选规则 × 52 枚 curated 样本，用 gmp 造出 double 的**精确十进制展开**）
+`fuzzy_scripts_720/tmp/c058_measure_tie_epsilon_tmp.php`（tie 容差形状量测：Δ 以「最低位 10^-N」为单位）
+
+| 候选 | 命中（52 枚 curated） | 命中（400 枚确定性随机，seed=20261017） |
+|---|---|---|
+| A 最短表示 + half-up | 48/52 | 377/400 |
+| B 精确展开 + half-up | 36/52 | — |
+| C 精确展开 + ties-to-even | 32/52 | — |
+| D 精确→先正确舍到 N+1→half-up | 51/52 | 388/400 |
+| E 最短→先舍 N+1→half-up | 47/52 | — |
+| **F 最短表示，小数位不足 N 时回退精确展开 + half-up** | **52/52** | **394/400** |
+| G F + 先舍 N+1 | 51/52 | — |
+| H 两段式（F 舍回 double 再打印其展开） | 48/52 | 394/400（与 F 同一批残差） |
+
+**规则 F 的口径（可直接实现）**：取该 double 的**最短往返十进制表示**（＝`var_export`/`serialize_precision=-1` 那一串）；
+① 若它的**小数位数 ≥ N** ⇒ 就在这串上按十进制做「half-up（远离零）」舍到 N 位；
+② 若小数位数 `< N` ⇒ 改用该 double 的**精确十进制展开**再舍到 N 位（**尾部补精确位、不是补零**）。
+⇒ 一举解释此前互相矛盾的全部样本：`1.005`@2（short 小数位 3≥2 ⇒ tie ⇒ **1.01**）／`1.004999999999999`@2（short 15≥2 ⇒ d3=4 ⇒ **1.00**）／`123456789012345.6`@2（short 小数位 1<2 ⇒ 精确 `…59375` ⇒ **…345.59**）／`1/3`@20（short 16<20 ⇒ 精确 ⇒ `0.33333333333333331483`）／`0.015`@2（short 3≥2 ⇒ tie ⇒ **0.02**）／`1.5E-8`@8（展开后 9≥8 ⇒ tie ⇒ `0.00000002`）。
+★**阈值口径的教训（我第一版踩错）**：判据是「**小数位数** vs N」，不是「有效位数」——`0.015` 有效位只有 2 而小数位有 3，按有效位判会误落精确支 ⇒ F 从 36/52 才升到 52/52。
+
+**F 的 6 枚残差全部是「N 超出该 double 可表位数」时的*重建段*误差**，不是判定段：实测 `round(643248.8032, 10)` 返回的 double 位型是 `4123A1619B3D07C9`，而输入是 `…C8` ⇒ **恰高一 ulp** ⇒ 打印成 `643248.8032000001`。六例同形（`9143313.175000001`/`88964.72020000001`/`75813263470.00002`/`7529.252607000001`/`539600375.9000001`）。
+⇒ 我的 H（两段式：舍回 `strtod(十进制串)` 再打印）**没有**复现该 ulp 偏移 ⇒ 说明 PHP 的 stage-1 不是「十进制串→double」，而是带 `10^N` 幂运算的重建（`v×10^N` 的乘积舍整再除回，商的双舍入产生 ulp 偏移）。
+★**关键推论**：AOT 现在的算法**也在重建段**（`scaled = num * pow10` ⇒ `@intFromFloat(std.math.round(scaled))` ⇒ 整数拆位）⇒ 它的高 N 尾迹**可能本来就与 PHP 同族**，而真正坏的是**判定段**（用 double 乘积的 frac 与 0.5 比，等价于候选「纯精确/纯二进制」⇒ 会被 `1.005` 那类样本判成 DOWN）。⇒ 下一轮的正确顺序＝**先用门 NFM 实测 AOT 落在哪一段坏**，再决定只替换判定段（保留其重建）还是两段都换。禁照抄 F 就直接写。
+
+### 49.5 本节的两条流程收获（已同步进 [[feedback-aot-regression-rules]]）
+
+① 用 `perl -pi -e 's/.../...$fails.../'` 做「改完再改回」的往返编辑，replacement 侧的 `$fails` 被 perl 当**变量插值**吃掉 ⇒ 资产直接 `Parse error`。⇒ 改文件用 Edit 工具，别用「perl 双向替换」；确需 shell 改文件时，replacement 里的 `$name` 必须转义或改写。
+② PHP 的 `or` 优先级**低于** `=`：`$x = A or B` 解析成 `($x = A) or B` ⇒ 我据此写错 `pick_str` 的混合条件，F 假性停在 36/52 并差点被误判为「规则不成立」。⇒ 条件表达式一律用 `||`/`&&`，或整条加括号。
+
+## 50. R-174c（2026-10-17，链跑动期间只读备料）：F-69 的**映射表已测全**（float→int 越界）
+
+真值资产＝`fuzzy_scripts_720/tmp/c059_truth_float_to_int_tmp.php`（24 例，跑绿 `TRUTH_F2I_OK cases=24`；只跑系统 PHP，链内可复测）。
+
+★**站点归一**：`(int)$v`／`intval($v)`／`sprintf("%d",$v)` 三径实测**同值同告警** ⇒ 是一个 helper，不是三处措辞。
+
+**PHP 的三条区制（正解必须三条全实现）**：
+
+| 区制 | 条件 | 结果 | 实测样本 |
+|---|---|---|---|
+| ① 回绕 | `PHP_INT_MAX < v < 2^64`（及负向对称） | **按 u64 截断后回绕**成 i64 | `1e19`⇒`-8446744073709551616`（＝1e19−2^64）；`2e19`⇒`1553255926290448384`；`1e20`⇒`7766279631452241920`（＝1e20−5·2^64）；`-1e19`⇒`+8446744073709551616` |
+| ② 归零 | `\|v\| ≥ 2^64` | **恒 `0`** | `2^64`⇒0、`2^65`⇒0、`±1e308`⇒0 |
+| ③ 非有限 | INF／−INF／NAN | **`0`** ＋ 告警（消息里写原词 `INF`/`-INF`/`NAN`） | — |
+
+★**告警条件是闭下界、开上界**：`v < PHP_INT_MIN or v > PHP_INT_MAX` ⇒ `−2^63`（恰等 minInt）**界内、不告警**，`+2^63` **越界、告警并回绕成 minInt**。⇒ 别把「±2^63 都告警」写进去（我第一版就这么写错，被资产自校验抓到）。
+★**陷阱两枚**：① 字面量 `9223372036854775807.0` **本身就解析成 2^63** ⇒ 它属越界区，不能当界内守卫样本（真守卫是 `9223372036854774784.0`＝界内最大可表 float）；② `var_export((int)2^63)` 打印 `-9223372036854775807-1`（PHP 对 minInt 的写法）而 `sprintf('%d')` 打印 `-9223372036854775808` ⇒ 比对只能用 `(string)`。
+★**告警里的 float repr 走「最短往返（序列化）口径」**：消息给 `9.223372036854776E+18`（16 位）／`3.6893488147419103E+19`（17 位），而显示口径（precision=14）会给 `9.2233720368548E+18` ⇒ 判据清楚。文本＝`The float <repr> is not representable as an int, cast occurred`。
+
+**AOT 侧已实测的部分**（来自门 FLT 的 g3 臂，非推测）：`1e19` 三站点全给 `-9223372036854775808`（Zig `@intFromFloat` 的**饱和**语义）且**完全不告警**；`number_format(1e19, 2)` 给 `92,233,720,368,547,758.07`——即先饱和成 i64、再当 float 用，**污染扩散到格式化**。
+★**尚未实测的部分**：②③区制与负向回绕在 AOT 侧的行为（g3 只覆盖 `1e19` 一枚）⇒ 下一轮建门 F2I 时**必须先取修前基线**，禁照 PHP 表反推 AOT 现状。
+
+**与 F-70/F-65 的关系（同批设计的理由）**：三者都落在「数值→字符串／数值→整型」的**边界处理**上，且 `number_format` 的大值路径依赖 float→int 的饱和行为（g3 已实证污染）。⇒ 修复顺序＝**先 F-69（helper 单点 + 告警）**，因为它改变了 `number_format` 大值的输入，F-70 的门臂读数才稳定；F-65（`decimals` 越界／`pow10` u64 溢出）与 F-69 同处 `php_number_format`，宜同批。
+
+### 48.6.1 F-73 的**落点与形态已定位**（读码，未动 `src/`；供老铁裁决）
+
+**根因链（逐段实测＋读码）**：`ir_generator.zig:1622/1662/2192/8371` 四处属性默认值统一走
+`tryMakeConstInstruction(dv)` ＝ 一个**纯语法白名单**（`literal_int`/`literal_float`/`literal_bool`/`literal_null`/`literal_string` ＋ 空数组/`const_array`）。
+遇到任何其它 tag ⇒ **返回 null** ⇒ `prop.default_value = null` 而 `has_default` 仍为 `true`
+⇒ `native_linker.zig` 那三叉的**第三支**（`else ⇒ runtime.Value.initNull()`，注释写着「非 readonly 声明属性或有默认值 null」）被误命中
+⇒ 属性静默变 NULL，而反射/`isset` 仍认为它有默认值。
+
+★**与参数/类常量的差别就在这一处**：参数默认值与类常量走 IR 指令发射路径，一元/二元在那里被**优化器折叠**成 `.const_float` ⇒ 所以同一条 `-5.0` 在参数位对、在属性位错（n3/n4 实测 SAME、n1/n2 实测 NULL）。
+
+**甲型（复用既有折叠，推荐）**：把 `tryMakeConstInstruction` 内部的语法 switch 换成调用**同文件已有的 `getConstantValue`**，再把 `ConstantValue` 映射成 IR op。
+读码实测 `getConstantValue` 已覆盖：`literal_int/float/bool/null/string` ＋ **`.unary_expr`** ＋ **`.binary_expr`** ＋ **`.class_constant_access`**（含 `self::`/`parent::` 解析），
+折叠逻辑本身来自单一来源 `src/aot/constant_folder.zig`（`foldBinary`/`foldUnary`，`ir_generator` 与 `optimizer` **共用**）⇒ 甲型**不新造任何折叠语义**，只在属性位接上这条通道。
+成本＝一个函数体（约 15 行）；影响面＝类/trait 的属性默认值注册发射；风险＝`getConstantValue` 目前返回的是「值」不是「寄存器」，需确认调用点不在函数体内发射寄存器（读码显示它是纯查询，安全）。
+
+**甲型收不掉的残余子面（须分开登记，别混进同一验收计数）**：`getConstantValue` 里 **`identifier`／全局常量取用 = 0 处**（实测 grep）
+⇒ `public $f = PHP_INT_MIN;` 这类**全局常量**默认值甲型后仍为 NULL。修法＝在类注册期查常量表（模板 `:8501` 一带有 `PHP_INT_MIN` 等登记表），属**第二小步**，禁在甲型里顺手糊一个「名字里带 INT_MAX 就特殊处理」的硬编码（违 §四.3）。
+
+**乙型（改成 fail-closed）**：把 `native_linker` 那三叉的兜底支从 `initNull()` 改编译期报错。
+★**不推荐单独采用**：合法 PHP 会从「静默错值」变成「编不过」，比现状更坏（同 R-145/F-18 的取舍原则：**宁可漏报，不可误杀**）；乙型只适合作为甲型落地后的**防回归诊断**（对确实无法折叠的形，如需要运行期构造的默认值——但 PHP 属性默认值本就只允许常量表达式，故这类形态极窄）。
+
+**门 LIT 的常驻臂**：b11（实例属性 `-0.0`）/b12（静态属性 `-0.0`）已进判据红集；甲型落地后它们必须转绿，且**新增臂**应覆盖 `-5`/`5*2`/`+1.0`/`Foo::C` 四形与 `PHP_INT_MIN`（后者单独标 F-73b，绿/红不许混记）。
+
+### 51. F-74 的**只读收窄**（R-174c，未编译；结论分「已证」与「待证」两栏）
+
+**已证（纯读码可证）**：
+- 运行期那句 `Cannot redeclare trait` 由 `runtime.registerClassRedeclare` 打印（模板 `:19703/19680/19718` 一族），全仓**只有两处发射**：`native_linker.zig:3371`（类面）与 `:3691`（**trait 面**）。
+- trait 面发射条件＝`emitted_trait_names.contains(tname)` 为真（`:3688`），且该循环只处理 `td.kind == .trait` **且**「至少有一个静态属性」的 TypeDef（`:3675` `if (td.kind != .trait) continue;` ⇒ `:3684` `if (!has_static) continue;`）。
+  ⇒ **完美解释隔离实验**：只带实例属性的 trait 恒不进入此循环（r2 SAME）；带静态属性的 trait 一旦命中就 rc=255（r1/r3/b4）。⇒ 「trait 静态属性」是**触发条件**而非根因，根因是**同名 trait TypeDef 在 `ir_module.types.items` 里出现了两次**。
+- `generateClassRegistration`（`:3314`）**只有一个调用点**（`:1799`）⇒ 不是「整个注册块被发射两遍」。
+- 全仓 `kind = .trait` 的 TypeDef 生产点**只有一处**：`ir_generator.zig:2146 generateTraitDecl` → `:2172 module.addTypeDef`，且 `addTypeDef` 是**裸 append、无去重**（`ir.zig:108`）。`generateTraitDecl` 的调用点是 `ir_generator.zig:725`（`.trait_decl`）。
+- 顶层语句走法（`:390-425`）：声明类节点（含 `.trait_decl`）在**这里就被 `generateStatement` 处理**，非声明语句才进 `top_level_stmts` 供 `__main__` ⇒ 所以 `.trait_decl` 不该被第二轮访问。
+
+**待证（必须看生成码/IR，链跑动期间不能编译）**：
+① 对 r1 取 `ZIGPHP_AOT_KEEP_TEMP=1` 的 `main.zig`，数 `registerClassRedeclare("T9"` 与 `trait_T9_meta = try runtime.ClassMeta.init` 各几次 ⇒ 若前者 1 次、后者 1 次 ⇒ 确认「types 里两条 T9」；若前者 2 次 ⇒ 说明整段被发射两遍（另一条根因）。
+② 在 `generateTraitDecl` 入口临时打印 `node_idx`（或统计 `ir_module.types.items.len` 按 kind 分桶）⇒ 判定重复发生在 **AST 侧**（同一 `trait_decl` 被喂两次：疑 `namespace` 包裹路径 `:390-406` 与顶层路径 `:415-421` 之外的第三个 gather/pass，或 parser 把 trait 同时放进 stmts 与某个 decls 表）还是 **IR 侧**（同一 node 被 `generateStatement` 调两次）。
+③ 修复取向二选一，**别先写**：甲＝`addTypeDef` 对同名同类做去重（影响全体 type，风险面大：`registerClassRedeclare` 的合法重复声明诊断会被吞 ⇒ 必须保留「源位置不同且非同一 node」的判定）；乙＝在 trait 循环里按 **location/AST node** 而非按名字去重（改动只在 `:3670-3694`，最小面）。⇒ 由实测②决定。
+★注意别把 F-74 与 F-73 混修：b4（trait 静态属性 `1e308`）现在绿不了的是 F-74，b11/b12（属性默认值 `-0.0`）是 F-73，两者在门 LIT 里身份不同。
+
+## 52. F-62f 的**静态普查**已建成（R-174c，纯读码，链跑动期间可跑）
+
+新资产＝`fuzzy_scripts_720/tmp/c060_f62f_unguarded_census_tmp.sh`（**不调用 AOT、不编译** ⇒ 与链无冲突）。
+实测读数（R-174c 代次）：`entries=497 distinct=464 guarded=31 unguarded=91 map_body=572 runtime_name_missing=7`。
+
+口径：`GUARDED` ＝函数体含 R-172 那套 helper（`requireNumParam|requireOptionalNumParam|requireArrayParam|rejectParamType`）；`UNGUARDED` ＝无任何上述 helper 却直接读 `.toInt()/.toFloat()`。
+★**必须先与 `builtin_map` 求交集**：模板里裸 `toInt/toFloat` 的函数体有 **109** 个，但其中含算术 binop（`php_add/php_sub/php_mul/php_div/php_mod/php_neg/php_increment/…`，其对象面已由 OPS/OBJ/ABS/MSR 分别收口）、内部 helper（`var_export/php_coerce_value/registerSplFixedArray`）与**不可从 PHP 调用的函数** ⇒ 不求交集就报数会虚高（这是我第一版 census 的错，已改）。
+
+**91 枚里已知的假阳性族（下一轮 triage 时须逐枚剔除，不许直接计入缺陷数）**：
+- **扩展族**（AOT 不在范围内）：`pcntl_*`／`posix_*`／`msg_*`／`sem_*`／`shmop_*`／`socket_*`。
+- **字符串族**（形参不是数值，PHP 侧不类型校验或另有口径）：`ctype_*`（10 枚）、`str_*`/`mb_str_*` 里以字符串为第一参者。
+- ★**负证据已实测过的**：`intval`／`floatval`／`sprintf`／`sscanf` **必须不抛**（R-172 实测）⇒ 清单里出现 `sprintf`/`sscanf`/`floatval`/`settype` 不代表要加校验，加了就是 over-fatal 假阳性（同 R-155 `count()` 面、R-172 `array_sum` 面两次踩过的陷阱）。
+- **内部名混入**：`php_array_get_ref`／`php_array_isset`／`php_object_new` 是以 `php_*` 形态出现在表里的 runtime_name，不是 PHP 可见函数名。
+- **重复行可见**：`preg_match_all`/`preg_replace`/`array_fill`/`array_splice`/`array_pad`/`base_convert` 各出现两次 ⇒ 与普查门 B 的 `dup_rows=33` 同源（F-4 未动）。
+- `runtime_name_missing=7` ＝表里指向的 runtime_name 在模板中找不到同名 `pub fn`（候选是转发器或别名），**未核实**，属普查自身的待查项。
+
+**真实工作清单的形状**（读清单可得，尚未逐枚实测）：以 **int 形参**为主的一族最像 F-62 的正经延伸——`str_repeat`/`str_pad`/`array_slice`/`array_splice`/`array_chunk`/`array_pad`/`array_fill`/`range`/`chunk_split`/`wordwrap`/`substr_replace`/`mb_substr`/`mb_strpos`/`mb_str_split`/`dechex`/`decoct`/`bindec`/`hexdec`/`octdec`/`base_convert`/`long2ip`/`rand`/`srand`/`random_int`/`sleep`/`usleep`/`mktime`/`idate`/`getdate`/`checkdate`/`hash_pbkdf2`/`password_hash`/`pack`/`chr`。
+其中 `dechex/decoct/long2ip/rand/sleep/array_fill/range/base_convert/bindec/hexdec/octdec/substr/str_repeat` 的**措辞已在 R-173 轮实测过**（见 §F-62f 既有登记）⇒ 那一族的口径不是未知，而是**未接线**；其余仍需系统 PHP 实测。
+★落地下一次批的边界＝「先把已实测措辞的枚数接上 + 门 BLT 扩臂定档」，禁一次铺开 30+ 枚（BLT 从 28 臂长到 129 臂的成本是实测 78s→140s 量级，一次铺太宽会让修复前后归因失效）。
+
+★**漂移归因脚手架已入库**＝`fuzzy_scripts_720/tmp/c061_integral_float_roles_tmp.php`（只跑系统 PHP 的词法器，不编译）。
+实测预测＝漂移文件 **6 枚**（f010/f036/f072/f104/f124/f163），整值浮点 token **11 处**；其中 **f124 line 44 的 `4.0` 角色＝属性默认值** ⇒ 走 `native_linker` 属性站点，其余 10 处走 `.const_float` 指令站点。
+⇒ 词法器天然排除串内形态（`192.168.1.0`、`'1e5'`），所以早先用 grep 得到的「14 枚上界」是**含串内噪声的粗读数**，真预测是 6 枚。⇒ 影子列回来后：若 `changed_rows=6` 且身份恰为这 6 枚 ⇒ 归因闭合；若**多出**文件 ⇒ 说明还有「折叠后整值化」的路径（如 `2.0*3` 折成 `6`）⇒ 那是新增知识，不是失败；若**少于** 6 枚 ⇒ 说明该文件的浮点常量被 DCE/内联吃掉或从未发射 ⇒ 也要实测解释，不许默认通过。
+
+## 53. R-175（2026-10-17）：**F-75 新立＝内置函数「多传一个可选实参」⇒ 合法 PHP 编不过（49 枚）**
+
+**发现方式**：本批原计划做 F-69，建门 F2I 取修前基线时，臂 `b3 = intval($v, 2)` **编译失败**：
+`main.zig:87:24: error: expected 1 argument(s), found 2`。⇒ 与 F-69 无关，是独立的 **arity 族**（老铁裁「甲：本批改做 F-75 通用机制」，F-69 顺延并裁「甲：改 `toInt()` 单点＋告警只在显式站点」）。
+
+### 53.1 根因（读码定性）
+发射器把用户实参**原样**交给模板 handler；模板 handler 是**定长形参**（Zig 无默认形参），且 `BuiltinInfo` 只有四字段
+（`runtime_name/needs_allocator/may_raise/ref_params`，`native_linker.zig:3980-3985`）⇒ **没有任何地方声明「这个内建可选参有几个、缺省值是什么」**。
+通用尾支＝`native_linker.zig:23430-23442`（`// 通用builtin函数调用` ⇒ `writeValueArgs(op.args)` 原样透传）＋其孪生 `:23641`。
+可选参目前只有两种坏法并存：
+- **多数名字（49 枚）**＝没有特例 ⇒ 多传一参直接 Zig arity 错 ⇒ 编译失败；
+- **少数名字（4 枚）**＝按名字硬编码补齐/裁剪：`php_strstr`（`:22929`）、`php_hash_pbkdf2`（`:22937`）、`php_file_put_contents`（`:22947` **`@min(op.args.len,2)` 裁参**）、`php_str_word_count`（`:22952`）。
+  ★其中 `file_put_contents` 的裁剪＝**`flags` 被静默丢弃**（模板签名只有 `filename/data/allocator`，`:4013`）⇒ `FILE_APPEND`/`LOCK_EX` 全部无效＝比编不过更隐蔽。
+
+### 53.2 实测半径（两层，禁混用）
+① **静态普查**（`c064_arity_gap_census_tmp.php`，零编译）＝`pairs=464 gaps=66 ok_or_variadic=346 not_reflectable=52`（66+346+52＝464 自洽）
+   ⇒ 口径＝模板 handler 形参数（跳过 `allocator` 类形参；识别 `[]const Value`/`anytype` 为可变）＜ PHP `ReflectionFunction::getNumberOfParameters()`。
+② **永久侧门 ARG**（`c065_arity_optional_arg_gate_tmp.sh`，实编译实跑）＝`arms=66 same=3 diff=7 compile_fail=49 bad_probe=7 @69s`
+   ⇒ **49 枚确认「合法 PHP 编不过」**：`define class_exists enum_exists interface_exists trait_exists is_subclass_of class_alias class_uses class_implements unserialize file_get_contents fopen fwrite php_uname unlink file fgets fseek scandir stristr strrchr mb_str_split fnmatch sscanf unpack array_keys array_unique srand mt_srand is_callable intval rename copy mkdir rmdir phpversion get_loaded_extensions getenv parse_url hash hash_hmac hash_pbkdf2 glob touch debug_zval_dump pcntl_wait hash_file stream_register_wrapper stream_wrapper_register`
+   （常用惯用法全在内：`class_exists('X', false)`、`intval($s,16)`、`array_keys($a,'v')`、`hash('sha256',$s,true)`、`getenv($n,false)`）。
+   `bad_probe=7`＝`preg_replace preg_filter preg_replace_callback password_hash password_needs_rehash sizeof http_build_query`（**门自身造参不足**：联合类型/可空/by-ref 出参 ⇒ 不是 AOT 缺口，禁计入）。
+   `diff=7`＝`sort rsort asort arsort ksort krsort ob_start`（by-ref 传 null 的诊断差异，需逐枚读，禁一律当 arity 面）。
+
+★**方法论新条（本轮学到）**：**`SAME` 不能反证「无缺口」**。`file_put_contents` 在门上显示 SAME，只因为我造的第三个实参恰好无可观测效果 —— 它实际是**静默裁参**。⇒ 对「已被裁剪特例吸收」的名字，验证必须用**对该实参敏感**的探针（例：连写两次 `FILE_APPEND` 后数行数），门 ARG 目前的通用造参做不到 ⇒ 修复时须为这类名字单独加**效果敏感臂**。
+
+### 53.3 已定的通用机制形状（老铁裁「甲」）
+在 `BuiltinInfo` 上加**声明式元数据**（缺省即旧行为，只标注被加宽的名字）：
+`handler_params: u8 = 0`（该 handler 加宽后的真实形参数）＋ `optional_defaults: []const []const u8 = &.{}`（逐位 Zig 表达式文本＝PHP 的缺省值）。
+发射器只在**通用尾支两处**（`:23430-23442`、`:23641` 区）加一条规则：`declared = handler_params`，`declared > 0 且 op.args.len < declared` ⇒ 逐个补 `optional_defaults[i]`；`op.args.len > declared` ⇒ 原样透传（加宽后不应发生）。
+⇒ 之后每枚内建的修复＝**纯模板工作**（把可选参加进 handler 并实现语义）＋表里一行元数据，**不再新增按名 `eql` 特例**；那 4 处手工特例（含静默裁剪的 `file_put_contents`）收敛到同一条通道。
+★注意：缺省值**不能**一律补 `initNull()` —— PHP 的 `bool $strict = false`、`int $flags = 0`、`int $base = 10` 补 null 会**改变行为**（这正是 R-172「省略形参到达时为 null」踩过的点），所以缺省必须逐位声明。
+
+### 53.4 通用机制已落地并实测收口（R-175 第一批）
+
+**机制（三件，全在发射器一处 + 声明式元数据）**：
+① `BuiltinInfo` 新增两字段：`handler_params: u8 = 0`（handler 的**位置形参总数**，不含 `allocator`；`0`＝未声明 ⇒ 发射器完全不介入）＋
+   `optional_defaults: []const []const u8 = &.{}`（**按位**的 PHP 缺省值 Zig 表达式文本）。
+② 新增 `writeBuiltinArgs(writer, args, func_name)`（紧邻 `writeValueArgs`）＝原样透传 ＋ 在 `[必填数, handler_params)` 区间逐个补 `optional_defaults[i]`。
+   ★两条**刻意收紧**：`args.len == 0` **不补**（必填参没给齐 ⇒ 留给既有 arity 诊断报可读错，绝不替用户臆造实参）；
+   `args.len < 可选段起点` 也不补（同理）。缺省段起点＝`handler_params - optional_defaults.len`，由元数据推得，不新增字段。
+③ 接线＝**四条通用尾支**全部换成 `writeBuiltinArgs`：result 带 allocator 支（`:23025` 区）、result 不带 allocator 支（`// 通用builtin函数调用`）、
+   statement 带 allocator 支、statement 不带 allocator 支（`// 通用builtin函数调用（无返回值）`）。
+   ⇒ 那 4 处按名字手工 `eql` 特例**本轮未删**（删除属 §六.3 需单独点头；且它们走的是各自的分支，与新机制不冲突、不会双补）。
+
+**第一批加宽＝6 枚「参数在 AOT 下本就惰性」的名字**（零行为风险，只解编译锁）：
+`class_exists`／`interface_exists`／`trait_exists`／`enum_exists`（`$autoload=true` ⇒ 模板内 `autoload` 出现 **0 次**＝无 autoloader，惰性成立）＋
+`getenv`（`$local_only=false` ⇒ AOT 无 SAPI 环境分层）＋ `is_subclass_of`（`$allow_string=true` ⇒ AOT 侧本就同时收对象与类名字符串）。
+每枚＝模板 handler 加形参 + `_ = 形参;` + 内部包装调用点传 `if (args.len > N) args[N] else 缺省` + 表里一行元数据。
+★**故意没加宽的四枚**（`intval` 的 `$base`、`stristr` 的 `$before_find`、`class_uses` 的 `$include_parents`、`class_implements` 的 `$fully_qualified_names`）：
+   它们的实参会**改变返回值** ⇒ 「接收但忽略」＝复刻 `file_put_contents` 那种静默丢参，比编不过更坏。
+   且本轮实测把我原先两个假设**否证**了：`class_implements("App\Leaf", false)` 在 PHP 8.5.8 **仍返回完全限定名**（`App\I3`）、
+   `class_uses("App\Leaf", true)` 返回 **`[]`** 而 `class_uses("App\Mid", true)` 返回 `["App\T2"]` ⇒ 口径必须重测清楚再写。
+   `intval` base 侧已测 10 例（`intval("0x1f",16)=31`、`intval("ff",16)=255`、`intval("zz",16)=0`、`intval("1.9",16)=1`、`intval([1],16)=1`、`intval(true,2)=1`）。
+
+**实测读数（门 ARG，同一 66 臂名单）**：
+| | same | diff | compile_fail | bad_probe |
+|---|---|---|---|---|
+| 修前 | 3 | 7 | **49** | 7 |
+| 修后 | 9 | 7 | **43** | 7 |
+⇒ **转绿恰为 6 枚**＝`class_exists enum_exists getenv interface_exists is_subclass_of trait_exists`；
+★**新增非绿臂＝0**（`comm` 差集为空 ⇒ 没把原本绿的弄红）。`diff=7`/`bad_probe=7` 身份未变。
+`bad_probe=7` 是**门自身造参不足**（`preg_replace`/`preg_filter`/`preg_replace_callback`/`password_hash`/`password_needs_rehash`/`sizeof`/`http_build_query`＝联合类型/可空/by-ref）⇒ 不计入 AOT 缺口。
+★顺带澄清一枚旧疑点：`interface_exists("Traversable")` 在 AOT 为 false —— **1 参形态下本来就是 false**（内建接口不在类注册表里）⇒ 属门 P 的 `i1/i2`＝**F-3** 注册红家族，**不是本批引入**（我用 1 参对照臂验的，禁凭猜）。
+★**本批动了发射器** ⇒ `class_exists($x)` 这类**短调用**的文本也会变（多出一个 `runtime.Value.initBool(true)` 实参）⇒ 影子必然漂移，
+   判据同 R-174＝「逐枚可解释」；主回归与影子的实测值见下方回填（跑动中，禁引用未实测数）。
+
+### 53.5 ★影子漂移集**事前预测**（2026-10-17 09:05 落笔，早于 shadow 腿跑动 ⇒ 可证伪）
+
+**预测方法**（纯语料普查，不调 AOT）：新机制只对**表里被标注的 6 个名字**补参，其余名字走 `writeBuiltinArgs` 时 `handler_params=0` 直接 return ⇒ 输出与旧 `writeValueArgs` **逐字节相同**。
+⇒ 漂移当且仅当该脚本的 `main.zig` 里出现这 6 枚的**短调用**（实参数 < `handler_params`）。
+普查命令：`grep -rinE '(^|[^A-Za-z0-9_$>:])(class_exists|interface_exists|trait_exists|enum_exists|is_subclass_of|getenv)[[:space:]]*\(' fuzzy_scripts_720/pass/`（`fuzzy_scripts_720/pass/*.php` 共 **68** 枚）。
+
+| 命中 | 实际文本 | 判定 |
+|---|---|---|
+| `f010_oop_singleton_registry_di.php:61` | `if (class_exists($concrete)) {` | **1 参 ⇒ 必补 ⇒ 预测漂移** |
+| `f072_type_inference_hindley_milner.php:127` | `public function getEnv(): TypeEnv` | **方法声明**，非内置调用 ⇒ 预测**不漂移** |
+
+★**事前声明的可证伪读数**：`changed_rows` 应为 **1**，身份应为 **f010**；其余 **67** 枚必须逐字节相同。
+- 若出现 **f072 漂移** ⇒ 说明 `getEnv()` 这类**方法名与内置名同形**的被误派发到内置通道＝一枚新缺陷（不是本批的补齐问题），必须单独立项，禁算进「本批预期」。
+- 若 `changed_rows > 1` 且新身份不含 f010 ⇒ 说明机制在**未标注名字**上也改了输出 ⇒ 立即回滚排查（这是机制级错误，不是语料巧合）。
+- 若 `changed_rows = 0` ⇒ 说明 f010 的 `class_exists` 没走通用尾支（被某条按名 `eql` 特例吃掉）⇒ 机制覆盖面比表看起来窄，须重新定位四条尾支。
+
+### 53.6 ★R-175 链**实测读数回填**＋§53.5 事前预测**核销**（2026-10-17 11:08:26 闭合）
+
+**链体**：`c066` 34 腿**全 `rc=0`**，`08:54:47 → 11:08:26`，`ELAPSED=8019s`；代次＝二进制 `bd7a7c1c0b5e609d0de075a96471c7d8`／模板 `ac995d5578270f3d0d4d5d0c6414438a`／发射器 `ed61abf5d1389d3753689ded9680739f`（每条腿 `repo_build_residue=0`）。
+
+**主门 ARG（66 臂）**：修前 `same=3 diff=7 compile_fail=49 bad_probe=7` ⇒ 修后 **`same=9 diff=7 compile_fail=43 bad_probe=7`**。
+★逐枚（不是逐计数）核对：转绿**恰为**加宽的 6 枚 `class_exists enum_exists getenv interface_exists is_subclass_of trait_exists`；臂名 `comm` 差集**为空** ⇒ 没把原本绿的弄红；`diff=7`/`bad_probe=7` 身份未变。
+★取数自纠：本门 TSV **无表头**，我第一版用 `awk 'NR>1'` 抽列把第 1 臂 `var_dump` 吞了 ⇒ 计数一度对不上 `same=3`；按全 66 臂重抽后才与 DONE 行一致（同错误已第三次，见 [[feedback-log-aggregation-regex-traps]]）。链上读数与我链前自跑的读数**逐字段全等** ⇒ 可复现。
+
+**其余 32 条与 R-174 共有的腿：剥掉计时后 `diff` 无一行改动**（新增行只有 ARG 与影子 DONE 两行）⇒ 本批除主门外**零连带**。LIT 维持 `compile_fail=0`（`same=31 diff=8 parse_fail=3`）、FLT `same=64 diff=4 compile_fail=0`、BLT `129/128/1 caught=53`、NST `32/0`、OBJ `33/2 caught=24`、ABS `26/0`、MSR `74/74`、F45FACE `raise_lost=0 preserved=19 both_match_php=12 both_red=7`、OPS `26/0`、PD `18/2`、S `47/47`、AC `cf=8 canary=7`、CENSUS `bit_only=24 both=9 neither=33`、Y `5/5 escape=1 cf=2`、ZFACES `9/1 dangling=0`、ZCENSUS `68/0`、X `8/1`、V `19/10`、W `7/13`、T `16/5 cf=1`、P `73/5`、M `red=0 green=19`、N `7/7`、O `6/6`、D8 `defect_red=0 guard_same=14`、Q `same=5`、R `8/1 terminate_lost=0`、B `entries=497 distinct=464 dup_rows=33 diff_impl=3`、U `rc=0`（无计数行，wall=217s）。
+
+**主回归**（815s）：`Total 68 / Pass 67 / Fail(Compile) 0 / Fail(Runtime) 0 / Fail(Diff) 0 / Skip 1`，唯一明细行仍是 `f004 … SKIP PHP_error_exit=255`。
+
+**影子**（1077s）：`C010_SHADOW_DONE total=68 same=0 diff=68 miss=0 invalid=0`（68 枚产物运行期全部与 PHP 等值 ⇒ 本批无行为回归）。
+**跨代整列抽取**：`SHADOWCOL_DONE gen=r175 rows=68 col_md5=4d1a92cf3e33ca7f2a95fa6937411fd7 base=…_r174_tmp.txt base_md5=351bc8342faf5853a1090edc5d0b8d26 changed_rows=1`。
+★逐枚复算（`join` 两列比 md5）⇒ 漂移身份**只有** `f010_oop_singleton_registry_di`。
+
+**§53.5 核销（三条都可证伪，全部命中）**：
+| 事前预测 | 实测 | 结论 |
+|---|---|---|
+| `changed_rows = 1` | `changed_rows = 1` | ✅ |
+| 身份＝`f010`（`class_exists($concrete)` 单参短调用） | 唯一漂移＝`f010_oop_singleton_registry_di` | ✅ |
+| `f072` **不**漂移（命中的是方法声明 `getEnv()`，非内置调用） | `f072` 未漂移 | ✅ ⇒ 「方法名与内置名同形被误派发到内置通道」这枚假说**被反证**，不是靠"它本来就这样"糊过去的 |
+| 其余 67 枚逐字节相同 | 67/67 相同 | ✅ |
+★这是本工单**第一次**把影子判据写成「事前点名＋可反证」的形态并被完整兑现 ⇒ 后续批次沿用（见 [[feedback-aot-regression-rules]]）。
+**新基线列**＝`fuzzy_scripts_720/tmp/c010_shadow_newside_r175_tmp.txt`（68 行，表身 md5 `4d1a92cf…`）⇒ R-176 的 `BASE`；`r174` 列（`351bc834…`）退役但保留作跨代对照。
+
+## 54. R-176 备料（2026-10-17，R-175 链跑动期间的**只读取证**）：F-69 的触发集被我写窄了 ＋ 三条码路 ＋ 门 NFM 建成
+
+### 54.1 ★实测否证了我登记的一条措辞：**隐式算术面也发同一条 Warning**（资产 `c068_truth_float_to_int_implicit_tmp.php`，PHP 8.5.8）
+§50 把 F-69 的触发集写成「`(int)`／`intval`／`%d`／`%u`／`settype`／数组键」＝**显式站点**口径。本轮用真值资产把隐式面跑全，实测四条**组合规则**：
+
+| 输入形态 | 站点 | 实测诊断 | 实测取值 |
+|---|---|---|---|
+| 越界**有限**（`1e19`、`-1e19`、`1.5e19`、`1e308`、`INF`、`-INF`） | `1e19 % 2`／`1e19 & 1`／`1e19 >> 1`／`~1e19`／`[1e19=>"v"]` | **只**发 `Warning: The float <repr> is not representable as an int, cast occurred` | 回绕后再参与运算：`1e19 % 2`⇒`0`、`1e19 >> 1`⇒`-4223372036854775808`、`~1e19`⇒`8446744073709551615`、键⇒`-8446744073709551616` |
+| 界内**非整值**（`2.5`） | `2.5 % 2`／`2.5 & 1`／`[2.5=>"v"]` | **只**发 `Deprecated: Implicit conversion from float 2.5 to int loses precision` | 截断：`0`／`0`／键 `2` |
+| **NAN** | `NAN % 2`／`~NAN`／`[NAN=>"v"]` | ★**两条叠发**（Warn 前、Deprecated 后）——唯一叠发形态 | `0`／`-1`／键 `0` |
+| 显式站点 | `(int)2.5`／`intval(2.5)` | **零诊断** | `2` |
+边界复证：`(int)-9.223372036854776e18`（恰 −2^63）⇒ **不告警**、值 `-9223372036854775808`；`@(1e19 % 2)` ⇒ 抑制生效（`emitWarning` 已尊重 `isErrorSuppressed`）；`switch(1e19){case 1e19:}` ⇒ PHP **零诊断**且命中（switch 不做 int 转换）。
+
+⇒ **结论**：老铁裁的「甲＝改 `toInt()` 单点 ＋ 告警只在显式站点」里，**"只在显式站点"这半句被实测否证**；但裁定的**精神仍成立且必须保住**——`native_linker` 会把 `.toInt()` **直接写进生成码**（`switch (reg_x.toInt())` :19458/:19492/:32352/:32371、`reg_x.toInt() == 0` :22188、`Value.initInt(reg_x.toInt())` :20269、具名参 `args[i].toInt()` :21416、`(try runtime.php_neg(reg_x)).toInt()` :22116），模板内另有 225 处 `.toInt()` 调用点绝大多数是**静默内部消费者** ⇒ **值型 helper 必须纯净（不发任何诊断）**，诊断挂到「显式站点 ∪ 实测确认的隐式算术族」这个**并集**上。站点集的取舍需要老铁再点一次头（见本轮报告末尾）。
+
+### 54.2 ★★字符串支与浮点支**不对称**（同批实测，禁一处通用规则）
+`(int)"1e19"` ⇒ `9223372036854775807`（**饱和**）、`(int)"-1e19"` ⇒ `-9223372036854775808`、`intval("1e19")` ⇒ maxInt，**三者全部零告警**。
+⇒ u64 回绕规则**只**加在浮点支（`toInt()`:2733-2742 与 `php_intval`:13706-13711）；串支（`toInt()`:2771-2775、`php_intval`:13742-13745）保持饱和。守卫臂＝门 F2I 新增 `g13`。
+
+### 54.3 新立 **F-76**（编译期码路，独立于运行期 helper）
+`src/aot/ir_generator.zig:3195-3205` 给 switch 的 case 标签算 i64：`if (c.float_val) |val| break :blk @intFromFloat(val);`（**:3199**）**无任何范围守卫** ⇒ 越界/NAN 的 float 标签在**编译期**就是 Zig 非法行为（`@intFromFloat` 超范围/NaN＝UB），与模板侧 `toInt()` 是两处修法：这里只能借**值型**规则（回绕/归零），**绝不能**在编译期发 PHP 运行期告警。
+★同族无守卫站点（本轮读码所得，待门实测逐枚定性）：模板 `:4829 valueToArrayKey`、`:20476 tryCoerceSingleType`、`:20682 coercePropertyType`、`:22863 php_gmdate`、`:23051`（日期族第二支）、`:29177 php_decbin`、`:5895/:5932 php_increment/php_decrement`、`:25293 php_number_format`。
+★另证 `php_intval` 的浮点支**没有** `isNan` 守卫（`toInt()`:2739 有，`intval`:13706-13711 无）⇒ `intval(NAN)` 落到 `@intFromFloat(NAN)`＝UB；PHP 实测给 `0` ＋ Warn。
+★读码排除一条**猜想**：`src/aot/constant_folder.zig` 里 `cast_int`/`@intFromFloat`/`toInt` **0 命中**，`foldMod`(:149-152) 要求两枚都 `.int`；`ir_generator.zig` 的 `tryMakeConstInstruction`(:1420+) 只认 `literal_int`/`literal_float` ⇒ **纯字面量 `(int)1e19`／`1e19 % 2` 预期不被折叠**、仍走运行时站点。门 F2I `d13` 是**把关臂**（折叠入口不该改变取值与告警），不是先验结论。
+
+### 54.4 门 F2I 扩臂并改载荷口径（33 → **48** 臂，`AOT_BIN=/bin/false` 预检 `bad_probe=0`）
+新增 **D 段 14 臂**（`d1…d14`）钉 54.1 的四条组合 ＋ `g13` 钉串支饱和。载荷从「Warn 有/无」改成 **Warn 与 Deprecated 各自条数**对账（`Warn p=2 a=0 Dep p=1 a=0` 形态），否则「NAN 叠发两条」与「越界只发一条」会被 yes/no 抹平；DONE 行新增 `warn_over/warn_under/dep_over/dep_under`。
+★修好我自己的一处**证据自截断**：`c057` 的 F 与 H 两个候选**共用**同一个样本上限 ⇒ 规则 F 的第 6 枚随机失配**根本没打印出来**（我原先按"6 枚"记账却只列出 5 枚）。改成分桶各自限 12 后 F=6 全列出，curated 命中数**不变**（52/52，八条候选逐字同前）；新补的第 6 枚＝`539600375.9 @ 7` ⇒ 已作 `rp6` 进 NFM 门。
+★诚实标注：本轮新增臂在 `AOT_BIN=/bin/false` 下只验过「`php -l` 通过 ∧ 真值非空」；**AOT 侧读数一律未取**（链在跑，禁并发），真实修前基线待链完再取。
+
+### 54.5 永久侧门 **NFM 建成**（`c067_number_format_gate_tmp.sh`，56 臂，F-70 用）
+★本门的价值在**分段归因**：每臂同时打五个带标记观测 `#NF#`(最终串)／`#RB#`(`round($v,$n)` 的**位型**)／`#IB#`(**输入**位型)／`#RR#`(round 可读值)／`#TY#`(输入类型)，门自己算出 `stage ∈ input/judgment/recon/both/ok` 并聚合进 DONE 行。
+⇒ 只看最终串**无法**区分「判定段错」与「重建段错」，而两者修法不同；`recon` 桶专门抓「**位型已错但最终显示看不出来**」的潜伏面。
+臂构成：curated 31 枚（`nf1…nf31`，逐枚来自 `c056` 真值矩阵）＋ 规则 F 的 6 枚随机失配重建探针（`rp1…rp6`）＋ 分隔符可选参 4 枚（`sp1…sp4`，预期撞 F-75 arity 面 ⇒ 红记 F-75 不记 F-70）＋ `round()` 独立面 3 枚（`rd1…rd3`）＋ 守卫 8 枚（`g1…g8`）。
+★PHP 侧真值已实测入档（`AOT_BIN=/bin/false` 那一遍的 PHP 腿）：`sp2`（`number_format($v,2,",")`）⇒ `1,234,567,89`、`sp3` ⇒ `1 234 567,89`、`sp4`（分隔符给空串）⇒ `1,234,56789`；`number_format(INF,2)`⇒`inf`、`(NAN,2)`⇒`nan`；`1e308@0` 展开 309 位带分组；`g7`（`100000.000000001@8`）⇒ `100,000.00000000`；`[2.5=>'v']`⇒Deprecated＋键 2。
+★**更正 §50 的一处归因**：我曾写「AOT 的 `number_format(1e19,2)=92,233,720,368,547,758.07` 是 `toInt()` 先饱和成 i64 再当 float 用」——**不成立**。模板 `php_number_format` 不走 `toInt()`；该怪值来自 `:25292-25293` 的 `@intFromFloat(std.math.round(scaled))`（`scaled = num × 10^dec`，`.num_param` 分支**不做范围检查**）在越界输入下的非定义行为，`92,233,720,368,547,758.07` 恰＝`maxInt/100` 带分组。PHP 实测 `number_format(1e19,2)` ⇒ `10,000,000,000,000,000,000.00` **零告警**（`c068` 复证）⇒ **`number_format` 根本不做 int 转换**。
+⇒ 因此 NFM 的 `nf32…nf35` 四枚红归 **F-65/F-70（缩放转换无守卫）**，**不归 F-69**；F-69 的门禁读数不许把它们算进自己的转绿数。
+
+## 55. R-176 备料（2026-10-17）：余下 43 枚 arity 红**逐枚实测分类** ⇒ ★更正我 §53.4 的一句错话
+
+★**先认错**：§53.4 结尾我写「剩余 43 枚此后是**纯模板＋元数据**工作」。**实测否证**。本轮把 43 枚的名字逐枚过了一遍（模板签名逐个 grep 核实、PHP 真值逐枚实测、发射器按名特例逐枚定位），结论是**只有 9 枚能靠加元数据收口，34 枚必须真实现形参**。⇒ 那句「纯模板工作」如果照做，就会把 23 枚变成**静默丢参**（与 `php_file_put_contents` 的 `@min(args,2)` 同型，正是本轮机制要消灭的东西）。
+
+### 55.1 分类（43 枚全测，无 C 档遗留）
+**A 档＝9 枚（多余参在 AOT 可支持面上本就惰性／PHP 自己丢弃）⇒ 可诚实加宽**
+`define`／`hash_pbkdf2`／`copy`／`rename`／`rmdir`／`unlink`／`mkdir`／`stream_register_wrapper`／`stream_wrapper_register`
+· 签名实测（模板行号逐条 grep）：`php_define(name,value,allocator)`:8592、`php_copy(src,dst)`:25583、`php_rename(old,new)`:25569、`php_rmdir(dir)`:25557、`php_unlink(file)`:4202、`php_mkdir(dir,perm,rec)`:25521、`php_hash_pbkdf2(algo,pw,salt,it,len,raw,allocator)`:29614、`php_stream_register_wrapper(proto,class,allocator)`:32828。
+· `define` 的第三参**不是**"加个形参就 SAME"：PHP 8.5.8 实测 `define("K1",1,true)` ⇒ **原样发** `Warning: define(): Argument #3 ($case_insensitive) is ignored since declaration of case-insensitive constants is no longer supported`（`false` 不发）⇒ 要 SAME 必须**同批发这条告警**，否则只是把 `COMPILE_FAIL` 换成 `DIFF`。
+· `hash_pbkdf2` 的 `options` 实测**真惰性**（`[1,2]`／`["length"=>8]`／`["seed"=>1]` 与无 options **逐位相同**、零告警），因为 pbkdf2 能用的算法里没有任何一种吃 options（`in_array("xxh64", hash_hmac_algos())`⇒false、`hash_pbkdf2("xxh64",…)`⇒ValueError）⇒ 这一枚加宽是**语义正确**，不是掩盖。
+· 五枚文件/目录类（`copy`/`rename`/`rmdir`/`unlink`/`mkdir`）多余参全是 `$context`：实测本地路径下**无可观测效果**（含带 notification 的合法 context），传 int ⇒ `TypeError: copy(): Argument #3 ($context) must be of type resource or null, int given` ⇒ 「接收但忽略」在 AOT 支持面上成立；**但** `touch` 不在此档（见 55.2）。
+· ★两枚**建议按范围裁掉而非"修"**：`stream_register_wrapper`/`stream_wrapper_register` 的模板体是**纯 stub**（`:32828` 起 `_ = protocol; _ = classname; _ = allocator; return Value.initBool(true);`）⇒ 它注册了个什么东西都没有，PHP 侧对非法类名发 `TypeError`，AOT 无从复现 ⇒ **加宽也变不绿**；另 `php_uname`:4188/`php_phpversion`:25648/`php_get_loaded_extensions`:25668 三个 0 参 handler 属解释器专属函数（AGENTS §七.3），本轮不为它们加臂。
+
+**B 档＝34 枚（多余参实测**改变**取值／告警／副作用）⇒ 只能真实现**
+其中两档细分（这决定"加宽能不能让臂变绿"）：
+· **arm-differs＝17 枚**：`array_keys`(`strict`)、`stristr`/`strrchr`(`before_needle`：全形⇒`''`、必参形⇒`'abc'`)、`unpack`(`offset`)、`parse_url`(`component`)、`glob`(`flags`：全形反而⇒`Warning: …flags is invalid…`＋false)、`mb_str_split`(`encoding`：全形⇒`ValueError`)、`sscanf`(第三参 by-ref：全形⇒`ValueError: Variable is not assigned…`)、`srand`/`mt_srand`(`mode`：⇒Deprecated **且换 PRNG 流**，`srand(42,1);rand()`⇒`1354439493` vs `804318771`)、`debug_zval_dump`(变参)、`touch`(`mtime`/`atime`：`touch($f,1,1)`⇒`filemtime=1`)、`is_callable`(`syntax_only`＋by-ref 出参)、`pcntl_wait`(flags＋by-ref)、`php_uname`、`phpversion`、`get_loaded_extensions` ⇒ 对这些**补错缺省＝直接出红**，藏不住。
+· **arm-eq＝17 枚**（门里那枚垃圾实参恰好等于 PHP 缺省 ⇒ 补缺省能**骗绿**，但语义仍丢）：`intval`(`base`)、`fopen`/`file`/`file_get_contents`/`fgets`/`fseek`/`fwrite`/`scandir`/`fnmatch`/`hash`/`hash_file`/`hash_hmac`/`class_alias`/`class_implements`/`class_uses`/`unserialize`/`array_unique` ⇒ **★这一档就是"静默丢参"陷阱本身**，禁按元数据一补了事，必须逐枚把形参实现出来（`base`/`flags`/`offset`/`length`/`whence`/`binary`/`encoding`/`component`/`sorting_order`/`options`/`allowed_classes`）。
+
+### 55.2 ★两处**结构性**阻碍（与 arity 无关，补参补不掉）
+① **by-ref 出参**在内置调用通道里**没有机制**：只有 `preg_match_all` 那类 `*Value` 形参走通（模板 `:28028`），而 `is_callable` 第 3 参、`sscanf` 第 3 参、`pcntl_wait` 第 1/3 参都要写回调用者 ⇒ 这 4 枚的真实前置是 F-53（按引用出参保留调用者预置值）那一族，**不是** F-75。
+② `php_pcntl_wait`(`:26940`) 连它**唯一**的 `$status` 形参都是 `_`（实测状态值靠 `last_wait_status` 旁路），且 `stream_*` 两枚是纯 stub ⇒ 属"实现缺失"，按 AGENTS §七降级／单独立项，禁算进本族的转绿数。
+
+### 55.3 发射器接线事实（逐行核过，禁再凭旧行号写）
+四条通用尾支现共调 `writeBuiltinArgs`：`native_linker.zig:23057 / 23472 / 23637 / 23680`。
+但 43 枚里**有 5 枚的名字被按名特例截走**，压根不走这四条：`php_array_keys`:22505、`php_hash`:22838 与 23400、`php_hash_pbkdf2`:22969 与 23452、`php_mkdir`:23196（另 `php_strstr`:22962 是同族既有特例）。
+⇒ 任何"加形参＋加元数据"的批次，**必须同时**在这 7 处特例支里各接一次，否则会出现「表里标了、生成码没补」的假修。`builtin_map` 里 `file_get_contents`(:4067/:4383) 与 `unlink`(:4076/:4389) 各有**重复行**（F-4 家族，两两内容相同 ⇒ 后键生效，本轮实测不影响读数，但改元数据时**两处都要改**）。
+★`writeBuiltinArgs`(:19073) 在 `args.len >= handler_params` 时**原样透传** ⇒ 这正是 43 枚一枚都没被第一批机制碰到的原因（不是遗漏，是设计如此）。
+
+## 56. R-176 备料（2026-10-17）：★F-69 的区制②**被实测否证** ＋ 候选实现已用 430 枚真值逐位证等价
+
+### 56.1 ★更正 §50 记的「三条区制」里第②条：**不存在"≥2^64 ⇒ 恒 0"这条区制**
+§50/c059 当时把 `2^64`、`2^65`、`±1e308` 全给 `0` 归纳成「`|v| ≥ 2^64` ⇒ 恒 0」。本轮生成 430 枚真值后**被反例直接打脸**：
+`1e20`（≈5.42×2^64，远在 2^64 之上）实测 ⇒ **`7766279631452241920`** ＝ `1e20 − 5·2^64`。
+⇒ 真正的规则只有一条：**界外一律取该 double 整数值的 `mod 2^64`（补码回绕）**。`2^65`、`±1e308` 给 `0` 是**"该值恰为 2^64 的整数倍"的自然结果**，不是一条独立区制；`1e20` 不是 2^64 的倍数 ⇒ 非零。
+★这条更正很关键：若照"≥2^64 ⇒ 0"实现，则 `(int)1e20`、`1e20 % 2`、`[1e20=>"v"]` 全给 0 ＝**静默错值**，比现在的饱和还难查（现在的饱和至少只在 2^63 处发生）。
+
+### 56.2 候选实现（＝将要逐字写进模板的那份）与验证结果
+值型函数只用**位运算**，不碰任何越界 `@intFromFloat`（那在 Zig 里是非法行为），也不用浮点减法（`1e308` 那种量级下 `f − q·2^64` 的商会溢出精度）：
+```zig
+// c069_float_to_int_equiv_tmp.zig（同批资产）
+fn floatToIntPHP(f: f64, two_pow_63: f64) i64 {
+    if (f >= -two_pow_63 and f < two_pow_63) return @intFromFloat(f);   // ① 闭下开上 ⇒ 向零截断
+    const u: u64 = @bitCast(f);
+    const exp11: u32 = @intCast((u >> 52) & 0x7FF);
+    if (exp11 == 0) return 0;
+    const m: u128 = @as(u128, (1 << 52) | (u & ((@as(u64, 1) << 52) - 1)));
+    const s: i32 = @as(i32, @intCast(exp11)) - 1075;                     // f = m × 2^s
+    if (s >= 64) return 0;                                               // 低 64 位必为 0 ⇒ INF/NAN 自然落这里
+    const low: u64 = if (s <= 0) @truncate(m) else @truncate(m << @intCast(s));
+    const wrapped: u64 = if (u >> 63 == 1) (~low) +% 1 else low;          // ② mod 2^64 回绕（负数取补码）
+    return @bitCast(wrapped);
+}
+```
+配套两条谓词／一条组合规则（同样已验证）：
+· `越界告警` ⇔ `!(f >= -2^63 and f < 2^63)`（**闭下界、开上界**；NAN 与任何比较为 false ⇒ 天然判"越界"，与实测 `The float NAN …` 一致）；
+· `Deprecated`（只挂隐式站点）⇔ `isnan(f)` ∨ (`未越界` ∧ `f != @trunc(f)`)；界外**有限**值 ⇒ **不发**（实测 `1e19 % 2` 只发 Warn）；
+· 隐式站点取值＝`@rem(floatToIntPHP(f), 2)`（Zig `@rem` 与 PHP `%` 同为**向零截断**余数，实测逐枚吻合）。
+★验证：资产 `c069_truth_float_to_int_matrix_tmp.php`（只跑系统 PHP 8.5.8）产 **430 行**真值（45 枚定向值＋9×3 枚 ±2^63/±2^64 **位邻值**＋400 枚 seed=20261017 随机量级 `1e-12…1e37`；列＝位型／`(int)` 值／显式 Warn／隐式 Warn／隐式 Deprecated／`% 2` 值），
+配 `c069_float_to_int_equiv_tmp.zig` 复证 ⇒ **`CHECK_DONE rows=430 warn_rows=38 bad_val=0 bad_warn=0 bad_dep=0 bad_mod=0`**（四件事全对，零失配）。
+★两处取数陷阱（已按形状过滤规避并写进资产注释）：① PHP 的 `unpack('J', pack('d',$v))` 给的是**字节序反转**值（`2.5` ⇒ `0000000000000440`）⇒ 读回必须 `@byteSwap`；② PHP CLI 会把二级 `Warning: …` 文本打到 **stdout** ⇒ 机器可读 TSV 必须按行形状过滤，否则列数被污染（本轮 485 行里只有 430 行是数据）。
+⇒ **落地前置已清零**：R-176 动模板时照这份实现逐字搬，禁再"顺手简化"成 `@intFromFloat(@abs(f))`（那是越界 UB，正是本轮 24 枚失配的成因）。
+
+### 56.3 ★§54.3 列的"8 处无守卫 `@intFromFloat`"**不能**一律接回绕 helper（实测＝三种不同契约，资产 `c071_truth_int_param_contracts_tmp.php`）
+| 契约 | 站点 | PHP 8.5.8 实测 |
+|---|---|---|
+| **① 拒绝＝TypeError** | `decbin@29177`、`dechex@13479`／`date@23051`、`gmdate@22863`；typed property 赋值 `tryCoerceSingleType@20476`、`coercePropertyType@20682` | `decbin(): Argument #1 ($num) must be of type int, float given`；`date(): Argument #2 ($timestamp) must be of type **?int**, float given`（注意**可空**标记）；`Cannot assign float to property T::$p of type int`。★但赋**界内非整值** `2.5` ⇒ 只 `Deprecated: Implicit conversion from float 2.5 to int loses precision` 后截断成 `2` ⇒ 界内/界外两条支，禁合并 |
+| **② 根本不该转 int** | `php_increment@5895`、`php_decrement@5932` | `$x = 1e19; $x++` ⇒ **`1.0E+19`（double）**、`$x="1e19"; $x++` ⇒ double、`"9223372036854775807"++` ⇒ `9.223372036854776E+18`；**零诊断** ⇒ 这两处的 `@intFromFloat` 支要按"保持 float"口径重核，换 helper 是错方向 |
+| **③ 自有第三套措辞** | string 偏移 `php_string_offset_*@11025/11037` | `$s="abcdef"; $s[2.5]` ⇒ `Warning: **String offset cast occurred**` ＋取到 `'c'`；`$s[1e19]` ⇒ **无任何诊断**、越界返回 null ⇒ 既非 F-69 的 int 转换句，也非形参 TypeError，属旁支族 |
+⇒ 仍归 F-69/F-76 的只有：**数组键两支**（`normalizeArrayKeyFromValue@1814`、`valueToArrayKey@4829`）与 **switch 标签的编译期支**（`ir_generator@3199`，只取值型规则、禁发运行期告警）。
+★正例（钉住"编译期与运行期必须同一条回绕"）：`switch ((int)1e19) { case -8446744073709551616: }` ⇒ 实测 **wrap-hit** ＋恰好一条 Warning ⇒ 任一侧仍饱和就撞不上。
+★新立 **F-77**（见 §59.3）：对象→数字的取值与诊断双错。
+
+## 60. R-176 备料（2026-10-17）：永久侧门 **PMOD 建成**（`c072_preg_modifier_gate_tmp.sh`，13 臂）＝§38.4 遗留的「修饰符被接受但未映射」定级门
+★来历：R-163（F-50）只补**合法性**校验，并明写「合法但语义未实现的 `n u r A D J S U X` 仍按接受但不映射处理 ⇒ 需要一枚 PHP-vs-AOT 的修饰符语义门才能定级（本批未测 ⇒ 不作"已支持"声明）」。本门就是那枚门。
+
+### 60.1 臂只按**实测可观测**建（先探针后建臂，禁死臂）
+用 `/tmp` 探针逐枚比较「同一模式体带/不带该修饰符」⇒ **6 枚可观测**，全部进了臂：
+| 修饰符 | 探针（基线 vs 带修饰符） | PHP 实测 |
+|---|---|---|
+| `A` | `/a/` vs `/a/A` 打 `xa` | `1 ["a"]` vs **`0 []`**（锚定） |
+| `D` | `/a$/` vs `/a$/D` 打 `"a\n"` | `1` vs **`0`** |
+| `J` | `/(?<x>a)(?<x>b)/` vs `/…/J` 打 `ab` | **`false`＋`Compilation failed: two named subpatterns have the same name (PCRE2_DUPNAMES not set)`** vs `1` 且 `x` 取**后**者 `b` |
+| `U` | `/a.*b/` vs `/a.*b/U` 打 `aXbYYb` | `aXbYYb` vs **`aXb`** |
+| `u` | `/[\xc3]/` vs `/…/u` 打 `"\xff"` | `0` vs **`false`** |
+| `n` | `/(?<x>a)(b)/` vs `/…/n` 打 `ab` | `{"0","x","1","2"}` vs **`{"0","x","1"}`**（数字组被摘） |
+★`n` 有**形依赖**：`/(?<x>a)b/n`（无第二个捕获组）与基线**完全同** ⇒ 必须写成 `/(?<x>a)(b)/n` 才可观测（探针实测出来的，不是推断）。
+★**未建臂的三枚（诚实标注，禁当作已支持）**：`r`（两形都 same）、`X`（三形都 same）⇒ 至今**没测出**可观测形 ⇒ 只登记「语义未证」；`S`（study）按文档无语义差 ⇒ 设计不留臂。
+★面覆盖（R-163 教训＝缺口覆盖整个 preg 家族而非只 `preg_match`）：`U` 另走 **`preg_match_all`**（`[["aXbYYb"]]` vs `[["aXb"]]`）、`A` 另走 **`preg_replace`**（`'x<X>'` vs `'xa'`），并加一枚**多修饰符组合** `/a.*b/iU` 打 `abBBb`（`["abBBb"]` vs `["ab"]` ⇒ i 与 U 必须同时生效）。
+★守卫臂 4 枚＝已映射的 `i s m x` ⇒ 修前修后必须逐字同，它们红＝映射被改坏，不算本族新红。
+
+### 60.2 建门轮被自己的预检抓出**四处门自身的错**（全部当场改掉后再谈读数）
+① 主题字面量没带 PHP 引号 ⇒ 生成 `$s = xa;` ⇒ PHP 8 视未定义常量**直接 fatal** ⇒ 11 枚臂空输出（`bad_probe` 抓到）。
+② `preg_replace` 臂用替换串 `"<>\$0"`：本机 PHP 8.5.8 实测**不做** `$0` 回填（输出留在 `<>$0`）⇒ 测的会是替换语义而非修饰符 ⇒ 改固定字面量 `<X>`。
+③ 多修饰符臂初版是**死臂**（`/a.*b/iU` 打 `aXbYYB` 与基线同为 `["aXb"]`）⇒ 换主题 `abBBb` 才真分叉。
+④ 抽取口径原先用 `B|…|M|…|` 靠 `|` 数字段，而 replace 形只有一段 ⇒ 死臂判据**永远触发不了**（守卫形同虚设）⇒ 改成 NFM 那套显式标记 `#B#…#G#…#E#` / `#M#…#E#`，并**单独造了一枚同形串验证守卫确实会报 `DEAD_SHAPE`**（`GUARD_FIRES_ON_DEAD_SHAPE_OK`）。
+⇒ 现状：`AOT_BIN=/bin/false` 预检 **`arms=13 bad_probe=0`**，9 枚可观测臂逐枚确认 PHP 侧 `#B#`≠`#M#`；**AOT 侧读数一律未取**（链在跑，禁并发），修前基线待 R-175 链完。
+★判据（事前注册）：AOT 若忽略修饰符 ⇒ 只有 `#M#` 段与 PHP 不同 ⇒ 门会给出 `B=same M=DIFF` 这种**可归因**读数（能区分「preg 家族整体坏」与「只有修饰符坏」）；落地后要求 9 枚可观测臂 `M=same`、4 枚守卫臂逐字不变。
+
+## 61. R-177 前置（2026-10-17，纯读码）：F-73 甲型的**两条可行性核实**＋一条必须先量的次序风险
+§48.6.1 定的甲型＝属性默认值位复用同文件已有的 `getConstantValue`。本轮把它的覆盖面与解析方式逐条打开核实：
+
+· ✅ **覆盖面够**（`ir_generator.zig:9608` 起）：`.literal_int/:9610`、`.literal_float/:9611`、`.literal_bool`、`.literal_null`、`.literal_string`、**`.class_constant_access/:9615`**、**`.binary_expr/:9669`**、**`.unary_expr/:9730`** ⇒ F-73 注册的四形 `-0.0`／`-5`／`5*2`／`+1.0` 全在折叠能力内（一元/二元本体仍是 `src/aot/constant_folder.zig` 单一来源）。
+✅ **F-73b 确认为真**（不是推测）：`getConstantValue` 内 **`.identifier`／全局常量分支 0 处**（在 `:9608-:9770` 区间 grep `identifier|global|const_decl` ⇒ 无命中）⇒ `public $f = PHP_INT_MIN` 在甲型之后**仍然**给 NULL，须另案（类注册期查常量表），禁按名字硬编码特判。
+· ⚠️ **新发现的次序风险（须在落地前量，不能事后解释）**：`getConstantValue` 解 `class_constant_access` 的方式是**按类名遍历 `module.types.items`**（`:9628` 的 `for (module.types.items)`），而 `generateClassDecl`（`:1493`）是在**收集完成员之后**才 `addTypeDef`（class 路径 `:1968→:1973`）。
+  ⇒ 推论（**待实测**，此处不作结论）：属性默认值若写 `public $p = self::K;`，在默认值求值的那一刻**本类还没进 types** ⇒ 甲型可能救不了 `self::K`／`static::K` 形，只能救 `-5.0`/`5*2` 这类纯字面量算式。
+  ⇒ 复测动作（一次 `KEEP_TEMP`/最小探针即可判，属 AOT 侧、链后做）：
+    形 1 `class A { const K = 7; public $p = self::K; }` ⇒ 看 AOT 产物 `var_export((new A)->p)` 是 `7` 还是 `NULL`；
+    形 2 `class B { const K = 7; } class C { public $p = B::K; }` ⇒ 外部已注册类，应给 `7`；
+  两形**分别**建臂进默认值槽门（门 O `c011_default_slot_gate_tmp.sh`／门 D8），禁只测形 2 就声称甲型全面可用（R-169「只测一行」教训的同型陷阱）。
+★排期结论：F-73 仍按 #82 待老铁裁（甲／乙），但**甲型的预期转绿集要按这两条实测来写**，不能写「属性默认值非字面量全收」。
+
+## 57. R-176 备料（2026-10-17）：★F-72 的**范围更正**＝它不是跨模式缺陷，是 AOT 入口内部不一致（三枚待裁缩成两枚）
+
+§48.8 把 F-67-b／F-67-c／F-72 三枚一起挂进「都在共享 parser/lexer ⇒ 必须先问老铁」的待裁队列（任务 #81）。本轮读码把 F-72 **摘出该队列**：
+
+· 站点全在 `src/main.zig:596 fn runAOTCompilation(...)`（**AOT 编译入口独占函数**，解释器/字节码/JIT 路径不经过它）：
+  `:742-752` 解析抛错支 ⇒ 印完错误后 **`return;`**；`:771-774` 致命诊断支 ⇒ 印 `Error: Parse error: …` 后 **`return;`** ⇒ 两条都以"成功"退出（rc=0）。
+· ★同函数 `:852` 对"编译期诊断失败"早就是 **`return error.CompilationFailed;`** ⇒ rc≠0。⇒ F-72 不是"要不要改共享层"的取向问题，而是**同一函数内两套失败约定**，改成与 :852 一致即可。
+· ★影响面**实测**（禁估算）：全仓只有 `fuzzy_scripts_720/run_regression.sh:54-58` 读编译 rc，且它把 **`compile_exit -ne 0` 判为失败** ⇒ 68 枚语料**没有一枚解析失败**（当前 Pass 67/Skip 1）⇒ 主回归读数零变化；`src/aot/tools/aot_diff_runner.zig` 不读编译 rc（grep `rc|exit|status|success` 于其 compile 调用处 ⇒ 0 命中），`test/`、`tests/` 里**没有任何**断言"解析失败 rc==0"的用例（grep `Parse error` ⇒ 0 文件命中）；本族各门（LIT/F2I/ARG）的分桶靠 **日志文本** `Parse error` 与产物存在性，`rc` 只作记录不参与判定 ⇒ 门读数零变化。
+· ★刻意**不**做的一件事：把 rc 对齐成 PHP 运行期的 `255`。PHP 的 255 来自**执行**进程，而这里是**编译**CLI；本函数既有约定是返回错误（Zig 默认 rc=1）。改成"编译 CLI 退 255"需要引入 `std.process.exit` 之类的旁路，属新增约定而非收口不一致 ⇒ 本轮按 rc≠0 收口，并在此写明取舍理由。
+· 顺带保留：`:833-845` 那条 `return;`（`Can't use function return value in write context`）**是有意的 rc=0** —— 那条路径**产出了**一个运行期 fatal 的二进制，编译本身成功，禁一起"顺手改成报错"。
+
+## 58. R-176 备料（2026-10-17）：F-74 用纯读码**再收窄一层**（KEEP_TEMP 只需分真假，不必再扫全空间）＋ 数组键告警面已核实
+
+### 58.1 F-74（trait 带静态属性 ⇒ 运行期 `Cannot redeclare trait`）：排除掉的可能已全部实测
+· `addTypeDef` 全仓**仅 5 个调用点**（全在 `ir_generator.zig`：`1547/1973/2063/2172/8346`；`grep -rn addTypeDef src/` 除 `ir.zig:108` 定义外无其它消费者），而 **`.kind = .trait` 的生产点全仓只有 1 处**＝`ir_generator.zig:2160`（由 `:2172` 追加）。
+· `generateTraitDecl` 的调用点**只有 1 处**＝`:725 .trait_decl => try self.generateTraitDecl(node)`（`grep -rn generateTraitDecl src/aot/*.zig`）。
+· 致命文本的发射点只有两处：`native_linker.zig:3371`（**类**面，同名重复时"仅发 redeclare、跳过 meta 构建"）与 `:3691`（**trait** 面）；本例必是后者，其条件＝`emitted_trait_names.contains(tname)`，而该集合只在 `:3673 for (ir_module.types.items)` 这一趟里填。
+· ★由此**排除**"全局重复注册"这一大类假说：若整趟注册被跑两遍，**类**也会逐一撞 `:3371` ⇒ 全体类都会 fatal，与"只有带静态属性的 trait 致命"矛盾。
+⇒ 只剩两条互斥假说，一次编译即可判：**(甲) `ir_module.types.items` 里 T9 出现两次**（则 `trait_T9_meta = ClassMeta.init` 只出现 1 次、`registerClassRedeclare("T9"` 出现 1 次）；
+**(乙) 整段 trait 静态块被发射两次**（则 `ClassMeta.init` 与 `registerClassRedeclare` 各 2 次 ⇒ 且 `emitted_trait_names` 是每次进入新建的 ⇒ 说明外层有两条路径都跑到 `:3673`）。
+★复测动作（链后，一次 `KEEP_TEMP` 即可，禁再盲改）：数 `main.zig` 里 `trait_T9_meta = try runtime.ClassMeta.init` 与 `registerClassRedeclare("T9"` 的**出现次数**，两数同为 2 ⇒ 乙；1 与 1 ⇒ 甲。
+· 另记一条普查事实：语料 `fuzzy_scripts_720/pass/` 里 `case` 标签共 **19** 枚、**浮点标签 0 枚** ⇒ F-76 的影子漂移集为空；`trait X` 声明 **0 枚** ⇒ F-74 主回归/影子零保护，只能靠门。
+
+### 58.2 甲型告警的数组键面：13 个调用者**全是用户态**（读码逐枚核实，非推测）
+`normalizeArrayKeyFromValue`（模板 `:1807`）的 13 处调用者所在函数＝`getByValue:2167`／`setByValue:2172`／`unsetByValue:2296`／`php_array_get_ref:4898`／`php_array_set_ref:14036`／`php_property_array_push_key_with_obj:21187`／`php_property_array_push_key2_with_obj:21226`（2 次）／`php_property_array_set_key2_with_obj:21266`（2 次）／`php_property_array_set_with_obj:21294`／`php_array_flip:23481`／`php_array_key_exists:23512`
+⇒ **没有**内部簿记/拷贝/序列化调用者 ⇒ 在该函数里发 Warning **不会**造出 PHP 并不存在的假告警（这是甲型敢动热路径的前提）。
+★写法定为「一次判定、不再重复算范围」：浮点键走 `warn + floatToIntPHP`，其余仍走 `toInt()` ⇒ 非浮点键只多付一次 NaN-box tag 比较。
+★刻意**不**扩的一处：`ref` 包着 float 的键仍经 `toInt()` 自动解引用而**不发**告警——这与既有 `emitFloatToIntDeprecatedIfNeeded`（`if (!v.isFloat()) return;`）的局限**同源**，本批不悄悄扩大范围；若要修，须单独立项（记为潜在 **F-78**；编号 `F-77` 已被 §59.3 的「对象→数字取值应为 1」缺口占用）。
+
+## 59. R-176 备料（2026-10-17）：F-62f 的 91 枚候选**triage 完成**（关键结论逐条复核过）＋ 新立 **F-77**（对象→数字的"值是 1 不是 0"缺口）
+
+### 59.1 归约结果（普查门 `c060` 的 91 行 ⇒ 85 个不同名）
+| 桶 | 枚数 | 证据 |
+|---|---|---|
+| **需接线**（复用 R-172 已实测的 `must be of type int`／`int\|float` 族，**零新措辞**） | **47** | 逐枚给出模板 `fn:line` 与裸 `.toInt()` 行号；★helper 命中数＝0（`requireNumParam` 全模板 **37** 处，全在已收口的 31 枚 guarded 家族里） |
+| **新措辞族**（`numParamExpectedText@6480` 现只能产 `int`/`float`/`int\|float` ⇒ 必须先扩 helper 才能接） | **3** | `password_hash`／`password_needs_rehash` ⇒ `string\|int\|null`（实测原句），`range($start/$end)` ⇒ `string\|int\|float`（实测原句） |
+| **string 旁支**（非数值族，`rejectParamType` 可承载） | 1 | `strrchr` ⇒ `Argument #2 ($needle) must be of type string`（实测；带 `__toString` 的对象**不抛**） |
+| **假阳性** | **34** | `ctype_*` 11（实测 `ctype_alnum(new Plain)` ⇒ **只** `E_DEPRECATED`＋返回 false，形参本就不是数值）；扩展族 12（pcntl/posix/msg/sem/shmop/socket，可达但超 AOT 数值形参范围）；内部名泄漏 3（`php_array_get_ref`/`php_object_new`/`php_array_isset` 非用户态函数名）；cast/不抛族 5（`floatval`/`sprintf`/`sscanf`/`pack`/`settype` ⇒ 实测给 **Warning** 或**无诊断**，接 `requireNumParam` 就是 over-fatal 假阳性）；内部取值 3（`serialize` 数组键 `@22504`、`var_export` DateTime 内部读 `@8184`、`krsort` 比较器结果 `@24287` ⇒ 不对应用户数值形参） |
+| **重复行折叠** | 6 行 | `preg_replace`(4121/4158)、`array_fill`(4223/4257)、`array_splice`(4205/4261)、`array_pad`(4222/4265)、`base_convert`(4315/4471)、`preg_match_all`(4120/4157) |
+★**未决一项（诚实标注）**：`preg_match_all` 的两行指向**两个不同的活函数**（legacy `:11594` 与 `php_ :28028`，两处都含裸 `.toInt()`）⇒ 接线目标行 **unresolved**，须先测 `std.StaticStringMap` 对重复键的 comptime 取舍（＝F-4 家族的另一面）才能定"改哪一枚"。禁在未决前盲改两枚。
+
+### 59.2 ★本轮亲自复核过的锚点（不是照抄代理结论）
+helper 行号逐条打开确认：`numParamExpectedText@6480`、`rejectParamType@6490`、`requireNumParamAs@6586`、`requireNumParam@6639`、`requireOptionalNumParam@6655`、`requireArrayParam@6667`、`emitObjectToNumberNotice@6726`。
+样本候选 `php_substr@10352` 打开确认体是 `const start_int = start.toInt();`／`length.toInt()`（**无 helper**）⇒ 与"未接线"判定一致。
+PHP 真值逐条复跑（`/tmp/f62f_spot.php`）：`substr('abc',$o)`⇒`Argument #2 ($offset) must be of type int, Plain given`、`password_hash`⇒`string|int|null`、`range`⇒`string|int|float`、`strrchr`⇒`must be of type string`、`ctype_alnum`⇒仅 Deprecated、`settype`⇒Warning、`floatval`⇒Warning＋**1.0** ⇒ 全部与代理报告一致（仅一处措辞需纠：`floatval` 的原句是 `…could not be converted to **float**`、`settype` 是 `…to **int**`，不是合并写法）。
+★顺带读到一枚**独立旁支**：`php_substr@10353` 的 `if (!str.isString()) return Value.initNull();` ⇒ 首参非字符串时**静默返回 null**，而 PHP 对 `substr(12345,1)` 会给 Deprecated/值 ⇒ 属 string 形参族，另案登记，禁混进本族。
+
+### 59.3 ★新立 **F-77**（实测）：对象→数字的**取值**也错，且 AOT 完全静默
+`toInt()`（模板 `:2729-2807`）**没有对象分支** ⇒ 落到末尾 `return 0`；`toFloat()` 同型。而 PHP 8.5.8 实测（资产 `c071_truth_int_param_contracts_tmp.php` ＋ `/tmp/objnum.php`）：
+
+| 站点 | PHP 实测值 | PHP 实测诊断 |
+|---|---|---|
+| `(int)$obj`（0 属性／1 属性／2 属性**都是 1**） | `1`（integer） | `Warning: Object of class X could not be converted to int` |
+| `(float)$obj` | `1.0`（double） | 同句但 `…to float` |
+| `intval($obj)`／`settype($v,"int")` | `1` | `…could not be converted to int`（`settype` 返回 true） |
+| `$obj + 1` | — | **TypeError**（算术族，已由 F-59/R-169 收口，禁与本族混） |
+⇒ 本族是「**值错（0 应为 1）＋ 诊断缺失（应为 Warning）**」双缺口，且**不是**措辞严重度错配：`emitObjectToNumberNotice@6726` 目前**只**被比较族两处调用（`:7358/:7365`，那里 PHP 本来就是 Notice ⇒ R-172d 的落地是对的），cast/显式强转族**根本不调它**。
+★修法取向（下一步单独成轮，勿夹进 R-176）：显式 cast／`intval`／`floatval`／`settype` 四站点发 **Warning** 并给 `1`；算术/比较族各自口径不动（一条措辞三个严重度：Warning／Notice／TypeError，禁合并）。匿名类实例的类名渲染是 `class@anonymous`，`operandTypeName` 是否给同样文本待测 ⇒ 复测时先钉这一形。
+
+⇒ 待裁队列 #81 从三枚缩为两枚：**F-67-b**（超 `PHP_INT_MAX` 整数字面量在 `src/compiler/parser.zig:3151/3160` 被饱和，且 PHP 自己**按进制**不同给不同结果）与 **F-67-c**（`.5`／`5.`／`.5e3` 被拒、`5.e3` 被误读成串接）仍在共享层，需老铁点头；F-72 已可在 R-176 内按 AOT-only 直接修。
+
+### 57.1 ★F-67-b 其实**有 AOT-only 路线**（读码所得）⇒ 待裁项从"要不要改共享层"变成"走甲还是走乙"
+· 共享层现状：`parser.zig:3138-3163` 把越界整数字面量 `catch error.Overflow => std.math.maxInt(i64)` 后，`:3165` **只**把 `i64` 存进 `.literal_int.value` ⇒ 饱和发生在解析期。
+· ★但**原文没丢**：节点仍带 `main_token = t`，而 `ir_generator` 结构体里有 `source_buffer: ?[]const u8`（`src/aot/ir_generator.zig:97`，由 `:323` 的入口注入），同文件 `:3169` 的 `.t_dnumber` 处理就是**现成的**按 token 取原文范式（`self.lexer.buffer[t.loc.start..t.loc.end]`），`:3207` 也证明 IR 侧拿得到 `main_token.loc.start`。
+⇒ **乙型（AOT-only）**＝在 ir_generator 读 `.literal_int` 时，若该 token 原文是越界整数，就按 PHP 实测的**逐进制**规则发 `.const_float`（十进制／`0x`／`0b` ⇒ 转 float；传统八进制全 7 ⇒ **饱和**，因 PHP 自己就这么给）。不动共享层 ⇒ 解释器／VM／bytecode 面零影响，合 §五.1。
+⇒ **甲型（共享层）**＝改 `parser.zig:3151/3160` 让它给 float 节点 ⇒ 一次修全体模式，但**必须老铁批准**（§五.2/§六.6），且要连带核 `literal_int` 的全体消费者。
+★两条都还留着同一个硬约束（§48.8 已实测）：**PHP 自己按进制不一致**（`0777777777777777777777` ⇒ `int(9223372036854775807)` 饱和，而 `02000000000000000000000` ⇒ `float(1.8446744073709552E+19)`、67 个 1 的 `0b1…` ⇒ `float(3.68934881474191E+19)`、十进制／hex ⇒ float）⇒ **禁一处通用规则**，逐进制照抄。
+
+## 62. ★新立 **F-79（P0）＝模板手抄的 PCRE2 option 位是错的**（门 PMOD 修前基线跑出来的；§60 的判据因此改写）
+
+**触发**：门 PMOD 的修前基线（`c072_pmod_prefix13_R176_snapshot_tmp.tsv`，`arms=13 same=1 diff=12 @48s`）里，按 §60 设计的**守卫臂 `i s m x` 竟然全红**（`g2/g3/g4`＝`B=same M=DIFF`）⇒ R-163 之后被当成「已映射」的那几枚根本没生效。先怀疑门、再怀疑实现、最后落到常量。
+
+★**我先前那句「连 `i` 也没生效」是我自己的探针错**：我用 `/a.b/i` 打 `"AB"`＝**三字符模式打两字符主题**，PHP 也给 0 ⇒ 退化形，不构成证据。`i` 的位是**对的**（见下表）；它要定档需要一枚有效形（`/a/i` 打 `"A"`）。
+
+**根因（与 `/opt/homebrew/include/pcre2.h` 逐位对照实测）**：模板 `runtime_lib_template.zig:11207-11211` 是**手抄的数字常量**，三枚抄错、一枚撞车：
+| 常量 | 模板值 | pcre2.h 真值 | 抄错后实际点到的位 |
+|---|---|---|---|
+| `PCRE2_CASELESS` | `0x00000008` | `0x00000008` ✅ | —（`i` 的位是对的） |
+| `PCRE2_MULTILINE` | `0x00000002` | **`0x00000400`** ❌ | `0x02`＝`PCRE2_ALT_BSUX` ⇒ `m` **完全不生效** |
+| `PCRE2_DOTALL` | `0x00000004` | **`0x00000020`** ❌ | `0x04`＝`PCRE2_AUTO_CALLOUT` ⇒ `s` 不生效，还白点一个 callout 位 |
+| `PCRE2_EXTENDED` | `0x00000008` | **`0x00000080`** ❌ | **与 `CASELESS` 同值** ⇒ `/a b/x` 变成「忽略大小写」而非「忽略空白」＝**过匹配**（方向相反的错） |
+| `PCRE2_UTF` | `0x00080000` | `0x00080000` ✅ | `:11366` 的缺省 `UTF\|DOTALL` 里那个 DOTALL 同样是错值 ⇒ 缺省位也没点到 |
+**实测对得上**：`/a.b/s` 打 `"a\nb"` ⇒ PHP `1`／AOT `0`；`/^b/m` 打 `"a\nb"` ⇒ PHP `1`／AOT `0`；`/a b/x` 打 `"ab"` ⇒ PHP `1`／AOT `0`。
+★`n u r A D J S U X` 九枚是 `:11439-11445` 的 `else => {}`（源码注释自陈「合法但语义尚未实现」）⇒ 那九枚红属**已登记的 §38.4**；F-79 是另一件事＝「映射写了但位抄错」。两者禁混：一个要补映射，一个要改常量。
+
+**影响面与暴露**：语料 `pass/` 内 `preg_*` 调用共 **22** 枚（`preg_match 10／preg_replace 5／preg_split 4／preg_quote 2／preg_match_all 1`），**带尾修饰符 0 枚** ⇒ 主回归与影子对本族**零保护**，只有门 PMOD 抓得住。危害＝**静默给错匹配结果**（不是编不过），且 `x` 那枚是**过匹配**方向。
+**修法与成本**：改 `11207-11211` 四个数值（`m→0x400`、`s→0x20`、`x→0x80`），再按头文件补齐 A/D/J/U/u/n/X 所需位（`PCRE2_ANCHORED 0x80000000`、`PCRE2_DOLLAR_ENDONLY 0x10`、`PCRE2_DUPNAMES 0x40`、`PCRE2_MATCH_UNSET_BACKREF 0x200000` 等）并接进 `:11439` 的 `switch` ⇒ 纯模板、发射中性。
+★**结构性教训（立规）**：本仓凡 `extern`／手抄的 C 侧常量，**数值必须有实测行为反推的证据**（至少一枚最小可观测臂），不能按记忆或别家版本填——NaN-box 的 `asInt()` 是全函数（§42.3），错值不 panic，只静默给错语义，正是最难查的一类。
+
+### 62.1 同函数另一枚独立缺陷 **F-79b＝正则缓存键不含 options**
+`getOrCompileRegex`（`:11112`）查缓存是 `if (regex_cache.getPtr(pattern))`（`:11119`）——**只按模式体**，不看 `options` ⇒ 同一次运行里 `/a.b/` 与 `/a.b/i` 命中同一条编译产物，**先编的那份 options 通吃** ⇒ 修饰符行为**依赖调用顺序**（顺序相关的错比恒错更难复现）。
+⇒ **F-79 与 F-79b 必须同批**：只改常量值而不把 options 并进缓存键，门 PMOD 的成对臂（同一脚本内先 base 后 modifier）仍会红。
+★门 PMOD 判据据此改写（覆盖 §60 的事前版本）：修前 `13 臂 same=1 diff=12`（12＝9 枚 §38.4 未映射＋3 枚 F-79 抄错；唯一 SAME 是退化形的 `g1`）⇒ F-79／F-79b 落地后 `g2/g3/g4` 必须转绿、`g1` 换有效形后仍须绿；`a1…a9` 属 §38.4，**不在 F-79 的转绿账上**。
+
+### 62.2 ★F-79／F-79b／§38.4 映射**已落地并实测**（2026-10-17，纯模板 ⇒ 二进制代次未变）
+**改动**（全在 `src/aot/runtime_lib_template.zig`）：① `:11206-11222` 常量块按 `pcre2.h` 改对三枚并补 `DOLLAR_ENDONLY/DUPNAMES/MATCH_UNSET_BACKREF/NO_AUTO_CAPTURE/UCP/UNGREEDY/ANCHORED`；② `:11366` 缺省 `UTF|DOTALL` ⇒ **`0`**（★必须同改：只改数值会把全体模式静默变成 dotall；PHP 的缺省两者都不开，实测 `/\w+/` 打 `"é具x"`⇒`["x"]` 而 `/\w+/u`⇒`["é具x"]`，`/[\xff]/`⇒`1` 而 `/[\xff]/u`⇒`false`＋`Compilation failed: UTF-8 error: illegal byte (0xfe or 0xff) at offset 1`）；③ 修饰符 `switch` 补映射 `A D J U n u r`（★`S` 刻意不映射＝PCRE2 下无语义差；`X` 刻意不映射＝属 **compile extra options**，需 `pcre2_compile_context_create_8`＋`pcre2_set_compile_extra_options_8` 两个尚未声明的 extern，且本机无可观测形 ⇒ 记为未收口）；④ **F-79b** 缓存键 `RegexCacheKey{pattern, options}` ＋ 自带 `hash/eql`。
+★Zig 0.16 两处**必须写下来否则下次再踩**：`AutoHashMap` 只接 2 个型参（键的 hash 上下文要走 `std.HashMap(K, V, Ctx, max_load_percentage)`），且含 slice 的 struct 键会被 `std.hash.autoHash` **直接 compileError**（"intent is unclear"）⇒ 必须自带 `pub fn hash/eql`；`std.hash.Wyhash` 在 0.16 **没有** `create/update/final`，只有 `init` 与静态 `hash(seed, input)`。
+**实测（门 PMOD，同一 13 臂名单）**：修前 `same=1 diff=12` ⇒ 修后 **`same=11 diff=2 compile_fail=0 bad_probe=0`**（51s）。转绿＝`A D U n` 四枚语义臂 ＋ 守卫 `s m x` 三枚 ＋ `i` 的有效形 ＋ 组合臂 `iU` ＋ `preg_match_all`/`preg_replace` 两个入口臂。
+★余 2 枚红**同源且被分半读数分开**（这正是 §60 设计 `B/M` 成对的目的）：`a3`(J) ⇒ `B=DIFF M=same`、`a5`(u) ⇒ `B=same M=DIFF` ⇒ 修饰符位都对了，错的是**另一半**：
+**新立 F-79d＝PCRE2 编译失败被吞成 `0`**：`getOrCompileRegex` 失败后调用点是 `catch return Value.initInt(0)`（`:11477` 一类写法），而 PHP 给 **`false` ＋ `Warning: preg_match(): Compilation failed: … at offset N`**（`J` 的 `two named subpatterns have the same name (PCRE2_DUPNAMES not set) at offset 12`、`u` 的 `UTF-8 error: illegal byte (0xfe or 0xff) at offset 1`）⇒ 「编不过」被伪装成「匹配不上」＝静默错值方向。修法＝把 errcode 经 `pcre2_get_error_message_8` 取文本、发 PHP 那条 Warning 并返回 `false`（涉及新增 extern，另批）。
+**连带面复证**：preg 家族两道既有守卫与 R-175 档**逐字不变**——门 S `shapes=47 same=47 diff=0`、门 PD `arms=20 same=18 diff=2`（那 2 枚＝登记的 F-53）。★UTF 缺省转 opt-in 的**唯一潜在波及**＝语料里 **17 枚**含非 ASCII 字节的 preg 模式 ⇒ 由主回归裁决，读数见 §62.3（跑动中，禁引用未实测数）。
+
+## 63. R-176 三门**修前基线**（2026-10-17 10:3x–10:4x，当前代次 `bd7a7c1c` 上取，F-79 落地之前）
+
+### 63.1 门 F2I（51 臂）＝`same=15 diff=34 compile_fail=2 parse_fail=0 bad_probe=0 warn_over=0 warn_under=28 dep_over=8 dep_under=1` @179s
+★这条 DONE 行把 F-69 的两面**量化**了（旧口径只有"有/无告警"，抓不到组合规则）：
+- `warn_under=28` ⇒ **AOT 在 28 枚臂上该发 `The float … is not representable as an int` 而完全沉默**（每条 Warn 在 TSV 里计两行＝stderr 的 `PHP Warning:` ＋ stdout 的 `Warning:` ⇒ a1~a12 的 `p=10`＝5 次转换，d15 的 `p=14`＝7 次转换，与 §54.1 的"每个 specifier 各发一条"完全对齐）。
+- `warn_over=0` ⇒ 反向不成立：**AOT 从未多告警** ⇒ 本族的修法是"补发"，不存在"少发"分支。
+- `dep_over=8`（`d1 d2 d3 d4 d6 d7 d13 d17`）⇒ ★这正是 §54 预判的**耦合雷实测现形**：`emitFloatToIntDeprecatedIfNeeded` 的谓词 `@floatFromInt(v.toInt()) != f` 把越界有限值判成"丢精度"⇒ 多发 Deprecated，而 PHP 实测只发 Warn。⇒ **改值必须先改谓词**，否则本族会从"沉默"翻成"话太多"。
+- `dep_under=1`（`d10`＝数组**字面量**键 × NAN）⇒ 字面量键路径压根不调用告警 helper ⇒ 甲型里数组键那一支是"两头都缺"。
+- `compile_fail=2`：`b3`＝`intval($v,2)` 多传 base（**F-75 面，常驻**，不许记进 F-69）；`d14`＝见 §63.4。
+
+### 63.2 门 NFM（56 臂）＝`same=33 diff=23 compile_fail=0 parse_fail=0 bad_probe=0`，★**分段**读数 `stage_ok=33 stage_judgment=13 stage_recon=0 stage_both=10 stage_input=0` @203s
+⇒ 直接回答 §49/§54 挂着的那个问题（"AOT 坏在判定段还是重建段"）：**判定段单独坏 13 枚，两段都坏 10 枚，纯重建段 0 枚**。
+⇒ 修法含义（事前定死，避免只修一半就宣布收口）：只改 `php_number_format` 的舍入判定 ⇒ 仍剩 10 枚红，因为那 10 枚连 `round($v,$n)` 落回的 double 都与 PHP 不同 ⇒ **`round()` 的重建段必须同批或先行**。
+`stage_input=0` ⇒ 无任何一枚差异来自字面量解析（LIT/F-67-b 那族没混进来）——这正是 `#IB#` 这一段的用途。
+
+### 63.3 门 PMOD（13 臂）修前＝`same=1 diff=12 @48s`（详见 §62.2 的落地后对照）
+唯一 SAME 是 `g1`，且它 SAME 的原因是**我的探针退化**（`/a.b/i` 打 `"AB"`＝三字符模式打两字符主题）⇒ 修后已换成有效形复验。
+
+### 63.4 ★`d14` 的实测性质要升级：不是"静默给错值"，是**编译器自己崩**
+F2I 跑基线时 shell 报 `Abort trap: 6`，落在 `timeout 180 "$AOT" --compile …` 上，臂＝`switch ($v) { case 1e19: … }` ⇒ §54.3 写的"编译期 `@intFromFloat` 越界是 Zig 非法行为"在此**以 SIGABRT 现形**（合法 PHP ⇒ 编译器当场崩，无产物、TSV 记 `COMPILE_FAIL ERR[]`＝抓不到错误文本，因为它不是 Zig 诊断而是运行时 trap）。
+⇒ 定级修正：F-76 属 **P0 编译器崩溃**族，不是"可能给错值"。⇒ 也解释门为何要带 `ERR[]` 空字段：这类崩法**没有**可 grep 的 `main.zig:NN: error:` 文本，只看分桶会误判成"普通编不过"（已在 §63.1 的 cf 身份里点名）。
+★纪律条：**基线跑动时 shell 抛出的 `Abort trap`／`Segmentation fault` 文本必须回捞进工单**，它常常比桶名更接近真相（本轮若无那行 shell 输出，F-76 会被继续当成"静默错值"低配处理）。
+
+※ 排版说明：因追加锚点选取，本节 §58–§62 在文件里的物理顺序为 §54→§55→§56→§60→§61→§57→§58→§59→§62；编号唯一、交叉引用有效，未做重排以免大范围搬运引入错引。

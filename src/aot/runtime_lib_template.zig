@@ -1811,6 +1811,16 @@ fn normalizeArrayKeyFromValue(key: Value) ArrayKey {
         }
         return ArrayKey{ .string = key.asString() };
     }
+    if (key.isFloat()) {
+        // ★F-69（甲型，工单 §54.1/§58.2）：数组键是 PHP 会发「不可表示」告警的**隐式**站点
+        //   （实测 `[1e19=>"v"]`⇒键 `-8446744073709551616`＋Warn、`[NAN=>"v"]`⇒键 0＋Warn＋Deprecated 叠发、
+        //   `[2.5=>"v"]`⇒键 2＋只 Deprecated）。本函数 13 处调用者**全是用户态键转换点** ⇒ 不会造出 PHP 没有的假告警。
+        const f = key.asFloat();
+        warnFloatToIntNotRepresentable(key);
+        const loses_precision = if (std.math.isNan(f)) true else !floatNotRepresentableAsInt(f) and f != @trunc(f);
+        if (loses_precision) emitDeprecatedFloatToInt(f);
+        return ArrayKey{ .integer = floatToIntPHP(f) };
+    }
     return ArrayKey{ .integer = key.toInt() };
 }
 
@@ -2731,14 +2741,10 @@ pub const Value = struct {
         if (self.isRef()) return self.asRef().*.toInt();
         if (self.isInt()) return self.asInt();
         if (self.isFloat()) {
-            const f = self.asFloat();
-            // PHP 语义：浮点溢出时返回 INT64_MIN（x86-64 行为）
-            // @floatFromInt(std.math.maxInt(i64)) = 9223372036854775808.0（f64 无法精确表示 9223372036854775807）
-            const max_as_float = @as(f64, @floatFromInt(std.math.maxInt(i64)));
-            const min_as_float = @as(f64, @floatFromInt(std.math.minInt(i64)));
-            if (std.math.isNan(f)) return 0;
-            if (f >= max_as_float or f < min_as_float) return std.math.minInt(i64);
-            return @intFromFloat(f);
+            // ★F-69（工单 §54/§56）：旧写法把越界一律**饱和**成 `minInt(i64)` ⇒ PHP 实测是「mod 2^64 回绕」，
+            //   `(int)1e19` 应为 `-8446744073709551616`、`(int)1e20` 应为 `7766279631452241920`，都不是 minInt。
+            //   值型规则收在 `floatToIntPHP` 单点；★本函数**不发诊断**——生成码里 `switch`／`!`／赋值／形参装填位直调 `toInt()`。
+            return floatToIntPHP(self.asFloat());
         }
         if (self.isBool()) return if (self.asBool()) 1 else 0;
         if (self.isNull()) return 0;
@@ -4698,7 +4704,7 @@ fn wrapBuiltin_filectime(ctx: Value, args: []const Value, allocator: Allocator) 
 fn wrapBuiltin_getenv(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     _ = ctx;
     if (args.len < 1) return error.InvalidArgumentCount;
-    return php_getenv(args[0], allocator);
+    return php_getenv(args[0], if (args.len > 1) args[1] else Value.initBool(false), allocator);
 }
 
 fn wrapBuiltin_gethostbyname(ctx: Value, args: []const Value, allocator: Allocator) !Value {
@@ -4826,7 +4832,13 @@ fn valueToArrayKey(val: Value, allocator: Allocator) !ArrayKey {
     } else if (val.isBool()) {
         return ArrayKey{ .integer = if (val.asBool()) 1 else 0 };
     } else if (val.isFloat()) {
-        return ArrayKey{ .integer = @intFromFloat(val.asFloat()) };
+        // ★F-69：原先这里直接 `@intFromFloat(val.asFloat())` **无范围守卫** ⇒ 越界／NAN 键是 Zig 非法行为；
+        //   改成与 `normalizeArrayKeyFromValue` 同一条规则＋同一套诊断（两条键路径此前口径不一致）。
+        const f = val.asFloat();
+        warnFloatToIntNotRepresentable(val);
+        const loses_precision = if (std.math.isNan(f)) true else !floatNotRepresentableAsInt(f) and f != @trunc(f);
+        if (loses_precision) emitDeprecatedFloatToInt(f);
+        return ArrayKey{ .integer = floatToIntPHP(f) };
     }
     return ArrayKey{ .integer = 0 };
 }
@@ -6028,8 +6040,8 @@ pub fn php_mod(lhs: Value, rhs: Value) !Value {
     // PHP 8.1+: float→int 隐式转换精度丢失时输出 Deprecated
     // ★R-167（F-58）：这两段逐字节抽出为 `emitFloatToIntDeprecatedIfNeeded`，与位运算族共用同一口径（DRY），
     //   形为不变（门 OPS 的 o4/o9/g8 与门 MSR 的 m12/g8 同时守护这条回边）。
-    emitFloatToIntDeprecatedIfNeeded(lhs);
-    emitFloatToIntDeprecatedIfNeeded(rhs);
+    emitImplicitFloatToIntDiagnostics(lhs);
+    emitImplicitFloatToIntDiagnostics(rhs);
     const a = lhs.toInt();
     const b = rhs.toInt();
     if (b == 0) {
@@ -6050,11 +6062,19 @@ fn operandTypeName(v: Value) []const u8 {
 
 /// ★F-58：float 参与整数语义运算时的 Deprecated 诊断（`%` 与位运算族同口径，从 `php_mod` 的内联形
 ///   抽成 helper 供本族复用；判据仍是「转整后回浮不等」＝精度丢失）。
-fn emitFloatToIntDeprecatedIfNeeded(v: Value) void {
+/// ★**隐式** float→int 站点（`%`／位运算族／`~`）的两条诊断，按 PHP 8.5.8 实测的**组合规则**发（工单 §54.1）：
+///   ① 越界**有限**值 ⇒ **只**发 `The float … is not representable as an int, cast occurred`；
+///   ② 界内非整值 ⇒ **只**发 `Implicit conversion from float … to int loses precision`；
+///   ③ **NAN ⇒ 两条叠发**（唯一叠发形，Warn 在前）；④ 显式站点永远只发 Warn ⇒ 它们不调本函数。
+///   ★旧谓词 `@floatFromInt(v.toInt()) != f` 在 `toInt()` 从饱和改回绕后会把越界有限值判成"丢精度"⇒ 多发一条
+///     Deprecated（F2I 修前基线实测 `dep_over=8` 就是它）⇒ 判定必须与**值型规则解耦**。
+///   ★改名理由：本函数现在同时管 Warn 与 Deprecated，旧名 `…DeprecatedIfNeeded` 会误导读者以为只管一种。
+fn emitImplicitFloatToIntDiagnostics(v: Value) void {
     if (!v.isFloat()) return;
+    warnFloatToIntNotRepresentable(v);
     const f = v.asFloat();
-    const i: f64 = @floatFromInt(v.toInt());
-    if (f != i) emitDeprecatedFloatToInt(f);
+    const loses_precision = if (std.math.isNan(f)) true else !floatNotRepresentableAsInt(f) and f != @trunc(f);
+    if (loses_precision) emitDeprecatedFloatToInt(f);
 }
 
 const BitOpKind = enum { bit_and, bit_or, bit_xor, shl, shr };
@@ -6160,8 +6180,8 @@ fn php_bitwise(lhs: Value, rhs: Value, kind: BitOpKind) !Value {
     }
 
     // ④ float ⇒ Deprecated
-    emitFloatToIntDeprecatedIfNeeded(lhs);
-    emitFloatToIntDeprecatedIfNeeded(rhs);
+    emitImplicitFloatToIntDiagnostics(lhs);
+    emitImplicitFloatToIntDiagnostics(rhs);
 
     const a = lhs.toInt();
     const b = rhs.toInt();
@@ -6228,7 +6248,7 @@ pub fn php_bit_not(val: Value) !Value {
         return Value.initString(try PHPString.init(runtime_allocator, buf));
     }
     if (!val.isInt() and !val.isFloat()) return throwBitNotError(val);
-    emitFloatToIntDeprecatedIfNeeded(val);
+    emitImplicitFloatToIntDiagnostics(val);
     return Value.initInt(~val.toInt());
 }
 
@@ -7111,6 +7131,59 @@ pub fn php_call_undefined_function(name: []const u8) noreturn {
 }
 
 /// 输出 PHP 8.1+ Deprecated 警告到 stdout（匹配 display_errors=On）
+// ============================================================================
+// F-69：float→int 的 PHP 语义。★**值型规则与诊断刻意分家**——
+//   `native_linker` 会把 `.toInt()` 直接写进生成码的 `switch`／`!`／赋值／形参装填位
+//   （:19458/:19492/:20269/:21416/:22116/:22188 一类站点），那些位置 PHP 不发任何诊断
+//   ⇒ **取值函数必须纯净**，告警一律挂在"确实发生 PHP 转换"的调用点。
+// 规格与逐位等价证明＝工单 §54.1／§56 ＋ 资产 `c069_float_to_int_equiv_tmp.zig`（430 枚 PHP 真值：bad_val=0 bad_warn=0 bad_dep=0 bad_mod=0）。
+// ============================================================================
+
+/// 界闭下开上 `[-2^63, 2^63)` ⇒ 向零截断；界外 ⇒ 该 double 整数值的 **mod 2^64 补码回绕**。
+/// ★实测否证「`|v| ≥ 2^64` ⇒ 恒 0」这条区制：`(int)1e20` = `7766279631452241920`（＝1e20 − 5·2^64）；
+///   `2^65`／`±1e308` 给 0 只是"恰为 2^64 整数倍"的自然结果，不是一条独立区制。
+/// ★全程只用 IEEE 位型，**不碰越界 `@intFromFloat`**（那是 Zig 非法行为；本仓另有 8 处这么写，见工单 §56.3 的三种契约分类）。
+fn floatToIntPHP(f: f64) i64 {
+    const two_pow_63: f64 = @floatFromInt(std.math.maxInt(i64));
+    if (f >= -two_pow_63 and f < two_pow_63) return @intFromFloat(f);
+    const bits: u64 = @bitCast(f);
+    const exp11: u32 = @intCast((bits >> 52) & 0x7FF);
+    if (exp11 == 0) return 0; // 次正规必在界内，到不了这里 ⇒ 防御性归零
+    const m: u128 = @as(u128, (1 << 52) | (bits & ((@as(u64, 1) << 52) - 1)));
+    const s: i32 = @as(i32, @intCast(exp11)) - 1075; // f = m × 2^s
+    if (s >= 64) return 0; // `m << s` 的低 64 位必为 0 ⇒ INF／-INF／NAN 自然落到这里（与实测同值）
+    const low: u64 = if (s <= 0) @truncate(m) else @truncate(m << @intCast(s));
+    const wrapped: u64 = if (bits >> 63 == 1) (~low) +% 1 else low;
+    return @bitCast(wrapped);
+}
+
+/// ★告警条件是**闭下界、开上界**：恰 `-2^63` 界内不告警，`+2^63` 越界告警（实测）；NAN 与任何比较都是 false ⇒ 天然判越界。
+fn floatNotRepresentableAsInt(f: f64) bool {
+    const two_pow_63: f64 = @floatFromInt(std.math.maxInt(i64));
+    return !(f >= -two_pow_63 and f < two_pow_63);
+}
+
+/// PHP 8.5.8 实测原句：`The float <repr> is not representable as an int, cast occurred`
+///   · repr 走**最短往返（序列化）口径 ＋ 大写 E**：`1.0E+19`／`1.5E+19`／`9.223372036854776E+18`／`INF`／`-INF`／`NAN`；
+///   · 显式站点（`(int)`／`intval`／`%d %u %x %X %o %b %c`／`settype`）**与**隐式算术／数组键站点都发（§54.1 四条组合），
+///     且**每次转换各发一条**（实测 sprintf 七枚 specifier 扫一遍＝7 条）。
+fn warnFloatToIntNotRepresentable(v: Value) void {
+    if (!v.isFloat()) return; // ★与既有 emitFloatToIntDeprecatedIfNeeded 同局限：ref 包 float 不在本批扩面（F-78）
+    const f = v.asFloat();
+    if (!floatNotRepresentableAsInt(f)) return;
+    var rbuf: [64]u8 = undefined;
+    const repr = phpFormatFloatSerialize(&rbuf, f, true, true);
+    var mbuf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&mbuf, "The float {s} is not representable as an int, cast occurred", .{repr}) catch return;
+    emitWarning(msg);
+}
+
+/// sprintf／printf 的 int 族 specifier 共用：先按 PHP 发「不可表示」告警，再取 int 值。
+fn castIntArgWithWarn(arg: Value) i64 {
+    warnFloatToIntNotRepresentable(arg);
+    return arg.toInt();
+}
+
 fn emitDeprecatedFloatToInt(f: f64) void {
     // 警告信息中使用完整精度（PHP serialize_precision），不是 echo 的 precision=14
     var fbuf: [64]u8 = undefined;
@@ -7648,145 +7721,212 @@ pub fn php_concat_with_undef(lhs: Value, rhs: Value, lhs_undef: bool, lhs_name: 
 // 输出函数
 // ============================================================================
 
-/// PHP 兼容浮点格式化（14 位有效数字，去尾零）
+/// ★F-63（R-173）：浮点→字符串的**唯一核心**（本仓原另有四套实现，见工单 §47.3）。
+///   PHP 是**两套完全不同的口径**（逐值实测件 `fuzzy_scripts_720/tmp/c052_truth_float_matrix_tmp.php`，37 值 × 7 路径）：
+///   · `.display`＝`precision ini=14` ⇒ 14 位有效、与 C 的 `%.14G` 同舍入，科学计数切换 **`exp >= 14` 或 `exp <= -5`**
+///   · `.serialize`＝`serialize_precision ini=-1` ⇒ **最短往返**，切换 **`exp >= 17` 或 `exp <= -5`**
+///     （实测 `1e16` 在序列化侧仍出**小数** `10000000000000000`、到 `1e17` 才出 `1.0E+17`；显示侧 `1e14` 就已出 `1.0E+14`）
+///   ★两套都能直接由 Zig 0.16 的 `std.fmt.float.render(.scientific)` 给出：`precision=13`＝14 位有效，
+///   `precision=null`＝最短往返（逐值 `std.fmt.parseFloat` 回读全等实测）⇒ **不需要「逐位数试算＋回读」的循环**。
+///   `dot_zero`＝只有 `var_export` 对整值补 `.0`（实测 `var_dump(0.0)`＝`float(0)`、`var_dump(1e16)`＝`float(10000000000000000)` 都**不补**）；
+///   `upper_e`＝`var_dump`/`var_export` 用大写 `E`，`json_encode` 用小写 `e`（实测 `1.0e+17`）。
+///   ★旧实现三处实测错在本核心一并根除：① 十进制支把 300 位小数塞进 `[64]u8` ⇒ `error: NoSpaceLeft`（门 FLT d6，症状是后续输出**整段丢失**）；
+///   ② 科学支先除幂再 `{d:.13}` ⇒ **二次舍入**（门 b5：AOT `1.2345678901235E+14` vs PHP `1.2345678901234E+14`）；
+///   ③ 三个序列化站点（`php_var_dump`/`exportValue`/`jsonEncodeValue`）各自 `{}`／`{d}` 直出 ⇒ **根本没有 E 切换**（门 b7..f5 共 16 枚红）。
+const FloatFmtKind = enum { display, serialize };
+
+/// `10^k` 的 f128 值。**只在**「最短往返位恰停在 14 位舍入的中点附近」这一支用到（见 `renderFloatPHP`）。
+/// 用量：`|k| ≤ 321`，二元快速幂 ≤ 9 次乘法；f128 的相对误差 ~1e-34，而需要分辨的间距 ≥ 一个 double ulp（~1e-16 相对）
+/// ⇒ 判向安全。真正的**恰好平分**只可能出现在 `k ∈ [0, 3]`（此时 `(2D+1)·5^k ≤ 2^53` 才是某个 double），
+/// 而这几档的 10^k 在 f128 里是**精确**的 ⇒ 「相等⇒取偶」那一支也成立。
+fn pow10F128(k: i32) f128 {
+    var n: u32 = if (k >= 0) @intCast(k) else @intCast(-k);
+    var acc: f128 = 1;
+    var base: f128 = 10;
+    while (n > 0) {
+        if ((n & 1) != 0) acc *= base;
+        base *= base;
+        n >>= 1;
+    }
+    return if (k >= 0) acc else 1 / acc;
+}
+
+fn renderFloatPHP(buf: []u8, f: f64, kind: FloatFmtKind, dot_zero: bool, upper_e: bool) []const u8 {
+    if (buf.len < 64) return "0"; // 调用方约定 `buf.len >= 64`；不满足宁可不格式化也不能越界写
+
+    if (std.math.isNan(f)) return "NAN";
+    if (std.math.isInf(f)) return if (f > 0) "INF" else "-INF";
+
+    var o: usize = 0;
+    if (f == 0.0) {
+        if (std.math.signbit(f)) {
+            buf[o] = '-';
+            o += 1;
+        }
+        buf[o] = '0';
+        o += 1;
+        if (dot_zero) {
+            buf[o] = '.';
+            buf[o + 1] = '0';
+            o += 2;
+        }
+        return buf[0..o];
+    }
+
+    // 一次 render 同时拿到「有效数字」与「十进制指数」：科学计数串形如 [-]D[.DDD]e[-]NN
+    // ★两套都取 `precision=null`（最短往返）：序列化口径直接用它；显示口径在下面自己舍到 14 位。
+    //   不能向 Zig 要 `precision=13`：实测它把 `123456789012345.0` 舍成 `1.2345678901235e14`（**half-away**），
+    //   而 PHP 的 `%.14G` 走 glibc 的**平分取偶**给 `1.2345678901234E+14`（门 FLT b5 实测）。
+    var scratch: [128]u8 = undefined;
+    const sci = std.fmt.float.render(&scratch, f, .{ .mode = .scientific, .precision = null }) catch return "0";
+
+    var i: usize = 0;
+    var neg = false;
+    if (sci.len > 0 and sci[0] == '-') {
+        neg = true;
+        i = 1;
+    }
+    var digits: [24]u8 = undefined;
+    var nd: usize = 0;
+    while (i < sci.len and sci[i] != 'e' and sci[i] != 'E') : (i += 1) {
+        const c = sci[i];
+        if (c == '.') continue;
+        if (nd >= digits.len) return "0";
+        digits[nd] = c;
+        nd += 1;
+    }
+    var exp: i32 = 0;
+    if (i < sci.len) {
+        i += 1;
+        exp = std.fmt.parseInt(i32, sci[i..], 10) catch 0;
+    }
+    if (nd == 0) return "0";
+
+    // ★显示口径：自己舍到 14 位有效。PHP 的 `%.14G`（glibc）在**真平分**时取偶，其余按真值的第 15 位方向舍。
+    //   最短往返位与真值相差 ≤ 半个 ulp（≤ 1.1e-16 相对），因此**只有**「最短位恰为 15 位且第 15 位是 5」时方向才不可知
+    //   （门 t6 实测：`0.0000123456789012345` 的最短位是 15 位、末位 5，而真值偏上 ⇒ PHP 舍入、按平分取偶会舍错）
+    //   ⇒ 该支用 f128 与精确中点 `M = (D14 + 0.5) × 10^(exp-13)` 比大小；其余支直接读第 15 位。
+    if (kind == .display and nd > 14) {
+        const d15 = digits[14];
+        // 最短往返数**末尾必非零** ⇒ 第 15 位是 5 且总位数 > 15 时，其后仍有非零位 ⇒ 一律入（门 b6/c5/c6）
+        var round_up = d15 >= '5';
+        if (d15 == '5' and nd == 15) {
+            const D = std.fmt.parseInt(u64, digits[0..14], 10) catch 0;
+            const m128: f128 = @as(f128, @floatFromInt(D)) + @as(f128, 0.5);
+            const M = m128 * pow10F128(exp - 13);
+            const v128: f128 = @floatCast(f);
+            if (v128 > M) round_up = true else if (v128 < M) round_up = false
+            else round_up = (digits[13] % 2) == 1; // 真平分 ⇒ 取偶（`123456789012345.0` 即此支，门 b5/t2）
+        }
+        if (round_up) {
+            var j: usize = 14;
+            var carry = true;
+            while (carry and j > 0) {
+                j -= 1;
+                if (digits[j] < '9') {
+                    digits[j] += 1;
+                    carry = false;
+                } else digits[j] = '0';
+            }
+            if (carry) {
+                // 999…9 进位成 1000…0 ⇒ 有效位缩回 1 位、指数 +1（门 t3：`999999999999995.0` ⇒ `1.0E+15`）
+                digits[0] = '1';
+                nd = 1;
+                exp += 1;
+            } else nd = 14;
+        } else nd = 14;
+    }
+
+    // `%.14G` 与最短往返都要去尾零（至少留一位），如 `1.0000000000000e16` ⇒ "1"
+    while (nd > 1 and digits[nd - 1] == '0') : (nd -= 1) {}
+
+    if (neg) {
+        buf[o] = '-';
+        o += 1;
+    }
+
+    const sci_threshold: i32 = if (kind == .display) 14 else 17;
+    if (exp >= sci_threshold or exp <= -5) {
+        buf[o] = digits[0];
+        o += 1;
+        buf[o] = '.';
+        o += 1;
+        if (nd > 1) {
+            @memcpy(buf[o .. o + nd - 1], digits[1..nd]);
+            o += nd - 1;
+        } else {
+            buf[o] = '0';
+            o += 1;
+        }
+        buf[o] = if (upper_e) 'E' else 'e';
+        o += 1;
+        if (exp >= 0) {
+            buf[o] = '+';
+            o += 1;
+        } else {
+            buf[o] = '-';
+            o += 1;
+            exp = -exp;
+        }
+        var ebuf: [12]u8 = undefined;
+        const es = std.fmt.bufPrint(&ebuf, "{d}", .{exp}) catch return buf[0..o];
+        @memcpy(buf[o .. o + es.len], es);
+        o += es.len;
+        return buf[0..o];
+    }
+
+    // 十进制支：长度由上面的切换阈值锁死（显示 ≤14 位整数、序列化 ≤17 位整数，前导零 ≤3 个）⇒ 结构上不可能再 NoSpaceLeft
+    if (exp >= 0) {
+        const ip: usize = @as(usize, @intCast(exp + 1));
+        if (ip >= nd) {
+            @memcpy(buf[o .. o + nd], digits[0..nd]);
+            o += nd;
+            var k: usize = nd;
+            while (k < ip) : (k += 1) {
+                buf[o] = '0';
+                o += 1;
+            }
+        } else {
+            @memcpy(buf[o .. o + ip], digits[0..ip]);
+            o += ip;
+            buf[o] = '.';
+            o += 1;
+            @memcpy(buf[o .. o + nd - ip], digits[ip..nd]);
+            o += nd - ip;
+        }
+    } else {
+        buf[o] = '0';
+        o += 1;
+        buf[o] = '.';
+        o += 1;
+        var z: i32 = -1;
+        while (z > exp) : (z -= 1) {
+            buf[o] = '0';
+            o += 1;
+        }
+        @memcpy(buf[o .. o + nd], digits[0..nd]);
+        o += nd;
+    }
+
+    if (dot_zero and std.mem.indexOfScalar(u8, buf[0..o], '.') == null) {
+        buf[o] = '.';
+        buf[o + 1] = '0';
+        o += 2;
+    }
+    return buf[0..o];
+}
+
+/// 显示口径：`echo`／`print`／`(string)`／插值／`print_r`，以及 `phpCompare` 的 number-vs-string 两支
 /// @pre buf.len >= 64
 /// @post 返回 buf 中的有效切片
 pub fn phpFormatFloat(buf: []u8, f: f64) []const u8 {
-    const PHP_PRECISION: usize = 14;
+    return renderFloatPHP(buf, f, .display, false, true);
+}
 
-    if (std.math.isNan(f)) return "NAN";
-    if (std.math.isInf(f)) {
-        return if (f > 0) "INF" else "-INF";
-    }
-    if (f == 0.0) {
-        if (std.math.signbit(f)) return "-0";
-        return "0";
-    }
-
-    // 计算指数（log10），决定是否使用科学计数法（模拟 PHP 的 %G 行为）
-    const abs_f = @abs(f);
-    const exp10: i32 = if (abs_f >= 1.0) @intFromFloat(@floor(@log10(abs_f))) else blk: {
-        // 对于小于1的数，log10为负数
-        const l = @log10(abs_f);
-        break :blk @as(i32, @intFromFloat(@floor(l)));
-    };
-
-    // PHP %.*G 规则：当指数 >= precision 或 < -4 时使用科学计数法
-    if (exp10 >= @as(i32, @intCast(PHP_PRECISION)) or exp10 < -4) {
-        // 科学计数法：如 9.2233720368548E+18
-        const mantissa = f / std.math.pow(f64, 10.0, @floatFromInt(exp10));
-        // 格式化尾数部分（precision-1 位小数）
-        var work: [64]u8 = undefined;
-        const dec_digits = PHP_PRECISION - 1;
-        const mant_str = std.fmt.bufPrint(&work, "{d:.13}", .{mantissa}) catch return "0";
-        // 手动截断到 dec_digits 位小数并去尾零
-        var out_len: usize = 0;
-        const sign_len: usize = if (mant_str[0] == '-') 1 else 0;
-        // 复制符号
-        if (sign_len > 0) {
-            buf[0] = '-';
-            out_len = 1;
-        }
-        // 找到小数点位置
-        var dot_pos: usize = 0;
-        for (mant_str[sign_len..], 0..) |c, idx| {
-            if (c == '.') {
-                dot_pos = sign_len + idx;
-                break;
-            }
-        }
-        if (dot_pos == 0) dot_pos = mant_str.len;
-        // 复制整数部分
-        const int_part = mant_str[sign_len..dot_pos];
-        @memcpy(buf[out_len .. out_len + int_part.len], int_part);
-        out_len += int_part.len;
-        // 复制小数部分（最多 dec_digits 位）
-        if (dot_pos < mant_str.len) {
-            buf[out_len] = '.';
-            out_len += 1;
-            const frac_start = dot_pos + 1;
-            const frac_avail = mant_str.len - frac_start;
-            const frac_copy = @min(frac_avail, dec_digits);
-            @memcpy(buf[out_len .. out_len + frac_copy], mant_str[frac_start .. frac_start + frac_copy]);
-            out_len += frac_copy;
-            // 去尾零（保留至少一位小数，PHP 科学计数法始终含小数点）
-            while (out_len > 0 and buf[out_len - 1] == '0') : (out_len -= 1) {}
-            if (out_len > 0 and buf[out_len - 1] == '.') {
-                buf[out_len] = '0';
-                out_len += 1;
-            }
-        }
-        // 追加 E±XX 部分（PHP 用大写 E）
-        const e_str = if (exp10 >= 0)
-            std.fmt.bufPrint(buf[out_len..], "E+{d}", .{exp10}) catch return "0"
-        else
-            std.fmt.bufPrint(buf[out_len..], "E{d}", .{exp10}) catch return "0";
-        out_len += e_str.len;
-        return buf[0..out_len];
-    }
-
-    // 非科学计数法路径
-    var work: [64]u8 = undefined;
-    const full = std.fmt.bufPrint(&work, "{d}", .{f}) catch
-        return "0";
-
-    var i: usize = 0;
-    const sign_len: usize = if (full[0] == '-') 1 else 0;
-    i = sign_len;
-
-    var sig_count: usize = 0;
-    var started = false;
-    var round_pos: usize = full.len;
-
-    while (i < full.len) : (i += 1) {
-        if (full[i] == '.') continue;
-        if (!started) {
-            if (full[i] == '0') continue;
-            started = true;
-        }
-        sig_count += 1;
-        if (sig_count == PHP_PRECISION) {
-            round_pos = i + 1;
-            break;
-        }
-    }
-
-    if (sig_count < PHP_PRECISION) {
-        @memcpy(buf[0..full.len], full[0..full.len]);
-        return phpStripTrailingZeros(buf[0..full.len]);
-    }
-
-    var next = round_pos;
-    if (next < full.len and full[next] == '.') next += 1;
-    const round_up = (next < full.len and full[next] >= '5');
-
-    var end = round_pos;
-    @memcpy(buf[0..end], full[0..end]);
-
-    if (round_up) {
-        var j: usize = end;
-        while (j > sign_len) {
-            j -= 1;
-            if (buf[j] == '.') continue;
-            if (buf[j] < '9') {
-                buf[j] += 1;
-                break;
-            }
-            buf[j] = '0';
-            if (j == sign_len) {
-                std.mem.copyBackwards(
-                    u8,
-                    buf[sign_len + 1 .. end + 1],
-                    buf[sign_len..end],
-                );
-                buf[sign_len] = '1';
-                end += 1;
-                break;
-            }
-        }
-    }
-
-    return phpStripTrailingZeros(buf[0..end]);
+/// 序列化口径：`var_dump`（`dot_zero=false`）／`var_export`（`true`）／`json_encode`（`upper_e=false`）
+/// @pre buf.len >= 64
+fn phpFormatFloatSerialize(buf: []u8, f: f64, dot_zero: bool, upper_e: bool) []const u8 {
+    return renderFloatPHP(buf, f, .serialize, dot_zero, upper_e);
 }
 
 fn phpStripTrailingZeros(s: []u8) []const u8 {
@@ -7880,8 +8020,12 @@ pub fn php_var_dump(value: Value) !Value {
         const str = try std.fmt.bufPrint(&buf, "int({})\n", .{value.asInt()});
         fileWriteAll(1, str);
     } else if (value.isFloat()) {
-        var buf: [64]u8 = undefined;
-        const str = try std.fmt.bufPrint(&buf, "float({})\n", .{value.asFloat()});
+        // ★F-63（R-173）：旧写 `float({})` 走 Zig general ⇒ **永不出 E**、`inf`/`nan` 小写、位数是 Zig 的 16 位上限。
+        //   `var_dump` 属序列化口径，且实测**不**补 `.0`（`float(0)`、`float(100000000000000)`、`float(1.0E+17)`）。
+        var num: [64]u8 = undefined;
+        const fs = phpFormatFloatSerialize(&num, value.asFloat(), false, true);
+        var buf: [96]u8 = undefined;
+        const str = std.fmt.bufPrint(&buf, "float({s})\n", .{fs}) catch "float(0)\n";
         fileWriteAll(1, str);
     } else if (value.isString()) {
         const str = value.asString();
@@ -8213,40 +8357,11 @@ fn exportValue(writer: anytype, value: Value, indent: usize) !void {
         return;
     }
     if (value.isFloat()) {
-        const f = value.asFloat();
-        if (std.math.isNan(f)) {
-            try writer.writeAll("NAN");
-        } else if (std.math.isInf(f)) {
-            try writer.writeAll(if (f > 0) "INF" else "-INF");
-        } else {
-            // var_export 使用最短往返精度（17位有效数字）
-            var buf: [64]u8 = undefined;
-            const str = std.fmt.bufPrint(&buf, "{d}", .{f}) catch "0";
-            if (std.mem.indexOf(u8, str, "e")) |idx| {
-                // 科学记数法：Zig 用 e，PHP var_export 用 E+
-                const mantissa = str[0..idx];
-                const exp_part = str[idx + 1 ..];
-                try writer.writeAll(mantissa);
-                if (std.mem.indexOf(u8, mantissa, ".") == null) {
-                    try writer.writeAll(".0");
-                }
-                if (exp_part.len > 0 and exp_part[0] == '-') {
-                    try writer.writeAll("E-");
-                    try writer.writeAll(exp_part[1..]);
-                } else if (exp_part.len > 0 and exp_part[0] == '+') {
-                    try writer.writeAll("E+");
-                    try writer.writeAll(exp_part[1..]);
-                } else {
-                    try writer.writeAll("E+");
-                    try writer.writeAll(exp_part);
-                }
-            } else {
-                try writer.writeAll(str);
-                if (std.mem.indexOf(u8, str, ".") == null) {
-                    try writer.writeAll(".0");
-                }
-            }
-        }
+        // ★F-63（R-173）：旧写 `{d}`＋手写 `e→E` 换算 ⇒ **没有 E 切换阈值**（`1e19` 直出 20 位小数、`1e-5` 直出 `0.00001`），
+        //   位数与 `.0` 规则也各自一套。现收敛到 `renderFloatPHP` 单点：`var_export` ＝序列化口径＋整值补 `.0`＋大写 E。
+        //   NAN/INF 的大小写由核心统一给（实测 `var_export(NAN)`＝`NAN`、`var_export(INF)`＝`INF`，与旧写一致 ⇒ 不新增行为）。
+        var buf: [64]u8 = undefined;
+        try writer.writeAll(phpFormatFloatSerialize(&buf, value.asFloat(), true, true));
         return;
     }
     if (value.isString()) {
@@ -11057,13 +11172,38 @@ const RegexCacheEntry = struct {
 
 // 全局正则缓存
 const REGEX_CACHE_SIZE = 128;
-var regex_cache: std.StringHashMap(RegexCacheEntry) = undefined;
+/// ★F-79b（工单 §62.1）：缓存键**必须含 options**。旧键只有 pattern ⇒ 同一次运行内 `/a.b/` 与 `/a.b/i`
+///   命中同一条编译产物，**先编的那份 options 通吃** ⇒ 修饰符行为依赖调用顺序（顺序相关的错比恒错更难复现）。
+const RegexCacheKey = struct {
+    pattern: []const u8,
+    options: c_uint,
+};
+/// ★键含 slice ⇒ Zig 0.16 的 `std.hash.autoHash` **直接 compileError**（"intent is unclear"），必须自带 hash/eql；
+///   自带 eql 同时把「同 pattern 不同 options」的真冲突挡在命中之外。
+const RegexCacheKeyContext = struct {
+    pub fn hash(_: @This(), key: RegexCacheKey) u64 {
+        // ★Zig 0.16：`Wyhash` 只有 `init`/静态 `hash(seed, input)`，没有 `create/update/final` 流式 API；
+        //   options 逐字节显式打包，避免 `@ptrCast`/对齐问题。
+        const opts = [_]u8{
+            @truncate(key.options),
+            @truncate(key.options >> 8),
+            @truncate(key.options >> 16),
+            @truncate(key.options >> 24),
+        };
+        return std.hash.Wyhash.hash(std.hash.Wyhash.hash(0, key.pattern), &opts);
+    }
+
+    pub fn eql(_: @This(), a: RegexCacheKey, b: RegexCacheKey) bool {
+        return a.options == b.options and std.mem.eql(u8, a.pattern, b.pattern);
+    }
+};
+var regex_cache: std.HashMap(RegexCacheKey, RegexCacheEntry, RegexCacheKeyContext, std.hash_map.default_max_load_percentage) = undefined;
 var regex_cache_mutex: std.atomic.Mutex = .unlocked;
 var regex_cache_initialized: bool = false;
 
 fn initRegexCache(allocator: Allocator) !void {
     if (regex_cache_initialized) return;
-    regex_cache = std.StringHashMap(RegexCacheEntry).init(allocator);
+    regex_cache = std.HashMap(RegexCacheKey, RegexCacheEntry, RegexCacheKeyContext, std.hash_map.default_max_load_percentage).init(allocator);
     regex_cache_initialized = true;
 }
 
@@ -11074,7 +11214,7 @@ fn getOrCompileRegex(pattern: []const u8, options: c_uint, allocator: Allocator)
     defer regex_cache_mutex.unlock();
 
     // 查找缓存
-    if (regex_cache.getPtr(pattern)) |entry| {
+    if (regex_cache.getPtr(.{ .pattern = pattern, .options = options })) |entry| {
         entry.touch();
         return entry.code;
     }
@@ -11095,7 +11235,7 @@ fn getOrCompileRegex(pattern: []const u8, options: c_uint, allocator: Allocator)
 
     // LRU淘汰：如果缓存满了，移除最旧的条目
     if (regex_cache.count() >= REGEX_CACHE_SIZE) {
-        var oldest_key: ?[]const u8 = null;
+        var oldest_key: ?RegexCacheKey = null;
         var oldest_time: i128 = std.math.maxInt(i128);
 
         var iter = regex_cache.iterator();
@@ -11110,14 +11250,14 @@ fn getOrCompileRegex(pattern: []const u8, options: c_uint, allocator: Allocator)
             if (regex_cache.fetchRemove(key)) |removed| {
                 var entry = removed.value;
                 entry.deinit();
-                allocator.free(removed.key);
+                allocator.free(removed.key.pattern);
             }
         }
     }
 
     // 添加到缓存
     const key_copy = try allocator.dupe(u8, pattern);
-    try regex_cache.put(key_copy, RegexCacheEntry.init(re));
+    try regex_cache.put(.{ .pattern = key_copy, .options = options }, RegexCacheEntry.init(re));
 
     return re;
 }
@@ -11162,11 +11302,23 @@ extern fn pcre2_substitute_8(
 ) c_int;
 
 // PCRE2 常量
+// ★F-79（工单 §62）：本块原有三枚**抄错**，且都是"错得不报错"的形态 ⇒ 数值一律与已安装的
+//   `/opt/homebrew/include/pcre2.h` 逐条对照实测过；改这些数必须有门臂反推（门 PMOD），禁按记忆或别家版本填。
+//     MULTILINE  曾写 0x00000002（那是 PCRE2_ALT_BSUX）  ⇒ `/m` 完全不生效
+//     DOTALL     曾写 0x00000004（那是 PCRE2_AUTO_CALLOUT）⇒ `/s` 完全不生效
+//     EXTENDED   曾写 0x00000008（与 CASELESS **同值**）   ⇒ `/x` 变成了「忽略大小写」＝过匹配
 const PCRE2_CASELESS: c_uint = 0x00000008;
-const PCRE2_MULTILINE: c_uint = 0x00000002;
-const PCRE2_DOTALL: c_uint = 0x00000004;
-const PCRE2_EXTENDED: c_uint = 0x00000008;
+const PCRE2_DOLLAR_ENDONLY: c_uint = 0x00000010;
+const PCRE2_DOTALL: c_uint = 0x00000020;
+const PCRE2_DUPNAMES: c_uint = 0x00000040;
+const PCRE2_EXTENDED: c_uint = 0x00000080;
+const PCRE2_MATCH_UNSET_BACKREF: c_uint = 0x00000200;
+const PCRE2_MULTILINE: c_uint = 0x00000400;
+const PCRE2_NO_AUTO_CAPTURE: c_uint = 0x00002000;
+const PCRE2_UCP: c_uint = 0x00020000;
+const PCRE2_UNGREEDY: c_uint = 0x00040000;
 const PCRE2_UTF: c_uint = 0x00080000;
+const PCRE2_ANCHORED: c_uint = 0x80000000;
 const PCRE2_ERROR_NOMATCH: c_int = -1;
 const PCRE2_SUBSTITUTE_GLOBAL: c_uint = 0x00000100;
 const PCRE2_SUBSTITUTE_OVERFLOW_LENGTH: c_uint = 0x00001000;
@@ -11321,7 +11473,12 @@ fn emitRegexPatternWarning(fn_name: []const u8, parsed: ParsedPattern) void {
 fn parsePHPRegexPattern(pattern: []const u8) ParsedPattern {
     var result = ParsedPattern{
         .pattern = pattern,
-        .options = PCRE2_UTF | PCRE2_DOTALL,
+        // ★F-79：缺省**不开** DOTALL 也不开 UTF——PHP 两者都只由修饰符决定（实测：
+        //   `preg_match("/[\xff]/", "\xff")`＝1（字节模式），加 `/u` ⇒ `false`＋`Compilation failed: UTF-8 error: illegal byte`；
+        //   `/\w+/` 打 `"é具x"` ⇒ `["x"]`，而 `/\w+/u` ⇒ `["é具x"]`。
+        //   旧写法把 `PCRE2_UTF|PCRE2_DOTALL` 当缺省，且那两个值当时都抄错 ⇒ 「缺省看起来像不开 dotall」是**错值掩盖错缺省**的巧合，
+        //   只改数值不改这里会让全体模式静默变成 dotall（工单 §62 的连带面）。
+        .options = 0,
     };
 
     var start: usize = 0;
@@ -11398,6 +11555,23 @@ fn parsePHPRegexPattern(pattern: []const u8) ParsedPattern {
             'm' => result.options |= PCRE2_MULTILINE,
             's' => result.options |= PCRE2_DOTALL,
             'x' => result.options |= PCRE2_EXTENDED,
+            // ★§38.4「合法但完全没映射」的九枚在此收口（工单 §60/§62）：每一位都取自 pcre2.h 且各有门 PMOD 的行为臂反推—
+            //   `A`⇒ANCHORED（`/a/A` 打 `xa` PHP=0）、`D`⇒DOLLAR_ENDONLY（`/a$/D` 打 `"a\n"` PHP=0）、
+            //   `J`⇒DUPNAMES（不带⇒`false`＋`two named subpatterns have the same name`，带⇒`1` 且命名组取后者）、
+            //   `U`⇒UNGREEDY（`/a.*b/U` 打 `aXbYYb`⇒`aXb`）、`n`⇒NO_AUTO_CAPTURE（`/(?<x>a)(b)/n`⇒数字组 `2` 消失）、
+            //   `u`⇒UTF|UCP（`/[\xff]/u`⇒`false`＋`Compilation failed: UTF-8 error: illegal byte`；不带 `u` 时 PHP 给 1）、
+            //   `r`⇒MATCH_UNSET_BACKREF（★本机**测不出可观测形** ⇒ 映射按 PCRE2 语义写，但**不得声称已验收**）。
+            // ★刻意留空两枚，理由不同：`S`＝study 在 PCRE2 下无语义差 ⇒ 不需要位；
+            //   `X`＝PCRE2_EXTRA_* 属 **compile extra options**，需 `pcre2_compile_context_create_8` ＋
+            //   `pcre2_set_compile_extra_options_8` 两个**尚未声明**的 extern（`pcre2_compile_8` 第 6 参才是 context）
+            //   且同样无可观测形 ⇒ 登记为未收口，见任务 #94。
+            'A' => result.options |= PCRE2_ANCHORED,
+            'D' => result.options |= PCRE2_DOLLAR_ENDONLY,
+            'J' => result.options |= PCRE2_DUPNAMES,
+            'U' => result.options |= PCRE2_UNGREEDY,
+            'n' => result.options |= PCRE2_NO_AUTO_CAPTURE,
+            'u' => result.options |= (PCRE2_UTF | PCRE2_UCP),
+            'r' => result.options |= PCRE2_MATCH_UNSET_BACKREF,
             // ★实测合法但语义尚未实现的修饰符（n u r A D J S U X）：工单 §38.4 已单列，禁在此静默当"已支持"
             else => {},
         }
@@ -13662,11 +13836,10 @@ pub fn php_intval(val: Value) !Value {
     // 使用完整的 PHP intval 语义
     if (val.isInt()) return val;
     if (val.isFloat()) {
-        const f = val.asFloat();
-        const max_as_float = @as(f64, @floatFromInt(std.math.maxInt(i64)));
-        const min_as_float = @as(f64, @floatFromInt(std.math.minInt(i64)));
-        if (f >= max_as_float or f < min_as_float) return Value.initInt(std.math.minInt(i64));
-        return Value.initInt(@intFromFloat(f));
+        // ★F-69：这里原先把 `toInt()` 的饱和逻辑**逐字抄了第三遍**（且**没有** `isNan` 守卫 ⇒ `intval(NAN)` 走
+        //   越界 `@intFromFloat`＝Zig 非法行为；PHP 实测给 `0` ＋ 告警）。改成单点 helper ＋ 显式站点告警。
+        warnFloatToIntNotRepresentable(val);
+        return Value.initInt(floatToIntPHP(val.asFloat()));
     }
     if (val.isBool()) return Value.initInt(if (val.asBool()) @as(i64, 1) else @as(i64, 0));
     if (val.isArray()) {
@@ -20989,6 +21162,7 @@ pub fn php_object_set_dynamic(obj_val: Value, prop_name_val: Value, value: Value
 
 /// 类型转换函数
 pub fn php_cast_int(val: Value) !Value {
+    warnFloatToIntNotRepresentable(val); // ★F-69 显式站点（实测：`(int)1e19` ⇒ Warn＋-8446744073709551616；`(int)2.5` ⇒ 零诊断）
     return Value.initInt(val.toInt());
 }
 
@@ -21498,8 +21672,12 @@ pub fn php_object_new_with_constructor(class_name: []const u8, args: []const Val
 }
 
 /// 检查类是否存在
-pub fn php_class_exists(class_name: Value, allocator: Allocator) !Value {
+///   ★F-75：`$autoload`／`$local_only`／`$allow_string` 一类参数在 AOT 下**惰性**（模板内 `autoload` 出现 0 次
+///     ⇒ 无 autoloader；`getenv` 无 SAPI 环境分层），但**必须接收**——旧状是多传一参就 `expected N argument(s),
+///     found N+1` ⇒ 合法 PHP 编不过（门 ARG 注册）。缺省值由 `builtin_map` 的 `optional_defaults` 声明式补齐。
+pub fn php_class_exists(class_name: Value, autoload: Value, allocator: Allocator) !Value {
     _ = allocator;
+    _ = autoload;
     if (!class_name.isString()) return Value.initBool(false);
     const name = class_name.asString().data;
     return Value.initBool(findClass(name) != null);
@@ -21508,12 +21686,13 @@ pub fn php_class_exists(class_name: Value, allocator: Allocator) !Value {
 pub fn class_exists(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
     _ = ctx;
     if (args.len < 1) return error.MissingArgument;
-    return php_class_exists(args[0], allocator);
+    return php_class_exists(args[0], if (args.len > 1) args[1] else Value.initBool(true), allocator);
 }
 
 /// 检查接口是否存在
-pub fn php_interface_exists(interface_name: Value, allocator: Allocator) !Value {
+pub fn php_interface_exists(interface_name: Value, autoload: Value, allocator: Allocator) !Value {
     _ = allocator;
+    _ = autoload;
     if (!interface_name.isString()) return Value.initBool(false);
     const name = interface_name.asString().data;
     // 在class_registry中查找，检查是否为接口
@@ -21526,12 +21705,13 @@ pub fn php_interface_exists(interface_name: Value, allocator: Allocator) !Value 
 pub fn interface_exists(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
     _ = ctx;
     if (args.len < 1) return error.MissingArgument;
-    return php_interface_exists(args[0], allocator);
+    return php_interface_exists(args[0], if (args.len > 1) args[1] else Value.initBool(true), allocator);
 }
 
 /// 检查trait是否存在
-pub fn php_trait_exists(trait_name: Value, allocator: Allocator) !Value {
+pub fn php_trait_exists(trait_name: Value, autoload: Value, allocator: Allocator) !Value {
     _ = allocator;
+    _ = autoload;
     if (!trait_name.isString()) return Value.initBool(false);
     const name = trait_name.asString().data;
     // 在class_registry中查找，检查是否为trait
@@ -21544,12 +21724,13 @@ pub fn php_trait_exists(trait_name: Value, allocator: Allocator) !Value {
 pub fn trait_exists(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
     _ = ctx;
     if (args.len < 1) return error.MissingArgument;
-    return php_trait_exists(args[0], allocator);
+    return php_trait_exists(args[0], if (args.len > 1) args[1] else Value.initBool(true), allocator);
 }
 
 /// enum_exists(name) -> bool
-pub fn php_enum_exists(name_val: Value, allocator: Allocator) !Value {
+pub fn php_enum_exists(name_val: Value, autoload: Value, allocator: Allocator) !Value {
     _ = allocator;
+    _ = autoload;
     if (!name_val.isString()) return Value.initBool(false);
     const name = name_val.asString().data;
     if (findClass(name)) |meta| {
@@ -21629,7 +21810,8 @@ pub fn php_class_uses(value: Value, allocator: Allocator) !Value {
     return Value.initArray(result);
 }
 
-pub fn php_is_subclass_of(child: Value, parent: Value) !Value {
+pub fn php_is_subclass_of(child: Value, parent: Value, allow_string: Value) !Value {
+    _ = allow_string; // ★F-75：见 `php_class_exists` 上方说明（AOT 侧本就拿对象或类名字符串两形）
     // 第一个参数可以是对象或类名字符串
     var child_class_name: []const u8 = undefined;
     var child_meta: ?*const ClassMeta = null;
@@ -21678,7 +21860,7 @@ pub fn is_subclass_of(ctx: Value, args: []const Value, allocator: Allocator) any
     _ = ctx;
     _ = allocator;
     if (args.len < 2) return error.MissingArgument;
-    return php_is_subclass_of(args[0], args[1]);
+    return php_is_subclass_of(args[0], args[1], if (args.len > 2) args[2] else Value.initBool(true));
 }
 
 /// instanceof 检查
@@ -24819,7 +25001,8 @@ pub fn php_rawurldecode(input: Value, allocator: Allocator) !Value {
 // ============================================================================
 
 /// gethostbyname - 通过主机名获取IP地址
-pub fn php_getenv(name_val: Value, allocator: Allocator) !Value {
+pub fn php_getenv(name_val: Value, local_only: Value, allocator: Allocator) !Value {
+    _ = local_only; // ★F-75：AOT 无 SAPI 环境分层 ⇒ 惰性，但必须接收（见 `php_class_exists` 上方说明）
     if (!name_val.isString()) return Value.initBool(false);
 
     const name = name_val.asString().data;
@@ -24960,6 +25143,20 @@ pub fn php_parse_url(url: Value, allocator: Allocator) !Value {
 }
 
 /// http_build_query - 生成 URL 编码的查询字符串
+/// `http_build_query` 的分量编码（PHP 的 `application/x-www-form-urlencoded`：字母数字与 `-._~` 原样、空格成 `+`、其余 `%XX`）
+/// ★F-71：从原字符串支里抽出来，是为了让**格式化后的浮点值**走同一支（旧写只有字符串编码 ⇒ `1.0E+19` 少转成 `%2B`）
+fn urlEncodeQueryComponent(writer: anytype, bytes: []const u8) !void {
+    for (bytes) |c| {
+        if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~') {
+            try writer.writeByte(c);
+        } else if (c == ' ') {
+            try writer.writeByte('+');
+        } else {
+            try writer.print("%{X:0>2}", .{c});
+        }
+    }
+}
+
 pub fn php_http_build_query(data: Value, allocator: Allocator) !Value {
     if (!data.isArray()) return Value.initString(try PHPString.init(allocator, ""));
 
@@ -24983,20 +25180,16 @@ pub fn php_http_build_query(data: Value, allocator: Allocator) !Value {
         // 写入值
         const val = entry.value_ptr.*;
         if (val.isString()) {
-            // URL 编码
-            for (val.asString().data) |c| {
-                if (std.ascii.isAlphanumeric(c) or c == '-' or c == '_' or c == '.' or c == '~') {
-                    try aw.writer.writeByte(c);
-                } else if (c == ' ') {
-                    try aw.writer.writeByte('+');
-                } else {
-                    try aw.writer.print("%{X:0>2}", .{c});
-                }
-            }
+            try urlEncodeQueryComponent(&aw.writer, val.asString().data);
         } else if (val.isInt()) {
             try aw.writer.print("{d}", .{val.asInt()});
         } else if (val.isFloat()) {
-            try aw.writer.print("{d}", .{val.asFloat()});
+            // ★F-71（R-173b 加封）：m1 实测两处因，缺一不可 ——
+            //   ① 旧写 `{d}` 是「最短位数直出」，而 PHP 的标量值走 `(string)` ＝**显示**口径（`a=1.0E+19`、`a=0.3`、`a=1.0E-5`）；
+            //   ② 旧写**不做 URL 编码**，而 PHP 对值一律编码 ⇒ `+` 必须成 `%2B`（实测 `a=1.0E%2B19`）。
+            //   ⇒ 先按显示口径格式化，再走与字符串同一支编码器（`E`/`.`/`-` 都属不编码集，只有 `+` 会被转义）。
+            var fbuf: [64]u8 = undefined;
+            try urlEncodeQueryComponent(&aw.writer, phpFormatFloat(&fbuf, val.asFloat()));
         } else if (val.isBool()) {
             if (val.asBool()) try aw.writer.writeAll("1");
         }
@@ -25413,7 +25606,10 @@ pub fn php_settype(var_ref: Value, type_val: Value, allocator: Allocator) !Value
     const new_val = if (std.mem.eql(u8, type_name, "bool") or std.mem.eql(u8, type_name, "boolean"))
         Value.initBool(old_val.toBool())
     else if (std.mem.eql(u8, type_name, "int") or std.mem.eql(u8, type_name, "integer"))
-        Value.initInt(old_val.toInt())
+        blk: {
+            warnFloatToIntNotRepresentable(old_val); // ★F-69 显式站点（实测 `settype($v,"int")` 越界 ⇒ Warn＋回绕值）
+            break :blk Value.initInt(old_val.toInt());
+        }
     else if (std.mem.eql(u8, type_name, "float") or std.mem.eql(u8, type_name, "double"))
         Value.initFloat(old_val.toFloat())
     else if (std.mem.eql(u8, type_name, "string")) blk: {
@@ -25696,8 +25892,13 @@ pub fn php_debug_zval_dump(value: Value) !Value {
         const msg = std.fmt.bufPrint(&buf, "int({d})\n", .{value.asInt()}) catch "int(?)\n";
         fileWriteAll(1, msg);
     } else if (value.isFloat()) {
-        var buf: [64]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "float({d})\n", .{value.asFloat()}) catch "float(?)\n";
+        // ★F-71（R-173b）：`debug_zval_dump` 与 `var_dump` 同属**序列化**口径（实测 `debug_zval_dump(1e19)`＝`float(1.0E+19)`、
+        //   `debug_zval_dump(0.1+0.2)`＝`float(0.30000000000000004)`）⇒ 接同一核心，不补 `.0`、大写 E。
+        //   ★本函数的**数组体与 refcount 面**整体不忠实（数组只印 `refcount(1){}`）⇒ 另登 F-71b，本批不设臂不顺手改。
+        var num: [64]u8 = undefined;
+        const fs = phpFormatFloatSerialize(&num, value.asFloat(), false, true);
+        var buf: [96]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "float({s})\n", .{fs}) catch "float(?)\n";
         fileWriteAll(1, msg);
     } else if (value.isBool()) {
         fileWriteAll(1, if (value.asBool()) "bool(true)\n" else "bool(false)\n");
@@ -25929,10 +26130,17 @@ pub fn php_json_encode(value: Value, flags: Value, depth: Value, allocator: Allo
     defer buffer.deinit(allocator);
 
     const pretty = (flags_int & 128) != 0; // JSON_PRETTY_PRINT
+    // ★F-63（R-173）：非有限浮点 ⇒ PHP 的 `json_encode` 返回 **false**（不是字符串 `"false"`、不是抛错）
     if (pretty) {
-        try jsonEncodeValuePretty(value, &buffer, allocator, flags_int, 0);
+        jsonEncodeValuePretty(value, &buffer, allocator, flags_int, 0) catch |err| switch (err) {
+            error.JsonInfOrNan => return Value.initBool(false),
+            else => return err,
+        };
     } else {
-        try jsonEncodeValue(value, &buffer, allocator, flags_int);
+        jsonEncodeValue(value, &buffer, allocator, flags_int) catch |err| switch (err) {
+            error.JsonInfOrNan => return Value.initBool(false),
+            else => return err,
+        };
     }
 
     const result = try PHPString.init(allocator, buffer.items);
@@ -25949,9 +26157,14 @@ fn jsonEncodeValue(value: Value, buffer: *std.ArrayListUnmanaged(u8), allocator:
         defer allocator.free(formatted);
         try buffer.appendSlice(allocator, formatted);
     } else if (value.isFloat()) {
-        const formatted = try std.fmt.allocPrint(allocator, "{d}", .{value.asFloat()});
-        defer allocator.free(formatted);
-        try buffer.appendSlice(allocator, formatted);
+        // ★F-63（R-173）：json 属序列化口径但用**小写 e**（实测 `1.0e+17`／`1.0e-5`），且
+        //   INF/-INF/NAN 让整个 encode **返回 false**（实测顶层与嵌套都 false，`JSON_PARTIAL_OUTPUT_ON_ERROR`
+        //   也救不回来，`json_last_error()=7 "Inf and NaN cannot be JSON encoded"`）
+        //   ⇒ 这里以 error 上抛，由 `php_json_encode` 收成 `false`。旧写 `{d}` 直出 20 位小数且非有限值出 `inf`。
+        const f = value.asFloat();
+        if (std.math.isNan(f) or std.math.isInf(f)) return error.JsonInfOrNan;
+        var buf: [64]u8 = undefined;
+        try buffer.appendSlice(allocator, phpFormatFloatSerialize(&buf, f, false, false));
     } else if (value.isString()) {
         const str = value.asString();
         try buffer.append(allocator, '"');
@@ -26161,9 +26374,14 @@ fn jsonEncodeValuePretty(value: Value, buffer: *std.ArrayListUnmanaged(u8), allo
         defer allocator.free(formatted);
         try buffer.appendSlice(allocator, formatted);
     } else if (value.isFloat()) {
-        const formatted = try std.fmt.allocPrint(allocator, "{d}", .{value.asFloat()});
-        defer allocator.free(formatted);
-        try buffer.appendSlice(allocator, formatted);
+        // ★F-63（R-173）：json 属序列化口径但用**小写 e**（实测 `1.0e+17`／`1.0e-5`），且
+        //   INF/-INF/NAN 让整个 encode **返回 false**（实测顶层与嵌套都 false，`JSON_PARTIAL_OUTPUT_ON_ERROR`
+        //   也救不回来，`json_last_error()=7 "Inf and NaN cannot be JSON encoded"`）
+        //   ⇒ 这里以 error 上抛，由 `php_json_encode` 收成 `false`。旧写 `{d}` 直出 20 位小数且非有限值出 `inf`。
+        const f = value.asFloat();
+        if (std.math.isNan(f) or std.math.isInf(f)) return error.JsonInfOrNan;
+        var buf: [64]u8 = undefined;
+        try buffer.appendSlice(allocator, phpFormatFloatSerialize(&buf, f, false, false));
     } else if (value.isString()) {
         // 复用 jsonEncodeValue 的字符串编码逻辑
         try jsonEncodeValue(value, buffer, allocator, flags);
@@ -27601,7 +27819,7 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
                     }
                 },
                 'd', 'i' => {
-                    const val = arg.toInt();
+                    const val = castIntArgWithWarn(arg); // ★F-69：sprintf／printf 的 int 族站点（实测 %d %u %x %X %o %b %c 各转换一次 ⇒ 各发一条 Warn）
                     if (flag_plus and val >= 0) try tmp_buf.append(allocator, '+') else if (flag_space and val >= 0) try tmp_buf.append(allocator, ' ');
                     const str = try std.fmt.allocPrint(allocator, "{d}", .{val});
                     defer allocator.free(str);
@@ -27616,38 +27834,38 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
                     try tmp_buf.appendSlice(allocator, fstr);
                 },
                 'x' => {
-                    const val = arg.toInt();
+                    const val = castIntArgWithWarn(arg); // ★F-69：sprintf／printf 的 int 族站点（实测 %d %u %x %X %o %b %c 各转换一次 ⇒ 各发一条 Warn）
                     const str = try std.fmt.allocPrint(allocator, "{x}", .{@as(u64, @bitCast(val))});
                     defer allocator.free(str);
                     try tmp_buf.appendSlice(allocator, str);
                 },
                 'X' => {
-                    const val = arg.toInt();
+                    const val = castIntArgWithWarn(arg); // ★F-69：sprintf／printf 的 int 族站点（实测 %d %u %x %X %o %b %c 各转换一次 ⇒ 各发一条 Warn）
                     const str = try std.fmt.allocPrint(allocator, "{X}", .{@as(u64, @bitCast(val))});
                     defer allocator.free(str);
                     try tmp_buf.appendSlice(allocator, str);
                 },
                 'c' => {
-                    const val = arg.toInt();
+                    const val = castIntArgWithWarn(arg); // ★F-69：sprintf／printf 的 int 族站点（实测 %d %u %x %X %o %b %c 各转换一次 ⇒ 各发一条 Warn）
                     if (val >= 0 and val <= 255) {
                         try tmp_buf.append(allocator, @intCast(val));
                     }
                 },
                 'u' => {
-                    const val = arg.toInt();
+                    const val = castIntArgWithWarn(arg); // ★F-69：sprintf／printf 的 int 族站点（实测 %d %u %x %X %o %b %c 各转换一次 ⇒ 各发一条 Warn）
                     const uval: u64 = @bitCast(val);
                     const str = try std.fmt.allocPrint(allocator, "{d}", .{uval});
                     defer allocator.free(str);
                     try tmp_buf.appendSlice(allocator, str);
                 },
                 'o' => {
-                    const val = arg.toInt();
+                    const val = castIntArgWithWarn(arg); // ★F-69：sprintf／printf 的 int 族站点（实测 %d %u %x %X %o %b %c 各转换一次 ⇒ 各发一条 Warn）
                     const str = try std.fmt.allocPrint(allocator, "{o}", .{@as(u64, @bitCast(val))});
                     defer allocator.free(str);
                     try tmp_buf.appendSlice(allocator, str);
                 },
                 'b' => {
-                    const val = arg.toInt();
+                    const val = castIntArgWithWarn(arg); // ★F-69：sprintf／printf 的 int 族站点（实测 %d %u %x %X %o %b %c 各转换一次 ⇒ 各发一条 Warn）
                     const str = try std.fmt.allocPrint(allocator, "{b}", .{@as(u64, @bitCast(val))});
                     defer allocator.free(str);
                     try tmp_buf.appendSlice(allocator, str);
