@@ -4272,10 +4272,45 @@ pub const IRGenerator = struct {
         }
 
         // Generate value
+        // ★F-107（工单 §79.4）：`@` 包住赋值目标时，抑制的作用范围覆盖**整条赋值表达式**
+        //   （实测：带 `@` 的赋值其右值告警一条都不打印，去掉 `@` 就打印；处理器仍照收＝PHP 契约 C2）
+        //   ⇒ 先探出包装，再把**右值求值**整体包进 push/pop；解析器侧已放行该形状（同批改动）。
+        var lvalue_suppressed = false;
+        {
+            var probe = self.getNode(assign_data.target);
+            while (probe) |nd| {
+                if (nd.tag != .unary_expr) break;
+                const probe_unary = nd.data.unary_expr;
+                if (probe_unary.op != .at_sign) break;
+                lvalue_suppressed = true;
+                probe = self.getNode(probe_unary.expr);
+            }
+        }
+        if (lvalue_suppressed) {
+            _ = try self.emit(.{ .call = .{
+                .func_name = "php_error_suppress_push",
+                .args = &.{},
+                .return_type = .void,
+            } }, null);
+        }
         const value_reg = try self.generateExpression(assign_data.value);
+        if (lvalue_suppressed) {
+            _ = try self.emit(.{ .call = .{
+                .func_name = "php_error_suppress_pop",
+                .args = &.{},
+                .return_type = .void,
+            } }, null);
+        }
 
         // Generate target
-        const target_node = self.getNode(assign_data.target) orelse return value_reg;
+        // ★F-107：剥掉 `@` 包装后再判 tag——写回目标仍是内层真实左值；`:4283` 的文案与 `else` 支**一字未动**
+        //   （那句只该给 `f() = 2` 这类真不可写目标，放宽它就是过接受）。
+        var target_node = self.getNode(assign_data.target) orelse return value_reg;
+        while (target_node.tag == .unary_expr) {
+            const target_unary = target_node.data.unary_expr;
+            if (target_unary.op != .at_sign) break;
+            target_node = self.getNode(target_unary.expr) orelse return value_reg;
+        }
 
         switch (target_node.tag) {
             .variable, .variable_variable, .array_access, .property_access, .variable_property_access, .static_property_access, .function_call => {},

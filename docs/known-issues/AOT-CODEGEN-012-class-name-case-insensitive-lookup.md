@@ -5106,4 +5106,218 @@ R-178 阶段我据 ESCG `28/28 compile_fail=0` 汇报"发射面已修完"。**�
 ### 78.5 代次台账与复测
 `tpl` **`dbbe5bb3503bbd4d33569b493587c7ac`**（本批唯一改动文件）｜`bin 793a98371cff92d3629fe76e0c992647`（清缓存后重链接，非源码变化）｜`nlk 95e42e62…`、`irg ca180028…`、`parser dd07fb09…` **未动**｜影子列 `43add0d5…`（与 R-178b 同）。
 复测：①`timeout 900 bash fuzzy_scripts_720/tmp/c067_number_format_gate_tmp.sh` ⇒ `arms=56 same=56 diff=0 stage_judgment=0`；②`timeout 900 bash …/c108_errh_gate_tmp.sh` ⇒ 认 `same=4 diff=10 compile_fail=1 bad_probe=0`；③`timeout 1800 bash …/c109_inl_gate_tmp.sh` ⇒ 认 `tier_fingerprint=4`；④全链 `timeout 14400 bash …/c107_r179_acceptance_chain_tmp.sh`（链头双断言：`EXPECT_BIN`＋`EXPECT_TPL`＋三枚源码 md5）。
-★提交状态：本批**未入库**（HEAD 仍 `18a692a`）⇒ 变更文档文件名用模板 md5 前缀 `dbbe5bb3` 标代次，不代表 commit。
+★提交状态：本批**未入库**（HEAD 仍 `18a692a`）⇒ 变更文档文件名用模板 md5 前缀 `dbbe5bb3` 标代次，不代表 commit。 ★**2026-10-19 更正**：本批与 R-178b/R-180 均已随 **`ca99151`** 入库（模板 654 行、`native_linker` 60 行、`ir_generator` 229 行、四份变更文档与两张工单同批进入），此处"未入库"是**写下当时**的事实，别再当作现值读。
+
+---
+
+## 79. R-180 落地记录（F-92 用户错误处理器路由）—— 待链闭后填数
+
+链＝`fuzzy_scripts_720/tmp/c111_r180_acceptance_chain_tmp.sh`（38 腿，2026-10-19 07:56 起跑）。
+★**本批偏差事前登记**：c111 派生时刻**早于**我把 ERRH/INL 写进母版 `c070` ⇒ c111 含 ESCG/PERR/PD2 但**不含 ERRH、INL 两腿**，而 ERRH 正是 F-180（F-92）的主门 ⇒ 链闭后必须**链外补跑**这两腿（同代次 `bin 793a98371cff92d3629fe76e0c992647`／`tpl 4160f577dc2f01f2d1fc030e8650c7ee`），并在下文读数表注明"补跑腿"。母版已同时补回漏了两代的 **PD2** 腿（现 40 腿）⇒ 教训：**腿集合的并集必须落母版，代次只改读数不改腿**。
+### 79.0 链闭读数（`c111` ⇒ `R180_CHAIN_DONE`，2026-10-19 10:29:55，`ELAPSED=9198s`）
+`LEG[buildtest] rc=0`｜`LEG[regression] rc=0`＝**`Total 68 / Pass 67 / Skip 1 / Fail_* 0`**（判据⑥达成）｜
+`LEG[shadow] rc=0 C010_SHADOW_DONE total=68 same=0 diff=68 miss=0 invalid=0 ELAPSED=1162s`｜
+★`SHADOWCOL_DONE gen=r180 rows=68` **`col_md5=43add0d50e809d87353d11f995f6d624` == `base_md5`（r179 列）** ⇒ **`changed_rows=0` 且 `col_identical=yes`**（四对账：`rows=68 ✓ / changed_rows=0 ✓ / miss=0 ✓ / invalid=0 ✓`）。
+⇒ **本批最强判据成立**：F-92 只动运行期模板（编译期读盘、不进 `main.zig` 文本），影子整列与 R-179／R-178b 逐字节同一 ⇒ 发射面零外溢。链头 `bin_md5=793a9837…` 与链尾同值（未重建），`tpl_md5=4160f577…` 与登记代次一致。
+### 79.0b 逐腿机械对账（`c084` 修复版，md5 `0c041a53d8f2aea495f3282166ea3b7e`）
+读数＝`fuzzy_scripts_720/tmp/c084_r179_vs_r180_final_tmp.txt`：**39 条可比腿，38 SAME ＋ 1 DIFF，缺对应项 0**。
+唯一 DIFF＝`PERR same 2→3`（`h1` 翻绿）⇒ 已按构造归因为 F-92 的设计效果（§80.2），**不是外溢**。其余 38 腿（含 F2I/NFM/ESCG/PD2/PMOD/ARG/LIT/FLT/BLT/NST/OBJ/ABS/MSR/F45FACE/OPS/PD/S/AC/AB/CENSUS/Y/ZFACES/ZCENSUS/X/V/W/T/P/M/N/O/D8/Q/R/U/B ＋ 回归 ＋ 影子）语义字段逐字同值。
+### 79.0c ERRH／INL 两腿＝**链外补跑**（偏差留痕）
+`c111` 派生早于母版补丁 ⇒ 链内无 ERRH、无 INL。已用 `c118_r180_supplement_tmp.sh`（六枚代次锚断言通过、跑前记门 md5、带并发护栏）补跑：ERRH＝**v2 18 臂含 rc 判据**、INL＝20 槽两档；逐臂快照分别落 `c108_errh_18arm_R180_snapshot_tmp.tsv`／`c109_inl_20slot_R180_snapshot_tmp.tsv`。**读数（ERRH v2，18 臂，代次＝链尾同一代 `bin 793a9837…`／`tpl 4160f577…`，`SLEG[ERRH] rc=0 ELAPSED=76s`）**：
+`arms=18 same=12 diff=4 compile_fail=2 parse_fail=0 bad_probe=0`；逐臂快照 `c108_errh_18arm_R180_snapshot_tmp.tsv`（md5 `be60a0f106250d267a0778bbca4b55ec`，18 行）。
+★该 DONE 行**没有** `rc_mismatch=`（我的补丁静默落空，见下方"两次工具自纠"）⇒ 按行手动数：`rc=php/N aot/M` 两值不等的只有 `h11`（`php/255` vs `aot/0`）⇒ **`rc_mismatch=1`**；而 `same` 的判定本身已含 rc 相等，故 h11 已计入 DIFF、没被算成 SAME。
+| 臂 | 读数 | 归因（具名，禁记在 F-92 头上） |
+|---|---|---|
+| `h1 h1b h2 h3 h5 h7 h8` | **SAME** | F-92 路由本体（v1 里这七枚全是 DIFF ⇒ 本批正是把它们转绿） |
+| `h4 g1 g2 g3 h13` | SAME | 无处理器／无诊断守卫，本就逐字对（`h13＝isset` 静默面也守住） |
+| `h6` `h12` | DIFF | AOT 不发 `Undefined array key`（`h6` 串键、`h12` int 键）⇒ **F-100** |
+| `h10` | DIFF | 缺 `E_DEPRECATED(8192)` 一句 ⇒ **F-105** |
+| `h11` | DIFF，**`rc=php/255 aot/0`** | 同缺 Deprecated（F-105）**且退出码证实不终止** ⇒ **F-106 由"间接"升为"实测成立"**：PHP 在无处理器时 `E_USER_ERROR` 走 fatal 并 `exit 255`，AOT 打完 `Fatal error:` 仍继续执行并 **`exit 0`** |
+| `h9` | COMPILE_FAIL | arity 面（`strlen()` 零参），属 F-75/F-47 家族 |
+| `h14` | COMPILE_FAIL | ★**首次读数即编译失败**（臂体＝`@$a["k"]` 整句抑制＋处理器）⇒ AOT 在"整句 `@` 的数组读"形制上编译不过 ⇒ **新立 F-107**，须单独取证（本腿无编译日志列，重跑一枚取 `clog` 尾巴才能定性；★禁与 F-100 混账：这条是"编译不过"，不是"不报诊断"） |
+★**两次工具自纠**（都属"改工具没验证＝白改"那一族）：
+① 我给 DONE 行加 `rc_mismatch=` 的 Python 补丁**静默落空**——锚串里的分隔符在文件内是**真制表符**，而我写的是两字符 `\t`，`str.replace` 找不到就原样返回、不报错。⇒ 已改成"断言锚存在再替换"，现 DONE 行确有该字段（门 md5 `838a24ff…` → **`4898730b8c19b107d7ddb1d11fc95fef`**）。**上面那 18 臂读数出自 `838a24ff`**，本次只往 DONE 行追加一个计数字段、**未改任何判定谓词** ⇒ 读数仍有效，这条 md5 台账差异如实留痕。
+② `c108` 的 COMPILE_FAIL 行**不落编译日志**（`echo -e "$a\tCOMPILE_FAIL\t-"`）⇒ 新臂首跑就撞上一个无法定性的红（`h14`）。⇒ 待补：给 COMPILE_FAIL 行加 `$(tail -3 clog)` 列（c117 已是这个形制），补腿前不改，避免"跑一半换门"。
+★`h14` 已单独取证完毕（链停后 4 枚编译臂，成本 ≈70 秒），新立 **F-107**，见 §79.4。
+
+### 79.4 新立 **F-107＝`@` 紧跟赋值目标时 AOT 编译失败**（由 ERRH 臂 `h14` 首跑引出，站点已钉死）
+★编号说明：本节按"发现即追加"排在 §79.0c 与 §79.0d 之间（追加顺序所致），编号沿用 §79.4 不改，**交叉引用一律指 §79.4**；任务 #120 亦按此号引用。
+- **症状**：`$a = []; @$x = $a["k"];` ⇒ AOT `rc=1`，`Error: Parse error: Can't use function return value in write context on line 2`；系统 PHP 8.5.8 正常执行并回调处理器（`[CB]no=2|Undefined array key "k"` ＋ `[V]ok`）。
+- **触发面已收窄**：`@$y = 2;`（无数组读）**同样失败** ⇒ 触发条件是 **`@` 直接包住一个赋值语句的目标**，与"缺失键读"无关；而 `$x = @$a["k"];`（`@` 包住右值）**编译通过** ⇒ 两形一败一过，说明问题在**赋值左值的形状识别**，不在抑制语义本身。
+- ★★**站点结论已被实测推翻（2026-10-19 落地尝试后的第三次自我更正；原写 `ir_generator.zig:4283` 不成立）**：那是按"该文案在 AOT 侧出现的位置"定的站点。真落地后 SUPA 仍 `8 枚 COMPILE_FAIL`，加编译日志才钉到真站点＝**`src/compiler/parser.zig:2030 isValidAssignmentTarget`（调用点 `:2049-2057`，另一处 `:2748`）**：`@` 的 `unary_expr` 不是合法左值 ⇒ **解析期**就 `reportError` ＋ `return error.ParseError`，**走不到 IR 生成**。
+  - ⇒ **这枚不是 AOT-only**：`src/compiler/root.zig:2` 表明解释／字节码／JIT 与 AOT **共用同一个 `Parser`** ⇒ 修它必动共享解析器 ⇒ 按宪法 §五**须老铁裁决**（已提问；未获批不落）。
+  - ⇒ **原记 F-108 不是另一枚缺陷**：解释模式跑 `@$y = 2;` 得空值（PHP 给 `2`）＝**同一根因的第二种表现**（该模式吞掉 parse 错误、整条赋值丢失），AOT 只是把它升级成编译失败 ⇒ **F-107／F-108 合并记账**，禁两处各说一半。
+  - ★本轮为验证加的 `ir_generator` 剥包装（37 行）**已整体 revert**（`git restore` ⇒ `src/` 干净、`ir_generator` 回到锚点 `ca180028…`）：解析器未改前它是**不可达死路**，不能留半个修复在树里。获批后两处**必须同批**落地（解析器放行 ⇒ IR 侧就得会剥，否则撞上 `:4283` 的 `else`）。
+  - ★**修法（获批后两处同批）**：① `isValidAssignmentTarget` 把 `.unary_expr ∧ op == .at_sign` 的节点**剥到内层再递归判**（`@(@$x = 1)` 一并吃下）；② IR 侧同样剥包装（代码已写好且能编译，见上条 revert 记录），并在赋值生成前把**右值**包进 `php_error_suppress_push/pop`。★实测**抑制范围覆盖整条赋值表达式**（带 `@` 的赋值零打印、去掉 `@` 就打印）⇒ 只剥左值不做 push/pop 会把右值告警漏出来＝修成另一种错。`:2056`／`:4283` 两处文案**一字不改**（PHP 对 `f() = 2` 就给这句）。
+  - ★**再证一次"二进制 md5 不是跨缓存态身份"**：revert 后源码与 R-180 代次逐字相同，重建却得 `8e6a26aa…` 而非链上登记的 `793a9837…` ⇒ 代次断言一律以**四枚源码 md5** 为准，`EXPECT_BIN` 每次重建后必须回刷（否则验收链把正常代次判成越界）。
+- **优先级／影响面／落地成本**：P0｜`@$x = …` 是常见 PHP 惯用形，凡源码里出现就**整脚本编译不过**（默认档即触发，非 opt-in）｜低-中（一处剥包装节点，需回归＋影子复证；纯 `ir_generator` 改动 ⇒ 二进制换代、影子按 §82 的"名单 vs 语义"两栏分别核）。
+★ERRH 的门 md5 台账：rc 判据版 `fdbbd95c…` → 加 `TSV_OUT` 覆写后 **`838a24ff16edd737cccfd85836a3cfc9`**（现值）。§79.3 原记 `fdbbd95c…` 属**陈旧锚点**，已在本节刷新（改门后必须回刷 md5，这正是记忆里"md5 在脚本定稿前取会盖住上一版"那条）。
+### 79.0d 提交台账（★本批与 R-178b/R-179 的状态已变化，别按旧叙述读）
+链跑动期间用户提交了 **`ca99151`**：含 `runtime_lib_template.zig` 654 行、`native_linker.zig` 60 行、`ir_generator.zig` 229 行、`test_runtime_comprehensive.zig` 24 行 ＋ R-176/R-177/R-178b/R-179 四份变更文档 ＋ 两张工单 ⇒ **R-180 的模板改动也在这笔提交里**（`git status -- src/` 现干净，工作区模板 md5 == 链尾 `4160f577…`）。
+⇒ ① 本文档多处"本批未入库，HEAD 仍 18a692a"是**写下当时**的事实，已在原行就地标注更正；② R-181 的变更文档命名基线应取 **`ca99151`** 而非 `18a692a`；③ 工单里 `6964` 行的 `optimizer.zig`（md5 `36f354f4…`）同样已入库 ⇒ §82.1 引用的 `native_linker.zig:4070/4144/4173`、`1828` 等行号**仍是现值**（本次提交未移动它们，已用 `grep -n` 复核）。
+★v2 零成本自证已过：`AOT_BIN=/bin/false TSV_OUT=/tmp/…` ⇒ `arms=18 same=0 diff=0 compile_fail=18 parse_fail=0 bad_probe=0 rc_mismatch=0`（18 臂全活、新列未破坏比对）。
+★**INL 补跑腿读数**（同代次，`SLEG[INL] rc=0 ELAPSED=117s`）：`arms=10 tiers=2 same=15 diff=4 compile_fail=1 parse_fail=0 bad_probe=0 `**`tier_fingerprint=4`**；快照 `c109_inl_20slot_R180_snapshot_tmp.tsv`（md5 `c2d999807d08c4377485b1dc1d139748`，24 行＝20 槽＋4 行 `TIER_FINGERPRINT` 明细，`15+4+1=20` 自洽）。
+⇒ 判据"本批不碰内联"成立：`tier_fingerprint` 与 R-179 档**同为 4**（红臂仍是 `i1 i3 i6 i8`，`i5` 仍开内联即编译失败）⇒ F-92 的路由改造**没有**外溢到内联面。补跑全程 193 秒（两腿合计），成本登记为实测非估算。
+
+### 79.1 逐腿对账（`c084` 机械版，R-179 log ↔ R-180 log）★已先跑**链闭前**的一份（38 条 gate 腿已全部落 log，仅缺回归后两腿）
+工具＝`fuzzy_scripts_720/tmp/c084_chain_leg_compare_tmp.sh`（修复后 md5 **`0c041a53d8f2aea495f3282166ea3b7e`**），读数＝`fuzzy_scripts_720/tmp/c084_r179_vs_r180_prelegclose_tmp.txt`。
+**结果＝37 腿 SAME ＋ 1 腿 DIFF**，且那枚 DIFF 已按构造归因：`PERR same 2→3`＝`h1` 翻绿（门头每臂都装 `set_error_handler(… return true)` ⇒ 凡"期望有诊断"的臂修前必红；`h1` 是唯一不依赖 `preg_last_error()` 的诊断臂）＝F-92 的**设计效果**，不是外溢。
+★**本工具自身的一处缺陷已修**（这轮暴露）：`norm_leg` 的剥离表达式锚定在**字面空格**上（`s/ ELAPSED.*//`、`s/ repo_build_residue=[0-9]+//`），而 ESCG/PERR 的 DONE 行用 `echo -e "…\t…"` 是**制表符**分隔 ⇒ 两条表达式对它们完全没生效；另外 Q/R 两腿把该字段简写成 `residue=`，全名表达式也匹配不上。⇒ 修前这份表会报出 **3 DIFF＋1**（ESCG/Q/R 三枚纯噪声），修后改 `[[:space:]]` 并两名都剥，得到上面的 37/1。
+★**历史读数需按此重解**：R-178 那次记的"4 枚 DIFF 里 Q/R 只是 `residue=` 短写未被剥＝噪声"——**结论没错，但成因是工具坏**（不是"短写无所谓"）。⇒ 反向判据"邻门逐腿必须相同"以前凡是由本工具给出的 DIFF，都要先确认不是这一类分隔符漏剥；已补进自检：**同一份 log 对比自己必须 0 DIFF**（本轮实测 0），这条以后每次改 `norm_leg` 都要先跑。
+待链闭后补：`LEG[regression]`/`LEG[shadow]` 两腿的同表比对、影子 `changed_rows`/`col_identical` 四对账、ERRH/INL 补跑腿读数（`c118_r180_supplement_tmp.sh`）。
+
+### 79.2 ERRH 逐臂过渡（15 臂档：修前快照 `c108_errh_prefix15_R180_snapshot_tmp.tsv` ↔ 修后 `…_postfix11_…tsv`）
+**过渡表**（`SAME`＝与 PHP 逐字等值）：`h1 h1b h2 h3 h5 h7 h8` 七枚 **DIFF→SAME**（＝F-92 路由本身：装处理器后诊断必须进处理器、`return false` 才追加标准打印、`@` 不拦处理器、掩码不匹配仍照打）；`h4 g1 g2 g3` 四枚 **SAME→SAME**（无处理器的标准两行打印**本来就是逐字对的**，⇒ F-92 只缺"路由"，不缺"文案"）；三枚仍红 ＋ 一枚编译失败，全部具名归因，不许记在 F-92 账上：
+| 臂 | 修后 | 具名成因（逐字取自 AOT/PHP 两列） |
+|---|---|---|
+| `h6` | DIFF | AOT 侧 `[O]` 只有 `[R]NULL[O-END]`、**连 `[CB]` 都没有** ⇒ 引擎压根不发 `Undefined array key "k"` ⇒ 记 **F-100**（与 18 臂档新增的 `h12` 同面） |
+| `h10` | DIFF | PHP 有两条 `[CB]`（`no=8192` ＋ `no=256`），AOT 只有 `no=256` ⇒ ★缺 **`trigger_error(E_USER_ERROR)` 的 `E_DEPRECATED(8192)` 那句**（PHP 8.4 起「Passing E_USER_ERROR to trigger_error() is deprecated since 8.4, throw an exception or call exit with a string message instead」）⇒ 新立 **F-105** |
+| `h11` | DIFF | 除同缺 Deprecated 一句外，PHP 侧**没有 `[REACHED]`**（Fatal 即终止），AOT 侧 `[O]` 打出 `Fatal error: …` 之后仍继续 `[REACHED][O-END]`，且 `PHP Fatal error:` 落到了 `[E]` ⇒ ★**未捕获的 E_USER_ERROR fatal 不终止执行** ⇒ 新立 **F-106**；★诚实边界：AOT 侧 **rc 未测**（本快照无 rc 列），须由 18 臂补跑腿补上再定性终止语义 |
+| `h9` | COMPILE_FAIL | arity 面（`strlen()` 零参）编译期就失败，属 F-75/F-47 家族，不在本批 |
+**自证**：修后逐臂计数 SAME=11／DIFF=3／COMPILE_FAIL=1，与链上 DONE 行 `11/3/1` **逐枚对得上** ⇒ 聚合与明细互为校验（记忆第 52 条那条硬规的正向用法）。
+★`c084` 的反向判据从此多一条：ERRH 的 15 臂档读数是**已冻结**的过渡基线，18 臂档（补跑腿）跑完必须能对上这 15 枚的位型，多出的 `h12 h13 h14` 三枚按 F-100 面单独记。
+### 79.3 ★ERRH **v2＝判据收紧**（本轮改门，跨代次读数不可直接相减）
+为给 F-106 定性，ERRH 加了退出码判据：`SAME` 现在要求**文本相同 ∧ `prc==arc`**，逐臂行尾多一列 `rc=php/N [aot/M]`，DONE 行多一项 `rc_mismatch=`。
+⇒ 本节的 `4/10/1`（v1 无 rc）与 `11/3/1`（v1 无 rc）**不能**与 v2 读数直接比——同一枚臂可能因"文本对但 rc 不对"从 SAME 变 DIFF（`h11` 那一类正是这样被位型暴露、却因旧判据太宽而只记成 DIFF 的）。⇒ 补跑腿（`c118`）跑前已强制记录门 md5（现 **`fdbbd95c84a3d54fa55af8251528c7b5`**），`say GATE_MD5 …`；以后 ERRH 跨代对比一律先核这枚 md5。
+★本轮改门时自己踩到一次并当场被抓：用行块替换 `if/SAME/else/DIFF/fi` 时**漏掉收尾的 `fi`** ⇒ `bash -n` 立刻报 `syntax error near unexpected token 'done'`。⇒ 改门后必须 `bash -n` ＋ `AOT_BIN=/bin/false` 自证两连，缺一步都可能把坏门推上验收链。
+
+---
+
+## 80. R-181 事前注册（落地**前**锁定，跑完只许对着这张表逐枚核）
+
+**目标**＝F-91（preg 错误码 API）＋同站点的 F-90（主题坏 UTF-8 契约），**模板为主 ＋ 编译期名字表一行**（★原记"纯模板，二进制无需重建"已被 §82 更正：`preg_last_error_msg` 必须进 `native_linker.zig` 的 `builtin_map` ⇒ 二进制换代、且影子名单必然整体漂移）。
+
+### 80.1 备料阶段的三处自我更正（禁止带错进落地）
+1. **常量缺的是 12 枚不是 19 枚**：模板常量表 `:8553-8560` 已有 `PREG_PATTERN_ORDER 1`／`PREG_SET_ORDER 2`／`PREG_OFFSET_CAPTURE 256`／`PREG_SPLIT_NO_EMPTY 1`／`PREG_SPLIT_DELIM_CAPTURE 2`／`PREG_SPLIT_OFFSET_CAPTURE 4`／`PREG_UNMATCHED_AS_NULL 512`（⇒ §73 里我按 C 层常量背的 "PATTERN_ORDER 0／SET_ORDER 1" 是错的）。真缺＝错误码 8 枚（`PREG_NO_ERROR 0`／`PREG_INTERNAL_ERROR 1`／`PREG_BACKTRACK_LIMIT_ERROR 2`／`PREG_RECURSION_LIMIT_ERROR 3`／`PREG_BAD_UTF8_ERROR 4`／`PREG_BAD_UTF8_OFFSET_ERROR 5`／`PREG_JIT_STACKLIMIT_ERROR 6`／`PREG_GREP_INVERT 1`）＋ PCRE 自述 4 枚（`PCRE_JIT_SUPPORT bool`／`PCRE_VERSION str`／`PCRE_VERSION_MAJOR`／`PCRE_VERSION_MINOR`，**须 `pcre2_config_8` 动态取**：`PCRE2_CONFIG_JIT=1`、`PCRE2_CONFIG_VERSION=11`，禁把 `'10.47 2025-10-21'` 写死）。★`PREG_BAD_PATTERN_ERROR` 在 8.5.8 **不存在** ⇒ 禁补。表支持四类（`IntConst/FloatConst/StrConst/BoolConst`，`:8500-8503`）。
+2. **错误码可取证面＝{0,1,2,4}**（系统 PHP 8.5.8 实测，链跑动期间只读 PHP）：编译失败⇒`1 'Internal error'`；**主题**坏 UTF-8⇒`4 'Malformed UTF-8 characters, possibly incorrectly encoded'`；`-d pcre.backtrack_limit=100`⇒`2 'Backtrack limit exhausted'`；不匹配／`preg_match_all` 零命中／正常⇒`0 'No error'`。**3/5/6 本机不可取证**：递归形（`-d pcre.recursion_limit=655`）实测给 **1**、offset 越界实测给 **1**、offset 落进多字节字符内实测 **`RET=1 PLE=0`（合法）** ⇒ 映射按 PCRE2 头名写（`MATCHLIMIT=-47→2`、`UTF8_ERR1..ERR21=-3…-23→4`、`RECURSIONLIMIT/DEPTHLIMIT=-53→3`、`JIT_STACKLIMIT=-46→6`、**其余负值兜底→1**），但 3/5/6 **不设门臂**，工单注明"不可取证"。AOT 不调 `pcre2_jit_compile` ⇒ 6 恒不可达。
+3. **★双实现陷阱**（承 R-178「门绿≠发射已修」）：AOT 实派发到的是 `php_preg_*` 族（`native_linker.zig:4173` 名字映射 ＋ `:22417/:22437` 两处直发），而 `preg_last_error()` 桩（模板 `:12425`）在另一族。`pcre2_match_8` 共 **11 个调用点**＝`11688 11727 11847 11987 12131 12191 12267 12362`（`preg_*` 族）＋ `28340 28497 28651`（`php_preg_*` 族）⇒ **必须收成单一 wrapper**（`fn pcreMatch(...) c_int` 内调用 `pcre2_match_8` 并就地记码），11 点全部改走它；只补一处＝另一族仍是旧行为。编译失败码可单点记（两族同经 `compileRegexOrWarn`）。状态位形制照抄既有先例 `threadlocal var last_json_error_code: i32`（`:26768`）＋ `php_json_last_error`/`_msg`（`:26770/:26774`）⇒ 协程安全口径与仓库现行一致。
+
+### 80.2 修前基线（本代次 `tpl 4160f577…` 实测，逐臂已快照）
+`C093PERR_DONE arms=21 same=3 diff=18 compile_fail=0 parse_fail=0 bad_probe=0`；快照＝`fuzzy_scripts_720/tmp/c093_perr_postR180_snapshot_tmp.tsv`（md5 **`0130c7cc790c5a30deddca3ffe1c0234`**，21 行＝每臂一行、含 `PHP[…]`／`AOT[…]` 两列逐字文本）。
+逐臂：绿＝`h1 g1 g2`；红 18＝`b1…b7`(7)＋`k1…k7`(7)＋`e1…e3`(3)＋`h2`(1)。
+★**该基线相对 §71.11 的 `2/19` 多出的一枚绿＝`h1`，已按构造归因为 F-92 的设计效果**（门头 `:30-46` 每臂都装 `set_error_handler(… return true)`、门尾打 `#NH#`/`#DIAG#` ⇒ 凡"期望有诊断"的臂修前必红；`h1` 是唯一不依赖 `preg_last_error()` 的诊断臂）。同时登记证据缺口：修前**逐臂**文本不可回溯（门 TSV 固定路径覆写、`/tmp/r180_PERR.out` 只有 DONE 行）⇒ 自此"取基线同批落逐臂快照"为硬规。
+
+### 80.2d ★**v3 32 臂修前基线已取**（2026-10-19 10:43，链已停 ⇒ 唯一被测代次 `tpl 4160f577…`）
+`C093PERR_DONE arms=32 same=4 diff=28 compile_fail=0 parse_fail=0 bad_probe=0 ELAPSED=266s`；
+快照＝`fuzzy_scripts_720/tmp/c093_perr_prefix32_R181_snapshot_tmp.tsv`（32 行，md5 **`845b5ade118a27aaef2d1ceef5fadd66`**）。
+★**四枚绿正是应有的四枚**：`h1 g1 g2 g3`（三枚守卫 ＋ 上一批靠 F-92 转绿的诊断臂 `h1`）⇒ 与 v2 档 `3/18` 的组成完全自洽（新增的 `g3` 首跑即绿，说明 `FACE_ARR` 折行面对"正常数组返回"本就无差），**红集＝其余 28 枚**＝本批要转绿的目标集：`b1…b10`(10)＋`k1…k7`(7)＋`e1…e5`(5)＋`h2`(1)＋`m1…m5`(5)＝28 ✔ 与 §80.3 判据①②③逐一对得上。
+⇒ 落地判据即此基线之上的**位移表**：`e1…e5` 全绿＋`k…`＋`h2`＋`m2` 绿（ple=1）＋`b…`＋`m3 m5` 绿（逐函数型别＋ple=4＋零诊断）＋`m1 m4` 绿（`No error`）；`g1 g2 g3 h1` **必须仍绿且逐字不变**；任何剩余红都要具名归因，禁并入 F-91。
+★`compile_fail=0`（32 臂全编译过）意味着修后若出现 `compile_fail>0` ＝本批把某臂写坏（例如 `preg_last_error_msg` 的名字表行没加上），这条也进判据。
+
+### 80.2b 门 PERR **v3**（2026-10-19 R-181 备料时扩臂＋修臂，21 → 32）
+新增 11 臂＝`b8 b9 b10`（F-90 三支漏形）＋`m1…m5`（`preg_last_error_msg()` 文案面）＋`e4 e5`（PCRE 自述常量 ＋ 反向守卫）＋`g3`（成功返回数组的守卫）。
+★**三条实测更正/修复（都是门自身的账，不是被测面）**：
+1. **`grep` 在编译失败族返回的是 `false` 不是空数组**（`k6` 真值 `#RET#false#T#boolean#PLE#1#`），"空数组"属**主题坏 UTF-8** 族（`b8`）。⇒ 门头注原写"编译失败…grep⇒空数组"是错的，已改。⇒ 又一次证明"两族禁合并"在**同一函数**上也成立。
+2. **假绿捕手**：门用 `grep -E '^#'` 取标记行，而 `var_export(数组)` 换行输出 ⇒ 返回数组的臂里 `#T#`／`#PLE#`／`#NH#` 全被丢掉，比对串只剩 `#RET#array (`。修后若 AOT 也返回数组就**必然 SAME**（把 ple 面整个遮住）。⇒ 新增 `FACE_ARR` 面（先折行再打），`b8/b10/g3` 用它。★两处踩坑：`var_export($R, true)` 是**返回而非打印**（配 `ob_get_clean()` 捕到空串）；折行标记**不能**用 `"\\n"`——门写 TSV 用 `echo -e`，会把 `\n` **再展开成真实换行**、一行读数劈成两行（实测 `awk` 只看到前半）⇒ 一律用非转义占位 `<NL>`。
+3. ★**老臂 FACE 一字未动**（msg 面只挂新臂 m1…m5）⇒ 21 枚老臂的读数跨代次仍可直接相减；但 `k6` 未改面、`b8/b10/g3` 是新臂 ⇒ **v3 的修前基线必须整门重取**（32 臂分母与 v2 的 21 臂不同，禁混比）。零成本自证已做：`AOT_BIN=/bin/false` ⇒ `arms=32 same=0 diff=0 compile_fail=32 bad_probe=0`（32 臂全活）＋ TSV 恰 32 行无劈行。
+新臂的 PHP 真值（v3 自证轮实测，落地后要逐枚对上）：`m1`＝`PLE#0 MSG#No error`；`m2`＝`false/boolean PLE#1 MSG#Internal error` ＋ 1 条诊断；`m3`＝`false/boolean PLE#4 MSG#Malformed UTF-8 characters, possibly incorrectly encoded` 零诊断；`m4`（不匹配）＝`0/integer PLE#0 No error`；`m5`＝`NULL PLE#4` 同文案；`b9`＝`NULL PLE#4`；`b8/b10`＝`array (<NL>) PLE#4` 零诊断；`e4`＝`PCRE_JIT_SUPPORT bool true`／`PCRE_VERSION string '10.47 2025-10-21'`／`MAJOR 10`／`MINOR 47`；`e5`＝`PREG_GREP_INVERT=1` ＋ **`PREG_BAD_PATTERN_ERROR` 恒 UNDEF（反向守卫）**。
+
+### 80.3 判据（八条，跑完逐枚核，禁事后编）★臂数已随 v3 刷为 **32**（`b1…b10 k1…k7 e1…e5 h1 h2 g1 g2 g3 m1…m5`）
+① `e1 e2 e3 e4 e5` 转绿（`function_exists("preg_last_error_msg")` ⇒ `true`；12 枚缺常量逐一对上；★`e5` 的 `PREG_BAD_PATTERN_ERROR` 必须**仍为 UNDEF**＝反向守卫，被"补齐"即算红）。
+② `k1…k7`＋`h2`＋`m2` 转绿＝`ple=1` 且告警文本沿用 F-79d 已落地那句（本批**不得**改文案）。
+③ `b1…b10`＋`m3 m5` 转绿＝按 §80.4 表逐函数返回型别（`false`／`null`／**空数组**三型并存）＋`ple=4`＋**零诊断**（F-90；`#NH#0#`）。
+④ `g1 g2 g3` 必须**逐字不变**（守卫：`g3` 专守"正常数组返回不被弄坏"＋`FACE_ARR` 折行本身）⇒ 动了它们＝越界。
+⑤ ★**反向硬判据**：影子 `changed_rows=0` **且** `col_identical=yes`（列 md5 == `43add0d50e809d87353d11f995f6d624`）——纯模板改动，任何漂移＝越界碰到了发射路径。
+    ~~（此条）~~ ⇒ **已被 §82 作废重写**：本批要往 `builtin_map` 加 `preg_last_error_msg` 一个名字，而 `native_linker.zig:1828` 会把它内嵌进**每枚** `main.zig` 的 `aot_registered_functions` 名单 ⇒ 影子必然 67 枚全变。改判据见 §82 第 3 条（⑤a 逐字一行 diff ＋ ⑤b 整列重登记 ＋ ⑤c "只改模板不加名"的反向对照臂）。
+⑥ 主回归 `Total 68 / Pass 67 / Skip 1 / Fail_* 0` 不变。
+⑦ 邻门逐臂同值：ESCG `32/32`、NFM `56/56`、F2I `46/4`＋`compile_fail=1`、ERRH `11/3/1`、INL `tier_fingerprint=4`（本批不碰内联 ⇒ 它**必须**仍为 4，变小＝越界）、门 S（PCRE flags，`c014`）**逐臂同值**（本批只加错误码记点，不动 flags 映射）。
+⑧ ★**唯一许可的邻门变绿**＝门 PMOD 的 `a5`（§71 已把它登记为 F-90 面）：若 `a5` 由 DIFF→SAME，属预期、须写明是 ③ 那半带起来的；其余 PMOD 臂必须与 R-180 档同值（`14/1`）。
+落地前先把 ⑦ 的 ERRH/INL 读数与 R-180 补跑腿对齐（同一代次，禁混代次比数）。
+
+### 80.4 F-90 落地规格（`c114_f90_badutf8_contract_tmp.php`，md5 **`98952d15c25d86b5122128b9c829a7fa`** ＋ `.tsv` 10 行，系统 PHP 8.5.8 实测）
+主题坏 UTF-8（`chr(0xFF)`，模式带 `u`）在**每个 preg 函数**上的返回型别**并不统一**，全部以实测为准、禁按"应返回 false"推理：
+
+| 函数 | PHP 返回 | 型别 | ple | msg | 诊断条数 |
+|---|---|---|---|---|---|
+| `preg_match`（含显式 offset 形） | `false` | boolean | 4 | Malformed UTF-8 characters, possibly incorrectly encoded | **0** |
+| `preg_match_all` | `false` | boolean | 4 | 同上 | 0 |
+| `preg_replace` | `null` | NULL | 4 | 同上 | 0 |
+| `preg_replace_callback` | `null` | NULL | 4 | 同上 | 0 |
+| `preg_filter` | `null` | NULL | 4 | 同上 | 0 |
+| `preg_split` | `false` | boolean | 4 | 同上 | 0 |
+| `preg_grep` | **`array()`（空数组）** | array | 4 | 同上 | 0 |
+
+★两处反直觉（这就是"必须实测、不许推理"的那类）：① `preg_match_all` 在此形给 **`false`**，而它正常零命中时给 **`0`** ⇒ 同函数两形不同型别；② `preg_grep` **不返回 `false`**，而是吞掉失败给**空数组** ⇒ 记点必须按"每函数各自的返回契约"写，wrapper 只能统一记 `ple`、**不能**统一返回值。八形诊断条数恒 0 ⇒ F-90 的"零诊断"面成立（与 F-79d 的编译失败族＝一句告警，是**两套契约**，禁混账）。
+
+### 80.5 落地前必须先做的两枚判定（新立 **F-102／F-103**，都是本轮读码读出来的）
+读 `native_linker.zig:4028` 发现分发表是 `std.StaticStringMap(BuiltinInfo).initComptime(...)`（`:4029..4600`，497 条、464 个不同键、33 枚重复键，其中 **3 枚重复且实现不同** ＝门 B 的 `DUP_DIFF_IMPL` 读数）：
+
+| PHP 名 | 两处 `runtime_name` | 行号 |
+|---|---|---|
+| `preg_match` | `preg_match`（模板 PCRE2 族，:11680）／ `php_preg_match`（模板另一族，:28340） | `:4135`／`:4173` |
+| `preg_match_all` | `preg_match_all`（:11822）／ `php_preg_match_all`（:28497） | `:4137`／`:4174` |
+| `preg_split` | `preg_split`（:12241）／ `php_preg_split`（:28718，**体内就是委托 `preg_split`** ⇒ 同实现） | `:4141`／`:4177` |
+
+- **F-102＝同名重复键、实现不同 ⇒ "哪一枚活着"取决于 `StaticStringMap` 对重复键的检索行为**（`builtinInfo` 在 `:4010-4018` 先原名 `get`、未命中再折大小写 `get`；`initComptime` 会排序，重复键取哪一条**未被本仓证明**）。⇒ 落地前必做 **E1**：AOT 编译 `preg_match('/a/','abc',$m); var_dump($m);`——只有 `php_preg_match` 支会填 `$m`（模板 `:11659` 注释明写 `preg_match` 成功支**不填** matches）⇒ 输出即可判定活实现。**E2**：`zig run` 一份只依赖 std 的最小探针，钉死 Zig 0.16 `StaticStringMap.initComptime` 遇重复键的检索结局（以及 Debug 下是否直接 panic）。★两枚实验成本各 ≈20 秒／≈10 秒，链跑动期间禁做 ⇒ 排在链闭后第一件事。
+- **F-103＝模板 `php_preg_replace:28586` 是一枚字面替换桩**：它把 `pat[1 .. pat.len-1]`（剥掉首尾分隔符）当**字面子串**用 `std.mem.indexOf` 替换，**完全不走 PCRE2**（`preg_replace('/a.c/','X','abc')` 会原样返回）。`grep -rn '"php_preg_replace"' src/` **零引用** ⇒ 现在**不可达**（`preg_replace` 两处分派都指向 PCRE2 的 `preg_replace`，属 `DUP_IDENTICAL`）⇒ 本批不动它（删除代码须走宪法 §六-3 请示），但**登记**：任何"按名字接线"都会让它变成静默错值源，且它属宪法 §四-2 明令禁止的桩实现留存。
+- ★对 R-181 的直接影响：wrapper 化 **11 个** `pcre2_match_8` 站点（`11688 11727 11847 11987 12131 12191 12267 12362 28340 28497 28651`）本来就同时覆盖两族 ⇒ F-102 的"哪枚活着"不影响记点的完整性，只影响**判据该读哪一族的返回契约**；两族返回型别现不一致（`preg_match` 族 rc<0 给 `int 0`；`php_preg_match` 同）⇒ 两族都要按 §80.4 表改成各自契约，禁只改活的那一族（否则 E1 判错就全盘落空）。
+  - ★E1 判据的读码依据已复验（2026-10-19）：模板 `preg_match`（`:11655`，注释"完整PCRE2实现"）里 `matches_ref.*` **只出现在两处告警早退支**（`:11673/:11681`，F-50 起写），成功支 `:11688-11693` 直接 `return initInt(0/1)` **不填**；而 `php_preg_match`（`:28294`）体内 `matches.* = Value.initArray(...)` 出现 7 处以上（含成功支）⇒ "带出参的 `preg_match` 是否填 `$m`"是一枚**真判据**，不是巧合读数。
+
+---
+
+## 81. F-100 取证收口（`Undefined array key` 一族）＋ 落地成本**未定**的警示（R-182 候选，先不排期）
+
+资产＝`fuzzy_scripts_720/tmp/c115_f100_undef_key_truth_tmp.php`（**v2**，20 形 × 4 制＝80 行读数，`WRITE_FAIL=0`）＋ `.tsv`。
+★c112（v1）已作废但**不删**：它的形名 `in_/array` 带 `/` ⇒ 临时文件路径多出一级不存在的目录 ⇒ 该形**与其后全部形**一起作废（81 行里只有前 24 行有效），且失败的 `unlink` 又喷两条诊断混进读数。⇒ 取证脚本的**形名必须 sanitize**（`preg_replace('/[^A-Za-z0-9_]/','_')`），否则一枚坏形会连坐后续所有形。
+
+### 81.1 措辞桶（实测＝**四套**措辞，禁"统一措辞"推理）
+| 语境 | PHP 8.5.8 原文（`PHP Warning:` 那半条） | 级别 |
+|---|---|---|
+| 数组缺键（string 键） | `Undefined array key "k"`（**带引号**） | E_WARNING=2 |
+| 数组缺键（int 键，含负数／解构少项） | `Undefined array key 7` / `-1` / `0` / `1`（**不带引号**） | 2 |
+| 字符串越界 | `Uninitialized string offset 9` | 2 |
+| 动态属性 | `Undefined property: stdClass::$missing` | 2 |
+| 对 null 取下标 | `Trying to access array offset on null`（★8.5 已无旧文案的 `value of type` 字样） | 2 |
+
+### 81.2 条数（门侧必须比"条数"，只比首条会漏）
+`miss_str/int/neg/zero`＝各 1；`list_short`＝1；`list_empty`＝**2**（两个键都报，即使 `$q` 未被使用）；`nested_deep`＝**2**（`"k"` ＋ 第二次对 null 取下标）；`nested2`＝**3**；`assign_inc`（`$a["k"] += 1`）＝1；`null_subscr`/`str_off`/`dyn_prop`＝各 1。
+**零诊断面（必须建守卫臂，禁被本批弄红）**：`numkey_str`（`$a["7"]` 命中 int 键 7）＝0、`append_deref`（`$a["k"][] = 1` 自动建）＝0、`in_isset`／`in_nullco`／`in_empty`／`unset_miss`／`key_exists`／`foreach_emp`＝0。
+★配套陷阱（第 41 条同源）：PHP 每条告警在 stdout 还有**第二行** `Warning: …` ⇒ 计数只认 `PHP Warning:`，否则 `warns` 会翻倍。
+
+### 81.3 ★落地成本**已定价＝低／纯模板一处**（本节含一次自我更正）
+`src/` 内 `Undefined array key` **零命中**（诊断确实缺）。
+- ❌ 本节初稿写"发射器里 `.array_get` 有**四处**站点（`native_linker.zig:651/:23799/:32522/:32610`），只有 `:23821` 走 helper ⇒ 成本未定"。**该判断按实码体更正**：`651/32522/32610` 三处是**寄存器使用／活跃性分析器**（`set.put(op.array.id, …)`／`reg_last_use.put(…)`／`updateUse(…)`），**不发射任何读取代码**；把 switch 臂计数当发射路径＝拿"计数"当"读数"，正是本仓反复禁止的那类错。
+- ✔ 真实发射面＝**一处**：`:23799` 的 `.array_get` 臂 → `:23821` `try runtime.php_array_get(`；另 `:23804/:23817` 是 **coalesce 短路**（`??`／`isset` 语境发 `reg_N = Value.initNull()`，**故意不进 helper**）⇒ 这恰好就是 PHP 的"抑制语境零诊断"口径（实测 `nested_nc`＝`$d["k"]["deep"] ?? "D"` 零诊断），**不该改它**。
+- ✔ **按引用读必须保持静默**：实测 `byref_read`（`$x = &$a["k"]`）四制全部零诊断，且键被自动建出（`count($a)=1`）而 `isset($a["k"])=false` ⇒ 修复点只落在**取值读**的 `php_array_get`（`:4848`：数组缺失键支 ＋ 字符串越界支 `:4861` 现为静默 `initNull()`），**不落在** `php_array_get_ref`（`:4912`）。
+- ⇒ **优先级／影响面／落地成本＝P1｜默认档真实用户面（凡读缺失键／字符串越界都缺诊断）｜低（纯模板一处 ＋ 四套措辞表）**；影子判据与 R-181 同为**硬中性**（`changed_rows=0` 且 `col_identical=yes`）。
+★v2b 追加三形（`byref_read`／`loop_oob`／`nested_nc`）后资产＝23 形 × 4 制，`.tsv` **93 行**（含 1 行 `SKIPPED_NOT_EXPRESSIBLE`，因 `&@$a["k"]` 是语法错），探针 md5 刷为 **`9e78f68687a276de390733130bb1a46b`**。
+★两枚 `rc=255` 是**真值不是门坏**：`in_isset/silenced`＝`Cannot use isset() on the result of an expression`、`unset_miss/silenced`＝`syntax error, unexpected token "@"` ⇒ 这两形没有"抑制版"，门侧只取 `raw/handler_false/handler_null` 三制。
+★另记 F-100 与 **F-86**（isset/?? 语境下未声明属性的 Warning 未被抑制）、**F-99**（用户 `fwrite(STDERR)` 无声）、**F-95/F-96** 同属"诊断与处理器"家族：`c115` 的 `handler_false/handler_null/silenced` 三制已把这四枚的**互相耦合**取到同一张表里 ⇒ 动 F-100 时必须同批复证门 ERRH（现 18 臂）不劣化。
+
+### 81.4 ★门 **UNDEF** 已建成（R-182 的验收面，本轮实物）
+`fuzzy_scripts_720/tmp/c117_undef_key_gate_tmp.sh`＝**32 槽**（23 形 × `raw`，其中 9 形再加 `handler_null` 制），期望标记 `want` **逐字取自 §81.1/§81.2 的 c115 真值表**（门与表同源，改期望必须先改取证资产）。
+★与门 ERRH 的分工写进了门头：ERRH 的 `h12/h13/h14` 只打**路由**三形；UNDEF 打**措辞桶 × 条数 × 抑制语境**全表 ⇒ 两门互为复证、不重复记账。
+零成本自证已过（`AOT_BIN=/bin/false`）：`arms=32 same=0 diff=0 compile_fail=32 parse_fail=0 bad_probe=0`，TSV 恰 32 行无劈行，`ELAPSED=4s`（PHP 侧部分）。四条口径全从 ERRH/PERR 旧坑搬来：臂头不写 `error_reporting()`（F-95）／观测一律内联 echo（F-93）／stdout·stderr 分轨 `[O]`/`[E]`（两行告警合轨看不出缺哪侧）／`want` 逐臂指定（只判非空＝放行值错）。
+★**已入母版**：`c070`（现 **41 腿**）与本代派生链 `c116` 同步加了 `run_gate UNDEF … 2400` —— 本轮已连吃两次"门建了只写进当代派生链、忘了回母版"（ESCG/PERR/ERRH/INL 一次、PD2 一次），故这次建成即双腿同补。
+待办（R-182 开工第一步）：取修前 32 臂 AOT 基线并同批落逐臂快照 `c117_undef_prefix_R182_snapshot_tmp.tsv`（§80.2 那条"只登聚合不可回溯"的硬规）。
+
+---
+
+## 82. ★R-181 判据⑤作废重写（落地前读码抓到的发射面事实，成本＝零）
+§80 把 R-181 整批记成"纯模板 ⇒ 二进制无需重建 ⇒ 影子 `changed_rows=0` 硬中性"。**该判据对 F-91 的一半不成立**，落地前已按实码更正：
+
+1. `preg_last_error_msg()` 要能被调用（PERR 臂 `e1` 的 `function_exists(...)` 为真也依赖它），必须进**编译期**名字表 `native_linker.zig` 的 `builtin_map`（先例成对：`:4070/:4071` 的 `json_last_error`／`json_last_error_msg`，后者 `needs_allocator=true, may_raise=false`）＋模板运行期派发表各一行（`:3138` 的 `wrapBuiltin_json_last_error_msg` 同款）。⇒ **二进制必然重建、必然换代次**（§80 头注的"无需重建"作废，`EXPECT_BIN` 要回填新值）。
+2. ★更要紧的是 `native_linker.zig:1828-1832`：**每枚** `main.zig` 都内嵌由 `for (builtin_map.keys())` 生成的 `aot_registered_functions` 名单（`:1823` 注释"AOT已注册函数名列表（用于function_exists）"）。⇒ 往表里加**一个名字＝全部 68 份生成码文本同时变**。影子 `changed_rows` 不可能为 0，原判据⑤把"必然漂移"写成了"必须不漂移"，会把一条正常落地打成"越界"。
+3. ⇒ **判据⑤ 改写为"漂移可逐字解释 ＋ 整列重登记"**：
+   ⑤a 抽取 5 枚代表形（含 `f040`＝§3.5 测得的最小生成码 278,560 B、以及带 preg 的形）用 `ZIGPHP_AOT_KEEP_TEMP` 留新旧 `main.zig`，断言**逐枚 diff 恰为一行新增**，且该行逐字＝注册项 `.{"preg_last_error_msg", {}}` 落在 `aot_registered_functions` 块内；出现任何第二处差异＝本批真的动了发射语义 ⇒ 停链归因。
+   ⑤b 其余各枚只核 `changed_rows == 67`（`f004` 仍 skip）且**新列落盘为 R-181 冻结基线** `c010_shadow_newside_r181_tmp.txt`（68 行），旧列 `43add0d5…` 转历史。
+   ⑤c **反向对照（把"注册行"与"模板改动"分离）**：模板侧 F-90/常量/状态位的改动单独构一臂（不加 `builtin_map` 那行）跑影子 ⇒ 该臂必须 `changed_rows=0`。这枚对照是本批唯一的"干净证据"，成本＝一次影子腿（≈1054 s），**必做**，否则 ⑤b 的重登记等于"把变化全归给那一行"而无实证。
+4. ★同一条读数也顺带否证一个旧担忧：§80.5 的 F-102"重复键到底哪枚活着"对**影子**也有影响吗？答＝没有——`aot_registered_functions` 用 `keys()`，重复键会让名单里出现两行同名 ⇒ 现基线里本来就有（`dup_rows=33`），所以名单文本对"哪枚实现活着"**不敏感**，F-102 只影响调用派发，不影响生成码指纹。
+
+### 82.1 落地编辑清单（逐条给站点，禁凭记忆写码）
+**阶段①（只改模板 `runtime_lib_template.zig`，影子必须仍 0 漂移）**
+1. 常量表 `:8553-8560` 区：在"正则"分组内补错误码 8 枚（`IntConst`）＋ PCRE 自述 4 枚（`PCRE_VERSION` 走 `StrConst`、`PCRE_JIT_SUPPORT` 走 `BoolConst`、MAJOR/MINOR 走 `IntConst`）；★`pcre2_config_8` 需新声明 extern（先例样式见 `:11330/:11346`，并注明取自 `/opt/homebrew/include/pcre2.h` 的行号），取值码 `PCRE2_CONFIG_JIT=1`／`PCRE2_CONFIG_VERSION=11`，版本串写入前用 `pcre2_config_8(11, buf)` 的返回长度判定，禁把 `'10.47 2025-10-21'` 写死。
+2. 状态位：仿 `:26768` 的 `threadlocal var last_json_error_code: i32 = json_error_none;` 新增 `threadlocal var last_pcre_error_code: i32 = preg_error_none;` ＋ 一枚 `preg_error_*` 常量组（值取自 PHP 实测：0/1/2/3/4/5/6，PCRE2 侧码用头名 `-47/-53/-46/-3..-15`，禁裸数字面值）。
+   ★PCRE2 侧取值已按 `/opt/homebrew/include/pcre2.h` 逐条核过（写码时直接引头名，注释里带行号）：
+   `NOMATCH=-1`(:350)、`UTF8_ERR1..ERR21 = -3…-23`(:355-375，**共 21 枚**，映射整段 ⇒ ple 4)、`BADOFFSET=-33`(:397)、
+   `JIT_STACKLIMIT=-46`(:410)、`MATCHLIMIT=-47`(:411)、`DEPTHLIMIT=-53`(:417，`:418` 的 `RECURSIONLIMIT` 是其 obsolete synonym)。
+   ★`BADOFFSET(-33)` **不映射成 ple 5**——实测 offset 越界 PHP 给的是 `ple=1`（§80.2 更正 2）⇒ 落进"其余负值兜底 1"，禁按常量名直觉映射成 5。
+3. 记点收口：新增单一 wrapper `fn pcreMatch(rec...) c_int`（内部调 `pcre2_match_8` 并按 §80.2 映射写 `last_pcre_error_code`），把 **11 个**站点 `:11688 :11727 :11847 :11987 :12131 :12191 :12267 :12362 :28340 :28497 :28651` 全部改走它；编译失败码在 `compileRegexOrWarn`（`:11285` 失败返回处）单点记 `1`。
+4. 返回契约：按 §80.4 表把 `rc<0` 分支的返回改成**各函数自己的型别**（`preg_match`/`preg_match_all`/`preg_split`⇒`false`，`preg_replace`/`preg_replace_callback`/`preg_filter`(标量)⇒`null`，`preg_filter`(数组)/`preg_grep`⇒空数组），且坏 UTF-8 族**不发任何诊断**（禁顺手加 `emitWarning`）。
+5. `preg_last_error()`：把 `:12425` 的"总是返回 0"桩改成读 `last_pcre_error_code`；新增 `php_preg_last_error_msg(allocator)`，文案逐字用 §80.2 的四条实测串，兜底支给 `Internal error` 并注明"未经实测"。
+**阶段②（加名字表，影子必然整体漂移 ⇒ 走 §82 ⑤a/⑤b）**
+6. `native_linker.zig:4144` 旁（`preg_last_error` 行之后）加 `.{ "preg_last_error_msg", bi(.{ .runtime_name = "php_preg_last_error_msg", .needs_allocator = true, .may_raise = false }) }`（成对先例 `:4070/:4071`）。
+7. 模板 `builtin_function_map`（`:3115`）加 `.{ "preg_last_error_msg", wrapBuiltin_preg_last_error_msg }` ＋ shim，形制照 `:4543-4547`：`_ = ctx; if (args.len != 0) return error.InvalidArgumentCount; return php_preg_last_error_msg(allocator);`
+   ★注意：该表里**没有任何 preg 条目**（`grep wrapBuiltin_preg`＝0 命中，256 枚 wrap 全无）⇒ 动态调用面（`call_user_func('preg_match',…)`）现状如何**未测**；链闭后跑一枚探针（AOT 编译 `var_dump(call_user_func('preg_match','/a/','abc',$m));`）定性，若不可用新立 **F-104**，本批不扩面。
+   ★arity 措辞不并入本批：PHP 真值实测 `ArgumentCountError: preg_last_error() expects exactly 0 arguments, 1 given`（`json_last_error_msg()` 同形），而现仓 shim 约定是 `return error.InvalidArgumentCount`（AOT 自有措辞）⇒ 差异属已登记的 **F-47** 家族，本批沿用现约定**不改措辞**，门侧也不建 arity 臂（否则会把 F-47 的账记到 F-91 头上）。
+**阶段③** 回填 `c116` 的 `EXPECT_BIN`/`EXPECT_TPL`/`nlk` 三锚 → 开链（41 腿）→ 逐腿对账 → 影子两阶段读数 → §79/§83 填数 → 变更文档 → 记忆。

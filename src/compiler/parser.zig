@@ -2028,14 +2028,26 @@ pub const Parser = struct {
     }
 
     fn isValidAssignmentTarget(self: *Parser, node_idx: ast.Node.Index) bool {
-        const node = self.context.nodes.items[node_idx];
-        return switch (node.tag) {
-            .variable, .variable_variable, .array_access, .property_access, .variable_property_access, .static_property_access => true,
-            // 引用返回的函数调用可以作为赋值目标：func() = value
-            // PHP要求函数声明为 function &func()，但parser阶段不检查返回引用标记
-            .function_call => true,
-            else => false,
-        };
+        // ★F-107：`@$x = 1;`／`@$a["k"] = 1;` 的树形是 assignment{target: unary_expr(.at_sign, 真实左值)}
+        //   （`@` 的操作数用 parseExpression(69) 解析，不吃优先级更低的 `=`）⇒ 判"可写"必须**先剥抑制包装再递归判**。
+        //   不剥就会把合法左值误判成"函数返回值写上下文"：AOT 侧整脚本编译失败，解释／字节码侧静默丢掉整条赋值。
+        //   ★只剥 `.at_sign`；其余一元运算符（`-`/`!`/`~`/`&` 等）在 PHP 里确实不是合法左值 ⇒ 仍拒。
+        var idx = node_idx;
+        while (true) {
+            const node = self.context.nodes.items[idx];
+            switch (node.tag) {
+                .variable, .variable_variable, .array_access, .property_access, .variable_property_access, .static_property_access => return true,
+                // 引用返回的函数调用可以作为赋值目标：func() = value
+                // PHP要求函数声明为 function &func()，但parser阶段不检查返回引用标记
+                .function_call => return true,
+                .unary_expr => {
+                    const unary_data = node.data.unary_expr;
+                    if (unary_data.op != .at_sign) return false;
+                    idx = unary_data.expr;
+                },
+                else => return false,
+            }
+        }
     }
 
     fn parseAssignment(self: *Parser) anyerror!ast.Node.Index {
