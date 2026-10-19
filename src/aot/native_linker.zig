@@ -1400,7 +1400,16 @@ pub const NativeLinker = struct {
     }
 
     /// 写入转义后的 Zig 字符串字面量内容（处理反斜杠等特殊字符）
-    fn writeEscapedZigString(writer: anytype, str: []const u8) !void {
+    /// ★F-89 配套（发射侧）：把 PHP 字节串写成 **Zig 源里合法**的字符串字面量。
+    /// 规则（三条，逐条都是实测驱动，禁凭印象加）：
+    ///   ① `\\ \" \n \r \t` 沿用既有写法（语料里这三种早已如此，改不得）；
+    ///   ② 其余 **控制字节**（`<0x20` 与 `0x7F`）一律 `\xNN` ⇒ ★不可 raw 落进 Zig 字面量：
+    ///      实测 `main.zig: error: string literal contains invalid byte: '\x00'`（门 ESCG 的 `c1 c2 c3 c4 e4 o3` 六臂
+    ///      就是被这一条打成 COMPILE_FAIL 的）；而转义形式 `"\x00"`/`"\x1b"`/`"\xff"` 实测**能编过**（/tmp/zt2.zig）。
+    ///   ③ `>=0x80` 的字节**仅当整串不是合法 UTF-8** 时才转义 ⇒ 中文等既有字面量发射文本**逐字节不变**
+    ///      （否则影子整列会无端漂移，违反发射中性纪律）。
+    fn writeZigStringLiteral(writer: anytype, str: []const u8) !void {
+        const escape_high = str.len > 0 and !std.unicode.utf8ValidateSlice(str);
         for (str) |c| {
             switch (c) {
                 '\\' => try writer.writeAll("\\\\"),
@@ -1408,9 +1417,25 @@ pub const NativeLinker = struct {
                 '\n' => try writer.writeAll("\\n"),
                 '\r' => try writer.writeAll("\\r"),
                 '\t' => try writer.writeAll("\\t"),
-                else => try writer.writeByte(c),
+                // ★控制字节/DEL/（非 UTF-8 串里的）高位字节 ⇒ `\xNN`。
+                //   刻意写在 `else` 里而不是单列 `0x00...0x1f` 支：那样会与上面的 `\n \r \t` 三个标量**重叠**，
+                //   Zig 直接报 `duplicate switch value`（实测）。
+                else => {
+                    if (c < 0x20 or c == 0x7f or (c >= 0x80 and escape_high)) {
+                        var b: [4]u8 = undefined;
+                        const s = std.fmt.bufPrint(&b, "\\x{x:0>2}", .{c}) catch unreachable;
+                        try writer.writeAll(s);
+                    } else {
+                        try writer.writeByte(c);
+                    }
+                },
             }
         }
+    }
+
+    fn writeEscapedZigString(writer: anytype, str: []const u8) !void {
+        // ★F-89 起统一走 `writeZigStringLiteral`（同一套转义规则只有一份，DRY）
+        try writeZigStringLiteral(writer, str);
     }
 
     /// 类型推断统计（用于诊断和质量门禁）
@@ -1616,18 +1641,10 @@ pub const NativeLinker = struct {
             try writer.writeAll("// String table\n");
             try writer.writeAll("const string_table = [_][]const u8{\n");
             for (ir_module.string_table.items) |str| {
-                // 转义字符串中的特殊字符
+                // ★F-89：转义规则统一走 `writeZigStringLiteral`（控制字节必须 `\xNN`，否则解码出来的
+                //   `\0 \e \v \f` 会让生成的 main.zig 直接编不过：实测 `string literal contains invalid byte: '\x00'`）
                 try writer.writeAll("    \"");
-                for (str) |c| {
-                    switch (c) {
-                        '\n' => try writer.writeAll("\\n"),
-                        '\r' => try writer.writeAll("\\r"),
-                        '\t' => try writer.writeAll("\\t"),
-                        '\\' => try writer.writeAll("\\\\"),
-                        '"' => try writer.writeAll("\\\""),
-                        else => try writer.writeByte(c),
-                    }
-                }
+                try writeZigStringLiteral(writer, str);
                 try writer.writeAll("\",\n");
             }
             try writer.writeAll("};\n\n");
@@ -32787,17 +32804,12 @@ pub const NativeLinker = struct {
     fn escapeString(self: *Self, str: []const u8) ![]const u8 {
         var buf = try std.ArrayList(u8).initCapacity(self.allocator, 0);
         defer buf.deinit(self.allocator);
-        var writer = ListWriter{ .list = &buf, .allocator = self.allocator };
-        for (str) |c| {
-            switch (c) {
-                '\\' => try writer.writeAll("\\\\"),
-                '"' => try writer.writeAll("\\\""),
-                '\n' => try writer.writeAll("\\n"),
-                '\r' => try writer.writeAll("\\r"),
-                '\t' => try writer.writeAll("\\t"),
-                else => try writer.writeByte(c),
-            }
-        }
+        const writer = ListWriter{ .list = &buf, .allocator = self.allocator };
+        // ★F-89 收口：转义规则只留一份（`writeZigStringLiteral`）。原先这里的 `else => writeByte(c)`
+        //   会把 `\x1b` 这类**控制字节**原样写进 Zig 字面量 ⇒ `string literal contains invalid byte`
+        //   （实测语料 f175：折叠成内联常量数组的 `"\e"` 走到 `writeConstantValueInlineDepth`，整文件编译失败）。
+        //   合法 UTF-8 的高位字节**仍不转义** ⇒ 其余 67 枚语料的 `main.zig` 逐字节不变（影子判据不受影响）。
+        try writeZigStringLiteral(writer, str);
         return buf.toOwnedSlice(self.allocator);
     }
 

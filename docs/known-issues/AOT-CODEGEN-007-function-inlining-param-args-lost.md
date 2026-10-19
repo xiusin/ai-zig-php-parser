@@ -502,3 +502,21 @@ rm -f fuzzy_scripts_720/tmp/aot_compile_f152_*   # 期望：本仓不应留下�
   - **定位更正**：路线 A 单独落地只转 1/19 ⇒ A 不是解锁 PERF-001 抬档的钥匙；**阈值路线在语料上剩余收益为 0**。新增永久 harness `c007_releasefast_face_tmp.sh`／`c007_rf_control_tmp.sh`／`c007_inline_only_face_tmp.sh`（+ 同名 TSV/HDR）。**零源码改动**（`native_linker.zig` `fbe6382a`/32797 仍为 #74 纯注释批 numstat `5 4`；`optimizer.zig` `252234ef`/6877、`ir_generator.zig` `cb53c2da`、`runtime_lib_template.zig` 均未改；二进制 `1f15e4ce9b5c9cdaaef7cabf5efb9c76` 冻结）。
 - 2026-10-06（任务 #89 同轮）: **§7.2 结案** —— 六形默认档探针实测 ①–⑤ 全等值 + 静态同基论证 ⇒ COW 支缺 `isPointerReg` 在非内联几何下**不可达**，修复项 **D 由「P2 健壮性缺口」降级为「P2 纯防御」**。同轮形 ⑥（闭包直调）暴露出**另一条默认档缺陷**并独立立案 [AOT-REF-004](AOT-REF-004-dynamic-call-byref-arg-not-made.md)：两单共享「引用形参实参装填**按函数名**查表」这一口径缺口（本单是内联把 `.param` 搬进无 `ref_params` 的帧，REF-004 是动态调用无名可查），但**成因、档位、症状均不同**（本单仅非默认档且为类型错误/静默错值，REF-004 默认档即 SIGSEGV），裁决与排期**不得互相顶替**。零源码改动（`fbe6382a`/32797、numstat `5 4`；`optimizer.zig` `252234ef`/6877 未改）。
 - 2026-10-06: **立项（任务 #88）**。发现路径 = AOT-TYPE-001 §P2 存活线索的 `=&` 压测探针（`t001_refparam_retain_probe_tmp.php`）在 release-fast 档编译失败；收窄出三形永久探针 `t007_inline_refparam_tmp.php`／`t007_inline_byval_tmp.php`／`t007_inline_multiblock_tmp.php`，两档 × 三形共 6 组编译运行 + 6 组 PHP 真值实测。根因锁定 `optimizer.zig:4861`（`.param` 原样返回）、`:4695-4701`（映射键类型错）、`:4711`（只搬入口块）、`:4720-4743`（仅入口块 `.ret` 才回传结果），并给出形 A 的完整成因链（含 `native_linker.zig:5492-5516` 与 `:21143/:21170-21193` 两处口径）。实测否证 PERF-001 的「改默认档不改生成码」论证（同脚本两档 md5/行数不同）。零源码改动（`fbe6382a`/32797 与 `252234ef`/6877 均为读-only 复验）。
+
+
+## 交叉引用：AOT-CODEGEN-012 §77 的 **F-93** 就是本缺陷（2026-10-18，同题并入，勿两处各说一半）
+CODEGEN-012 侧在归因 F-93（"单形参用户函数在特定文件形制下取不到实参"）时**独立走到同一结论**，并补上三条本工单未逐条钉住的细节：
+
+1. **种子映射的键写错层级**：`src/aot/optimizer.zig:4771` 用 `reg_map.put(@intCast(i), args[i].id)`——键是**形参下标**，而 callee 体内引用形参用的是 `.param` 指令的**结果寄存器号**；两者只在"形参寄存器恰好排在 0..n-1"时偶然相等。
+2. **种子随即被覆盖**：`cloneAndRemapInstruction` 对**每一条有结果的指令**都做 `reg_map.put(res.id, new_id)`，于是 `.param` 指令被克隆时其结果寄存器改绑到**新分配号**，第 1 步那点偶然正确也保不住。
+3. **`.param` 被原样克隆**：`remapInstructionOp` 的 `.param => op`（`optimizer.zig:4937`）不重写下标，而发射器 `native_linker.zig:21319` 把 `.param` 渲染成 `reg_N = <当前帧入参/ctx>` ⇒ 内联结果读的是**调用方的帧**。
+
+另两条只有这次才拿到的事实：
+- **档位表**（`optimizer.zig` 的 `PassConfig`）：`debug`(:133) 与 `releaseSmall`(:209，注释 Inlining increases size) 的 `function_inlining=false`；`releaseSafe`(:154) 阈值 15、`releaseFast`(:182) 阈值 50 ⇒ **只有 safe/fast 两档踩得到**。
+  - ★**该句后半「门与主回归正是 `--optimize=release-fast`」是错的，2026-10-19 实测自我更正**：主回归与影子门都**不带 `--optimize`** ⇒ 走 `CompileOptions` 的默认值 `.release_small`（`src/main.zig:214` 只填 `input_file`、`compiler.zig:140` 默认 `.release_small` → `optimizer.zig:60-67 getPassConfig` 的 `.size` → `:209 function_inlining=false`）。实测锚点＝`fuzzy_scripts_720/run_regression.sh:54`（`--compile --output=`，无 `--optimize`）与 `fuzzy_scripts_720/tmp/c010_shadow_main_md5_tmp.sh:22`（`--compile --no-debug-info`，无 `--optimize`）。⇒ **冻结基线 68 语料的内联面＝0**（与本单 §3.4 一致，本节当时把 §3.4 的结论自己否证掉了）。只有 **INL 门自己**显式带 `--optimize=release-small/release-fast` 两档跑臂，所以「链全绿、门 4 枚红」不矛盾——红面在 opt-in 档，不在语料。
+  - **判据改写（原"census 先行"作废）**：由上述默认档事实直接**证明**修内联器是发射中性的 ⇒ 影子判据从「漂移集需普查预注册」收紧为 **`changed_rows=0` 且 `col_identical=yes` 的硬反向判据**（非 0＝越界碰到了非 `function_inlining` 门控路径）。语料暴露面**不必重测**：§3.5 C/D 臂已用「默认档 + `--aot-enable-pass=inline[ --aot-inline-threshold=50]`」单变量量过（C 臂 1/67 红＝`f152`，D 臂 threshold=5 全语料零内联），比原计划的双档 × 68 重编更省且更干净。
+- **`i < args.len` 的静默跳过**：实参少于形参时（默认值形制）映射直接缺一块，且不阻止内联 ⇒ `d($a,$b="DEF")` 只传 1 个时会读到外层帧的第 2 个入参。
+
+复证工具＝新常驻门 **INL** `fuzzy_scripts_720/tmp/c109_inl_gate_tmp.sh`：10 臂 × 两档共 20 槽，自动统计 `TIER_FINGERPRINT`（"small 对而 fast 错"＝差只由内联档位解释）⇒ **门自身就是判生死实验**。其中 `i3`（嵌套调用 `f3($a){ return g3("lit"); }`，PHP 必得 `G:lit`、错内联得 `G:outer`）专门揭穿"形参恰好对上调用方帧所以装作正确"的那一类。
+
+修形与验收见 CODEGEN-012 §77（★原记「census 先行的影子漂移集预注册」已于 2026-10-19 作废，理由见上一条目）；落地轮＝**R-181**。★本工单的既有分析与行号引用**未被改写**，仅加本节交叉链接与两处更正。

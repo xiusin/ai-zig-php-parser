@@ -284,10 +284,28 @@ test "数学 - sqrt" {
 }
 
 test "数学 - round" {
-    const val = Value.initFloat(3.7);
     const precision = Value.initInt(0);
-    const result = try runtime.php_round(val, precision, Value.initInt(0));
-    try testing.expectApproxEqAbs(@as(f64, 4.0), result.asFloat(), 0.001);
+    // ★第三参在 PHP 里是 mode：想表达"不传 mode"必须给 **null**（缺省＝HALF_UP）；`0` 是**非法值**
+    //   （PHP 8.5.8 实测 `round(2.5,0,0)` 抛 `ValueError: … must be a valid rounding mode`）。
+    //   旧测试正是把 `initInt(0)` 当"缺省"用，才把 F-82 的错位映射一路固化成断言。
+    const val = Value.initFloat(3.7);
+    const r0 = try runtime.php_round(val, precision, Value.initNull());
+    try testing.expectApproxEqAbs(@as(f64, 4.0), r0.asFloat(), 0.001);
+
+    // ★F-82：mode 的 int↔语义 映射按 PHP 8.5.8 逐枚实测（工单 §68.3 的网格），1..8 连续合法
+    const half = Value.initFloat(2.5);
+    try testing.expectEqual(@as(f64, 3.0), (try runtime.php_round(half, precision, Value.initInt(1))).asFloat()); // HALF_UP
+    try testing.expectEqual(@as(f64, 2.0), (try runtime.php_round(half, precision, Value.initInt(2))).asFloat()); // HALF_DOWN
+    try testing.expectEqual(@as(f64, 2.0), (try runtime.php_round(half, precision, Value.initInt(3))).asFloat()); // HALF_EVEN
+    try testing.expectEqual(@as(f64, 3.0), (try runtime.php_round(half, precision, Value.initInt(4))).asFloat()); // HALF_ODD
+    try testing.expectEqual(@as(f64, 2.0), (try runtime.php_round(Value.initFloat(1.4), precision, Value.initInt(5))).asFloat()); // CEILING
+    try testing.expectEqual(@as(f64, 1.0), (try runtime.php_round(Value.initFloat(1.4), precision, Value.initInt(6))).asFloat()); // FLOOR
+    try testing.expectEqual(@as(f64, 1.0), (try runtime.php_round(Value.initFloat(1.9), precision, Value.initInt(7))).asFloat()); // TOWARD_ZERO
+    try testing.expectEqual(@as(f64, 2.0), (try runtime.php_round(Value.initFloat(1.1), precision, Value.initInt(8))).asFloat()); // AWAY_FROM_ZERO
+
+    // ★F-70 段①的核心回归：`1.005` 的二进制是 `1.004999…`，PHP 靠"误差校正"那一步仍给 `1.01`，
+    //   朴素 `@round(v*10^n)/10^n` 会给 `1.00`（＝修前 AOT 的实测行为）
+    try testing.expectEqual(@as(f64, 1.01), (try runtime.php_round(Value.initFloat(1.005), Value.initInt(2), Value.initNull())).asFloat());
 }
 
 test "数学 - floor" {

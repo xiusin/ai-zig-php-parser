@@ -2776,7 +2776,11 @@ pub const Value = struct {
                 if (std.fmt.parseFloat(f64, num_str)) |float_val| {
                     const max_as_float = @as(f64, @floatFromInt(std.math.maxInt(i64)));
                     const min_as_float = @as(f64, @floatFromInt(std.math.minInt(i64)));
-                    if (float_val >= max_as_float or float_val < min_as_float) return std.math.minInt(i64);
+                    // ★F-80（工单 §64.1）：数字串经 parseFloat 后越界 ⇒ PHP 按**符号**饱和且**零告警**
+                    //   （实测 `(int)"1e19"`=maxInt、`(int)"-1e19"`=minInt、`intval("1e19")`=maxInt，三条都无诊断）。
+                    //   旧写法不分符号一律给 minInt ⇒ `(int)"1e19"` 错到另一个端点。
+                    //   ★刻意**不**套用浮点支的 mod 2^64 回绕：串支与浮点支不对称（§54/§64.1 实测）。
+                    if (float_val >= max_as_float or float_val < min_as_float) return if (float_val < 0) std.math.minInt(i64) else std.math.maxInt(i64);
                     return @intFromFloat(float_val);
                 } else |_| {}
             }
@@ -4360,37 +4364,35 @@ pub fn php_restore_exception_handler() !Value {
 }
 
 /// trigger_error - 触发用户错误
+/// ★F-92（R-180）：与引擎诊断**共用同一分发口**。旧实现自成一套，四处偏差逐条修：
+///   ①实参序 `message` 在前 ⇒ 用户处理器里 `$no`/`$str` 互换（PHP 是 `(errno, errstr, errfile, errline)`）；
+///   ②结构 `if (handler) { 掩码内调用 } else { 打印 }` ⇒ **掩码不匹配时 PHP 照打、AOT 彻底静默**；
+///   ③`_ = closure(...) catch {}` 丢掉返回值 ⇒ 处理器 `return false` 该补的标准打印补不上；
+///   ④无处理器分支用 `std.debug.print`（只走 stderr 一行、缺 `PHP Warning:  ` 首行与 `in 文件 on line N`）。
+/// ★未纳入本批：`E_USER_ERROR` 在 PHP 8.4+ 要**先**发一条 `Deprecated: Passing E_USER_ERROR to trigger_error() …`、
+///   无处理器时再发 Fatal 并以 255 退出（实测），有处理器且返回非 false 时继续执行 rc=0 ⇒ 属致命路径，另立 P2 单。
+/// ★`else` 分支（非法 level）保持改动前的旧输出：PHP 侧该形制的口径**未实测**，不做无据改动。
 pub fn php_trigger_error(message: Value, error_type: Value, allocator: Allocator) !Value {
+    _ = allocator;
     if (!message.isString()) return Value.initBool(false);
 
-    const err_type = if (error_type.isNull()) E_USER_NOTICE else error_type.toInt();
+    const err_type: i64 = if (error_type.isNull()) E_USER_NOTICE else error_type.toInt();
+    const msg = message.asString().data;
 
-    // 如果设置了自定义错误处理器
-    if (global_error_handler) |handler| {
-        // 检查是否在错误类型掩码内
-        if ((err_type & global_error_types) != 0) {
-            // 调用用户错误处理器
-            if (handler.isFunction()) {
-                const closure = handler.asFunction();
-                var args = [_]Value{
-                    message,
-                    Value.initInt(err_type),
-                    Value.initString(try PHPString.init(allocator, "")), // errfile
-                    Value.initInt(0), // errline
-                };
-                _ = closure.func(Value.initNull(), args[0..], allocator) catch {};
-            }
-        }
-    } else {
-        // 没有自定义处理器，直接输出错误
-        const err_type_str = switch (err_type) {
-            E_USER_ERROR => "Fatal error",
-            E_USER_WARNING => "Warning",
-            E_USER_NOTICE => "Notice",
-            E_USER_DEPRECATED => "Deprecated",
-            else => "Error",
-        };
-        std.debug.print("{s}: {s}\n", .{ err_type_str, message.asString().data });
+    if (dispatchToUserHandler(err_type, msg)) |handled| {
+        if (handled) return Value.initBool(true); // C4：处理器接管 ⇒ 不打任何字
+    }
+    // C3／C5／没设处理器 ⇒ 标准处理（两行两流，与引擎诊断同一套文案规则）
+    switch (err_type) {
+        E_USER_ERROR => standardPrint("PHP Fatal error:  ", "\nFatal error: ", msg),
+        E_USER_WARNING => standardPrint("PHP Warning:  ", "\nWarning: ", msg),
+        E_USER_NOTICE => standardPrint("PHP Notice:  ", "\nNotice: ", msg),
+        E_USER_DEPRECATED => standardPrint("PHP Deprecated:  ", "\nDeprecated: ", msg),
+        else => {
+            var buf: [1024]u8 = undefined;
+            const old = std.fmt.bufPrint(&buf, "Error: {s}\n", .{msg}) catch return Value.initBool(true);
+            fileWriteAll(2, old);
+        },
     }
 
     return Value.initBool(true);
@@ -6354,44 +6356,68 @@ fn hasAllowDynamicProperties(meta: *const ClassMeta) bool {
     return false;
 }
 
-/// AOT-CODEGEN-012 R-132：PHP 8.2+ Deprecated 诊断（动态属性创建等）
-pub fn emitDeprecated(msg: []const u8) void {
-    if (isErrorSuppressed()) return;
+/// ★F-92（R-180）：引擎诊断的**唯一分发口**。PHP 契约（工单 §73.3 实测七条里的 C1…C5）：
+///   C1 设了处理器且 `level & global_error_types != 0` ⇒ **先调处理器**；
+///   C2 `@` 只抑制"标准显示"，**不抑制处理器被调用**（旧实现把 `isErrorSuppressed()` 放在最前面＝连处理器一起挡掉）；
+///   C3 处理器返回 `false` ⇒ 追加标准处理；
+///   C4 返回非 false（实测返回 `"not-a-bool"` 这种非布尔值也一样）⇒ **一个字都不打**；
+///   C5 掩码不匹配或没设处理器 ⇒ 直接走标准处理（**不是静默**）。
+/// 返回＝`null`（交给标准处理）／`.?==true`（处理器已接管）／`.?==false`（处理器要求再走标准处理）。
+/// ★两条**本批刻意不做**的面（另立条目，不在文档里假装等价）：
+///   F-98＝处理器内抛异常时 PHP 让它向上传播（实测 `CAUGHT:RuntimeException|in-handler`），而 `emitWarning` 是
+///        `void`、改成可抛出要动数百个调用点 ⇒ 这里 `catch` 后按"处理器已接管"处理；
+///   F-97＝`error_get_last()` 在 AOT 未实现（同族缺 `error_reporting()`/`register_shutdown_function()`＝F-95/F-96，
+///        见任务 #113）⇒ C3/C4 的"last-error 是否更新"那半轴无从观测，ERRH 的 `l1/l2` 臂待其落地后补。
+fn dispatchToUserHandler(level: i64, msg: []const u8) ?bool {
+    const handler = global_error_handler orelse return null;
+    if ((level & global_error_types) == 0) return null; // ★C5：不调处理器，但标准处理照走
+    // ★★必须走 `php_invoke_callable`，**不能**判 `handler.isFunction()`：AOT 里注册进来的可调用值是
+    //   "函数名字符串"（`set_error_handler("h")`）或**闭包对象**（门 V 的"闭包=对象"面），两者都不是 `TYPE_FUNCTION`
+    //   ⇒ 旧 `php_trigger_error` 那套 `isFunction()+asFunction()` 对绝大多数真实处理器**根本不触发**（R-180 实测：
+    //   只打标准两行、`[ECHO]/[FW]` 全无）。这也是为什么"两套口径并存"其实是一套半失效。
+    // ★`php_is_callable` 返回 `!Value` ⇒ 先落成 Value 再取布尔，别把 `!`/`catch` 混在一个表达式里（优先级会读错）。
+    const callable = php_is_callable(handler) catch Value.initBool(false);
+    if (!callable.toBool()) return null;
+    const msg_str = PHPString.init(runtime_allocator, msg) catch return true;
+    const file_str = PHPString.init(runtime_allocator, src_file) catch msg_str;
+    var args = [_]Value{
+        Value.initInt(level), // ★偏差①：`errno` 在前（旧 `php_trigger_error` 把 message 放第一位 ⇒ 处理器里 $no/$str 互换）
+        Value.initString(msg_str),
+        Value.initString(file_str),
+        Value.initInt(@intCast(src_line)),
+    };
+    const ret = php_invoke_callable(handler, args[0..], runtime_allocator) catch return true; // ★F-98
+    if (ret.isBool() and !ret.asBool()) return false; // C3
+    return true; // C4
+}
+
+/// 标准处理＝PHP 的两行两流。★文案与改动前**逐字节相同**（修前基线里"无处理器/无诊断"的臂本来就全绿）：
+///   stderr `PHP <Label>:  {msg} in {file} on line {N}`（**两个**空格、无前导空行）；
+///   stdout `{前导}\n<Label>: {msg} …`（**一个**空格）。★`Deprecated` 的 stdout 行历史上就没有前导空行
+///   ⇒ 用 `out_label` 参数原样带上，不在本批"顺手统一"。
+fn standardPrint(err_label: []const u8, out_label: []const u8, msg: []const u8) void {
+    if (isErrorSuppressed()) return; // ★C2：抑制只作用在这一层
     var ebuf: [1024]u8 = undefined;
-    const emsg = std.fmt.bufPrint(
-        &ebuf,
-        "PHP Deprecated:  {s} in {s} on line {d}\n",
-        .{ msg, src_file, src_line },
-    ) catch "";
+    const emsg = std.fmt.bufPrint(&ebuf, "{s}{s} in {s} on line {d}\n", .{ err_label, msg, src_file, src_line }) catch return;
     fileWriteAll(2, emsg);
     var buf: [1024]u8 = undefined;
-    const smsg = std.fmt.bufPrint(
-        &buf,
-        "Deprecated: {s} in {s} on line {d}\n",
-        .{ msg, src_file, src_line },
-    ) catch "";
+    const smsg = std.fmt.bufPrint(&buf, "{s}{s} in {s} on line {d}\n", .{ out_label, msg, src_file, src_line }) catch return;
     fileWriteAll(1, smsg);
 }
 
-pub fn emitWarning(msg: []const u8) void {
-    // @操作符：错误抑制时不输出警告
-    if (isErrorSuppressed()) return;
+/// AOT-CODEGEN-012 R-132：PHP 8.2+ Deprecated 诊断（动态属性创建等）
+pub fn emitDeprecated(msg: []const u8) void {
+    if (dispatchToUserHandler(E_DEPRECATED, msg)) |handled| {
+        if (handled) return; // C4
+    }
+    standardPrint("PHP Deprecated:  ", "Deprecated: ", msg);
+}
 
-    // PHP 输出顺序：先 stderr（PHP Warning:），再 stdout（Warning:）
-    var ebuf: [1024]u8 = undefined;
-    const emsg = std.fmt.bufPrint(
-        &ebuf,
-        "PHP Warning:  {s} in {s} on line {d}\n",
-        .{ msg, src_file, src_line },
-    ) catch "";
-    fileWriteAll(2, emsg);
-    var buf: [1024]u8 = undefined;
-    const wmsg = std.fmt.bufPrint(
-        &buf,
-        "\nWarning: {s} in {s} on line {d}\n",
-        .{ msg, src_file, src_line },
-    ) catch "";
-    fileWriteAll(1, wmsg);
+pub fn emitWarning(msg: []const u8) void {
+    if (dispatchToUserHandler(E_WARNING, msg)) |handled| {
+        if (handled) return; // C4
+    }
+    standardPrint("PHP Warning:  ", "\nWarning: ", msg);
 }
 
 pub fn emitDeprecatedStrGetcsvEscape() void {
@@ -6755,21 +6781,10 @@ fn emitObjectToNumberNotice(val: Value, target: []const u8) void {
 
 /// `Notice` 诊断（模板此前只有 Warning／Deprecated；比较族是第一条 Notice 站点）
 fn emitNotice(msg: []const u8) void {
-    if (isErrorSuppressed()) return;
-    var ebuf: [1024]u8 = undefined;
-    const emsg = std.fmt.bufPrint(
-        &ebuf,
-        "PHP Notice:  {s} in {s} on line {d}\n",
-        .{ msg, src_file, src_line },
-    ) catch "";
-    fileWriteAll(2, emsg);
-    var buf: [1024]u8 = undefined;
-    const smsg = std.fmt.bufPrint(
-        &buf,
-        "\nNotice: {s} in {s} on line {d}\n",
-        .{ msg, src_file, src_line },
-    ) catch "";
-    fileWriteAll(1, smsg);
+    if (dispatchToUserHandler(E_NOTICE, msg)) |handled| {
+        if (handled) return; // C4
+    }
+    standardPrint("PHP Notice:  ", "\nNotice: ", msg);
 }
 
 /// 获取 Value 的 PHP 类型名称
@@ -11213,7 +11228,46 @@ fn initRegexCache(allocator: Allocator) !void {
     regex_cache_initialized = true;
 }
 
-fn getOrCompileRegex(pattern: []const u8, options: c_uint, allocator: Allocator) !*pcre2_code {
+/// ★F-79d（工单 §62.2 末）：PCRE2 编译失败的**原因载体**＋PHP 那条 Warning 的成文器。
+/// 旧形态是 `getOrCompileRegex(...) catch return Value.initInt(0)` ⇒ "编不过"被伪装成"匹配不上"＝静默错值方向。
+/// PHP 8.5.8 实测契约（逐枚 @ 抑制后取 error_get_last）＝
+///   `preg_match/preg_match_all/preg_split/preg_grep` ⇒ **`false`** ＋ `Warning: <fn>(): Compilation failed: <原因> at offset <N>`
+///   `preg_replace/preg_replace_callback/preg_filter` ⇒ **`null`** ＋ 同一条措辞；★模式**数组**里任一枚失败 ⇒ **整次调用**返回 `null`（不是逐枚跳过）
+const PcreCompileFail = struct {
+    errcode: c_int = 0,
+    erroffset: usize = 0,
+};
+
+fn warnPcreCompileFailed(fn_name: []const u8, fail: PcreCompileFail) void {
+    var msg_buf: [256:0]u8 = undefined;
+    @memset(&msg_buf, 0);
+    const reason_len = pcre2_get_error_message_8(fail.errcode, &msg_buf, msg_buf.len);
+    // ★实测（探针 `c086_pcre2_errmsg_probe_tmp.zig`，直连 `-lpcre2-8`）：本函数**返回写入的字节长度**
+    //   （`errcode=143 ⇒ rc=65`，文本＝`two named subpatterns have the same name (PCRE2_DUPNAMES not set)`），
+    //   **不是** "0 表示成功"（那是我记混了另一枚 pcre2 接口的约定）。≤0 才是没拿到原因。
+    const reason: []const u8 = if (reason_len > 0 and @as(usize, @intCast(reason_len)) <= msg_buf.len)
+        msg_buf[0..@intCast(reason_len)]
+    else
+        "unknown error";
+    var out: [512]u8 = undefined;
+    const msg = std.fmt.bufPrint(&out, "{s}(): Compilation failed: {s} at offset {d}", .{ fn_name, reason, fail.erroffset }) catch return;
+    emitWarning(msg);
+}
+
+/// ★F-79d 的调用侧统一入口：编译失败 ⇒ 就地发 PHP 那条 Warning，返回 `null` 让调用方给出**各自**的失败值
+///   （`preg_match/match_all/split/grep` ⇒ `false`；`preg_replace/replace_callback/filter` ⇒ `null`；实测见 §71）。
+///   存在这个包装是为了 11 个调用点不再各写一遍样板（DRY），也避免旧形态 `catch return Value.initInt(0)` 那种
+///   "各点自己决定怎么吞"的漂移——现在吞不吞只由一处决定，失败值由契约决定。
+fn compileRegexOrWarn(fn_name: []const u8, parsed: ParsedPattern, allocator: Allocator) ?*pcre2_code {
+    var fail: PcreCompileFail = .{};
+    const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator, &fail) catch {
+        warnPcreCompileFailed(fn_name, fail);
+        return null;
+    };
+    return re;
+}
+
+fn getOrCompileRegex(pattern: []const u8, options: c_uint, allocator: Allocator, fail: ?*PcreCompileFail) !*pcre2_code {
     try initRegexCache(allocator);
 
     spinLock(&regex_cache_mutex);
@@ -11236,7 +11290,12 @@ fn getOrCompileRegex(pattern: []const u8, options: c_uint, allocator: Allocator)
         &erroffset,
         null,
     );
-    if (re_ptr == null) return error.RegexCompileFailed;
+    if (re_ptr == null) {
+        // ★F-79d：把 errcode/erroffset 交给调用者（它们此前被 `return error.RegexCompileFailed` 丢弃 ⇒
+        //   调用点只能"吞成匹配不上"）。用出参而非全局变量，是为了不引入跨调用共享的可变状态（并发安全）。
+        if (fail) |f| f.* = .{ .errcode = errcode, .erroffset = erroffset };
+        return error.RegexCompileFailed;
+    }
     const re = re_ptr.?;
 
     // LRU淘汰：如果缓存满了，移除最旧的条目
@@ -11278,6 +11337,10 @@ extern fn pcre2_compile_8(
 ) ?*pcre2_code;
 
 extern fn pcre2_code_free_8(?*pcre2_code) void;
+/// ★F-79d 新增：把 `pcre2_compile_8` 的 errcode 翻成 PHP 那句 `Compilation failed: <原因>` 的**原因文本**。
+///   pcre2.h：`int pcre2_get_error_message(int errorcode, PCRE2_SPTR buffer, PCRE2_SIZE buffersize)`
+///   ★返回值＝**写入缓冲的字节长度**（实测 `143 ⇒ 65`），`<= 0` 才是失败；不是"0 表示成功"。
+extern fn pcre2_get_error_message_8(errorcode: c_int, buffer: [*:0]u8, buffersize: usize) c_int;
 extern fn pcre2_match_data_create_from_pattern_8(?*const pcre2_code, ?*anyopaque) ?*pcre2_match_data;
 extern fn pcre2_match_data_free_8(?*pcre2_match_data) void;
 extern fn pcre2_match_8(
@@ -11612,7 +11675,12 @@ pub fn preg_match(pattern_val: Value, subject_val: Value, matches_ref: *Value, f
     }
 
     // 使用缓存获取编译后的正则（不需要release，缓存管理生命周期）
-    const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch return Value.initInt(0);
+    // ★F-79d：编译失败不再吞成"匹配不上"⇒ 发 PHP 那条 `Compilation failed` Warning 并按契约返回 `false`
+    //   （出参清空＝与上方 F-50 非法模式早退支同形）
+    const re = compileRegexOrWarn("preg_match", parsed, allocator) orelse {
+        matches_ref.* = Value.initArray(try PHPArray.init(allocator));
+        return Value.initBool(false);
+    };
 
     const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse return Value.initInt(0);
     defer pcre2_match_data_free_8(match_data);
@@ -11638,15 +11706,16 @@ pub fn preg_match_with_matches(pattern_val: Value, subject_val: Value, matches_r
     // ★F-50（R-163）：非法分隔符/修饰符 ⇒ 按 PHP 口径发 Warning 后返回 false，不进 PCRE。
     //   出参槽按本文件既有早退支装成空数组；★实测 PHP 在告警路径上**保留调用者预置值**，本仓因按引用实参未初始化而做不到 ⇒ 另立 F-53。
     if (parsed.issue != .none) {
-        emitRegexPatternWarning("preg_match_with_matches", parsed);
+        emitRegexPatternWarning("preg_match", parsed); // ★F-84：本 handler 只由 `preg_match` 的三参形重写而来 ⇒ 告警须用 PHP 可见名
         matches_ref.* = Value.initArray(try PHPArray.init(allocator));
         return Value.initBool(false);
     }
 
     // 使用缓存获取编译后的正则
-    const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch {
+    // ★F-79d＋F-84：失败路径同样用 `preg_match` 这个名字，返回 `false`（旧给 `initInt(0)`＝静默错值）
+    const re = compileRegexOrWarn("preg_match", parsed, allocator) orelse {
         matches_ref.* = Value.initArray(try PHPArray.init(allocator));
-        return Value.initInt(0);
+        return Value.initBool(false);
     };
 
     const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse {
@@ -11749,9 +11818,10 @@ pub fn preg_match_all(pattern_val: Value, subject_val: Value, matches_ref: *Valu
     }
 
     // 使用缓存获取编译后的正则
-    const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch {
+    // ★F-79d：实测 PHP `preg_match_all` 编译失败 ⇒ `false` ＋ Warning（旧给 `initInt(0)`）
+    const re = compileRegexOrWarn("preg_match_all", parsed, allocator) orelse {
         matches_ref.* = Value.initArray(try PHPArray.init(allocator));
-        return Value.initInt(0);
+        return Value.initBool(false);
     };
 
     const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse {
@@ -11877,7 +11947,9 @@ pub fn preg_replace(pattern_val: Value, replacement_val: Value, subject_val: Val
     }
 
     // 使用缓存获取编译后的正则
-    const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch return subject_val;
+    // ★F-79d：实测 PHP `preg_replace` 编译失败 ⇒ **`null`** ＋ Warning（旧返回未替换的 subject＝静默错值方向）；
+    //   模式为**数组**时任一枚失败也是**整次**返回 `null`（实测），故下面的数组支同样直接出参。
+    const re = compileRegexOrWarn("preg_replace", parsed, allocator) orelse return Value.initNull();
 
     const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse return subject_val;
     defer pcre2_match_data_free_8(match_data);
@@ -12050,7 +12122,8 @@ pub fn preg_filter(pattern_val: Value, replacement_val: Value, subject_val: Valu
                         continue;
                     }
 
-                    const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch continue;
+                    // ★F-79d：数组里任一枚编不过 ⇒ 整次调用返回 `null`（实测），不再"跳过这一枚"继续
+                    const re = compileRegexOrWarn("preg_filter", parsed, allocator) orelse return Value.initNull();
                     const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse continue;
                     defer pcre2_match_data_free_8(match_data);
 
@@ -12108,7 +12181,8 @@ pub fn preg_filter(pattern_val: Value, replacement_val: Value, subject_val: Valu
         emitRegexPatternWarning("preg_filter", parsed);
         return Value.initNull();
     }
-    const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch return Value.initNull();
+    // ★F-79d：失败值本就是 `null`（与实测一致），本处只补"发 Warning"这一段
+    const re = compileRegexOrWarn("preg_filter", parsed, allocator) orelse return Value.initNull();
 
     const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse return Value.initNull();
     defer pcre2_match_data_free_8(match_data);
@@ -12163,12 +12237,8 @@ pub fn preg_split(pattern_val: Value, subject_val: Value, limit_val: Value, flag
     }
 
     // 使用缓存获取编译后的正则
-    const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch {
-        // 编译失败，返回包含原字符串的数组
-        const arr = try PHPArray.init(allocator);
-        try arr.push(allocator, subject_val);
-        return Value.initArray(arr);
-    };
+    // ★F-79d：实测 PHP `preg_split` 编译失败 ⇒ `false` ＋ Warning（旧返回 `[subject]` 数组＝静默错值）
+    const re = compileRegexOrWarn("preg_split", parsed, allocator) orelse return Value.initBool(false);
 
     const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse {
         const arr = try PHPArray.init(allocator);
@@ -12263,7 +12333,8 @@ pub fn preg_grep(pattern_val: Value, input_val: Value, flags_val: Value, allocat
         emitRegexPatternWarning("preg_grep", parsed);
         return Value.initBool(false);
     }
-    const re = try getOrCompileRegex(parsed.pattern, parsed.options, allocator);
+    // ★F-79d：实测 PHP `preg_grep` 编译失败 ⇒ `false` ＋ Warning（旧 `try` 把 Zig 错误外抛＝整条 fatal 路径）
+    const re = compileRegexOrWarn("preg_grep", parsed, allocator) orelse return Value.initBool(false);
 
     const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse {
         return Value.initArray(try PHPArray.init(allocator));
@@ -13424,47 +13495,123 @@ pub fn php_sqrt(val: Value) !Value {
 
 /// round - 四舍五入 (支持3参数: value, precision, mode)
 /// mode: 0=PHP_ROUND_HALF_UP(default), 1=PHP_ROUND_HALF_DOWN, 2=PHP_ROUND_HALF_EVEN, 3=PHP_ROUND_HALF_ODD
+/// ★F-70 段①＋F-82（R-177）：以下四枚 helper ＝ php-src `ext/standard/math.c` 的 `_php_math_round`
+///   （`:166`）＋`php_round_helper`（`:67`）＋`php_intpow10`（`:37`）＋两个 `edge_case`（`:51/:57`）的**逐条移植**。
+///   等价性不是"写完再试"：候选实现已在 **581 项系统 PHP 8.5.8 真值**上证完逐位相等
+///   （`c081_round_equiv_tmp.zig`：445 行矩阵 `bad_val=0` ＋ 136 格 mode 网格 `bad_mode=0`，工单 §69），
+///   覆盖 INF/NAN/±0、`|places| <= 20` 含负位数、量级 `1e-30..1e21`、八枚 mode。
+/// ★旧实现的三处错都在这批收掉：① mode 数值映射与 PHP 全错位（旧写作 `1=>DOWN、2=>EVEN、3=>ODD、else=>UP`，
+///   实测 `1..8`＝UP/DOWN/EVEN/ODD/CEILING/FLOOR/TOWARD_ZERO/AWAY_FROM_ZERO）＝**F-82**；
+///   ② 朴素 `@round(v*10^n)/10^n` 给不出 PHP 的"误差校正"（`round(1.005,2)` PHP＝`1.01`、旧＝`1.00`）；
+///   ③ HALF_EVEN/HALF_ODD 两支各有一枚**无守卫 `@intFromFloat`**（旧 `:13451/:13457`）＝F-76 族的越界 UB，新实现用
+///   `@mod(integral, 2.0)` 判奇偶 ⇒ **不需要把 double 转 int**，崩溃面随之消失。
+const ROUND_MODE_HALF_UP: u8 = 1;
+const ROUND_MODE_HALF_DOWN: u8 = 2;
+const ROUND_MODE_HALF_EVEN: u8 = 3;
+const ROUND_MODE_HALF_ODD: u8 = 4;
+const ROUND_MODE_CEILING: u8 = 5;
+const ROUND_MODE_FLOOR: u8 = 6;
+const ROUND_MODE_TOWARD_ZERO: u8 = 7;
+const ROUND_MODE_AWAY_FROM_ZERO: u8 = 8;
+
+/// math.c:37 —— `pow(10, n)` 的 0..22 用**精确**查表（超出才 `std.math.pow`），否则回位会引入额外舍入
+fn phpMathIntPow10(power: u31) f64 {
+    const table = [23]f64{
+        1e0,   1e1,   1e2,   1e3,   1e4,   1e5,   1e6,   1e7,
+        1e8,   1e9,   1e10,  1e11,  1e12,  1e13,  1e14,  1e15,
+        1e16,  1e17,  1e18,  1e19,  1e20,  1e21,  1e22,
+    };
+    if (power <= 22) return table[power];
+    return std.math.pow(f64, 10.0, @floatFromInt(power));
+}
+
+/// math.c:51 —— "半个单位"边界（`.5` 判据），按 `places` 符号决定乘除回位
+inline fn phpMathRoundBasicEdge(integral: f64, exponent: f64, places_positive: bool) f64 {
+    const t = integral + std.math.copysign(@as(f64, 0.5), integral);
+    return @abs(if (places_positive) t / exponent else t * exponent);
+}
+
+/// math.c:57 —— "零位"边界（CEILING/FLOOR/TOWARD_ZERO/AWAY_FROM_ZERO 用）
+inline fn phpMathRoundZeroEdge(integral: f64, exponent: f64, places_positive: bool) f64 {
+    return @abs(if (places_positive) integral / exponent else integral * exponent);
+}
+
+/// math.c:67 —— 八枚 mode 的判定式；增量一律 `integral + copysign(1, integral)`（PHP 注释自陈"避免分支"）
+fn phpMathRoundHelper(integral: f64, value: f64, exponent: f64, places_positive: bool, mode: u8) f64 {
+    const value_abs = @abs(value);
+    const step = integral + std.math.copysign(@as(f64, 1.0), integral);
+    const basic = phpMathRoundBasicEdge(integral, exponent, places_positive);
+    const zero = phpMathRoundZeroEdge(integral, exponent, places_positive);
+    return switch (mode) {
+        ROUND_MODE_HALF_UP => if (value_abs >= basic) step else integral,
+        ROUND_MODE_HALF_DOWN => if (value_abs > basic) step else integral,
+        ROUND_MODE_CEILING => if (value > 0.0 and value_abs > zero) integral + 1.0 else integral,
+        ROUND_MODE_FLOOR => if (value < 0.0 and value_abs > zero) integral - 1.0 else integral,
+        ROUND_MODE_TOWARD_ZERO => integral,
+        ROUND_MODE_AWAY_FROM_ZERO => if (value_abs > zero) step else integral,
+        // ★奇偶判定用 `@mod(integral, 2.0)`（double 域）⇒ 旧实现那两枚 `@intFromFloat(floor_val)` 无守卫转换不再需要
+        ROUND_MODE_HALF_EVEN => if (value_abs > basic)
+            step
+        else if (value_abs == basic and @mod(integral, 2.0) != 0.0)
+            step
+        else
+            integral,
+        ROUND_MODE_HALF_ODD => if (value_abs > basic)
+            step
+        else if (value_abs == basic and @mod(integral, 2.0) == 0.0)
+            step
+        else
+            integral,
+        else => integral,
+    };
+}
+
+/// math.c:166 `_php_math_round` 的七步（1 非有限/0 短路、2 整值短路、3 位数下限＋精确 exponent、
+/// 4 误差校正、5 `1e16` 放弃舍入、6 判定、7 回位）。
+/// ★第 7 步 PHP 在 `|places| >= 23` 时改走 `%15fe%d`＋`strtod` 文本回环；本轮真值矩阵 `|dec|` 上限 20 ⇒
+///   那条支路**没有期望值可核对**，此处按 PHP 的注释理由（大位数下简单除法会给错值）仍先走除法，
+///   并把缺口显式登记在工单 §69（禁"顺手猜一遍"）；补覆盖后单独一批对齐。
+fn phpMathRoundValue(value: f64, places_in: i32, mode: u8) f64 {
+    var places = places_in;
+    if (std.math.isInf(value) or std.math.isNan(value) or value == 0.0) return value;
+    if (places == 0 and value == @trunc(value)) return value;
+    if (places < std.math.minInt(i32) + 1) places = std.math.minInt(i32) + 1;
+    const ap: u31 = @intCast(if (places < 0) -@as(i64, places) else @as(i64, places));
+    const exponent = phpMathIntPow10(ap);
+    const places_positive = places > 0;
+    const scaled = if (places_positive) value * exponent else value / exponent;
+    // 第 4 步：`floor/ceil` 后 `±1` 回位若**恰好**等于原值 ⇒ 判定整值少一枚并补回
+    var tmp: f64 = if (value >= 0.0) @floor(scaled) else @ceil(scaled);
+    const tmp2 = if (value >= 0.0) tmp + 1.0 else tmp - 1.0;
+    if ((if (places_positive) tmp2 / exponent else tmp2 * exponent) == value) tmp = tmp2;
+    // 第 5 步：超出十进制精度 ⇒ 舍入无意义，原样返回（`nf(1/3,50)`/`1e-30@40` 就是走这里）
+    if (@abs(tmp) >= 1e16) return value;
+    const rounded = phpMathRoundHelper(tmp, value, exponent, places_positive, mode);
+    return if (places_positive) rounded / exponent else rounded * exponent;
+}
+
 pub fn php_round(val: Value, precision_val: Value, mode_val: Value) !Value {
     // ★F-62（R-172）：`$num` 是 int|float、`$precision` 是 int ⇒ 各过一遍参数校验。
-    //   `$mode` 的期望类型是 `RoundingMode|int`，且非法值走的是 **ValueError**（实测 `round(1.5,2,123)`
-    //   ⇒ `round(): Argument #3 ($mode) must be a valid rounding mode (RoundingMode::*)`）⇒ 另立 F-62d，本轮不碰。
     const v = requireNumParam("round", 1, "num", .num_param, val) orelse return Value.initNull();
     const pv = requireOptionalNumParam("round", 2, "precision", .int_param, precision_val) orelse return Value.initNull();
     const num = v.toFloat();
-    const precision = if (pv.isNull()) 0 else @as(i32, @intCast(pv.toInt()));
-    const mode = if (mode_val.isNull()) @as(i64, 0) else mode_val.toInt();
-
-    const multiplier = std.math.pow(f64, 10.0, @floatFromInt(precision));
-    const scaled = num * multiplier;
-    const frac = scaled - @floor(scaled);
-    const is_half = @abs(frac - 0.5) < 1e-9;
-
-    const rounded = if (is_half) blk: {
-        switch (mode) {
-            1 => {
-                // HALF_DOWN: round towards zero
-                break :blk if (num >= 0) @floor(scaled) / multiplier else @ceil(scaled) / multiplier;
-            },
-            2 => {
-                // HALF_EVEN: round to nearest even
-                const floor_val = @floor(scaled);
-                const floor_int: i64 = @intFromFloat(floor_val);
-                break :blk if (@rem(floor_int, 2) == 0) floor_val / multiplier else @ceil(scaled) / multiplier;
-            },
-            3 => {
-                // HALF_ODD: round to nearest odd
-                const floor_val = @floor(scaled);
-                const floor_int: i64 = @intFromFloat(floor_val);
-                break :blk if (@rem(floor_int, 2) != 0) floor_val / multiplier else @ceil(scaled) / multiplier;
-            },
-            else => {
-                // HALF_UP (default): round away from zero
-                break :blk @round(scaled) / multiplier;
-            },
-        }
-    } else @round(scaled) / multiplier;
-
-    return Value.initFloat(rounded);
+    // ★位数饱和照 PHP 的 `ZEND_LONG_INT_OVFL/UDFL`（越界取 INT_MAX/INT_MIN），旧写法 `@intCast` 在越界时是 Zig 非法行为
+    const precision: i32 = if (pv.isNull()) 0 else blk: {
+        const p = pv.toInt();
+        if (p > std.math.maxInt(i32)) break :blk std.math.maxInt(i32);
+        if (p < std.math.minInt(i32)) break :blk std.math.minInt(i32);
+        break :blk @intCast(p);
+    };
+    // ★F-82＋F-62d（本批）：mode 缺省＝HALF_UP；显式实参必须落在**实测合法集 `1..8`**，否则 ValueError
+    //   （措辞已实测＝PHP 8.5.8 对 `0/9/16/-1..-5` 抛的那句；`@` 抑制不了，属 throw）
+    //   ★`RoundingMode` 枚举对象作实参**仍属另批**（`RoundingMode::cases()` 实测是 8 枚 pure enum，
+    //   枚举 id 与 int mode **不同序** ⇒ 需要一层独立映射，禁在此混入）
+    const mode_int: i64 = if (mode_val.isNull()) ROUND_MODE_HALF_UP else mode_val.toInt();
+    if (mode_int < ROUND_MODE_HALF_UP or mode_int > ROUND_MODE_AWAY_FROM_ZERO) {
+        _ = throwThrowable("ValueError", "round(): Argument #3 ($mode) must be a valid rounding mode (RoundingMode::*)", runtime_allocator) catch {};
+        return Value.initNull();
+    }
+    return Value.initFloat(phpMathRoundValue(num, precision, @intCast(mode_int)));
 }
 
 /// floor - 向下取整
@@ -13878,7 +14025,9 @@ pub fn php_intval(val: Value) !Value {
             if (std.fmt.parseFloat(f64, if (negative) str else s)) |float_val| {
                 const max_as_float: f64 = @floatFromInt(std.math.maxInt(i64));
                 const min_as_float: f64 = @floatFromInt(std.math.minInt(i64));
-                if (float_val >= max_as_float or float_val < min_as_float) return Value.initInt(std.math.minInt(i64));
+                // ★F-80 同族第二处（`intval` 的"串含小数点/科学记法 ⇒ 先 parseFloat"子路）：按符号饱和、零告警。
+                //   ★纯数字溢出路本来就是按符号饱和的，禁一并改动（工单 §64.1 已点名）。
+                if (float_val >= max_as_float or float_val < min_as_float) return Value.initInt(if (float_val < 0) std.math.minInt(i64) else std.math.maxInt(i64));
                 return Value.initInt(@intFromFloat(float_val));
             } else |_| {}
         }
@@ -18654,7 +18803,12 @@ pub const ClassMeta = struct {
                     if (cname_val.isString() and pname_val.isString()) {
                         if (findClass(cname_val.asString().data)) |cmeta| {
                             if (cmeta.properties.get(pname_val.asString().data)) |p| {
-                                return Value.initBool(p.has_default);
+                                // ★F-83 后半（实测四形，工单 §70.1）：
+                                //   `public $p;`（**无类型**、没写默认值）⇒ PHP 视为"隐式 null 默认值" ⇒ `hasDefaultValue()=true`；
+                                //   `public int $q;`／`public ?int $s;`（有类型、无默认值）⇒ **false**
+                                //   （此时 `getDefaultValue()` 还会发一句 Deprecated＝另立 F-87，本批不碰）；
+                                //   写了默认值 ⇒ true ＋ 值。⇒ 规则＝`has_default ∨ 无类型声明`。
+                                return Value.initBool(p.has_default or p.type_name == null);
                             }
                         }
                     }
@@ -20959,6 +21113,13 @@ pub fn php_object_get(obj_val: Value, property_name: []const u8) !Value {
                     const msg = std.fmt.bufPrint(&buf, "Typed property {s}::${s} must not be accessed before initialization", .{ decl.class.name, property_name }) catch "Typed property must not be accessed before initialization";
                     return throwThrowable("Error", msg, runtime_allocator);
                 }
+            }
+            // ★F-83（工单 §70.1，由门 PD2 的守卫臂 `g6` 抓到）：**声明了但未写默认值的无类型属性**，
+            //   PHP 的语义是"隐式 null 默认值"⇒ 读取静默给 NULL。而 AOT 只为"有默认值"的属性建槽 ⇒
+            //   槽缺失时控制流一路落到下面的"未声明属性"支，多发 `Warning: Undefined property: G6::$p`＝**多说话**方向。
+            //   ★刻意只覆盖"无类型"（typed 无默认值已由上面的 Error 拦住，不能在这里变成 null）。
+            if (decl.prop.type_name == null and obj.getPropertyDirect(property_name) == null) {
+                return Value.initNull();
             }
         } else {
             // 属性未声明：检查动态属性，若无则尝试 __get
@@ -25407,6 +25568,20 @@ pub fn php_strripos(haystack: Value, needle: Value, offset: Value) !Value {
 }
 
 /// number_format - 格式化数字
+/// ★R-179（工单 §72.5／§75）＝按**律 D′** 重写，弃旧的 i64 缩放塔。旧实现的两处硬伤一并结掉：
+///   ①`@intCast(@max(0, dv.toInt()))` 把负 `decimals` 直接归零 ⇒ 门 NFM 那 22 枚 `stage_judgment` 红的直接原因；
+///   ②`pow10 *= 10`（`dec>=19` 即溢出）与**无守卫**的 `@intFromFloat(num * pow10)`（越过 i64 是未定义）＝§56／F-76 的账。
+/// php-src `_php_math_number_format_ex` 的顺序（照抄，不改语义）：
+///   ①`value < 0` ⇒ 剥负号（★对 `-INF` 同样先取反）
+///   ②`rounded = _php_math_round(|value|, dec, PHP_ROUND_HALF_UP)`——★`dec` 的**负号保留**（舍入按十位/百位…）
+///   ③`rounded == 0` ⇒ 丢负号（`-0.0` 在此归一成 `+0.0`，否则 `%.{dec}f` 会把负号带进数字串）
+///   ④`%.*F` **精确展开**——★打印与分节的位数用 `max(dec, 0)`
+///   ⑤展开串首字符非数字（`inf`／`nan`）⇒ **原样返回**，既不分节也不补负号
+///   ⑥整数段从右每 3 位插千分位；小数段＝`decimal_separator` 原串＋dec 位（★`""` ⇒ 不插点但位数照留）
+/// `dec < 0` 再分两支（c075 445 行×3 形＋c099 252 行＝**697 例零失配**，见 §75）：
+///   **D′-1** `|value| > PHP_INT_MAX` ⇒ 该量级 `_php_math_round` 走放弃支 ⇒ 输出该 double 的**精确整数展开**；
+///   **D′-2** 否则 ⇒ 对 `value` 的**精确值**按 `10^|dec|` 做**十进制半进位（远离零）**再补零。
+/// ★分隔符按**整串**输出（旧实现只取首字节、且把显式 `""` 当默认值 ⇒ `sep2`/`sep4` 那类形制必错）。
 pub fn php_number_format(number: Value, decimals: Value, dec_point: Value, thousands_sep: Value, allocator: Allocator) !Value {
     // ★F-62（R-172）：`$num` 的 TypeError 文本实测是 `int|float`，而它的 Passing-null 文本实测是 `float`
     //   （`number_format(): Passing null to parameter #1 ($num) of type float is deprecated`）⇒ 用 `requireNumParamAs` 显式给出。
@@ -25414,63 +25589,151 @@ pub fn php_number_format(number: Value, decimals: Value, dec_point: Value, thous
     //   「stringable／nullable-string」那道，另立 F-62b，本轮不碰 #3/#4。
     const nv = requireNumParamAs("number_format", 1, "num", .num_param, number, "float") orelse return Value.initNull();
     const dv = requireOptionalNumParam("number_format", 2, "decimals", .int_param, decimals) orelse return Value.initNull();
-    const num = nv.toFloat();
-    const dec: usize = @intCast(@max(0, dv.toInt()));
-    const dp: u8 = if (dec_point.isString() and dec_point.asString().data.len > 0)
-        dec_point.asString().data[0]
+    const dp: []const u8 = if (dec_point.isString()) dec_point.asString().data else ".";
+    const ts: []const u8 = if (thousands_sep.isString()) thousands_sep.asString().data else ",";
+
+    var value = nv.toFloat();
+    var is_negative = false;
+    if (value < 0.0) { // ①
+        is_negative = true;
+        value = -value;
+    }
+    // ★`-0.0` 与 `+0.0` 相等 ⇒ ①的取反对它不执行，`%.{k}f` 会把负号带进数字串（真值资产里 `-0.0@-1` 实测期望 `0`）
+    //   ⇒ 一律在此归一，两支展开都只吃非负值。
+    const mag: f64 = if (value == 0.0) 0.0 else value;
+
+    // ★`decimals` 是 `zend_long`，而 `_php_math_round` 的 places 与 `%.*F` 的精度在 PHP 侧都是 C `int`
+    //   ⇒ 做**饱和**转换（与 `phpMathRoundValue` 自带的 `minInt(i32)+1` clamp 同口径）。
+    //   越界 `decimals` 的耗时与缓冲上界另属 **F-65**（本批只保证不再越 i64／不再无守卫转整）。
+    const d64 = dv.toInt();
+    const dec_in: i32 = if (d64 > std.math.maxInt(i32))
+        std.math.maxInt(i32)
+    else if (d64 < std.math.minInt(i32) + 1)
+        std.math.minInt(i32) + 1
     else
-        '.';
-    const ts: u8 = if (thousands_sep.isString() and thousands_sep.asString().data.len > 0)
-        thousands_sep.asString().data[0]
-    else if (thousands_sep.isNull()) ',' else ',';
+        @intCast(d64);
+    const dec: usize = if (dec_in > 0) @intCast(dec_in) else 0; // ④打印位数＝max(dec,0)
 
-    var pow10: u64 = 1;
-    for (0..dec) |_| pow10 *= 10;
+    const rounded = blk: { const r = phpMathRoundValue(mag, dec_in, ROUND_MODE_HALF_UP); break :blk if (r == 0.0) 0.0 else r; }; // ②③
+    if (rounded == 0.0) is_negative = false; // ③
 
-    const scaled = num * @as(f64, @floatFromInt(pow10));
-    const rounded: i64 = @intFromFloat(std.math.round(scaled));
-    const negative = rounded < 0;
-    const abs_r: u64 = @intCast(if (negative) -rounded else rounded);
-    const int_part: u64 = abs_r / pow10;
-    const frac_part: u64 = abs_r % pow10;
+    // ★任何 double 的精确十进制展开最多 1074 位小数（最小非规格化数＝`2^-1074`），整数段最多 309 位
+    //   （`DBL_MAX < 2^1024 < 10^309`）⇒ 这两个**导出**上界取代旧实现里凭空的定长缓冲。
+    const exact_frac: usize = 1074;
+    const int_cap: usize = 512;
+    // ★D′-1 的分界＝`PHP_INT_MAX`。它本身不可被 f64 精确表示，`@floatFromInt` 会**进到 `2^63`**，
+    //   而 PHP 侧比较也在 `zend_long` 溢出点上做 ⇒ 与已证的 Python 模型（`float(PHP_INT_MAX)`）逐位同口径。
+    const php_int_max: f64 = @floatFromInt(std.math.maxInt(i64));
+    const exact_expansion = dec_in < 0 and mag <= php_int_max; // ★D′-2 的开关（**不能**用「精度==1074」判别：`dec==1074` 会误触发）
+    const bnd: usize = if (dec_in < 0) @intCast(-@as(i64, dec_in)) else 0; // 仅 D′ 支有意义
 
-    // 整数部分转字符串（带千分位）
-    const int_str = try std.fmt.allocPrint(allocator, "{d}", .{int_part});
-    defer allocator.free(int_str);
-    const n_groups = (int_str.len + 2) / 3; // ceil
-    const sep_count = if (int_str.len > 3) (int_str.len - 1) / 3 else 0;
+    var raw = try allocator.alloc(u8, dec +| bnd +| exact_frac +| int_cap +| 16);
+    defer allocator.free(raw);
+    var fmt_buf: [64:0]u8 = undefined;
 
-    // 估算总长度
-    var total: usize = (if (negative) @as(usize, 1) else 0) + int_str.len + sep_count;
-    if (dec > 0) total += 1 + dec;
-    _ = n_groups;
-
-    var aw3 = std.Io.Writer.Allocating.initCapacity(allocator, total + 4) catch return Value.initNull();
-    defer aw3.deinit();
-
-    if (negative) try aw3.writer.writeByte('-');
-    // 写整数部分（带千分位）
-    for (int_str, 0..) |ch, idx| {
-        const remaining = int_str.len - idx;
-        if (idx > 0 and remaining % 3 == 0) try aw3.writer.writeByte(ts);
-        try aw3.writer.writeByte(ch);
+    // 展开成十进制串：D′-2 需要**精确值**的全部整数位（小数位只在整数段右侧的半进位判定里起作用），
+    // 其余三支（`dec>=0`、D′-1、inf/nan）都直接吃 `%.*F` 对 `rounded` 的输出。
+    const prec: usize = if (exact_expansion) exact_frac else dec;
+    {
+        const fs = std.fmt.bufPrint(&fmt_buf, "%.{d}f", .{prec}) catch return error.InvalidArgument;
+        fmt_buf[fs.len] = 0;
+        const n = snprintf(raw.ptr, raw.len, &fmt_buf, if (exact_expansion) mag else rounded);
+        if (n <= 0 or @as(usize, @intCast(n)) >= raw.len) return error.InvalidArgument; // ★上界算错＝宁可报错，禁静默截断
+        raw.len = @intCast(n);
     }
-    // 写小数部分
-    if (dec > 0) {
-        try aw3.writer.writeByte(dp);
-        var tmp = frac_part;
-        var digits = try allocator.alloc(u8, dec);
-        defer allocator.free(digits);
-        var j: usize = dec;
-        while (j > 0) {
-            j -= 1;
-            digits[j] = '0' + @as(u8, @intCast(tmp % 10));
-            tmp /= 10;
+    // ⑤inf／nan：首字符非数字 ⇒ 原样返回（PHP 此处既不分节也不补负号）
+    if (!(raw[0] >= '0' and raw[0] <= '9')) return Value.initString(try PHPString.init(allocator, raw));
+
+    // ★`%.0f` 与 inf/nan 的输出**没有小数点** ⇒ 必须 `orelse raw.len`，写 `.?` 会当场 panic
+    const dot = std.mem.indexOfScalar(u8, raw, '.') orelse raw.len;
+    var digits: []const u8 = raw[0..dot]; // 整数段
+    var frac: []const u8 = if (dot < raw.len) raw[dot + 1 ..] else "";
+
+    // ★D′-2 的结果缓冲**必须活到函数尾**：`digits` 会指回它。写成块内 `defer free` 会让装配阶段读已释放内存
+    //   （实测 `number_format(1.234,-1)` 出 `^@`、`(-50,-2)` 出 `----`、`(995,-1)` 出 `^@,^@^@^@`＝典型 use-after-free）。
+    var d2_buf: ?[]u8 = null;
+    defer if (d2_buf) |b| allocator.free(b);
+
+    if (exact_expansion) { // ★D′-2 分支：对精确值按 `10^bnd` 做十进制半进位（远离零）
+        // 1) 丢弃段与阈值「'5'＋(bnd-1)×'0'」逐位比：缺位视作前导零。
+        var up = false;
+        var i: usize = 0;
+        while (i < bnd and !up) : (i += 1) {
+            const pos: isize = @as(isize, @intCast(digits.len)) - @as(isize, @intCast(bnd)) + @as(isize, @intCast(i));
+            const td: u8 = if (pos < 0) '0' else digits[@intCast(pos)];
+            const hd: u8 = if (i == 0) '5' else '0';
+            if (td > hd) {
+                up = true;
+            } else if (td < hd) {
+                break; // ★低于阈值必须停：漏掉这步会把 `0.11@-2` 判成进位（工单 §72.4 实测 got=100）
+            } else if (i + 1 == bnd) {
+                up = true; // 与阈值逐位全等＝正好一半 ⇒ HALF_UP 远离零
+            }
         }
-        try aw3.writer.writeAll(digits);
+        // 2) 保留段 ＋1（含溢出）。★**绝不剥前导零**：溢出时那些 0 是有效位数
+        //    （`995@-1` ⇒ 保留段 "99"＋1 ⇒ "00" 且进位 ⇒ 结果必须是 "1"+"00"+一个零＝"1000"；
+        //     旧草稿剥了前导零 ⇒ got="10"，是 §75 里 Zig 等价器抓到的第一条）。
+        const keep_len = if (digits.len > bnd) digits.len - bnd else 0;
+        var acc = try allocator.alloc(u8, keep_len); // ★独立缓冲：与下面写 `keep` 的位置错开，禁就地覆写
+        defer allocator.free(acc);
+        @memcpy(acc, digits[0..keep_len]);
+        var carry: u8 = if (up) 1 else 0;
+        var q: usize = keep_len;
+        while (q > 0 and carry == 1) {
+            q -= 1;
+            var d: u16 = @as(u16, acc[q]) - '0' + 1;
+            if (d >= 10) {
+                d -= 10;
+                carry = 1;
+            } else {
+                carry = 0;
+            }
+            acc[q] = '0' + @as(u8, @intCast(d));
+        }
+        const keep = try allocator.alloc(u8, digits.len +| bnd +| 4);
+        d2_buf = keep; // ★登记到函数作用域，随函数结束统一释放
+        var kl: usize = 0;
+        if (carry == 1) {
+            keep[kl] = '1';
+            kl += 1;
+        }
+        @memcpy(keep[kl .. kl + keep_len], acc);
+        kl += keep_len;
+        if (kl == 0) {
+            keep[0] = '0';
+            kl = 1;
+            is_negative = false; // ★D′-3：结果为零 ⇒ 丢负号（实测 `number_format(-50,-3)`⇒`0`；`(-50,-2)` 是 `-100` 不算零）
+        } else {
+            var z: usize = 0;
+            while (z < bnd) : (z += 1) {
+                keep[kl] = '0';
+                kl += 1;
+            }
+        }
+        digits = keep[0..kl];
+        frac = ""; // `dec` 已归 0 ⇒ 无小数段
+    } else {
+        frac = frac[0..@min(dec, frac.len)]; // `%.*F` 本就该给满 dec 位；这一刀只是防御，不改语义
     }
 
-    return Value.initString(try PHPString.init(allocator, aw3.written()));
+    // ⑥装配：符号 ＋ 分节整数段 ＋（有小数位时）`decimal_separator` 原串 ＋ 小数位
+    const groups = if (digits.len > 3) (digits.len - 1) / 3 else 0;
+    var total: usize = (if (is_negative) @as(usize, 1) else 0) +| digits.len +| groups *| ts.len;
+    if (frac.len > 0) total +|= dp.len +| frac.len;
+
+    var out = std.Io.Writer.Allocating.initCapacity(allocator, total +| 4) catch return error.OutOfMemory;
+    defer out.deinit(); // ★与旧实现同一对 `defer`＋`return PHPString.init(..., written())` 形状（init 会拷贝，安全）
+    if (is_negative) try out.writer.writeByte('-');
+    for (digits, 0..) |ch, idx| {
+        if (idx > 0 and (digits.len - idx) % 3 == 0 and ts.len > 0) try out.writer.writeAll(ts);
+        try out.writer.writeByte(ch);
+    }
+    if (frac.len > 0) {
+        try out.writer.writeAll(dp);
+        try out.writer.writeAll(frac);
+    }
+
+    return Value.initString(try PHPString.init(allocator, out.written()));
 }
 
 /// nl2br - 将换行符转换为HTML <br>标签
@@ -27853,9 +28116,12 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
                 },
                 'c' => {
                     const val = castIntArgWithWarn(arg); // ★F-69：sprintf／printf 的 int 族站点（实测 %d %u %x %X %o %b %c 各转换一次 ⇒ 各发一条 Warn）
-                    if (val >= 0 and val <= 255) {
-                        try tmp_buf.append(allocator, @intCast(val));
-                    }
+                    // ★F-81（工单 §64.2，根因已由"吞 NUL"改写为此条）：PHP 的 `%c` **恒发 1 字节＝低 8 位**，
+                    //   与符号/范围无关（9 枚实测：`0→00`、`65→41`、`255→ff`、`256→00`、`321→41`、`-1→ff`、
+                    //   `-255→01`、`-8446744073709551616→00`、`9223372036854775807→ff`）。
+                    //   旧守卫 `val >= 0 and val <= 255` 的问题是对范围外**整字节丢弃**；NUL 本身 PHPString 保得住
+                    //   （`:1483` 按 `str.len` 全量 memcpy）。★此处一处修四入口：printf/vprintf/vsprintf 都委托 php_sprintf。
+                    try tmp_buf.append(allocator, @truncate(@as(u64, @bitCast(val))));
                 },
                 'u' => {
                     const val = castIntArgWithWarn(arg); // ★F-69：sprintf／printf 的 int 族站点（实测 %d %u %x %X %o %b %c 各转换一次 ⇒ 各发一条 Warn）
@@ -28052,9 +28318,11 @@ pub fn php_preg_match(pattern: Value, subject: Value, matches: *Value, flags: Va
     }
 
     // 使用缓存获取编译后的正则
-    const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch {
+    // ★F-79d：本文件内另有 `preg_match` 的孪生实现（builtin_map 重复键，工单 §66.2-2/§70.2）⇒
+    //   **两侧必须同语义**，否则"哪一行活着"会决定这里是否报警。
+    const re = compileRegexOrWarn("preg_match", parsed, allocator) orelse {
         matches.* = Value.initArray(try PHPArray.init(allocator));
-        return Value.initInt(0);
+        return Value.initBool(false);
     };
 
     const off = pcreSearchOffset(offset, subject_str.length);
@@ -28194,9 +28462,10 @@ pub fn php_preg_match_all(pattern: Value, subject: Value, matches: *Value, flags
     }
 
     // 使用缓存获取编译后的正则
-    const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch {
+    // ★F-79d：同 `preg_match` 孪生支 ⇒ 两侧同语义（§66.2-2 的重复键未决项不因本批改变）
+    const re = compileRegexOrWarn("preg_match_all", parsed, allocator) orelse {
         matches.* = Value.initArray(try PHPArray.init(allocator));
-        return Value.initInt(0);
+        return Value.initBool(false);
     };
 
     const off = pcreSearchOffset(offset, subject_str.length);
@@ -28361,9 +28630,8 @@ pub fn php_preg_replace_callback(pattern: Value, callback: Value, subject: Value
     }
 
     // 编译正则表达式
-    const re = getOrCompileRegex(parsed.pattern, parsed.options, allocator) catch {
-        return Value.initString(try PHPString.init(allocator, try allocator.dupe(u8, subject_str)));
-    };
+    // ★F-79d：实测 PHP `preg_replace_callback` 编译失败 ⇒ `null` ＋ Warning（旧返回未替换的 subject）
+    const re = compileRegexOrWarn("preg_replace_callback", parsed, allocator) orelse return Value.initNull();
 
     // 创建匹配数据
     const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse {

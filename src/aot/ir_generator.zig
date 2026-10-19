@@ -1408,7 +1408,8 @@ pub const IRGenerator = struct {
             .literal_null => return .{ .null = {} },
             .literal_bool => return .{ .bool = expr_node.main_token.tag == .k_true },
             .literal_string => {
-                const s = self.getString(expr_node.data.literal_string.value);
+                // ★F-89：属性/类常量默认值的字面串同样回原文重解（`"\x41"` ⇒ `A`）。
+                const s = try self.literalStringText(expr_node);
                 const dup = try self.allocator.dupe(u8, s);
                 return .{ .string = dup };
             },
@@ -1432,7 +1433,21 @@ pub const IRGenerator = struct {
                 }
                 return .{ .array = elements };
             },
-            else => return null,
+            else => {
+                // ★F-73 甲型（数组元素形，门 PD2 `p8`＝`[1+1, 2*2]`）：元素是常量表达式时过去整枚数组折不出
+                //   ⇒ 默认值静默变 NULL。这里同样复用 `getConstantValue`（一元/二元/类常量已覆盖），
+                //   保持"全仓只有一套常量折叠逻辑"，不另写第二份算式。
+                const cv = self.getConstantValue(expr_node) orelse return null;
+                if (cv.int_val) |v| return .{ .int = v };
+                if (cv.float_val) |v| return .{ .float = v };
+                if (cv.bool_val) |v| return .{ .bool = v };
+                if (cv.is_null) return .{ .null = {} };
+                if (cv.string_val) |s| {
+                    const dup = try self.allocator.dupe(u8, s);
+                    return .{ .string = dup };
+                }
+                return null;
+            },
         }
     }
 
@@ -1454,7 +1469,8 @@ pub const IRGenerator = struct {
             .literal_null => inst.op = .const_null,
             .literal_bool => inst.op = .{ .const_bool = expr_node.main_token.tag == .k_true },
             .literal_string => {
-                const s = self.getString(expr_node.data.literal_string.value);
+                // ★F-89：属性默认值的字面串同样回原文重解（`public $p = "\x41";` ⇒ `A`，探针 c096 的 PA/PC 形）
+                const s = try self.literalStringText(expr_node);
                 const id = try module.internString(s);
                 inst.op = .{ .const_string = id };
             },
@@ -1501,7 +1517,38 @@ pub const IRGenerator = struct {
                     },
                 }
             },
+            // ★F-73 甲型（工单 §70.1）：一元／二元常量表达式形（`-5.0`、`-5`、`5*2`、`+1.0`、`~5`、`-0.0`、`1+2*3`、
+            //   以及静态属性上的同些形）过去直落下面的 `else => null` ⇒ `default_value=null` 而 `has_default` 仍 true
+            //   ⇒ 发射器三叉的第三支 `initNull()` 被误命中＝**合法 PHP 静默得到 NULL**（反射还声称"有默认值"）。
+            //   本支只复用**已存在**的 `getConstantValue`（`:9629`，它已覆盖 `.unary_expr/.binary_expr/.class_constant_access`，
+            //   且 `self::K`/外部类常量实测本来就好）⇒ 不新增第二套折叠逻辑。
+            .unary_expr, .binary_expr => {
+                const cv = self.getConstantValue(expr_node) orelse {
+                    self.allocator.destroy(inst);
+                    return null;
+                };
+                if (cv.int_val) |v| {
+                    inst.op = .{ .const_int = v };
+                } else if (cv.float_val) |v| {
+                    // ★`-0.0` 的符号靠这条路径保到发射（R-174 的可回读字面量 helper 负责文本），门 PD2 `p6` 是它的守卫
+                    inst.op = .{ .const_float = v };
+                } else if (cv.bool_val) |v| {
+                    inst.op = .{ .const_bool = v };
+                } else if (cv.string_val) |s| {
+                    const id = try module.internString(s);
+                    inst.op = .{ .const_string = id };
+                } else if (cv.is_null) {
+                    inst.op = .const_null;
+                } else {
+                    self.allocator.destroy(inst);
+                    return null;
+                }
+            },
             else => {
+                // ★刻意**不**在此折叠"全局常量"（`PHP_INT_MIN`／`-PHP_INT_MIN`＝门 PD2 的 `p12/p13`）：
+                //   AOT 的内置常量表活在**运行期**（`runtime_lib_template.zig:8583` 的 `{ .name = "PHP_INT_MIN", … }`），
+                //   编译期折叠就要求编译器里复制一份同值常量表＝宪法「禁止硬编码本应动态计算的值」的正面对撞，
+                //   且两份表会漂移。⇒ 该形改走"构造期求值"（属性默认值发射成真实表达式），另案报批（工单 §71）。
                 self.allocator.destroy(inst);
                 return null;
             },
@@ -2109,7 +2156,7 @@ pub const IRGenerator = struct {
                             case_value = switch (value_node.tag) {
                                 .literal_int => .{ .int = value_node.data.literal_int.value },
                                 .literal_float => .{ .float = value_node.data.literal_float.value },
-                                .literal_string => .{ .string = self.getString(value_node.data.literal_string.value) },
+                                .literal_string => .{ .string = try self.literalStringText(value_node) }, // ★F-89：枚举 case 值也是用户可见串
                                 .literal_bool => blk: {
                                     const is_true = value_node.main_token.tag == .k_true;
                                     break :blk .{ .bool = is_true };
@@ -5671,13 +5718,168 @@ pub const IRGenerator = struct {
         return self.emitWithResult(.{ .const_float = value }, .f64);
     }
 
+    /// F-89：双引号串的 **原文** 解码（★AOT-only；共享层 `src/compiler/parser.zig:134 unescapeDoubleQuoted` 一字未动）。
+    /// ★为什么必须回到 token 原文重解、不能在 parser 已产出的值上"再解一遍"：
+    ///   `"\x41"` 与 `"\\\x41"` 经 parser 后**逐字相同**（都是 4 字符 `\x41`），而 PHP 的正解分别是 `A` 与 `\A`
+    ///   ⇒ 二次解码必然把后者解错（工单 §71.5 已实测该形）。⇒ 只有原文能区分两者。
+    /// ★覆盖判定（刻意**不**碰单引号/反引号，那两支配法与 parser 现行为一致）：
+    ///   ① 整枚双引号字面量＝原文以 `"` 开头且以 `"` 结尾 ⇒ 去引号后解；
+    ///   ② 插值串的文本片段（含 heredoc 片段）＝`main_token.tag == .t_encapsed_and_whitespace` ⇒ 原文即片段内容，直接解
+    ///      （实测：`"{$a}\x41"` 与 `<<<EOT … \x41 … EOT` 都走这条，片段本身不带引号）。
+    ///   其余 ⇒ 返回 null，沿用 parser 的值。
+    /// ★解码集＝PHP 8.5.8 逐臂实测（工单 §71.5，期望值一律 chr() 构造防自证）：
+    ///   `\n \r \t \v(0x0B) \f(0x0C) \e(0x1B) \\ \$ \"` ＋ 八进制 `\ooo`（**1~3 位取满即止** ⇒ `\1000`＝`chr(64)."0"`；
+    ///   值按 256 取模 ⇒ `\777`＝`0xFF`；PHP 那句 overflow Warning 属**编译期**诊断，不在本支）＋
+    ///   十六进制 `\xHH`/`\xH`（★**大写 X 同解**；无有效位⇒原样保留 ⇒ `"\x"`＝2 字符、`"\xg1"`＝4 字符）＋
+    ///   `\u{…}`（★**必须有花括号**：`"\u41"` 原样；越界/代理位⇒原样，PHP 那形是 Parse error＝已登记另案）。
+    /// ★内存：返回的切片由 `self.allocator` 拥有（编译期生命周期）；调用方 intern 后不释放＝与既有
+    ///   `tryMakeConstValue` 的 `dupe` 同一口径，长度上限＝原文长度，无额外放大。
+    fn doubleQuotedTextFromSource(self: *const Self, node: *const Node) !?[]const u8 {
+        const src = self.source_buffer orelse return null;
+        const start = node.main_token.loc.start;
+        const end = node.main_token.loc.end;
+        if (end <= start or end > src.len) return null;
+        if (node.data.literal_string.quote_type != .double) return null;
+
+        var raw = src[start..end];
+        const wrapped = raw.len >= 2 and raw[0] == '"' and raw[raw.len - 1] == '"';
+        if (!wrapped and node.main_token.tag != .t_encapsed_and_whitespace) return null;
+        if (wrapped) raw = raw[1 .. raw.len - 1];
+
+        var out = try std.ArrayList(u8).initCapacity(self.allocator, raw.len);
+        errdefer out.deinit(self.allocator);
+        var i: usize = 0;
+        while (i < raw.len) {
+            const c = raw[i];
+            if (c != '\\' or i + 1 >= raw.len) { // ★末位落单的反斜杠：PHP 也原样保留
+                try out.append(self.allocator, c);
+                i += 1;
+                continue;
+            }
+            const n = raw[i + 1];
+            switch (n) {
+                'n' => {
+                    try out.append(self.allocator, '\n');
+                    i += 2;
+                },
+                'r' => {
+                    try out.append(self.allocator, '\r');
+                    i += 2;
+                },
+                't' => {
+                    try out.append(self.allocator, '\t');
+                    i += 2;
+                },
+                'v' => {
+                    try out.append(self.allocator, 0x0B);
+                    i += 2;
+                },
+                'f' => {
+                    try out.append(self.allocator, 0x0C);
+                    i += 2;
+                },
+                'e' => {
+                    try out.append(self.allocator, 0x1B);
+                    i += 2;
+                },
+                '\\' => {
+                    try out.append(self.allocator, '\\');
+                    i += 2;
+                },
+                '$' => {
+                    try out.append(self.allocator, '$');
+                    i += 2;
+                },
+                '"' => {
+                    try out.append(self.allocator, '"');
+                    i += 2;
+                },
+                '0'...'7' => {
+                    var val: u32 = 0;
+                    var j: usize = i + 1;
+                    while (j < raw.len and j <= i + 3 and raw[j] >= '0' and raw[j] <= '7') : (j += 1) {
+                        val = val * 8 + (raw[j] - '0');
+                    }
+                    try out.append(self.allocator, @truncate(val)); // ★按 256 取模＝PHP 口径（`\777`⇒0xFF）
+                    i = j;
+                },
+                'x', 'X' => {
+                    var val: u32 = 0;
+                    var j: usize = i + 2;
+                    while (j < raw.len and j <= i + 3 and std.ascii.isHex(raw[j])) : (j += 1) {
+                        const hd = std.fmt.charToDigit(raw[j], 16) catch break; // ★先落局部再累加：`x + f() catch break` 会把 break 的值硬塞进 error union（实测编译错）
+                        val = val * 16 + hd;
+                    }
+                    if (j == i + 2) { // 无有效十六进制位 ⇒ 原样 `\x`
+                        try out.append(self.allocator, '\\');
+                        try out.append(self.allocator, n);
+                        i += 2;
+                    } else {
+                        try out.append(self.allocator, @truncate(val));
+                        i = j;
+                    }
+                },
+                'u' => {
+                    var handled = false;
+                    if (i + 2 < raw.len and raw[i + 2] == '{') {
+                        var k: usize = i + 3;
+                        var cp: u32 = 0;
+                        var ndig: usize = 0;
+                        while (k < raw.len and raw[k] != '}') {
+                            if (!std.ascii.isHex(raw[k])) break;
+                            const ud = std.fmt.charToDigit(raw[k], 16) catch break;
+                            cp = cp * 16 + ud;
+                            k += 1;
+                            ndig += 1;
+                        }
+                        const closed = k < raw.len and raw[k] == '}';
+                        if (closed and ndig > 0 and ndig <= 6 and cp <= 0x10FFFF and !(cp >= 0xD800 and cp <= 0xDFFF)) {
+                            var buf: [4]u8 = undefined;
+                            const enc = std.unicode.utf8Encode(@intCast(cp), &buf) catch 0;
+                            if (enc > 0) {
+                                try out.appendSlice(self.allocator, buf[0..enc]);
+                                i = k + 1;
+                                handled = true;
+                            }
+                        }
+                    }
+                    if (!handled) { // ★无花括号／越界／代理位 ⇒ 只吐反斜杠，其后文本逐字保留
+                        try out.append(self.allocator, '\\');
+                        i += 1;
+                    }
+                },
+                else => { // 未识别转义 ⇒ 反斜杠＋原字符（PHP 与 parser 同口径，禁过解）
+                    try out.append(self.allocator, '\\');
+                    try out.append(self.allocator, n);
+                    i += 2;
+                },
+            }
+        }
+        return try out.toOwnedSlice(self.allocator);
+    }
+
+    /// F-89 统一 intake：双引号形回原文重解，单引号/反引号/无源文可用时沿用 parser 的值。
+    fn literalStringText(self: *const Self, node: *const Node) ![]const u8 {
+        if (try self.doubleQuotedTextFromSource(node)) |decoded| return decoded;
+        return self.getString(node.data.literal_string.value);
+    }
+
+    /// 非外抛版本：给**签名不可外抛**的折叠函数（`getConstantValue`／`evalConstantExprToTypeDef`）用。
+    /// ★解码只在分配失败时回退 parser 值——编译期分配失败本身就会让整次编译在后一步终止，
+    ///   这里不外抛是为了**不动那两个函数的签名**（13 个调用点牵连），不是吞错续跑。
+    fn literalStringTextOrParser(self: *const Self, node: *const Node) []const u8 {
+        return self.literalStringText(node) catch self.getString(node.data.literal_string.value);
+    }
+
     /// Generate IR for string literal
     fn generateLiteralString(self: *Self, node: *const Node) !Register {
         const string_id = node.data.literal_string.value;
 
         // Intern string in module
         if (self.module) |module| {
-            const str = self.getString(string_id);
+            // ★F-89：走 `literalStringText`（双引号原文重解）。★下面的 `无 module` 兜底分支**刻意不解**：
+            //   那条只能拿 AST 字符串表的 id，不建新 id 就无处登记解码后的串（实测仅在单测路径命中）。
+            const str = try self.literalStringText(node);
             const interned_id = try module.internString(str);
             return self.emitWithResult(.{ .const_string = interned_id }, .php_string);
         }
@@ -5915,10 +6117,10 @@ pub const IRGenerator = struct {
             if (lhs_node != null and rhs_node != null and
                 lhs_node.?.tag == .literal_string and rhs_node.?.tag == .literal_string)
             {
-                const lhs_id = lhs_node.?.data.literal_string.value;
-                const rhs_id = rhs_node.?.data.literal_string.value;
-                const lhs_str = self.getString(lhs_id);
-                const rhs_str = self.getString(rhs_id);
+                // ★F-89：这里**不能**用 `getString(id)`——那是 parser 的半成品值（`"\x41"` 仍是 4 字符），
+                //   折叠出来的就是错串。⇒ 两个操作数都改走 `literalStringText`（双引号回原文重解，单引号沿用）。
+                const lhs_str = try self.literalStringText(lhs_node.?);
+                const rhs_str = try self.literalStringText(rhs_node.?);
                 const folded = try std.fmt.allocPrint(self.allocator, "{s}{s}", .{ lhs_str, rhs_str });
                 const folded_id = try self.module.?.internString(folded);
                 return try self.emitWithResult(.{ .const_string = folded_id }, .php_string);
@@ -9581,7 +9783,7 @@ prop_name: ?[]const u8 = null,
         switch (node.tag) {
             .literal_int => return .{ .int = node.data.literal_int.value },
             .literal_float => return .{ .float = node.data.literal_float.value },
-            .literal_string => return .{ .string = self.getString(node.data.literal_string.value) },
+            .literal_string => return .{ .string = self.literalStringTextOrParser(node) }, // ★F-89
             .literal_bool => return .{ .bool = node.main_token.tag == .k_true },
             .literal_null => return .{ .null = {} },
             .array_init => {
@@ -9632,7 +9834,7 @@ prop_name: ?[]const u8 = null,
             .literal_float => .{ .float_val = node.data.literal_float.value },
             .literal_bool => .{ .bool_val = node.main_token.tag == .k_true },
             .literal_null => .{ .is_null = true },
-            .literal_string => .{ .string_val = self.getString(node.data.literal_string.value) },
+            .literal_string => .{ .string_val = self.literalStringTextOrParser(node) }, // ★F-89
             .class_constant_access => blk: {
                 // 支持类常量折叠
                 const access_data = node.data.class_constant_access;
@@ -9754,6 +9956,11 @@ prop_name: ?[]const u8 = null,
                 const operand = self.getConstantValue(operand_node) orelse break :blk_un null;
                 break :blk_un switch (un.op) {
                     .minus => if (operand.int_val) |v| ConstantValue{ .int_val = -%v } else if (operand.float_val) |v| ConstantValue{ .float_val = -v } else null,
+                    // ★F-73 甲型补的第二形：一元 `+`（`public $p = +1.0;`）。运行期支 `:6320` 早就是
+                    //   "unary plus is a no-op"，折叠支此前**没写** ⇒ 整条默认值折不出来而静默变 NULL。
+                    //   ★刻意只做恒等：串操作数（`+"5"`）的类型转换是**表达式求值**那条路的既有范围，
+                    //   不在本支扩大语义（要改就连 `.variable` 一起改，另案）。
+                    .plus => operand,
                     .bang => if (operand.bool_val) |v| ConstantValue{ .bool_val = !v } else null,
                     .tilde => if (operand.int_val) |v| ConstantValue{ .int_val = ~v } else null,
                     else => null,
