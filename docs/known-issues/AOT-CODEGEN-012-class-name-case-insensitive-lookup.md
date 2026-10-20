@@ -7081,10 +7081,63 @@ AOT 修前＝**六面全静默给 `0`／`0.0`**（值错＋诊断缺失双缺口
 ### 106.5 代次与影子预置
 | 侧 | nlk | opt | tpl | 二进制 |
 |---|---|---|---|---|
-| 修前（R-196） | `0d598ff8…` | `36f354f4…` | `fda7f3ee…` | `/tmp/f132_bins/php-interpreter.prefix`（c232 复现 `fin=` 空） |
-| 修后 | `bcaf4e3b…` | `50c5fa36…` | `fda7f3ee…` | `/tmp/f132_bins/php-interpreter.postfix` |
+| 修前（R-196） | `0d598ff8…` | `36f354f4…` | `fda7f3ee…` | `/tmp/f132_bins/php-interpreter.prefix`（c232 复现 `fin=` 空，md5 `a919798b…`） |
+| 修后①＋②（postfix） | `bcaf4e3b…` | `50c5fa36…` | `fda7f3ee…` | `/tmp/f132_bins/php-interpreter.postfix`（md5 `82194f5b…`）；★该态已由老铁提交为 `05c9318`（2026-10-20 14:27） |
+| **修后①＋②＋③（leakfix2，最终）** | **`9fba50b9…`** | `50c5fa36…` | `fda7f3ee…` | `/tmp/f132_bins/php-interpreter.leakfix2`（md5 `21b70365…`）；③ 仅改 `native_linker.zig`（+13/−2，**未提交**） |
 
-其余三源（ir `1fb6b01f…`／irg `a5751960…`／parser `70e80f18…`）两代相同。★二进制 md5 不作代次身份：同一源码重建得到 `665f23da…` ≠ 存档 `82194f5b…`，行为逐字相同。
+其余三源（ir `1fb6b01f…`／irg `a5751960…`／parser `70e80f18…`／analysis `631e2b4f…`）三代相同。★二进制 md5 不作代次身份：同一源码重建得到 `665f23da…` ≠ 存档 `82194f5b…`，行为逐字相同。
+
+### 106.6 ★第三缺陷：store value 的引用从未释放（①② 修好后才显形）
+
+**发现路径**：postfix（①＋②）语义已全绿后，泄漏探针出现**线性增长的 RSS**，而 prefix 平坦 ⇒ 不是既存泄漏，是①②让「堆值跨异常边存活」后暴露出的**第三枚独立缺陷**（内存在每次执行 store 时漏一份）。
+
+| 探针（`--no-debug-info`，`/usr/bin/time -l`） | prefix | postfix | leakfix2 |
+|---|---|---|---|
+| c241（每次调用 1 枚 8 字节堆串 store，try 体执行、无抛出）N=250k | 3,047,424 | 15,089,664 | **3,047,424** |
+| c241 N=1M | 3,047,424 | 51,101,696 | **3,047,424** |
+| c236（每次调用 1 枚 8 字节堆串 store ＋ try 体内字面量赋值，无抛出）N=250k | 3,063,808 | 15,106,048 | **3,063,808** |
+| c236 N=1M | 3,063,808 | 51,118,080 | **3,063,808** |
+| 增量／调用 | 0 | **≈48 B**（＝8 字节串的分配器对齐后大小） | **0** |
+
+**根因（读发射器，非推测）**：
+1. store 的发射路径对槽位**先 `_ = (src).retain()` 再 `slot.release(); val_assign/直接赋值`**（`native_linker.zig:20315-20325`，旧值释放 `:20343-20344`）⇒ 槽位持有**独立**引用，临时寄存器自己那份引用没有任何人消费；
+2. 临时引用的释放点只有按 liveness 的「最后使用释放」`releaseDeadOperands`（`:19712`，由 `generateInstructionSimple` 在每条指令后调用，`:25240-25247`，上下文由各发射路径设置如 `:18222`），以及块尾／出口清理；
+3. `releaseDeadOperands` 对所有 `.store` 直接 `{}`（`ptr` 被 mem2reg 改写，不动是对的；`value` 被连带跳过），而块尾与出口清理只处理 alloca 槽位、单块出口对 `stored_to_alloca` 另有豁免（`:6314`/`:6364`/`:6470`/`:6517`）⇒ store 的 value 在两条路径上都没有释放点，每执行一次 store 就漏一份引用。
+★这解释了为什么它**只在①②修好后**才有量：②之前该变量被提升为寄存器 ⇒ store 的 value **不**进 `stored_to_alloca`，块尾 cleanup 会释放临时引用；②把它落回 alloca 后，value 被记为 `stored_to_alloca` 而豁免 cleanup（`:6311` 的注释即「alloca 会负责 cleanup」），但 store 对槽位做的是**额外 retain**（`:20385-20392`）而非接管 ⇒ 临时引用无人释放。
+
+**修法（`native_linker.zig:19749-19761`，仅 `releaseDeadOperands` 一处）**：`.store` 在「非 `through_ref` 且 `ptr` 不被目标槽托管」时把 `op.value.id` 纳入最后使用释放。托管判定四路（`ref_param_alloca_map`／`current_make_ref_allocas`／`current_ref_capture_allocas`／`current_foreach_ref_allocas`）——这些写穿路径的 retain 发生在 `val_assign`／槽位**内部**（例：`target` 为 Ref 时 `val_assign` 先 `release` 再 `retain`，`runtime_lib_template.zig:3015-3024`），发射器**未在外部** retain；临时引用是否已被槽消费取决于路径，按普通赋值释放可能 UAF ⇒ 一律不在本轮回放（保守口径，残余泄漏未测，见 §106.8）。
+★**宽版（只判 `through_ref`）被自我否证**：它会把「ref 形参 alloca 重定向」「`php_ref_assign_ptr`」「`ref_aware_store`」三条外部不 retain 的路径当普通赋值释放，属于典型"能编译过就行"的投机式写法；收窄后由 c243 六径守卫实测兜底。
+
+**守卫探针 c243**（六径：A ref 形参赋值／B `make_ref`／C 闭包按引用捕获／D `foreach` 按引用／E 赋值后值仍被读／F 原 F-132 面），leakfix2 输出与 PHP 8.5.8 **逐字相同**（`A:qqqq…`／`B:rrrr…`／`C:nnnn…`／`D:zzzz,zzzz`／`E:kkkk…|kkkk…!`／`F:ok4`）。
+
+### 106.7 验收链读数（R-197 收口，leakfix2 代次）
+| 腿 | 读数 | 判据 |
+|---|---|---|
+| CTB（14 臂） | `CTB_JOIN pre=14 post=14 inter=14 chg=9 diff_to_same=9 same_to_diff=0`；9 枚＝`c1…c7 g5 g6` | 诊断面不因 ③ 回退：**0 枚 SAME→DIFF** |
+| 十邻门（逐臂 join，代次相符 pre/post） | `c164 40/40/40`／`c073 19`／`c154 9`／`c146 12`／`c117 32`／`c067 56`／`c062 51`／`c093 32`／`c012 88`／`c047 209`（`pre=post=inter`），十门全部 `verdict_chg=0 diff_to_same=0 same_to_diff=0 missing_pre=0 missing_post=0` | 邻门零转移 |
+| 主回归 | `rc=0 wall=808s`；`SELF_CHECK_OK rows=68 uniq=68 total=68`；报告表 **Total 68 / Pass 67 / Skip 1 / Fail(Compile|Runtime|Diff) 0**（skip＝f004 PHP 自身 rc=255 的既有基线；harness 横幅 `PASS=68 FAIL=0` 把 Skip 计入，引用用报告表） | 无回归 |
+| 代次 | 链头/链尾各一次 `GEN_OK`（六枚源码 md5，nlk `9fba50b9…`）⇒ 跑动中源码未变 | 代次身份成立 |
+| 影子 | `SHADOW_LF2_DONE rows=68 invalid=0 col_md5=ea9a85bb…`；对 prefix `COLJOIN_PRE drift=10`、对 postfix `COLJOIN_POST drift=10`；10 份 diff 全 `add>0 del=0 non_release_lines=0`（§106.6 三枚纯 ③＋七枚 ①②） | 只增 release 行 |
+
+★链 `c244` 在 CTB 之后中断，根因是链脚本自身：`local g="$1" tsv="$OUTDIR/${g}_post.tsv"` 在 `set -u` 下，bash 先展开**所有**右侧再赋值 ⇒ `${g}` unbound，进程静默退出（stderr 未进日志，日志停在段标题）。修复＝拆成两行 `local`，c245 续跑十邻门＋主回归（`CHAIN_DONE_CONT wall=3246s`）。CTB 腿的 TSV 未受影响、直接沿用。
+
+**性能（c236，N=2M，三代交错各 3 次，同空闲时段）**：
+| 代 | 三次（s） | 中位 | 相对 prefix |
+|---|---|---|---|
+| prefix | 3.13／2.67／2.66 | **2.67** | — |
+| postfix（①②） | 3.24／2.93／2.94 | **2.94** | +10.1%（②的 alloca 化正确性代价） |
+| leakfix2（①②③） | 3.31／2.96／2.96 | **2.96** | +10.9%（③ 在 ② 之上 +0.7%） |
+| 输出 | 九次全部 `n=2000000 sum=22000000` | — | 逐字相同 |
+
+### 106.8 残余与登记（本批不修，均已实测留数）
+| 项 | 现场 | 实测 | 结论／处置 |
+|---|---|---|---|
+| **F-133**（新立） | c234：每次调用都抛异常 | N=1M RSS：prefix 667,025,408／postfix 666,992,640／leakfix2 667,025,408 | **三代同量级 ⇒ 既存、与 F-132 无关**；本轮不修，登记待排 |
+| typed 形参所有权 | c242：`function f(string $s)`，调用方传 `str_repeat(...)` | RSS 250k 29,097,984 → 1M 107,118,592 ＝ **≈104 B／调用**；prefix 即存在 | 既存泄漏（形参未被 cleanup 集合覆盖），本轮不修 |
+| `through_ref` 保守豁免 | store 的写穿路径不在本轮释放 | 未测 | 口径保守（可能仍漏），待专门定价后再收 |
+| `--optimize=release-fast` | 本批全部读数均在默认档 `--compile --no-debug-info` | — | F-93 禁混测，不属本批 |
+
+
 
 
 

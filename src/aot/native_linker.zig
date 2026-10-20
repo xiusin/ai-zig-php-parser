@@ -228,6 +228,10 @@ pub const NativeLinker = struct {
     /// 只有在含抑制作用域的函数里，异常清理路径才需要清零抑制计数 ⇒ 无 `@` 的函数**生成码一字不变**（影子中性）。
     current_func_has_suppression: bool = false,
     current_cleanup_regs: ?[]const usize = null,
+    /// F-133：调用类指令（call/method_call/static_method_call/new_object）的结果寄存器。
+    /// 这些指令按契约返回 +1 自有引用；`.ret` 时除返回值外必须归还。
+    /// 其它 php_value 临时值（box/load/select-ref_ptr 等）可能是借用，保持不释放。
+    current_owned_call_result_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_alloca_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_this_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_var_name_map: ?*const std.AutoHashMap(usize, []const u8) = null,
@@ -285,6 +289,7 @@ pub const NativeLinker = struct {
     current_gen_block_idx: ?usize = null, // 当前正在生成代码的基本块索引（用于 releaseDeadOperands）
     current_gen_inst_idx: ?usize = null, // 当前正在生成代码的指令索引（用于 releaseDeadOperands）
     current_catch_used_regs: ?*const std.AutoHashMap(usize, void) = null, // catch块中引用的寄存器集合（cleanup时跳过）
+    current_exception_owned_regs: ?[]const usize = null, // F-133: catch_/get_exception 结果寄存器（持有 getException() 转移的异常引用，升序）
     current_cond_br_source_block: ?usize = null, // 嵌套cond_br的源块索引（用于PHI incoming选择）
     current_cond_br_header_idx: ?usize = null, // 嵌套循环头块索引（用于while内重生成非phi指令）
     force_nested_loop: bool = false, // 由 generateBrChain 嵌套循环处理设置，强制 generateCondBrBlock 生成 while(true)
@@ -916,6 +921,22 @@ pub const NativeLinker = struct {
                 } else {
                     try writer.print("{s}if (!reg_{d}.isNull()) reg_{d}.release(runtime.runtime_allocator);\n", .{ indent, reg_id, reg_id });
                 }
+            }
+        }
+        // F-133: setException 已 retain 一份；该路径立即返回，异常对象寄存器自身引用在此归还
+        //（上面的 cleanup 循环按设计跳过 ex_reg）。
+        if (self.isAllocaReg(ex_reg.id)) {
+            if (self.shouldReleaseReg(ex_reg.id) and !self.isRefParamAlloca(ex_reg.id)) {
+                try writer.print("{s}reg_{d}.*.release(runtime.runtime_allocator);\n", .{ indent, ex_reg.id });
+            }
+        } else {
+            const ex_is_this = if (self.current_this_regs) |tr| tr.contains(ex_reg.id) else false;
+            const ex_is_ref_ptr = if (self.current_ref_ptr_regs) |rpr| rpr.contains(ex_reg.id) else false;
+            const ex_is_ref_param = self.isRefParamAlloca(ex_reg.id);
+            if (!ex_is_this and !ex_is_ref_ptr and !ex_is_ref_param and
+                self.shouldReleaseReg(ex_reg.id) and self.regMayHeap(ex_reg.id))
+            {
+                try writer.print("{s}if (!reg_{d}.isNull()) reg_{d}.release(runtime.runtime_allocator);\n", .{ indent, ex_reg.id, ex_reg.id });
             }
         }
         try writer.print("{s}return error.RuntimeError;\n", .{indent});
@@ -6306,6 +6327,26 @@ pub const NativeLinker = struct {
             try cleanup_registers.append(self.allocator, key.*);
         }
 
+        // F-133: 收集调用类结果寄存器（自有 +1 引用）。`.throw` 路径早已统一归还非 alloca
+        // 死临时值，`.ret` 此前只清 alloca ⇒ 成功返回路径每调用泄漏一份调用结果。
+        var owned_call_result_regs = std.AutoHashMap(usize, void).init(self.allocator);
+        defer owned_call_result_regs.deinit();
+        for (func.blocks.items) |blk_owned| {
+            for (blk_owned.instructions.items) |inst_owned| {
+                const res_owned = inst_owned.result orelse continue;
+                switch (inst_owned.op) {
+                    .call, .method_call, .static_method_call, .new_object => try owned_call_result_regs.put(res_owned.id, {}),
+                    // 变量读取（非 no_deref）在发射时显式 retain 结果 ⇒ 同样自带 +1
+                    .load => |ld| {
+                        if (!ld.no_deref) try owned_call_result_regs.put(res_owned.id, {});
+                    },
+                    else => {},
+                }
+            }
+        }
+        self.current_owned_call_result_regs = &owned_call_result_regs;
+        defer self.current_owned_call_result_regs = null;
+
         self.current_cleanup_regs = cleanup_registers.items;
         defer self.current_cleanup_regs = null;
 
@@ -6454,6 +6495,27 @@ pub const NativeLinker = struct {
                                     defer self.allocator.free(_f);
                                     try code.appendSlice(self.allocator, _f);
                                 }
+                            }
+                        }
+
+                        // F-133: setException 已 retain 一份；该路径立即返回，异常对象寄存器自身引用在此归还
+                        //（上面的 cleanup 循环按设计跳过 ex_reg；镜像 writeThrowTerminator）
+                        if (alloca_registers.contains(ex_reg.id)) {
+                            if (self.shouldReleaseReg(ex_reg.id) and !self.isRefParamAlloca(ex_reg.id)) {
+                                const _f = try std.fmt.allocPrint(self.allocator, "    reg_{d}.*.release(runtime.runtime_allocator);\n", .{ex_reg.id});
+                                defer self.allocator.free(_f);
+                                try code.appendSlice(self.allocator, _f);
+                            }
+                        } else {
+                            const ex_is_this = if (self.current_this_regs) |tr| tr.contains(ex_reg.id) else false;
+                            const ex_is_ref_ptr = if (self.current_ref_ptr_regs) |rpr| rpr.contains(ex_reg.id) else false;
+                            const ex_is_ref_param = self.isRefParamAlloca(ex_reg.id);
+                            if (!ex_is_this and !ex_is_ref_ptr and !ex_is_ref_param and
+                                self.shouldReleaseReg(ex_reg.id) and self.regMayHeap(ex_reg.id))
+                            {
+                                const _f = try std.fmt.allocPrint(self.allocator, "    if (!reg_{d}.isNull()) reg_{d}.release(runtime.runtime_allocator);\n", .{ ex_reg.id, ex_reg.id });
+                                defer self.allocator.free(_f);
+                                try code.appendSlice(self.allocator, _f);
                             }
                         }
 
@@ -18009,10 +18071,47 @@ pub const NativeLinker = struct {
         self.current_cleanup_regs = cleanup_regs;
         self.current_alloca_regs = alloca_regs;
         const prev_catch_used_regs = self.current_catch_used_regs;
+        // F-133：catch_/get_exception 的结果寄存器持有 getException() 转移来的异常引用。
+        // 该引用的生命周期止于 catch 变量作用域退出（return / 离开 catch 块 / rethrow）；
+        // 不释放则每次抛异常泄漏一个异常对象（c234/c248 实测 ≈664 B/throw）。
+        // 只登记整个函数中唯一定义的寄存器，避免寄存器复用导致误释放非异常值。
+        var exception_owned_regs: std.ArrayList(usize) = .empty;
+        defer exception_owned_regs.deinit(self.allocator);
+        {
+            var def_counts = std.AutoHashMap(usize, u32).init(self.allocator);
+            defer def_counts.deinit();
+            for (func.blocks.items) |blk| {
+                for (blk.instructions.items) |inst| {
+                    if (inst.result) |r| {
+                        const gop = try def_counts.getOrPut(r.id);
+                        if (!gop.found_existing) gop.value_ptr.* = 0;
+                        gop.value_ptr.* += 1;
+                    }
+                }
+            }
+            for (func.blocks.items) |blk| {
+                for (blk.instructions.items) |inst| {
+                    switch (inst.op) {
+                        .catch_, .get_exception => {
+                            if (inst.result) |r| {
+                                if ((def_counts.get(r.id) orelse 0) == 1) {
+                                    try exception_owned_regs.append(self.allocator, r.id);
+                                }
+                            }
+                        },
+                        else => {},
+                    }
+                }
+            }
+            std.mem.sort(usize, exception_owned_regs.items, {}, std.sort.asc(usize));
+        }
+        const prev_exception_owned_regs = self.current_exception_owned_regs;
+        self.current_exception_owned_regs = exception_owned_regs.items;
         defer {
             self.current_cleanup_regs = prev_cleanup_regs;
             self.current_alloca_regs = prev_alloca_regs;
             self.current_catch_used_regs = prev_catch_used_regs;
+            self.current_exception_owned_regs = prev_exception_owned_regs;
         }
 
         var writer = ListWriter{ .list = code, .allocator = self.allocator };
@@ -19443,6 +19542,36 @@ pub const NativeLinker = struct {
         }
     }
 
+    /// F-133：释放 catch_/get_exception 转移给寄存器的那一份异常引用。
+    /// dead_only=true 时只释放块出口已死亡的寄存器（br/cond_br/switch/throw 路径），
+    /// false 时用于函数返回（此时除返回值外全部死亡）。终止符自身操作数不在
+    /// live_out 中，故通过 except_reg 排除。
+    fn emitExceptionOwnedReleases(self: *Self, writer: anytype, block_idx: usize, dead_only: bool, except_reg: ?usize, alloca_regs: *const std.AutoHashMap(usize, void), indent: []const u8) !void {
+        const owned = self.current_exception_owned_regs orelse return;
+        for (owned) |reg_id| {
+            if (except_reg) |er| {
+                if (er == reg_id) continue;
+            }
+            if (alloca_regs.contains(reg_id)) continue;
+            if (!self.shouldReleaseReg(reg_id)) continue;
+            if (!self.regMayHeap(reg_id)) continue;
+            if (self.current_this_regs) |tr| {
+                if (tr.contains(reg_id)) continue;
+            }
+            if (self.current_ref_ptr_regs) |rpr| {
+                if (rpr.contains(reg_id)) continue;
+            }
+            if (self.ref_param_alloca_map) |map| {
+                if (map.get(reg_id)) |_| continue;
+            }
+            if (dead_only) {
+                const liveness = self.current_liveness orelse continue;
+                if (liveness.isLiveAtBlockExit(block_idx, reg_id)) continue;
+            }
+            try writer.print("{s}if (!reg_{d}.isNull()) {{ reg_{d}.release(runtime.runtime_allocator); reg_{d} = runtime.Value.initNull(); }}\n", .{ indent, reg_id, reg_id, reg_id });
+        }
+    }
+
     /// 生成终止指令（简化版，用于状态机）
     fn generateTerminatorSimple(self: *Self, code: *std.ArrayList(u8), term: IR.Terminator, cleanup_regs: []const usize, alloca_regs: *const std.AutoHashMap(usize, void), func: *const IR.Function, current_block_idx: usize, _: bool) !void {
         var writer = ListWriter{ .list = code, .allocator = self.allocator };
@@ -19468,10 +19597,25 @@ pub const NativeLinker = struct {
                             // 其他寄存器（临时值）可能被返回值引用，不安全释放
                             if (alloca_regs.contains(reg_id)) {
                                 try writer.print("                reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
+                            } else if (self.current_owned_call_result_regs) |owned| {
+                                // F-133: 调用类结果自带 +1 引用 ⇒ 返回后（非返回值）必须归还。
+                                // 仅限已证明自有的调用结果，借用性临时值（box/load/…）仍不释放。
+                                if (owned.contains(reg_id) and self.regMayHeap(reg_id)) {
+                                    const dead_at_exit = if (self.current_liveness) |lv|
+                                        !lv.isLiveAtBlockExit(current_block_idx, reg_id)
+                                    else
+                                        false;
+                                    if (dead_at_exit) {
+                                        try writer.print("                if (!reg_{d}.isNull()) {{ reg_{d}.release(runtime.runtime_allocator); reg_{d} = runtime.Value.initNull(); }}\n", .{ reg_id, reg_id, reg_id });
+                                    }
+                                }
                             }
                         }
                     }
                 }
+                // F-133: 返回后 catch_/get_exception 结果寄存器不再使用（返回值除外）
+                const ret_except_reg: ?usize = if (ret_val) |r| @as(usize, r.id) else null;
+                try self.emitExceptionOwnedReleases(writer, current_block_idx, false, ret_except_reg, alloca_regs, "                ");
                 if (ret_val) |reg| {
                     // 始终返回原始 Value，不做类型转换
                     const is_alloca = alloca_regs.contains(reg.id);
@@ -19490,6 +19634,8 @@ pub const NativeLinker = struct {
                 }
             },
             .br => |target| {
+                // F-133: 块出口已死亡的 catch_/get_exception 引用在此释放（phi incoming 由 live_out 保护）
+                try self.emitExceptionOwnedReleases(writer, current_block_idx, true, null, alloca_regs, "                ");
                 // 找到目标块的索引
                 var target_idx: ?usize = null;
                 const target_ptr = @intFromPtr(target);
@@ -19553,6 +19699,9 @@ pub const NativeLinker = struct {
                     return;
                 }
 
+                // F-133: 条件寄存器是终止符操作数（不在 live_out 中），显式排除
+                try self.emitExceptionOwnedReleases(writer, current_block_idx, true, @as(usize, br.cond.id), alloca_regs, "                ");
+
                 try writer.writeAll("                if (");
                 try self.writeConditionExpr(writer, br.cond.id, br.cond.type_);
                 try writer.writeAll(") {\n");
@@ -19568,6 +19717,8 @@ pub const NativeLinker = struct {
                 try writer.print("                    prev_block = current_block;\n                    current_block = {d};\n                }}\n", .{else_idx});
             },
             .switch_ => |sw| {
+                // F-133: switch 值寄存器是终止符操作数（不在 live_out 中），显式排除
+                try self.emitExceptionOwnedReleases(writer, current_block_idx, true, @as(usize, sw.value.id), alloca_regs, "                ");
                 try writer.writeAll("                prev_block = current_block;\n");
 
                 // 查找 switch value 对应的 global_get 变量名
@@ -19668,9 +19819,50 @@ pub const NativeLinker = struct {
                     }
                 }
 
+                // F-133: setException 已 retain 一份；非 alloca 抛出值自身的引用在
+                // 寄存器死亡后必须归还，否则每次 throw 泄漏一份对象引用。
+                // catch 自有寄存器（getException 转移而来）由下方 emitExceptionOwnedReleases 负责，避免双释放。
+                const ex_is_owned = if (self.current_exception_owned_regs) |owned| blk: {
+                    for (owned) |owned_id| {
+                        if (owned_id == ex_reg.id) break :blk true;
+                    }
+                    break :blk false;
+                } else false;
+                if (!is_alloca and !ex_is_owned and self.shouldReleaseReg(ex_reg.id) and self.regMayHeap(ex_reg.id)) {
+                    const ex_is_this = if (self.current_this_regs) |tr| tr.contains(ex_reg.id) else false;
+                    const ex_is_ref_ptr = if (self.current_ref_ptr_regs) |rpr| rpr.contains(ex_reg.id) else false;
+                    const ex_is_ref_param = self.isRefParamAlloca(ex_reg.id);
+                    const ex_live_at_exit = if (self.current_liveness) |lv| lv.isLiveAtBlockExit(current_block_idx, ex_reg.id) else false;
+                    if (!ex_is_this and !ex_is_ref_ptr and !ex_is_ref_param and !ex_live_at_exit) {
+                        try writer.print("                if (!reg_{d}.isNull()) {{ reg_{d}.release(runtime.runtime_allocator); reg_{d} = runtime.Value.initNull(); }}\n", .{ ex_reg.id, ex_reg.id, ex_reg.id });
+                    }
+                }
+
+                // F-133: 抛出后 catch_/get_exception 结果寄存器已死亡。
+                // setException 已 retain，非 alloca 的抛出值临时引用可安全释放（alloca 由 cleanup 跳过）。
+                try self.emitExceptionOwnedReleases(writer, current_block_idx, true, null, alloca_regs, "                ");
+
                 if (self.current_exception_handler) |handler_idx| {
                     try writer.print("                current_block = {d};\n", .{handler_idx});
                 } else {
+                    // F-133: 逃逸 throw 令函数立即返回，局部变量槽没有后续使用者；不清理则每调用泄漏一份
+                    var wrote_local_cleanup = false;
+                    for (cleanup_regs) |reg_id| {
+                        if (!alloca_regs.contains(reg_id)) continue;
+                        if (!self.shouldReleaseReg(reg_id)) continue;
+                        if (self.isRefParamAlloca(reg_id)) continue;
+                        if (self.current_ref_ptr_regs) |rpr| {
+                            if (rpr.contains(reg_id)) continue;
+                        }
+                        if (self.current_this_regs) |tr| {
+                            if (tr.contains(reg_id)) continue;
+                        }
+                        if (!wrote_local_cleanup) {
+                            try code.appendSlice(self.allocator, "                // Cleanup locals before escaping throw\n");
+                            wrote_local_cleanup = true;
+                        }
+                        try writer.print("                reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg_id});
+                    }
                     // 返回 null 而非 error，让调用方的 hasException() 检查路由到 catch 块
                     try code.appendSlice(self.allocator, "                return runtime.Value.initNull();\n");
                 }
@@ -19746,8 +19938,19 @@ pub const NativeLinker = struct {
             .call_indirect => {},
             // load 的 ptr 被结果引用（bitwise copy），不释放
             .load => {},
-            // store 的 ptr 被修改（mem2reg），不释放 ptr 和 value
-            .store => {},
+            // store 的 ptr 被修改（mem2reg），不释放 ptr；
+            // 只有正常值赋值路径（发射器先 retain 再 val_assign，槽位持有独立引用）才按最后使用释放 value；
+            // 引用写穿/捕获/make_ref/foreach 路径由目标槽自行管理所有权，value 不在此释放
+            .store => |op| {
+                const ptr_managed_by_target =
+                    (if (self.ref_param_alloca_map) |m| m.contains(op.ptr.id) else false) or
+                    (if (self.current_make_ref_allocas) |m| m.contains(op.ptr.id) else false) or
+                    (if (self.current_ref_capture_allocas) |m| m.contains(op.ptr.id) else false) or
+                    (if (self.current_foreach_ref_allocas) |m| m.contains(op.ptr.id) else false);
+                if (!op.through_ref and !ptr_managed_by_target) {
+                    try used_regs.append(self.allocator, op.value.id);
+                }
+            },
             // make_ref 的 ptr 被修改，不释放
             .make_ref => {},
             // global_set 的 value 被全局变量管理，不释放
@@ -19787,8 +19990,11 @@ pub const NativeLinker = struct {
             },
             // property_set 的 object 可能被修改，不释放
             .property_set => {},
-            // method_call 的 object 被结果引用，args 可能被消费，不释放
-            .method_call => {},
+            // method_call: args 可能被消费（不释放）；receiver 不由 php_object_call 消费，
+            // 且 `$this` 返回路径会在 .ret 处 retain ⇒ receiver 临时值死亡后可安全释放。
+            .method_call => |op| {
+                try used_regs.append(self.allocator, op.object.id);
+            },
             // static_method_call 的 args 可能被消费，不释放
             .static_method_call => {},
             .static_property_set => |op| {

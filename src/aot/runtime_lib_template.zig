@@ -697,17 +697,25 @@ pub fn setException(ex: Value) void {
         var has_file = false;
         if (obj.getProperty("file")) |val| {
             has_file = !val.isNull();
+            // F-133: getProperty 返回 +1 引用；仅用于存在性判断，必须归还，
+            // 否则每次 setException（如 catch 内 rethrow）漏一枚源文件路径字符串
+            val.release(runtime_allocator);
         }
         if (!has_file) {
             const file_str = PHPString.init(runtime_allocator, src_file) catch null;
             if (file_str) |s| {
-                obj.setProperty("file", Value.initString(s)) catch {};
+                // setProperty 会 retain 一份进属性表；init 的这份所有权必须在此归还，
+                // 否则每次抛异常都漏掉一枚源文件路径字符串（F-133）
+                const file_val = Value.initString(s);
+                defer file_val.release(runtime_allocator);
+                obj.setProperty("file", file_val) catch {};
             }
         }
 
         var has_line = false;
         if (obj.getProperty("line")) |val| {
             has_line = !val.isNull();
+            val.release(runtime_allocator);
         }
         if (!has_line) {
             obj.setProperty("line", Value.initInt(@intCast(src_line))) catch {};
@@ -1441,6 +1449,9 @@ fn gcDestroyArray(a: *PHPArray) void {
 }
 
 fn gcDestroyObject(o: *PHPObject) void {
+    if (alloc_counters.php_object_live_objects > 0) {
+        alloc_counters.php_object_live_objects -= 1;
+    }
     if (global_object_registry) |*registry| {
         var i: usize = 0;
         while (i < registry.items.len) : (i += 1) {
@@ -2916,7 +2927,7 @@ pub const Value = struct {
         }
         if (self.isFunction()) {
             // 函数转字符串也应该抛出异常（PHP 8+）
-            _ = try throwException("Object of class Closure could not be converted to string", allocator);
+            try throwExceptionDiscard("Object of class Closure could not be converted to string", allocator);
             return PHPString.init(allocator, "");
         }
         if (Value_isObject(self)) {
@@ -6025,7 +6036,7 @@ pub fn php_div(lhs: Value, rhs: Value) !Value {
         const a = lhs.toInt();
         const b = rhs.toInt();
         if (b == 0) {
-            _ = try throwThrowable("DivisionByZeroError", "Division by zero", runtime_allocator);
+            try throwThrowableDiscard("DivisionByZeroError", "Division by zero", runtime_allocator);
             return Value.initNull();
         }
         if (@mod(a, b) == 0) {
@@ -6039,7 +6050,7 @@ pub fn php_div(lhs: Value, rhs: Value) !Value {
     const a = lhs.toFloat();
     const b = rhs.toFloat();
     if (b == 0.0) {
-        _ = try throwThrowable("DivisionByZeroError", "Division by zero", runtime_allocator);
+        try throwThrowableDiscard("DivisionByZeroError", "Division by zero", runtime_allocator);
         return Value.initNull();
     }
     return Value.initFloat(a / b);
@@ -6060,7 +6071,7 @@ pub fn php_mod(lhs: Value, rhs: Value) !Value {
     const a = lhs.toInt();
     const b = rhs.toInt();
     if (b == 0) {
-        _ = try throwThrowable("DivisionByZeroError", "Modulo by zero", runtime_allocator);
+        try throwThrowableDiscard("DivisionByZeroError", "Modulo by zero", runtime_allocator);
         return Value.initNull();
     }
     return Value.initInt(@rem(a, b));
@@ -6109,7 +6120,7 @@ fn throwBitwiseOperandError(lhs: Value, rhs: Value, op: []const u8) Value {
         "Unsupported operand types: {s} {s} {s}",
         .{ operandTypeName(first), op, operandTypeName(second) },
     ) catch "Unsupported operand types";
-    _ = throwThrowable("TypeError", msg, runtime_allocator) catch {};
+    throwThrowableDiscardCatch("TypeError", msg, runtime_allocator);
     return Value.initNull();
 }
 
@@ -6119,13 +6130,13 @@ fn throwBitNotError(v: Value) Value {
     const kind: []const u8 = if (v.isBool()) (if (v.asBool()) "true" else "false") else operandTypeName(v);
     var buf: [512]u8 = undefined;
     const msg = std.fmt.bufPrint(&buf, "Cannot perform bitwise not on {s}", .{kind}) catch "Cannot perform bitwise not";
-    _ = throwThrowable("TypeError", msg, runtime_allocator) catch {};
+    throwThrowableDiscardCatch("TypeError", msg, runtime_allocator);
     return Value.initNull();
 }
 
 /// ★F-58：负移位计数 ⇒ 可捕获 `ArithmeticError: Bit shift by negative number`（实测 `1 << -1`、`8 >> -1`）。
 fn throwBitShiftNegativeError() Value {
-    _ = throwThrowable("ArithmeticError", "Bit shift by negative number", runtime_allocator) catch {};
+    throwThrowableDiscardCatch("ArithmeticError", "Bit shift by negative number", runtime_allocator);
     return Value.initNull();
 }
 
@@ -6486,7 +6497,7 @@ fn throwUnsupportedOperandError(lhs: Value, rhs: Value, op: []const u8) Value {
         .{ operandTypeName(lhs), op, operandTypeName(rhs) },
     ) catch "Unsupported operand types";
     // 置异常失败只可能是分配失败：此时仍然返回 null，绝不回退成 exit(255)（那就退回旧缺陷形态）
-    _ = throwThrowable("TypeError", msg, runtime_allocator) catch {};
+    throwThrowableDiscardCatch("TypeError", msg, runtime_allocator);
     return Value.initNull();
 }
 
@@ -6501,7 +6512,7 @@ fn throwNegateOperandError(val: Value) Value {
         .{operandTypeName(val)},
     ) catch "Unsupported operand types";
     // 置异常失败只可能是分配失败：此时仍然返回 null，绝不回退成 exit(255)（那就退回旧缺陷形态）
-    _ = throwThrowable("TypeError", msg, runtime_allocator) catch {};
+    throwThrowableDiscardCatch("TypeError", msg, runtime_allocator);
     return Value.initNull();
 }
 
@@ -6518,7 +6529,7 @@ fn throwCannotIncDecError(val: Value, action: []const u8) Value {
         "Cannot {s} {s}",
         .{ action, operandTypeName(val) },
     ) catch "Cannot increment";
-    _ = throwThrowable("TypeError", msg, runtime_allocator) catch {};
+    throwThrowableDiscardCatch("TypeError", msg, runtime_allocator);
     return Value.initNull();
 }
 
@@ -6559,7 +6570,7 @@ fn rejectParamType(
         "{s}(): Argument #{d} (${s}) must be of type {s}, {s} given",
         .{ fn_name, arg_no, param_name, expected, operandTypeName(val) },
     ) catch "TypeError";
-    _ = throwThrowable("TypeError", msg, runtime_allocator) catch {};
+    throwThrowableDiscardCatch("TypeError", msg, runtime_allocator);
     return null;
 }
 
@@ -6900,7 +6911,7 @@ pub fn php_check_param_type(
         const msg = std.fmt.bufPrint(&buf, "{s}(): Argument #{d} (${s}) must be of type {s}, {s} given", .{
             func_name, arg_index + 1, bare_param_name, expected_type, got_type,
         }) catch "TypeError";
-        _ = try throwThrowable("TypeError", msg, runtime_allocator);
+        try throwThrowableDiscard("TypeError", msg, runtime_allocator);
         return;
     }
 
@@ -6912,7 +6923,7 @@ pub fn php_check_param_type(
         const msg = std.fmt.bufPrint(&buf, "{s}(): Argument #{d} (${s}) must be of type {s}, {s} given", .{
             func_name, arg_index + 1, bare_param_name, expected_type, got_type,
         }) catch "TypeError";
-        _ = try throwThrowable("TypeError", msg, runtime_allocator);
+        try throwThrowableDiscard("TypeError", msg, runtime_allocator);
         return;
     }
 }
@@ -13896,7 +13907,7 @@ pub fn php_round(val: Value, precision_val: Value, mode_val: Value) !Value {
     //   枚举 id 与 int mode **不同序** ⇒ 需要一层独立映射，禁在此混入）
     const mode_int: i64 = if (mode_val.isNull()) ROUND_MODE_HALF_UP else mode_val.toInt();
     if (mode_int < ROUND_MODE_HALF_UP or mode_int > ROUND_MODE_AWAY_FROM_ZERO) {
-        _ = throwThrowable("ValueError", "round(): Argument #3 ($mode) must be a valid rounding mode (RoundingMode::*)", runtime_allocator) catch {};
+        throwThrowableDiscardCatch("ValueError", "round(): Argument #3 ($mode) must be a valid rounding mode (RoundingMode::*)", runtime_allocator);
         return Value.initNull();
     }
     return Value.initFloat(phpMathRoundValue(num, precision, @intCast(mode_int)));
@@ -14183,13 +14194,13 @@ pub fn php_intdiv(dividend: Value, divisor: Value) !Value {
         // 旧写法 `return error.DivisionByZero` 是 Zig error 外逸（门 Y y5：打 `error: DivisionByZero`
         // 且 rc=1，未捕获面连后续语句都不跑）；PHP 侧是可捕获 DivisionByZeroError。
         // 形态照搬本文件既有的 `/`、`%` 支（:5962/:5976/:6003）。
-        _ = try throwThrowable("DivisionByZeroError", "Division by zero", runtime_allocator);
+        try throwThrowableDiscard("DivisionByZeroError", "Division by zero", runtime_allocator);
         return Value.initNull();
     }
     if (b == -1 and a == std.math.minInt(i64)) {
         // 商不可表示为 int：PHP 给 ArithmeticError。旧写法直接 @divTrunc 会**静默回绕**回
         // minInt 本身（门 Y y6 实测 AOT `Y6=RET`、rc=0）。minInt(i64) 即 :494 登记的 PHP_INT_MIN。
-        _ = try throwThrowable("ArithmeticError", "Division of PHP_INT_MIN by -1 is not an integer", runtime_allocator);
+        try throwThrowableDiscard("ArithmeticError", "Division of PHP_INT_MIN by -1 is not an integer", runtime_allocator);
         return Value.initNull();
     }
     return Value.initInt(@divTrunc(a, b));
@@ -16089,7 +16100,7 @@ pub const ClassMeta = struct {
                     _ = args;
                     const this = Value_asObject(ctx);
                     if (this.getProperty("message")) |val| {
-                        _ = val.retain();
+                        // getProperty 已 retain（+1），方法返回值契约即 +1，勿再 retain
                         return val;
                     }
                     return Value.initString(try PHPString.init(runtime_alloc, ""));
@@ -16106,7 +16117,7 @@ pub const ClassMeta = struct {
                     _ = runtime_alloc;
                     const this = Value_asObject(ctx);
                     if (this.getProperty("code")) |val| {
-                        _ = val.retain();
+                        // getProperty 已 retain（+1），勿再 retain
                         return val;
                     }
                     return Value.initInt(0);
@@ -16122,7 +16133,7 @@ pub const ClassMeta = struct {
                     _ = args;
                     const this = Value_asObject(ctx);
                     if (this.getProperty("file")) |val| {
-                        _ = val.retain();
+                        // getProperty 已 retain（+1），勿再 retain
                         return val;
                     }
                     return Value.initString(try PHPString.init(runtime_alloc, ""));
@@ -16139,7 +16150,7 @@ pub const ClassMeta = struct {
                     _ = runtime_alloc;
                     const this = Value_asObject(ctx);
                     if (this.getProperty("line")) |val| {
-                        _ = val.retain();
+                        // getProperty 已 retain（+1），勿再 retain
                         return val;
                     }
                     return Value.initInt(0);
@@ -16156,7 +16167,7 @@ pub const ClassMeta = struct {
                     _ = runtime_alloc;
                     const this = Value_asObject(ctx);
                     if (this.getProperty("previous")) |val| {
-                        _ = val.retain();
+                        // getProperty 已 retain（+1），勿再 retain
                         return val;
                     }
                     return Value.initNull();
@@ -17271,15 +17282,24 @@ pub const ClassMeta = struct {
                     if (args.len == 0) return Value.initNull();
                     const this = Value_asObject(ctx);
                     // PHP 签名：ReflectionClass::__construct(object|string $object_or_class)
+                    // F-133: toString 返回 +1 自有字符串，name_str 仅借用其 data ⇒ 出口归还
+                    var name_owned: ?*PHPString = null;
+                    defer if (name_owned) |s| s.release(alloc);
                     const name_str = if (Value_isObject(args[0]))
                         Value_asObject(args[0]).class_name
-                    else
-                        (try args[0].toString(alloc)).data;
+                    else blk: {
+                        const s = try args[0].toString(alloc);
+                        name_owned = s;
+                        break :blk s.data;
+                    };
                     // AOT-CODEGEN-012 R-136：类名 CI —— __class_name 存**规范注册拼写**
                     //（getName 与 PHP 一致返回声明名；跨大小写查找已经 findClass CI 生效）
                     const found = findClass(name_str);
                     if (found) |meta| {
-                        try this.setProperty("__class_name", Value.initString(try PHPString.init(alloc, meta.name)));
+                        // F-133: PHPString.init 的 +1 由 setProperty 之外的这层持有，存完归还
+                        const cls_str = try PHPString.init(alloc, meta.name);
+                        defer cls_str.release(alloc);
+                        try this.setProperty("__class_name", Value.initString(cls_str));
                         return Value.initNull();
                     }
                     // AOT-CODEGEN-012 R-138 重落 R-137b：未注册类 ⇒ ReflectionException（可 catch）
@@ -17287,7 +17307,7 @@ pub const ClassMeta = struct {
                     var buf: [256]u8 = undefined;
                     const msg = std.fmt.bufPrint(&buf, "Class \"{s}\" does not exist", .{name_str}) catch
                         "Class does not exist";
-                    _ = throwThrowable("ReflectionException", msg, alloc) catch {};
+                    throwThrowableDiscardCatch("ReflectionException", msg, alloc);
                     return error.ReflectionClassNotFound;
                 }
             }.call,
@@ -17468,13 +17488,13 @@ pub const ClassMeta = struct {
                         var buf: [256]u8 = undefined;
                         const msg = std.fmt.bufPrint(&buf, "Method {s}::{s}() does not exist", .{ cmeta.name, mname }) catch
                             "Method does not exist";
-                        _ = throwThrowable("ReflectionException", msg, alloc) catch {};
+                        throwThrowableDiscardCatch("ReflectionException", msg, alloc);
                         return error.ReflectionMethodNotFound;
                     }
                     var ebuf: [256]u8 = undefined;
                     const emsg = std.fmt.bufPrint(&ebuf, "Class \"{s}\" does not exist", .{cname}) catch
                         "Class does not exist";
-                    _ = throwThrowable("ReflectionException", emsg, alloc) catch {};
+                    throwThrowableDiscardCatch("ReflectionException", emsg, alloc);
                     return error.ReflectionClassNotFound;
                 }
             }.call,
@@ -17787,7 +17807,7 @@ pub const ClassMeta = struct {
                         var b: [256]u8 = undefined;
                         const m = std.fmt.bufPrint(&b, "Class \"{s}\" does not exist", .{parent_name}) catch
                             "Class does not exist";
-                        _ = throwThrowable("ReflectionException", m, alloc) catch {};
+                        throwThrowableDiscardCatch("ReflectionException", m, alloc);
                         return error.ReflectionClassNotFound;
                     };
                     const cmeta = findClass(cname_val.asString().data) orelse return Value.initBool(false);
@@ -17821,14 +17841,14 @@ pub const ClassMeta = struct {
                         var b: [256]u8 = undefined;
                         const m = std.fmt.bufPrint(&b, "Interface \"{s}\" does not exist", .{iface_name}) catch
                             "Interface does not exist";
-                        _ = throwThrowable("ReflectionException", m, alloc) catch {};
+                        throwThrowableDiscardCatch("ReflectionException", m, alloc);
                         return error.ReflectionInterfaceNotFound;
                     };
                     if (!tmeta.is_interface) {
                         var b: [256]u8 = undefined;
                         const m = std.fmt.bufPrint(&b, "{s} is not an interface", .{tmeta.name}) catch
                             "is not an interface";
-                        _ = throwThrowable("ReflectionException", m, alloc) catch {};
+                        throwThrowableDiscardCatch("ReflectionException", m, alloc);
                         return error.ReflectionNotInterface;
                     }
                     if (findClass(cname_val.asString().data)) |cmeta| {
@@ -18244,14 +18264,14 @@ pub const ClassMeta = struct {
                         var b: [256]u8 = undefined;
                         const m = std.fmt.bufPrint(&b, "Class \"{s}\" does not exist", .{cname_in}) catch
                             "Class does not exist";
-                        _ = throwThrowable("ReflectionException", m, alloc) catch {};
+                        throwThrowableDiscardCatch("ReflectionException", m, alloc);
                         return error.ReflectionClassNotFound;
                     };
                     const lookup = cmeta.findMethodLookup(mname_in) orelse {
                         var b: [256]u8 = undefined;
                         const m = std.fmt.bufPrint(&b, "Method {s}::{s}() does not exist", .{ cmeta.name, mname_in }) catch
                             "Method does not exist";
-                        _ = throwThrowable("ReflectionException", m, alloc) catch {};
+                        throwThrowableDiscardCatch("ReflectionException", m, alloc);
                         return error.ReflectionMethodNotFound;
                     };
                     try this.setProperty("__class_name", Value.initString(try PHPString.init(alloc, cmeta.name)));
@@ -18422,14 +18442,14 @@ pub const ClassMeta = struct {
                         var b: [256]u8 = undefined;
                         const m = std.fmt.bufPrint(&b, "Class \"{s}\" does not exist", .{cname}) catch
                             "Class does not exist";
-                        _ = throwThrowable("ReflectionException", m, alloc) catch {};
+                        throwThrowableDiscardCatch("ReflectionException", m, alloc);
                         return error.ReflectionClassNotFound;
                     };
                     const lookup = cmeta.findMethodLookup(mname) orelse {
                         var b: [256]u8 = undefined;
                         const m = std.fmt.bufPrint(&b, "Method {s}::{s}() does not exist", .{ cmeta.name, mname }) catch
                             "Method does not exist";
-                        _ = throwThrowable("ReflectionException", m, alloc) catch {};
+                        throwThrowableDiscardCatch("ReflectionException", m, alloc);
                         return error.ReflectionMethodNotFound;
                     };
                     // AOT-CODEGEN-012 R-138 重落 R-137c：静态方法原样返回 null（g6 实测空输出）
@@ -18446,7 +18466,7 @@ pub const ClassMeta = struct {
                     var b: [256]u8 = undefined;
                     const m = std.fmt.bufPrint(&b, "Trying to invoke non static method {s}::{s}() without an object", .{ cmeta.name, lookup.method.name }) catch
                         "Trying to invoke non static method without an object";
-                    _ = throwThrowable("ReflectionException", m, alloc) catch {};
+                    throwThrowableDiscardCatch("ReflectionException", m, alloc);
                     return error.ReflectionNoObject;
                 }
             }.call,
@@ -18818,7 +18838,7 @@ pub const ClassMeta = struct {
                             return v;
                         }
                     }
-                    _ = throwThrowable("ReflectionException", "Internal error: Failed to retrieve the default value", alloc) catch {};
+                    throwThrowableDiscardCatch("ReflectionException", "Internal error: Failed to retrieve the default value", alloc);
                     return Value.initNull();
                 }
             }.call,
@@ -18923,7 +18943,7 @@ pub const ClassMeta = struct {
                         var b: [256]u8 = undefined;
                         const m = std.fmt.bufPrint(&b, "Class \"{s}\" does not exist", .{cname_in}) catch
                             "Class does not exist";
-                        _ = throwThrowable("ReflectionException", m, alloc) catch {};
+                        throwThrowableDiscardCatch("ReflectionException", m, alloc);
                         return error.ReflectionClassNotFound;
                     };
                     // 属性名区分大小写 ⇒ 精确沿链查找
@@ -18931,7 +18951,7 @@ pub const ClassMeta = struct {
                         var b: [256]u8 = undefined;
                         const m = std.fmt.bufPrint(&b, "Property {s}::${s} does not exist", .{ cmeta.name, pname_in }) catch
                             "Property does not exist";
-                        _ = throwThrowable("ReflectionException", m, alloc) catch {};
+                        throwThrowableDiscardCatch("ReflectionException", m, alloc);
                         return error.ReflectionPropertyNotFound;
                     }
                     try this.setProperty("__class_name", Value.initString(try PHPString.init(alloc, cmeta.name)));
@@ -22203,7 +22223,17 @@ pub fn php_object_new_with_constructor(class_name: []const u8, args: []const Val
         if (m.findMethodLookup("__construct")) |lookup| {
             const guard = ClassContext.init(m, lookup.owner);
             defer guard.deinit();
-            _ = try lookup.method.func(obj_val, args, allocator);
+            _ = lookup.method.func(obj_val, args, allocator) catch |err| {
+                // __construct 抛错时对象从未交给调用者，工厂持有的 rc=1 必须归还
+                obj_val.release(allocator);
+                return err;
+            };
+            // F-133: 单块发射器的 throw 只 setException 后正常返回（不走 Zig error）
+            // ⇒ 构造器置了异常同样意味着对象未交出，工厂引用必须在此归还
+            if (hasException()) {
+                obj_val.release(allocator);
+                return error.RuntimeError;
+            }
             // 注意：构造函数中的 store $this 会 retain，函数结束时会 release
             // 这是正确的引用计数行为，不需要补偿
         }
@@ -22630,7 +22660,7 @@ fn enumFrom(meta: *const ClassMeta, needle: Value, allocator: Allocator) !Value 
     defer needle_str.release(allocator);
     const msg = try std.fmt.allocPrint(allocator, "{s} is not a valid backing value for enum {s}", .{ needle_str.data, meta.name });
     defer allocator.free(msg);
-    _ = try throwThrowable("ValueError", msg, allocator);
+    try throwThrowableDiscard("ValueError", msg, allocator);
     return Value.initNull();
 }
 
@@ -23357,6 +23387,31 @@ pub fn throwException(message: []const u8, allocator: Allocator) !Value {
     const exception = Value.initString(msg_str);
     setException(exception);
     return exception;
+}
+
+/// 抛出并丢弃返回的字符串异常引用（setException 已另持一份）
+pub fn throwExceptionDiscard(message: []const u8, allocator: Allocator) !void {
+    const ex = try throwException(message, allocator);
+    ex.release(allocator);
+}
+
+/// 同上，用于没有错误返回通道的站点
+pub fn throwExceptionDiscardCatch(message: []const u8, allocator: Allocator) void {
+    const ex = throwException(message, allocator) catch return;
+    ex.release(allocator);
+}
+
+/// 抛出并丢弃返回的异常对象引用（setException 已另持一份）。
+/// 不接收返回值的站点必须走这里；PHPObject.init 的那份引用若没人 release 就永久泄漏。
+pub fn throwThrowableDiscard(class_name: []const u8, message: []const u8, allocator: Allocator) !void {
+    const ex = try throwThrowable(class_name, message, allocator);
+    ex.release(allocator);
+}
+
+/// 同上，用于没有错误返回通道的站点（分配失败保持原有的静默吞掉口径）
+pub fn throwThrowableDiscardCatch(class_name: []const u8, message: []const u8, allocator: Allocator) void {
+    const ex = throwThrowable(class_name, message, allocator) catch return;
+    ex.release(allocator);
 }
 
 pub fn throwThrowable(class_name: []const u8, message: []const u8, allocator: Allocator) !Value {
@@ -28737,7 +28792,7 @@ pub fn php_preg_match(pattern: Value, subject: Value, matches: *Value, flags: Va
     const flags_val: i64 = if (flags.isNull()) 0 else flags.toInt();
     if (pregMatchFlagsInvalid(flags_val)) {
         matches.* = Value.initArray(try PHPArray.init(allocator));
-        _ = throwThrowable("ValueError", "preg_match(): Argument #4 ($flags) must be a PREG_* constant", allocator) catch {};
+        throwThrowableDiscardCatch("ValueError", "preg_match(): Argument #4 ($flags) must be a PREG_* constant", allocator);
         return Value.initBool(false);
     }
     const offset_capture = (flags_val & PREG_OFFSET_CAPTURE_BIT) != 0;
@@ -28886,7 +28941,7 @@ pub fn php_preg_match_all(pattern: Value, subject: Value, matches: *Value, flags
     const flags_val: i64 = if (flags.isNull()) 0 else flags.toInt();
     if (pregMatchAllFlagsInvalid(flags_val)) {
         matches.* = Value.initArray(try PHPArray.init(allocator));
-        _ = throwThrowable("ValueError", "preg_match_all(): Argument #4 ($flags) must be a PREG_* constant", allocator) catch {};
+        throwThrowableDiscardCatch("ValueError", "preg_match_all(): Argument #4 ($flags) must be a PREG_* constant", allocator);
         return Value.initBool(false);
     }
     const offset_capture = (flags_val & PREG_OFFSET_CAPTURE_BIT) != 0;
