@@ -230,6 +230,9 @@ pub const TypeDef = struct {
         param_types: []const []const u8 = &.{},
         /// 参数是否允许 null（nullable 类型或无类型声明）
         param_nullable: []const bool = &.{},
+        /// AOT-CODEGEN-012 F-118：与 `param_names` 同序的**默认值常量指令**（折叠不出常量则为 null）。
+        /// 形状照 `Property.default_value: ?*Instruction`（:205），发射期共用同一条常量序列化支。
+        param_defaults: []const ?*Instruction = &.{},
         /// 返回类型字符串（无返回类型声明时为 null）
         return_type: ?[]const u8 = null,
         /// 返回类型是否 nullable
@@ -433,6 +436,9 @@ pub const Parameter = struct {
     is_variadic: bool,
     /// Whether this is passed by reference
     is_reference: bool,
+    /// AOT-CODEGEN-012 F-118：默认值的**常量指令**（折叠不出常量则为 null）。
+    /// 带默认值 ⇒ 与 `TypeDef.Method.param_defaults` 同口径；缺失即不猜。
+    default_value: ?*Instruction = null,
 };
 
 /// 循环元数据 - 为循环块提供显式的结构化引用

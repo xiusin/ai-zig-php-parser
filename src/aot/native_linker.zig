@@ -224,6 +224,9 @@ pub const NativeLinker = struct {
     current_reg_may_heap: ?[]bool,
     current_function_has_this: bool = false,
     current_exception_handler: ?u32 = null,
+    /// F-115：本函数是否发射过 `@` 抑制作用域（`php_error_suppress_push`）。
+    /// 只有在含抑制作用域的函数里，异常清理路径才需要清零抑制计数 ⇒ 无 `@` 的函数**生成码一字不变**（影子中性）。
+    current_func_has_suppression: bool = false,
     current_cleanup_regs: ?[]const usize = null,
     current_alloca_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_this_regs: ?*const std.AutoHashMap(usize, void) = null,
@@ -3194,6 +3197,33 @@ pub const NativeLinker = struct {
             }
             try writer.writeAll("}");
         }
+        // AOT-CODEGEN-012 F-118：默认值＝两条**平行数组**（值 + 是否静态可知），形状照 param_types/param_nullable
+        // ★内存安全（实测否证了数组字面量方案）：元素含运行期调用（`try PHPString.init`）时，
+        //   `&[_]runtime.Value{…}` 只能落在 `registerAllClasses` 的**栈帧**上，而 `addMethod` 是按值拷贝
+        //   结构体 ⇒ 方法表里存的是指向上面那个临时数组的**切片头**，帧一销毁即悬垂。
+        //   实测签名＝同一份元数据在不同调用序列下有时读对、有时读出 `float(3.0E-314)` 且逐次变值，
+        //   并在读回 PHPString 头时报 `PHPString corrupted! length=0x4000000001029c00`。
+        //   `param_names`/`param_types` 等全字面量数组会被提到静态段所以无此问题；本字段必须运行期分配。
+        if (method.param_defaults.len > 0) {
+            try writer.print(
+                ", .param_default_values = blk_pdef_vals: {{\n            const pdef_vals = try runtime.runtime_allocator.alloc(runtime.Value, {d});\n",
+                .{method.param_defaults.len},
+            );
+            for (method.param_defaults, 0..) |pd, i| {
+                try writer.print("            pdef_vals[{d}] = ", .{i});
+                try self.writeConstInstrValueExpr(writer, pd);
+                try writer.writeAll(";\n");
+            }
+            try writer.writeAll("            break :blk_pdef_vals pdef_vals;\n        }");
+            try writer.print(
+                ", .param_default_known = blk_pdef_known: {{\n            const pdef_known = try runtime.runtime_allocator.alloc(bool, {d});\n",
+                .{method.param_defaults.len},
+            );
+            for (method.param_defaults, 0..) |pd, i| {
+                try writer.print("            pdef_known[{d}] = {};\n", .{ i, pd != null });
+            }
+            try writer.writeAll("            break :blk_pdef_known pdef_known;\n        }");
+        }
         // 生成 param_types 数组
         if (method.param_types.len > 0) {
             try writer.writeAll(", .param_types = &[_][]const u8{");
@@ -3297,6 +3327,32 @@ pub const NativeLinker = struct {
             try writer.writeAll("}");
         }
         try writer.writeAll(" });\n");
+    }
+
+    /// AOT-CODEGEN-012 F-118：把一条**常量指令**序列化成 `runtime.Value` 表达式（形参默认值元数据用）。
+    /// ★形状纪律：调用方（`emitMethodRegistrationFull`）必须把本函数产出的表达式**逐个赋值进运行期分配的
+    ///   切片**，不得塞进 `&[_]runtime.Value{…}` 字面量——字面量含运行期元素时会落在调用帧上，被 `addMethod`
+    ///   按值存进方法表后就成了悬垂切片（工单 §99 实测：读回 `float(3.0E-314)`／`PHPString corrupted`）。
+    ///   折叠不出默认值时这里发 `initNull()`，「是否静态可知」由平行 bool 数组 `param_default_known` 表达。
+    /// 映射表与属性默认值发射处（`addProperty` 内联 switch）逐项同序，禁在此另写第二套口径。
+    fn writeConstInstrValueExpr(self: *Self, writer: anytype, inst: ?*IR.Instruction) !void {
+        const i = inst orelse {
+            try writer.writeAll("runtime.Value.initNull()");
+            return;
+        };
+        switch (i.op) {
+            .const_int => |v| try writer.print("runtime.Value.initInt({d})", .{v}),
+            .const_float => |v| try writeFloatValueExpr(writer, v),
+            .const_bool => |v| try writer.writeAll(if (v) "runtime.Value.initBool(true)" else "runtime.Value.initBool(false)"),
+            .const_null => try writer.writeAll("runtime.Value.initNull()"),
+            .const_string => |sid| try writer.print(
+                "runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, string_table[{d}]))",
+                .{sid},
+            ),
+            .array_new => try writer.writeAll("runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))"),
+            .const_array => |elements| try self.writeConstantValueInline(writer, .{ .array = elements }),
+            else => try writer.writeAll("runtime.Value.initNull()"),
+        }
     }
 
     /// 检查函数是否有返回值
@@ -4142,6 +4198,9 @@ pub const NativeLinker = struct {
         .{ "preg_grep", bi(.{ .runtime_name = "preg_grep", .needs_allocator = true }) },
         .{ "preg_quote", bi(.{ .runtime_name = "preg_quote", .needs_allocator = true }) },
         .{ "preg_last_error", bi(.{ .runtime_name = "preg_last_error", .needs_allocator = false, .may_raise = false }) },
+        // ★F-91 阶段②（R-185）：`preg_last_error_msg()` 进派发。形制逐字照本表既有成对先例
+        //   `json_last_error`／`json_last_error_msg`（`:4073`／`:4074`：`needs_allocator = true, .may_raise = false`）。
+        .{ "preg_last_error_msg", bi(.{ .runtime_name = "php_preg_last_error_msg", .needs_allocator = true, .may_raise = false }) },
         .{ "str_starts_with", bi(.{ .runtime_name = "php_str_starts_with", .needs_allocator = false }) },
         .{ "str_word_count", bi(.{ .runtime_name = "php_str_word_count", .needs_allocator = true }) },
         .{ "count_chars", bi(.{ .runtime_name = "php_count_chars", .needs_allocator = true }) },
@@ -4641,6 +4700,19 @@ pub const NativeLinker = struct {
         defer self.current_function_for_resolve = null;
         // 重置 return_generated 标志（每个函数开始时清除）
         self.return_generated = false;
+
+        // F-115：预扫本函数是否含 `@` 抑制作用域（IR 里表现为 `php_error_suppress_push` 调用）。
+        //   异常清理路径只在"确有抑制作用域"的函数里清零 ⇒ 其余函数生成码逐字不变。
+        self.current_func_has_suppression = false;
+        for (func.blocks.items) |blk| {
+            for (blk.instructions.items) |inst| {
+                if (inst.op == .call and std.mem.eql(u8, inst.op.call.func_name, "php_error_suppress_push")) {
+                    self.current_func_has_suppression = true;
+                    break;
+                }
+            }
+        }
+        defer self.current_func_has_suppression = false;
 
         // 设置返回类型（用于返回值弱类型转换）
         self.current_return_type = func.php_return_type;
@@ -19823,6 +19895,11 @@ pub const NativeLinker = struct {
     }
 
     fn generateCleanupCodeExcept(self: *Self, writer: anytype, except_reg: ?u32) !void {
+        // F-115：跳出 `@` 抑制作用域的异常路径必须清零抑制计数，否则 push 了却没 pop ⇒
+        //   该执行流之后所有本该打印的诊断被静默吞掉（门 SUPB `L1`／探针 P1 实测；PHP 侧是 `AFTER` 必打）。
+        if (self.current_func_has_suppression) {
+            try writer.writeAll("    runtime.php_error_suppress_reset();\n");
+        }
         if (self.current_cleanup_regs) |regs| {
             if (regs.len > 0) {
                 try writer.writeAll("        // Cleanup on exception\n");

@@ -1182,6 +1182,9 @@ pub const IRGenerator = struct {
                 .has_default = param_data.default_value != null,
                 .is_variadic = param_data.is_variadic,
                 .is_reference = param_data.is_reference,
+                // AOT-CODEGEN-012 F-118：与属性侧同一个 helper 折叠默认值（发射期由 `addMethod` 落成
+                //   `param_default_values/param_default_known` 两条**平行数组**，见 §99.5 的形状说明）。
+                .default_value = if (param_data.default_value) |dv| try self.tryMakeConstInstruction(dv) else null,
             });
 
             // 记录引用参数索引
@@ -2445,6 +2448,8 @@ pub const IRGenerator = struct {
         var param_name_list = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
         var param_type_list = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
         var param_nullable_list = std.ArrayListUnmanaged(bool){ .items = &.{}, .capacity = 0 };
+        // AOT-CODEGEN-012 F-118：与 param_names 同序收集默认值常量指令（折叠不出 ⇒ null）
+        var param_default_list = std.ArrayListUnmanaged(?*Instruction){ .items = &.{}, .capacity = 0 };
         for (method_data.params) |param_idx| {
             if (self.getNode(param_idx)) |param_node| {
                 if (param_node.tag == .parameter) {
@@ -2456,6 +2461,13 @@ pub const IRGenerator = struct {
                     // PHP ReflectionParameter::getName() 返回不带 $ 的参数名
                     const pname = if (raw_pname.len > 0 and raw_pname[0] == '$') raw_pname[1..] else raw_pname;
                     param_name_list.append(self.allocator, pname) catch {};
+                    // AOT-CODEGEN-012 F-118：默认值复用属性侧同一个 helper（`tryMakeConstInstruction`，
+                    //   含一元／二元常量表达式与数组字面量），禁在此另写第二套折叠逻辑。
+                    const pdefault_inst: ?*Instruction = if (param_node.data.parameter.default_value) |dv|
+                        (self.tryMakeConstInstruction(dv) catch null)
+                    else
+                        null;
+                    param_default_list.append(self.allocator, pdefault_inst) catch {};
                     // 提取参数类型信息
                     if (param_node.data.parameter.type) |type_idx| {
                         const type_info = self.resolveTypeNodeToString(type_idx);
@@ -2493,6 +2505,7 @@ pub const IRGenerator = struct {
             .param_names = self.allocator.dupe([]const u8, param_name_list.items) catch &.{},
             .param_types = self.allocator.dupe([]const u8, param_type_list.items) catch &.{},
             .param_nullable = self.allocator.dupe(bool, param_nullable_list.items) catch &.{},
+            .param_defaults = self.allocator.dupe(?*Instruction, param_default_list.items) catch &.{},
             .return_type = ret_type,
             .return_nullable = ret_nullable,
             .attributes = try self.collectAttributes(method_data.attributes),
