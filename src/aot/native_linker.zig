@@ -745,6 +745,46 @@ pub const NativeLinker = struct {
         }
     }
 
+    /// F-132：collectBlockUsedRegs 只扫单块，而处理器块（catch 派发）通常只有一条 instanceof，
+    ///   真正读 try 前值的代码在它的后继（catch 体及 catch 之后的续接块）里。
+    ///   异常边 cleanup 以本集合为豁免表 ⇒ 必须按**处理器子图**收集；只扫派发块会把
+    ///   try 前建立的堆值当死值清零，catch 内外读到的都是 initNull。
+    fn collectHandlerSubgraphUsedRegs(self: *Self, blocks: []*IR.BasicBlock, start_idx: usize, set: *std.AutoHashMap(usize, void)) !void {
+        var visited = std.AutoHashMap(usize, void).init(self.allocator);
+        defer visited.deinit();
+        var stack: std.ArrayList(usize) = .empty;
+        defer stack.deinit(self.allocator);
+
+        try visited.put(start_idx, {});
+        try stack.append(self.allocator, start_idx);
+        while (stack.pop()) |idx| {
+            if (idx >= blocks.len) continue;
+            const block = blocks[idx];
+            try self.collectBlockUsedRegs(block, set);
+            const term = block.terminator orelse continue;
+            switch (term) {
+                .br => |target| try pushBlockIndex(&visited, &stack, self.allocator, target.index),
+                .cond_br => |cb| {
+                    try pushBlockIndex(&visited, &stack, self.allocator, cb.then_block.index);
+                    try pushBlockIndex(&visited, &stack, self.allocator, cb.else_block.index);
+                },
+                .switch_ => |sw| {
+                    for (sw.cases) |case| {
+                        try pushBlockIndex(&visited, &stack, self.allocator, case.block.index);
+                    }
+                    try pushBlockIndex(&visited, &stack, self.allocator, sw.default.index);
+                },
+                else => {},
+            }
+        }
+    }
+
+    fn pushBlockIndex(visited: *std.AutoHashMap(usize, void), stack: *std.ArrayList(usize), allocator: std.mem.Allocator, idx: u32) !void {
+        const key: usize = idx;
+        const gop = try visited.getOrPut(key);
+        if (!gop.found_existing) try stack.append(allocator, key);
+    }
+
     /// 查找make_ref指令的原始alloca
     fn findMakeRefSource(self: *Self, reg_id: usize) ?usize {
         const func = self.current_function_for_resolve orelse return null;
@@ -18120,7 +18160,7 @@ pub const NativeLinker = struct {
                 if (!catch_used_regs_map.contains(catch_idx)) {
                     const set_ptr = try self.allocator.create(std.AutoHashMap(usize, void));
                     set_ptr.* = std.AutoHashMap(usize, void).init(self.allocator);
-                    try self.collectBlockUsedRegs(func.blocks.items[catch_idx], set_ptr);
+                    try self.collectHandlerSubgraphUsedRegs(func.blocks.items, catch_idx, set_ptr);
                     try catch_used_regs_map.put(catch_idx, set_ptr);
                 }
             }

@@ -14217,11 +14217,18 @@ pub fn php_hypot(x: Value, y: Value) !Value {
 
 /// base_convert - 在任意进制之间转换数字
 pub fn php_base_convert(number: Value, frombase: Value, tobase: Value, allocator: Allocator) !Value {
+    // ★F-62f 接线第四批（门 BLT 段 I b181/b182，R-195）：#2/#3 实测都是**裸 `int`** ⇒ 现形制 helper 直接可用，零新措辞维。
+    //   ★形参名以实测为准：PHP 写 **`$from_base`／`$to_base`（带下划线）**，而模板变量名是 `frombase`/`tobase` ⇒ 禁照变量名印。
+    //   ★位置在 `!number.isString()` 早退**之上**（PHP 参数类型检查先于函数体；否则 `base_convert(123, $o, 10)` 会被早退吞成 "0"）。
+    //   ★**只接类型拒**：下面 `@min(@max(_,2),36)` 的夹取是另一枚面——实测 PHP 对底数 0/1/37/负数给
+    //   `ValueError: base_convert(): Argument #2 ($from_base) must be between 2 and 36 (inclusive)`（＝F-126 第五套措辞族，#142），本批不动。
+    const frombase_ok = requireNumParam("base_convert", 2, "from_base", .int_param, frombase) orelse return Value.initNull();
+    const tobase_ok = requireNumParam("base_convert", 3, "to_base", .int_param, tobase) orelse return Value.initNull();
     if (!number.isString()) return Value.initString(try PHPString.init(allocator, "0"));
 
     const num_str = number.asString().data;
-    const from: u8 = @intCast(@min(@max(frombase.toInt(), 2), 36));
-    const to: u8 = @intCast(@min(@max(tobase.toInt(), 2), 36));
+    const from: u8 = @intCast(@min(@max(frombase_ok.toInt(), 2), 36));
+    const to: u8 = @intCast(@min(@max(tobase_ok.toInt(), 2), 36));
 
     // 先将源进制转为十进制整数
     var decimal: u64 = 0;
@@ -30472,13 +30479,21 @@ pub fn php_hash_equals(str1: Value, str2: Value) !Value {
 
 /// hash_pbkdf2 - PBKDF2 密钥派生函数
 pub fn php_hash_pbkdf2(algo: Value, password: Value, salt: Value, iterations: Value, length: Value, raw_output: Value, allocator: Allocator) !Value {
+    // ★F-62f 接线第四批（门 BLT 段 I b179/b180，R-195）：#4 `$iterations`／#5 `$length` 实测都是**裸 `int`**（工单 §104.5）。
+    //   ★同样置于下面三枚 string 早退**之上**：PHP 的参数类型检查先于函数体 ⇒ `hash_pbkdf2("x","y","z",$o)` 必须抛而不是返回 false。
+    //   ★**只接类型拒**：`@max(1,…)`／`@max(0,…)` 两处夹取是另一枚面——实测 PHP 给
+    //   `ValueError: hash_pbkdf2(): Argument #4 ($iterations) must be greater than 0`（`-1`／`0` 都抛）与
+    //   `Argument #5 ($length) must be greater than or equal to 0`（`-1` 抛），
+    //   而 ★`length=0` 是**合法哨兵**（PHP 返回整个摘要＝64 位十六进制，门臂 b206）⇒ 禁当越界夹掉；两形都属 F-126（#142）。
+    const iterations_ok = requireNumParam("hash_pbkdf2", 4, "iterations", .int_param, iterations) orelse return Value.initNull();
+    const length_ok = requireNumParam("hash_pbkdf2", 5, "length", .int_param, length) orelse return Value.initNull();
     if (!algo.isString() or !password.isString() or !salt.isString()) return Value.initBool(false);
 
     const algo_str = algo.asString().data;
     const password_str = password.asString().data;
     const salt_str = salt.asString().data;
-    const iterations_count: u32 = @intCast(@max(1, iterations.toInt()));
-    const dklen: usize = @intCast(@max(0, length.toInt()));
+    const iterations_count: u32 = @intCast(@max(1, iterations_ok.toInt()));
+    const dklen: usize = @intCast(@max(0, length_ok.toInt()));
     const raw = raw_output.toBool();
 
     // 支持的算法及对应的哈希长度

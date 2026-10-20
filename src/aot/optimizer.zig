@@ -1814,6 +1814,14 @@ pub const IROptimizer = struct {
         var dt = try Analysis.computeDominators(self.allocator, func);
         defer dt.deinit();
 
+        // F-132：异常边可在 try 块中途（调用点）离开，块尾的"当前值"在该边上并不支配处理器入口。
+        // 处理器及其后继（含 finally 合并块、catch 之后的续接块）里的 load 一旦被提升，就会绑定到
+        // 只在中途之后才定义的值，异常路径读到未赋值寄存器。SSA 无法表达"抛出点前最后一次写"，
+        // 这些变量保留 alloca 由内存承载。
+        var handler_reachable = try std.DynamicBitSet.initEmpty(self.allocator, func.blocks.items.len);
+        defer handler_reachable.deinit();
+        try self.markHandlerReachableBlocks(func, &handler_reachable);
+
         // 2. Find promotable allocas
         var promotable_allocas = std.ArrayListUnmanaged(*Instruction){ .items = &.{}, .capacity = 0 };
         defer promotable_allocas.deinit(self.allocator);
@@ -1854,7 +1862,7 @@ pub const IROptimizer = struct {
         if (func.getEntryBlock()) |entry| {
             for (entry.instructions.items) |inst| {
                 if (inst.*.op == .alloca) {
-                    if (self.isPromotable(inst, func, &property_get_result_regs)) {
+                    if (self.isPromotable(inst, func, &property_get_result_regs, &handler_reachable)) {
                         try promotable_allocas.append(self.allocator, inst);
                         try def_blocks.put(inst, .{ .items = &.{}, .capacity = 0 });
                         if (inst.result) |res| {
@@ -2253,8 +2261,34 @@ pub const IROptimizer = struct {
         return idf;
     }
 
+    /// F-132：收集从任一异常处理器（catch/finally 派发块）沿 CFG 可达的全部块。
+    /// 异常边可在 try 块中途离开，结构支配树把 try 块整块当作 handler 的前驱，表达不了中途抛出；
+    /// handler 及其后继（finally 合并块、catch 之后的续接块）中的 load 都会继承这个错误的当前值。
+    fn markHandlerReachableBlocks(self: *Self, func: *Function, out: *std.DynamicBitSet) !void {
+        var stack = std.ArrayListUnmanaged(*BasicBlock){ .items = &.{}, .capacity = 0 };
+        defer stack.deinit(self.allocator);
+
+        var seen = std.AutoHashMap(*BasicBlock, void).init(self.allocator);
+        defer seen.deinit();
+
+        for (func.blocks.items) |block| {
+            const handler = block.exception_handler orelse continue;
+            if (handler == block) continue;
+            const gop = try seen.getOrPut(handler);
+            if (!gop.found_existing) try stack.append(self.allocator, handler);
+        }
+
+        while (stack.pop()) |block| {
+            out.set(block.index);
+            for (block.successors.items) |succ| {
+                const gop = try seen.getOrPut(succ);
+                if (!gop.found_existing) try stack.append(self.allocator, succ);
+            }
+        }
+    }
+
     /// Check if alloca is promotable
-    fn isPromotable(self: *Self, alloca: *Instruction, func: *Function, property_get_regs: *const std.AutoHashMap(u32, void)) bool {
+    fn isPromotable(self: *Self, alloca: *Instruction, func: *Function, property_get_regs: *const std.AutoHashMap(u32, void), handler_reachable: *const std.DynamicBitSet) bool {
         // Check if marked as no_optimize
         if (alloca.op == .alloca and alloca.op.alloca.no_optimize) {
             return false;
@@ -2273,6 +2307,10 @@ pub const IROptimizer = struct {
                             // Valid use
                             if (!op.type_.eql(alloca.op.alloca.type_)) {
                                 // std.debug.print("  reg_{d} NOT promotable: load type mismatch\n", .{result_id});
+                                return false;
+                            }
+                            // F-132：处理器可达块内的 load 走异常边，不能绑定 try 块中途定义的值
+                            if (handler_reachable.isSet(block.index)) {
                                 return false;
                             }
                         }
