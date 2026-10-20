@@ -6750,5 +6750,185 @@ AOT 修前＝**六面全静默给 `0`／`0.0`**（值错＋诊断缺失双缺口
 - 链成本实测（`c193`）：BLT 616 s／F2I 215 s／OBJ 154 s／PRC 25 s／PERR 250 s／REG 801 s／SHADOW 1060 s／COL 0 s，`residue=0`。
 ★语料暴露普查＝**0 枚**（`pass/` 内无 `(int)$x`／`(float)$x` 形态）⇒ 与 F-118 同型的"主回归失明"面：正确性只能由门 BLT 的 F 段证明，"回归没红"不等于没弄坏。
 
+---
+
+## 102. R-193（F-62f 接线第一批＝字符串族函数的 `int` 形参）：13 枚静默错值面转 TypeError，3 枚**刻意留红**
+
+### 102.1 真值与修前态（资产 `c194_f62f_truth_tmp.php`，PHP 8.5.8 与 AOT 各跑一遍）
+这批不是"少一条告警"，而是**静默给错返回值**（P0）：
+
+| 站点 | PHP 8.5.8 | AOT 修前 |
+|---|---|---|
+| `substr("abc",$o)` | `TypeError: substr(): Argument #2 ($offset) must be of type int, stdClass given` | `string(3) "abc"`（整串返回） |
+| `str_repeat("a",$o)` | `Argument #2 ($times) must be of type int` | `string(0) ""` |
+| `str_pad("a",$o)` | `Argument #2 ($length) must be of type int` | `string(1) "a"` |
+| `strpos`／`stripos`／`strrpos`／`strripos`(…,$o) | `Argument #3 ($offset) must be of type int` | `int(0)`／`bool(false)` |
+| `explode(",", "a,b", $o)` | `Argument #3 ($limit) must be of type int` | 无界拆分 |
+| `str_split`／`chunk_split`／`wordwrap`(…,$o) | `Argument #2 ($length\|$length\|$width) must be of type int` | 按 1／1／1 处理 |
+| `strncmp`／`strncasecmp`("a","b",$o) | `Argument #3 ($length) must be of type int` | `int(0)` |
+| `substr("abc", null)` | **Deprecated** `Passing null … of type int is deprecated` 后按 0 继续 | 与 PHP 同（守卫臂 `b156` 证未劣化） |
+
+### 102.2 接线形态（纯模板，helper 零新措辞）
+13 枚站点全部复用 R-172 已收口的 `requireNumParam`／`requireOptionalNumParam`（`.int_param` 维，`numParamExpectedText` 原样）：**必填**槽用前者（`substr` #2、`str_repeat` #2、`str_pad` #2、`strncmp`／`strncasecmp` #3），**可选**槽用后者（`strpos`／`stripos`／`strrpos`／`strripos`／`explode`／`str_split`／`chunk_split`／`wordwrap`）⇒ null／省略继续按既有口径透传，本批不动。
+站点行：`php_substr:10536`／`php_strpos:10630`／`php_str_repeat:10994`／`php_str_pad:11023`／`php_strncasecmp:13023`／`php_strncmp:13038`／`php_explode:12773`（＋体内 `lim = limit_ok.toInt()`）／`php_str_split:12968`／`php_chunk_split:26099`／`php_wordwrap:29280`／`php_stripos:25788`／`php_strrpos:25824`／`php_strripos:25857`。校验一律放在**函数体其它语句之前**（PHP 的参数校验先于函数体）。
+
+### 102.3 三枚**刻意留红**（新登记，禁为转绿而发错措辞）
+| 臂 | 面 | 为何本批不接 |
+|---|---|---|
+| `b141` | `substr("abc",1,$o)` ⇒ PHP 措辞是 **`must be of type ?int`** | `numParamExpectedText` 只产 `int`／`float`／`int|float` ⇒ 直接接线即发**错措辞**（§59.1 预言的"新措辞族"之一），须先扩 helper 的类型维 |
+| `b142` | `substr_replace("abc","x",$o)` ⇒ **`must be of type array|int`** | 同上，且该槽**真能吃数组**（多段替换）⇒ 接线前必须先实现数组形，另属功能缺口 |
+| `b149` | `substr_count("abc","a",$o)` | 模板体里是 `_ = offset; _ = length;` ⇒ **两个形参被完全忽略**，只加校验的话返回值仍是错的 ⇒ 新立 **F-123** |
+
+### 102.4 读数账本
+- 门 BLT 139→**158 臂**（G 段 `b140…b158`＝13 枚接线面＋3 枚留红＋3 枚**反向守卫**：`b156` null⇒Deprecated、`b157` array⇒`array given`、`b158` `"3"`⇒弱模式合法重复三次）。
+- 修前（R-192 档 `c047_blt_postfix139_R192_tmp.tsv`）：139 臂红**恰只有 `b5`**。
+- 修后 `c047_blt_postfix158_R193_tmp.tsv`（md5 `01fd93ff45862d9bccde5ff279f26611`）：`arms=158 same=154 diff=4 compile_fail=0 bad_probe=0` @729 s，红集**恰等** `b5 b141 b142 b149`。
+- join（139 共有臂）：`same→diff=0 diff→same=0`；19 枚新臂逐枚显名（16 SAME＋3 留红）⇒ 接线未伤及任何既存臂。
+- ★留红三枚在门内**逐臂有名**，不会被 `diff=4` 这类汇总数掩盖（判据取明细行存在性）。
+- ★**本轮流程偏差（诚实记录，勿引为先例）**：G 段是**先改模板后建臂**，故没有"新臂的修前逐臂快照"。代偿证据＝`c194_f62f_truth_tmp.php` 在**第一次 `Edit` 之前**用同一二进制跑出的 AOT 逐枚读数（§102.1 全表），加上 139 枚既存臂的**代次相符** join ⇒ 落 r82「缺修前快照 ⇒ 用实测非交集＋首枚冻结基线」替代法。下轮仍须**先冻结再改**。
+- 影子／主回归／邻门读数见 §102.5（链 `c197` 跑完追记）。
+
+---
+
+## 103. R-193b：本批**自造的邻门回归**（门 F2I `g8` SAME→DIFF）根因＝`emitDeprecatedFloatToInt` 绕过抑制位
+
+### 103.1 现象与定位（未放过的原因：join 逐臂打印，不看汇总数）
+第一次链跑（`c197`，在补齐修复前被我主动中止）里 F2I 印 `same=47 diff=3 dep_over=1`，而 R-192 档是 `same=46 diff=4 dep_over=0` —— 汇总数看着"少了 1 枚红"，**逐臂 join 才暴露**它是 `g8 SAME→DIFF`（同时 `b5`／`b7` DIFF→SAME，属两枚既存红的意外关闭，另计）。
+`g8` 臂体＝`@str_repeat("a", 2.5)`（界内非整值 ⇒ PHP 发 Deprecated 后截断）。用 `c198_float_depr_tmp.php` 分形实测：
+- 不加 `@`：PHP **确实**发 `Implicit conversion from float 2.5 to int loses precision`（⇒ 本批接线发这条**方向正确**，不是 over-fatal）；
+- 加 `@`：PHP **一行都不打**；AOT 修前后差别＝接线后开始打印 ⇒ **抑制位没生效**。
+
+### 103.2 根因（一枚既存缺陷，被本批"第一次调用到这条路径"暴露）
+`emitDeprecatedFloatToInt`（模板 `:7237`）用 `fileWriteAll(2,…)`＋`fileWriteAll(1,…)` **直写**，绕过了 `standardPrint@6411` 里那句 `if (isErrorSuppressed()) return;`（＝C2 规则的唯一实现点）。修前 `str_repeat` 根本没有参数校验 ⇒ 这条路径从未被 `@` 语境触发过；R-193 接线后第一次触发即显形。
+★普查（禁只盯肇事的这一枚）：全模板 `fileWriteAll(2,` 共 **16** 处，带抑制位的**只有 `standardPrint` 一处**。其中属"可被 `@` 抑制的 E_WARNING／E_DEPRECATED"的另两枚＝**`emitDeprecatedStrGetcsvEscape:6436`** 与 **`emitUndefinedVariableWarning:6454`**（后者与 F-86 的"isset/?? 语境未抑制"同 neighborhood 但**不同机制**：F-86 是语境未抑制，这条是 `@` 未抑制）。其余（`emitTypeFatalError`／`php_call_undefined_function`／类重声明／final／abstract／未捕获异常…）都是 **fatal**，PHP 自己也不受 `@` 抑制 ⇒ 现状是对的，**禁"顺手统一"**。
+⇒ 新立 **F-125**：这两枚直写站点是否真该抑制，须各自先测真值再接线；本批只动肇事的 `emitDeprecatedFloatToInt`。
+
+### 103.3 修法（最小面，AOT-only）
+`emitDeprecatedFloatToInt` 开头补 `if (isErrorSuppressed()) return;`，**不改**措辞、两行格式与 `stderr→stdout` 顺序（`{d}` 与序列化口径是 F-69 实测档）。
+★刻意**不**改走 `emitDeprecated()`：那条路径的 stdout 标签是 `"Deprecated: "`（无前导换行），而本函数与 `emitWarning` 都是 `"\nDeprecated: "` —— 门里 `norm()` 会删空行所以看不出，但**主回归的逐字比较不会** ⇒ 换出口＝跨面改动，风险大于收益。路由缺失（`dispatchToUserHandler`）另计入 F-125。
+实测复证：`c198` 四形 ⇒ A/B/C（未抑制）照打两行、`D|`（`@str_repeat`）**零输出**，与 PHP 逐字同。
+⇒ 判据回到：F2I `g8` 必须转回 SAME（且 `b5`／`b7` 的转绿仍须逐枚归因）；链改跑 `c197`（含 SUPA／SUPB／ERRH 三枚抑制／处理器邻门，因为本批动的正是抑制位）。
+
+### 103.4 R-193＋R-193b 合并账本（链 `c197`，锚 `tpl=e06c1208b19fd710e0bc3cd7be41de44`，其余五枚源逐字未动）
+| 腿 | 读数 | join／判据 | 结果 |
+|---|---|---|---|
+| 门 BLT（158 臂，`c047_blt_postfix158b_R193b_tmp.tsv`） | `same=154 diff=4 compile_fail=0 bad_probe=0` @749 s | 139 共有臂 `same→diff=0 diff→same=0`；红集恰 `b5 b141 b142 b149` | ✅ |
+| 门 F2I（51 臂） | `same=48 diff=2 compile_fail=1 dep_over=0` @228 s | vs R-192 档（`86a8764b…`）`inter=51 same→diff=0`，`b5`＋`b7` DIFF→SAME | ✅ 抑制回归已消 |
+| 邻门 OBJ（35 臂） | `same=33 diff=2` @165 s | 红 `i8 i11`＝F-61，零转移 | ✅ |
+| 邻门 PRC | `shape_same=56 shape_diff=1` @27 s | 红 `P\|100`＝F-122 | ✅ |
+| 邻门 PERR（32 臂） | `same=31 diff=1` @268 s | 唯一红 `e4`＝F-117 | ✅ |
+| ★邻门 SUPA（`@` 左值面） | `same=9 diff=1 bad_overaccept=3` @58 s | 残红 `s4`＝F-110，与 R-181f107 档一致 | ✅ |
+| ★邻门 SUPB（抑制栈平衡） | `arms=7 same=7 leak_suspect=0 scope_fail=0` @60 s | 抑制位改动未破坏栈平衡（F-115 判据保持） | ✅ |
+| ★邻门 ERRH（18 臂） | `same=12 diff=5 cf=1 rc_mismatch=1` @80 s | vs `c108_errh_18arm_R180_snapshot` `inter=18 same→diff=0`，红 `h6 h9 h10 h11 h12 h14` 逐名同 | ✅ |
+| 邻门 PD2（19 臂） | `same=17 diff=2 silent_null=2` @104 s | 红 `p12 p13` 未变 | ✅ |
+| 主回归 | `rc=0` ∧ `SELF_CHECK_OK rows=68 uniq=68 total=68` @842 s | Fail 三型全 0 | ✅ |
+| 影子列 | `col_md5=7f4b2c8a…` **＝** base（R-192 列）⇒ `changed_rows=0 col_identical=yes` @1170 s | 纯模板档预言达成 | ✅ |
+★★本批最重要的一条纪律复证：**汇总数会变好而逐臂 join 才能看见自造回归**——R-193 首跑 F2I 从 `46/4` 变 `47/3`（"少一枚红"），只有 join 指出那枚是 `g8 SAME→DIFF`。⇒ ★**任何邻门读数变化必须先做逐臂 join 才可上报为改善**（并入 §103.1）。
+★F2I `b5`／`b7` 两枚既存红被同批关闭，身份已逐枚核实＝**越界 float（`1e19`）进 int 形参未拒**（`str_repeat` 的 `#2`、`substr` 的 `#2`），正是本批 `.int_param` 拒绝支的应有效果，非偶然。
+★提交态实测校正（**不凭记忆写**）：老铁本会话中途提交 `3fba09f`，其模板态＝`37612064…`＝**含 R-186…R-193 全部接线、但不含 §103 的抑制位补口** ⇒ 工作区 `e06c1208…` 相对 HEAD 只差那 6 行。⇒ 被提交的那一代次带一枚已知可测缺陷（F2I `g8`），补口落地前勿以 `3fba09f` 作"全绿代次"引用。
+
+---
+
+## 104. R-194（F-62f 接线第二批＝数组族／转换器／随机族 `int` 形参）：14 枚转绿＋★一枚"接对了消息、接错了控制流"的撤回（新立 **F-128**）
+
+### 104.1 门 BLT 扩 H 段与修前基线（★r90 的**前置动作**在本轮首次真正做到"改码前先另存"）
+- 门体 `c047_builtin_numeric_object_gate_tmp.sh`（`6559448cd98e95573d60ea8ba59e6fde`）扩 `b159..b178` 共 20 臂 ⇒ 全门 158→**178 臂**。
+- ★修前逐臂快照在任何编辑**之前**就 cp 成轮次名文件 `c047_blt_prefix178_R194_snapshot_tmp.tsv`（r90 写的是"复跑前必须另存"，本轮把动作提前到"改码前"，基准不再依赖默认 OUT 表）。
+- 修前读数：`arms=178 same=157 diff=21 compile_fail=0 aot_caught=67 zig_escape=1 bad_probe=0 repo_build_residue=0` @**843 s**。
+- 21 枚红逐名＝`b5 b141 b142 b149`（既存四枚）＋`b159…b175`（本批 17 枚新臂）；`b176 b177 b178` 三枚反向守卫修前即 SAME ⇒ ★它们的作用是**接过头就会被看见**。
+- ★`zig_escape=1` 不是噪声：逐臂核对定位到 **b161 `array_chunk([1,2,3], $o)`** ⇒ 对象被 `size.toInt()` 折成 0，再撞 `if (chunk_size < 1) return error.InvalidArgument;` ⇒ **Zig 错误外逸成 PHP 不可见的失败**。这条"逃逸"本身就是 §104.3/§104.4 两枚面的可见证据。
+
+### 104.2 接线清单（13 枚函数／★**18 枚形参，其中 3 枚 `checkdate` 已撤回 ⇒ 净落 15 枚**）与三条**实测得到**的接线纪律
+★计数口径先钉死，因为三种数互相不等：**门臂 20 枚**（`b159..b178`）＝ 17 枚 TypeError 面 ＋ 3 枚反向守卫；
+**形参 18 枚**（下表逐枚相加）；**净落地 15 枚**＝`git diff -U0` 实测新增 `require(Optional)NumParam(` 行数＝新增 `_ok.toInt()` 行数，两者**相等**⇒ 每枚 require 都真的接到了消费点，没有"校验了但没人用"的悬空接线。
+| 站点（模板行号为修前代次） | 形参 | PHP 8.5.8 实测措辞 | helper |
+|---|---|---|---|
+| `php_array_slice` | #2 | `Argument #2 ($offset) must be of type int` | `requireNumParam` |
+| `php_array_splice` | #2 | `Argument #2 ($offset) must be of type int` | `requireNumParam` |
+| `php_array_chunk` | #2 | `Argument #2 ($length) must be of type int` | `requireNumParam` |
+| `php_array_pad` | #2 | `Argument #2 ($length) must be of type int` | `requireNumParam` |
+| `php_array_fill` | #1 #2 | `($start_index)`／`($count) must be of type int` | `requireNumParam`×2 |
+| `php_dechex`／`php_decoct` | #1 | `($num) must be of type int` | `requireNumParam` |
+| `php_long2ip` | #1 | `($ip) must be of type int` | `requireNumParam` |
+| `php_sleep`／`php_usleep` | #1 | `($seconds)`／`($microseconds) must be of type int` | `requireNumParam` |
+| `php_checkdate` | #1 #2 #3 | `($month)`／`($day)`／`($year) must be of type int` | ★**已撤回**，见 §104.3 |
+| `php_rand` | #1 #2 | `($min)`／`($max) must be of type int` | ★`requireOptionalNumParam`×2 |
+| `php_random_int` | #1 #2 | `($min)`／`($max) must be of type int` | `requireNumParam`×2 |
+
+三条纪律（都不是推出来的，是测出来／被反向守卫逼出来的）：
+1. **★require 的位置＝语义**：PHP 的参数类型检查发生在函数体执行**之前** ⇒ 校验必须放在各函数的 `!isArray()`／空数组早退**之上**。若照"就近改 `toInt()`"的直觉写，`array_slice([], $o)` 会被早退吞成 `[]`，臂照红、而且红得看不出错因。
+2. **★形参名以 PHP 实测为准，不可从模板变量名推断**：三处会错——`array_chunk` 的模板变量叫 `size` 而 PHP 叫 **`$length`**、`array_pad` 叫 `pad_size` 而 PHP 叫 **`$length`**、`long2ip` 叫 `long` 而 PHP 叫 **`$ip`**。照变量名写会把消息**印错**，而消息正是本族的判据。
+3. **★带默认值的形参必须走 `requireOptionalNumParam`**：`rand` 两枚在 PHP 都有默认值，而省略的形参在本调用约定里同样是 null ⇒ 用必填支路会让 `rand(10)` 替**没写的** `$max` 多印一句 `Passing null … is deprecated`。这条是 R-172 b72 已付过学费的口径，本轮在站点上复用。
+- 另记一条普查纪律：`php_dechex`／`php_decoct` 的函数体是**逐字节同形**的 `const n = val.toInt();` ⇒ 文本匹配会串台，必须用签名行当唯一锚（§86「站点普查只 grep 一个 C 函数名会漏同族」的模板版）。
+
+### 104.3 ★撤回 `checkdate`：消息全对、控制流错，根因在**发射器注册表**而非模板（新立 F-128）
+接线态实测（门 BLT `c047_blt_postfix178_R194_tmp.tsv`，锚 `tpl=76b952b5…`）三臂仍 DIFF，但 AOT 侧读数变成
+`B170=RET|B170=CAUGHT|TypeError|checkdate(): Argument #1 ($month) must be of type int, Foo given`
+⇒ **类名与消息逐字正确**，却先印出了 try 体的 `RET|`、随后才跳进 catch＝**异常在调用点没被接手，漂到了下一个检查点**。
+根因（读码定位，非猜测）：`native_linker.zig:4411` 把 `checkdate` 注册为 `.may_raise = false`，而 `functionMayRaise()`（`:3990-3995`）正是"是否在调用点做异常路由"的开关；模板签名 `Value`（无错误并集）与该旗是**配套约束**——只翻旗不改签名会让生成码把 `try` 打在非错误并集函数上，编译期即错。
+⇒ 处置：本批**撤回**这三枚接线（`tpl` 回到 `83679bda…`），并逐臂验证撤回态与修前**逐字节相同**（`B170/B171/B172=RET|boolean|false`），判据回到干净；正解另立 **F-128（#144）**，需老铁裁是否批准"动发射器注册表"的批型。
+★为什么不能"先留着、以后再说"：接线态会让**任何** `checkdate` 坏参调用产生一句多余的 stdout，并在远处才 fatal——这是比修前"静默假值"更**难归因**的错态；两态都不合 PHP，但只有静默态是既存的、已被登记的面。
+
+### 104.4 三枚"顺手动就会错"的面已立项，逐枚附实测真值（探针 `c205_r194_sidefaces_tmp.php`）
+| 面 | 实测 PHP | AOT 现状 | 为何本批不接 |
+|---|---|---|---|
+| **F-126（#142）** `array_chunk(_,0)`／`(-1)` | `ValueError: array_chunk(): Argument #2 ($length) must be greater than 0` | `return error.InvalidArgument`（Zig 外逸） | ★**第五套措辞族**（参数序／参数域比较），抛的类是 `ValueError` 不是 `TypeError` ⇒ 需新 helper，与 F-62f 接线混批会让两批评据互相污染 |
+| 同上 `array_fill(0,-3,…)` | `ValueError: … Argument #2 ($count) must be greater than or equal to 0` | `@max(0,…)` 静默夹取 | 同上 |
+| 同上 `random_int(5,1)` | `ValueError: … Argument #1 ($min) must be less than or equal to argument #2 ($max)` | `return error.InvalidRange`（外逸） | 同上 |
+| **F-127（#143）** `long2ip(4294967296)` | `RET\|string\|'0.0.0.0'`（按 32 位掩码） | `@intCast(… u32)` 越界＝Debug panic／ReleaseFast UB | 值域面，需先测负数与大整数全口径 |
+| **F-123（#140）** `substr_count(_,_, $o)` | `Argument #3 ($offset) must be of type int` | 静默 `integer\|1` | ★站点写死 `_ = offset; _ = length;`＝两枚形参**整体丢弃**；只接类型拒会让臂转绿而值语义照错＝**假性收口**，必须与语义实现同批、并为语义另扩臂 |
+- `b149` 因此**不计入本批可接项**（虽然它的措辞与已就位的 `.int_param` 完全匹配、一行就能转绿）——这是本批唯一一次"能转绿而故意不转"，理由如上。
+- 余下红 `b5`（F-62b stringable 感知的拒绝）／`b141`（`?int`）／`b142`（`array|int`）仍挂 #140，措辞维未扩，与 R-193 同档。
+
+### 104.5 ★F-128 的**范围普查**（两遍，只读）：结论是「潜在约束一枚」，不是系统性面
+一级 `c207_may_raise_census_tmp.sh` 把注册表里所有 `.may_raise = false` 条目取出来，逐枚扫函数体的**直接**置异常调用；
+二级 `c208_may_raise_indirect_tmp.sh` 先集合化"模板里直接会抛的 23 枚 `pub fn`"，再看这些条目有无**间接**调用进该集合
+（★一级只看直接抛点会漏"体内叫了另一枚会抛的 helper"，这是本仓第 N 次遇到"普查只盯一个名字会漏同族"的形状，故必须补二级）。
+| 读数 | 值 |
+|---|---|
+| 注册表 `.may_raise = false` 条目 | **48**（原始 `grep` 命中 49，其中 `:4202` 是**注释行**提到同名旗 ⇒ 已排除） |
+| 键形制 | **两种**：`.{ "n", bi(.{ … }) }` 与 `.{ "n", .{ … } }`（`unset`＝`:4448` 无 `bi` 包装）⇒ 正则锚死 `bi(` 会**漏一枚真条目** |
+| 抽到函数体 | 47／48；唯一 `NO_BODY`＝`aot_function_exists`，★它**不在模板里**——由发射器自带（`native_linker.zig:1838` 的 `\\` 前言串），"抽不到"≠"不存在" |
+| 直接抛点条目 | 当前代次（撤回后 `83679bda…`）＝**0**；接线代次（`76b952b5…`）实测＝**1**（`php_checkdate`，`rejectParamType` 1 处） |
+| 间接抛点条目 | **0** |
+⇒ 结论写死：`.may_raise = false` 是**一枚潜在约束**而非普遍缺陷——今天只有 `checkdate` 一旦被 F-62f 接线就会撞上；其余 47 枚条目本身不抛，旗与签名相配。
+⇒ 因此 F-128 的修法范围也就是**两文件两处**（模板签名 ＋ `:4411` 那一枚旗），不需全量翻新；但也因此**禁**把"以后任何 `.may_raise=false` 条目都能随便接线"当成默认——每接一枚都要重跑 `c207`＋`c208` 两遍普查。
+
+### 104.6 R-194 判据账本（链 `c206`，交付代次锚 `tpl=83679bdad2ce281d45622e1b964998e0`，其余五枚源逐字未动）
+★链头实测：`BATCH_TYPE=pure-template` 断言通过（`nlk 0d598ff8…`／`ir 1fb6b01f…`／`irg a5751960…`／`parser 70e80f18…`／`opt 36f354f4…` 五枚全未变）⇒ 影子判据走**硬中性**档；八枚邻门的**默认 OUT 表**在复跑前已全部 `cp` 并登记 md5＋行数（r90 前置动作第二次达成：`c062=51 行／c044=35／c164=57／c093=32／c073=19／c121=10／c123=7／c108=18`）。
+
+| 判据 | 读数 | 结果 |
+|---|---|---|
+| ①门 BLT 全 178 臂 join（`c047_blt_postfix178_R194b_tmp.tsv` @**798 s**，`same=171 diff=7 compile_fail=0 zig_escape=0 bad_probe=0 repo_build_residue=0`） | `inter=178` ∧ **`same→diff=0`** ∧ **`diff→same=14`** ∧ `diff→diff=7` | ✅ 逐名＝`b159…b169`＋`b173…b175` 转绿；`aot_caught 67→81` |
+| ②残红恰等预登记集合 | `b5 b141 b142 b149`（既存四枚，挂 #140／F-62b）＋`b170 b171 b172`（本批撤回，挂 #144） | ✅ 无意外红 |
+| ③`zig_escape 1→0` | 修前唯一逃逸源＝b161 `array_chunk`，接线后消失 | ✅ 与 §104.1 的归因一致 |
+| ④反向守卫未破 | `b176 array_fill(-2,3,"z")`／`b177 array_pad([1],-3,0)`／`b178 dechex("255")` 三枚 `same→same` | ✅ 未过接 |
+| ⑤语料暴露（★本批**非**零暴露，与 F-118/F-77 的"主回归失明"档不同） | `pass/` 内 `array_slice` 24／`array_fill` 23／`array_splice` 9／`dechex` 3／`decoct` 1／`array_chunk` 1＝**61 处**，逐枚原文核对恒为 int | ✅ 主回归有真实证据力 |
+| ⑥邻门八腿＋主回归＋影子列 | （链后续腿读数见下表，完成后回填） | ⏳ |
+★判据①的**口径注记**：`diff→same=14` 而不是 17，因为 17 枚 TypeError 面里有 3 枚属于被撤回的 `checkdate`——★这个 14 必须在写码前就按"17−3"预告，否则跑完再解释就成了事后合理化（§104.3 的撤回决定正是为了保住这条判据的可预言性）。
+
+### 104.7 ★链外备料已一次做完：F-62f 措辞维**整表真值矩阵**（资产 `c210_f62f_truth_matrix_tmp.php`／干净表 `c210_clean_tmp.tsv`，77 行）
+探针形制是关键：**先用 `ReflectionFunction` 取每枚形参的声明类型，按类型给合法占位值，再把待测那一槽换成对象**。
+★若不这样做就测不到东西——PHP 的参数类型检查**按槽位顺序**进行，前一槽值不合法时消息永远关于前一槽，目标槽的措辞根本观察不到（这正是 §92.5"helper 拿不到语境"那类"观察点选错 ⇒ 证据为零"的形状）。
+| 期望类型文本 | 行数 | 代表函数（实测槽位） |
+|---|---|---|
+| `int` | 23 | 已支持（`.int_param`） |
+| `string` | 21 | ★属 F-62b「stringable 感知」另一族，禁与本族混 |
+| **`?int`** | **10** | ★`mktime` #2–#6（**一枚函数 5 个槽**，最大簇）、`mb_substr` #3、`getdate` #1、`idate` #2、`srand` #1、`substr_count` #4 |
+| `array\|string` | 5 | `substr_replace` #1#2、`preg_replace` pattern/replacement |
+| `array` | 3 | `hash_pbkdf2`／`password_hash`／`password_needs_rehash` 的 `$options` |
+| `string\|int\|null` | 2 | `password_hash`／`password_needs_rehash` 的 `$algo`（§59.1 原句复证） |
+| `string\|int\|float` | 2 | `range` #1#2 |
+| `int\|float` | 1 | `range` #3（已支持 `.num_param`） |
+| `array\|int`／`array\|int\|null` | 1／1 | `substr_replace` #3／#4 |
+| `bool`／`?string`／`?bool` | 2／2／1 | `hash_pbkdf2`、`strrchr`、`mb_substr`、`mb_strpos`、`json_decode` #2 |
+★★**设计结论（比任何一枚臂都值钱，因为它决定了改造的形状）**：13 个措辞维**不是一个 13 项枚举**，而是两个正交开关——「可空 ⇒ `?` 前缀」×「类型集文本」。现 `NumParamKind`＋`numParamExpectedText()` 把两者捏成一个枚举，照原样扩到 13 会组合爆炸 ⇒ ★正解＝helper 改收 `expected: []const u8` ＋ 一枚 `null_ok: bool`（可空形参的 null 是**合法值**，措辞与语义**同时**变，不能只改文本）。
+★顺带测得一条新事实（来自那批"污染行"，见下）：**union 型形参并不静默吃 null**——`range()` 实测发 `Deprecated: range(): Passing null to parameter #1 ($start) of type string|int|float is deprecated` ⇒ union 的 `Passing null` 文本＝**整个 union 原文**，`requireNumParamAs` 现有的 `null_type` 形参已能承载，无需改形制。
+★工具教训（并入记忆 r97）：探针首跑 `php probe.php > tsv` 得到 **150 行**，真值只有 **77 行**——多出的 73 行是 PHP 把 `Deprecated:` 直接打进 **stdout** 混进表里。⇒ ①真值探针一律 `php -d display_errors=0 -d error_reporting="E_ALL & ~E_DEPRECATED & ~E_WARNING"`；②产出后先印 `awk '{print NF}' | sort | uniq -c` **字段数直方图**断言行形制，禁把 `wc -l` 当样本量；③但那批污染行本身是一条新事实 ⇒ ★**证据要先读一遍再删**。
+
+
+
+
+
 
 

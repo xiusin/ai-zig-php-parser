@@ -7235,6 +7235,12 @@ fn castIntArgWithWarn(arg: Value) i64 {
 }
 
 fn emitDeprecatedFloatToInt(f: f64) void {
+    // ★F-115 同族收口（由 R-193 接线暴露）：本函数**直写** fd2/fd1，绕过了 `standardPrint` 的 C2 抑制位
+    //   ⇒ 修前 `@str_repeat("a", 2.5)` 照打两行 Deprecated，而 PHP 8.5.8 实测 `@` 下一行不打（门 F2I g8 由 SAME 转 DIFF 抓住）。
+    //   此处只补抑制位，**不改** 措辞／两行格式／顺序（`{d}` 与序列化口径是 F-69 实测档，动不得）。
+    //   ★已知残余（另立 F-125）：本函数仍**不经** `dispatchToUserHandler` ⇒ `set_error_handler` 收不到这条 E_DEPRECATED；
+    //     同族直写站点还有 `emitDeprecatedStrGetcsvEscape:6436`／`emitUndefinedVariableWarning:6454`，须先逐枚测真值再改，禁顺手动。
+    if (isErrorSuppressed()) return;
     // 警告信息中使用完整精度（PHP serialize_precision），不是 echo 的 precision=14
     var fbuf: [64]u8 = undefined;
     // ★F-69：`{d}` 把 NAN 印成**小写** `nan`，而 PHP 8.5.8 实测发大写原词 `NAN`（`INF`／`-INF` 同理）
@@ -13282,6 +13288,13 @@ pub fn php_in_array(needle: Value, haystack: Value, strict: Value) !Value {
 /// array_slice($arr, 1, -1);  // [2, 3, 4]
 /// ```
 pub fn php_array_slice(arr: Value, offset: Value, length: Value, preserve_keys: Value, allocator: Allocator) !Value {
+    // ★F-62f 接线（门 BLT 段 H b159，R-194）：`$offset` 是**必填 int**，实测 PHP 8.5.8 抛
+    //   `array_slice(): Argument #2 ($offset) must be of type int, Foo given`，而修前 `offset.toInt()` 对对象静默给 0。
+    //   ★位置必须在下面两枚早退**之上**：PHP 的参数类型检查发生在函数体执行之前，
+    //   若放在空数组早退之后，`array_slice([], $o)` 会被早退吞成 `[]` 而非 TypeError（接线顺序即语义）。
+    const offset_ok = requireNumParam("array_slice", 2, "offset", .int_param, offset) orelse return Value.initNull();
+    // ★`$length`(#3) 本批刻意**不接**：PHP 声明是 **`?int`**（实测措辞 `must be of type ?int`），
+    //   `numParamExpectedText` 只会产 int／float／int|float ⇒ 直接接线会发**错措辞**（工单 §102.3，#140）。
     if (!arr.isArray()) return Value.initNull();
 
     const php_arr = arr.asArray();
@@ -13294,7 +13307,7 @@ pub fn php_array_slice(arr: Value, offset: Value, length: Value, preserve_keys: 
     }
 
     // 计算起始位置
-    const offset_int = offset.toInt();
+    const offset_int = offset_ok.toInt();
     const start_idx: usize = blk: {
         if (offset_int < 0) {
             const abs_offset = @as(usize, @intCast(-offset_int));
@@ -14037,7 +14050,10 @@ pub fn php_tanh(val: Value) !Value {
 
 /// dechex - 十进制转十六进制字符串
 pub fn php_dechex(val: Value, allocator: Allocator) !Value {
-    const n = val.toInt();
+    // ★F-62f 接线（门 BLT 段 H b165）：实测 `dechex(): Argument #1 ($num) must be of type int, Foo given`。
+    //   b178（`dechex("255")`='ff'）是**反向守卫**：完整数值串的弱强转必须继续可用 ⇒ 走 helper 的 string 支路而非直接拒。
+    const num_ok = requireNumParam("dechex", 1, "num", .int_param, val) orelse return Value.initNull();
+    const n = num_ok.toInt();
     const un: u64 = @bitCast(n);
     const str = try std.fmt.allocPrint(allocator, "{x}", .{un});
     defer allocator.free(str);
@@ -14047,7 +14063,10 @@ pub fn php_dechex(val: Value, allocator: Allocator) !Value {
 
 /// decoct - 十进制转八进制字符串
 pub fn php_decoct(val: Value, allocator: Allocator) !Value {
-    const n = val.toInt();
+    // ★F-62f 接线（门 BLT 段 H b166）：与 dechex 同族、同措辞（`Argument #1 ($num) must be of type int, Foo given`）。
+    //   ★站点普查教训复用：两枚函数体都写 `const n = val.toInt();`，按文本匹配会串台 ⇒ 用签名行做唯一锚。
+    const num_ok = requireNumParam("decoct", 1, "num", .int_param, val) orelse return Value.initNull();
+    const n = num_ok.toInt();
     const un: u64 = @bitCast(n);
     const str = try std.fmt.allocPrint(allocator, "{o}", .{un});
     defer allocator.free(str);
@@ -23486,6 +23505,12 @@ pub fn php_mktime(hour: Value, minute: Value, second: Value, month: Value, day: 
 
 /// checkdate(month, day, year) -> bool: 验证日期合法性
 pub fn php_checkdate(month: Value, day: Value, year: Value) Value {
+    // ★F-62f 接线**已在 R-194 撤回**（门 BLT b170..b172 留红，另立 F-128）：本函数是发射器注册表里
+    //   `.may_raise = false` 的少数条目（`native_linker.zig:4411`），helper 内 `throwThrowable` 置的 pending
+    //   异常**不会在调用点被路由** ⇒ 实测表现为「先印出 try 体的 `RET|`，再在下个检查点跳进 catch」，
+    //   消息与类名全对但控制流错（修前则是静默假值，两态都不合 PHP）。
+    //   正解需**同时**改模板签名 `Value`→`!Value` 与注册表 `may_raise`＝true（动发射器⇒批型改变），
+    //   且 must_raise=false 与签名是**配套约束**（只翻旗不改签名 ⇒ 生成码 `try` 打在非错误并集函数上，编译期即错）。
     const m = month.toInt();
     const d = day.toInt();
     const y = year.toInt();
@@ -23772,8 +23797,15 @@ pub fn php_rand(min: Value, max: Value) !Value {
         return Value.initInt(@as(i64, @intCast(random >> 1)));
     }
 
-    const min_val = min.toInt();
-    const max_val = max.toInt();
+    // ★F-62f 接线（门 BLT 段 H b173/b174）：实测 `rand(): Argument #N ($min|$max) must be of type int, Foo given`。
+    //   ★用 requireOptionalNumParam 而非 requireNumParam：两枚形参在 PHP 都带默认值，
+    //   而省略的形参在本调用约定里同样是 null ⇒ 若走必填支路，`rand(10)` 会替没写的 `$max` 多印一句 Passing-null Deprecated。
+    //   代价与 b72 同档（显式 `rand(1,null)` 的 Deprecated 不发），已登记在 helper 注释。
+    const min_ok = requireOptionalNumParam("rand", 1, "min", .int_param, min) orelse return Value.initNull();
+    const max_ok = requireOptionalNumParam("rand", 2, "max", .int_param, max) orelse return Value.initNull();
+
+    const min_val = min_ok.toInt();
+    const max_val = max_ok.toInt();
 
     if (min_val > max_val) {
         return Value.initInt(min_val);
@@ -23838,8 +23870,14 @@ pub fn php_mt_getrandmax() !Value {
 /// @param max 最大值
 /// @return 随机整数
 pub fn php_random_int(min: Value, max: Value) !Value {
-    const min_val = min.toInt();
-    const max_val = max.toInt();
+    // ★F-62f 接线（门 BLT 段 H b175）：实测 `random_int(): Argument #1 ($min) must be of type int, Foo given`。
+    //   与 rand 相反，这两枚在 PHP **无默认值** ⇒ 走必填支路（requireNumParam）。
+    //   ★下面 `min_val > max_val ⇒ error.InvalidRange` 是另一枚面：实测 PHP 给
+    //   `ValueError: random_int(): Argument #1 ($min) must be less than or equal to argument #2 ($max)`，本批不动（工单 §104.3）。
+    const min_ok = requireNumParam("random_int", 1, "min", .int_param, min) orelse return Value.initNull();
+    const max_ok = requireNumParam("random_int", 2, "max", .int_param, max) orelse return Value.initNull();
+    const min_val = min_ok.toInt();
+    const max_val = max_ok.toInt();
 
     if (min_val > max_val) {
         return error.InvalidRange;
@@ -24210,10 +24248,17 @@ pub fn php_array_key_last(arr: Value) !Value {
 
 /// array_fill - 用指定值填充数组
 pub fn php_array_fill(start_index: Value, num: Value, value: Value, allocator: Allocator) !Value {
+    // ★F-62f 接线（门 BLT 段 H b163/b164）：两枚都是必填 int，实测措辞分别用**形参名** `$start_index`(#1)／`$count`(#2)。
+    //   ★只接类型拒，符号语义不动：b176（`array_fill(-2, 3, "z")`）是**反向守卫**，负 start_index 合法；
+    //   而负 count 在 PHP 是 `ValueError: array_fill(): Argument #2 ($count) must be greater than or equal to 0`，
+    //   现有 `@max(0, …)` 静默夹取属另一枚面（工单 §104.3），本批不随之改。
+    const start_ok = requireNumParam("array_fill", 1, "start_index", .int_param, start_index) orelse return Value.initNull();
+    const num_ok = requireNumParam("array_fill", 2, "count", .int_param, num) orelse return Value.initNull();
+
     const result = try PHPArray.init(allocator);
 
-    const start = start_index.toInt();
-    const count = @max(0, num.toInt());
+    const start = start_ok.toInt();
+    const count = @max(0, num_ok.toInt());
 
     var i: i64 = 0;
     while (i < count) : (i += 1) {
@@ -24514,10 +24559,13 @@ pub fn php_array_combine(keys: Value, values: Value, allocator: Allocator) !Valu
 }
 
 pub fn php_array_pad(arr: Value, pad_size: Value, pad_value: Value, allocator: Allocator) !Value {
+    // ★F-62f 接线（门 BLT 段 H b162）：形参名实测 **`$length`**，`array_pad(): Argument #2 ($length) must be of type int, Foo given`。
+    //   b177（`array_pad([1], -3, 0)`）是**反向守卫**：负 length 在 PHP 是合法前填 ⇒ 只接类型拒，符号语义一律不动。
+    const pad_size_ok = requireNumParam("array_pad", 2, "length", .int_param, pad_size) orelse return Value.initNull();
     if (!arr.isArray()) return Value.initNull();
     const php_arr = arr.asArray();
     const n = php_arr.count();
-    const target_i = pad_size.toInt();
+    const target_i = pad_size_ok.toInt();
     const target: usize = @intCast(@abs(target_i));
 
     const result = try PHPArray.init(allocator);
@@ -24679,6 +24727,9 @@ pub fn php_array_intersect_key(arrays: []const Value, allocator: Allocator) !Val
 }
 
 pub fn php_array_splice(arr: Value, offset: Value, length: Value, replacement: Value, allocator: Allocator) !Value {
+    // ★F-62f 接线（门 BLT 段 H b160）：`$offset` 必填 int，实测 `array_splice(): Argument #2 ($offset) must be of type int, Foo given`。
+    //   同样置于 by-ref 解引用与 `!isArray()` 早退之前（PHP 先做参数类型检查）。
+    const offset_ok = requireNumParam("array_splice", 2, "offset", .int_param, offset) orelse return Value.initNull();
     // 解引用 Ref：by-ref 参数通过 make_ref 传递，arr 可能是 Ref(cell)
     const derefed = if (arr.isRef()) blk: {
         const cell = arr.asRef();
@@ -24688,7 +24739,7 @@ pub fn php_array_splice(arr: Value, offset: Value, length: Value, replacement: V
     const php_arr = derefed.asArray();
     const n = php_arr.count();
 
-    const off_i = offset.toInt();
+    const off_i = offset_ok.toInt();
     const start_idx: usize = blk: {
         if (off_i < 0) {
             const abs_off = @as(usize, @intCast(@abs(off_i)));
@@ -25589,7 +25640,11 @@ pub fn php_ip2long(ip: Value) !Value {
 
 /// long2ip - 将长整型转换为IP地址
 pub fn php_long2ip(long: Value, allocator: Allocator) !Value {
-    const ip_num: u32 = @intCast(@max(long.toInt(), 0));
+    // ★F-62f 接线（门 BLT 段 H b167）：形参名实测 **`$ip`**（不是模板变量名 `long`）。
+    const ip_ok = requireNumParam("long2ip", 1, "ip", .int_param, long) orelse return Value.initNull();
+    // ★下面的 `@intCast(… u32)` 对 >u32 域是越界转换（实测 `long2ip(4294967296)` PHP 给 '0.0.0.0'，即 32 位掩码）
+    //   ——那是独立一枚面（工单 §104.3），本批只接类型拒，不改这里的取模语义。
+    const ip_num: u32 = @intCast(@max(ip_ok.toInt(), 0));
 
     const a: u8 = @intCast((ip_num >> 24) & 0xFF);
     const b: u8 = @intCast((ip_num >> 16) & 0xFF);
@@ -27540,14 +27595,19 @@ extern "c" fn usleep(usec: c_uint) c_int;
 
 /// sleep - 延迟执行（秒）
 pub fn php_sleep(seconds: Value) !Value {
-    const secs: c_uint = @intCast(@max(0, seconds.toInt()));
+    // ★F-62f 接线（门 BLT 段 H b168/b169）：实测 `sleep(): Argument #1 ($seconds) must be of type int, Foo given`。
+    //   ★位置在 `sleep()` 系统调用**之前** ⇒ 对象入参不再有机会把 `toInt()` 的 0 当成「睡 0 秒」静默放过。
+    const secs_ok = requireNumParam("sleep", 1, "seconds", .int_param, seconds) orelse return Value.initNull();
+    const secs: c_uint = @intCast(@max(0, secs_ok.toInt()));
     _ = sleep(secs);
     return Value.initInt(0);
 }
 
 /// usleep - 延迟执行（微秒）
 pub fn php_usleep(microseconds: Value) !Value {
-    const usecs: c_uint = @intCast(@max(0, microseconds.toInt()));
+    // ★F-62f 接线（门 BLT 段 H b169）：`usleep(): Argument #1 ($microseconds) must be of type int, Foo given`。
+    const usecs_ok = requireNumParam("usleep", 1, "microseconds", .int_param, microseconds) orelse return Value.initNull();
+    const usecs: c_uint = @intCast(@max(0, usecs_ok.toInt()));
     _ = usleep(usecs);
     return Value.initNull();
 }
@@ -28157,9 +28217,15 @@ pub fn php_array_find_key(arr: Value, callback: Value, allocator: Allocator) !Va
 /// array_chunk - 将数组分割成指定大小的块
 /// array_chunk - 将数组分割成指定大小的块
 pub fn php_array_chunk(arr: Value, size: Value, preserve_keys: Value, allocator: Allocator) !Value {
+    // ★F-62f 接线（门 BLT 段 H b161）：形参名实测是 **`$length`**（不是模板变量名 `size`）——
+    //   `array_chunk(): Argument #2 ($length) must be of type int, Foo given`。
+    //   ★本臂是 R-194 修前**唯一 `zig_escape=1`** 的来源：修前对象先被 `size.toInt()` 折成 0，
+    //   再撞上下面 `chunk_size < 1` 的 `return error.InvalidArgument` ⇒ Zig 错误外逸成 PHP 不可见的失败。
+    //   接线的正确位置在早退**之前**，于是 b161 与 escape 同时消失；而 `<1` 那条分支自身是另一枚面（ValueError，工单 §104.3），本批不动。
+    const size_ok = requireNumParam("array_chunk", 2, "length", .int_param, size) orelse return Value.initNull();
     if (!arr.isArray()) return error.InvalidArgument;
 
-    const chunk_size = size.toInt();
+    const chunk_size = size_ok.toInt();
     if (chunk_size < 1) return error.InvalidArgument;
 
     const preserve = preserve_keys.toBool();
