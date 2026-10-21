@@ -25395,11 +25395,19 @@ pub const NativeLinker = struct {
             },
             .release => |op| {
                 // release: 减少引用计数，可能触发析构
-                const suffix = self.getRegSuffix(op.operand.id);
-                try writer.print("    if (reg_{d}{s}.isArray() or runtime.Value_isObject(reg_{d}{s}) or reg_{d}{s}.isFunction()) {{\n", .{ op.operand.id, suffix, op.operand.id, suffix, op.operand.id, suffix });
-                try writer.print("        reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ op.operand.id, suffix });
-                try writer.print("        reg_{d}{s} = runtime.Value.initNull();\n", .{ op.operand.id, suffix });
-                try writer.writeAll("    }\n");
+                // alloca 槽必须先置空：作用域/异常清理会对槽再释放一次，不置空即二次释放（f034 实测 rc=139）
+                if (self.isAllocaReg(op.operand.id)) {
+                    try writer.print("    if (!reg_{d}.*.isNull()) {{\n", .{op.operand.id});
+                    try writer.print("        reg_{d}.*.release(runtime.runtime_allocator);\n", .{op.operand.id});
+                    try writer.print("        reg_{d}.* = runtime.Value.initNull();\n", .{op.operand.id});
+                    try writer.writeAll("    }\n");
+                } else {
+                    const suffix = self.getRegSuffix(op.operand.id);
+                    try writer.print("    if (reg_{d}{s}.isArray() or runtime.Value_isObject(reg_{d}{s}) or reg_{d}{s}.isFunction()) {{\n", .{ op.operand.id, suffix, op.operand.id, suffix, op.operand.id, suffix });
+                    try writer.print("        reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ op.operand.id, suffix });
+                    try writer.print("        reg_{d}{s} = runtime.Value.initNull();\n", .{ op.operand.id, suffix });
+                    try writer.writeAll("    }\n");
+                }
             },
             .unset_var => |op| {
                 // unset_var: 专门处理unset操作

@@ -2927,7 +2927,9 @@ pub const Value = struct {
         }
         if (self.isFunction()) {
             // 函数转字符串也应该抛出异常（PHP 8+）
-            try throwExceptionDiscard("Object of class Closure could not be converted to string", allocator);
+            // ★F-134：必须抛可 catch 的 `Error` 对象。throwException 设的是**字符串**，
+            // catch 派发的 php_instanceof 对非对象恒 false ⇒ 会被当成未捕获致命退出。
+            try throwThrowableDiscard("Error", "Object of class Closure could not be converted to string", allocator);
             return PHPString.init(allocator, "");
         }
         if (Value_isObject(self)) {
@@ -5440,7 +5442,19 @@ pub fn php_invoke_callable(callback: Value, args: []const Value, allocator: Allo
 
 pub fn php_args_append_spread(dest: Value, src: Value, allocator: Allocator) !Value {
     if (!dest.isArray()) {
-        return throwException("Only arrays can be unpacked", allocator);
+        return throwThrowable("Error", "php_args_append_spread: destination is not an array", allocator);
+    }
+
+    // ★F-134：PHP 8 的 `...$x` 只接受 array 与 Traversable，其余抛 TypeError。
+    // 旧实现把非数组交给 php_array_iter_init ⇒ 发一条 foreach 口径的 Warning 后**静默吞掉**实参（f(...5) 变 f()）。
+    const unpackable = src.isArray() or (Value_isObject(src) and blk: {
+        const meta = Value_asObject(src).class_meta orelse break :blk false;
+        break :blk (meta.findMethod("rewind") != null and meta.findMethod("valid") != null and
+            meta.findMethod("current") != null and meta.findMethod("key") != null and
+            meta.findMethod("next") != null) or meta.findMethod("getIterator") != null;
+    });
+    if (!unpackable) {
+        return throwUnpackTypeError(src, allocator);
     }
 
     const dest_arr = dest.asArray();
@@ -5460,7 +5474,8 @@ pub fn php_args_append_spread(dest: Value, src: Value, allocator: Allocator) !Va
 
 pub fn php_invoke_callable_args_array(callback: Value, args_array: Value, allocator: Allocator) !Value {
     if (!args_array.isArray()) {
-        return throwException("Only arrays can be unpacked", allocator);
+        // 常规入口由 php_call_user_func_array 先审查（带函数专有措辞）；此处兜内部调用方。
+        return throwUnpackTypeError(args_array, allocator);
     }
 
     const arr = args_array.asArray();
@@ -5562,11 +5577,12 @@ pub fn php_object_call_safe_args_array(obj_val: Value, method_name_val: Value, a
     if (!Value_isObject(obj_val)) {
         return Value.initNull();
     }
+    // 实测：`$x=null; $x?->$m()` 短路为 NULL（不查方法名）；但接收者是对象时非字符串方法名抛 Error。
     if (!method_name_val.isString()) {
-        return Value.initNull();
+        return throwThrowable("Error", "Method name must be a string", allocator);
     }
     if (!args_array.isArray()) {
-        return throwException("Only arrays can be unpacked", allocator);
+        return throwUnpackTypeError(args_array, allocator);
     }
 
     const arr = args_array.asArray();
@@ -5588,14 +5604,19 @@ pub fn php_object_call_safe_args_array(obj_val: Value, method_name_val: Value, a
 }
 
 pub fn php_object_call_args_array(obj_val: Value, method_name_val: Value, args_array: Value, allocator: Allocator) !Value {
-    if (!Value_isObject(obj_val)) {
-        return throwException("Call to a member function on null", allocator);
-    }
+    // 实测（$x=null; $m=1; $x->$m()）：方法名检查先于接收者检查。
     if (!method_name_val.isString()) {
-        return throwException("Method name must be a string", allocator);
+        return throwThrowable("Error", "Method name must be a string", allocator);
+    }
+    if (!Value_isObject(obj_val)) {
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Call to a member function {s}() on {s}", .{
+            method_name_val.asString().data, phpArgTypeWord(obj_val),
+        }) catch "Call to a member function on a non-object";
+        return throwThrowable("Error", msg, allocator);
     }
     if (!args_array.isArray()) {
-        return throwException("Only arrays can be unpacked", allocator);
+        return throwUnpackTypeError(args_array, allocator);
     }
 
     const arr = args_array.asArray();
@@ -5619,14 +5640,20 @@ pub fn php_object_call_args_array(obj_val: Value, method_name_val: Value, args_a
 /// 使用命名参数调用对象方法
 /// args_array 包含位置参数（整数键）和命名参数（字符串键）
 pub fn php_object_call_named_args(obj_val: Value, method_name_val: Value, args_array: Value, allocator: Allocator) !Value {
-    if (!Value_isObject(obj_val)) {
-        return throwException("Call to a member function on null", allocator);
-    }
+    // 实测（$x=null; $m=1; $x->$m()）：方法名检查先于接收者检查。
     if (!method_name_val.isString()) {
-        return throwException("Method name must be a string", allocator);
+        return throwThrowable("Error", "Method name must be a string", allocator);
+    }
+    if (!Value_isObject(obj_val)) {
+        var nbuf: [256]u8 = undefined;
+        const nmsg = std.fmt.bufPrint(&nbuf, "Call to a member function {s}() on {s}", .{
+            method_name_val.asString().data, phpArgTypeWord(obj_val),
+        }) catch "Call to a member function on a non-object";
+        return throwThrowable("Error", nmsg, allocator);
     }
     if (!args_array.isArray()) {
-        return throwException("Arguments must be an array", allocator);
+        // 命名实参数组由发射器构造，非数组属内部不变量；仍用 TypeError 保持可捕获。
+        return throwThrowable("TypeError", "Arguments must be an array", allocator);
     }
 
     const obj = Value_asObject(obj_val);
@@ -5634,8 +5661,13 @@ pub fn php_object_call_named_args(obj_val: Value, method_name_val: Value, args_a
     const arr = args_array.asArray();
 
     // 获取方法的参数信息
-    const meta = obj.class_meta orelse return throwException("Cannot find class metadata", allocator);
-    _ = meta.findMethod(method_name) orelse return throwException("Call to undefined method", allocator);
+    const meta = obj.class_meta orelse return throwThrowable("Error", "Cannot find class metadata", allocator);
+    _ = meta.findMethod(method_name) orelse {
+        var ubuf: [512]u8 = undefined;
+        const umsg = std.fmt.bufPrint(&ubuf, "Call to undefined method {s}::{s}()", .{ meta.name, method_name }) catch
+            "Call to undefined method";
+        return throwThrowable("Error", umsg, allocator);
+    };
 
     // 收集位置参数（整数键，按顺序）
     var positional = std.ArrayListUnmanaged(Value){ .items = &.{}, .capacity = 0 };
@@ -22760,27 +22792,29 @@ pub fn php_call_static_with_ctx(ctx: Value, class_name: []const u8, method_name:
     const lookup_meta = blk: {
         if (std.mem.eql(u8, class_name, "self")) {
             break :blk getCurrentScopeClass() orelse {
-                return throwException("Cannot access self:: when no class scope is active", allocator);
+                // F-134：必须抛 Throwable 对象；throwException 设的是字符串，catch 派发恒不命中 ⇒ 假致命。
+                return throwThrowable("Error", "Cannot access \"self\" when no class scope is active", allocator);
             };
         }
         if (std.mem.eql(u8, class_name, "parent")) {
             const scope = getCurrentScopeClass() orelse {
-                return throwException("Cannot access parent:: when no class scope is active", allocator);
+                return throwThrowable("Error", "Cannot access \"parent\" when no class scope is active", allocator);
             };
             break :blk scope.parent orelse {
-                return throwException("Cannot access parent:: when current class has no parent", allocator);
+                // PHP 8.5.8 该形是编译期 Fatal（不可捕获）；AOT 侧保留运行期兜底，措辞对齐 PHP。
+                return throwThrowable("Error", "Cannot use \"parent\" when current class scope has no parent", allocator);
             };
         }
         if (std.mem.eql(u8, class_name, "static")) {
             // static:: 回退：先查 called class，再查 scope class
             break :blk getCurrentCalledClass() orelse getCurrentScopeClass() orelse {
-                return throwException("Cannot access static:: when no class scope is active", allocator);
+                return throwThrowable("Error", "Cannot access \"static\" when no class scope is active", allocator);
             };
         }
         break :blk findClass(class_name) orelse {
             const msg = std.fmt.allocPrint(allocator, "Class \"{s}\" not found", .{class_name}) catch return Value.initNull();
             defer allocator.free(msg);
-            return throwException(msg, allocator);
+            return throwThrowable("Error", msg, allocator);
         };
     };
 
@@ -23426,6 +23460,19 @@ pub fn throwThrowable(class_name: []const u8, message: []const u8, allocator: Al
     try obj.setProperty("message", msg_val);
     setException(exception);
     return exception;
+}
+
+/// ★F-134：`...$x` 解包操作数不可遍历时的 TypeError。
+/// PHP 8.5.8 实测措辞：bool 打 `true`/`false`，对象打类名（`stdClass`/`Closure`），其余用通用名表。
+fn throwUnpackTypeError(src: Value, allocator: Allocator) !Value {
+    var buf: [256]u8 = undefined;
+    const given = if (src.isBool())
+        (if (src.toBool()) "true" else "false")
+    else
+        phpGetValueTypeName(src);
+    const msg = std.fmt.bufPrint(&buf, "Only arrays and Traversables can be unpacked, {s} given", .{given}) catch
+        "Only arrays and Traversables can be unpacked";
+    return throwThrowable("TypeError", msg, allocator);
 }
 
 /// never 返回类型检查：never 函数不应正常返回，调用此函数即抛出 TypeError
@@ -33369,6 +33416,17 @@ pub fn php_call_user_func(args: []const Value, allocator: Allocator) !Value {
 
 /// call_user_func_array - 使用数组参数调用回调函数
 pub fn php_call_user_func_array(callback: Value, args_arr: Value, allocator: Allocator) !Value {
+    if (!args_arr.isArray()) {
+        // PHP 8.5.8：TypeError `call_user_func_array(): Argument #2 ($args) must be of type array, int given`
+        var buf: [256]u8 = undefined;
+        const given = if (args_arr.isBool())
+            (if (args_arr.toBool()) "true" else "false")
+        else
+            phpGetValueTypeName(args_arr);
+        const msg = std.fmt.bufPrint(&buf, "call_user_func_array(): Argument #2 ($args) must be of type array, {s} given", .{given}) catch
+            "call_user_func_array(): Argument #2 ($args) must be of type array";
+        return throwThrowable("TypeError", msg, allocator);
+    }
     return php_invoke_callable_args_array(callback, args_arr, allocator);
 }
 

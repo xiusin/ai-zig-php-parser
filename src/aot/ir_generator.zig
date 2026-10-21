@@ -9350,11 +9350,16 @@ prop_name: ?[]const u8 = null,
         args[1] = caps_arr_reg;
         args[2] = is_static_reg;
 
-        return self.emitWithResult(.{ .call = .{
+        const closure_reg = try self.emitWithResult(.{ .call = .{
             .func_name = "php_create_closure",
             .args = args,
             .return_type = .php_callable,
         } }, .php_callable);
+
+        // 捕获数组是一次性临时量：闭包已逐元素 retain ⇒ 创建后即可释放（F-136b）。
+        // 该调用点此前不释放（.call 参数一律按"可能被消费"跳过）⇒ 每建一枚闭包漏一枚数组。
+        _ = try self.emit(.{ .release = .{ .operand = caps_arr_reg } }, null);
+        return closure_reg;
     }
 
     /// Generate IR for arrow function
@@ -9453,11 +9458,15 @@ prop_name: ?[]const u8 = null,
         args[1] = caps_arr_reg;
         args[2] = is_static_reg;
 
-        return self.emitWithResult(.{ .call = .{
+        const closure_reg = try self.emitWithResult(.{ .call = .{
             .func_name = "php_create_closure",
             .args = args,
             .return_type = .php_callable,
         } }, .php_callable);
+
+        // 捕获数组是一次性临时量：闭包已逐元素 retain ⇒ 创建后即可释放（F-136b），理由同 generateClosure。
+        _ = try self.emit(.{ .release = .{ .operand = caps_arr_reg } }, null);
+        return closure_reg;
     }
 
     /// Generate IR for yield expression

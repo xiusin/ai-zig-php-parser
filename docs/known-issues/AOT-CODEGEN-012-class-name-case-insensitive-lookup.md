@@ -7137,6 +7137,203 @@ AOT 修前＝**六面全静默给 `0`／`0.0`**（值错＋诊断缺失双缺口
 | `through_ref` 保守豁免 | store 的写穿路径不在本轮释放 | 未测 | 口径保守（可能仍漏），待专门定价后再收 |
 | `--optimize=release-fast` | 本批全部读数均在默认档 `--compile --no-debug-info` | — | F-93 禁混测，不属本批 |
 
+## 107. R-198（F-133 闭环）：异常路径「每调用泄漏」＝模板侧 6 类 ＋ 发射器侧 7 类自有引用未回收
+
+### 107.1 先读：本批的读数分两段，禁把 c249 的 pre 列当「原始缺陷全貌」
+
+F-133 由 §106.8 登记（c234 三代同量级 ⇒ 既存缺陷），R-198 落地时**模板侧与发射器侧不是同时改完的**：
+
+| 段 | 内容 | 证据 |
+|---|---|---|
+| 原始缺陷 | 模板丢弃面／路径串／计数器等全部未修 | c234 N=1M RSS 667,025,408（§106.8）；c248 `% 0` 探针 ≈594 B/次；tnl `:18076` 现场注释记录 c234/c248 ≈664 B/throw（异常对象面） |
+| 半修基线（c249 的 pre 列） | **模板已修**（tpl mtime 19:00:03），发射器未修（pre 用 leakfix2 二进制） | `c249_f133_leak_preR198_tmp.tsv` 时间 19:00:47；此时 a1-a4/a9 已 FLAT，只剩 a5/a6/a7 三臂 LEAK |
+| 本批终态（post/final） | 模板＋发射器全修 | `c249_f133_leak_postR198_tmp.tsv`（19:02:24）与 `c249_f133_leak_finalR198_tmp.tsv`（20:31:10，清场后复跑）逐行相同（仅临时目录名不同） |
+
+★因此：**a2 在 pre 列 FLAT 不等于「丢弃面没有缺陷」**——它的 594 B/次是模板修前 c248 的读数；c249 的 pre 列只承担「发射器面 A/B」的证明。
+★模板在 AOT 编译期以符号链接嵌入 ⇒「leakfix2 二进制 + 当前模板」是一代合法组合，不需要重编二进制。
+
+### 107.2 根因清单（模板侧，锚 `tpl=23ef5fe1…`）
+
+| # | 根因 | 站点（现测） | 泄漏量级 |
+|---|---|---|---|
+| T1 | 丢弃面：`_ = try throwThrowable(...)` / `_ = throwThrowable(...) catch {}` 丢掉返回值的 +1；`setException` 另持一份 | 新增 helper `:23393-23415`；**32 个调用点**＝8×`throwThrowableDiscard`＋24×`throwThrowableDiscardCatch` | c248 a2 ≈594 B/次（修前） |
+| T2 | 路径串面：`setException` 的 `PHPString.init(src_file)` 交给 `setProperty`（内部 retain）后未归还；`getProperty("file"/"line")` 仅作存在性判断也漏 +1 | `:700-718` | 每次抛异常固定 ≈84 B |
+| T3 | 计数器面：`gcDestroyObject` 绕过 `PHPObject.deinit` ⇒ `php_object_live_objects` 只增不减 | `:1452` | 对象计数不复位 |
+| T4 | 异常读取器二次 retain：`getMessage/getCode/getFile/getLine/getPrevious` 在 `getProperty` 已 +1 后又 retain | `:16103/:16120/:16136/:16153/:16170` | 每次读取漏一枚 |
+| T5 | `ReflectionClass::__construct`：`args[0].toString()` 返回 +1 未归还；`__class_name` 的 `PHPString.init` 交 `setProperty` 后也未归还 | `:17285-17302` | 每次构造漏 1-2 枚串 |
+| T6 | 对象工厂：构造器以 Zig error 返回、或单块发射器「置异常后正常返回」时，工厂持有的 `obj_val` rc=1 未归还 | `:22227-22235` | 每次失败的 new 漏一个对象 |
+
+★T1 的两种 helper 不能合并：`throwThrowableDiscardCatch` 保留「分配失败静默吞掉」的既有口径（这些站点没有错误返回通道），`throwThrowableDiscard` 返回 `!void` 供 `may_raise` 路径使用。
+
+### 107.3 根因清单（发射器侧，锚 `nlk=e9389974…`）
+
+| # | 根因 | 站点（现测） |
+|---|---|---|
+| E1 | `.ret` 只清 alloca ⇒ 调用类结果（`call/method_call/static_method_call/new_object`，及非 `no_deref` 的 `load`，发射时均 +1）在成功返回路径泄漏 | 字段 `:231`；收集 `:6330-6348`；释放 `:19601-19612`（按 liveness 死亡且非返回值） |
+| E2 | `catch_`/`get_exception` 结果寄存器持有 `getException()` **转移**来的异常引用，无释放点 | 字段 `:292`；收集（仅 `def_counts==1`，防寄存器复用误放）`:18074-18107`；统一释放器 `:19545-19573`；`.ret` 全量 `:19616-19618`；`.br` 死亡集 `:19637-19638` |
+| E3 | `.throw` 的异常对象寄存器自身引用未归还（`setException` 已 retain 一份） | 状态机 `:926-941`；单块发射器镜像 `:6501-6520` |
+| E4 | 非 alloca 抛出值、逃逸 throw 的局部 alloca 槽、抛出后死亡的 catch 引用均无清理 | `:19822-19839`（非 alloca 抛出值）／`:19841-19843`（死亡 catch 集）／`:19848-19867`（逃逸 throw 清局部槽，并新增 `// Cleanup locals before escaping throw`） |
+| E5 | `cond_br`/`switch` 的条件寄存器是终止符操作数、不在 `live_out` ⇒ 释放前必须显式排除，否则冲写 | `:19702-19705`／`:19720-19722` |
+| E6 | `method_call` 的 receiver 不由 `php_object_call` 消费，`$this` 返回路径会在 `.ret` retain ⇒ 临时 receiver 死亡后可释放 | `:19993-19997`（`releaseDeadOperands`） |
+| E7 | `store` 的 value 临时引用（R-197 ③） | `:19941-19953`（**属 R-197，不在本批**） |
+
+### 107.4 门读数：c249（12 臂，`--optimize=release-fast`）
+
+**臂表**：a1 `intdiv`／a2 `% 0`／a3 `/ 0`／a4 `throw new`／a5 catch 读 `getMessage`／a6 跨函数 rethrow／a7 `ReflectionException`／a8 `Closure→string`／a9 `int + array`／g1 不抛控制臂／g2 try 不进 catch 守卫／s1 敏感度臂（每轮保留 16 B 串）。N=1000/3000 双跑，判据 `Δlive_bytes==0 ∧ Δlive_allocs==0 ∧ php_object_live_objects==0`。
+
+| 臂 | pre（模板已修、发射器未修，19:00:47） | post/final（全修） | 斜率（pre） |
+|---|---|---|---|
+| a5 | LEAK `lb=85177→285165`／`la=1116→3118` | **FLAT** `lb=42593→42593`／`la=115→115` | **≈100.0 B/次**（Δ=199,988/2000） |
+| a6 | LEAK `lb=106097→348085`／`la=1115→3117` | **FLAT** `lb=42513→42513`／`la=114→114` | **≈121.0 B/次**（Δ=241,988/2000） |
+| a7 | LEAK `lb=144441→291085`／`la=1116→3117` | **FLAT** `lb=42513→42513`／`la=114→114` | **≈73.3 B/次**（Δ=146,644/2000） |
+| a1-a4/a9 | FLAT（模板侧修好后的半修基线） | FLAT | 0 |
+| g1/g2 | FLAT（量具守卫） | FLAT | 0 |
+| s1 | SENSE_OK（`lb` 140172→368160） | SENSE_OK（同读数） | 量具能看见泄漏 |
+| a8 | ROUTE_GAP `rc=255/255` | ROUTE_GAP（未修，转 **F-134**） | — |
+
+**final DONE（清场后，仓库根无并发）**：
+`C249F133_DONE arms=12 flat=10 leak=0 diff=0 sense_ok=1 route_gap=1 compile_fail=0 parse_fail=0 runtime_fail=0 stats_missing=0 repo_build_residue=0 ELAPSED=101s`
+
+★档位说明：c249 门固定用 `--optimize=release-fast`（`:158`），pre/post 两侧同档 ⇒ A/B 成立；主回归与十邻门走默认档。两档禁互相引用为同一读数（F-93 口径）。
+
+### 107.5 验收链
+
+| 腿 | 读数 | 判据 |
+|---|---|---|
+| 十邻门（逐臂 join，pre=leakfix2 代次基线） | c146 12／c164 61／c093 32／c062 51／c154 9／c117 32／c073 19／c012 88／c067 56／c047 209（均 `pre=post=inter`）；十门 **`verdict_chg=0 diff_to_same=0 same_to_diff=0 missing_pre=0 missing_post=0`** | 邻门零转移 |
+| 主回归 | `rc=0`，19:03:41→19:17:11（**wall≈810 s**）；`SELF_CHECK_OK rows=68 uniq=68 total=68`；`PASS=68 FAIL=0`；报告表 **Total 68 / Pass 67 / Skip 1 / Fail(Compile|Runtime|Diff) 0**（skip＝f004 既有基线） | 无回归 |
+| `zig build test` | `Build Summary: 21/21 steps succeeded; 326/326 tests passed`，`rc=0`；日志 `/tmp/zbuildtest_f133b.log`。★输出里的 `failed command:` 是 `ci_integration.test.CIRunner` 自调二进制的既有噪声（同缓存哈希，R-176 起就有），判据只认 Build Summary＋rc | 通过 |
+| 影子（NEW 68 份 main.zig） | `SHADOW_R198_DONE total=68 drift=25 invalid=0 out_md5=05ec67d107da9b379b7c6e71940fea34 wall=1185s` | 本批动发射器 ⇒ **必须漂移** |
+| 影子归因 | 25 份 diff：**新增 836 行＝826 行 `release` ＋ 10 行 `// Cleanup locals before escaping throw`；删除 0 行**（逐文件 `add>0 del=0`，最大 f048 ＝151 行） | 只增释放行，无语义改写 |
+| 性能（c252，OLD=leakfix2／NEW=R-198，N=2M，交错 3 轮） | OLD 3.176／2.723／2.723 **中位 2.723 s**；NEW 2.966／2.734／2.678 **中位 2.734 s**；**+0.011 s＝+0.40%**；六次输出均 `n=2000000 sum=16444445` | 无实质性能代价 |
+| 代次 | nlk `e93899747e9552ccfa8e912bca51d362`／tpl `23ef5fe1d5048d67e87793a13f5434e0`／opt `50c5fa36eac9ebfd96eee18afa3aa1ad`／ir `1fb6b01f9b0bdff318de496538e7620e`／irg `a57519607f10ba6140c27df535cd90dd`／parser `70e80f18a2c6ef6787b4c5d817c31773`（★六枚＝`ir_generator.zig`／`parser.zig`／`native_linker.zig`／`runtime_lib_template.zig`／`optimizer.zig`／`ir.zig` 按 `md5 -q` 实测；本批仅 nlk＋tpl 动，其余四枚沿用 R-197 锚） | 跑动期间源码未变 |
+| 提交态 | 老铁于 **2026-10-20 19:40** 提交 `8f53834`，含本批全部源码（`git show --numstat`：nlk **+210/−4**、tpl **+98/−43**）与 §106.5-106.8 文档；工作区两枚 `.zig` 与 HEAD 逐字相同（md5 已复测） | 代次已入库 |
+
+★c047 首轮被 c250 的外层 `timeout 500` 在 b103 截断（`rc=124`、`post=103`），随后**单独**以 `timeout 1800` 复跑（`C047BLT_DONE arms=209 … ELAPSED=1005s`）再 join ⇒ 209/209。截断读数不得当回归，也不得与 209 臂基线混比。
+★二进制 md5 `851200a9…` 只登记不断言（`zig build` 非字节可复现，§106.5 已证）。
+
+### 107.6 残余与登记（本批不修）
+
+| 项 | 现场 | 实测 | 处置 |
+|---|---|---|---|
+| **F-134**（新立） | `(string)$closure` 在 try/catch 内仍以 rc=255 致命退出 | c249 a8 两代均 `ROUTE_GAP`／`rc=255/255`；AOT 文本 `Fatal error: Uncaught Exception: Object of class Closure could not be converted to string` | ★**机制叙述已在 §108.1 更正**：原写「转换调用点不检查 `hasException()`」**被生成码证伪**（`/tmp/f134attr/closure_throw_main.zig:54/:118/:158` 等均有 `if (runtime.hasException())` 检查）。真根因＝`throwException` 把**字符串**写进异常槽，catch 派发的 `php_instanceof` 对非对象恒 false ⇒ 所有 `catch (Throwable)` 都不命中。同族 `throwException` 调用点共 **17 枚**（`md5` 对照 diff 实测：17 行 `-throwException`），已在 R-199 全量改抛 Throwable 对象 |
+| typed 形参所有权 | `function f(string $s)`，调用方传 `str_repeat(...)` | §106.8：≈104 B/调用（prefix 即存在） | 既存，未在本批扩大范围 |
+| `through_ref` 写穿豁免 | `.store` 的写穿路径仍不释放临时引用 | 未测 | 保守口径，待专门定价 |
+| c249 档位缺口 | 泄漏门固定 release-fast；主回归/邻门为默认档 | — | 若要把「泄漏」纳入默认档硬闸，需另建默认档臂（本批未做） |
+| a8 的 `flat` 计数 | a8 不计入 flat（route_gap 单列） | `flat=10 + sense=1 + route_gap=1 = 12` | 门自身记账自洽 |
+
+### 107.7 后续建议（P0/P1/P2 ＋ 影响面 ＋ 落地成本）
+
+| 优先级 | 建议 | 影响面 | 落地成本 |
+|---|---|---|---|
+| P0 | **F-134**：为 17 枚 `throwException` 站点建「路由判定表」（返回值被消费／被丢弃／被 return），先修 `(string)$closure` 的转换调用点，再按表逐枚补 `hasException()` 检查 | 异常语义面；当前 a8 是不可 catch 的致命退出 | 中（需逐站点读码＋8-12 臂门）<br>★**R-199 已完成**，但路线改判：「补检查」被 §108.1 证伪，实际按**异常对象化**落地，见 §108 |
+| P1 | typed 形参所有权（≈104 B/调用）：把形参纳入块尾 cleanup 集合，需先审 `ref`/`by-ref` 形参的写穿路径 | 全局函数调用面；内存线性增长 | 中高（所有权普查＋守卫探针） |
+| P1 | c249 增默认档复跑臂（或把门切到默认档并另存 pre 基线），消除「泄漏门 release-fast／回归默认档」的档位缺口 | 证据一致性 | 低（改一行＋重取 pre） |
+| P2 | 扩 c249：`getPrevious`／`getFile`／`getLine`、构造器置异常但正常返回、Reflection 字符串构造、跨函数 rethrow 两跳 | 覆盖 T4/T5/T6 的其余分支 | 低（门臂复制现有模板） |
+| P2 | `through_ref` 写穿路径的释放定价：用 ref 形参／make_ref／闭包捕获／foreach ref 四径守卫实测「槽是否已消费临时引用」 | 可能再收一部分泄漏，但 UAF 风险高 | 中高 |
+
+### 108 R-199：F-134 异常路由对象化（`throwException` → `Throwable` 对象）落盘
+
+> 本批**只动模板**（`src/aot/runtime_lib_template.zig`，+80/−22），不动发射器、不动共享 parser/IR。
+> 代次（实测）：nlk `e93899747e9552ccfa8e912bca51d362`／tpl 前 `23ef5fe1d5048d67e87793a13f5434e0` → 后 `df9cf8e164cbeab59ec3cdefa90125fe`／opt `50c5fa36eac9ebfd96eee18afa3aa1ad`／ir `1fb6b01f9b0bdff318de496538e7620e`／irg `a57519607f10ba6140c27df535cd90dd`／parser `70e80f18a2c6ef6787b4c5d817c31773`。六枚中**只有 tpl 变**。
+
+#### 108.1 机制更正（推翻 §107.6 的原始叙述）
+
+| 项 | §107.6 原叙述 | R-199 实测 |
+|---|---|---|
+| 失效位置 | 「转换调用点不检查 `hasException()`」 | **证伪**：`(string)$closure` 的生成码在 `:54/:118/:158/:187/:250/:357` 等处均有 `if (runtime.hasException())`（样本 `/tmp/f134attr/closure_throw_main.zig`） |
+| 真根因 | — | `throwException` 把**字符串**写进异常槽；catch 派发走 `php_instanceof`，对非对象恒 false ⇒ **所有 `catch (Throwable)` 都不命中** ⇒ 按未捕获致命退出（`rc=255`，文本 `Uncaught Exception: …`） |
+| 影响面 | 单点 | `throwException` 家族在模板里共 **17 枚**调用点（`git diff -U0` 实测 17 行 `-…throwException`），全部改抛 Throwable **对象** |
+
+★这是一次**证据驱动的叙述反转**：先按「调用点缺检查」建门（c249 a8），再用生成码定位，发现检查本就在，问题在**异常槽的类型**。判据也因此从「补检查」改为「异常对象化」。
+
+#### 108.2 站点普查与落地（17 枚 → 20 个新抛出点 ＋ 1 个 helper）
+
+| 函数（后锚点） | 修前站点 | 修后 | 新形态 |
+|---|---|---|---|
+| `Value.toString` 闭包转串（`:2932`） | 1 | 1 | `throwThrowableDiscard("Error", "Object of class Closure could not be converted to string")`（措辞不变） |
+| `php_args_append_spread`（`:5443`） | 1 | 2 | 目标非数组→`Error`（内部不变量）；**源非 array/Traversable→`throwUnpackTypeError`** |
+| `php_invoke_callable_args_array`（`:5475`） | 1 | 1 | 兜底 TypeError（常规入口已由 `call_user_func_array` 先审） |
+| `php_object_call_safe_args_array`（`:5576`） | 1 | 2 | 非字符串方法名由**静默 initNull 改为 `Error`**（非 `throwException` 站点，属同批扩修）；解包非数组→TypeError |
+| `php_object_call_args_array`（`:5606`） | 3 | 3 | 方法名 `Error`＋**接收者 `Call to a member function {m}() on {type}`**＋解包 TypeError |
+| `php_object_call_named_args`（`:5642`） | 5 | 5 | 方法名／接收者／实参数组 `TypeError`／元数据缺失／**`Call to undefined method {C}::{m}()`** |
+| `php_call_static_with_ctx`（`:22791`） | 5 | 5 | `self`/`parent`(无作用域)/`parent`(无父类)/`static` 四句带引号措辞＋`Class "{C}" not found` |
+| `php_call_user_func_array`（`:33418`） | 0 | 1 | **新增前置审查**：`Argument #2 ($args) must be of type array, {type} given` |
+| 合计 | **17** | **20**＋helper | — |
+
+新增 helper `throwUnpackTypeError`（`:23467`，体内抛出点 `:23475`）：`Only arrays and Traversables can be unpacked, {given} given`，`given` 对 bool 打 `true`/`false`、对象打类名、其余走 `phpGetValueTypeName`。
+
+★**顺序契约**（c254 逐臂实测，PHP 8.5.8）：普通 `->` 的检查序＝**方法名 → 接收者 → 方法解析 → 实参解包**（r22、r12 反证）；`?->` 空接收者**整通调用短路为 NULL**（g3）。AOT 现在的顺序在前三档与 PHP 一致，解包仍偏早（见 §108.7 F-134b）。
+
+#### 108.3 PHP 真值契约（8.5.8，c254 臂逐条实测）
+
+| 形 | PHP 输出 | 异常类 |
+|---|---|---|
+| `(string)$closure` | `Object of class Closure could not be converted to string` | `Error`（可 catch） |
+| `$x->foo()`，`$x=null` | `Call to a member function foo() on null` | `Error` |
+| `$x->foo()`，`$x="s"` | `Call to a member function foo() on string` | `Error` |
+| `$o->$m()`，`$m=1`（对象接收者） | `Method name must be a string` | `Error` |
+| `$o->nope()` | `Call to undefined method stdClass::nope()` | `Error` |
+| `new NoSuchX`／`NoSuchX::m()` | `Class "NoSuchX_F134" not found` | `Error` |
+| 无类作用域下的 `self::`／`parent::`／`static::` | `Cannot access "self|parent|static" when no class scope is active` | `Error` |
+| `f(...5)`／`$o->m(...5)` | `Only arrays and Traversables can be unpacked, int given` | `TypeError` |
+| 同上，given ∈ {float,null,true,false,stdClass,Closure} | 词形分别为 `float`/`null`/`true`/`false`/`stdClass`/`Closure` | `TypeError` |
+| `call_user_func_array($f, 5|"s"|true)` | `call_user_func_array(): Argument #2 ($args) must be of type array, int|string|true given` | `TypeError` |
+
+#### 108.4 实现要点（为何是「对象化」而不是「补检查」）
+
+1. **单一收敛点**：17 枚全部改走既有 `throwThrowable`／`throwThrowableDiscard`（构造真异常对象，写 `message` 属性并 `setException`），catch 派发的 `php_instanceof` 才有对象可比。
+2. **错误类按 PHP 分档**：方法名／接收者／作用域／类不存在＝`Error`；解包与 `call_user_func_array` 形参＝`TypeError`。类名错档会同时打红 c254 的 r* 与邻门 BLT。
+3. **措辞逐字对齐**（含引号）：`Cannot access "self" when no class scope is active`、`Cannot use "parent" when current class scope has no parent`、`Call to a member function {m}() on {type}`（复用 `phpArgTypeWord`）、`Call to undefined method {C}::{m}()`。
+4. **修掉一处静默吞参**：旧 `php_args_append_spread` 对非数组源交给 `php_array_iter_init`，只发一句 foreach 口径告警后**把实参整段丢掉**（`f(...5)` 等价 `f()`）；现按 PHP 抛 TypeError。
+5. **不引入新分配路径**：helper 用栈上 `buf` + `bufPrint`，异常对象仍由既有 `throwThrowable` 分配，与 R-198 的释放纪律不冲突。
+6. **性能（只做读码定性，未做基准）**：`php_object_call_*` 三入口的 `isString()`／`isObject()` 判定原本就有，只是**调换顺序**；唯一新增在正常路径上的是 `php_args_append_spread` 的可遍历性判定——**array 源只多一次 `isArray()` 布尔短路**，**对象源**才走 `class_meta.findMethod ×5` 或 `getIterator`。异常路径新增的 `throwUnpackTypeError` 用栈上 `buf`，不增加热路径分配。★未测基准，故不报价；影子列 md5 与 R-198 逐字节相同 ⇒ 生成码不变，差异只在模板运行期。
+
+#### 108.5 门读数（修前 → 修后）
+
+| 门 | 修前（tpl `23ef5fe1`） | 修后（tpl `df9cf8e1`） | 判据 |
+|---|---|---|---|
+| **c249 泄漏门**（13 臂，release-fast，`ZIGPHP_ALLOC_STATS=1`，N=1000/3000 双跑） | `flat=10 leak=0 known_leak=1 runtime_fail=1 route_gap=1 compile_fail=0`，**rc=10**；a8 报 `RT_FAIL_UNREGISTERED … Uncaught Exception: Object of class Closure … rc=255/255` | `C249F133_DONE arms=13 flat=11 leak=0 known_leak=1 known_leak_cleared=0 diff=0 sense_ok=1 route_gap=0 compile_fail=0 parse_fail=0 runtime_fail=0 stats_missing=0 repo_build_residue=0 ELAPSED=102s`，**rc=0**；a10 登记泄漏仍在：`lb=454633→1209141`（Δ2000 iter ⇒ **≈377 B/次**）、`la=2124→6127`（≈2.0 枚/次） | 除 a10（F-136/F-137 登记泄漏）外 11 臂 FLAT、s1 SENSE_OK |
+| **c254 异常路由门**（30 臂，默认档，逐臂比对 stdout+rc） | `same=8 diff=8 unexpected=2(r12,g3) runtime_fail=11 compile_fail=1`，**门红** | `C254EXR_DONE arms=30 same=27 known_red=2 fixed=0 diff=0 unexpected=0 compile_fail=0 known_compile_fail=1 php_fail=0 runtime_fail=0 tpl=df9cf8e164cbeab59ec3cdefa90125fe repo_build_residue=0 ELAPSED=131s`，**rc=0** | 27 SAME；登记红 r12/g3（F-134b）与登记编译缺口 r23（F-135）**保持原形态未漂移** |
+| 门的自证 | c249：`AOT_BIN=/bin/false` ⇒ `compile_fail=13`、exit 3 | c254：`AOT_BIN=/bin/false` ⇒ `compile_fail=29 known_compile_fail=1`、exit 3 | 全臂编译失败＝门确实在跑 |
+
+★c254 的**首轮修后复跑**（`/tmp/r199_c254_post.log`）曾报 `repo_build_residue=1`：当时 68 份影子编译正在并行，仓库根瞬时存在 `.zigphp_aot_build_*`。**单独复跑**（无并发编译）得 `repo_build_residue=0`，两次逐臂表 md5 一致（`bd3f9824526433779786afc1a58a5900`）⇒ 该读数属**并发假阳性**，不是编译产物泄漏。★纪律：**残渣检查型门禁止与任何 AOT 编译并行**。
+
+#### 108.6 验收链
+
+| 腿 | 读数 | 判据 |
+|---|---|---|
+| 十邻门（c146 12／c164 61／c093 32／c062 51／c154 9／c117 32／c073 19／c012 88／c067 56／c047 209＝**569 臂**） | 十行全部 `pre=post=inter`（逐门相等），`verdict_chg=0 diff_to_same=0 same_to_diff=0 missing_pre=0 missing_post=0` | **零转移**（模板轮不得动邻门语义） |
+| c255 双跑相位断言 | 每相位头尾各断言一次 tpl md5（pre `23ef5fe1`／post `df9cf8e1`），`NB_PHASE_DONE` 成对落盘 | 代次相符 |
+| c256 join 自测 | `NB_SELFTEST=1` 合成对 ⇒ 能报 `SAME→DIFF` 与 `DIFF→SAME` | join 灵敏度自证 |
+| 主回归 | `SELF_CHECK_OK rows=68 uniq=68 total=68`；`PASS=68 FAIL=0`；报告表 **Total 68 / Pass 67 / Fail(Compile|Runtime|Diff) 0 / Skip 1**（skip＝f004 既有基线） | 无回归（与 R-198 同形） |
+| 影子（NEW 68 份 `main.zig` 对 R-198 列） | `SHADOW_R198_DONE total=68 drift=0 invalid=0 out_md5=05ec67d107da9b379b7c6e71940fea34 wall=810s` | 纯模板轮 ⇒ **必须硬中性**，实测列 md5 与 R-198 逐字节相同 |
+| `zig build` | `rc=0`（120 s 超时内） | 编译通过 |
+| `zig build test` | `rc=0`；日志两段 `Running performance regression check… ✅ All performance tests passed`（本次缓存命中，未打印 `Build Summary` 行；rc 为准） | 测试通过 |
+
+#### 108.7 残余与登记（本批不修）
+
+| 项 | 现场 | 实测 | 处置 |
+|---|---|---|---|
+| **F-134b**（新立） | 同一调用里「方法解析 vs 实参解包」谁先 | r12：`$o->nope(...5)` PHP 报 `Call to undefined method`，AOT 报解包 TypeError；g3：`$x=null; $x?->m(...5)` PHP 得 `NULL`，AOT 报解包 TypeError | 门内**登记红**；修法＝把解包审查推迟到方法解析之后（`php_object_call_*` 三入口）＋`?->` 空接收者先短路 |
+| **F-135**（新立） | `$x?->$m()`（非空接收者＋变量方法名） | PHP 运行期 `Error: Method name must be a string`；AOT **编译期** rc=1 `Parse error: syntax error, unexpected variable "$m", expecting identifier on line 4` | 站点在**共享 parser**（非 AOT 独有）⇒ 按宪法「非 AOT 逻辑须先问」**未动**；门内登记 `KNOWN_COMPILE_FAIL` |
+| **F-136**（新立） | 局部捕获闭包的生命周期 | release-fast 八臂矩阵：v3（捕获标量、**不抛**）`rc=139/139`、v5（捕获标量、不调用）`rc=139/139`；v7（捕获数组、不调用）`rc=0/0` 但 **≈1257 B/次**；v0（无捕获、抛）167 B/次、v1（捕获串、抛）377 B/次、v2（捕获数组、抛）1110 B/次、v4（无捕获、不抛）**FLAT 0** | 未调用的捕获闭包会 UAF/段错误（v3/v5）；被调用则转成泄漏（v7）。**比 F-137 更严重**，单独立项 |
+| **F-137**（新立） | 异常展开路径下的局部闭包对象 | v0 vs v4 的差分：仅「抛且展开」即 **≈167 B/次**（无捕获也漏）⇒ 闭包对象本体在展开路径未被释放；a10 的 377 B/次 ≈ 闭包对象＋捕获环境 | a10 已挂 `KNOWN_LEAK` 常驻看守；修 F-137 前不得把 a10 当绿灯 |
+| 死符号 | `throwException`／`throwExceptionDiscard`／`throwExceptionDiscardCatch`（`:23419/:23427/:23433`）现在**只剩内部互调** | `grep -c` 实测：全模板 3 处 `throwException(`，均在这三个定义体内 | **删码需老铁明示**（宪法第六节）；本批原样保留 |
+| c254 档位 | 默认档；c249 泄漏门固定 release-fast | — | 与 §107.6 同一档位缺口，未在本批扩大 |
+
+#### 108.8 后续建议（P0/P1/P2 ＋ 影响面 ＋ 落地成本）
+
+| 优先级 | 建议 | 影响面 | 落地成本 |
+|---|---|---|---|
+| P0 | **F-136**：定位「未调用捕获闭包」的捕获环境所有权（先用 `ZIGPHP_AOT_KEEP_TEMP=1` 比对 v3/v5/v7 的生成码与 `release` 集合），UAF 优先于泄漏 | 闭包面；可致 rc=139 崩溃 | 中高（生成码对照＋至少 6 臂守卫） |
+| P1 | **F-137**：异常展开路径补局部闭包对象的释放；修好后 c249 的 a10 会转 FLAT，门会主动报 `KNOWN_LEAK_CLEARED` 强制摘登记 | 异常面；每调用 ≈167 B | 中（发射器释放集合＋c249 复跑） |
+| P1 | **F-134b**：把解包审查推迟到方法解析之后，并让 `?->` 空接收者整通短路；需同时改 r12/g3 两臂并摘掉登记 | 方法调用面 3 入口 | 中（顺序重排＋6 臂） |
+| P2 | **F-135**：`?->$m()` 的 parser 缺口——跨模式问题，须老铁先裁是否允许动共享层 | 共享 parser，影响 tree/bytecode/fast 全模式 | 中（parser 语法＋三模式回归） |
+| P2 | 死符号清理（`throwException` 三枚）：确认零外部引用后删除，防止后来者再用字符串异常槽 | 模板内部 | 低（删 3 函数＋全量编译） |
+| P2 | c254 加 release-fast 复跑臂，消除默认档／release 档的口径缺口 | 证据一致性 | 低（复制运行函数＋重取基线） |
+
+
 
 
 
