@@ -5055,7 +5055,7 @@ R-178 阶段我据 ESCG `28/28 compile_fail=0` 汇报"发射面已修完"。**�
 |---|---|---|---|
 | P0 | 实验 1/2 判生死（各 1 次编译，秒级） | 只影响结论 | 极低 |
 | P0 | 普查 `functions_inlined` 定漂移集 | 决定该批改动的判据形状 | 低（脚本＋一轮链） |
-| P1 | 内联器修形＋门 INL | **改了发射** ⇒ 影子必非 0；且这是**跨档**缺陷（safe/fast 两档），tree/bytecode 不受影响（不跑该优化器） | 中：优化器两处改动＋普查＋一轮链 |
+| P1 | 内联器修形＋门 INL（★**R-201 已闭环，见 §110**：INL 20/20、inline-only 67 PASS、f152 阶梯 8/8、影子硬中性） | **改了发射** ⇒ 影子必非 0；且这是**跨档**缺陷（safe/fast 两档），tree/bytecode 不受影响（不跑该优化器） | 中：优化器两处改动＋普查＋一轮链 |
 | P2 | 与 AOT-CODEGEN-007 并案：把"顶层调用被内联"补进那张工单的缺陷表，避免两处台账各说一半 | 文档 | 低 |
 ★流程收获（值得记进纪律）：这条线索**全程零编译**——只用 `PassConfig` 档位、`remapInstructionOp` 的 `.param` 分支、发射器 `.param` 渲染三处源码就闭环了；"必须先插桩"的直觉差点让我把归因排到链后。⇒ **源码能判死的先判死，插桩只留给判不活的**。
 
@@ -7412,3 +7412,97 @@ F-136 原判「未调用捕获闭包的捕获环境所有权」只对了一半�
 | P0 | **F-138**：debug 档异常对象/`class_meta` 悬垂 UAF（可致 rc=134） | 仅 debug 档；异常密集脚本 | 中高（GC 根集/异常槽生命周期） |
 | P2 | 错误路径的 F-136d（抛错时漏数组） | 仅 OOM/UnknownFunction | 低（异常清理表补一项） |
 | P2 | c249 的 a11 已守 alloca 形；建议再补「箭头函数在顶层」与「静态闭包」两臂 | 闭包面覆盖 | 低 |
+
+## 110. ★R-201 落地记录（F-93／F-136a 闭环：内联器重绑穷举＋形参绑定＋单块守卫）
+
+### 110.1 一句话结论
+F-93 的三处旧缺陷（`.param` 原样克隆重读调用方帧／种子映射用形参下标且被克隆覆盖／手工 op 清单漏 `array_push`、`.release` 等）已全部修掉；另发现并堵住第四处：`can_inline` 允许 ≤6 块，而 `inlineFunction` **只克隆入口块**（多块被调方会整段丢分支）。INL 20/20、inline-only 67 语料全 PASS、f152 阈值阶梯 8/8 PASS、F-136a 的 release-fast 崩溃臂 `rc=139→0`。
+
+### 110.2 旧码的三处根因（`src/aot/optimizer.zig` @ `9d0c514`）
+| # | 旧码 | 后果 |
+|---|---|---|
+| ① | `remapInstructionOp` 的 `.param => op` 原样保留，且 `cloneAndRemapInstruction` 为 `.param` 结果分配**新寄存器并覆盖 `reg_map`** | 内联副本执行"读当前帧第 i 个入参"⇒ 读的是**调用方帧** |
+| ② | 种子映射 `reg_map.put(@intCast(i), args[i].id)` 以形参**下标**为键 | 与 `.param` 结果寄存器号无关；被①覆盖后完全失效 |
+| ③ | `remapInstructionOp` 手工枚举 25 个 op，`else => op` | `.array_push`/`.release`/`array_get` 等操作数不重绑 ⇒ 指向被调方寄存器号（未初始化/串用） |
+| ④ | `can_inline` 允许 `block_count <= 6`，`inlineFunction` 只克隆 `callee_entry` 且仅处理 `.ret` 终结符 | 2–6 块被调方内联后**丢掉其余块**（静默错值） |
+
+### 110.3 修法（提交 `8edfc85`，优化器 md5 `745e4bd4bbb77258fbd5de58629d8684`）
+1. **单块守卫**：`if (callee.blocks.items.len != 1) return false;`（多块内联需块克隆与 phi 重写，未实现前一律拒绝）。
+2. **形参绑定**：遍历入口块的 `.param`，键＝其结果寄存器号，值＝`args[op.index]`；`op.index >= args.len`、`name == "this"`、`bound_params != args.len`、`is_variadic`、`is_reference` 任一成立即拒绝内联。
+3. **帧依赖指令拒绝**：`.arg_count`／`.has_arg`／`.capture_get` 出现即不内联。
+4. **`.param` 不克隆**：`cloneAndRemapInstruction` 对 `.param` 返回 `null`（形参已预映射）。
+5. **穷举重绑**：`remapInstructionOp` 改为按 `Instruction.Op` 的 payload 字段 **comptime 穷举**——`payloadContainsRegister` 判定类型是否含寄存器，`remapPayloadValue` 递归重绑 `Register`／`?Register`／`[]Register`／含寄存器的 struct 与切片；切片重建，非寄存器字段原样。★实现陷阱：`Register` 是 struct，`T == Register` 的判定必须放在 `@typeInfo` 的 struct 分支**之前**，否则被 struct 分支吞掉（探针实测返回"未重绑"）。
+
+### 110.4 验收读数（全部实测）
+| 项 | 修前 | 修后 |
+|---|---|---|
+| INL `c109`（10 臂 × 2 档） | `same=15 diff=4 compile_fail=1 tier_fingerprint=4` | **`same=20 diff=0 compile_fail=0 tier_fingerprint=0`**，rc=0 |
+| inline-only 语料面（68 枚，T=50） | f152 `RUNTIME_FAIL exit=139` | **`pass=67 diff=0 runtime_fail=0 compile_fail=0 skip=1`** |
+| f152 阈值阶梯（15/20/25/30/34/35/45/50） | 35/45/50 = TypeError/SIGSEGV | **8/8 PASS**；T≤34 md5 `760a7018…`（=冻结基线），T≥35 `fd8cbba4…` |
+| F-136a（v3 捕获闭包+不抛，release-fast） | `rc=139/139` | **`rc=0/0`，`lb=12321→12321`（FLAT）** |
+| c249（14 臂） | — | `flat=12 known_leak=1(a11) leak=0 residue=0`，rc=0；与 R-200 逐臂同值 |
+| c254（30 臂） | — | `same=27 known_red=2 known_compile_fail=1`，rc=0（逐项同值） |
+| 主回归 | 68/68 | **PASS=68 FAIL=0**（`SELF_CHECK_OK rows=68 uniq=68`） |
+| 影子（默认档） | R-200 列 `b286c535…` | **`drift=0 invalid=0`，列 md5 `b286c535…` 逐字同** ⇒ 硬中性（默认档 `function_inlining=false`，`optimizer.zig:506` 门控） |
+| 十邻门（594 臂） | — | 10 门 594 臂（9 门 385＋c047 209）逐门 `pre=post=inter`、`verdict_chg=0 same→diff=0 diff→same=0 missing=0` |
+| `zig build` / `zig build test` | — | `zig build` rc=0；`zig build test` rc=0（含性能回归检查全过） |
+
+### 110.5 边界、代价与残余
+- **多块内联未实现**：旧码在多块形上是错的（丢分支），现一律拒绝。这是**正确性修复**而非性能取舍；如需覆盖多块，须单独实现块克隆＋phi 重写。
+- 变参／by-ref／缺省值（实参数≠形参数）不内联；`this` 形参不内联。
+- F-136c（`array_map` 自身 ≈390 B/iter + 闭包调用面残余）与 F-138（debug 档异常对象 UAF）不受本批影响，仍待修。
+- 本批只动优化器（默认档不进内联 pass）⇒ 影子硬中性；release-safe/fast 生成码随内联面变化，语义由 INL/face/bisect 三门与 F-136a 臂共同兜底。
+
+### 110.6 提交态与后续
+- 提交态（实测）：老铁把本批优化器改动并进 **`8edfc85`**（提交信息 "fix closure captured array leak by emitter side release" 只描述 R-200，未提内联器修复）⇒ 查历史以本节为准。
+- 建议：把 **INL `c109`** 与 **inline-only 语料面**挂进母版链（当前母版链只跑语义邻门，内联面一直是盲区，F-93 因此活了很久）；需老铁裁（会加约 2 分钟/轮）。
+
+## 111. ★R-202 落地记录（F-138 闭环：GC 释放池闭包用错分配器，写坏存活对象的 class_meta）
+
+### 111.1 根因（一行代码的归属错配）
+`gcDestroyClosure` 用**通用分配器**释放闭包：
+```zig
+fn gcDestroyClosure(c: *PHPClosure) void {
+    c.allocator.free(c.captures);
+    c.allocator.destroy(c);          // ← 错：闭包由 php_closure_pool 分配
+}
+```
+而闭包分配/正常释放都走池（`allocPHPClosure` / `destroyPHPClosure`，`PHPClosure.release` 亦然）。后果链：
+1. 池分配的闭包被 GC 用 `allocator.destroy` 退回**通用分配器**（池侧仍认为该块属于自己 ⇒ 归属分裂）；
+2. 该地址被后续 `allocator.create(PHPObject)` 复用为**异常对象**；
+3. 池侧再对同一地址执行 `MemoryPool.destroy`（Zig 0.16：`ptr.* = undefined`）⇒ 在 Debug 档把**存活对象的首字（class_meta）写成 0xaa**；
+4. `catch (Throwable)` 分派调用 `php_instanceof` → `meta.isSubclassOf` 解引用 0xaa ⇒ **rc=134**（Debug 档；ReleaseFast 下 `ptr.* = undefined` 被优化掉，表现为静默/泄漏）。
+
+### 111.2 取证链（全部实测，非推测）
+| # | 实验 | 结果 |
+|---|---|---|
+| ① | 关闭自动 GC（`gcMaybeCollect` 直接 return） | 崩溃消失 ⇒ GC 参与 |
+| ② | GC 三相打点（`gc_enter/after_scan/after_collect` 读 `current_exception.class_meta`） | mark/scan 后仍有效，**collect 后变 0xaa** |
+| ③ | 对象内存转储（崩溃点） | `size=96 off_meta=0`；`w0=0xaaaa…`、`class_name/rc/properties/allocator` 全有效 ⇒ 单字段被写坏，非整块释放 |
+| ④ | 分配历史环（StatsAllocator 记录 alloc/free） | 该地址最近事件是 `alloc(96)`，**其后无 free** ⇒ 不是分配器释放 |
+| ⑤ | 全量 GC 事件日志 | **同一地址在更早的 GC 里被当作闭包回收过两次**（闭包→对象的地址复用） |
+| ⑥ | 关闭闭包池（闭包改走通用分配器） | 崩溃消失 ⇒ 0xaa 来自闭包池处置 |
+| ⑦ | Zig 0.16 `MemoryPool.destroy` 源码 | `ptr.* = undefined;` ⇒ Debug 下正是 0xaa 写 |
+
+### 111.3 修法（`tpl=28a07ae5bd02833ce333496a93b5c0fe`，+5/−1，纯模板）
+`gcDestroyClosure` 改为 `destroyPHPClosure(c, c.allocator);`（与 `PHPClosure.release` 同一归属）。
+配套：新增永久门 **c262**（4 臂 × debug：d0/d1/d2 异常+闭包形必须 rc=0 且斜率 ≤8；g1 未调用闭包＝登记泄漏 F-138b）。
+
+### 111.4 读数（实测）
+| 项 | 修前 | 修后 |
+|---|---|---|
+| debug 三臂（v0/v1/v2，闭包+throw） | `rc=134/134` | **`rc=0/0`**（斜率 3/3/0 B/iter） |
+| v6（捕获闭包+调用）release-safe 斜率 | 64 B/iter | **0**（同源：池闭包释放错配，F-136c 的调用面残余一并关闭） |
+| c249（14 臂，release-fast） | — | `flat=12 known_leak=1(a11=F-136c) leak=0 residue=0`，rc=0（与 R-201 同值） |
+| c254（30 臂） | — | `same=27 known_red=2 known_compile_fail=1`，rc=0，`tpl=28a07ae5…` |
+| c262（新永久门，4 臂 debug） | 未建 | **`flat=3 known_leak=1 leak=0 runtime_fail=0 residue=0`**，rc=0；`/bin/false` 自证 4/4 compile_fail + `SELFTEST_ALIVE` |
+| 主回归 | — | **`SELF_CHECK_OK rows=68 uniq=68`，PASS=68 FAIL=0**（rc=0） |
+| 影子（纯模板） | — | **`drift=0 invalid=0`，列 md5 `b286c535…` 与 R-201 列逐字同 ⇒ 硬中性** |
+| 十邻门 | — | TTB_NB |
+| `zig build` / `zig build test` | — | TTB_BUILD |
+
+### 111.5 新登记 / 边界
+- **F-138b（新，P1）**：debug 档「创建闭包但不调用」仍漏 ≈151 B/iter（g1 实测 `129285→432141`），release-safe 为 FLAT；与本次崩溃不同源，已作为 c262 的 KNOWN_LEAK 臂登记。
+- **F-136c 现状**：`array_map('trim',$a)` 自身 ≈390 B/iter 与 v7（捕获数组不调用）170 B/iter 仍在；v6 的 64 B/iter 已随本批关闭。
+- 本批纯模板 ⇒ 默认档生成码不变，影子判据为**硬中性**；debug/ReleaseFast 的运行时行为由 c262 + c249 + 回归覆盖。
+- 归属纪律：**凡是池分配的运行期对象，释放必须走与分配同一归属的 `destroyPHPX`**；GC 侧三处已有两处正确（数组 `destroyPHPArray`、对象 `o.allocator.destroy`），唯闭包用错，已修。

@@ -228,6 +228,8 @@ pub const NativeLinker = struct {
     /// 只有在含抑制作用域的函数里，异常清理路径才需要清零抑制计数 ⇒ 无 `@` 的函数**生成码一字不变**（影子中性）。
     current_func_has_suppression: bool = false,
     current_cleanup_regs: ?[]const usize = null,
+    /// ★F-139：store 值寄存器 → 全函数 store 次数（链式赋值守卫）。
+    current_store_count_by_value: ?*const std.AutoHashMap(usize, usize) = null,
     /// F-133：调用类指令（call/method_call/static_method_call/new_object）的结果寄存器。
     /// 这些指令按契约返回 +1 自有引用；`.ret` 时除返回值外必须归还。
     /// 其它 php_value 临时值（box/load/select-ref_ptr 等）可能是借用，保持不释放。
@@ -6358,6 +6360,24 @@ pub const NativeLinker = struct {
         // 找出被store过的alloca指针（它们的值被retain过）
         var alloca_with_store = std.AutoHashMap(usize, void).init(self.allocator);
         defer alloca_with_store.deinit();
+
+        // ★F-139：统计每个寄存器被 store 的次数。链式赋值 `$a = $b = <expr>` 会
+        //   让同一临时量进入两次 store（第二次仍读它）⇒ 只有"全函数仅被 store 一次"
+        //   的临时量才能在 store 后立即归还自身那份引用。
+        var store_count_by_value = std.AutoHashMap(usize, usize).init(self.allocator);
+        defer store_count_by_value.deinit();
+        for (func.blocks.items) |block_cnt| {
+            for (block_cnt.instructions.items) |inst_cnt| {
+                if (inst_cnt.op == .store) {
+                    const sc = inst_cnt.op.store;
+                    const gop = try store_count_by_value.getOrPut(sc.value.id);
+                    if (!gop.found_existing) gop.value_ptr.* = 0;
+                    gop.value_ptr.* += 1;
+                }
+            }
+        }
+        self.current_store_count_by_value = &store_count_by_value;
+        defer self.current_store_count_by_value = null;
 
         // 遍历所有block查找store指令
         for (func.blocks.items) |block_scan| {
@@ -20638,6 +20658,16 @@ pub const NativeLinker = struct {
                         } else {
                             try writer.print("    runtime.val_assign({s}reg_{d}{s}, reg_{d});\n", .{ ptr_prefix, op.ptr.id, ptr_val_deref, op.value.id });
                         }
+                    }
+                    // ★F-139：存入局部槽的临时量自身那份引用必须在此归还。
+                    //   上方 store 已为槽 retain 一份；而函数级 cleanup 把 stored_to_alloca 的寄存器排除在外
+                    //   （"alloca 会负责 cleanup"只归还槽的那一份）⇒ 不归还即每轮漏一份（如 `$r = array(...)`）。
+                    const single_store_value = if (self.current_store_count_by_value) |m|
+                        (m.get(op.value.id) orelse 0) == 1
+                    else
+                        false;
+                    if (single_store_value and !value_is_alloca and !value_is_ref_param and op.value.id != op.ptr.id and self.regMayHeap(op.value.id)) {
+                        try writer.print("    if (!reg_{d}.isNull()) {{ reg_{d}.release(runtime.runtime_allocator); reg_{d} = runtime.Value.initNull(); }}\n", .{ op.value.id, op.value.id, op.value.id });
                     }
                 } // end of optimized_alloca else
 

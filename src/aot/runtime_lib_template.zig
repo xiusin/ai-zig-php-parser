@@ -1475,7 +1475,11 @@ fn gcDestroyObject(o: *PHPObject) void {
 
 fn gcDestroyClosure(c: *PHPClosure) void {
     c.allocator.free(c.captures);
-    c.allocator.destroy(c);
+    // ★F-138：闭包由 php_closure_pool 分配（allocPHPClosure），此处必须走同一归属的
+    // destroyPHPClosure；用 c.allocator.destroy 会把池块退回通用分配器 ⇒ 该地址被
+    // PHPObject 复用后，池侧再执行 `ptr.* = undefined`，把存活对象的 class_meta 写成 0xaa
+    // （Debug 档 catch 分派 php_instanceof 崩溃，f138 v0/v1/v2 rc=134）。
+    destroyPHPClosure(c, c.allocator);
 }
 
 // ============================================================================
