@@ -7343,3 +7343,72 @@ F-133 由 §106.8 登记（c234 三代同量级 ⇒ 既存缺陷），R-198 落�
 
 
 
+
+## 109. ★R-200 落地记录（F-136b／F-137 闭环；F-136a/c/d 与 F-138 新登记）
+
+### 109.1 一句话结论
+F-136 原判「未调用捕获闭包的捕获环境所有权」只对了一半：真因是**闭包创建点现造的捕获数组从未被释放**（全档位泄漏，含异常展开路径），而 release-fast 的 `rc=139` 是**另一笔**——内联器重绑缺口（F-93 族）。修法从「模板取得所有权」改为**发射器在创建调用后释放 + `.release` 对 alloca 槽释放后置空**；F-137 的 167 B/iter 与其同源（空捕获数组），一并关闭。
+
+### 109.2 根因与两次否决（禁止照抄"先简化跑通"）
+- **否决①（模板取得所有权）**：`defer captures.release(allocator)`（临时代次 `tpl=9b27cc22…`）在释放语义上正确，且把 release-safe 的 v0/v1/v2/v3/v4 斜率全部清零；但捕获数组在部分生成形里被提升为 **alloca 槽**（f034 生成码 `reg_7.*`），模板释放后槽仍指向已释放数组 ⇒ 作用域清理二次释放，**f034 `rc=139`、f104 输出 DIFF**。⇒ 撤销该方向。
+- **否决②（只补 `.release` 不看 alloca）**：同一路径仍二次释放。
+- **最终修法**：
+  1. `src/aot/ir_generator.zig:9361`（`generateClosure`）与 `:9468`（`generateArrowFunction`）在 `php_create_closure` 调用之后发 `.release = .{ .operand = caps_arr_reg }`；
+  2. `src/aot/native_linker.zig:25396-25412` 的 `.release` 发射增加 alloca 分支：`if (!reg_N.*.isNull()) { reg_N.*.release(...); reg_N.* = null; }` —— **置空是关键**，否则作用域/异常清理会对槽再释放一次；
+  3. 为什么此前没人释放：`releaseDeadOperands` 对 `.call` 的参数一律按"可能被消费"跳过（`native_linker.zig` 的 `.call => {}`），而 `php_create_closure` 并不消费该数组（`PHPClosure.init` 已逐元素 retain）。
+
+### 109.3 三档七臂矩阵（release-safe 斜率，B/iter；修前 = R-199 代次，修后 = 本批）
+| 臂 | 形态 | 修前 | 修后 | 说明 |
+|---|---|---|---|---|
+| v0 | 无捕获闭包 + throw | 171 | 3 | F-137 同源（空捕获数组） |
+| v1 | 捕获 16B 串 + throw | 380 | 3 | c249 的 a10 同形 |
+| v2 | 捕获 8×16B 数组 + throw | 1109 | −1 | |
+| v3 | 捕获 16B 串、不抛 | 405 | 0 | release-fast 仍 `rc=139`＝F-136a |
+| v4 | 无捕获、不抛 | 167 | 0 | |
+| v6 | 捕获串 + 调用 | 470 | 64 | 残余＝F-136c |
+| v7 | 捕获数组、不抛 | 1259 | 170 | 残余与捕获元素数无关（1 元素 167／32 元素 173） |
+
+### 109.4 a11 分解（新登记 F-136c；release-fast 实测）
+| 臂 | 形态 | 斜率 B/iter |
+|---|---|---|
+| a11 | 方法内 `array_map(fn($v)=>trim($v), $d)`（捕获数组） | 645 |
+| a11e | 方法内 `array_map('trim', $d)`（**无闭包**） | 390 |
+| a11d | 方法内 `array_map(fn($v)=>$v, $d)`（无捕获箭头） | 558 |
+⇒ `array_map` 自身约 390 B/iter，闭包面再加约 168（无捕获）/255（带捕获）⇒ 与 F-136b 无关的新缺陷，登记 F-136c。a11 已作为**永久守卫臂**加入 c249 并登记 KNOWN_LEAK。
+
+### 109.5 验收链（逐项实测）
+| 项 | 读数 |
+|---|---|
+| c249（14 臂，release-fast） | `flat=12 leak=0 known_leak=1(a11=F-136c) known_leak_cleared=0 route_gap=0 compile_fail=0 runtime_fail=0 repo_build_residue=0`，**rc=0**，108s；`AOT_BIN=/bin/false` 自证 `arms=14 compile_fail=14` + `SELFTEST_ALIVE` |
+| c254（30 臂） | `same=27 known_red=2 known_compile_fail=1 diff=0 unexpected=0 runtime_fail=0`，rc=0，**tpl=df9cf8e1…**（与 R-199 逐项同值） |
+| 主回归 | `SELF_CHECK_OK rows=68 uniq=68 total=68`，**PASS=68 FAIL=0** |
+| 影子 | pre 列＝用 **R-199 编译器**重编 68 枚（`/tmp/f136/pre_r199_col.txt`）；**drift=43，恰等于含闭包调用点的文件集（43）；`drift−closure=∅`、`closure−drift=∅`**；抽验 f034 `e5d75119…` 与新列一致 |
+| 十邻门 | c146/c164/c093/c062/c154/c117/c073/c012/c067/c047 共 **594 臂**：逐门 `pre=post=inter`、`verdict_chg=0 same→diff=0 diff→same=0 missing=0`；c047 单跑 `same=181 diff=27 compile_fail=1` 与 R-199 逐项同值 |
+| 编译/测试 | `zig build` rc=0；`zig build test` rc=0（含性能回归检查全过） |
+
+### 109.6 ★影子基线教训（新增纪律）
+`fuzzy_scripts_720/tmp/c010_shadow_main_md5_tmp.tsv` 的 new 行**不是 R-199 代次列**：拿它当基线得到假 `drift=54`（其中 11 枚**无闭包文件**也"漂移"）。用 R-199 编译器重编 f009 得到的 md5 恰等于**新侧**值 ⇒ 该表是陈旧代次快照。⇒ 跨代影子必须用**代次相符的编译器现场重编**取 pre 列，禁止拿历史 TSV 当基线（与 R-190b 的"被回退批次快照作废"同族）。
+
+### 109.7 新登记 / 改判
+| 编号 | 内容 | 证据 |
+|---|---|---|
+| **F-136a** | 内联器重绑缺口（F-93 同族）：`array_push`、`.release` 等含寄存器操作数的 op 未被 `remapInstructionOp` 重绑；捕获闭包+不抛在 release-fast 下 `rc=139` | 生成码 `__main__` 里 push 到未初始化 `reg_7`；本批新增的 `.release` 也在未重绑集合内 ⇒ F-93 修复必须是**按字段穷举**而非手工清单 |
+| **F-136c** | `array_map` 自身 ≈390 B/iter（无闭包）+ 闭包调用面残余（v6 64／v7 170） | 109.4 三臂分解；c249 a11 登记 KNOWN_LEAK |
+| **F-136d**（子项） | `php_create_closure` 抛错（UnknownFunction/OOM）时后置 release 被跳过 ⇒ 漏一枚数组 | 代码路径；罕见，未扩面 |
+| **F-138**（新） | debug 档 `catch (Throwable)` 分派时 `php_instanceof` 读到 0xaa 填充（对象/`class_meta` 链悬垂），v0/v1/v2 `rc=134` | 插桩显示 `has=true obj=true rc=2` 后崩在 `meta.isSubclassOf`；**用 R-199 模板重建同样崩** ⇒ 既存、与装载布局相关，非本批引入 |
+| **F-137** | **关闭**：167 B/iter 即空捕获数组，与 F-136b 同源 | v0 斜率 171→3 |
+| F-134b / F-135 | 不变（仍待裁） | — |
+
+### 109.8 风险、提交态与复测路径
+- 本批含**发射器**改动 ⇒ 生成码变化仅限 43 枚闭包文件，已逐枚归因；非闭包文件零变化；语义面由 594 臂邻门零转移 + 回归 68/68 兜底。
+- 提交态（实测）：老铁已把 R-199 与本批源码合并提交为 **`9d0c514`**（`fix(aot): fix exception object leaks and routing issues…`）；**其提交信息只描述了 R-199 面，未提本批"闭包捕获数组释放"** ⇒ 查阅历史时以本 §109 为准。
+- 复测路径：`c249`（14 臂，109s）→ `NB_PHASE=post c260_r200_nb_tmp.sh`（十门）→ 主回归 → 影子（pre 列须重编）→ `zig build test`。
+
+### 109.9 后续建议
+| 优先级 | 项 | 影响面 | 落地成本 |
+|---|---|---|---|
+| P0 | **F-93/F-136a**：把 `remapInstructionOp` 改为按寄存器字段穷举（含 `.array_push`/`.release`），并补 INL 两档判据 | 仅 safe/fast 两档；可致 rc=139 | 中高（优化器重写＋INL 门＋影子） |
+| P1 | **F-136c**：`array_map` 自身的 390 B/iter（先查 `php_array_map` 的参数/结果所有权），再处理闭包调用面 64/170 | 全档位；数组函数高频 | 中（模板一处＋c249 扩臂） |
+| P0 | **F-138**：debug 档异常对象/`class_meta` 悬垂 UAF（可致 rc=134） | 仅 debug 档；异常密集脚本 | 中高（GC 根集/异常槽生命周期） |
+| P2 | 错误路径的 F-136d（抛错时漏数组） | 仅 OOM/UnknownFunction | 低（异常清理表补一项） |
+| P2 | c249 的 a11 已守 alloca 形；建议再补「箭头函数在顶层」与「静态闭包」两臂 | 闭包面覆盖 | 低 |

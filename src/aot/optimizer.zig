@@ -4791,9 +4791,10 @@ pub const IROptimizer = struct {
         callee: *const Function,
         args: []const Register,
     ) !bool {
-        // Safety checks
-        if (callee.blocks.items.len == 0) return false;
-        if (callee.blocks.items.len > 3) return false; // Only inline simple functions
+        // Safety checks（F-93 / R-201）
+        // 只内联**单块**函数：旧实现允许 ≤3 块却只克隆入口块，被调方的分支/后续块会被
+        // 整段丢掉（静默错值）。多块内联需块克隆与 phi 重写，未实现前一律拒绝。
+        if (callee.blocks.items.len != 1) return false;
 
         const call_inst = block.instructions.items[inst_index];
         const result_reg = call_inst.result;
@@ -4805,13 +4806,27 @@ pub const IROptimizer = struct {
         var reg_map = std.AutoHashMap(u32, u32).init(self.allocator);
         defer reg_map.deinit();
 
-        // Map parameters to arguments
-        for (callee.params.items, 0..) |_, i| {
-            if (i < args.len) {
-                // Map parameter register to argument register
-                // Note: Parameters are typically represented by their index
-                try reg_map.put(@intCast(i), args[i].id);
+        // 形参绑定：键＝`.param` 指令的**结果寄存器号**，值＝调用点实参寄存器。
+        // 旧实现用形参下标当键，且随后克隆 `.param` 时又分配新寄存器覆盖映射 ⇒ 形参读调用方帧。
+        var bound_params: usize = 0;
+        for (callee_entry.instructions.items) |callee_inst| {
+            switch (callee_inst.op) {
+                .param => |p| {
+                    if (p.index >= args.len) return false;
+                    if (std.mem.eql(u8, p.name, "this")) return false;
+                    const res = callee_inst.result orelse return false;
+                    try reg_map.put(res.id, args[p.index].id);
+                    bound_params += 1;
+                },
+                // 依赖“当前函数帧”的指令：内联后无法保持语义
+                .arg_count, .has_arg, .capture_get => return false,
+                else => {},
             }
+        }
+        // 形参/实参必须一一对应；缺省值、变参、by-ref 包装一律不内联
+        if (bound_params != args.len) return false;
+        for (callee.params.items) |p| {
+            if (p.is_variadic or p.is_reference) return false;
         }
 
         // Allocate new registers for callee's local registers
@@ -4880,6 +4895,13 @@ pub const IROptimizer = struct {
         reg_map: *std.AutoHashMap(u32, u32),
         next_reg_id: *u32,
     ) !?*Instruction {
+        // F-93：`.param` 的语义是“读当前帧的入参”，内联副本里必须消失
+        // （形参寄存器已由 inlineFunction 预映射到调用点实参寄存器）。
+        switch (inst.op) {
+            .param => return null,
+            else => {},
+        }
+
         const new_inst = try self.allocator.create(Instruction);
         errdefer self.allocator.destroy(new_inst);
 
@@ -4904,177 +4926,69 @@ pub const IROptimizer = struct {
         return new_inst;
     }
 
-    /// Remap registers in an instruction operation
+    /// 重绑指令里**所有**寄存器操作数（F-93 / R-201）。
+    /// 旧实现手工枚举 op 清单，漏了 `.array_push`／`.release` 等 ⇒ 内联副本仍读被调方寄存器号。
+    /// 现按 payload 字段 comptime 穷举：Register／?Register／[]Register／含 Register 的 struct 与切片。
     fn remapInstructionOp(
         self: *Self,
         op: Instruction.Op,
         reg_map: *std.AutoHashMap(u32, u32),
     ) !Instruction.Op {
-        return switch (op) {
-            .add => |bin| .{ .add = .{
-                .lhs = remapRegister(bin.lhs, reg_map),
-                .rhs = remapRegister(bin.rhs, reg_map),
-            } },
-            .sub => |bin| .{ .sub = .{
-                .lhs = remapRegister(bin.lhs, reg_map),
-                .rhs = remapRegister(bin.rhs, reg_map),
-            } },
-            .mul => |bin| .{ .mul = .{
-                .lhs = remapRegister(bin.lhs, reg_map),
-                .rhs = remapRegister(bin.rhs, reg_map),
-            } },
-            .div => |bin| .{ .div = .{
-                .lhs = remapRegister(bin.lhs, reg_map),
-                .rhs = remapRegister(bin.rhs, reg_map),
-            } },
-            .mod => |bin| .{ .mod = .{
-                .lhs = remapRegister(bin.lhs, reg_map),
-                .rhs = remapRegister(bin.rhs, reg_map),
-            } },
-            .neg => |un| .{ .neg = .{
-                .operand = remapRegister(un.operand, reg_map),
-            } },
-            .not => |un| .{ .not = .{
-                .operand = remapRegister(un.operand, reg_map),
-            } },
-            .eq => |bin| .{ .eq = .{
-                .lhs = remapRegister(bin.lhs, reg_map),
-                .rhs = remapRegister(bin.rhs, reg_map),
-            } },
-            .ne => |bin| .{ .ne = .{
-                .lhs = remapRegister(bin.lhs, reg_map),
-                .rhs = remapRegister(bin.rhs, reg_map),
-            } },
-            .lt => |bin| .{ .lt = .{
-                .lhs = remapRegister(bin.lhs, reg_map),
-                .rhs = remapRegister(bin.rhs, reg_map),
-            } },
-            .le => |bin| .{ .le = .{
-                .lhs = remapRegister(bin.lhs, reg_map),
-                .rhs = remapRegister(bin.rhs, reg_map),
-            } },
-            .gt => |bin| .{ .gt = .{
-                .lhs = remapRegister(bin.lhs, reg_map),
-                .rhs = remapRegister(bin.rhs, reg_map),
-            } },
-            .ge => |bin| .{ .ge = .{
-                .lhs = remapRegister(bin.lhs, reg_map),
-                .rhs = remapRegister(bin.rhs, reg_map),
-            } },
-            .load => |ld| .{ .load = .{
-                .ptr = remapRegister(ld.ptr, reg_map),
-                .type_ = ld.type_,
-                .no_deref = ld.no_deref,
-            } },
-            .store => |st| .{ .store = .{
-                .ptr = remapRegister(st.ptr, reg_map),
-                .value = remapRegister(st.value, reg_map),
-            } },
-            .const_int, .const_float, .const_bool, .const_string, .const_null, .const_missing, .arg_count, .has_arg => op,
-            .alloca => op,
-            .param => op,
+        var result: Instruction.Op = undefined;
+        inline for (@typeInfo(Instruction.Op).@"union".fields) |f| {
+            if (std.meta.activeTag(op) == @field(std.meta.Tag(Instruction.Op), f.name)) {
+                result = @unionInit(
+                    Instruction.Op,
+                    f.name,
+                    try remapPayloadValue(f.type, @field(op, f.name), reg_map, self.allocator),
+                );
+            }
+        }
+        return result;
+    }
 
-            // Deep copy needed for slice fields
-            .call => |call| blk: {
-                const new_args = try self.allocator.alloc(Register, call.args.len);
-                for (call.args, 0..) |arg, i| {
-                    new_args[i] = remapRegister(arg, reg_map);
+    /// T 是否含寄存器字段（含嵌套 struct／可选／切片）。
+    fn payloadContainsRegister(comptime T: type) bool {
+        if (T == Register) return true;
+        return switch (@typeInfo(T)) {
+            .@"struct" => blk: {
+                inline for (@typeInfo(T).@"struct".fields) |f| {
+                    if (payloadContainsRegister(f.type)) break :blk true;
                 }
-                break :blk .{
-                    .call = .{
-                        .func_name = call.func_name, // String literal/slice, usually static or owned by module? Assumed safe to share if const
-                        .args = new_args,
-                        .return_type = call.return_type,
-                    },
-                };
+                break :blk false;
             },
-            .call_indirect => |call| blk: {
-                const new_args = try self.allocator.alloc(Register, call.args.len);
-                for (call.args, 0..) |arg, i| {
-                    new_args[i] = remapRegister(arg, reg_map);
+            .optional => |o| payloadContainsRegister(o.child),
+            .pointer => |p| p.size == .slice and payloadContainsRegister(p.child),
+            else => false,
+        };
+    }
+
+    /// 递归重绑：Register 改 id（保留原 type_，与旧实现口径一致）；切片重建；其它原样。
+    fn remapPayloadValue(
+        comptime T: type,
+        value: T,
+        reg_map: *std.AutoHashMap(u32, u32),
+        allocator: std.mem.Allocator,
+    ) !T {
+        if (T == Register) return remapRegister(value, reg_map);
+        if (!comptime payloadContainsRegister(T)) return value;
+        return switch (@typeInfo(T)) {
+            .@"struct" => blk: {
+                var out = value;
+                inline for (@typeInfo(T).@"struct".fields) |f| {
+                    @field(out, f.name) = try remapPayloadValue(f.type, @field(out, f.name), reg_map, allocator);
                 }
-                break :blk .{ .call_indirect = .{
-                    .func_ptr = remapRegister(call.func_ptr, reg_map),
-                    .args = new_args,
-                    .return_type = call.return_type,
-                } };
+                break :blk out;
             },
-            .interpolate => |interp| blk: {
-                const new_parts = try self.allocator.alloc(Register, interp.parts.len);
-                for (interp.parts, 0..) |part, i| {
-                    new_parts[i] = remapRegister(part, reg_map);
+            .optional => |o| if (value) |v| try remapPayloadValue(o.child, v, reg_map, allocator) else null,
+            .pointer => |p| blk: {
+                const out = try allocator.alloc(p.child, value.len);
+                for (value, 0..) |elem, i| {
+                    out[i] = try remapPayloadValue(p.child, elem, reg_map, allocator);
                 }
-                break :blk .{ .interpolate = .{ .parts = new_parts } };
+                break :blk out;
             },
-            .new_object => |op0| blk: {
-                const new_args = try self.allocator.alloc(Register, op0.args.len);
-                for (op0.args, 0..) |arg, i| {
-                    new_args[i] = remapRegister(arg, reg_map);
-                }
-                break :blk .{ .new_object = .{ .class_name = op0.class_name, .args = new_args } };
-            },
-            .method_call => |op0| blk: {
-                const new_args = try self.allocator.alloc(Register, op0.args.len);
-                for (op0.args, 0..) |arg, i| {
-                    new_args[i] = remapRegister(arg, reg_map);
-                }
-                break :blk .{ .method_call = .{
-                    .object = remapRegister(op0.object, reg_map),
-                    .method_name = op0.method_name,
-                    .args = new_args,
-                } };
-            },
-            .static_method_call => |op0| blk: {
-                const new_args = try self.allocator.alloc(Register, op0.args.len);
-                for (op0.args, 0..) |arg, i| {
-                    new_args[i] = remapRegister(arg, reg_map);
-                }
-                break :blk .{ .static_method_call = .{
-                    .class_name = op0.class_name,
-                    .method_name = op0.method_name,
-                    .args = new_args,
-                } };
-            },
-            .closure_new => |op0| blk: {
-                const new_caps = try self.allocator.alloc(Register, op0.captures.len);
-                for (op0.captures, 0..) |cap, i| {
-                    new_caps[i] = remapRegister(cap, reg_map);
-                }
-                break :blk .{ .closure_new = .{
-                    .func_ptr = remapRegister(op0.func_ptr, reg_map),
-                    .captures = new_caps,
-                    .param_count = op0.param_count,
-                } };
-            },
-            .parent_call => |op0| blk: {
-                const new_args = try self.allocator.alloc(Register, op0.args.len);
-                for (op0.args, 0..) |arg, i| {
-                    new_args[i] = remapRegister(arg, reg_map);
-                }
-                break :blk .{ .parent_call = .{
-                    .object = remapRegister(op0.object, reg_map),
-                    .method_name = op0.method_name,
-                    .args = new_args,
-                } };
-            },
-            .phi => |phi| blk: {
-                const IncomingType = @TypeOf(phi.incoming[0]);
-                const new_incoming = try self.allocator.alloc(IncomingType, phi.incoming.len);
-                for (phi.incoming, 0..) |inc, i| {
-                    // Block pointers need to be remapped if we are cloning blocks...
-                    // But here we only remap registers.
-                    // If blocks are also cloned, we might need a block map.
-                    // For Loop Unrolling, we fix up Phi nodes separately after cloning.
-                    // So we can just copy the block pointer for now?
-                    // Or maybe we should clone the structure.
-                    new_incoming[i] = .{
-                        .block = inc.block,
-                        .value = remapRegister(inc.value, reg_map),
-                    };
-                }
-                break :blk .{ .phi = .{ .incoming = new_incoming } };
-            },
-            else => op,
+            else => value,
         };
     }
 
