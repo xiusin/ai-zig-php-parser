@@ -7918,3 +7918,87 @@ AOT 的可选参补齐实际散落在**三处**：① IR 手工补齐 switch（`
 - **F-86-c 新立（P2）**：`isset($plainObj['k'])` 的 Error 文案——PHP `Cannot use object of type Plain3 as array`，AOT `Call to undefined method Plain3::offsetExists()`（类同文案异；helper 已具备同款文案，只差 `php_array_isset` 前置判定）。
 - **F-86-d 新立（P2）**：**普通读**（非 coalesce）四形：①`$arr['k']` 缺失键 PHP 告警、AOT 静默；②`$s['1abc']` PHP 告警、AOT 静默；③`$s[-1]` PHP 末字符、AOT null；④`$s['k']` PHP 8.5 `TypeError`、AOT 返回 `'a'`（**静默错值**）。修法＝`php_array_get` 复用 `stringOffsetIndexFromValue`＋补缺失键/非法 offset 诊断，需独立真值表。
 - 代次锚：`nlk 2057bd8899fe962961c47f1010042fbb`／`tpl e4f8ffec89b246996542ce92a6738a64`／`irg f260626e…`（未动）／`opt 745e4bd4…`／`parser 70e80f18…`／`ir 1fb6b01f…`。全部**未提交**。
+
+## 123. ★R-214 落地记录（F-86-d 值/诊断面闭环；F-86-d2 登记；发射器实验回退留痕）
+
+### 123.1 契约（PHP 8.5.8 实测，`plain_truth/msg/nullkey/skey3` 四探针）
+| 形态 | PHP 真值 | R-214 前 AOT |
+|---|---|---|
+| `$arr['zz']` / `$arr[99]` | Warning `Undefined array key "zz"` / `... 99`（键归一后：int 裸写、string 带引号） | 静默 null |
+| `$arr[null]`（读/写/isset） | **Deprecated**「Using null as an array offset…」＋键归一为 `""` | 键归一为 **0**，无 Deprecated |
+| `$s[-1]` | 末字符 | null |
+| `$s[-99]` / `$s[10]` | Warning `Uninitialized string offset -99/10` ＋ **`""`（空串）** | 静默 null |
+| `$s['1abc']` / `'0x10'` / `'1e'` | Warning `Illegal string offset "…"` ＋前缀索引 | 静默同值 |
+| `$s[1.9]` / `true` / `null` | Warning `String offset cast occurred` ＋转换后索引 | 静默 |
+| `$b[0]`（bool 基） | `Trying to access array offset on true` | `... on bool` |
+| `$s['k']` / `'1.0'` / `'1e1'` / `''` | **TypeError**「Cannot access offset of type string on string」 | `'a'`/null（静默错值） |
+| `(new Plain)['k']` | Error「Cannot use object of type X as array」 | Error（文案异） |
+| `array_key_exists(null, $arr)` | Deprecated「…as the key parameter for array_key_exists()…」 | 无 |
+
+### 123.2 实现（**纯模板**；发射器零改动）
+- `normalizeArrayKeyFromValue`：null → `ArrayKey{.string = &empty_array_key_string}`（静态空串单例，不分配/不释放）；其余不变。⇒ 读写/isset/coalesce 的 null 键值语义全局对齐。
+- `php_array_get`：数组缺失键→`emitUndefinedArrayKey`（归一后键：int 裸写、string 带引号）；string offset 走 `stringOffsetIndexFromValue`（负下标、越界→`Uninitialized string offset`＋**空串**、非法键→null 占位）、float/bool/null 键先发 `String offset cast occurred`；非数组基文案改用 `phpArgTypeWord`（true/false）。
+- null 键 Deprecated：`php_array_get` / `php_array_get_coalesce` / `php_array_isset` / `setByValue`（通用措辞）＋`php_array_key_exists`（专用措辞）。
+- `stringOffsetIndexFromValue` 浮点前缀判定收窄：`.` 一律浮点；`e/E` 仅后随合法指数才算浮点（`'1e'` 走“整数前缀+垃圾”＝告警+1）。
+
+### 123.3 被回退的实验（必须留痕）
+首版还把 `TypeError`（非法 string 键）与 `Error`（普通对象）真正抛出，并在 **普通 `array_get` 发射点**新增 `hasException()` 路由块。归因发现该路由会引发**跨块代码生成抖动**（R-213 等价二进制 vs 新二进制，60 文件里出现 setSourceLocation/PHI/调用行的非局部增删，而非“仅插入 8 行”）；即使回归/门全绿，这种非局部改写超出“只加诊断”的假设，故**整段回退**（`nlk` md5 回到 `2057bd88…`），异常两面另立 **F-86-d2**。
+- 产物指纹：回退后 `nlk` 与 R-213 逐字节相同、影子硬中性，可直接佐证“回退是回退到上一代而非第三态”。
+
+### 123.4 读数（实测）
+| 臂 | 读数 |
+|---|---|
+| C268（新门 **13 臂**：p1–p4/p6/p8/p9/p11–p16；p5/p7/p10 属 F-86-d2 未入） | 自证 `AOT_BIN=/bin/false` ⇒ **13 CF**；实跑 **13/13 SAME**，63 s |
+| C266 / C267 | 19/19 / 14/14 |
+| 探针 | `nullkey`/`elem_truth`/`elem_truth2`/`strkey` 全 SAME；`plain_truth`/`skey3` 仅剩 F-86-d2 两族（TypeError/对象文案） |
+| 邻门 9 门（静默重跑，quiesced） | c121 `9/1+3oa`（逐臂一致）／c123 `7/7`／c249 `12/0/1`／c254 `27/2`／c262 `4`／c264 `19/0/1(CF)`（逐臂一致）／c265 `7/7`／c062 `49/1/1`／c073 `17/2`；**residue=0** |
+| 主回归 | **PASS=68 FAIL=0**，`SELF_CHECK_OK` |
+| 影子（纯模板） | **changed_rows=0 / 68**，`col_md5=2664fa34…` 与 R-213 **逐字相同**（`col_identical=yes`），wall=1161 s |
+| `zig build test` | 21/21 steps、**326/326**、rc=0 |
+
+### 123.5 登记 / 边界
+- **F-86-d 值/诊断面关闭**（缺失键告警、null 键归一并 Deprecated、string 负下标/越界/前缀/转换告警、bool 基文案、array_key_exists 措辞）。
+- **F-86-d2 新立（P1）**：`$s['k']` 等非法 string 键的 **TypeError**、普通对象读的 **Error 文案**。前置＝给普通 `array_get` 加异常路由；实测该路由会扰动后续发射（cleanup 记账），必须按**结构性发射器批**做：先建“路由前后”两个代次二进制、逐文件归因允许族（含 setSourceLocation/PHI 等非局部改写需先解释清楚）、再定是否接受。
+- ★验收陷阱复现：同一条门批里若仍有**并发编译**（前一轮 attr 归因残留进程），`repo_build_residue` 会瞬时为 1、c262 rc=10；本轮据此废弃前两次批读数，静默后单跑才取得干净记录。
+- 代次锚：`nlk 2057bd8899fe962961c47f1010042fbb`（与 R-213 相同）／`tpl c0fed0b6667a9f1428d50b3871018055`／`irg f260626e…`／`opt 745e4bd4…`／`parser 70e80f18…`／`ir 1fb6b01f…`。全部**未提交**。
+
+## 124. ★R-216 落地记录（F-86-d2 闭环：普通元素读的 TypeError/对象 Error；R-214 误判更正；c264 时间抖动硬化）
+
+### 124.1 契约（补全 §123.1 的两面）
+| 形态 | PHP 8.5.8 | R-214（收窄版） | R-216 |
+|---|---|---|---|
+| `$s['k']` / `'1.0'` / `'1e1'` / `''` / `'  '` | TypeError「Cannot access offset of type string on string」 | null（静默） | **TypeError（同文案）** |
+| `(new Plain)['k']` | Error「Cannot use object of type Plain as array」 | Error（`Call to undefined method …::offsetGet()`） | **Error（同文案）** |
+| `$aa['k']`（ArrayAccess） | 直接 `offsetGet`（不调 offsetExists） | 同 | 同（未回归） |
+
+### 124.2 实现
+- 模板（`php_array_get`）：非法 string 键 → `throwThrowable("TypeError", "Cannot access offset of type string on string")`；普通对象无 `offsetGet` → `throwThrowable("Error", "Cannot use object of type {class} as array")`。
+- 发射器（普通 `array_get`，`!get_ref`）：调用后追加 8 行 `hasException()` 路由（cleanup＋handler/return），与 property_get 同构。
+- 门 C268 恢复 **16 臂**（p5/p7/p10 回归）。
+
+### 124.3 ★R-214 误判更正（必须留痕）
+R-214 曾把“归因里出现 setSourceLocation/PHI/调用行等非局部增删”判为**异常路由引发发射抖动**并整段回退。R-216 受控复现（只加路由建 A、回退建 B，静默后对同一文件取两份 main.zig）证明：
+- 逐行 `diff -u` 报 18,776 行变化，但**多重集判据**下 `new-old` 只多 **5,780 行、少 0 行、UNEXPECTED=0** ⇒ 纯新增；
+- 上次的“抖动”是**测量污染**：归因脚本仍在跑时我修改源码并 `zig build` 重建了 `zig-out/bin/php-interpreter`，old/new 两侧混入了不同二进制。
+- 教训已写入规则 r112（改版）：**批次运行期间禁止编辑源码/重建**；发射器批的判据用多重集而不是逐行 diff。
+
+### 124.4 读数（实测）
+| 腿 | 读数 |
+|---|---|
+| 探针 | `plain_truth`/`skey3` 由 DIFF → **SAME**；`nullkey`/`elem_truth`/`elem_truth2`/`strkey` 保持 SAME |
+| C268 | 自证 `AOT_BIN=/bin/false` ⇒ **16 CF**；实跑 **16/16 SAME**（69 s） |
+| C266 / C267 | 19/19 / 14/14 |
+| 邻门 9 门 | c121 `9/1+3oa`（逐臂一致）／c123 `7/7`／c249 `12/0/1`／c254 `27/2`（`tpl=1d2e0041…`）／c262 `4`／c265 `7/7`／c062 `49/1/1`／c073 `17/2`；**residue=0**；c264 见 §124.5 |
+| 主回归 | **PASS=68 FAIL=0**，`SELF_CHECK_OK` |
+| 影子 | R-215 列 `2664fa34…` → R-216 列 `9337b17b…`，**changed_rows=60**（分母 68） |
+| 影子归因（多重集） | 60/60 文件 `missing=0 ∧ UNEXPECTED=0`；纯新增 **176,001 行**（路由脚手架＋cleanup），与上次实验列 md5 **逐字相同**（确定性复现） |
+| 代价（实测） | f048 二进制 1,275,816→1,292,232（+1.29%）、编译 13.19→13.36 s；f105 1,669,824→1,719,072（+2.95%）、13.75→14.13 s；f110 2,375,736→2,523,480（+6.22%）、20.64→22.32 s；运行期中位 f105 5.6→5.7 ms、f110 5.5→5.8 ms |
+| `zig build test` | 21/21、**326/326**、rc=0 |
+
+### 124.5 c264 时间抖动硬化
+`c264` 的 a3/a4/a5/a7 用“今天/此刻”的默认分量并与脚本头 `$FULL` 相减：PHP 与 AOT 两次运行之间夹着一次编译（实测 3 s），**±2 s 容差**不足 ⇒ a3 偶发 DIFF（34566 vs 34563；单跑复测两次均 SAME）。已把 a1–a7 容差放宽到 **±5 s**（注释写明原因），两次单跑均 `19/0/1`，新冻结基线 `c264_mktime_R216_snapshot_tmp.tsv`（旧 R-206 快照的 a3 载荷已变）。
+
+### 124.6 边界 / 代次锚
+- **F-86-d2 关闭**（F-86 族属性/元素读的 isset/`??`/普通读三面已全对齐；F-86-c 的另一半 `isset($plainObj['k'])` 文案仍待做）。
+- 代次锚：`nlk e091cb278e5129bce82ab3826d1f14c5`／`tpl 1d2e004107a2bcbb656a5c1615940e8a`／`irg f260626e…`／`opt 745e4bd4…`／`parser 70e80f18…`／`ir 1fb6b01f…`。全部**未提交**。
+- 代价待裁：二进制 +1.3~6.2%、编译 +1.3~8.1%、运行期 +0~5%（3 文件抽测）；若老铁要求压回，正解是“块级异常尾段共享”（把 per-site cleanup 改成每块一份 epilogue），属独立结构批。

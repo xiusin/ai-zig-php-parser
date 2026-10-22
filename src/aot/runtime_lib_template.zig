@@ -4937,8 +4937,8 @@ pub fn php_array_get(arr_val: Value, key_val: Value, allocator: Allocator) !Valu
         if (key_val.isFloat() or key_val.isBool() or key_val.isNull()) {
             emitWarning("String offset cast occurred");
         }
-        const idx_i64 = stringOffsetIndexFromValue(key_val) orelse {
-            // 非整数型字符串键（'k'/'1.0'/'1.5x'/''/溢出）⇒ PHP 8.5 TypeError
+        // 非整数型字符串键（'k'/'1.0'/'1.5x'/''/溢出）⇒ PHP 8.5 TypeError
+        const idx_i64 = stringOffsetIndexFromValue(key_val, true) orelse {
             return throwThrowable("TypeError", "Cannot access offset of type string on string", runtime_allocator);
         };
         const len: i64 = @intCast(str.length);
@@ -5000,7 +5000,7 @@ pub fn php_array_get_coalesce(arr_val: Value, key_val: Value, allocator: Allocat
     }
     if (arr_resolved.isString()) {
         const str = arr_resolved.asString();
-        const idx = stringOffsetIndexFromValue(key_val) orelse return Value.initNull();
+        const idx = stringOffsetIndexFromValue(key_val, true) orelse return Value.initNull();
         const len: i64 = @intCast(str.length);
         const real = if (idx < 0) len + idx else idx;
         if (real < 0 or real >= len) return Value.initNull();
@@ -5017,8 +5017,8 @@ pub fn php_array_get_coalesce(arr_val: Value, key_val: Value, allocator: Allocat
 /// PHP string offset 的键解析（`zend_get_string_offset` 口径）：
 /// int/float/bool/null 走 zval 转换；string 取整数前缀——'1abc'/'0x10'/'1 2' 用前缀值并告警
 /// `Illegal string offset "…"`；浮点前缀（'1.0'/'1e1'/'1.5x'）、整数溢出、无数字前缀一律无效（null）。
-fn stringOffsetIndexFromValue(key_val: Value) ?i64 {
-    if (key_val.isRef()) return stringOffsetIndexFromValue(key_val.asRef().*);
+fn stringOffsetIndexFromValue(key_val: Value, emit_illegal: bool) ?i64 {
+    if (key_val.isRef()) return stringOffsetIndexFromValue(key_val.asRef().*, emit_illegal);
     if (key_val.isInt()) return key_val.asInt();
     if (key_val.isFloat()) return floatToIntPHP(key_val.asFloat());
     if (key_val.isBool()) return if (key_val.asBool()) 1 else 0;
@@ -5063,6 +5063,8 @@ fn stringOffsetIndexFromValue(key_val: Value) ?i64 {
     var j = i;
     while (j < s.len and std.ascii.isWhitespace(s[j])) j += 1;
     if (j < s.len) {
+        // 普通读：整数前缀+垃圾 ⇒ Illegal 告警并用前缀；isset：整键必须整数型（PHP 对 '1abc' 返回 false 且不告警）
+        if (!emit_illegal) return null;
         var wbuf: [512]u8 = undefined;
         const wmsg = std.fmt.bufPrint(&wbuf, "Illegal string offset \"{s}\"", .{s}) catch "Illegal string offset";
         emitWarning(wmsg);
@@ -5082,13 +5084,30 @@ pub fn php_array_isset(arr_val: Value, key_val: Value) !Value {
         arr_resolved = arr_resolved.asRef().*;
     }
     if (Value_isObject(arr_resolved)) {
+        const obj = Value_asObject(arr_resolved);
+        const has_exists = if (obj.class_meta) |meta| meta.findMethod("offsetExists") != null else false;
+        if (!has_exists) {
+            var buf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "Cannot use object of type {s} as array", .{obj.class_name}) catch "Cannot use object as array";
+            return throwThrowable("Error", msg, runtime_allocator);
+        }
         const result = try php_object_call(arr_val, "offsetExists", &[_]Value{key_val});
+        defer result.release(runtime_allocator);
         return Value.initBool(result.toBool());
     }
     if (arr_resolved.isString()) {
         const str = arr_resolved.asString();
-        const idx_i64 = key_val.toInt();
-        return Value.initBool(idx_i64 >= 0 and idx_i64 < str.length);
+        // float 键：PHP isset 仍发「隐式转 int 丢精度」Deprecated；bool/null 静默转
+        if (key_val.isFloat()) {
+            const f = key_val.asFloat();
+            warnFloatToIntNotRepresentable(key_val);
+            const loses_precision = if (std.math.isNan(f)) true else !floatNotRepresentableAsInt(f) and f != @trunc(f);
+            if (loses_precision) emitDeprecatedFloatToInt(f);
+        }
+        const idx_i64 = stringOffsetIndexFromValue(key_val, false) orelse return Value.initBool(false);
+        const len: i64 = @intCast(str.length);
+        const real: i64 = if (idx_i64 < 0) len + idx_i64 else idx_i64;
+        return Value.initBool(real >= 0 and real < len);
     }
     if (arr_resolved.isArray()) {
         if (key_val.isNull()) emitNullArrayOffsetDeprecated();

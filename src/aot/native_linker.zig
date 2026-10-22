@@ -24303,7 +24303,7 @@ pub const NativeLinker = struct {
                             try writer.print("reg_{d}", .{op.key.id});
                         }
                         try writer.writeAll(", runtime.runtime_allocator);\n");
-                        // ★F-86-d：普通对象作数组用 ⇒ Error；非法 string offset ⇒ TypeError；offsetGet 也可能抛
+                        // ★F-86-d2：普通对象作数组用 ⇒ Error；非法 string offset ⇒ TypeError；offsetGet 也可能抛
                         if (!op.get_ref) {
                             try writer.writeAll("    if (runtime.hasException()) {\n");
                             try writer.writeAll("        @branchHint(.unlikely);\n");
