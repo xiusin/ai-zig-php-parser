@@ -8002,3 +8002,78 @@ R-214 曾把“归因里出现 setSourceLocation/PHI/调用行等非局部增删
 - **F-86-d2 关闭**（F-86 族属性/元素读的 isset/`??`/普通读三面已全对齐；F-86-c 的另一半 `isset($plainObj['k'])` 文案仍待做）。
 - 代次锚：`nlk e091cb278e5129bce82ab3826d1f14c5`／`tpl 1d2e004107a2bcbb656a5c1615940e8a`／`irg f260626e…`／`opt 745e4bd4…`／`parser 70e80f18…`／`ir 1fb6b01f…`。全部**未提交**。
 - 代价待裁：二进制 +1.3~6.2%、编译 +1.3~8.1%、运行期 +0~5%（3 文件抽测）；若老铁要求压回，正解是“块级异常尾段共享”（把 per-site cleanup 改成每块一份 epilogue），属独立结构批。
+
+## 125. ★R-217 落地记录（F-86-c 闭环：isset 对象文案＋string 严格键；纯模板轮）
+
+### 125.1 契约（PHP 8.5.8 实测，`f86c/f86c2` 探针）
+| 形态 | PHP | R-217 前 AOT |
+|---|---|---|
+| `isset($plainObj['k'])` | `Error: Cannot use object of type Plain as array` | Error（`Call to undefined method Plain::offsetExists()`） |
+| `isset($aa['k'])`（ArrayAccess） | 调 `offsetExists`，返回其 bool | 同（正确） |
+| `isset($s[-1])` / `[-3]` / `[-4]` | true / true / false | **全 false**（未支持负下标） |
+| `isset($s['1abc'])` / `['1.0']` / `['']` | **false**（且**不告警**） | `'1abc'` 走前缀＝true，且发 Illegal 告警 |
+| `isset($s[1.9])` | true ＋ **Deprecated**（隐式转 int 丢精度） | true（无 Deprecated） |
+| `isset($s[true])` / `[null]` | true / true（静默） | true / true |
+| `isset($arr[null])` | Deprecated（null 键）＋ `false` | 同（R-214 已接） |
+| `empty($plainObj['k'])` | Error（同文案） | 已正确（array_get 路径，R-216） |
+
+### 125.2 实现（**纯模板**；发射器零改动）
+- `php_array_isset` 对象分支：先 `findMethod("offsetExists")`；缺失 → `throwThrowable("Error", "Cannot use object of type {class} as array")`。**并补 `defer result.release(...)`**（原实现从不释放 offsetExists 返回值 ⇒ ArrayAccess 的 isset 每次调用漏一份）。
+- `php_array_isset` string 分支：float 键先按 `normalize` 同款发 `warnFloatToIntNotRepresentable`＋`emitDeprecatedFloatToInt`；索引用 `stringOffsetIndexFromValue(key, false)`（严格整数型，垃圾串返回 null→false 且**不告警**）；负下标 `-len..-1` 有效。
+- `stringOffsetIndexFromValue(key, emit_illegal: bool)` 加参数：普通读/coalesce 传 `true`（保留 `Illegal string offset` 告警＋前缀语义），isset 传 `false`。
+- 新门 C268 16→**20 臂**：p17 普通对象 isset/empty 文案、p18 ArrayAccess 守卫、p19 string isset 九形、p20 数组 null 键 Deprecated＋isset 真假。
+
+### 125.3 读数（实测）
+| 腿 | 读数 |
+|---|---|
+| C268 | 自证 `AOT_BIN=/bin/false` ⇒ **20 CF**；实跑 **20/20 SAME**（88 s） |
+| C266 / C267 | 19/19 / 14/14 |
+| 邻门 9 门 | c121 `9/1+3oa`（逐臂一致）／c123 `7/7`／c249 `12/0/1`／c254 `27/2`（`tpl=35b8f939…`）／c262 `4`／c264 `19/0/1`（与 R-216 新快照逐臂一致）／c265 `7/7`／c062 `49/1/1`／c073 `17/2`；**residue=0** |
+| 主回归 | **PASS=68 FAIL=0**，`SELF_CHECK_OK` |
+| 影子（纯模板） | **changed_rows=0 / 68**，`col_md5=9337b17b…` 与 R-216 **逐字相同**（`col_identical=yes`），wall=1281 s |
+| `zig build test` | 21/21、**326/326**、rc=0 |
+
+### 125.4 登记 / 边界
+- **F-86-c 关闭**；F-86 族（属性读 R-212、coalesce 元素读 R-213、普通读值/诊断 R-214、普通读异常 R-216、isset 面 R-217）**全部关闭**。
+- 附带修复：`php_array_isset` 对 ArrayAccess 的 `offsetExists` 结果从不释放（每次调用漏一份，c249 未覆盖该形）；本轮加 `defer release`。
+- 代次锚：`nlk e091cb278e5129bce82ab3826d1f14c5`（未动）／`tpl 35b8f9393d0f6246aede9a540a26812d`／`irg f260626e…`／`opt 745e4bd4…`／`parser 70e80f18…`／`ir 1fb6b01f…`。全部**未提交**。
+
+## 126. ★R-218 落地记录（F-95 闭环：error_reporting()；F-95-b/F-95-c 新立）
+
+### 126.1 契约（PHP 8.5.8 实测，`er/er2/er3` 探针）
+| 形态 | PHP | R-218 前 AOT |
+|---|---|---|
+| `error_reporting()` 默认 | **30719**（= E_ALL，8.5 已移除 E_STRICT 位） | 未定义函数（fatal） |
+| `error_reporting($lvl)` | 返回**旧值**并设置 | 同（未定义） |
+| `error_reporting(null)` | 取值不改 | 同（未定义） |
+| 掩码含/不含某级别 | 只影响**标准显示**（warning/notice/deprecated/fatal 文本） | 无门控（永远打） |
+| `error_reporting(0)` + `set_error_handler` | **handler 仍被调用**（掩码不挡处理器） | 原 C5 实现**会挡住 handler**（与真值相反） |
+| `error_reporting(0)` + 未捕获 Error/未定义函数 | **完全静默**，rc=255 | 仍打印 fatal 文本 |
+| `ini_get('error_reporting')` | `"30719"` | `"32767"` |
+
+### 126.2 实现
+- 发射器/注册表：`nlk` 内置表新增 `error_reporting`（`php_error_reporting`，`handler_params=1`，可选参默认 `initNull`，无 allocator）。模板里函数早已存在但从未被登记。
+- 模板：
+  - `E_ALL` 32767→**30719**（常量定义＋`defined()` 表＋`ini_get('error_reporting')` 三处同口径）。
+  - **C5 更正**：`dispatchToUserHandler` 不再按 `level & global_error_types` 跳过处理器（PHP 实测 0 掩码仍调用）；掩码判定下沉到 `standardPrint`。
+  - `standardPrint(..., level)` 增加级别参数：抑制位之后、打印之前判 `(level & global_error_types) == 0`；7 个调用点分别传 E_USER_ERROR/E_USER_WARNING/E_USER_NOTICE/E_USER_DEPRECATED/E_DEPRECATED/E_WARNING/E_NOTICE。
+  - 三处直写诊断（`emitDeprecatedStrGetcsvEscape`/`emitUndefinedVariableWarning`/`emitDeprecatedFloatToInt`）补同款掩码门控（handler 仍在掩码前调用）。
+  - fatal 显示按 **E_ERROR** 位门控：未捕获异常、未定义函数、内部 TypeError、Class not found、函数重复声明五处；掩掉时仍 `exit(255)` 且零输出。
+
+### 126.3 读数（实测）
+| 腿 | 读数 |
+|---|---|
+| C269（新门 14 臂：默认值/常量/set-get/选择性掩码/handler 在 0 掩码/`@` 叠加/null/fatal 静默且 rc=255/trigger_error/ini_get/正向 fatal/-1/常量/Deprecated 掩码） | 自证 `AOT_BIN=/bin/false` ⇒ **14 CF**；实跑 **14/14 SAME**（rc 也逐臂一致），62 s |
+| C266 / C267 / C268 | 19/19 · 14/14 · 20/20 |
+| 邻门 9 门 | c121 `9/1+3oa`（逐臂一致）／c123 `7/7`／c249 `12/0/1`／c254 `27/2`（`tpl=ab620b6e…`）／c262 `4`／c264 `19/0/1`（与 R-216 新快照逐臂一致）／c265 `7/7`／c062 `49/1/1`／c073 `17/2`；**residue=0** |
+| 主回归 | **PASS=68 FAIL=0**，`SELF_CHECK_OK` |
+| 影子 | **changed_rows=68 / 68**（预期漂移：生成码内嵌**内置名注册表**，每文件新增 1 行 `.{ "error_reporting", {} },`；且该表是哈希序，新增会重排后续行） |
+| 影子归因（多重集） | 逐文件 old（回退该条目重建）/new 对比：**68/68 OK** —— `missing=0`，`extra` 恰为该 1 行 |
+| `zig build test` | 21/21、**326/326**、rc=0 |
+
+### 126.4 边界 / 新登记
+- **F-95 关闭**（函数语义＋诊断显示门控＋主要 fatal 显示）。
+- **F-95-b 新立（P2）**：其余 fatal 站点未接 E_ERROR 门控——类重复声明、final 继承、类名冲突等（`tpl` 约 20665/20700 一带）；未定义常量走 `std.debug.print` 直写。`error_reporting(0)` 下这些形仍会打印。
+- **F-95-c 新立（P2）**：`E_STRICT` 常量**使用**在 PHP 8.4+ 会发 Deprecated「Constant E_STRICT is deprecated since 8.4, the error level was removed」；AOT 取常量不发。属常量访问告警面（与 F-95 无关但同探针撞出）。
+- F-97（`error_get_last()`）/F-98（handler 内异常向上传播）仍为既知缺口，本批未动。
+- 代次锚：`nlk efecdc9d3aa2da0e43f94ff6e270b049`／`tpl ab620b6e84c00fcbb0e2b95f3d313848`／`irg f260626e…`／`opt 745e4bd4…`／`parser 70e80f18…`／`ir 1fb6b01f…`。全部**未提交**。

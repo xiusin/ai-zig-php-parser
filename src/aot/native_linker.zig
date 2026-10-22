@@ -2485,6 +2485,7 @@ pub const NativeLinker = struct {
 
         try writer.writeAll(
             \\    _ = runtime.php_go_wait_all(runtime.Value.initNull(), &[_]runtime.Value{}, allocator) catch {};
+            \\    runtime.php_run_shutdown_functions();
             \\}
             \\
         );
@@ -4338,6 +4339,7 @@ pub const NativeLinker = struct {
         .{ "strrpos", bi(.{ .runtime_name = "php_strrpos", .needs_allocator = false }) },
         .{ "strripos", bi(.{ .runtime_name = "php_strripos", .needs_allocator = false }) },
         .{ "sprintf", bi(.{ .runtime_name = "php_sprintf", .needs_allocator = true }) },
+        .{ "register_shutdown_function", bi(.{ .runtime_name = "php_register_shutdown_function", .needs_allocator = true }) },
         .{ "vsprintf", bi(.{ .runtime_name = "php_vsprintf", .needs_allocator = true }) },
         .{ "sscanf", .{ .runtime_name = "php_sscanf", .needs_allocator = true } },
         .{ "preg_match", .{ .runtime_name = "php_preg_match", .needs_allocator = true } },
@@ -4707,6 +4709,7 @@ pub const NativeLinker = struct {
         .{ "headers_list", bi(.{ .runtime_name = "php_headers_list", .needs_allocator = true }) },
         .{ "header", bi(.{ .runtime_name = "php_header", .needs_allocator = false }) },
         .{ "http_response_code", bi(.{ .runtime_name = "php_http_response_code", .needs_allocator = false, .handler_params = 1, .optional_defaults = &.{"runtime.Value.initNull()"} }) },
+        .{ "error_reporting", bi(.{ .runtime_name = "php_error_reporting", .needs_allocator = false, .handler_params = 1, .optional_defaults = &.{"runtime.Value.initNull()"} }) },
 
         .{ "php_concat", bi(.{ .runtime_name = "php_concat", .needs_allocator = true }) },
         .{ "php_array_iter_init", bi(.{ .runtime_name = "php_array_iter_init", .needs_allocator = true }) },
@@ -23076,7 +23079,7 @@ pub const NativeLinker = struct {
                                         }
                                     }
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
-                                } else if (std.mem.eql(u8, runtime_name, "php_sprintf") or std.mem.eql(u8, runtime_name, "php_printf") or std.mem.eql(u8, runtime_name, "php_pack")) {
+                                } else if (std.mem.eql(u8, runtime_name, "php_sprintf") or std.mem.eql(u8, runtime_name, "php_printf") or std.mem.eql(u8, runtime_name, "php_pack") or std.mem.eql(u8, runtime_name, "php_register_shutdown_function")) {
                                     if (op.args.len == 0) {
                                         try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{reg.id});
                                     } else {
@@ -24036,7 +24039,7 @@ pub const NativeLinker = struct {
                                     } else {
                                         try writer.print("    _ = runtime.{s}(runtime.Value.initNull(), &[_]runtime.Value{{}}, runtime.runtime_allocator);\n", .{runtime_name});
                                     }
-                                } else if (std.mem.eql(u8, runtime_name, "php_sprintf") or std.mem.eql(u8, runtime_name, "php_printf")) {
+                                } else if (std.mem.eql(u8, runtime_name, "php_sprintf") or std.mem.eql(u8, runtime_name, "php_printf") or std.mem.eql(u8, runtime_name, "php_register_shutdown_function")) {
                                     if (op.args.len == 0) {
                                         try writer.writeAll("    _ = runtime.Value.initNull();\n");
                                     } else {

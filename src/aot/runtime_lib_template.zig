@@ -765,25 +765,28 @@ pub fn php_handle_uncaught_exception() void {
             message = ex.asString().data;
         }
 
-        // PHP 输出顺序：先 stderr，再 stdout
-        var ebuf: [1024]u8 = undefined;
-        const emsg = std.fmt.bufPrint(
-            &ebuf,
-            "PHP Fatal error:  Uncaught {s}: {s} in {s}:{d}\n" ++
-                "Stack trace:\n#0 {{main}}\n" ++
-                "  thrown in {s} on line {d}\n",
-            .{ class_name, message, src_file, src_line, src_file, src_line },
-        ) catch "";
-        fileWriteAll(2, emsg);
-        var buf: [1024]u8 = undefined;
-        const msg = std.fmt.bufPrint(
-            &buf,
-            "\nFatal error: Uncaught {s}: {s} in {s}:{d}\n" ++
-                "Stack trace:\n#0 {{main}}\n" ++
-                "  thrown in {s} on line {d}\n",
-            .{ class_name, message, src_file, src_line, src_file, src_line },
-        ) catch "";
-        fileWriteAll(1, msg);
+        // PHP 输出顺序：先 stderr，再 stdout；★F-95：error_reporting 掩掉 E_ERROR 时完全静默（rc 仍 255）
+        if ((E_ERROR & global_error_types) != 0) {
+            var ebuf: [1024]u8 = undefined;
+            const emsg = std.fmt.bufPrint(
+                &ebuf,
+                "PHP Fatal error:  Uncaught {s}: {s} in {s}:{d}\n" ++
+                    "Stack trace:\n#0 {{main}}\n" ++
+                    "  thrown in {s} on line {d}\n",
+                .{ class_name, message, src_file, src_line, src_file, src_line },
+            ) catch "";
+            fileWriteAll(2, emsg);
+            var buf: [1024]u8 = undefined;
+            const msg = std.fmt.bufPrint(
+                &buf,
+                "\nFatal error: Uncaught {s}: {s} in {s}:{d}\n" ++
+                    "Stack trace:\n#0 {{main}}\n" ++
+                    "  thrown in {s} on line {d}\n",
+                .{ class_name, message, src_file, src_line, src_file, src_line },
+            ) catch "";
+            fileWriteAll(1, msg);
+        }
+        php_run_shutdown_functions();
         std.process.exit(255);
     }
 }
@@ -884,6 +887,10 @@ pub fn registerUserFunctionWithLocation(name: []const u8, func: *const fn (ctx: 
                     prev_line = loc.line;
                 }
             }
+            if (!fatalDisplayEnabled()) {
+                php_run_shutdown_functions();
+                std.process.exit(255);
+            }
             // PHP 输出顺序：先 stderr，再 stdout
             var ebuf: [1024]u8 = undefined;
             const emsg = std.fmt.bufPrint(
@@ -899,6 +906,7 @@ pub fn registerUserFunctionWithLocation(name: []const u8, func: *const fn (ctx: 
                 .{ name, prev_file, prev_line, file, line },
             ) catch "";
             fileWriteAll(1, msg);
+            php_run_shutdown_functions();
             std.process.exit(255);
             }
         }
@@ -4355,7 +4363,7 @@ pub const E_STRICT: i64 = 2048;
 pub const E_RECOVERABLE_ERROR: i64 = 4096;
 pub const E_DEPRECATED: i64 = 8192;
 pub const E_USER_DEPRECATED: i64 = 16384;
-pub const E_ALL: i64 = 32767;
+pub const E_ALL: i64 = 30719;
 
 /// set_error_handler - 设置用户自定义错误处理函数
 pub fn php_set_error_handler(handler: Value, error_types: Value, allocator: Allocator) !Value {
@@ -4429,10 +4437,10 @@ pub fn php_trigger_error(message: Value, error_type: Value, allocator: Allocator
     restoreDiagLoc(loc);
     // C3／C5／没设处理器 ⇒ 标准处理（两行两流，与引擎诊断同一套文案规则）
     switch (err_type) {
-        E_USER_ERROR => standardPrint("PHP Fatal error:  ", "\nFatal error: ", msg),
-        E_USER_WARNING => standardPrint("PHP Warning:  ", "\nWarning: ", msg),
-        E_USER_NOTICE => standardPrint("PHP Notice:  ", "\nNotice: ", msg),
-        E_USER_DEPRECATED => standardPrint("PHP Deprecated:  ", "\nDeprecated: ", msg),
+        E_USER_ERROR => standardPrint("PHP Fatal error:  ", "\nFatal error: ", msg, E_USER_ERROR),
+        E_USER_WARNING => standardPrint("PHP Warning:  ", "\nWarning: ", msg, E_USER_WARNING),
+        E_USER_NOTICE => standardPrint("PHP Notice:  ", "\nNotice: ", msg, E_USER_NOTICE),
+        E_USER_DEPRECATED => standardPrint("PHP Deprecated:  ", "\nDeprecated: ", msg, E_USER_DEPRECATED),
         else => {
             var buf: [1024]u8 = undefined;
             const old = std.fmt.bufPrint(&buf, "Error: {s}\n", .{msg}) catch return Value.initBool(true);
@@ -4506,7 +4514,7 @@ pub fn php_ini_get(args: []const Value, allocator: Allocator) !Value {
     const value: ?[]const u8 = if (std.mem.eql(u8, option, "display_errors"))
         "1"
     else if (std.mem.eql(u8, option, "error_reporting"))
-        "32767"
+        "30719"
     else if (std.mem.eql(u8, option, "max_execution_time"))
         "0"
     else if (std.mem.eql(u8, option, "memory_limit"))
@@ -6602,11 +6610,11 @@ fn hasAllowDynamicProperties(meta: *const ClassMeta) bool {
 }
 
 /// ★F-92（R-180）：引擎诊断的**唯一分发口**。PHP 契约（工单 §73.3 实测七条里的 C1…C5）：
-///   C1 设了处理器且 `level & global_error_types != 0` ⇒ **先调处理器**；
+///   C1 设了处理器 ⇒ **先调处理器**（★F-95 更正：与 error_reporting 掩码无关，PHP 实测 0 掩码仍调用）；
 ///   C2 `@` 只抑制"标准显示"，**不抑制处理器被调用**（旧实现把 `isErrorSuppressed()` 放在最前面＝连处理器一起挡掉）；
 ///   C3 处理器返回 `false` ⇒ 追加标准处理；
 ///   C4 返回非 false（实测返回 `"not-a-bool"` 这种非布尔值也一样）⇒ **一个字都不打**；
-///   C5 掩码不匹配或没设处理器 ⇒ 直接走标准处理（**不是静默**）。
+///   C5 没设处理器 ⇒ 直接走标准处理；掩码只决定标准显示是否静默（standardPrint 内判定）。
 /// 返回＝`null`（交给标准处理）／`.?==true`（处理器已接管）／`.?==false`（处理器要求再走标准处理）。
 /// ★两条**本批刻意不做**的面（另立条目，不在文档里假装等价）：
 ///   F-98＝处理器内抛异常时 PHP 让它向上传播（实测 `CAUGHT:RuntimeException|in-handler`），而 `emitWarning` 是
@@ -6615,7 +6623,8 @@ fn hasAllowDynamicProperties(meta: *const ClassMeta) bool {
 ///        见任务 #113）⇒ C3/C4 的"last-error 是否更新"那半轴无从观测，ERRH 的 `l1/l2` 臂待其落地后补。
 fn dispatchToUserHandler(level: i64, msg: []const u8) ?bool {
     const handler = global_error_handler orelse return null;
-    if ((level & global_error_types) == 0) return null; // ★C5：不调处理器，但标准处理照走
+    // ★F-95：PHP 实测**处理器不受 error_reporting 掩码影响**（error_reporting(0) 下仍收到 E_WARNING）；
+    //   掩码只作用于标准显示（见 standardPrint）。
     // ★★必须走 `php_invoke_callable`，**不能**判 `handler.isFunction()`：AOT 里注册进来的可调用值是
     //   "函数名字符串"（`set_error_handler("h")`）或**闭包对象**（门 V 的"闭包=对象"面），两者都不是 `TYPE_FUNCTION`
     //   ⇒ 旧 `php_trigger_error` 那套 `isFunction()+asFunction()` 对绝大多数真实处理器**根本不触发**（R-180 实测：
@@ -6640,8 +6649,14 @@ fn dispatchToUserHandler(level: i64, msg: []const u8) ?bool {
 ///   stderr `PHP <Label>:  {msg} in {file} on line {N}`（**两个**空格、无前导空行）；
 ///   stdout `{前导}\n<Label>: {msg} …`（**一个**空格）。★`Deprecated` 的 stdout 行历史上就没有前导空行
 ///   ⇒ 用 `out_label` 参数原样带上，不在本批"顺手统一"。
-fn standardPrint(err_label: []const u8, out_label: []const u8, msg: []const u8) void {
+/// F-95：PHP 的 fatal 显示同样受 error_reporting 的 E_ERROR 位控制（掩掉后完全静默，rc 仍 255）。
+fn fatalDisplayEnabled() bool {
+    return (E_ERROR & global_error_types) != 0;
+}
+
+fn standardPrint(err_label: []const u8, out_label: []const u8, msg: []const u8, level: i64) void {
     if (isErrorSuppressed()) return; // ★C2：抑制只作用在这一层
+    if ((level & global_error_types) == 0) return; // ★F-95：error_reporting 掩码只静默标准显示
     var ebuf: [1024]u8 = undefined;
     const emsg = std.fmt.bufPrint(&ebuf, "{s}{s} in {s} on line {d}\n", .{ err_label, msg, src_file, src_line }) catch return;
     fileWriteAll(2, emsg);
@@ -6669,7 +6684,7 @@ pub fn emitDeprecated(msg: []const u8) void {
     }
     restoreDiagLoc(loc);
     // ★F-130：与同契约的另 6 处（Warning/Notice/E_USER_*）一致，stdout 支必须带**前导换行**。
-    standardPrint("PHP Deprecated:  ", "\nDeprecated: ", msg);
+    standardPrint("PHP Deprecated:  ", "\nDeprecated: ", msg, E_DEPRECATED);
 }
 
 pub fn emitWarning(msg: []const u8) void {
@@ -6678,7 +6693,7 @@ pub fn emitWarning(msg: []const u8) void {
         if (handled) return; // C4
     }
     restoreDiagLoc(loc);
-    standardPrint("PHP Warning:  ", "\nWarning: ", msg);
+    standardPrint("PHP Warning:  ", "\nWarning: ", msg, E_WARNING);
 }
 
 pub fn emitDeprecatedStrGetcsvEscape() void {
@@ -6691,6 +6706,7 @@ pub fn emitDeprecatedStrGetcsvEscape() void {
     }
     restoreDiagLoc(loc);
     if (isErrorSuppressed()) return;
+    if ((E_DEPRECATED & global_error_types) == 0) return; // ★F-95：掩码静默标准显示
     // PHP 输出顺序：先 stderr，再 stdout
     var ebuf: [1024]u8 = undefined;
     const emsg = std.fmt.bufPrint(
@@ -6718,6 +6734,7 @@ pub fn emitUndefinedVariableWarning(name: []const u8) void {
     }
     restoreDiagLoc(loc);
     if (isErrorSuppressed()) return;
+    if ((E_WARNING & global_error_types) == 0) return; // ★F-95：掩码静默标准显示
     // PHP 输出顺序：先 stderr，再 stdout
     var ebuf: [1024]u8 = undefined;
     const emsg = std.fmt.bufPrint(
@@ -7087,7 +7104,7 @@ fn emitNotice(msg: []const u8) void {
         if (handled) return; // C4
     }
     restoreDiagLoc(loc);
-    standardPrint("PHP Notice:  ", "\nNotice: ", msg);
+    standardPrint("PHP Notice:  ", "\nNotice: ", msg, E_NOTICE);
 }
 
 /// 获取 Value 的 PHP 类型名称
@@ -7104,6 +7121,10 @@ fn valueTypeName(v: Value) []const u8 {
 
 /// 输出 PHP Fatal TypeError 并终止执行
 fn emitTypeFatalError(func_name: []const u8, arg_num: u32, expected: []const u8, got: []const u8) noreturn {
+    if (!fatalDisplayEnabled()) {
+        php_run_shutdown_functions();
+        std.process.exit(255);
+    }
     // PHP 输出顺序：先 stderr，再 stdout
     var ebuf: [1024]u8 = undefined;
     const stderr_msg = std.fmt.bufPrint(
@@ -7136,6 +7157,7 @@ fn emitTypeFatalError(func_name: []const u8, arg_num: u32, expected: []const u8,
         std.process.exit(255);
     };
     fileWriteAll(1, stdout_msg);
+    php_run_shutdown_functions();
     std.process.exit(255);
 }
 
@@ -7421,6 +7443,10 @@ fn checkSingleType(expected: []const u8, got: []const u8, arg: Value) bool {
 
 /// 调用未定义函数时输出 PHP Fatal error 并终止执行
 pub fn php_call_undefined_function(name: []const u8) noreturn {
+    if (!fatalDisplayEnabled()) {
+        php_run_shutdown_functions();
+        std.process.exit(255);
+    }
     // PHP 输出顺序：先 stderr，再 stdout
     var ebuf: [1024]u8 = undefined;
     const stderr_msg = std.fmt.bufPrint(
@@ -7445,6 +7471,7 @@ pub fn php_call_undefined_function(name: []const u8) noreturn {
         std.process.exit(255);
     };
     fileWriteAll(1, stdout_msg);
+    php_run_shutdown_functions();
     std.process.exit(255);
 }
 
@@ -7526,6 +7553,7 @@ fn emitDeprecatedFloatToInt(f: f64) void {
     }
     restoreDiagLoc(loc);
     if (isErrorSuppressed()) return;
+    if ((E_DEPRECATED & global_error_types) == 0) return; // ★F-95：掩码静默标准显示
     // PHP 输出顺序：先 stderr，再 stdout
     var err_buf: [512]u8 = undefined;
     const stderr_msg = std.fmt.bufPrint(
@@ -8883,7 +8911,7 @@ pub fn registerPHPPredefinedConstants(allocator: Allocator) !void {
         .{ .name = "E_RECOVERABLE_ERROR", .value = 4096 },
         .{ .name = "E_DEPRECATED", .value = 8192 },
         .{ .name = "E_USER_DEPRECATED", .value = 16384 },
-        .{ .name = "E_ALL", .value = 32767 },
+        .{ .name = "E_ALL", .value = 30719 },
         // 正则
         .{ .name = "PREG_OFFSET_CAPTURE", .value = 256 },
         .{ .name = "PREG_UNMATCHED_AS_NULL", .value = 512 },
@@ -20635,6 +20663,7 @@ pub fn registerClassWithLocation(meta: *ClassMeta, file: []const u8, line: u32) 
                 .{ noun, prev_name, prev_file, prev_line, file, line },
             ) catch "";
             fileWriteAll(1, msg);
+            php_run_shutdown_functions();
             std.process.exit(255);
             }
         }
@@ -20713,6 +20742,7 @@ pub fn php_check_final_inheritance(child_class_name: []const u8, parent_meta: *c
             std.process.exit(255);
         };
         fileWriteAll(1, stdout_msg);
+        php_run_shutdown_functions();
         std.process.exit(255);
     }
 }
@@ -20792,6 +20822,7 @@ pub fn php_check_abstract_methods(child_class_name: []const u8, file: []const u8
         std.process.exit(255);
     };
     fileWriteAll(1, stdout_msg);
+    php_run_shutdown_functions();
     std.process.exit(255);
 }
 
@@ -22473,6 +22504,10 @@ pub fn php_object_new_with_constructor(class_name: []const u8, args: []const Val
     }
 
     if (meta == null) {
+        if (!fatalDisplayEnabled()) {
+            php_run_shutdown_functions();
+            std.process.exit(255);
+        }
         // PHP Fatal error: Class "X" not found
         // PHP 输出顺序：先 stderr，再 stdout
         var ebuf: [1024]u8 = undefined;
@@ -22498,6 +22533,7 @@ pub fn php_object_new_with_constructor(class_name: []const u8, args: []const Val
             std.process.exit(255);
         };
         fileWriteAll(1, stdout_msg);
+        php_run_shutdown_functions();
         std.process.exit(255);
     }
 
@@ -28013,7 +28049,103 @@ pub fn php_usleep(microseconds: Value) !Value {
 }
 
 /// exit/die - 终止程序执行
+/// ★F-96：register_shutdown_function 注册表（注册序执行；fatal/exit/正常出口统一触发）。
+const ShutdownEntry = struct { callable: Value, args: []Value };
+var shutdown_entries: ?std.ArrayList(ShutdownEntry) = null;
+var shutdown_done: bool = false;
+var shutdown_running: bool = false;
+
+/// ★F-96：无副作用可调用判定（`php_is_callable` 的 AOT hook 会**执行**可调用体，注册场景不可用）。
+fn isCallableNoInvoke(val: Value) bool {
+    const v = if (val.isRef()) val.asRef().* else val;
+    if (v.isFunction()) return true;
+    if (v.isString()) {
+        const name = v.asString().data;
+        if (lookupBuiltinFunction(name) != null) return true;
+        if (lookupUserFunctionCI(name) != null) return true;
+        if (std.mem.indexOf(u8, name, "::")) |sep| {
+            const meta = findClass(name[0..sep]) orelse return false;
+            return meta.findMethodLookup(name[sep + 2 ..]) != null;
+        }
+        return false;
+    }
+    if (v.isArray()) {
+        const arr = v.asArray();
+        if (arr.elements.count() != 2) return false;
+        const e0 = arr.elements.get(ArrayKey{ .integer = 0 }) orelse return false;
+        const e1 = arr.elements.get(ArrayKey{ .integer = 1 }) orelse return false;
+        if (!e1.isString()) return false;
+        const m = e1.asString().data;
+        if (Value_isObject(e0)) {
+            const meta = Value_asObject(e0).class_meta orelse return false;
+            return meta.findMethodLookup(m) != null;
+        }
+        if (e0.isString()) {
+            const meta = findClass(e0.asString().data) orelse return false;
+            return meta.findMethodLookup(m) != null;
+        }
+        return false;
+    }
+    // 闭包对象：交给 invoke 处理
+    return Value_isObject(v);
+}
+
+pub fn php_register_shutdown_function(callable: Value, rest: []const Value, allocator: Allocator) !Value {
+    _ = allocator;
+    if (!isCallableNoInvoke(callable)) {
+        var buf: [512]u8 = undefined;
+        const msg = if (callable.isString())
+            std.fmt.bufPrint(&buf, "register_shutdown_function(): Argument #1 ($callback) must be a valid callback, function \"{s}\" not found or invalid function name", .{callable.asString().data}) catch "register_shutdown_function(): Argument #1 ($callback) must be a valid callback"
+        else
+            "register_shutdown_function(): Argument #1 ($callback) must be a valid callback";
+        return throwThrowable("TypeError", msg, runtime_allocator);
+    }
+    if (shutdown_entries == null) shutdown_entries = std.ArrayList(ShutdownEntry).empty;
+    const copied = try runtime_allocator.alloc(Value, rest.len);
+    for (rest, 0..) |raw, i| {
+        var v = raw;
+        _ = v.retain();
+        copied[i] = v;
+    }
+    var cb = callable;
+    _ = cb.retain();
+    try shutdown_entries.?.append(runtime_allocator, .{ .callable = cb, .args = copied });
+    return Value.initNull();
+}
+
+/// 执行注册的 shutdown 回调（注册序）。回调内抛异常 ⇒ 走未捕获 fatal 并停止后续回调（PHP 实测）。
+pub fn php_run_shutdown_functions() void {
+    if (shutdown_done or shutdown_running) return;
+    shutdown_running = true;
+    defer shutdown_done = true;
+    if (shutdown_entries) |*list| {
+        var i: usize = 0;
+        while (i < list.items.len) : (i += 1) {
+            const entry = list.items[i];
+            const ret = php_invoke_callable(entry.callable, entry.args, runtime_allocator) catch Value.initNull();
+            ret.release(runtime_allocator);
+            if (hasException()) php_handle_uncaught_exception();
+        }
+        for (list.items) |entry| {
+            entry.callable.release(runtime_allocator);
+            for (entry.args) |raw| {
+                var v = raw;
+                v.release(runtime_allocator);
+            }
+            runtime_allocator.free(entry.args);
+        }
+        list.deinit(runtime_allocator);
+        shutdown_entries = null;
+    }
+}
+
 pub fn php_exit(status: Value) !noreturn {
+    if (status.isString()) {
+        fileWriteAll(1, status.asString().data);
+        php_run_shutdown_functions();
+        std.process.exit(0);
+    }
+    php_run_shutdown_functions();
     const code: u8 = if (status.isInt())
         @truncate(@as(u64, @intCast(status.asInt() & 0xFF)))
     else
