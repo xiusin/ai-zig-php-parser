@@ -6621,7 +6621,69 @@ fn hasAllowDynamicProperties(meta: *const ClassMeta) bool {
 ///        `void`、改成可抛出要动数百个调用点 ⇒ 这里 `catch` 后按"处理器已接管"处理；
 ///   F-97＝`error_get_last()` 在 AOT 未实现（同族缺 `error_reporting()`/`register_shutdown_function()`＝F-95/F-96，
 ///        见任务 #113）⇒ C3/C4 的"last-error 是否更新"那半轴无从观测，ERRH 的 `l1/l2` 臂待其落地后补。
+/// ★F-97：error_get_last() 账本。PHP 实测：**所有**诊断都记录（`@`、handler 接管、error_reporting 掩码静默都不例外）；
+/// message 为裸消息（无 "PHP Warning:" 前缀），file/line 取诊断发生点。
+/// ★F-95-d：裸常量标识符未定义 ⇒ PHP 8 的 `Error: Undefined constant "NAME"`（未捕获即 fatal，rc=255）。
+/// 注意：可捕获性（try/catch(Error)）需要 global_get 调用点的异常路由，本函数先给未捕获等价形。
+pub fn php_undefined_constant(name: []const u8) noreturn {
+    if (fatalDisplayEnabled()) {
+        var ebuf: [1024]u8 = undefined;
+        const emsg = std.fmt.bufPrint(
+            &ebuf,
+            "PHP Fatal error:  Uncaught Error: Undefined constant \"{s}\" in {s}:{d}\nStack trace:\n#0 {{main}}\n  thrown in {s} on line {d}\n",
+            .{ name, src_file, src_line, src_file, src_line },
+        ) catch "";
+        fileWriteAll(2, emsg);
+        var buf: [1024]u8 = undefined;
+        const msg = std.fmt.bufPrint(
+            &buf,
+            "\nFatal error: Uncaught Error: Undefined constant \"{s}\" in {s}:{d}\nStack trace:\n#0 {{main}}\n  thrown in {s} on line {d}\n",
+            .{ name, src_file, src_line, src_file, src_line },
+        ) catch "";
+        fileWriteAll(1, msg);
+    }
+    php_run_shutdown_functions();
+    std.process.exit(255);
+}
+
+const LastError = struct { type: i64, message: []u8, file: []u8, line: u32 };
+var last_error: ?LastError = null;
+
+fn recordLastError(level: i64, msg: []const u8) void {
+    if (last_error) |old| {
+        runtime_allocator.free(old.message);
+        runtime_allocator.free(old.file);
+    }
+    const m = runtime_allocator.dupe(u8, msg) catch return;
+    const f = runtime_allocator.dupe(u8, src_file) catch {
+        runtime_allocator.free(m);
+        return;
+    };
+    last_error = .{ .type = level, .message = m, .file = f, .line = src_line };
+}
+
+pub fn php_error_get_last(allocator: Allocator) !Value {
+    const le = last_error orelse return Value.initNull();
+    const arr = try PHPArray.init(allocator);
+    errdefer arr.release(allocator);
+    try arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "type")), Value.initInt(le.type));
+    try arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "message")), Value.initString(try PHPString.init(allocator, le.message)));
+    try arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "file")), Value.initString(try PHPString.init(allocator, le.file)));
+    try arr.setByValue(allocator, Value.initString(try PHPString.init(allocator, "line")), Value.initInt(le.line));
+    return Value.initArray(arr);
+}
+
+pub fn php_error_clear_last() !Value {
+    if (last_error) |old| {
+        runtime_allocator.free(old.message);
+        runtime_allocator.free(old.file);
+        last_error = null;
+    }
+    return Value.initNull();
+}
+
 fn dispatchToUserHandler(level: i64, msg: []const u8) ?bool {
+    recordLastError(level, msg); // ★F-97：先记账（与显示/处理器/掩码无关）
     const handler = global_error_handler orelse return null;
     // ★F-95：PHP 实测**处理器不受 error_reporting 掩码影响**（error_reporting(0) 下仍收到 E_WARNING）；
     //   掩码只作用于标准显示（见 standardPrint）。
@@ -9156,12 +9218,20 @@ pub fn php_defined(name_val: Value) !Value {
     return Value.initBool(constants.contains(name));
 }
 
+/// ★F-95-c：PHP 8.4+ 使用 `E_STRICT` 常量本身会发 E_DEPRECATED（每次读取一条；`defined()` 不触发）。
+pub fn php_note_constant_access(name: []const u8) void {
+    if (std.mem.eql(u8, name, "E_STRICT")) {
+        emitDeprecated("Constant E_STRICT is deprecated since 8.4, the error level was removed");
+    }
+}
+
 pub fn php_constant_get(name_val: Value, allocator: Allocator) !Value {
     _ = allocator;
     if (!name_val.isString()) return Value.initNull();
     const name = name_val.asString().data;
 
     if (constants.get(name)) |val| {
+        php_note_constant_access(name);
         _ = val.retain();
         return val;
     }
@@ -14761,16 +14831,9 @@ pub fn php_is_callable(val: Value) !Value {
     const actual_val = if (val.isRef()) val.asRef().* else val;
     if (actual_val.isFunction()) return Value.initBool(true);
     if (actual_val.isString()) {
-        // 字符串只有是已知函数名时才callable
-        const name = actual_val.asString().data;
-        if (lookupBuiltinFunction(name) != null) return Value.initBool(true);
-        // §8 #6：用户函数名 CI（is_callable("get") 须命中声明为 Get 的函数）
-        if (lookupUserFunctionCI(name) != null) return Value.initBool(true);
-        if (aot_callable_hook) |hook| {
-            _ = hook(name, &[_]Value{}, runtime_allocator) catch return Value.initBool(false);
-            return Value.initBool(true);
-        }
-        return Value.initBool(false);
+        // ★F-96-c：绝不能借 `aot_callable_hook` 探测——hook 会**真的执行**目标（`is_callable("C::m")` 跑一次方法）。
+        //   改用无副作用的静态判定：内置名 ∪ 用户函数（CI）∪ `Class::method`。
+        return Value.initBool(isCallableNoInvoke(actual_val));
     }
     if (actual_val.isArray()) {
         // [obj/class, method] 形式
@@ -20688,20 +20751,23 @@ pub fn registerClassRedeclare(name: []const u8, file: []const u8, line: u32) !vo
             prev_line = loc.line;
         }
     }
-    var ebuf: [512]u8 = undefined;
-    const emsg = std.fmt.bufPrint(
-        &ebuf,
-        "PHP Fatal error:  Cannot redeclare {s} {s} (previously declared in {s}:{d}) in {s} on line {d}\nStack trace:\n#0 {{main}}\n",
-        .{ noun, prev_name, prev_file, prev_line, file, line },
-    ) catch "";
-    fileWriteAll(2, emsg);
-    var buf: [512]u8 = undefined;
-    const msg = std.fmt.bufPrint(
-        &buf,
-        "\nFatal error: Cannot redeclare {s} {s} (previously declared in {s}:{d}) in {s} on line {d}\nStack trace:\n#0 {{main}}\n",
-        .{ noun, prev_name, prev_file, prev_line, file, line },
-    ) catch "";
-    fileWriteAll(1, msg);
+    if (fatalDisplayEnabled()) {
+        var ebuf: [512]u8 = undefined;
+        const emsg = std.fmt.bufPrint(
+            &ebuf,
+            "PHP Fatal error:  Cannot redeclare {s} {s} (previously declared in {s}:{d}) in {s} on line {d}\nStack trace:\n#0 {{main}}\n",
+            .{ noun, prev_name, prev_file, prev_line, file, line },
+        ) catch "";
+        fileWriteAll(2, emsg);
+        var buf: [512]u8 = undefined;
+        const msg = std.fmt.bufPrint(
+            &buf,
+            "\nFatal error: Cannot redeclare {s} {s} (previously declared in {s}:{d}) in {s} on line {d}\nStack trace:\n#0 {{main}}\n",
+            .{ noun, prev_name, prev_file, prev_line, file, line },
+        ) catch "";
+        fileWriteAll(1, msg);
+    }
+    php_run_shutdown_functions();
     std.process.exit(255);
 }
 
@@ -20731,17 +20797,19 @@ pub fn php_check_final_inheritance(child_class_name: []const u8, parent_meta: *c
         ) catch {
             std.process.exit(255);
         };
-        fileWriteAll(2, stderr_msg);
-        var buf: [512]u8 = undefined;
-        const stdout_msg = std.fmt.bufPrint(
-            &buf,
-            "\nFatal error: Class {s} cannot extend final class {s} in {s} on line {d}\n",
-            .{ child_class_name, parent_meta.name, file, line },
-        ) catch {
-            fileWriteAll(1, "\nFatal error: Class cannot extend final class\n");
-            std.process.exit(255);
-        };
-        fileWriteAll(1, stdout_msg);
+        if (fatalDisplayEnabled()) {
+            fileWriteAll(2, stderr_msg);
+            var buf: [512]u8 = undefined;
+            const stdout_msg = std.fmt.bufPrint(
+                &buf,
+                "\nFatal error: Class {s} cannot extend final class {s} in {s} on line {d}\n",
+                .{ child_class_name, parent_meta.name, file, line },
+            ) catch {
+                fileWriteAll(1, "\nFatal error: Class cannot extend final class\n");
+                std.process.exit(255);
+            };
+            fileWriteAll(1, stdout_msg);
+        }
         php_run_shutdown_functions();
         std.process.exit(255);
     }
@@ -34174,14 +34242,6 @@ fn wrapBuiltin_stripslashes(ctx: Value, args: []const Value, allocator: Allocato
 // ============================================================================
 // 新增缺失的内置函数
 // ============================================================================
-
-/// error_get_last - 获取最后发生的错误
-pub fn php_error_get_last(allocator: Allocator) !Value {
-    // 简化实现：返回 null（表示没有错误）
-    // PHP CLI 中如果没有发生错误也返回 null
-    _ = allocator;
-    return Value.initNull();
-}
 
 /// rewind - 倒回文件指针的位置
 pub fn php_rewind(handle: Value) !Value {

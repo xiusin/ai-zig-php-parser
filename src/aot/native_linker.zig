@@ -2093,9 +2093,12 @@ pub const NativeLinker = struct {
             \\    }
             \\    // 先查找常量表
             \\    if (runtime.constants.get(name)) |const_val| {
+            \\        runtime.php_note_constant_access(name); // ★F-95-c：E_STRICT 使用告警
             \\        _ = const_val.retain();
             \\        return const_val;
             \\    }
+            \\    // ★F-95-d：裸标识符（不以 $ 开头）未命中常量 ⇒ PHP 8 `Error: Undefined constant`（未捕获即 fatal）
+            \\    if (name.len > 0 and name[0] != '$') runtime.php_undefined_constant(name);
             \\    // 再查找全局变量表
             \\    if (!global_vars_initialized) {
             \\        var wbuf: [256]u8 = undefined;
@@ -2140,6 +2143,7 @@ pub const NativeLinker = struct {
             \\        }
             \\    }
             \\    if (runtime.constants.get(name)) |const_val| {
+            \\        runtime.php_note_constant_access(name); // ★F-95-c：E_STRICT 使用告警
             \\        _ = const_val.retain();
             \\        return const_val;
             \\    }
@@ -4709,6 +4713,8 @@ pub const NativeLinker = struct {
         .{ "headers_list", bi(.{ .runtime_name = "php_headers_list", .needs_allocator = true }) },
         .{ "header", bi(.{ .runtime_name = "php_header", .needs_allocator = false }) },
         .{ "http_response_code", bi(.{ .runtime_name = "php_http_response_code", .needs_allocator = false, .handler_params = 1, .optional_defaults = &.{"runtime.Value.initNull()"} }) },
+        .{ "error_get_last", bi(.{ .runtime_name = "php_error_get_last", .needs_allocator = true }) },
+        .{ "error_clear_last", bi(.{ .runtime_name = "php_error_clear_last", .needs_allocator = false }) },
         .{ "error_reporting", bi(.{ .runtime_name = "php_error_reporting", .needs_allocator = false, .handler_params = 1, .optional_defaults = &.{"runtime.Value.initNull()"} }) },
 
         .{ "php_concat", bi(.{ .runtime_name = "php_concat", .needs_allocator = true }) },

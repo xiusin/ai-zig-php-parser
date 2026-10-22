@@ -8073,7 +8073,142 @@ R-214 曾把“归因里出现 setSourceLocation/PHI/调用行等非局部增删
 
 ### 126.4 边界 / 新登记
 - **F-95 关闭**（函数语义＋诊断显示门控＋主要 fatal 显示）。
-- **F-95-b 新立（P2）**：其余 fatal 站点未接 E_ERROR 门控——类重复声明、final 继承、类名冲突等（`tpl` 约 20665/20700 一带）；未定义常量走 `std.debug.print` 直写。`error_reporting(0)` 下这些形仍会打印。
+- **F-95-b 已关闭（R-219 同轮）**：类重复声明、final 继承两处 fatal 已接 E_ERROR 显示门控＋shutdown 触发。
+- **F-95-d 新立（P2）**：裸常量标识符 `UNDEF_CONST` 被 AOT 当**未定义变量**（Warning+null），PHP 是 `Error: Undefined constant`（可被 Throwable 捕获）；`constant("X")` 路径为直写 stderr+exit、不可捕获——属常量解析/可捕获性面。
 - **F-95-c 新立（P2）**：`E_STRICT` 常量**使用**在 PHP 8.4+ 会发 Deprecated「Constant E_STRICT is deprecated since 8.4, the error level was removed」；AOT 取常量不发。属常量访问告警面（与 F-95 无关但同探针撞出）。
 - F-97（`error_get_last()`）/F-98（handler 内异常向上传播）仍为既知缺口，本批未动。
 - 代次锚：`nlk efecdc9d3aa2da0e43f94ff6e270b049`／`tpl ab620b6e84c00fcbb0e2b95f3d313848`／`irg f260626e…`／`opt 745e4bd4…`／`parser 70e80f18…`／`ir 1fb6b01f…`。全部**未提交**。
+
+## 127. ★R-219 落地记录（F-96 闭环：register_shutdown_function；按加速策略收敛验证）
+
+### 127.1 契约（PHP 8.5.8 实测，`sd1…sd6` 探针）
+| 形态 | PHP |
+|---|---|
+| 正常结束 | 按注册序执行，参数原样绑定；注册返回 null |
+| `exit(3)` / `die("msg")` | 先打印 die 消息；shutdown 仍执行；rc 保 3 / 0 |
+| 未定义函数 / 未捕获异常 | 先 fatal 文本，再执行 shutdown；rc=255 |
+| shutdown 回调内抛异常 | 前面的回调已执行，**后续回调不再执行**，按未捕获 fatal 收场（rc=255） |
+| 非可调用注册 | TypeError「…must be a valid callback, function "x" not found or invalid function name」，不登记 |
+| shutdown 内再注册 | 新注册的回调随后执行（外→内） |
+| 数组可调用 / 静态方法串 / 同函数注册两次 | 均支持，按注册序 |
+
+### 127.2 实现
+- 模板：`ShutdownEntry` 注册表（`std.ArrayList` 0.16 无管理形态：`.empty`/`append(allocator,…)`/`deinit(allocator)`）＋ `php_register_shutdown_function` ＋ `php_run_shutdown_functions`（`shutdown_running/done` 防重入；异常回调走 `php_handle_uncaught_exception` 并停止后续）。
+- **无副作用可调用判定** `isCallableNoInvoke`：避免复用 `php_is_callable`（其 AOT hook 会**执行**可调用体——见 F-96-c）。
+- 出口挂钩：正常结束（生成 main 尾）、`php_exit`（含 **die 字符串消息打印**、rc 保真）、五处 fatal（未捕获/未定义函数/内部 TypeError/Class not found/函数重复声明；显示态与静默态都跑 shutdown）。
+- 发射器：内置表登记 `register_shutdown_function`（变参，复用 `php_sprintf` 族的 slice 包装分支）；生成 main 尾部新增一行调用。
+
+### 127.3 读数（按老铁加速策略：定向门为主）
+| 腿 | 读数 |
+|---|---|
+| C270（新门 12 臂：正常/exit/die/fatal/TypeError/嵌套/闭包 use/数组/静态/重复/未捕获/无注册反向守卫） | 自证 `AOT_BIN=/bin/false` ⇒ **12 CF**；实跑 **12/12 SAME（rc 亦同）** |
+| C266 / C267 / C268 / C269 | 19/19 · 14/14 · 20/20 · 14/14 |
+| 九邻门 9 门 | 全部零转移、residue=0（c264 与 R-216 快照逐臂一致） |
+| 主回归 | **PASS=68 FAIL=0**，`SELF_CHECK_OK`（本批末次全量；后续小修改用定向门） |
+| 生成码 | 单文件核对：每文件新增 1 行内置名注册表项 ＋ 1 行 `runtime.php_run_shutdown_functions();`（哈希序重排属已知等价） |
+| `zig build test` | 21/21、**326/326**、rc=0 |
+
+### 127.4 边界 / 新登记
+- **F-96 关闭**。
+- **F-96-b（P2）**：shutdown 回调内抛异常的**栈帧格式**与 PHP 不同（PHP 多 `[internal function]` 帧；语义/rc 一致）——宪法允许忽略栈帧差异，未做。
+- **F-96-c 已关闭（同轮）**：`php_is_callable` 原先借 AOT hook 探测字符串可调用 ⇒ 会**执行**目标（`is_callable("K2::m")` 跑一次方法）；改为 `isCallableNoInvoke` 静态判定后探针 SAME（不再有 STATIC_CALLED 副作用），`is_callable("no_such_fn_xyz")`＝false、内置名＝true。
+- 零实参 `register_shutdown_function()` 的 ArgumentCountError 未实现（走通用零参分支）。
+- 代次锚：`nlk 8e96c0409a345da725dfb760cd73a71c`／`tpl 5679e418a6477121ff67243859c0a35b`（未提交）。
+
+## 128. ★R-220 落地记录（F-97 闭环：error_get_last／error_clear_last；加速档）
+
+### 128.1 契约（PHP 8.5.8 实测，`egl` 探针）
+| 形态 | PHP |
+|---|---|
+| 无错误 | `null` |
+| 诊断后 | `['type'=>级别,'message'=>裸消息（无 "PHP Warning:" 前缀）,'file'=>完整路径,'line'=>行号]` |
+| `error_clear_last()` | 清空（返回 null） |
+| `@` 抑制 | **仍记录** |
+| `set_error_handler` 返回 true 接管 | **仍记录** |
+| `error_reporting(0)` 掩码静默 | **仍记录** |
+| notice/deprecated/trigger_error(E_USER_WARNING) | type = 8 / 8192 / 512 |
+
+### 128.2 实现
+- 模板：`LastError{type,message,file,line}` 全局账本＋`recordLastError`（dup message/file，覆盖旧值前释放）；**在 `dispatchToUserHandler` 顶部无条件记账** ⇒ 所有诊断路径（emitWarning/Deprecated/Notice、trigger_error、三处直写）天然覆盖，且与显示/处理器/掩码无关。
+- `php_error_get_last(allocator)` 组装 PHPArray 四键；`php_error_clear_last()` 释放并置空。
+- 内置表登记两条；**删除原有的同名 stub**（`php_error_get_last` 返回 null 的占位实现，造成 duplicate symbol）。
+
+### 128.3 读数（加速档：定向门为主）
+| 腿 | 读数 |
+|---|---|
+| C271（新门 11 臂） | 自证 `AOT_BIN=/bin/false` ⇒ **11 CF**；实跑 **11/11 SAME**（49 s） |
+| C269 / C270（关联门） | 14/14 · 12/12 |
+| 探针 | `egl.php` 全矩阵与 PHP 逐字节 SAME |
+| `zig build test` | 21/21、**326/326**、rc=0 |
+| 全量回归/影子 | 按加速策略跳过（模板＋内置表 2 行；里程碑批补） |
+
+### 128.4 边界
+- **F-97 关闭**；F-98（handler 内异常向上传播）仍为既知缺口。
+- 未覆盖：fatal（E_ERROR）是否进入 `error_get_last`（PHP 在 shutdown 函数内可读取；本批未测/未接）、`$e['file']` 与 AOT 路径映射的极端差异。
+- 代次锚：`nlk e02f4b797479d34b4aa3f0cf2dfcc3f4`／`tpl 98659caee374cb13ba2132e04a730445`（未提交）。
+
+## 129. ★R-221 落地记录（F-95-d 主面闭环：未定义常量 fatal；F-95-d2 可捕获性新立）
+
+### 129.1 契约（PHP 8.5.8 实测，`uc/const1` 探针）
+| 形态 | PHP |
+|---|---|
+| `UNDEF_CONST`（裸标识符，未定义） | `Error: Undefined constant "UNDEF_CONST"`；未捕获 ⇒ 双流 fatal、rc=255（`@` 不抑制 Error） |
+| 已定义常量（`define`/`const`/内置如 `E_ALL`） | 正常取值；`define` 运行期定义可被后续读取 |
+| `true/false/null` 大小写混合 | 正常（关键字常量 CI） |
+| `error_reporting(0)` 下未定义常量 | fatal 文本静默，rc 仍 255 |
+| 未定义常量 fatal 后 | shutdown 函数仍执行 |
+| `try { echo UNDEF; } catch (Error $e)` | **可捕获**（AOT 未实现，F-95-d2） |
+
+### 129.2 实现
+- 根因：生成的 `getGlobalVar` 在常量表未命中后直接按全局变量读取 ⇒ `Undefined variable` + null。
+- 修法：常量表未命中且名字**不以 `$` 开头**（裸标识符）⇒ 调 `runtime.php_undefined_constant(name)`（新增模板函数）：按 E_ERROR 门控打印 PHP 同款双流 fatal（`Uncaught Error: Undefined constant "X" in file:line` + `#0 {main}` 栈），执行 shutdown，`exit(255)`。
+- 变量路径不受影响（parser 给变量名加 `$` 前缀；superglobals 亦以 `$` 开头）。
+
+### 129.3 读数（本批触及生成码 ⇒ 跑一次全量回归）
+| 腿 | 读数 |
+|---|---|
+| C272（新门 10 臂：未定义 fatal/define/const/内置/函数作用域/掩码/fatal 后 shutdown/关键字/参与运算/`@` 下仍 fatal） | 自证 10 CF；实跑 **10/10 SAME**（含 rc） |
+| 探针 | `uc.php`（未定义常量）与 `const1.php`（已定义/内置）均逐字节 SAME |
+| 主回归 | **PASS=68 FAIL=0**，`SELF_CHECK_OK` |
+| `zig build test` | 21/21、**326/326**、rc=0 |
+| 影子 | 按加速策略跳过；生成码单文件核对：`getGlobalVar` 内新增 1 行常量判定 |
+
+### 129.4 边界 / 新登记
+- **F-95-d 主面关闭**。**F-95-d2 新立（P2）**：可捕获性——`try/catch(Error)` 需在 `global_get` 调用点加异常路由（与 F-86-d2 同型结构批）；当前为未捕获等价形。
+- 函数内未定义常量的 fatal **栈帧**与 PHP 不同（PHP 含调用帧），属宪法允许忽略项（门 u5 因此改为函数作用域常量解析）。
+- 代次锚：`nlk 500d7ea7bb11a5834ff5727a3e3ea038`／`tpl e46c11f7f10d2f7699bf2f0b838557fa`（未提交）。
+
+## 130. ★R-222 落地记录（F-95-c 闭环：E_STRICT 使用弃用；加速档）
+
+### 130.1 契约（PHP 8.5.8 实测，`es`／`p2` 探针）
+| 形态 | PHP |
+|---|---|
+| 裸读取 `E_STRICT`（每次、每行） | 每次一条 `Deprecated: Constant E_STRICT is deprecated since 8.4, the error level was removed`（行号=读取行）；值仍 `int(2048)` |
+| `constant("E_STRICT")` | 同样一条；`defined("E_STRICT")` **静默** |
+| `error_reporting(E_ALL & ~E_DEPRECATED)`／`error_reporting(0)` | 不显示，但进 `error_get_last`（`type=8192`、裸消息、file/line） |
+| `@E_STRICT` | 不显示，仍进 `error_get_last` |
+| `set_error_handler` | 收到 `8192`；消息无 `Deprecated: ` 前缀；`return true` 抑制显示 |
+| 表达式/数组/位或 | 值不变（`E_STRICT\|E_ALL`＝32767） |
+| `E_STRICT . "!"` | **也发一条**（拼接路径在生成码里走 `getGlobalVarNoWarn`，是本批唯一漏点） |
+| 小写 `e_strict` | 仍是未定义常量 fatal（常量名大小写敏感，守卫） |
+
+### 130.2 实现
+- 模板：新增 `php_note_constant_access(name)`（仅 `name=="E_STRICT"` 时 `emitDeprecated` 同款文案）；在 `php_constant_get` 常量命中分支调用 ⇒ 覆盖 `constant("E_STRICT")`。
+- 发射器：生成的 `getGlobalVar` 常量命中分支 +1 行调用。
+- ★e9 暴露的第二站点：生成的 `getGlobalVarNoWarn`（R-177／F-73 为“常量参与拼接”引入）常量命中分支同样 +1 行调用；未补前 `E_STRICT . "!"` 漏一条。
+- 刻意**不**在 `defined()`／`globalVarIsDefined`／`getGlobalVarPtrRaw` 调用（前两者是存在性检查，PHP 静默；后者是写槽取指针）。
+
+### 130.3 读数（本批触及生成码 ⇒ 跑一次全量回归）
+| 腿 | 读数 |
+|---|---|
+| C273（新门 10 臂：单读/双读/constant+defined/掩码+error_get_last/handler/@/小写守卫/多行行号/表达式/掩码恢复） | 自证 `AOT_BIN=/bin/false` ⇒ **10 CF**；补 `NoWarn` 站点前实跑 **9/10**（e9 DIFF，证据 `c273_estrict_R222prehook_tmp.tsv`）；补齐后 **10/10 SAME**（46 s，stdout/stderr/rc 三者逐字节） |
+| `es.php` 探针 | PHP/AOT stdout+stderr 逐字节相同（含 `/private/tmp/... on line N`） |
+| `zig build test` | 21/21、**326/326**、rc=0 |
+| 主回归 | 运行中（本批触及生成码，按策略跑一次全量） |
+| 影子 | 按加速策略跳过；漂移成因明确（两个生成 helper 各 +1 行调用） |
+
+### 130.4 边界 / 新登记
+- **F-95-c 关闭**。
+- 待测残余：常量**表达式语境**（默认参数值、全局 `const`、类常量初始化、`static` 初始化）PHP 也在使用行发一条；AOT 可能编译期折叠而静默 ⇒ 回归后补测，若红登记 **F-95-c-b**。
+- 性能：每次常量命中多一次小函数调用（函数体先比长度、无分配）；热循环常量读的微优化（`pub inline fn` 或仅对字面量 `"E_STRICT"` 的调用点发射）留里程碑批实测后定。
+- 代次锚：`nlk f987285cf7cda1cb34c4d03540b6e082`／`tpl cb5389167696669cefdaa8a2aeb93426`；`irg f260626e…`／`opt 745e4bd4…`／`parser 70e80f18…`／`ir 1fb6b01f…` 未变（未提交）。
