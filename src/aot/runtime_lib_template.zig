@@ -4344,6 +4344,14 @@ pub fn php_filectime(filename: Value) !Value {
 
 // 全局错误处理器存储
 threadlocal var global_error_handler: ?Value = null;
+/// ★F-140：`set_error_handler($h, $mask)` 的第二形参是**处理器掩码**，与 `error_reporting` 无关。
+///   旧实现把它写进 `global_error_types` ⇒ 既误改报告级别，又让掩码外的诊断仍调处理器（门 ERRH h7 红）。
+threadlocal var global_error_handler_mask: i64 = E_ALL;
+const ErrorHandlerFrame = struct {
+    handler: ?Value,
+    mask: i64,
+};
+threadlocal var error_handler_stack: std.ArrayListUnmanaged(ErrorHandlerFrame) = .empty;
 threadlocal var global_error_types: i64 = E_ALL;
 threadlocal var global_exception_handler: ?Value = null;
 
@@ -4366,32 +4374,38 @@ pub const E_USER_DEPRECATED: i64 = 16384;
 pub const E_ALL: i64 = 30719;
 
 /// set_error_handler - 设置用户自定义错误处理函数
+/// ★F-140：第二形参是**处理器掩码**（默认 E_ALL），不是 error_reporting；且 restore 要恢复上一层的处理器与掩码。
 pub fn php_set_error_handler(handler: Value, error_types: Value, allocator: Allocator) !Value {
     _ = allocator;
-    // 返回之前设置的错误处理器
+    // 返回之前设置的错误处理器（沿用既有借用语义，不额外 retain）
     const prev_handler = if (global_error_handler) |h| h else Value.initNull();
 
-    // 设置新的错误处理器
+    // 嵌套栈：保存当前处理器与掩码。★沿用既有“处理器永不释放”的所有权约定（见 F-140-b）。
+    error_handler_stack.append(runtime_allocator, .{
+        .handler = global_error_handler,
+        .mask = global_error_handler_mask,
+    }) catch {};
+
     if (handler.isNull()) {
         global_error_handler = null;
     } else {
         _ = handler.retain();
         global_error_handler = handler;
     }
-
-    // 设置错误类型掩码
-    if (!error_types.isNull()) {
-        global_error_types = error_types.toInt();
-    }
-
+    global_error_handler_mask = if (error_types.isNull()) E_ALL else error_types.toInt();
     return prev_handler;
 }
 
-/// restore_error_handler - 恢复之前的错误处理函数
+/// restore_error_handler - 恢复上一层的处理器与掩码；PHP 返回 bool(true)（实测，含空栈）。
 pub fn php_restore_error_handler() !Value {
-    const prev_handler = if (global_error_handler) |h| h else Value.initNull();
-    global_error_handler = null;
-    return prev_handler;
+    if (error_handler_stack.pop()) |frame| {
+        global_error_handler = frame.handler;
+        global_error_handler_mask = frame.mask;
+    } else {
+        global_error_handler = null;
+        global_error_handler_mask = E_ALL;
+    }
+    return Value.initBool(true);
 }
 
 /// set_exception_handler - 设置用户自定义异常处理函数
@@ -4420,9 +4434,8 @@ pub fn php_restore_exception_handler() !Value {
 ///   ②结构 `if (handler) { 掩码内调用 } else { 打印 }` ⇒ **掩码不匹配时 PHP 照打、AOT 彻底静默**；
 ///   ③`_ = closure(...) catch {}` 丢掉返回值 ⇒ 处理器 `return false` 该补的标准打印补不上；
 ///   ④无处理器分支用 `std.debug.print`（只走 stderr 一行、缺 `PHP Warning:  ` 首行与 `in 文件 on line N`）。
-/// ★未纳入本批：`E_USER_ERROR` 在 PHP 8.4+ 要**先**发一条 `Deprecated: Passing E_USER_ERROR to trigger_error() …`、
-///   无处理器时再发 Fatal 并以 255 退出（实测），有处理器且返回非 false 时继续执行 rc=0 ⇒ 属致命路径，另立 P2 单。
-/// ★`else` 分支（非法 level）保持改动前的旧输出：PHP 侧该形制的口径**未实测**，不做无据改动。
+/// ★F-105/F-106（R-223）：`E_USER_ERROR` 在 PHP 8.4+ **先**发一条 E_DEPRECATED，无处理器时再发 Fatal、
+///   打印同款栈帧、执行 shutdown 并以 255 退出；有处理器且返回非 false 时继续执行 rc=0（实测）。
 pub fn php_trigger_error(message: Value, error_type: Value, allocator: Allocator) !Value {
     _ = allocator;
     if (!message.isString()) return Value.initBool(false);
@@ -4431,13 +4444,17 @@ pub fn php_trigger_error(message: Value, error_type: Value, allocator: Allocator
     const msg = message.asString().data;
 
     const loc = diagLoc();
+    if (err_type == E_USER_ERROR) {
+        emitDeprecated("Passing E_USER_ERROR to trigger_error() is deprecated since 8.4, throw an exception or call exit with a string message instead");
+        restoreDiagLoc(loc);
+    }
     if (dispatchToUserHandler(err_type, msg)) |handled| {
         if (handled) return Value.initBool(true); // C4：处理器接管 ⇒ 不打任何字
     }
     restoreDiagLoc(loc);
     // C3／C5／没设处理器 ⇒ 标准处理（两行两流，与引擎诊断同一套文案规则）
     switch (err_type) {
-        E_USER_ERROR => standardPrint("PHP Fatal error:  ", "\nFatal error: ", msg, E_USER_ERROR),
+        E_USER_ERROR => printUserErrorFatalAndExit(msg),
         E_USER_WARNING => standardPrint("PHP Warning:  ", "\nWarning: ", msg, E_USER_WARNING),
         E_USER_NOTICE => standardPrint("PHP Notice:  ", "\nNotice: ", msg, E_USER_NOTICE),
         E_USER_DEPRECATED => standardPrint("PHP Deprecated:  ", "\nDeprecated: ", msg, E_USER_DEPRECATED),
@@ -4449,6 +4466,49 @@ pub fn php_trigger_error(message: Value, error_type: Value, allocator: Allocator
     }
 
     return Value.initBool(true);
+}
+
+/// ★F-105/F-106：`E_USER_ERROR` 的 Fatal 面。PHP 实测：
+///   - 显示受 `error_reporting & E_USER_ERROR` 门控（不是 E_ERROR 位），但 **`@` 不抑制 Fatal**（实测）；
+///   - stdout 是 `\nFatal error: …`、stderr 是 `PHP Fatal error:  …`（两空格），两边都跟同款栈帧；
+///   - 栈帧首参按 PHP 的渲染规则：反斜杠加倍、换行写成 `\n`，单引号**不转义**（实测）；
+///   - 无论是否显示、是否有 shutdown，rc=255 且 shutdown 函数执行。
+fn printUserErrorFatalAndExit(msg: []const u8) noreturn {
+    if ((E_USER_ERROR & global_error_types) != 0) {
+        var ebuf: [1024]u8 = undefined;
+        const eline: []const u8 = std.fmt.bufPrint(&ebuf, "PHP Fatal error:  {s} in {s} on line {d}\n", .{ msg, src_file, src_line }) catch "";
+        fileWriteAll(2, eline);
+        var obuf: [1024]u8 = undefined;
+        const oline: []const u8 = std.fmt.bufPrint(&obuf, "\nFatal error: {s} in {s} on line {d}\n", .{ msg, src_file, src_line }) catch "";
+        fileWriteAll(1, oline);
+
+        var esc_buf: [512]u8 = undefined;
+        var esc_len: usize = 0;
+        for (msg) |c| {
+            const piece: []const u8 = switch (c) {
+                '\\' => "\\\\",
+                '\n' => "\\n",
+                else => "",
+            };
+            if (piece.len > 0) {
+                if (esc_len + piece.len > esc_buf.len) break;
+                @memcpy(esc_buf[esc_len..][0..piece.len], piece);
+                esc_len += piece.len;
+            } else {
+                if (esc_len + 1 > esc_buf.len) break;
+                esc_buf[esc_len] = c;
+                esc_len += 1;
+            }
+        }
+        var tbuf: [2048]u8 = undefined;
+        const trace: []const u8 = std.fmt.bufPrint(&tbuf,
+            "Stack trace:\n#0 {s}({d}): trigger_error('{s}', 256)\n#1 {{main}}\n",
+            .{ src_file, src_line, esc_buf[0..esc_len] }) catch "";
+        fileWriteAll(2, trace);
+        fileWriteAll(1, trace);
+    }
+    php_run_shutdown_functions();
+    std.process.exit(255);
 }
 
 /// error_reporting - 设置或获取错误报告级别
@@ -6683,8 +6743,15 @@ pub fn php_error_clear_last() !Value {
 }
 
 fn dispatchToUserHandler(level: i64, msg: []const u8) ?bool {
-    recordLastError(level, msg); // ★F-97：先记账（与显示/处理器/掩码无关）
-    const handler = global_error_handler orelse return null;
+    const handler = global_error_handler orelse {
+        recordLastError(level, msg); // ★F-97-b：无处理器 ⇒ 记账
+        return null;
+    };
+    // ★F-140：处理器掩码（set_error_handler 第二形参）之外的级别不调处理器，走标准处理并记账。
+    if ((level & global_error_handler_mask) == 0) {
+        recordLastError(level, msg);
+        return null;
+    }
     // ★F-95：PHP 实测**处理器不受 error_reporting 掩码影响**（error_reporting(0) 下仍收到 E_WARNING）；
     //   掩码只作用于标准显示（见 standardPrint）。
     // ★★必须走 `php_invoke_callable`，**不能**判 `handler.isFunction()`：AOT 里注册进来的可调用值是
@@ -6693,7 +6760,10 @@ fn dispatchToUserHandler(level: i64, msg: []const u8) ?bool {
     //   只打标准两行、`[ECHO]/[FW]` 全无）。这也是为什么"两套口径并存"其实是一套半失效。
     // ★`php_is_callable` 返回 `!Value` ⇒ 先落成 Value 再取布尔，别把 `!`/`catch` 混在一个表达式里（优先级会读错）。
     const callable = php_is_callable(handler) catch Value.initBool(false);
-    if (!callable.toBool()) return null;
+    if (!callable.toBool()) {
+        recordLastError(level, msg); // 不可调用 ⇒ 走标准处理，等价无处理器
+        return null;
+    }
     const msg_str = PHPString.init(runtime_allocator, msg) catch return true;
     const file_str = PHPString.init(runtime_allocator, src_file) catch msg_str;
     var args = [_]Value{
@@ -6703,7 +6773,11 @@ fn dispatchToUserHandler(level: i64, msg: []const u8) ?bool {
         Value.initInt(@intCast(src_line)),
     };
     const ret = php_invoke_callable(handler, args[0..], runtime_allocator) catch return true; // ★F-98
-    if (ret.isBool() and !ret.asBool()) return false; // C3
+    if (ret.isBool() and !ret.asBool()) {
+        recordLastError(level, msg); // ★F-97-b：处理器 return false ⇒ 标准处理补打，且记账
+        return false; // C3
+    }
+    // ★F-97-b：处理器 return null/true（非 false）接管 ⇒ 不记账（PHP 实测 error_get_last 保持 null）
     return true; // C4
 }
 

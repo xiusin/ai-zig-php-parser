@@ -8204,11 +8204,55 @@ R-214 曾把“归因里出现 setSourceLocation/PHI/调用行等非局部增删
 | C273（新门 10 臂：单读/双读/constant+defined/掩码+error_get_last/handler/@/小写守卫/多行行号/表达式/掩码恢复） | 自证 `AOT_BIN=/bin/false` ⇒ **10 CF**；补 `NoWarn` 站点前实跑 **9/10**（e9 DIFF，证据 `c273_estrict_R222prehook_tmp.tsv`）；补齐后 **10/10 SAME**（46 s，stdout/stderr/rc 三者逐字节） |
 | `es.php` 探针 | PHP/AOT stdout+stderr 逐字节相同（含 `/private/tmp/... on line N`） |
 | `zig build test` | 21/21、**326/326**、rc=0 |
-| 主回归 | 运行中（本批触及生成码，按策略跑一次全量） |
+| 主回归 | **PASS=68 FAIL=0**，`SELF_CHECK_OK rows=68 uniq=68`（本批触及生成码，按策略跑一次全量） |
 | 影子 | 按加速策略跳过；漂移成因明确（两个生成 helper 各 +1 行调用） |
 
 ### 130.4 边界 / 新登记
 - **F-95-c 关闭**。
-- 待测残余：常量**表达式语境**（默认参数值、全局 `const`、类常量初始化、`static` 初始化）PHP 也在使用行发一条；AOT 可能编译期折叠而静默 ⇒ 回归后补测，若红登记 **F-95-c-b**。
+- 常量表达式语境实测（`p3`／`cc` 探针）：
+  - 默认参数 `function f($x = E_STRICT)`、全局 `const GX = E_STRICT` ⇒ AOT **SAME**（走运行期读取，诊断行号正确）。
+  - **F-95-c-b 新立（P1，既存缺陷，非本批引入）**：类常量初始化器含**不可编译期折叠**的值（`const A = E_ALL;`／`const A = E_STRICT;`）⇒ 该类常量未注册，使用点变成静态属性访问：`Fatal error: Uncaught Error: Access to undeclared static property K1::$A`（PHP 侧 rc=0、正常取值；AOT rc=255）。CC 矩阵 `cc.php` 实测：`E_ALL` 首枚即 fatal，后续 `1+2`/`PHP_INT_SIZE`/`M_PI`/`self::B` 未及观察。修好注册后还须补“使用点发 E_STRICT Deprecated”（PHP 实测类常量的弃用行号＝**使用行**，不是声明行）。
+  - `static $sv = E_STRICT;` 因上式 fatal 未及测量，归入 F-95-c-b 同一批。
 - 性能：每次常量命中多一次小函数调用（函数体先比长度、无分配）；热循环常量读的微优化（`pub inline fn` 或仅对字面量 `"E_STRICT"` 的调用点发射）留里程碑批实测后定。
 - 代次锚：`nlk f987285cf7cda1cb34c4d03540b6e082`／`tpl cb5389167696669cefdaa8a2aeb93426`；`irg f260626e…`／`opt 745e4bd4…`／`parser 70e80f18…`／`ir 1fb6b01f…` 未变（未提交）。
+
+## 131. ★R-223 落地记录（F-105＋F-106＋F-97-b 闭环；F-140 新立并同批关闭；模板-only）
+
+### 131.1 契约（PHP 8.5.8 实测，`t1`–`t5`／`last2`／`m`／`n`／`r` 探针）
+| 形态 | PHP |
+|---|---|
+| `trigger_error("msg", E_USER_ERROR)` 无处理器 | 先 `Deprecated: Passing E_USER_ERROR to trigger_error() is deprecated since 8.4, …`（8192），再 Fatal＋栈帧；**shutdown 执行、rc=255、后续代码不执行** |
+| 同上，处理器 return true（两级别都接管） | 处理器依次收到 `8192`、`256`；零显示；`rc=0`；`error_get_last()===null` |
+| 同上，处理器 return false | Deprecated 标准打印 → 处理器收 256 → Fatal＋栈帧；rc=255 |
+| `error_reporting(E_USER_ERROR)` | Deprecated 静默（8192 位不在掩码），Fatal 显示；rc=255 |
+| `error_reporting(E_ERROR)`／`E_ALL & ~E_USER_ERROR`／`0` | 两级别均静默；rc=255；shutdown 仍执行 |
+| `@trigger_error(..., E_USER_ERROR)` | **Deprecated 被抑制，Fatal 照打**（@ 不抑制致命错误）；rc=255 |
+| 栈帧渲染 | `Stack trace:\n#0 {file}({line}): trigger_error('{msg}', 256)\n#1 {main}`；反斜杠加倍、换行写 `\n`、单引号**不转义** |
+| `error_get_last`（F-97-b） | 无处理器 ⇒ 记录（含掩码/`@`）；处理器 return false ⇒ 记录；处理器 return null/true 接管 ⇒ **null（不记录）** |
+| `set_error_handler($h, $mask)`（F-140） | 第二形参是**处理器掩码**（默认 E_ALL）；**不改 error_reporting**；掩码外级别不调处理器、走标准打印；`restore_error_handler()` 恢复上一层处理器＋掩码并返回 `true`（空栈也 true）；`set_error_handler` 返回前一个处理器（无则 null） |
+
+### 131.2 实现（纯模板，生成码零变化）
+- `dispatchToUserHandler`：`recordLastError` 从函数顶部移出——只在**无处理器／处理器不可调用／处理器 return false** 时记账（F-97-b）；新增处理器掩码判定 `(level & global_error_handler_mask)==0 ⇒ 不调、记账、走标准处理`（F-140）。
+- `php_set_error_handler`：不再写 `global_error_types`；改用 `global_error_handler_mask`，嵌套保存 `ErrorHandlerFrame{handler,mask}` 栈；`php_restore_error_handler` 弹栈恢复并返回 `bool(true)`。
+- `php_trigger_error`：`E_USER_ERROR` 先 `emitDeprecated`（走同一路由，`@`/掩码/handler 三态天然正确）；未接管时走新增 `printUserErrorFatalAndExit`：按 `E_USER_ERROR` 掩码位门控显示（`@` 不抑制）、双流打印 Fatal＋同款栈帧（反斜杠/换行转义）、执行 shutdown、`exit(255)`。
+- 所有权：沿用既有“处理器 Value 永不释放”的借用约定（栈只借存，不新增 UAF）；登记 **F-140-b**（handler 引用计数约定待收口）。
+
+### 131.3 读数（纯模板 ⇒ 按策略跑定向门；本批触及核心诊断路径，另跑一次全量回归）
+| 腿 | 读数 |
+|---|---|
+| ERRH 18 臂（含 h7 掩码／h10 handler-true／h11 无处理器 fatal） | **same=17 diff=0 compile_fail=1**（h9 `strlen()` arity＝既知编译期拒）`rc_mismatch=0 residue=0`（80 s）；修前 h7 自 R-218 起就红（旧快照来自早期代次，不可当基线） |
+| C271（`error_get_last` 11 臂） | **11/11 SAME**（50 s） |
+| C273（`E_STRICT` 10 臂） | **10/10 SAME**（45 s） |
+| C269（`error_reporting` 14 臂） | **14/14 SAME**（63 s） |
+| 探针矩阵 | `t1 t2 t3 t4 t5 last2` 六枚 + `f97b` + `m/n`（handler 掩码/嵌套恢复）**全部 stdout/stderr/rc 逐字节 SAME** |
+| `zig build test` | 21/21、**326/326**、rc=0 |
+| 主回归 | 首次跑 **PASS=36 FAIL=32**，32 枚全为 `FAIL_COMPILE: NoSpaceLeft` ⇒ **环境失效，整轮作废**（证据 `c274_regression_R223_diskfull_INVALID_tmp.log`）；根因＝`.zig-cache` 74 GB、根分区仅剩 134 MiB。清理缓存并全量重建后重跑，读数回填于下 |
+| 影子 | 纯模板 ⇒ 生成码不变，按加速策略跳过 |
+
+### 131.4 边界 / 新登记
+- **F-105／F-106／F-97-b／F-140 关闭**。
+- **F-106-b（P2）**：`trigger_error(E_USER_ERROR)` 发生在**用户函数内部**时，AOT 栈帧只印 `#0 trigger_error`＋`#1 {main}`，PHP 会带中间调用帧；宪法允许栈帧差异，门只覆盖顶层形。
+- **F-140-b（P2）**：`set_error_handler` 的处理器 Value 沿用“永不释放”的借用约定（历史行为）；栈借存不新增 UAF，引用计数归口另案。
+- handler 内抛异常（F-98）与注册 handler 返回值的所有权语义仍未收口。
+- `trigger_error` 的非字符串消息（PHP 侧为 TypeError）未实测、未改。
+- 代次锚：`tpl 7132f27576478422cbe632e1a2857eb0`／`nlk f987285cf7cda1cb34c4d03540b6e082`（未提交）。
