@@ -786,6 +786,18 @@ pub const IRGenerator = struct {
                     _ = try self.generateExpression(expr_idx);
                 }
             },
+            // ★F-125-c：裸 `@expr;` 语句——PHP 会**求值**（未定义变量会调 set_error_handler，
+            //   只是标准流被抑制）；而本优化器把 `.global_get` 判为无副作用（optimizer.zig
+            //   `hasSideEffects: .global_get => false`）⇒ 结果未使用即整条 DCE。
+            //   在 `@` 语句的结果上挂一条 `.release`（副作用指令）作锚点，使内侧读取得以保留；
+            //   非 `@` 的一元语句维持原行为（PHP 对裸 `$var;` 也不告警）。
+            .unary_expr => {
+                const un = node.data.unary_expr;
+                const r = try self.generateExpression(index);
+                if (un.op == .at_sign) {
+                    _ = try self.emit(.{ .release = .{ .operand = r } }, null);
+                }
+            },
             else => {
                 _ = try self.generateExpression(index);
             },

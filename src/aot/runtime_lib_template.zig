@@ -1435,6 +1435,10 @@ fn gcCollectWhiteClosure(c: *PHPClosure) void {
 }
 
 fn gcDestroyArray(a: *PHPArray) void {
+    // ★F-139c：与 gcDestroyObject 同族——绕过 deinit 时也要归还活体计数。
+    if (alloc_counters.php_array_live_objects > 0) {
+        alloc_counters.php_array_live_objects -= 1;
+    }
     if (array_internal_pointers) |*m| {
         _ = m.remove(a);
     }
@@ -1770,6 +1774,9 @@ pub const PHPString = struct {
 // ============================================================================
 
 /// 数组键类型
+/// ★F-86-d：null 数组键归一成的空字符串键（静态单例：不分配、不释放）。
+var empty_array_key_string = PHPString{ .data = @constCast(""), .length = 0, .ref_count = 1, .is_static = true };
+
 pub const ArrayKey = union(enum) {
     integer: i64,
     string: *PHPString,
@@ -1836,6 +1843,9 @@ fn normalizeArrayKeyFromValue(key: Value) ArrayKey {
         if (loses_precision) emitDeprecatedFloatToInt(f);
         return ArrayKey{ .integer = floatToIntPHP(f) };
     }
+    // ★F-86-d：PHP 的 null 数组键归一为**空字符串**（不是 0）——`$a[null]` 读写都落在 `""` 键上，
+    //   并伴 E_DEPRECATED（告警在各用户态站点单独发，避免 array_key_exists 的专用措辞被串成通用那句）。
+    if (key.isNull()) return ArrayKey{ .string = &empty_array_key_string };
     return ArrayKey{ .integer = key.toInt() };
 }
 
@@ -2152,9 +2162,20 @@ pub const PHPArray = struct {
         }
     }
 
+    /// 快照引用转交（★F-139c）：`php_array_iter_init_snapshot` 克隆出的数组只有迭代器一个所有者，
+    /// 克隆自身那份必须立即归还；但 iter_init 已把 `ref_lock_count` 置 1，走 release 会被锁存
+    /// 直接返回 ⇒ 每个 by-value foreach 漏一份快照数组。
+    /// 此处只减计数、不进入 GC buffer：调用点 rc 必然 ≥1（迭代器持有），随后的 iter_free
+    /// 会在 `buffered=false` 下直接 deinit，不依赖强制 GC。
+    pub fn releaseTransferred(self: *PHPArray, allocator: Allocator) void {
+        if (self.ref_count > 1000000 or self.ref_count == 0) return;
+        self.ref_count -= 1;
+        if (self.ref_count == 0) self.deinit(allocator);
+    }
+
     /// 释放数组
     fn deinit(self: *PHPArray, allocator: Allocator) void {
-        if (array_internal_pointers) |*m| {
+            if (array_internal_pointers) |*m| {
             _ = m.remove(self);
         }
         var iter = self.elements.iterator();
@@ -2195,6 +2216,7 @@ pub const PHPArray = struct {
 
     /// 设置元素（通过Value键）
     pub fn setByValue(self: *PHPArray, allocator: Allocator, key: Value, value: Value) !void {
+        if (key.isNull()) emitNullArrayOffsetDeprecated();
         try self.set(allocator, normalizeArrayKeyFromValue(key), value);
     }
 
@@ -4400,9 +4422,11 @@ pub fn php_trigger_error(message: Value, error_type: Value, allocator: Allocator
     const err_type: i64 = if (error_type.isNull()) E_USER_NOTICE else error_type.toInt();
     const msg = message.asString().data;
 
+    const loc = diagLoc();
     if (dispatchToUserHandler(err_type, msg)) |handled| {
         if (handled) return Value.initBool(true); // C4：处理器接管 ⇒ 不打任何字
     }
+    restoreDiagLoc(loc);
     // C3／C5／没设处理器 ⇒ 标准处理（两行两流，与引擎诊断同一套文案规则）
     switch (err_type) {
         E_USER_ERROR => standardPrint("PHP Fatal error:  ", "\nFatal error: ", msg),
@@ -4875,6 +4899,21 @@ fn valueToArrayKey(val: Value, allocator: Allocator) !ArrayKey {
     return ArrayKey{ .integer = 0 };
 }
 
+/// 缺失数组键的 PHP 同款告警：整数键裸写、字符串键带双引号（格式化用**归一后**的键）。
+fn emitUndefinedArrayKey(key: ArrayKey) void {
+    var buf: [512]u8 = undefined;
+    const msg = switch (key) {
+        .integer => |i| std.fmt.bufPrint(&buf, "Undefined array key {d}", .{i}) catch "Undefined array key",
+        .string => |s| std.fmt.bufPrint(&buf, "Undefined array key \"{s}\"", .{s.data}) catch "Undefined array key",
+    };
+    emitWarning(msg);
+}
+
+/// null 数组键的 E_DEPRECATED（通用措辞；array_key_exists 有自己的专用措辞）。
+fn emitNullArrayOffsetDeprecated() void {
+    emitDeprecated("Using null as an array offset is deprecated, use an empty string instead");
+}
+
 pub fn php_array_get(arr_val: Value, key_val: Value, allocator: Allocator) !Value {
     // 解引用：如果值是引用类型，先解引用获取实际值
     var arr_resolved = arr_val;
@@ -4882,33 +4921,157 @@ pub fn php_array_get(arr_val: Value, key_val: Value, allocator: Allocator) !Valu
         arr_resolved = arr_resolved.asRef().*;
     }
     if (Value_isObject(arr_resolved)) {
+        const obj = Value_asObject(arr_resolved);
+        const has_get = if (obj.class_meta) |meta| meta.findMethod("offsetGet") != null else false;
+        if (!has_get) {
+            var buf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "Cannot use object of type {s} as array", .{obj.class_name}) catch "Cannot use object as array";
+            return throwThrowable("Error", msg, runtime_allocator);
+        }
         return php_object_call(arr_val, "offsetGet", &[_]Value{key_val});
     }
 
     if (arr_resolved.isString()) {
         const str = arr_resolved.asString();
-        const idx_i64 = key_val.toInt();
-        if (idx_i64 < 0 or idx_i64 >= str.length) return Value.initNull();
-        const idx = @as(usize, @intCast(idx_i64));
+        // PHP：float/bool/null 键读字符串偏移先发 E_WARNING「String offset cast occurred」
+        if (key_val.isFloat() or key_val.isBool() or key_val.isNull()) {
+            emitWarning("String offset cast occurred");
+        }
+        const idx_i64 = stringOffsetIndexFromValue(key_val) orelse {
+            // 非整数型字符串键（'k'/'1.0'/'1.5x'/''/溢出）⇒ PHP 8.5 TypeError
+            return throwThrowable("TypeError", "Cannot access offset of type string on string", runtime_allocator);
+        };
+        const len: i64 = @intCast(str.length);
+        const real: i64 = if (idx_i64 < 0) len + idx_i64 else idx_i64;
+        if (real < 0 or real >= len) {
+            var wbuf: [128]u8 = undefined;
+            const wmsg = std.fmt.bufPrint(&wbuf, "Uninitialized string offset {d}", .{idx_i64}) catch "Uninitialized string offset";
+            emitWarning(wmsg);
+            return Value.initString(try PHPString.init(allocator, ""));
+        }
+        const idx = @as(usize, @intCast(real));
         const ch_slice = str.data[idx..@min(idx + 1, str.data.len)];
         return Value.initString(try PHPString.init(allocator, ch_slice));
     }
 
     if (arr_resolved.isArray()) {
-        const result = arr_resolved.asArray().getByValue(key_val) orelse Value.initNull();
-        _ = result.retain();
-        return result;
+        if (key_val.isNull()) emitNullArrayOffsetDeprecated();
+        const key = normalizeArrayKeyFromValue(key_val);
+        // ★F-139c：get → 内部已 retain；此处不再 retain（否则每次读自有元素漏一份）。
+        if (arr_resolved.asArray().get(key)) |val| {
+            return val;
+        }
+        emitUndefinedArrayKey(key);
+        return Value.initNull();
     }
 
     var buf: [256]u8 = undefined;
     const msg = std.fmt.bufPrint(
         &buf,
         "Trying to access array offset on {s}",
-        .{valueTypeName(arr_resolved)},
+        .{phpArgTypeWord(arr_resolved)},
     ) catch "Trying to access array offset";
     emitWarning(msg);
 
     return Value.initNull();
+}
+
+/// ★F-86-b：`isset($x[$k])` / `$x[$k] ?? 默认` 的元素读（PHP 的 BP_VAR_IS 语义）。
+/// 与 `php_array_get` 的差别只在“无效/越界/非数组基一律静默给 null”，并补 PHP 的
+/// string offset 规则（整数前缀、负下标、非整数前缀告警）与 ArrayAccess 的 offsetExists 门。
+/// 返回值所有权同 `php_array_get`（数组元素 retain；string offset 新建；offsetGet 结果直接返回）。
+pub fn php_array_get_coalesce(arr_val: Value, key_val: Value, allocator: Allocator) !Value {
+    var arr_resolved = arr_val;
+    if (arr_resolved.isRef()) {
+        arr_resolved = arr_resolved.asRef().*;
+    }
+    if (Value_isObject(arr_resolved)) {
+        const obj = Value_asObject(arr_resolved);
+        const has_offset = if (obj.class_meta) |meta| meta.findMethod("offsetExists") != null else false;
+        if (!has_offset) {
+            var buf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "Cannot use object of type {s} as array", .{obj.class_name}) catch "Cannot use object as array";
+            return throwThrowable("Error", msg, runtime_allocator);
+        }
+        const exists = try php_object_call(arr_val, "offsetExists", &[_]Value{key_val});
+        defer exists.release(runtime_allocator);
+        if (!exists.toBool()) return Value.initNull();
+        return php_object_call(arr_val, "offsetGet", &[_]Value{key_val});
+    }
+    if (arr_resolved.isString()) {
+        const str = arr_resolved.asString();
+        const idx = stringOffsetIndexFromValue(key_val) orelse return Value.initNull();
+        const len: i64 = @intCast(str.length);
+        const real = if (idx < 0) len + idx else idx;
+        if (real < 0 or real >= len) return Value.initNull();
+        const u: usize = @intCast(real);
+        return Value.initString(try PHPString.init(allocator, str.data[u..@min(u + 1, str.data.len)]));
+    }
+    if (arr_resolved.isArray()) {
+        if (key_val.isNull()) emitNullArrayOffsetDeprecated();
+        return arr_resolved.asArray().getByValue(key_val) orelse Value.initNull();
+    }
+    return Value.initNull();
+}
+
+/// PHP string offset 的键解析（`zend_get_string_offset` 口径）：
+/// int/float/bool/null 走 zval 转换；string 取整数前缀——'1abc'/'0x10'/'1 2' 用前缀值并告警
+/// `Illegal string offset "…"`；浮点前缀（'1.0'/'1e1'/'1.5x'）、整数溢出、无数字前缀一律无效（null）。
+fn stringOffsetIndexFromValue(key_val: Value) ?i64 {
+    if (key_val.isRef()) return stringOffsetIndexFromValue(key_val.asRef().*);
+    if (key_val.isInt()) return key_val.asInt();
+    if (key_val.isFloat()) return floatToIntPHP(key_val.asFloat());
+    if (key_val.isBool()) return if (key_val.asBool()) 1 else 0;
+    if (key_val.isNull()) return 0;
+    if (!key_val.isString()) return 0;
+    const s = key_val.asString().data;
+    var i: usize = 0;
+    while (i < s.len and std.ascii.isWhitespace(s[i])) i += 1;
+    var neg = false;
+    if (i < s.len and (s[i] == '-' or s[i] == '+')) {
+        neg = s[i] == '-';
+        i += 1;
+    }
+    const digits_start = i;
+    var mag: u64 = 0;
+    var overflow = false;
+    while (i < s.len and s[i] >= '0' and s[i] <= '9') : (i += 1) {
+        const d: u64 = s[i] - '0';
+        if (mag > (std.math.maxInt(u64) - d) / 10) {
+            overflow = true;
+            break;
+        }
+        mag = mag * 10 + d;
+    }
+    if (i == digits_start) return null;
+    if (overflow) return null;
+    const int_max_u64: u64 = @intCast(std.math.maxInt(i64));
+    if (mag > int_max_u64 + (if (neg) @as(u64, 1) else @as(u64, 0))) return null;
+    // 浮点前缀 ⇒ is_numeric_string 返回 IS_DOUBLE ⇒ string offset 无效。
+    // '.' 一律视为浮点（'1.'/'1.5x' 实测都是 TypeError）；'e'/'E' 只有后随合法指数才算浮点，
+    // 否则按“整数前缀+垃圾”处理（'1e' 实测 = Illegal 告警 + 索引 1）。
+    if (i < s.len) {
+        if (s[i] == '.') return null;
+        if (s[i] == 'e' or s[i] == 'E') {
+            var k = i + 1;
+            if (k < s.len and (s[k] == '+' or s[k] == '-')) k += 1;
+            const exp_start = k;
+            while (k < s.len and s[k] >= '0' and s[k] <= '9') k += 1;
+            if (k > exp_start) return null;
+        }
+    }
+    var j = i;
+    while (j < s.len and std.ascii.isWhitespace(s[j])) j += 1;
+    if (j < s.len) {
+        var wbuf: [512]u8 = undefined;
+        const wmsg = std.fmt.bufPrint(&wbuf, "Illegal string offset \"{s}\"", .{s}) catch "Illegal string offset";
+        emitWarning(wmsg);
+    }
+    if (neg) {
+        if (mag == int_max_u64 + 1) return std.math.minInt(i64);
+        return -@as(i64, @intCast(mag));
+    }
+    return @intCast(mag);
 }
 
 /// isset($arr[$key]) - 检查数组键是否存在且非null（不产生警告）
@@ -4928,7 +5091,10 @@ pub fn php_array_isset(arr_val: Value, key_val: Value) !Value {
         return Value.initBool(idx_i64 >= 0 and idx_i64 < str.length);
     }
     if (arr_resolved.isArray()) {
+        if (key_val.isNull()) emitNullArrayOffsetDeprecated();
         if (arr_resolved.asArray().getByValue(key_val)) |val| {
+            // ★F-139c：getByValue 返回的是已 retain 的所有权值，不还就每次 isset 漏一份。
+            defer val.release(runtime_allocator);
             return Value.initBool(!val.isNull());
         }
         return Value.initBool(false);
@@ -6465,22 +6631,47 @@ fn standardPrint(err_label: []const u8, out_label: []const u8, msg: []const u8) 
     fileWriteAll(1, smsg);
 }
 
+/// ★F-131-e：用户 handler 是生成的闭包，执行时会把全局 src_file/src_line 推进到**闭包内**的语句；
+///   诊断的标准打印发生在 dispatch **之后**，必须用"诊断发生时"的位置，否则行号/文件会指到 handler 里。
+const DiagLoc = struct { file: []const u8, line: u32 };
+fn diagLoc() DiagLoc {
+    return .{ .file = src_file, .line = src_line };
+}
+fn restoreDiagLoc(loc: DiagLoc) void {
+    src_file = loc.file;
+    src_line = loc.line;
+}
+
 /// AOT-CODEGEN-012 R-132：PHP 8.2+ Deprecated 诊断（动态属性创建等）
 pub fn emitDeprecated(msg: []const u8) void {
+    const loc = diagLoc();
     if (dispatchToUserHandler(E_DEPRECATED, msg)) |handled| {
         if (handled) return; // C4
     }
-    standardPrint("PHP Deprecated:  ", "Deprecated: ", msg);
+    restoreDiagLoc(loc);
+    // ★F-130：与同契约的另 6 处（Warning/Notice/E_USER_*）一致，stdout 支必须带**前导换行**。
+    standardPrint("PHP Deprecated:  ", "\nDeprecated: ", msg);
 }
 
 pub fn emitWarning(msg: []const u8) void {
+    const loc = diagLoc();
     if (dispatchToUserHandler(E_WARNING, msg)) |handled| {
         if (handled) return; // C4
     }
+    restoreDiagLoc(loc);
     standardPrint("PHP Warning:  ", "\nWarning: ", msg);
 }
 
 pub fn emitDeprecatedStrGetcsvEscape() void {
+    // ★F-125：直写路径须补齐 standardPrint 的两件事——
+    //   ① 先路由用户处理器（PHP 实测：`@` 下处理器**仍被调用**，抑制只作用于标准打印）；
+    //   ② 再查抑制位（C2 规则，fileWriteAll 直写不会自动生效）。
+    const loc = diagLoc();
+    if (dispatchToUserHandler(E_DEPRECATED, "str_getcsv(): the $escape parameter must be provided as its default value will change")) |handled| {
+        if (handled) return;
+    }
+    restoreDiagLoc(loc);
+    if (isErrorSuppressed()) return;
     // PHP 输出顺序：先 stderr，再 stdout
     var ebuf: [1024]u8 = undefined;
     const emsg = std.fmt.bufPrint(
@@ -6499,6 +6690,15 @@ pub fn emitDeprecatedStrGetcsvEscape() void {
 }
 
 pub fn emitUndefinedVariableWarning(name: []const u8) void {
+    // ★F-125：同上——先路由处理器（`@` 不阻止处理器），再查抑制位。
+    var mbuf: [512]u8 = undefined;
+    const hmsg = std.fmt.bufPrint(&mbuf, "Undefined variable {s}", .{name}) catch "Undefined variable";
+    const loc = diagLoc();
+    if (dispatchToUserHandler(E_WARNING, hmsg)) |handled| {
+        if (handled) return;
+    }
+    restoreDiagLoc(loc);
+    if (isErrorSuppressed()) return;
     // PHP 输出顺序：先 stderr，再 stdout
     var ebuf: [1024]u8 = undefined;
     const emsg = std.fmt.bufPrint(
@@ -6863,9 +7063,11 @@ fn derefForNumberProbe(val: Value) Value {
 
 /// `Notice` 诊断（模板此前只有 Warning／Deprecated；比较族是第一条 Notice 站点）
 fn emitNotice(msg: []const u8) void {
+    const loc = diagLoc();
     if (dispatchToUserHandler(E_NOTICE, msg)) |handled| {
         if (handled) return; // C4
     }
+    restoreDiagLoc(loc);
     standardPrint("PHP Notice:  ", "\nNotice: ", msg);
 }
 
@@ -7285,9 +7487,8 @@ fn emitDeprecatedFloatToInt(f: f64) void {
     // ★F-115 同族收口（由 R-193 接线暴露）：本函数**直写** fd2/fd1，绕过了 `standardPrint` 的 C2 抑制位
     //   ⇒ 修前 `@str_repeat("a", 2.5)` 照打两行 Deprecated，而 PHP 8.5.8 实测 `@` 下一行不打（门 F2I g8 由 SAME 转 DIFF 抓住）。
     //   此处只补抑制位，**不改** 措辞／两行格式／顺序（`{d}` 与序列化口径是 F-69 实测档，动不得）。
-    //   ★已知残余（另立 F-125）：本函数仍**不经** `dispatchToUserHandler` ⇒ `set_error_handler` 收不到这条 E_DEPRECATED；
-    //     同族直写站点还有 `emitDeprecatedStrGetcsvEscape:6436`／`emitUndefinedVariableWarning:6454`，须先逐枚测真值再改，禁顺手动。
-    if (isErrorSuppressed()) return;
+    //   ★F-125-d：同族另两站点已在 R-208 接线（先 dispatchToUserHandler，再 isErrorSuppressed）；
+    //     本函数此前仍绕过 handler ⇒ `set_error_handler` 收不到这条 E_DEPRECATED（PHP 实测在 `@` 下也调用 handler）。
     // 警告信息中使用完整精度（PHP serialize_precision），不是 echo 的 precision=14
     var fbuf: [64]u8 = undefined;
     // ★F-69：`{d}` 把 NAN 印成**小写** `nan`，而 PHP 8.5.8 实测发大写原词 `NAN`（`INF`／`-INF` 同理）
@@ -7297,6 +7498,15 @@ fn emitDeprecatedFloatToInt(f: f64) void {
         std.fmt.bufPrint(&fbuf, "{d}", .{f}) catch "?"
     else
         phpFormatFloatSerialize(&fbuf, f, false, true);
+    // ★F-125-d：handler 先于抑制（PHP 在 @ 下仍调用 handler）；processor 收到的是裸消息。
+    var hbuf: [512]u8 = undefined;
+    const hmsg = std.fmt.bufPrint(&hbuf, "Implicit conversion from float {s} to int loses precision", .{fstr}) catch "Implicit conversion from float to int loses precision";
+    const loc = diagLoc();
+    if (dispatchToUserHandler(E_DEPRECATED, hmsg)) |handled| {
+        if (handled) return;
+    }
+    restoreDiagLoc(loc);
+    if (isErrorSuppressed()) return;
     // PHP 输出顺序：先 stderr，再 stdout
     var err_buf: [512]u8 = undefined;
     const stderr_msg = std.fmt.bufPrint(
@@ -9016,7 +9226,8 @@ pub fn php_array_iter_init_snapshot(array_val: Value, allocator: Allocator) !Val
     errdefer snapshot.release(allocator);
 
     const iter_val = try php_array_iter_init(Value.initArray(snapshot), allocator);
-    snapshot.release(allocator);
+    // ★F-139c：iter_init 已 retain 并加迭代锁，普通 release 会被锁拦截 ⇒ 必须走转交式释放。
+    snapshot.releaseTransferred(allocator);
     return iter_val;
 }
 
@@ -9079,10 +9290,17 @@ pub fn php_array_iter_init(array_val: Value, allocator: Allocator) !Value {
     // 设置迭代器锁，防止数组在迭代期间被释放
     array.ref_lock_count += 1;
     array.has_active_refs = true;
+    // ★F-139c：create 失败时必须回滚 retain + 锁，否则快照路径的 errdefer release 会被锁吞掉。
+    errdefer {
+        if (array.ref_lock_count > 0) array.ref_lock_count -= 1;
+        if (array.ref_lock_count == 0) array.has_active_refs = false;
+        array.release(allocator);
+    }
 
     const iter = try allocator.create(ArrayIterator);
-    iter.array = array; // 保存数组引用
-    iter.iter = array.elements.iterator();
+    // ★F-139c：allocator.create 不执行字段默认值——复用的堆块可能带着上一枚的 freed/ref_count，
+    //   令 iter_free 早退（快照数组整枚泄漏）。必须显式初始化全部字段。
+    iter.* = .{ .array = array, .iter = array.elements.iterator(), .current = undefined, .freed = false, .ref_count = 1 };
     iter.current = iter.iter.next();
 
     // std.debug.print("ITER_INIT: iter={*} array={*}\n", .{ iter, array });
@@ -9109,8 +9327,8 @@ pub fn php_array_iter_init_ref(array_val: Value, allocator: Allocator) !Value {
 
     // 创建迭代器（在mixed模式上）
     const iter = try allocator.create(ArrayIterator);
-    iter.array = array;
-    iter.iter = array.elements.iterator();
+    // ★F-139c：同上，复用堆块不得继承上一枚的 freed/ref_count。
+    iter.* = .{ .array = array, .iter = array.elements.iterator(), .current = undefined, .freed = false, .ref_count = 1 };
     iter.current = iter.iter.next();
 
     return Value.initInt(@intCast(@intFromPtr(iter)));
@@ -21646,6 +21864,27 @@ pub fn php_object_get_safe_value(obj_val: Value, prop_name_val: Value) !Value {
     return obj.getProperty(name) orelse Value.initNull();
 }
 
+/// ★F-86：`??` 语境的属性读（PHP 8.5.8 实测）：未声明属性、**不可访问的 private/protected**、
+/// typed 属性未初始化、以及非对象接收者，一律**静默返回 null**（`??` 下均不告警、不抛 Error），
+/// 且未声明属性仍会尝试 `__get`。与 `php_object_get` 同契约：返回**借用**引用，调用点负责 retain。
+pub fn php_object_get_coalesce(obj_val: Value, property_name: []const u8) !Value {
+    if (!Value_isObject(obj_val)) return Value.initNull();
+    const obj = Value_asObject(obj_val);
+    if (obj.class_meta) |meta| {
+        if (findPropertyDeclaringClass(meta, property_name)) |decl| {
+            if (!checkPropertyAccess(decl.class, decl.prop)) {
+                if (try tryMagicGet(obj_val, meta, property_name)) |result| return result;
+                return Value.initNull();
+            }
+        } else {
+            if (obj.getProperty(property_name)) |val| return val;
+            if (try tryMagicGet(obj_val, meta, property_name)) |result| return result;
+            return Value.initNull();
+        }
+    }
+    return obj.getProperty(property_name) orelse Value.initNull();
+}
+
 pub fn php_object_get_dynamic(obj_val: Value, prop_name_val: Value) !Value {
     if (!Value_isObject(obj_val)) {
         return Value.initNull();
@@ -23586,33 +23825,52 @@ pub fn php_idate(format_val: Value, ts_val: Value, allocator: Allocator) !Value 
 
 /// mktime(hour, minute, second, month, day, year) -> Unix timestamp
 pub fn php_mktime(hour: Value, minute: Value, second: Value, month: Value, day: Value, year: Value) Value {
-    const h = hour.toInt();
-    const mi = minute.toInt();
-    const s = second.toInt();
-    const mon = month.toInt();
-    const d = day.toInt();
-    var y = year.toInt();
+    // ★F-131：PHP 的 6 个形参全部可省略（min=1），省略与显式 null 一律取**当前本地时间**的对应分量。
+    //   本模板的时间族统一按 UTC 解释（DateTimeFormatter 同口径），故这里取 UTC 分量。
+    const any_null = hour.isNull() or minute.isNull() or second.isNull() or
+        month.isNull() or day.isNull() or year.isNull();
+    var now_mi: i64 = 0;
+    var now_s: i64 = 0;
+    var now_mon: i64 = 1;
+    var now_d: i64 = 1;
+    var now_y: i64 = 1970;
+    if (any_null) {
+        const now = @max(unixTimestamp(), 0);
+        const epoch = std.time.epoch.EpochSeconds{ .secs = @intCast(now) };
+        const ds = epoch.getDaySeconds();
+        const yd = epoch.getEpochDay().calculateYearDay();
+        const md = yd.calculateMonthDay();
+        now_mi = @intCast(ds.getMinutesIntoHour());
+        now_s = @intCast(ds.getSecondsIntoMinute());
+        now_mon = @intCast(md.month.numeric());
+        now_d = @intCast(md.day_index + 1);
+        now_y = @intCast(yd.year);
+    }
+    // ★F-131 真值实测：mktime 的 #1 `$hour` 是**不可空 int**（null ⇒ 0，并带一条 Deprecated），
+    //   与 #2–#6 的 `?int`（null ⇒ 当前分量）不同口径。
+    const h = if (hour.isNull()) @as(i64, 0) else hour.toInt();
+    const mi = if (minute.isNull()) now_mi else minute.toInt();
+    const sec = if (second.isNull()) now_s else second.toInt();
+    const mon_in = if (month.isNull()) now_mon else month.toInt();
+    const day_in = if (day.isNull()) now_d else day.toInt();
+    var y = if (year.isNull()) now_y else year.toInt();
     // PHP: 0-69 => 2000-2069, 70-100 => 1970-2000
     if (y >= 0 and y <= 69) y += 2000;
     if (y >= 70 and y <= 100) y += 1900;
-    const days_per_month = [_]i64{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
-    var total_days: i64 = 0;
-    var yi: i64 = 1970;
-    while (yi < y) : (yi += 1) {
-        const is_leap = (@rem(yi, 4) == 0 and @rem(yi, 100) != 0) or (@rem(yi, 400) == 0);
-        total_days += if (is_leap) 366 else 365;
-    }
-    var mi2: i64 = 1;
-    while (mi2 < mon) : (mi2 += 1) {
-        const idx = @as(usize, @intCast(mi2 - 1));
-        total_days += days_per_month[idx];
-        if (mi2 == 2) {
-            const is_leap = (@rem(y, 4) == 0 and @rem(y, 100) != 0) or (@rem(y, 400) == 0);
-            if (is_leap) total_days += 1;
-        }
-    }
-    total_days += d - 1;
-    const ts = total_days * 86400 + h * 3600 + mi * 60 + s;
+
+    // ★F-131：libc mktime 会把任意月/日归一化（mon=0→上一年 12 月、mon=13→下一年 1 月、day=0/32 同理）。
+    //   先把 (year, mon) 折成正规年月，再按 Howard Hinnant 的 days_from_civil 求纪元日数。
+    const total_months = y * 12 + (mon_in - 1);
+    const cy = @divFloor(total_months, 12);
+    const cm = @mod(total_months, 12) + 1; // 1..12
+    const yy = if (cm <= 2) cy - 1 else cy;
+    const era = @divFloor(yy, 400);
+    const yoe = yy - era * 400; // 0..399
+    const mp = if (cm > 2) cm - 3 else cm + 9; // Mar=0 .. Feb=11
+    const doy = @divFloor(153 * mp + 2, 5) + (day_in - 1);
+    const doe = yoe * 365 + @divFloor(yoe, 4) - @divFloor(yoe, 100) + doy;
+    const days = era * 146097 + doe - 719468;
+    const ts = days * 86400 + h * 3600 + mi * 60 + sec;
     return Value.initInt(ts);
 }
 
@@ -24309,6 +24567,9 @@ pub fn php_array_flip(arr: Value, allocator: Allocator) !Value {
 /// array_key_exists - 检查数组中是否存在指定的键
 pub fn php_array_key_exists(key: Value, arr: Value) !Value {
     if (!arr.isArray()) return Value.initBool(false);
+    if (key.isNull()) {
+        emitDeprecated("Using null as the key parameter for array_key_exists() is deprecated, use an empty string instead");
+    }
 
     const php_arr = arr.asArray();
     return Value.initBool(php_arr.get(normalizeArrayKeyFromValue(key)) != null);
@@ -26737,15 +26998,22 @@ pub fn php_header(header_str: Value, replace: Value, response_code: Value) !Valu
 }
 
 /// http_response_code - 获取/设置 HTTP 响应状态码
-threadlocal var current_http_response_code: i64 = 200;
-
+/// ★R-207（F-131-b）真值实测（PHP 8.5.8 CLI）：未设置时 get 返回 **false**；
+///   首次 set 返回 **true**（无前值），其后 set 返回前一个 int；set(0) 返回 false 且不改状态。
+///   "headers already sent 时 set 失败"属输出状态跟踪，未接（已登记）。
+threadlocal var current_http_response_code: i64 = 0; // 0 = 未设置
 pub fn php_http_response_code(code: Value) !Value {
     if (!code.isNull() and code.isInt()) {
+        const c = code.asInt();
+        if (c == 0) return Value.initBool(false);
         const prev = current_http_response_code;
-        current_http_response_code = code.asInt();
-        return Value.initInt(prev);
+        current_http_response_code = c;
+        return if (prev == 0) Value.initBool(true) else Value.initInt(prev);
     }
-    return Value.initInt(current_http_response_code);
+    return if (current_http_response_code == 0)
+        Value.initBool(false)
+    else
+        Value.initInt(current_http_response_code);
 }
 
 // ============================================================================

@@ -7498,11 +7498,423 @@ fn gcDestroyClosure(c: *PHPClosure) void {
 | c262（新永久门，4 臂 debug） | 未建 | **`flat=3 known_leak=1 leak=0 runtime_fail=0 residue=0`**，rc=0；`/bin/false` 自证 4/4 compile_fail + `SELFTEST_ALIVE` |
 | 主回归 | — | **`SELF_CHECK_OK rows=68 uniq=68`，PASS=68 FAIL=0**（rc=0） |
 | 影子（纯模板） | — | **`drift=0 invalid=0`，列 md5 `b286c535…` 与 R-201 列逐字同 ⇒ 硬中性** |
-| 十邻门 | — | TTB_NB |
-| `zig build` / `zig build test` | — | TTB_BUILD |
+| 十邻门 | — | 10 门 **594 臂**（385＋209）逐门 `pre=post=inter`、`verdict_chg=0 same→diff=0 diff→same=0 missing=0` |
+| `zig build` / `zig build test` | — | `zig build` rc=0；`zig build test` rc=0（含性能回归检查全过） |
 
 ### 111.5 新登记 / 边界
 - **F-138b（新，P1）**：debug 档「创建闭包但不调用」仍漏 ≈151 B/iter（g1 实测 `129285→432141`），release-safe 为 FLAT；与本次崩溃不同源，已作为 c262 的 KNOWN_LEAK 臂登记。
 - **F-136c 现状**：`array_map('trim',$a)` 自身 ≈390 B/iter 与 v7（捕获数组不调用）170 B/iter 仍在；v6 的 64 B/iter 已随本批关闭。
 - 本批纯模板 ⇒ 默认档生成码不变，影子判据为**硬中性**；debug/ReleaseFast 的运行时行为由 c262 + c249 + 回归覆盖。
 - 归属纪律：**凡是池分配的运行期对象，释放必须走与分配同一归属的 `destroyPHPX`**；GC 侧三处已有两处正确（数组 `destroyPHPArray`、对象 `o.allocator.destroy`），唯闭包用错，已修。
+
+## 112. ★R-203 落地记录（F-139：存入局部槽的临时量泄漏；F-138b 一并关闭）
+
+### 112.1 根因（发射器双重所有权口径不一致）
+- `generateFunction` 把「作为 store 值」的寄存器收进 `stored_to_alloca`，随后在函数级 cleanup 中**一律跳过**它们（注释："alloca 会负责 cleanup"）。
+- 但 store 发射对目标槽执行的是 `retain(); val_assign(slot, temp)` ⇒ 槽持有的那份与临时量自身持有的那份是**两份**；cleanup 只归还槽的那份 ⇒ **每次 `$x = <堆值表达式>` 漏一份**。
+- 最小复现：`function f(){ $r = array("a","b"); return $r[0]; }` ⇒ **305 B/iter**（debug/release-safe/release-fast 三档同值；`return "x"` 控制臂 0 B/iter）。
+- 以往未暴露的原因：回归与各门不测内存；且 liveness 死操作数释放 `releaseDeadOperands` 在该生成形里**未被调用**（探针实测 `RDO_ENTER` 0 次）⇒ 只能依赖 cleanup，而 cleanup 恰好把它排除了。
+
+### 112.2 修法（`src/aot/native_linker.zig`，+30 行，`nlk=bcc13390e9109fe942925a5c8eaf6cc9`）
+1. `generateFunction` 先统计每个寄存器被 store 的次数（`:6364`，`current_store_count_by_value`）。
+2. store 的 alloca 分支尾部归还临时量自身那份（`:20662`）：
+   ```zig
+   if (single_store_value and !value_is_alloca and !value_is_ref_param and op.value.id != op.ptr.id and self.regMayHeap(op.value.id)) {
+       if (!reg_N.isNull()) { reg_N.release(...); reg_N = null; }
+   }
+   ```
+3. **单次 store 守卫是必需的**：链式赋值 `$left = $right = []` 会让同一临时量进入两次 store（第二次仍读它）；无守卫的首版把 **f175 打成 rc=139**，加守卫后 f175 与 PHP 逐字相同。
+
+### 112.3 读数（实测）
+| 臂 | 修前 | 修后 |
+|---|---|---|
+| m7 `$r = array("a","b"); return $r[0]`（release-fast） | 305 B/iter | **2** |
+| m9 建数组但不读（release-fast） | 303 | **1** |
+| c262 `g1`（debug，创建闭包不调用） | 151 | **0 ⇒ F-138b 关闭** |
+| c262 门 | `flat=3 known_leak=1`（g1 登记） | **`flat=4`，KNOWN_LEAK 摘除**，rc=0 |
+| c249（14 臂，release-fast） | — | `flat=12 known_leak=1(a11)`，rc=0（a11 仍 645＝F-139b） |
+| f175（链式赋值） | 首版 rc=139 | 加守卫后 **rc=0 且输出与 PHP 逐字同** |
+| 主回归 | — | **`SELF_CHECK_OK rows=68 uniq=68`，PASS=68 FAIL=0**（rc=0；首版无守卫时 f175 rc=139，加守卫后复原） |
+| 影子（发射器） | — | **`drift=59/68`**（发射器批，预期）；用 R-202 参照编译器逐文件 diff：**changed=59、新增 792 行全部逐字匹配 F-139 释放模板、removed=0、UNEXPECTED=0**；new 列 `4816a2b43698626949e8540876c05640` |
+| 十邻门 | — | 10 门 **594 臂**（385＋209）逐门 `pre=post=inter`、`verdict_chg=0 same→diff=0 diff→same=0 missing=0` |
+| `zig build test` | — | `zig build` rc=0；`zig build test` rc=0（含性能回归检查全过） |
+
+### 112.4 新登记 / 改判
+| 编号 | 内容 | 证据 |
+|---|---|---|
+| **F-139** | 局部槽赋值的临时量泄漏（本批关闭） | m7/m9 305/303→2/1 |
+| **F-138b** | debug 档未调用闭包 151 B/iter（随本批关闭） | g1 151→0 |
+| **F-139b**（新，P1） | 调用实参临时量不释放：数组字面量/闭包作为 `.call` 实参（`array_map` 无闭包也漏） | m0 `array_map(null, literal)` 304 B/iter、m1 `array_map('trim',…)` 391、m3 644；机制＝`releaseDeadOperands` 对 `.call` 参数一律不释放 |
+| **F-139c**（新，P2） | `foreach` + `$o[] = …` 的 push/COW 路径残余 | m2 853→706、m5 705 |
+
+### 112.5 风险、边界与后续
+- 只在「该值寄存器全函数仅被 store 一次」时归还；链式赋值/多 store 形保留一份（正确性优先，残余泄漏登记为 F-139c 的同族）。
+- **`releaseDeadOperands` 在默认发射路径未被调用**（探针证据）：这套 liveness 释放机制目前形同虚设；是否把它接入主路径需单独立项（接入会同时改变大量指令的释放面，必须全链验证）。
+- 本批动发射器 ⇒ 生成码必漂移；漂移必须逐文件归因（只允许新增上述 release 行）。
+
+## 113. ★R-204 落地记录（F-139b：调用实参临时量；cleanup 类型集合补齐）
+
+### 113.1 根因（collect 条件漏掉一半堆类型）
+函数级 cleanup 的收集条件是 `corrected_type == .php_value or .php_object`（或 alloca）。于是：
+- `array_new`（结果类型 `.php_array`）、常量/拼接串（`.php_string`）、闭包（`.php_callable`）、资源（`.php_resource`）的**结果寄存器从不进入 cleanup**；
+- 这些临时量若作为 `.call` 实参（如 `array_map(null, array(...))`），既不在 cleanup，`.call` 的死操作数释放又未接线（§112.5）⇒ **每次调用漏一份**。
+最小复现：m0 `array_map(null, array("a","b"))` **304 B/iter**、m1 `array_map('trim', …)` 391、m3（闭包实参）644；m10（函数内循环同形）304。
+
+### 113.2 修法（`native_linker.zig:5159` 起，条件扩展）
+```zig
+if (corrected_type == .php_value or corrected_type == .php_object or
+    corrected_type == .php_array or corrected_type == .php_string or
+    corrected_type == .php_callable or corrected_type == .php_resource)
+```
+- `release` 对静态串/null 是 no-op；`shouldReleaseReg`/`regMayHeap` 继续兜底；`stored_to_alloca` 的排除与 R-203 的 store 释放互补（R-203 管「存入槽」，本批管「仅作实参/中间值」）。
+- 为什么无需逐调用释放：函数级 cleanup 是现有所有权机制；循环体内临时量在下一次赋值时已有前置 `release`（m10/m11 实测 1 B/iter，证明"不换帧"的循环也不漏）。
+
+### 113.3 读数（实测）
+| 臂 | 修前 | 修后 |
+|---|---|---|
+| m0 `array_map(null, literal)` | 304 | **1** |
+| m1 `array_map('trim', …)` | 391 | **88**（残余 F-139c） |
+| m2 / m5 foreach+push | 706 | **468**（残余 F-139c） |
+| m3 闭包实参 | 644 | **405**（残余 F-139c） |
+| m7 / m9（R-203 臂） | 2 / 1 | 2 / 1（保持） |
+| m10 / m11 函数内循环 | 304 / 303 | **1 / 1** |
+| f175 链式赋值 | 与 PHP 同 | 仅时间戳不同（允许） |
+| c249 / c254 / c262 | — | 逐项同值（`flat=12 known_leak=1` / `same=27 known_red=2` / `flat=4`） |
+| 主回归 | — | **PASS=68 FAIL=0**（`SELF_CHECK_OK rows=68 uniq=68`） |
+| 影子（发射器） | R-203 编译器 `/tmp/f140/bin_ref` 同代 ref 列（68 枚） | **changed=68 removed_files=0 missing_new=0 UNEXPECTED=0**；新增 633,530 行全属清理族（`release=318,055`、`init_null=312,894`、`release_guarded=2,515`、注释 42、空行 24） |
+| 生成码体积 | 118,135,465 B / 2,373,880 行 | **148,262,956 B / 3,007,410 行（+25.50% B / +26.69% 行）**；最大单文件 +44.8%（f119） |
+| 体积/耗时代价（实测） | f119：编译 13.57/12.91 s，产物 1,522,040 B；f095：15.88/15.93 s，1,702,544 B | f119：**15.87/15.96 s（+20%）**，**1,817,528 B（+19.4%）**；f095：**18.69/18.89 s（+18%）**，**1,948,784 B（+14.5%）**（各跑两轮，交替顺序，产物即删） |
+| 十邻门 | `/tmp/r203_nb`（R-203 同代 post 列） | **10 门 / 569 臂，判定转移 = 0**（SAME→DIFF=0、DIFF→SAME=0、其它=0）；同判定载荷差异 3 枚均为非语义：`c146 a10` mktemp 目录名、`c062 b3` 生成码行号 90→96、`c047 b192` bcrypt 随机盐（该臂本就登记为 DIFF）；10 门 DONE 行质量字段（`warn_over/under`、`dep_over/under`、`bad_probe`、`repo_build_residue`）逐字同 |
+| `zig build test` | — | **21/21 steps、326/326 tests 通过，rc=0**（日志末行 `failed command: …--listen=-` 是 Zig listen 模式的既有噪声：R-203 同日志逐字相同，Build Summary 为成功） |
+
+### 113.3.1 影子判据为何改用「多重集」而不用逐行 diff
+`cleanup_registers_set` 是 `AutoHashMap`，**扩集合会改变迭代顺序** ⇒ 异常清理块内同一批释放行的次序整体重排。逐行 unified diff 会把"重排"报成大量删除/新增（首跑得 `removed=5,268`／`UNEXPECTED=1,795,494`，全是假象）。语义判据改为：
+1. `Counter(ref) - Counter(new)` 必须为空 ⇒ **ref 的每一行都还在**（只增不删）；
+2. `Counter(new) - Counter(ref)` 的每一行都必须命中清理族形态：`reg_N.release(...)`（任意缩进）、`reg_N = Value.initNull()`、清理块注释与空行。
+实测恰好 `UNEXPECTED=0`：**除清理行外没有任何其它语句形态出现**。
+★代价必须记账：+25.5% 生成码是本批的直接成本（异常清理块按「抛点 × 活跃临时量」展开，补齐类型集合后基数变大）。是否接受该体积，或改为 liveness 限制清理集合，须老铁裁；本批功能面全绿，但这是**编译器侧体积/编译耗时**的既有取舍点。
+
+### 113.4 登记 / 边界
+- 代次锚（实测）：`nlk 8a8b1c4dba0ba488f6fb1356b5e6b293`（本批唯一源改动，+9/−1 行）／`tpl 28a07ae5bd02833ce333496a93b5c0fe`／`irg 8bf9aad68f2a02a63833dd693617ef0e`／`opt 745e4bd4bbb77258fbd5de58629d8684`／`ir 1fb6b01f9b0bdff318de496538e7620e`／`parser 70e80f18a2c6ef6787b4c5d817c31773`；**未提交**。
+- **F-139b 关闭**；**F-139c 保留**（残余 88/468/405：字符串回调面、foreach+push 的 COW 临时量、闭包实参残余）。
+- 本批仍不改 `releaseDeadOperands` 的接线；逐指令 liveness 释放是另一议题（§112.5）。
+
+## 114. ★R-205 落地记录（F-139c 闭环；模板五处，纯模板轮）
+### 114.1 归因（隔离探针矩阵，`ZIGPHP_ALLOC_STATS` N=1000/3000）
+| 探针 | 形制 | 修前 B/iter |
+|---|---|---|
+| p1/p2/p3 | 按值数组形参 / 返回数组 / 无 foreach 的 push | 0 / 0 / 0 |
+| p4 | **仅 foreach**（2 元素） | **379**（+1.5 分配/次） |
+| p5 | foreach + `$o[]=` | 466 |
+| p6/p8 | `array_map('trim')` / 箭头回调 | **86**（+1 分配/次） |
+| p7/p12 | `array_map(null)` / 方法内 null 回调 | 0 / 0 |
+| r5/r7 | `array(trim(...))` 存入数组、再读 | **86** |
+| r1/r3 | 函数返回自有串 / 拼接串 | 0 |
+| q1–q4 | foreach 空/1 元/2 元/整型 | 227/363/379/379（固定 ≈347＋每元素 ≈16） |
+| q5 | by-ref foreach | 197（+2.78 分配/次） |
+⇒ 三支独立缺陷：**① 读自有元素漏一份**（p6/r5/r7）、**② by-value foreach 快照漏一份**（p4/q1–q4）、**③ by-ref 绑定残余**（q5，另立 F-139d）。
+
+### 114.2 根因与修法（`runtime_lib_template.zig` 五处）
+1. **`php_array_get` 重复 retain**：`PHPArray.get`（`:2180`）已 retain，`php_array_get` 的数组分支又 `_ = result.retain()` ⇒ 每次读自有元素漏一份（86 B/iter；静态串因 retain no-op 不可见）。删重复那次。
+2. **`php_array_isset` 漏释放**：`getByValue` 返回已 retain 的值，分支直接返回布尔 ⇒ 每次 isset 漏一份。补 `defer val.release(runtime_allocator)`。
+3. **迭代器快照的 `release` 被锁吞掉**：`php_array_iter_init_snapshot` 克隆后调 `iter_init`，后者 `retain()+ref_lock_count+=1`；随后的 `snapshot.release()` 命中 `PHPArray.release` 的「ref_lock_count>0 直接返回」⇒ 快照数组永不销毁。新增 `releaseTransferred()`（只减计数、不 buffer，供一次性克隆转交），快照路径改走它。
+4. **★`ArrayIterator` 未初始化字段（真正的主漏点）**：`allocator.create(ArrayIterator)` **不执行字段默认值**，复用堆块继承上一枚的 `freed=true`/`ref_count` ⇒ `php_array_iter_free` 在 `if (iter.freed) return` 早退，**半数 foreach 根本不回收**（实测 IFENTRY=20 但分支体只跑 12 次）。两处初始化改为 `iter.* = .{ .array=…, .iter=…, .current=…, .freed=false, .ref_count=1 }` 后再取 `current`。
+5. **`gcDestroyArray` 绕过活体计数**：与 F-138 的对象计数同族，补 `php_array_live_objects -= 1`。
+另在 `php_array_iter_init` 的 retain+锁之后补 `errdefer` 回滚（OOM 时快照路径的 errdefer release 否则同样被锁吞掉）。
+
+### 114.3 读数（实测）
+| 臂 | 修前 | 修后 |
+|---|---|---|
+| p4 / p5 foreach 面 | 379 / 466 | **0 / 0**（live_allocs 全平） |
+| p6 / p8 array_map 回调 | 86 / 86 | **0 / 0** |
+| q1–q4 foreach 变体 | 227–379 | **全 0** |
+| q5 by-ref foreach | 197 | **16**（残余，F-139d） |
+| q6–q10 / r1–r10 | 0–86 | **全 0** |
+| m0 / m1 / m2 / m5 / m10 / m11 | 304/391/706/706/304/303 | **1 / 1 / 0 / 0 / 1 / 1** |
+| m3（箭头闭包捕获） | 644 | **318**（既有 F-136c；R-203 编译器同形 543–559） |
+| m7 / m9（R-203 臂） | 2 / 1 | 2 / 1（保持） |
+| c249 | `flat=12 known_leak=1` | `flat=12 leak=0 known_leak=1`（a11＝F-136c，645→320 B/iter） |
+| c254 | `same=27 known_red=2` | 逐字同（`tpl=921b2ee8…`） |
+| c262（debug） | `flat=4` | `flat=4` |
+| 主回归 | — | **PASS=68 FAIL=0**（`SELF_CHECK_OK rows=68 uniq=68`） |
+| 影子 | 纯模板 ⇒ **必须中性** | **drift=0 / 68**，`out_md5=86b5c1d0fd21786b1b5e88c3298c8f0f` 与 R-204 列逐字相同（col_identical=yes），invalid=0，wall=866s |
+| 十邻门 | R-204 同代 post 列（`/tmp/r204_nb`） | **10 门 / 569 臂零判定转移**；同判定非语义 2 枚（`c146 a10` mktemp 目录名、`c047 b192` bcrypt 随机盐）；10 门 DONE 质量字段逐字同 |
+| `zig build test` | — | **21/21 steps、326/326 tests 通过，rc=0**（`failed command …--listen=-` 为既有噪声） |
+
+### 114.4 登记 / 边界
+- **F-139c 关闭**；新立 **F-139d**（by-ref foreach 绑定：16 B/2 分配 per call，按元素泄漏，待归因发射/模板侧）；**F-136c 仍在**（捕获闭包面，本批顺带 645→320）。
+- 代次锚：`tpl 921b2ee8533e772f16403403af3bb00b`（本轮唯一源改动）；其余五枚同 §113.4；**未提交**。
+
+## 115. ★R-206 落地记录（F-131：mktime 的 arity 与可选参语义；模板＋注册表）
+### 115.1 对表普查（先做，后动代码；三源扣除法）
+AOT 的可选参补齐实际散落在**三处**：① IR 手工补齐 switch（`ir_generator.zig` 内 `func_name, "X"` 名单，51 名）；② 发射器按 `runtime_name` 的特支（`native_linker.zig` 内 `eql(u8, runtime_name, "php_X")`，128 名）；③ 声明式 `handler_params + optional_defaults`（BuiltinInfo）。对 PHP 全量内置（2143 枚，`getNumberOfRequiredParameters/Parameters`）逐名比对、**扣掉三源**后：
+| 口径 | 数量 |
+|---|---|
+| 原始 `php_min > AOT 形参数` 候选 | 141 |
+| 扣 IR 手工补齐后 | 84 |
+| 再扣发射器特支（即**无任何已知补齐**） | **38** |
+★38 枚中仍含**口径噪声**：0 实参函数（`time`/`getmypid`/`json_last_error` 等）的运行时首参是 `ctx/_`，不是用户实参，静态模型会多算 1；系统/进程面（`pcntl_*`/`posix_*`/`sem_get`/`shmop_open`/`socket_*`/`mysqli_*`）与 ob 族属既定排除项。⇒ 本批只落**已实测、语料可见、非排除族**的 `mktime`；其余留作逐枚编译实证的下一批（禁照名单放宽）。
+### 115.2 真值矩阵（PHP 8.5.8，TZ=UTC；`mktime == gmmktime` 实测同值）
+- **arity**：min=1、max=6；`mktime()` ⇒ `ArgumentCountError`。
+- **可选参**：#2–#6 是 `?int`，**省略与显式 null 都取当前分量**（实测 `mktime(12)` == 补全当前分量；`mktime(0,0,0,null,1,2000)` == 当前月）。
+- ★**#1 是例外**：`$hour` 是**不可空 `int`**，null ⇒ **0**（且 stdout 一条 `Deprecated: mktime(): Passing null to parameter #1 ($hour) of type int is deprecated`），不是当前小时——首版按「全 null=当前」实现，门 a7 实测 `PHP[-50400] vs AOT[0]`（-14h＝当时小时）当场否证。
+- **归一化**（libc 口径）：`mon=13` ⇒ 次年 1 月（978307200）、`mon=0` ⇒ 上年 12 月、`day=0/32`、`hour=25`、`minute=61`、`second=-1` 全部按秒溢出折算；旧实现的 `days_per_month[mi2-1]` 在 `mon≥13` 会**越界索引**（ReleaseSmall 下 UB）。
+### 115.3 修法
+1. `native_linker.zig`：`mktime` 条目加 `handler_params = 6` ＋ 5 个 `runtime.Value.initNull()` 缺省（缺省 ≠ "补 null 就完事"：null 的语义由模板按位区分）。
+2. `runtime_lib_template.zig::php_mktime` 重写：按位解 null（#1⇒0，其余⇒UTC 当前分量）；`(year,mon)` 折成正规年月后用 **Howard Hinnant days_from_civil** 求纪元日数，年月日时分秒的越界统一按秒归一（替换原逐月循环）。
+### 115.4 读数（实测）
+| 判据 | 读数 |
+|---|---|
+| 新门 **C264（20 臂）** | **same=19 diff=0 compile_fail=1**（唯一 CF＝`a8 mktime()`：PHP 运行时 `ArgumentCountError` vs AOT 编译期拒，记预期）；自证 `AOT_BIN=/bin/false` ⇒ `arms=20 compile_fail=20` |
+| `c047`（b183 受影响） | `arms=209 same=181 diff=28 compile_fail=0`（R-205：181/27/1）；**唯一转移＝`b183` CF→DIFF**：`mktime(0,0,0,$o)` 现可编译，AOT 静默算值 vs PHP `TypeError: mktime(): Argument #4 ($month) must be of type ?int, Foo given` ⇒ 这是**按预期暴露的既有缺口**（F-62f/#140 `?int` 类型校验未接），不是本批新缺陷；其余 208 臂逐字同 |
+| c249 / c254 / c262 | 逐字同 R-205：`flat=12 leak=0 known_leak=1`／`same=27 known_red=2`（`tpl=244a9620…`）／`flat=4` |
+| 主回归（f045 3 枚 6 实参调用） | **PASS=68 FAIL=0**（`SELF_CHECK_OK rows=68 uniq=68`） |
+| 影子（tpl＋nlk 改动；语料 3 枚 mktime 全 6 实参 ⇒ 生成码应不变） | **drift=0 / 68**；`out_md5=86b5c1d0…` 与 R-205 列逐字相同（`col_identical=yes`），invalid=0，wall=865s |
+| `zig build test` | **21/21 steps、326/326 tests 通过，rc=0** |
+
+## 116. ★R-207 落地记录（F-131-b：可选参实证普查第二批；4 函数放宽 ＋ 3 处发射缺陷）
+### 116.1 逐枚编译实证（12 枚高价值候选，cwd 必须是仓库根）
+| 臂 | 调用 | AOT 修前 |
+|---|---|---|
+| c01 | `array_reduce(array(1), fn)` | **CF**（php_array_reduce 要 4 形参） |
+| c02 | `implode(array("a","b"))` | **CF**（要 3） |
+| c03 | `http_response_code()` | **CF**（要 1） |
+| c04 | `get_defined_constants()` | **CF**（要 2） |
+| c07 | `get_class()` | **CF**（要 2；需 `$this` 类上下文，本批不改） |
+| c11 | `token_get_all("…")` | **CF**（要 3；但模板是**空桩**，放宽只会把编译拒变成错值 ⇒ 只登记） |
+| c05/c06/c08/c09/c10/c12 | `json_last_error()`/`time()`/`gc_enabled()`/`func_num_args()`/`getmypid()`/`ftok()` | **OK**（静态普查的口径噪声：首参是 `ctx/_` 或已有特支） |
+### 116.2 修法
+1. **4 个注册项放宽**（模板 null 语义已实测正确）：`array_reduce` 2..3、`implode`/`join` 1..2、`http_response_code` 0..1、`get_defined_constants` 0..1。
+2. **发射器 3 处**（R-207 现场挖出）：
+   - `writeBuiltinArgs` 的补齐循环硬打前导 `", "` ⇒ 0 实参改成 `f(, null)` **语法错**；改为 `i > 0 or args.len > 0` 才打逗号。
+   - **值形** 0 实参分配器分支完全绕过补齐（`php_X(runtime.runtime_allocator)`）；改为：声明了 `handler_params` 且**全部形参可选**时走 `writeBuiltinArgs` 再补 `, allocator`。
+   - **语句形** 0 实参同款，同样处理。
+3. **`http_response_code` 语义补修**（PHP 8.5.8 CLI 实测）：未设置时 get ⇒ **false**（旧实现默认 200）；首次 set ⇒ **true**，其后 set ⇒ 前一个 int；`set(0)` ⇒ false 且不改状态。`headers already sent 时 set 失败`未接（需输出状态跟踪，登记为遗留）。
+### 116.3 读数（实测）
+| 判据 | 读数 |
+|---|---|
+| 新门 **C265（7 臂）** | **same=7 diff=0 compile_fail=0**（array_reduce 2 参／implode 1 参／join 1 参／http_response_code get／set-get 往返／get_defined_constants is_array／array_reduce 3 参守卫）；自证 `AOT_BIN=/bin/false` ⇒ 7 臂全 CF |
+| c264（mktime 门） | 20 臂 `19/0/1` 逐字同 R-206（a8 仍预期 CF） |
+| c249 / c254 / c262 | 逐字同（`tpl=3433ff99…`） |
+| 十邻门 | **不跑**（机械判据）：① grep 实测十门脚本均无本批五函数的**短调用**（implode/join 全 2 参、array_reduce 全 3 参、http_response_code/get_defined_constants 0 处）；② 3 处发射改动只在 `args.len==0 且全可选` 时生效，而 R-207 之前**没有任何条目是全可选**（既有 handler_params 条目必填数≥1）⇒ 其它门不可能受影响；c047 单独 grep 亦为 0 |
+| 主回归 | **PASS=68 FAIL=0**（`SELF_CHECK_OK rows=68 uniq=68`） |
+| 影子（发射器改动，但语料短调用=0 ⇒ 生成码应不变） | **drift=0 / 68**；`out_md5=86b5c1d0…` 与 R-206 列逐字相同（`col_identical=yes`），invalid=0，wall=866s |
+| `zig build test` | **21/21 steps、326/326 tests 通过，rc=0** |
+### 116.4 登记 / 边界
+- **F-131-b 关闭**（4 函数放宽）；`get_class()`（需 `$this` 注入）与 `token_get_all`（空桩）**留在普查账**；`http_response_code` 的 headers-sent 语义登记为遗留。
+- 代次锚：`tpl 3433ff99c8cb2c051b60ccbc4e65df3c`／`nlk 9410ae834ae60a69bfbac3ec912f21a7`；未提交。
+
+## 117. ★R-208 落地记录（F-130 换行 ＋ F-125 两枚直写站点；纯模板轮）
+### 117.1 真值（PHP 8.5.8，逐字节 `od -An -c`）
+- **F-130**：`emitDeprecated` 的 stdout 支缺前导 `\n`，与同契约另 6 处（Warning/Notice/E_USER_*）不一致；PHP 动态属性实测 stdout 首字节序列为 `\n D e p r e c a t e d : …`。
+- **F-125**（两枚直写站点 = `emitDeprecatedStrGetcsvEscape` / `emitUndefinedVariableWarning`）：
+  1. 无 handler、`@` ⇒ **stdout/stderr 全空**（PHP 实测）；
+  2. ★有 handler、`@` ⇒ **handler 仍被调用**（`CB|8192`、`CB|2`），抑制只作用于标准打印；
+  3. handler 返回 true ⇒ 只留 handler 输出；返回 false ⇒ handler 后**标准诊断照打**。
+  ⇒ 正确顺序＝**先 `dispatchToUserHandler`，再 `isErrorSuppressed`，最后直写**；只加抑制位（首版）会把"`@` 下的 handler"一并吞掉。
+### 117.2 修法（`runtime_lib_template.zig` 三处）
+1. `emitDeprecated`：stdout 标签 `"Deprecated: "` → `"\nDeprecated: "`。
+2. `emitDeprecatedStrGetcsvEscape`：补 handler 路由（E_DEPRECATED，裸消息）＋抑制位。
+3. `emitUndefinedVariableWarning`：补 handler 路由（E_WARNING，裸消息 `Undefined variable {s}`）＋抑制位。
+### 117.3 读数（字节级，逐流对比）
+| 臂 | 形 | stdout | stderr |
+|---|---|---|---|
+| s1 | `str_getcsv` 无 `@` | **SAME** | **SAME** |
+| s2 | `@str_getcsv` | SAME | SAME |
+| s3 | 未定义变量无 `@` | SAME | SAME |
+| s4 | `@$zz` | SAME | SAME |
+| dyn | 动态属性 Deprecated（F-130 面） | **SAME**（修前缺前导 `\n`） | SAME |
+| h1 | handler 返回 true（两站点） | SAME | SAME |
+| h2 | handler 返回 false | 除**行号**（AOT 报调用前一条语句的行号，PHP 报调用行）外逐字相同 | 同左 |
+| h3 | handler + `@`（含**裸** `@$zz;` 语句） | `CB|8192` 相同；**缺 `CB|2`** ⇒ ★复核更正：**不是**"`@` 抑制被省略"，而是**裸 `@$var;` 语句被 DCE**（PHP 实测：`$zz;` 不告警、`@$zz;` **会**调 handler、`$x=@$zz;` 也调）；`$x=@$zz;`（h4）AOT 与 PHP **SAME** ⇒ 赋值形不受影响 | 同左 |
+### 117.4 门与链
+| 判据 | 读数 |
+|---|---|
+| SUPA(C121) / SUPB(C123) | SUPA `same=9 diff=1 bad_overaccept=3`（与既有基线逐字同：红＝`s4` F-110、3 枚 F-109 守卫）/ SUPB **7/7 leak=0 scope_fail=0** |
+| c249 / c254 / c262 | `flat=12 leak=0 known_leak=1` / `same=27 known_red=2`（`tpl=061aca28…`）/ `flat=4`（均逐字同 R-207） |
+| c012（动态属性 Deprecated 捕获面） | `shapes=88 same=82 diff=6`（逐字同 R-207；该门的捕获折叠空白，故换行面证据仍以字节探针为准） |
+| c264 / c265 | 20 臂 `19/0/1` / 7 臂 `7/7`（逐字同 R-207） |
+| 主回归 | **PASS=68 FAIL=0**（`SELF_CHECK_OK rows=68 uniq=68`） |
+| 影子（纯模板） | **drift=0 / 68**；`out_md5=86b5c1d0…` 与 R-207 列逐字相同（`col_identical=yes`），invalid=0，wall=864s |
+| `zig build test` | **21/21 steps、326/326 tests 通过，rc=0** |
+### 117.5 登记 / 边界
+- **F-130 关闭**；**F-125-a（抑制位）＋F-125-b（handler 路由）关闭**；新立 **F-125-c**（★定性已按 h4/h5 更正）：**裸 `@$var;` 表达式语句被 DCE** ⇒ handler 不被调用（PHP 对裸 `@$var;` 会求值并调 handler；对裸 `$var;` 反而不告警）⇒ 只影响"裸语句"这一冷形，赋值/使用形（h4）已逐字对；修法属发射器语义，另批。
+- 行号差异（h2）按既有归因口径容忍（诊断行号 ≠ 栈追踪；门均归一化 `@N@`）。
+- ★流程教训（本轮）：批量跑门时用 `v="AOT_BIN=… TSV_OUT=…"; env $v bash …` 在 **zsh 不会分词** ⇒ 整串成了 `AOT_BIN` 的值，所有臂秒速编译失败；门自检行把错误值打印出来才定位。批量命令必须写显式 `env A=… B=… bash …`。
+- 代次锚：`tpl 061aca287bc1ab8470995b68d0442687`；`nlk 9410ae83…`（本轮未动）；未提交。
+### 117.6 附带：arity 普查第二批 21 枚实测（本批开工前完成）
+对 §115/§116 余量中**在范围内**的 21 枚候选（header/json_encode/filter_var/array_slice/array_chunk/array_column/array_keys/array_search/array_rand/array_reverse/count_chars/date/getdate/str_word_count/substr_count/mb_strtolower/mb_detect_encoding/trigger_error/set_error_handler/restore_error_handler/extract）逐枚编译合法最小调用：**21/21 全部 COMPILE_OK** ⇒ 剩余真 over-rejection 仅 `get_class()`（需 `$this` 上下文）、`token_get_all`（空桩）与系统/进程/ob 排除族；**arity 族在册收口**。
+
+## 118. ★R-209 落地记录（F-125-d：`emitDeprecatedFloatToInt` 的 handler 路由；纯模板轮）
+### 118.1 真值（PHP 8.5.8）
+`str_repeat("a", 2.5)` ⇒ handler 收到 **`CB|8192|Implicit conversion from float 2.5 to int loses precision`**；handler 返回 false ⇒ handler 后标准 stderr/stdout 照打；`@` 下 handler **仍被调用**（只抑标准流）。
+### 118.2 修法
+`emitDeprecatedFloatToInt`：先算 `fstr`（保持原 `{d}`/序列化口径，不动措辞）→ 组裸消息 `Implicit conversion from float {s} to int loses precision` → `dispatchToUserHandler(E_DEPRECATED, …)`（返回 true 即 return）→ `isErrorSuppressed()` → 原双流直写。至此 F-125 家族三处直写站点（str_getcsv / undefined var / float→int）**顺序一致**。
+### 118.3 读数（字节级）
+| 臂 | 形 | stdout | stderr |
+|---|---|---|---|
+| f1 | handler true | **SAME** | **SAME** |
+| f2 | handler false | 除既有**行号**差（AOT 2 vs PHP 3）外逐字同 | 同左 |
+| f3 | 无 handler 无 `@` | SAME | SAME |
+| f4 | 无 handler + `@` | SAME | SAME |
+| f5 | handler + `@` | SAME | SAME |
+### 118.4 门与链
+| 判据 | 读数 |
+|---|---|
+| F2I(C062，含 `g8`=`@str_repeat` 臂) | **`same=49 diff=1 compile_fail=1`（逐字同 R-208；`g8` 保持 SAME）**，`warn_over/under=0 dep_over/under=0` |
+| SUPA(C121) / SUPB(C123) | 逐字同：`same=9 diff=1 bad_overaccept=3` / `7/7 leak=0` |
+| c249 / c254 / c262 | `flat=12 leak=0 known_leak=1` / `same=27 known_red=2`（`tpl=7e182c76…`）/ `flat=4` |
+| c264 / c265 | `19/0/1` / `7/7`（逐字同 R-208） |
+| 主回归 | **PASS=68 FAIL=0**（`SELF_CHECK_OK rows=68 uniq=68`） |
+| 影子（纯模板） | **drift=0 / 68**；`out_md5=86b5c1d0…` 与 R-208 列逐字相同（`col_identical=yes`），invalid=0，wall=866s |
+| `zig build test` | **21/21 steps、326/326 tests 通过，rc=0** |
+### 118.5 边界
+- 代次锚：`tpl 7e182c760e424393e77419f8e4daa555`（nlk 未动 `9410ae83…`）；未提交。
+- 行号归属仍是既有问题（诊断使用上一条语句的 `src_line`），本批不动。
+
+## 119. ★R-210 落地记录（F-125-c：裸 `@$var;` 语句被 DCE；IR 轮）
+### 119.1 根因（三处合围）
+1. 语句层到达的是 **`.unary_expr`**（`@` 在 `generateExpression` 里展开成 `suppress_push → 内层表达式 → suppress_pop`），不是无 payload 的 `.expression_stmt`；
+2. 优化器把 **`.global_get` 判为无副作用**（`optimizer.zig:3333`）⇒ 裸语句里未使用的读取整条被 DCE；
+3. PHP 真值的**不对称**（实测）：裸 `$var;` **不告警**（PHP 自己也 DCE），但裸 `@$var;` **会求值**并调用 `set_error_handler`（`CB|2`），只是标准流被抑制；赋值/使用形 `$x=@$var;` 两侧本就逐字相同（h4）。
+### 119.2 修法（`ir_generator.zig::generateStatement` 新增 `.unary_expr` 分支）
+`@` 语句：先生成表达式，再对结果发 **`.release`**（副作用指令，且把寄存器置空）作锚点 ⇒ DCE 因"结果被副作用指令使用"而保留内侧 `global_get`；非 `@` 一元语句维持原行为。`release` lowering 对 null/int/string 是 no-op 或常规归还，无额外语义。
+### 119.3 读数
+| 臂 | 形 | 修前 | 修后 |
+|---|---|---|---|
+| h3 | handler + `@str_getcsv; @$zz;` | 缺 `CB|2` | **逐字 SAME**（stdout+stderr） |
+| h5 | 裸 `$zz;` | 无输出 | 无输出（保持；PHP 同） |
+| h6 | `$v=1; @$v;` | — | SAME |
+| s4 | `$x=@$zz;` | SAME | SAME |
+| **新门 C266（12 臂）** | s1–s4／h1–h3／f1–f5 的**字节级**对比（仅归一 `on line N`） | — | **same=12 diff=0 cf=0**；`/bin/false` 自证 12 臂全 CF |
+### 119.4 门与链
+| 判据 | 读数 |
+|---|---|
+| SUPA(C121) / SUPB(C123) | 逐字同：`same=9 diff=1 bad_overaccept=3` / `7/7 leak=0` |
+| c249 / c254 / c262 | `flat=12 leak=0 known_leak=1` / `same=27 known_red=2` / `flat=4` |
+| c264 / c265 | `19/0/1` / `7/7` |
+| F2I(C062) | `same=49 diff=1 compile_fail=1`（`g8` SAME、`warn_*/dep_*` 全 0） |
+| 语料暴露面 | 裸 `@` 语句 **0 处**（`^[[:space:]]*@…;$` 普查）⇒ 生成码应不变 |
+| 主回归 | **PASS=68 FAIL=0**（`SELF_CHECK_OK rows=68 uniq=68`） |
+| 影子（IR 改动） | **drift=0 / 68**；`out_md5=86b5c1d0…` 与 R-209 列逐字相同（`col_identical=yes`），invalid=0，wall=865s |
+| `zig build test` | **21/21 steps、326/326 tests 通过，rc=0** |
+### 119.5 边界
+- 代次锚：`tpl 7e182c76…`（本轮未动）／`irg f260626e8ef50e9c249e70d488ef6c58`；未提交。
+- 本修只覆盖"`@` 一元表达式作为语句"；裸**非 `@`** 的纯读仍被 DCE（与 PHP 一致）。
+
+## 120. ★R-211 落地记录（F-131-e：诊断行号被用户 handler 改写；纯模板轮）
+### 120.1 根因（先否证"发射侧没设行号"）
+生成码在 `php_str_repeat` 前**确实**发了 `setSourceLocation(..., 3)`；但 handler 是生成的闭包，执行时会把全局 `src_file/src_line` 推进到**闭包体内**的最后一条语句（line 2）；诊断的标准打印发生在 `dispatchToUserHandler` **之后**，于是用了被改写的全局 ⇒ stderr/stdout 的 `in … on line N` 指到 handler 内（实测 f2：PHP 3 vs AOT 2；h2 两条都如此）。
+### 120.2 修法（7 处 dispatch 站点统一快照/恢复）
+新增 `DiagLoc`/`diagLoc()`/`restoreDiagLoc()`；在 `emitWarning`／`emitDeprecated`／`emitNotice`／`php_trigger_error`／`emitDeprecatedStrGetcsvEscape`／`emitUndefinedVariableWarning`／`emitDeprecatedFloatToInt` 中：dispatch 前 `const loc = diagLoc()`，dispatch 后（返回 true 已 return 的分支除外）`restoreDiagLoc(loc)`，再做标准打印/抑制判断。
+### 120.3 读数
+| 判据 | 读数 |
+|---|---|
+| h2（handler=false：两条诊断 + 两站点） | **行号逐字对齐**（3/4）；stdout 逐字 SAME；stderr 仅剩 handler `echo` 的跨管位置差（内容一致） |
+| f2（float→int + handler=false） | **stdout/stderr 原始字节 SAME（未归一化）** |
+| h3（handler + `@`） | **原始字节 SAME** |
+| **C266（12 臂）** | ★**去掉 `on line N` 归一化后仍 12/12 SAME**（严格字节门）；stderr 侧仅剔除 `CB\|` 行（handler 的 stdout 经管道捕获的已知串流） |
+### 120.4 门与链
+| 判据 | 读数 |
+|---|---|
+| SUPA / SUPB | `same=9 diff=1 bad_overaccept=3` / `7/7 leak=0`（同基线） |
+| c249 / c254 / c262 | `flat=12 leak=0 known_leak=1` / `same=27 known_red=2`（`tpl=4b6a35ba…`）/ `flat=4` |
+| c264 / c265 / F2I | `mktime 19/0/1` / `arity 7/7` / F2I `same=49 diff=1 compile_fail=1`（`warn_*/dep_*` 全 0）—— 全部同基线 |
+| 主回归（handler 行号面） | **PASS=68 FAIL=0**（`SELF_CHECK_OK rows=68 uniq=68`） |
+| 影子（纯模板） | **drift=0 / 68**；`out_md5=86b5c1d0…` 与 R-210 列逐字相同（`col_identical=yes`），invalid=0，wall=870s |
+| `zig build test` | **21/21 steps、326/326 tests 通过，rc=0** |
+### 120.5 边界
+- 代次锚：`tpl 4b6a35ba5b53abaf6eaa9df89e42ab1b`（irg/nlk 未动）；未提交。
+- 未覆盖：**跨流交错顺序**不可作为契约（两条管道捕获同一进程的双流时顺序不可比）；handler 的 `echo` 属 stdout，stderr 侧按 `CB|` 过滤。
+
+## 121. ★R-212 落地记录（F-86 闭环：isset/??/empty 属性读静默；F-86-b 新登记）
+
+### 121.1 契约（PHP 8.5.8 实测，四枚探针）
+| 形态 | PHP 真值 | R-212 前 AOT |
+|---|---|---|
+| `$c->missing` 普通读 | Warning `Undefined property` | 告警（正确，`u2`） |
+| `$c->missing ?? $c->alsoMissing` | LHS 静默；**RHS 默认值是普通读⇒告警** | LHS 告警 / RHS 依实现 |
+| `isset($a->missing->x)`、`$a->missing->x ?? 'd'` | **整条 LHS 链静默**（含 null 接收者） | 内层属性读告警（`chain_prop`） |
+| `isset($c->missing['k'])`、`empty($c->missing['k'])`、`$c->missing['k'] ?? 'd'` | **静默** | 属性基读告警（`arrchain_prop`） |
+| `isset($c->x)` / `empty($c->x)` / `$c->x ?? d` | 静默 | 已静默（g1/g3） |
+| `$s['k'] ?? 'e'`（string 基，非数字键） | `'e'` | `'a'`（**静默错值**，F-86-b） |
+| `$c->a['k'] ?? 'e'`（int 基） | 静默 `'e'` | 多一条 offset 告警（F-86-b） |
+
+### 121.2 两次自我否证（必须留痕）
+1. **method-2 扩面过宽**：把 `property_get` 纳入 `coalesce_rhs` 块标记，会让 `??` 的**默认值**里的属性读变成静默 ⇒ `$c->missing ?? $c->alsoMissing` 少一条 PHP 会给的告警（太安静）。已撤回，并在代码里写明边界注释（`nlk:6317`）。
+2. **第三遍无条件标记**：isset/empty 实参若是纯元素读（`isset($arr['k'])`），标记它只会给 `array_get` 套 coalesce 的 null 守卫 ⇒ 无收益的生成码形状漂移（实测 38 枚影子漂移）。收窄为“链上至少一级属性读才标记”（`markCoalesceQuietChainIfProperty`），漂移 38→37，且 `isset($arr['k'])` 形状不变。
+
+### 121.3 实现（模板 1 处 ＋ 发射器 4 处）
+- 模板 `php_object_get_coalesce`（`tpl:21723`）：非对象/未声明/不可访问/typed 未初始化一律**静默 null**；未声明仍尝试 `__get`；**返回借用引用**（与 `php_object_get` 同契约，调用点 retain）。
+- `markCoalesceQuietChain`（`nlk:162`）：沿 `property_get_origins.object_reg_id` ∪ `array_get_base` 回溯，最多 8 跳，把整条读链标入 `coalesce_nowarn_regs`。
+- 方法①（`nlk:6302`）：`identical(被检值, null)` 的被检值走该闭包 ⇒ `??`/`isset` 链。
+- 第三遍（`nlk:6329`）：`php_object_isset` / `php_array_isset` / `php_object_empty` / `php_empty` / 通用 `isset`/`empty` 的 `args[0]` 反标；**仅当链上有属性读**。
+- 发射（`nlk:24598`）：`property_get` 命中标记时用 `php_object_get_coalesce`，否则不变。
+
+### 121.4 读数（实测）
+| 臂 | 读数 |
+|---|---|
+| C266（16→**19** 臂；新增 g5 RHS 反向守卫、g6 链静默、g7 isset/empty 数组基） | 自证 `AOT_BIN=/bin/false` ⇒ 19 CF；实跑 **19/19 SAME**，81 s |
+| 探针矩阵 | `rhs_prop`/`chain_prop`/`u1`/`u2`/`u3`/`t1` 全 SAME；`arrchain_prop`/`arr_prop` 仅剩 F-86-b 两类 |
+| 邻门 9 门 | c121 `9/1+3 overaccept`（与 R-183 快照逐臂一致）、c123 `7/7`、c249 `12/0/1`、c254 `27/2`、c262 `4`、c264 `19/0/1(CF)`（与快照逐臂一致）、c265 `7/7`、c062 `49/1/1`（红恰 `b3(CF)`+`b8`）、c073 `17/2`（红恰 `p12/p13`）；**residue=0** |
+| 主回归 | **PASS=68 FAIL=0**，`SELF_CHECK_OK rows=68 uniq=68 total=68` |
+| 影子 | 基线 R-211 列 `86b5c1d0…`；R-212 列 `27c90db6…`；**changed_rows=37**（分母 68） |
+| 影子归因（硬证） | 造 R-211 等价发射器（源码回退，`nlk 94d20d80…`）逐文件生成 main.zig：**37/37 归一后逐字节相等**（归一＝把 `php_object_get_coalesce` 还原＋剔除 coalesce null 守卫脚手架）；共 **153 处名称替换 ＋ 11 处 null 守卫**，UNEXPECTED=0 |
+| `zig build test` | 21/21 steps、**326/326 tests**、rc=0 |
+| 性能抽测 | f160（13 coalesce 站点＋1 守卫）7 次中位：R-211 6.1 ms → R-212 5.9 ms（同噪声内；**不做全局性能断言**） |
+
+### 121.5 影子方法论（本轮新增）
+- 影子表先算 **new 侧整列**（`c010_shadow_col_extract`），old 侧是 2026-10-13 的前缀二进制，跨代比较**禁止**用它。
+- 漂移归因不能只靠名称回代（有守卫块时回代后 md5 不等）：正解是**造代次相符的发射器二进制**（回退本次 R-212 的 5 个 hunks、保留模板）再逐文件 diff；归一判据必须由设计决定并写明，且要求 100% 文件成立。
+- ★`fuzzy_scripts_720/tmp/c121_supa_tmp.tsv`（2026-10-22 00:13）是**无效基线**：其 AOT_BIN 被 zsh 整串吞入（`rc=127 timeout: failed to run command 'zig-out/bin/php-interpreter TSV_OUT=…'`）⇒ 全臂 COMPILE_FAIL。SUPA 的合法参照是 `c121_supa_R183_tmp.tsv` / `c121_supa_postfix_R181f107_snapshot_tmp.tsv`（两者与该轮逐臂一致）。
+
+### 121.6 登记 / 边界
+- **F-86 关闭**；**F-86-b 新立（P2）**：coalesce 语境的**元素读**两类残面——①string 基非数字键 `$s['k'] ?? d` 返回首字符（静默错值）②非数组基（int 等）多打 `Trying to access array offset on <type>`（太吵）。修法需模板 `php_array_get_coalesce`（isset 语义：ArrayAccess 走 offsetExists、string 数字键保留、非数组基 null）＋发射侧换名，属独立批。
+- 代次锚：`nlk 9fff171a4146d0a8e3da286abbb16cfe`／`tpl 867cbe687848e763e6c3a22c60d78e25`／`irg f260626e8ef50e9c249e70d488ef6c58`（未动）／`opt 745e4bd4bbb77258fbd5de58629d8684`／`parser 70e80f18a2c6ef6787b4c5d817c31773`／`ir 1fb6b01f9b0bdff318de496538e7620e`。
+- 全部**未提交**。
+
+## 122. ★R-213 落地记录（F-86-b 闭环：coalesce 语境元素读；F-86-c/F-86-d 新登记）
+
+### 122.1 契约（PHP 8.5.8 实测，`elem_truth/elem_truth2/strkey` 三探针 40+ 例）
+| 形态 | PHP 真值 | R-213 前 AOT |
+|---|---|---|
+| `$arr['k'] ?? d` 缺失 / 值为 null | 默认值（`??` 视 null 为缺失） | 同（正确） |
+| `$arr[1.7] ?? d` / `$arr[true] ?? d` | 键转 1 + Deprecated（float） | 同 |
+| `$s[-1] ?? d` | 末字符 | **默认值**（负下标未支持） |
+| `$s['k'] ?? d` | 默认值 | **首字符 `'a'`**（非数字键被 toInt 成 0） |
+| `$s['1abc'] ?? d` | `'b'` **＋ Warning `Illegal string offset "1abc"`** | `'b'`（缺告警） |
+| `$s['1.0']/'1e1'/'1.5x' ?? d` | 默认值（浮点前缀无效，**不告警**） | 部分错值 |
+| `$s[' 1']/'01'/'+1' ?? d` | `'b'`（整数前缀，无告警） | 同 |
+| `$i[0]/$f[0]/$b[0] ?? d`（非数组基） | 静默默认值 | **多打 offset 告警** |
+| `$aa['k'] ?? d`（ArrayAccess，offsetExists=false） | 默认值，**不调 offsetGet** | `val`（无条件 offsetGet） |
+| `$aa['k'] ?? d`（exists=true，offsetGet→null） | 默认值 | 同 |
+| `(new Plain)['k'] ?? d` | `Error: Cannot use object of type Plain as array` | Error（文案不同） |
+
+### 122.2 实现
+- 模板 `php_array_get_coalesce`（`tpl` 紧跟 `php_array_get`）：array=键缺失/值为 null→null；string=PHP string offset 规则；ArrayAccess=先 `offsetExists`；非 ArrayAccess 对象→PHP 同款 `Error`；其它类型→静默 null。返回所有权同 `php_array_get`。
+- 模板 `stringOffsetIndexFromValue`：整数前缀解析（前导空白/符号/尾随空白合法；`'1abc'/'0x10'/'1 2'` 用前缀值并告警；浮点前缀/溢出/无数字→无效）；负下标 `-len..-1` 有效。
+- 发射器 `nlk` array_get 的 coalesce 分支：整段 null 守卫 → 单次 `php_array_get_coalesce` 调用，并补 **`hasException()` 路由**（与 property_get 同款；否则 helper 抛出的 Error 对象会被当作值 `var_dump`）。
+- 新永久门 **C267**（14 臂）：e1 数组/缺失/null/数字键、e2 键类型+嵌套、e3 string offset 九形、e4 非数组基静默、e5 ArrayAccess 三门、e6 普通对象 Error 文案、e7 非 null 假值、e8 负/边界下标、e9 `@` 抑制、e10 handler 路由、e11 isset 反向守卫、e12 `+1/01/1e1`、e13 offsetExists 返回 1、e14 len±1。
+
+### 122.3 读数（实测）
+| 腿 | 读数 |
+|---|---|
+| C267 | 自证 `AOT_BIN=/bin/false` ⇒ **14 CF**；实跑 **14/14 SAME**，60 s |
+| C266 | **19/19 SAME** |
+| 探针 | `elem_truth` / `elem_truth2` / `strkey` 三组逐字节 SAME（`strkey2` 只剩 F-86-c/d 两类非 coalesce 面） |
+| 邻门 9 门 | c121 `9/1+3oa`（与 R-183 快照逐臂一致）／c123 `7/7`／c249 `12/0/1`／c254 `27/2`（`tpl=e4f8ffec…`）／c262 `4`／c264 `19/0/1(CF)`（逐臂一致）／c265 `7/7`／c062 `49/1/1`（`b3(CF)+b8`）／c073 `17/2`（`p12/p13`）；**residue=0** |
+| 主回归 | **PASS=68 FAIL=0**，`SELF_CHECK_OK rows=68 uniq=68` |
+| 影子 | R-212 基线列 `27c90db6…` → R-213 列 `2664fa34…`，**changed_rows=44**（分母 68） |
+| 影子归因（硬证） | 造 R-212 等价发射器（只回退本批 array_get 分支），44 文件双版本 main.zig 逐 diff：**44/44 OK**，恰 **146 处** `guard 块 → php_array_get_coalesce` 变换，UNEXPECTED=0 |
+| `zig build test` | 21/21 steps、**326/326**、rc=0 |
+
+### 122.4 影子方法论补充（本轮新增）
+- 漂移分母比 R-212 大（44 vs 37）：因为 **guard 分支是 R-211 既有机制**，R-213 换的是所有“被标记的 array_get”，不止 R-212 新增的 11 处；预测集合必须按“标记面”而非“上批新增面”推。
+- 归因脚本先把 `.old.zig/.new.zig/diff` **落盘**，再按允许族重分类——补一条 `// Cleanup on exception` 时**无需重编译**（首跑 44 个 BAD 全是这条注释）。
+- `--output` 只接受 `--output=path` 等号形；Python 归因读 `main.zig` 必须 `utf-8/surrogateescape`（生成码含非 UTF-8 字节）。
+
+### 122.5 登记 / 边界
+- **F-86-b 关闭**。
+- **F-86-c 新立（P2）**：`isset($plainObj['k'])` 的 Error 文案——PHP `Cannot use object of type Plain3 as array`，AOT `Call to undefined method Plain3::offsetExists()`（类同文案异；helper 已具备同款文案，只差 `php_array_isset` 前置判定）。
+- **F-86-d 新立（P2）**：**普通读**（非 coalesce）四形：①`$arr['k']` 缺失键 PHP 告警、AOT 静默；②`$s['1abc']` PHP 告警、AOT 静默；③`$s[-1]` PHP 末字符、AOT null；④`$s['k']` PHP 8.5 `TypeError`、AOT 返回 `'a'`（**静默错值**）。修法＝`php_array_get` 复用 `stringOffsetIndexFromValue`＋补缺失键/非法 offset 诊断，需独立真值表。
+- 代次锚：`nlk 2057bd8899fe962961c47f1010042fbb`／`tpl e4f8ffec89b246996542ce92a6738a64`／`irg f260626e…`（未动）／`opt 745e4bd4…`／`parser 70e80f18…`／`ir 1fb6b01f…`。全部**未提交**。

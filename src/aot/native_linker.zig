@@ -155,6 +155,54 @@ const PropertyGetOrigin = struct {
     property_name: []const u8,
 };
 
+/// ★F-86：把 `??`/isset/empty 语境下的读链（`$a->b->c ?? d`、`isset($a->b['k'])`）整条标记为静默。
+/// PHP 对 `??` 左操作数与 isset/empty 的实参按 BP_VAR_IS 求值 ⇒ 链上每级属性读/元素读都不告警；
+/// 只沿“被读值的基”（对象操作数 / 数组基）回溯，绝不触及 RHS 默认值里的独立读
+/// （那在 PHP 是普通读，会告警）。
+fn markCoalesceQuietChain(
+    coalesce_nowarn_regs: *std.AutoHashMap(usize, void),
+    property_get_origins: *const std.AutoHashMap(usize, PropertyGetOrigin),
+    array_get_base: *const std.AutoHashMap(usize, usize),
+    start_reg_id: usize,
+) !void {
+    var chain_id = start_reg_id;
+    var depth: usize = 0;
+    while (depth < 8) : (depth += 1) {
+        if (property_get_origins.get(chain_id)) |origin| {
+            try coalesce_nowarn_regs.put(chain_id, {});
+            chain_id = origin.object_reg_id;
+        } else if (array_get_base.get(chain_id)) |base_id| {
+            try coalesce_nowarn_regs.put(chain_id, {});
+            chain_id = base_id;
+        } else break;
+    }
+}
+
+/// 仅当链上至少有一级**属性读**时才整条标记。
+/// isset/empty 的纯元素读（`isset($arr['k'])`）本来就由 php_array_isset/php_empty 静默，
+/// 标记它只会给 array_get 套上 coalesce 的 null 守卫 ⇒ 无收益的生成码形状漂移。
+fn markCoalesceQuietChainIfProperty(
+    coalesce_nowarn_regs: *std.AutoHashMap(usize, void),
+    property_get_origins: *const std.AutoHashMap(usize, PropertyGetOrigin),
+    array_get_base: *const std.AutoHashMap(usize, usize),
+    start_reg_id: usize,
+) !void {
+    var probe_id = start_reg_id;
+    var has_property = false;
+    var depth: usize = 0;
+    while (depth < 8) : (depth += 1) {
+        if (property_get_origins.get(probe_id)) |origin| {
+            has_property = true;
+            probe_id = origin.object_reg_id;
+        } else if (array_get_base.get(probe_id)) |base_id| {
+            probe_id = base_id;
+        } else break;
+    }
+    if (has_property) {
+        try markCoalesceQuietChain(coalesce_nowarn_regs, property_get_origins, array_get_base, start_reg_id);
+    }
+}
+
 /// 原生链接器
 /// 与运行期 `isScopeQualifiedClassName`（runtime_lib_template.zig）同一口径：
 /// self / parent / static 是作用域常量，类内经它们调用非静态方法合法。
@@ -4161,7 +4209,7 @@ pub const NativeLinker = struct {
         .{ "define", bi(.{ .runtime_name = "php_define", .needs_allocator = true }) },
         .{ "defined", bi(.{ .runtime_name = "php_defined", .needs_allocator = false }) },
         .{ "constant", bi(.{ .runtime_name = "php_constant_get", .needs_allocator = true }) },
-        .{ "get_defined_constants", bi(.{ .runtime_name = "php_get_defined_constants", .needs_allocator = true }) },
+        .{ "get_defined_constants", bi(.{ .runtime_name = "php_get_defined_constants", .needs_allocator = true, .handler_params = 1, .optional_defaults = &.{"runtime.Value.initNull()"} }) },
 
         .{ "class_exists", bi(.{ .runtime_name = "php_class_exists", .needs_allocator = true, .handler_params = 2, .optional_defaults = &.{"runtime.Value.initBool(true)"} }) },
         .{ "enum_exists", bi(.{ .runtime_name = "php_enum_exists", .needs_allocator = true, .handler_params = 2, .optional_defaults = &.{"runtime.Value.initBool(true)"} }) },
@@ -4274,8 +4322,8 @@ pub const NativeLinker = struct {
         .{ "lcfirst", bi(.{ .runtime_name = "php_lcfirst", .needs_allocator = true }) },
         .{ "ucwords", bi(.{ .runtime_name = "php_ucwords", .needs_allocator = true }) },
         .{ "explode", bi(.{ .runtime_name = "php_explode", .needs_allocator = true }) },
-        .{ "implode", bi(.{ .runtime_name = "php_implode", .needs_allocator = true }) },
-        .{ "join", bi(.{ .runtime_name = "php_implode", .needs_allocator = true }) },
+        .{ "implode", bi(.{ .runtime_name = "php_implode", .needs_allocator = true, .handler_params = 2, .optional_defaults = &.{"runtime.Value.initNull()"} }) },
+        .{ "join", bi(.{ .runtime_name = "php_implode", .needs_allocator = true, .handler_params = 2, .optional_defaults = &.{"runtime.Value.initNull()"} }) },
         .{ "str_getcsv", bi(.{ .runtime_name = "php_str_getcsv", .needs_allocator = true }) },
         .{ "str_split", bi(.{ .runtime_name = "php_str_split", .needs_allocator = true }) },
         .{ "mb_str_split", bi(.{ .runtime_name = "php_str_split", .needs_allocator = true }) },
@@ -4346,7 +4394,7 @@ pub const NativeLinker = struct {
         .{ "array_replace", bi(.{ .runtime_name = "php_array_replace", .needs_allocator = true }) },
         .{ "array_map", bi(.{ .runtime_name = "php_array_map", .needs_allocator = true }) },
         .{ "array_filter", bi(.{ .runtime_name = "php_array_filter", .needs_allocator = true }) },
-        .{ "array_reduce", bi(.{ .runtime_name = "php_array_reduce", .needs_allocator = true }) },
+        .{ "array_reduce", bi(.{ .runtime_name = "php_array_reduce", .needs_allocator = true, .handler_params = 3, .optional_defaults = &.{"runtime.Value.initNull()"} }) },
         .{ "array_find", bi(.{ .runtime_name = "php_array_find", .needs_allocator = true }) },
         .{ "array_find_key", bi(.{ .runtime_name = "php_array_find_key", .needs_allocator = true }) },
         .{ "array_chunk", bi(.{ .runtime_name = "php_array_chunk", .needs_allocator = true }) },
@@ -4470,7 +4518,7 @@ pub const NativeLinker = struct {
         .{ "time", bi(.{ .runtime_name = "php_time", .needs_allocator = false, .may_raise = false }) },
         .{ "getdate", bi(.{ .runtime_name = "php_getdate", .needs_allocator = true }) },
         .{ "idate", bi(.{ .runtime_name = "php_idate", .needs_allocator = true }) },
-        .{ "mktime", bi(.{ .runtime_name = "php_mktime", .needs_allocator = false, .may_raise = false }) },
+        .{ "mktime", bi(.{ .runtime_name = "php_mktime", .needs_allocator = false, .may_raise = false, .handler_params = 6, .optional_defaults = &.{ "runtime.Value.initNull()", "runtime.Value.initNull()", "runtime.Value.initNull()", "runtime.Value.initNull()", "runtime.Value.initNull()" } }) },
         .{ "checkdate", bi(.{ .runtime_name = "php_checkdate", .needs_allocator = false, .may_raise = false }) },
         .{ "gmdate", bi(.{ .runtime_name = "php_gmdate", .needs_allocator = true }) },
         .{ "microtime", bi(.{ .runtime_name = "php_microtime", .needs_allocator = true }) },
@@ -4658,7 +4706,7 @@ pub const NativeLinker = struct {
         // HTTP 头（CLI 模式）
         .{ "headers_list", bi(.{ .runtime_name = "php_headers_list", .needs_allocator = true }) },
         .{ "header", bi(.{ .runtime_name = "php_header", .needs_allocator = false }) },
-        .{ "http_response_code", bi(.{ .runtime_name = "php_http_response_code", .needs_allocator = false }) },
+        .{ "http_response_code", bi(.{ .runtime_name = "php_http_response_code", .needs_allocator = false, .handler_params = 1, .optional_defaults = &.{"runtime.Value.initNull()"} }) },
 
         .{ "php_concat", bi(.{ .runtime_name = "php_concat", .needs_allocator = true }) },
         .{ "php_array_iter_init", bi(.{ .runtime_name = "php_array_iter_init", .needs_allocator = true }) },
@@ -5158,7 +5206,14 @@ pub const NativeLinker = struct {
                         // 覆盖 call/method_call/property_get/clone/cast/box/array_get/interpolate 等产生堆值的指令
                         // 安全保证：generateCleanupCodeExcept 有 ref_ptr/this/ref_param_alloca 跳过 + regMayHeap 检查
                         // release 对 null/基本类型值（int/float/bool 包装在 Value 中）是 no-op
-                        if (corrected_type == .php_value or corrected_type == .php_object) {
+                        // ★F-139b：cleanup 收全部**堆类型**结果，不只 php_value/php_object。
+                        //   array_new（php_array）、const/concat（php_string）、closure（php_callable）
+                        //   等临时量此前从未进入 cleanup ⇒ 作调用实参时每次调用漏一份
+                        //   （`array_map(null, array(...))` ≈304 B/iter）。release 对静态串/null 是 no-op。
+                        if (corrected_type == .php_value or corrected_type == .php_object or
+                            corrected_type == .php_array or corrected_type == .php_string or
+                            corrected_type == .php_callable or corrected_type == .php_resource)
+                        {
                             try cleanup_registers_set.put(reg.id, {});
                         }
                     } else {
@@ -6268,23 +6323,24 @@ pub const NativeLinker = struct {
                         if (global_get_reg_set.contains(cid)) {
                             try coalesce_nowarn_regs.put(cid, {});
                         }
-                        // 通过 array_get 间接连接的 global_get
+                        // ★F-86：`$obj->prop ?? 默认` / `isset($obj->prop)` —— 被检值整条读链静默
+                        try markCoalesceQuietChain(&coalesce_nowarn_regs, &property_get_origins, &array_get_base, cid);
                         var trace_id = cid;
                         var depth: usize = 0;
                         while (depth < 5) : (depth += 1) {
                             if (array_get_base.get(trace_id)) |base_id| {
-                                try coalesce_nowarn_regs.put(trace_id, {});
-                                if (global_get_reg_set.contains(base_id)) {
-                                    try coalesce_nowarn_regs.put(base_id, {});
-                                    break;
-                                }
                                 trace_id = base_id;
                             } else break;
+                        }
+                        if (global_get_reg_set.contains(trace_id)) {
+                            try coalesce_nowarn_regs.put(trace_id, {});
                         }
                     }
                 }
             }
             // 方法2：coalesce_rhs 块中的 global_get 和 array_get 也需要 NoWarn
+            // ★F-86 边界：**不得**把 property_get 纳入 —— coalesce_rhs 是 `??` 的默认值表达式，
+            //   其中对属性的读是普通读（PHP 实测会告警），只有左侧被检值的读才静默。
             if (std.mem.startsWith(u8, blk_scan.label, "coalesce_rhs")) {
                 for (blk_scan.instructions.items) |inst_scan| {
                     if (inst_scan.op == .global_get or inst_scan.op == .array_get) {
@@ -6293,6 +6349,24 @@ pub const NativeLinker = struct {
                         }
                     }
                 }
+            }
+        }
+        // 第三遍：isset()/empty() 的实参按 BP_VAR_IS 求值 ⇒ 实参读链上的属性/元素读同样静默。
+        // 这三族 lowering 绕开 `identical`（`php_object_isset` / `php_array_isset` /
+        // `php_object_empty` / `php_empty`），只能从调用点反标。
+        for (func.blocks.items) |blk_isset| {
+            for (blk_isset.instructions.items) |inst_isset| {
+                if (inst_isset.op != .call) continue;
+                const quiet_call = std.mem.eql(u8, inst_isset.op.call.func_name, "php_object_isset") or
+                    std.mem.eql(u8, inst_isset.op.call.func_name, "php_array_isset") or
+                    std.mem.eql(u8, inst_isset.op.call.func_name, "php_object_empty") or
+                    std.mem.eql(u8, inst_isset.op.call.func_name, "php_empty") or
+                    // 通用分支：内置名在 IR 里仍是 "isset"/"empty"（发射期才映射成 php_*）
+                    std.mem.eql(u8, inst_isset.op.call.func_name, "isset") or
+                    std.mem.eql(u8, inst_isset.op.call.func_name, "empty");
+                if (!quiet_call) continue;
+                if (inst_isset.op.call.args.len == 0) continue;
+                try markCoalesceQuietChainIfProperty(&coalesce_nowarn_regs, &property_get_origins, &array_get_base, inst_isset.op.call.args[0].id);
             }
         }
         self.current_global_get_names = &global_get_names;
@@ -19327,7 +19401,10 @@ pub const NativeLinker = struct {
         try self.writeValueArgs(writer, args);
         const info = builtinInfo(func_name) orelse return;
         const total: usize = info.handler_params;
-        if (total == 0 or args.len == 0 or args.len >= total) return;
+        // ★R-207：旧条件带 `args.len == 0 ⇒ return`，把"全可选形参"的 0 实参调用（http_response_code()/
+        //   get_defined_constants()）永远挡在补齐之外。必填参是否给齐由下方 `args.len < opt_from` 判定，
+        //   0 实参只在 opt_from==0（全可选）时才合法补默认——不替用户臆造必填实参。
+        if (total == 0 or args.len >= total) return;
         const opt_from: usize = total - @min(total, info.optional_defaults.len);
         if (args.len < opt_from) return;
         var i: usize = args.len;
@@ -19335,7 +19412,8 @@ pub const NativeLinker = struct {
             // ★循环只在 `i ≥ args.len ≥ opt_from` 时进入 ⇒ 补齐位必有对应缺省文本；
             //   原先这里还带一个「越界则补 initNull()」的兜底分支，既不可达又读起来像"缺省会补 null"
             //   （补 null 会改变行为，正是 R-172 踩过的形态）⇒ 工单 §53.4/#89 删除。
-            try writer.writeAll(", ");
+            // ★R-207：0 实参全可选时第一个缺省前不能打逗号（否则 `f(, null)`）。
+            if (i > 0 or args.len > 0) try writer.writeAll(", ");
             try writer.writeAll(info.optional_defaults[i - opt_from]);
         }
     }
@@ -23482,7 +23560,17 @@ pub const NativeLinker = struct {
                                         }
                                     }
                                 } else {
-                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(runtime.runtime_allocator);\n", .{runtime_name});
+                                    // ★R-207：0 实参的分配器型内置也要走声明式补齐（get_defined_constants()）。
+                                    //   仅当 handler_params 已声明且**全部形参可选**时才补；否则维持原样。
+                                    const info0 = builtinInfo(op.func_name);
+                                    const pads_all = if (info0) |inf| inf.handler_params > 0 and inf.optional_defaults.len >= inf.handler_params else false;
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                    if (pads_all) {
+                                        try self.writeBuiltinArgs(writer, op.args, op.func_name);
+                                        try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    } else {
+                                        try writer.writeAll("runtime.runtime_allocator);\n");
+                                    }
                                 }
                             } else {
                                 // 特殊处理可选参数函数
@@ -24009,7 +24097,16 @@ pub const NativeLinker = struct {
                                     try self.writeBuiltinArgs(writer, op.args, op.func_name);
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
                                 } else {
-                                    try writer.print("    _ = try runtime.{s}(runtime.runtime_allocator);\n", .{runtime_name});
+                                    // ★R-207：语句形 0 实参同上。
+                                    const info0 = builtinInfo(op.func_name);
+                                    const pads_all = if (info0) |inf| inf.handler_params > 0 and inf.optional_defaults.len >= inf.handler_params else false;
+                                    if (pads_all) {
+                                        try writer.print("    _ = try runtime.{s}(", .{runtime_name});
+                                        try self.writeBuiltinArgs(writer, op.args, op.func_name);
+                                        try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    } else {
+                                        try writer.print("    _ = try runtime.{s}(runtime.runtime_allocator);\n", .{runtime_name});
+                                    }
                                 }
                             } else {
                                 // 特殊处理php_ref_assign_ptr：第一个参数需要指针
@@ -24154,7 +24251,8 @@ pub const NativeLinker = struct {
                     if (self.shouldReleaseReg(reg.id)) {
                         try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
                     }
-                    // coalesce 上下文: 基值为 null 时直接返回 null，不触发警告
+                    // coalesce 上下文: 元素读按 BP_VAR_IS 语义（缺失/越界/非数组基静默 null、
+                    // string offset 走 PHP 前缀规则、ArrayAccess 先 offsetExists）——F-86-b
                     const is_coalesce_ag = if (self.current_coalesce_nowarn_regs) |cr| cr.contains(reg.id) else false;
 
                     // 检查操作数是否是alloca
@@ -24162,16 +24260,9 @@ pub const NativeLinker = struct {
                     const key_is_alloca = if (self.current_alloca_regs) |allocas| allocas.contains(op.key.id) else false;
 
                     if (is_coalesce_ag) {
-                        if (array_is_alloca) {
-                            try writer.print("    if (reg_{d}.*.isNull()) {{\n", .{op.array.id});
-                        } else {
-                            try writer.print("    if (reg_{d}.isNull()) {{\n", .{op.array.id});
-                        }
-                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initNull();\n", .{});
-                        try writer.print("    }} else {{\n", .{});
                         try writer.writeAll("    ");
                         try self.writeRegAssignmentPrefix(writer, reg.id);
-                        try writer.writeAll("try runtime.php_array_get(");
+                        try writer.writeAll("try runtime.php_array_get_coalesce(");
                         if (array_is_alloca) {
                             try writer.print("reg_{d}.*", .{op.array.id});
                         } else {
@@ -24184,7 +24275,17 @@ pub const NativeLinker = struct {
                             try writer.print("reg_{d}", .{op.key.id});
                         }
                         try writer.writeAll(", runtime.runtime_allocator);\n");
-                        try writer.print("    }}\n", .{});
+                        // 普通对象作数组用 ⇒ helper 抛 Error（PHP 同款）；offsetGet 也可能抛
+                        try writer.writeAll("    if (runtime.hasException()) {\n");
+                        try writer.writeAll("        @branchHint(.unlikely);\n");
+                        try self.generateCleanupCode(writer);
+                        if (self.current_exception_handler) |handler_idx| {
+                            try writer.print("        current_block = {d};\n", .{handler_idx});
+                            try writer.writeAll("        continue;\n");
+                        } else {
+                            try writer.writeAll("        return error.RuntimeError;\n");
+                        }
+                        try writer.writeAll("    }\n");
                     } else {
                         try writer.writeAll("    ");
                         try self.writeRegAssignmentPrefix(writer, reg.id);
@@ -24202,6 +24303,19 @@ pub const NativeLinker = struct {
                             try writer.print("reg_{d}", .{op.key.id});
                         }
                         try writer.writeAll(", runtime.runtime_allocator);\n");
+                        // ★F-86-d：普通对象作数组用 ⇒ Error；非法 string offset ⇒ TypeError；offsetGet 也可能抛
+                        if (!op.get_ref) {
+                            try writer.writeAll("    if (runtime.hasException()) {\n");
+                            try writer.writeAll("        @branchHint(.unlikely);\n");
+                            try self.generateCleanupCode(writer);
+                            if (self.current_exception_handler) |handler_idx| {
+                                try writer.print("        current_block = {d};\n", .{handler_idx});
+                                try writer.writeAll("        continue;\n");
+                            } else {
+                                try writer.writeAll("        return error.RuntimeError;\n");
+                            }
+                            try writer.writeAll("    }\n");
+                        }
                     }
                 }
             },
@@ -24521,13 +24635,18 @@ pub const NativeLinker = struct {
                     defer self.allocator.free(escaped_prop);
                     const result_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(reg.id) else false;
                     const object_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.object.id) else false;
+                    // ★F-86：`??` 语境（被标记）走静默变体；普通读维持 php_object_get
+                    const get_fn = if (self.current_coalesce_nowarn_regs) |m|
+                        (if (m.contains(reg.id)) "php_object_get_coalesce" else "php_object_get")
+                    else
+                        "php_object_get";
 
                     if (result_is_alloca) {
                         try writer.print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg.id});
                         if (object_is_alloca) {
-                            try writer.print("    reg_{d}.* = try runtime.php_object_get(reg_{d}.*, \"{s}\");\n", .{ reg.id, op.object.id, escaped_prop });
+                            try writer.print("    reg_{d}.* = try runtime.{s}(reg_{d}.*, \"{s}\");\n", .{ reg.id, get_fn, op.object.id, escaped_prop });
                         } else {
-                            try writer.print("    reg_{d}.* = try runtime.php_object_get(reg_{d}, \"{s}\");\n", .{ reg.id, op.object.id, escaped_prop });
+                            try writer.print("    reg_{d}.* = try runtime.{s}(reg_{d}, \"{s}\");\n", .{ reg.id, get_fn, op.object.id, escaped_prop });
                         }
                         // 必须 retain：php_object_get 返回借用引用，不 retain 会导致
                         // 后续 release 释放对象属性持有的值，造成悬垂指针
@@ -24537,9 +24656,9 @@ pub const NativeLinker = struct {
                     } else {
                         try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
                         if (object_is_alloca) {
-                            try writer.print("    reg_{d} = try runtime.php_object_get(reg_{d}.*, \"{s}\");\n", .{ reg.id, op.object.id, escaped_prop });
+                            try writer.print("    reg_{d} = try runtime.{s}(reg_{d}.*, \"{s}\");\n", .{ reg.id, get_fn, op.object.id, escaped_prop });
                         } else {
-                            try writer.print("    reg_{d} = try runtime.php_object_get(reg_{d}, \"{s}\");\n", .{ reg.id, op.object.id, escaped_prop });
+                            try writer.print("    reg_{d} = try runtime.{s}(reg_{d}, \"{s}\");\n", .{ reg.id, get_fn, op.object.id, escaped_prop });
                         }
                         if (self.regMayHeap(reg.id)) {
                             try writer.print("    _ = reg_{d}.retain();\n", .{reg.id});
