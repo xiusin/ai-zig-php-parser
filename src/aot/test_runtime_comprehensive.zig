@@ -449,8 +449,12 @@ test "类型检查 - is_numeric" {
 // 测试类型转换
 test "类型转换 - intval" {
     const float_val = Value.initFloat(3.7);
-    const result = try runtime.php_intval(float_val);
+    const result = try runtime.php_intval(float_val, Value.initInt(10));
     try testing.expectEqual(@as(i64, 3), result.asInt());
+    const base_val = Value.initString(try PHPString.init(testing.allocator, "101"));
+    defer base_val.asString().release(testing.allocator);
+    const result2 = try runtime.php_intval(base_val, Value.initInt(2));
+    try testing.expectEqual(@as(i64, 5), result2.asInt());
 }
 
 test "类型转换 - floatval" {

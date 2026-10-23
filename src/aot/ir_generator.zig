@@ -6786,7 +6786,7 @@ pub const IRGenerator = struct {
             .array_access => {
                 const access = node.data.array_access;
                 if (access.index) |key_idx| {
-                    const array_reg = try self.generateExpression(access.target);
+                    const array_reg = try self.generateQuietBaseExpr(access.target);
                     const key_reg = try self.generateExpression(key_idx);
                     const call_args = try self.allocator.alloc(Register, 2);
                     call_args[0] = array_reg;
@@ -6800,7 +6800,7 @@ pub const IRGenerator = struct {
             },
             .property_access => {
                 const pa = node.data.property_access;
-                const object_reg = try self.generateExpression(pa.target);
+                const object_reg = try self.generateQuietBaseExpr(pa.target);
                 const prop_reg = try self.emitPropertyNameValue(self.getString(pa.property_name));
                 const call_args = try self.allocator.alloc(Register, 2);
                 call_args[0] = object_reg;
@@ -6816,6 +6816,19 @@ pub const IRGenerator = struct {
         }
         // 调用点已按四种左值 tag 预筛，此支不可达；保留通用求值以免未来扩形时崩溃。
         return try self.generateExpression(arg_idx);
+    }
+
+    /// isset/empty 链的基座读取（F-151）：未声明变量的基座必须静默（PHP 对 `$undef->p`/`$undef['k']` 零诊断）。
+    /// 仅收敛到变量基座；更深的缺失键/属性链仍属 F-151-b。
+    fn generateQuietBaseExpr(self: *Self, node_idx: Node.Index) !Register {
+        const node = self.getNode(node_idx) orelse return self.generateExpression(node_idx);
+        if (node.tag == .variable) {
+            const var_name = self.getString(node.data.variable.name);
+            if (self.getVarRegister(var_name) == null) {
+                return self.emitWithResult(.{ .global_get = .{ .name = var_name, .no_warn = true } }, .php_value);
+            }
+        }
+        return self.generateExpression(node_idx);
     }
 
     fn generateTernaryExpr(self: *Self, node: *const Node) !Register {
@@ -7140,7 +7153,7 @@ pub const IRGenerator = struct {
                 const arg_idx = call_data.args[0];
                 const arg_node = self.getNode(arg_idx);
                 if (call_data.args.len == 1 and arg_node != null and arg_node.?.tag == .property_access) {
-                    const object_reg = try self.generateExpression(arg_node.?.data.property_access.target);
+                    const object_reg = try self.generateQuietBaseExpr(arg_node.?.data.property_access.target);
                     const property_name_reg = try self.emitPropertyNameValue(self.getString(arg_node.?.data.property_access.property_name));
                     const isset_args = try self.allocator.alloc(Register, 2);
                     isset_args[0] = object_reg;
@@ -7173,7 +7186,7 @@ pub const IRGenerator = struct {
                 if (call_data.args.len == 1 and arg_node != null and arg_node.?.tag == .array_access) {
                     const access = arg_node.?.data.array_access;
                     if (access.index) |key_idx| {
-                        const array_reg = try self.generateExpression(access.target);
+                        const array_reg = try self.generateQuietBaseExpr(access.target);
                         const key_reg = try self.generateExpression(key_idx);
                         const isset_args = try self.allocator.alloc(Register, 2);
                         isset_args[0] = array_reg;
@@ -7199,7 +7212,7 @@ pub const IRGenerator = struct {
                 const arg_idx = call_data.args[0];
                 const arg_node = self.getNode(arg_idx);
                 if (arg_node != null and arg_node.?.tag == .property_access) {
-                    const object_reg = try self.generateExpression(arg_node.?.data.property_access.target);
+                    const object_reg = try self.generateQuietBaseExpr(arg_node.?.data.property_access.target);
                     const property_name_reg = try self.emitPropertyNameValue(self.getString(arg_node.?.data.property_access.property_name));
                     const empty_args = try self.allocator.alloc(Register, 2);
                     empty_args[0] = object_reg;
@@ -7232,7 +7245,7 @@ pub const IRGenerator = struct {
                 if (call_data.args.len == 1 and arg_node != null and arg_node.?.tag == .array_access) {
                     const access = arg_node.?.data.array_access;
                     if (access.index) |key_idx| {
-                        const arr_reg = try self.generateExpression(access.target);
+                        const arr_reg = try self.generateQuietBaseExpr(access.target);
                         const key_reg = try self.generateExpression(key_idx);
                         const arr_args = try self.allocator.alloc(Register, 2);
                         arr_args[0] = arr_reg;

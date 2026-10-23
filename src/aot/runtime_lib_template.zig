@@ -3356,9 +3356,13 @@ pub fn php_create_closure(name: Value, captures: Value, is_static_val: Value, al
 }
 
 pub fn php_object_isset(obj_val: Value, property_name_val: Value) !Value {
-    if (!Value_isObject(obj_val)) return Value.initBool(!obj_val.isNull());
+    // ★F-153（R-243）：非对象接收者一律 false（PHP 8.5.8 实测 int/float/bool/string/array/null 全 false）；
+    //   先解引用，避免 `$r = &$obj; isset($r->p)` 被误判成非对象。
+    var resolved = obj_val;
+    while (resolved.isRef()) resolved = resolved.asRef().*;
+    if (!Value_isObject(resolved)) return Value.initBool(false);
 
-    const obj = Value_asObject(obj_val);
+    const obj = Value_asObject(resolved);
     const prop_name = if (property_name_val.isString())
         property_name_val.asString().data
     else
@@ -3376,7 +3380,7 @@ pub fn php_object_isset(obj_val: Value, property_name_val: Value) !Value {
                     const args = [_]Value{name_val};
                     const guard = ClassContext.init(meta, lookup.owner);
                     defer guard.deinit();
-                    return try lookup.method.func(obj_val, &args, runtime_allocator);
+                    return try lookup.method.func(resolved, &args, runtime_allocator);
                 }
                 return Value.initBool(false);
             }
@@ -3401,7 +3405,7 @@ pub fn php_object_isset(obj_val: Value, property_name_val: Value) !Value {
                 const args = [_]Value{name_val};
                 const guard = ClassContext.init(meta, lookup.owner);
                 defer guard.deinit();
-                return try lookup.method.func(obj_val, &args, runtime_allocator);
+                return try lookup.method.func(resolved, &args, runtime_allocator);
             }
             return Value.initBool(false);
         }
@@ -3413,9 +3417,12 @@ pub fn php_object_isset(obj_val: Value, property_name_val: Value) !Value {
 /// empty($obj->prop): 先检查 __isset，若属性不存在则视为空
 /// 若 __isset 返回 true（属性存在），再取值判断是否为空
 pub fn php_object_empty(obj_val: Value, property_name_val: Value) !Value {
-    if (!Value_isObject(obj_val)) return Value.initBool(php_empty_val(obj_val));
+    // ★F-153（R-243）：非对象接收者 empty 恒 true（PHP 8.5.8 实测 int/float/bool/string/array/null 全 true）。
+    var resolved = obj_val;
+    while (resolved.isRef()) resolved = resolved.asRef().*;
+    if (!Value_isObject(resolved)) return Value.initBool(true);
 
-    const obj = Value_asObject(obj_val);
+    const obj = Value_asObject(resolved);
     const prop_name = if (property_name_val.isString())
         property_name_val.asString().data
     else
@@ -3440,7 +3447,7 @@ pub fn php_object_empty(obj_val: Value, property_name_val: Value) !Value {
             const args = [_]Value{name_val};
             const guard = ClassContext.init(meta, lookup.owner);
             defer guard.deinit();
-            const isset_result = try lookup.method.func(obj_val, &args, runtime_allocator);
+            const isset_result = try lookup.method.func(resolved, &args, runtime_allocator);
             if (!isset_result.toBool()) {
                 // __isset 返回 false：属性不存在，empty 返回 true
                 return Value.initBool(true);
@@ -3449,7 +3456,7 @@ pub fn php_object_empty(obj_val: Value, property_name_val: Value) !Value {
             if (meta.findMethodLookup("__get")) |get_lookup| {
                 const get_guard = ClassContext.init(meta, get_lookup.owner);
                 defer get_guard.deinit();
-                const get_result = try get_lookup.method.func(obj_val, &args, runtime_allocator);
+                const get_result = try get_lookup.method.func(resolved, &args, runtime_allocator);
                 return Value.initBool(php_empty_val(get_result));
             }
         }
@@ -14808,8 +14815,9 @@ pub fn php_pi() !Value {
 }
 
 /// intval - 转换为整数
-pub fn php_intval(val: Value) !Value {
+pub fn php_intval(val: Value, base: Value) !Value {
     // 使用完整的 PHP intval 语义
+    // ★R-242：`intval($value, $base = 10)`——base 只作用于字符串，其余类型一律忽略 base。
     // ★F-77：对象 ⇒ Warning＋1（与 `(int)$o` 同口径，实测 `__toString` 不豁免）
     const probe = derefForNumberProbe(val);
     if (Value_isObject(probe)) {
@@ -14830,6 +14838,11 @@ pub fn php_intval(val: Value) !Value {
     }
     if (val.isString()) {
         const str = val.asString().data;
+
+        // 非法 base（非 0 且不在 2..36）⇒ PHP 直接给 0，不抛异常（实测 1/37/-1 全 0）
+        const base_i = base.toInt();
+        if (!(base_i == 0 or (base_i >= 2 and base_i <= 36))) return Value.initInt(0);
+
         // 内联 intval 逻辑
         if (str.len == 0) return Value.initInt(0);
 
@@ -14846,46 +14859,103 @@ pub fn php_intval(val: Value) !Value {
 
         if (s.len == 0) return Value.initInt(0);
 
-        // 如果包含小数点或科学记数法，先解析为浮点数
-        if (std.mem.indexOf(u8, s, ".") != null or
-            std.mem.indexOf(u8, s, "e") != null or
-            std.mem.indexOf(u8, s, "E") != null)
-        {
-            if (std.fmt.parseFloat(f64, if (negative) str else s)) |float_val| {
-                const max_as_float: f64 = @floatFromInt(std.math.maxInt(i64));
-                const min_as_float: f64 = @floatFromInt(std.math.minInt(i64));
-                // ★F-80 同族第二处（`intval` 的"串含小数点/科学记法 ⇒ 先 parseFloat"子路）：按符号饱和、零告警。
-                //   ★纯数字溢出路本来就是按符号饱和的，禁一并改动（工单 §64.1 已点名）。
-                if (float_val >= max_as_float or float_val < min_as_float) return Value.initInt(if (float_val < 0) std.math.minInt(i64) else std.math.maxInt(i64));
-                return Value.initInt(@intFromFloat(float_val));
-            } else |_| {}
-        }
-
-        // 手动解析整数（仅接受 0-9，不接受下划线，处理溢出）
-        var result: i64 = 0;
-        var overflow = false;
-        for (s) |c| {
-            if (c >= '0' and c <= '9') {
-                if (result > 922337203685477580) {
-                    overflow = true;
-                    break;
-                }
-                result = result * 10 + (c - '0');
-                if (result < 0) {
-                    overflow = true;
-                    break;
-                }
-            } else {
-                break;
+        // ★R-242：显式 base=10 走既有十进制／浮点串／科学记法子路（逐字保留；
+        //   注意 base=0 的十进制**不**识别指数与小数点，实测 intval("1e3",0)=1、intval("0.5",0)=0）。
+        if (base_i == 10) {
+            // 如果包含小数点或科学记数法，先解析为浮点数
+            if (std.mem.indexOf(u8, s, ".") != null or
+                std.mem.indexOf(u8, s, "e") != null or
+                std.mem.indexOf(u8, s, "E") != null)
+            {
+                if (std.fmt.parseFloat(f64, if (negative) str else s)) |float_val| {
+                    const max_as_float: f64 = @floatFromInt(std.math.maxInt(i64));
+                    const min_as_float: f64 = @floatFromInt(std.math.minInt(i64));
+                    // ★F-80 同族第二处（`intval` 的"串含小数点/科学记法 ⇒ 先 parseFloat"子路）：按符号饱和、零告警。
+                    //   ★纯数字溢出路本来就是按符号饱和的，禁一并改动（工单 §64.1 已点名）。
+                    if (float_val >= max_as_float or float_val < min_as_float) return Value.initInt(if (float_val < 0) std.math.minInt(i64) else std.math.maxInt(i64));
+                    return Value.initInt(@intFromFloat(float_val));
+                } else |_| {}
             }
+
+            // 手动解析整数（仅接受 0-9，不接受下划线，处理溢出）
+            var result: i64 = 0;
+            var overflow = false;
+            for (s) |c| {
+                if (c >= '0' and c <= '9') {
+                    if (result > 922337203685477580) {
+                        overflow = true;
+                        break;
+                    }
+                    result = result * 10 + (c - '0');
+                    if (result < 0) {
+                        overflow = true;
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            if (overflow) {
+                return Value.initInt(if (negative) -9223372036854775808 else 9223372036854775807);
+            }
+            return Value.initInt(if (negative) -result else result);
         }
 
-        if (overflow) {
-            return Value.initInt(if (negative) -9223372036854775808 else 9223372036854775807);
+        // ★R-242：base=0 与前缀识别（0x/0X ⇒ 16、0b/0B ⇒ 2、其余前导 0 ⇒ 8；PHP 不认 0o）。
+        //   显式 base=16/2 同样剥掉对应前缀（实测 intval("0b11",2)=3、intval("0x1A",16)=26）。
+        var eff_base: u64 = if (base_i == 0) 10 else @intCast(base_i);
+        var digits = s;
+        if (base_i == 0) {
+            if (digits.len >= 2 and digits[0] == '0' and (digits[1] == 'x' or digits[1] == 'X')) {
+                eff_base = 16;
+                digits = digits[2..];
+            } else if (digits.len >= 2 and digits[0] == '0' and (digits[1] == 'b' or digits[1] == 'B')) {
+                eff_base = 2;
+                digits = digits[2..];
+            } else if (digits.len >= 2 and digits[0] == '0') {
+                eff_base = 8;
+            }
+        } else if (base_i == 16 and digits.len >= 2 and digits[0] == '0' and (digits[1] == 'x' or digits[1] == 'X')) {
+            digits = digits[2..];
+        } else if (base_i == 2 and digits.len >= 2 and digits[0] == '0' and (digits[1] == 'b' or digits[1] == 'B')) {
+            digits = digits[2..];
         }
-        return Value.initInt(if (negative) -result else result);
+        return intvalParseDigits(digits, eff_base, negative);
     }
     return Value.initInt(0);
+}
+
+/// `intval` 的 2..36 进制 digit 值；非法字符返回 null 交调用方截断。
+fn intvalDigitValue(c: u8) ?u64 {
+    if (c >= '0' and c <= '9') return c - '0';
+    if (c >= 'a' and c <= 'z') return 10 + (c - 'a');
+    if (c >= 'A' and c <= 'Z') return 10 + (c - 'A');
+    return null;
+}
+
+/// 非十进制 digit 解析：遇非法 digit 停止；无任何 digit ⇒ 0；溢出按符号饱和（实测）。
+fn intvalParseDigits(digits: []const u8, base: u64, negative: bool) Value {
+    const limit: u64 = if (negative) (@as(u64, 1) << 63) else @as(u64, std.math.maxInt(i64));
+    var mag: u64 = 0;
+    var any = false;
+    for (digits) |c| {
+        const d = intvalDigitValue(c) orelse break;
+        if (d >= base) break;
+        any = true;
+        if (mag > (limit - d) / base) {
+            mag = limit;
+            break;
+        }
+        mag = mag * base + d;
+    }
+    if (!any) return Value.initInt(0);
+    if (negative) {
+        if (mag >= (@as(u64, 1) << 63)) return Value.initInt(std.math.minInt(i64));
+        return Value.initInt(-@as(i64, @intCast(mag)));
+    }
+    if (mag > @as(u64, @intCast(std.math.maxInt(i64)))) return Value.initInt(std.math.maxInt(i64));
+    return Value.initInt(@intCast(mag));
 }
 
 /// floatval - 转换为浮点数

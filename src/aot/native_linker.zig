@@ -4585,7 +4585,7 @@ pub const NativeLinker = struct {
         .{ "empty", .{ .runtime_name = "php_empty", .needs_allocator = false } },
         .{ "unset", .{ .runtime_name = "php_unset", .needs_allocator = true, .may_raise = false } },
 
-        .{ "intval", .{ .runtime_name = "php_intval", .needs_allocator = false } },
+        .{ "intval", .{ .runtime_name = "php_intval", .needs_allocator = false, .handler_params = 2, .optional_defaults = &.{"runtime.Value.initInt(10)"} } },
         .{ "floatval", .{ .runtime_name = "php_floatval", .needs_allocator = false } },
         .{ "strval", .{ .runtime_name = "php_strval", .needs_allocator = true } },
         .{ "boolval", .{ .runtime_name = "php_boolval", .needs_allocator = false } },

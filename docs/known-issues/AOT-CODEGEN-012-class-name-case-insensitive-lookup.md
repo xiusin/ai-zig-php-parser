@@ -8802,8 +8802,116 @@ R-214 曾把“归因里出现 setSourceLocation/PHI/调用行等非局部增删
 | C287（新门 7 臂：合法域／正越界／负越界／`@`／连续两次／类型守卫／handler 路由） | 自证 **7 CF**；实跑 **7/7 SAME** 30 s（stdout＋stderr＋rc 三流逐字节，行首空白折叠、文件/行号归一） |
 | 主回归 | **PASS=68 FAIL=0**、`SELF_CHECK_OK rows=68 uniq=68`（`c291_regression_R240_tmp.log`） |
 | `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/zigtest_R240.log`） |
-| 代次锚 | `tpl 2286fe876d38501baa87516a1b1c56bb`（R-239 为 `8535900f…`，仅此一枚变化）／`nlk d58543cd…`／`irg 3d04a693…`／`ir 5b99795…`／`parser 70e80f18…`／`opt 745e4bd4…`（全部未提交） |
+| 代次锚 | `tpl 2286fe876d38501baa87516a1b1c56bb`（R-239 为 `8535900f…`，仅此一枚变化）／`nlk d58543cd…`／`irg 3d04a693…`／`ir 5b99795…`／`parser 70e80f18…`／`opt 745e4bd4…`（源与本文档已随 `e56f569` 提交） |
 
 ### 147.4 边界
 - 值域判断用 `i64` 比较，无溢出面；`chr(PHP_INT_MIN)` 仍落 `%256` 路径（PHP 同形）。
 - 文案中的 `% 256` 为字面文本（非格式化占位），不得走 `std.fmt`。
+
+## 148. ★R-241 落地记录（F-142-c 闭环：多实参 `isset` 静默求值＋左到右短路；F-151 新立）
+
+### 148.1 实测契约（PHP 8.5.8，C279 11 臂）
+| 形 | PHP |
+|---|---|
+| `isset($a,$a)` / `isset($a,$b=null)` | true / false；**全参静默**（未定义变量/缺失键/缺失静态属性均零诊断） |
+| `isset($arr["k"], $arr["z"])` | 逐键判值，null 键 ⇒ false |
+| `isset($o->p, $o->n)` / `isset($o->p, $o->x)` | 属性判值；未声明属性静默 false |
+| `isset(G::$q, G::$nope)`（含 `$c::$q` 动态类名） | 判值；缺失静态属性静默 false（不再 fatal） |
+| `isset($a[0], $b[0])`（ArrayAccess） | **只调第一个 `offsetExists`** ⇒ `EX1 bool(false)`（短路） |
+| 长链 `isset($n,$a,$b)` / `($a,$n,$b)` / `($a,$b,$n)` | 首个 false 即止，右侧不产生副作用 |
+| `$r = isset(...)` / `if (isset(...))` | 值恒为 bool，可用于赋值与条件 |
+
+### 148.2 实现（`ir_generator.zig`，单点接管）
+- `isset` 分支新增多实参分流（`args.len > 1`）：先按四种左值 tag 预筛（`.variable`／`.array_access`(须有 key)／`.property_access`／`.static_property_access`），全符合才接管；其余形维持通用路径。
+- `emitQuietIssetArg`：逐参复用既有静默单点——
+  - 局部变量：`load` → `php_is_null` → `eq(false)`（值必须转 bool，否则末参值会漏进 phi）；
+  - 未声明/全局变量：`php_isset_var`（`getGlobalVarNoWarn`）；
+  - 数组元素：`php_array_isset`；对象属性：`php_object_isset`；静态属性：`php_isset_static_property`。
+- `generateMultiArgIsset`：**左结合** `&&` 链，每步建 `logical_rhs_`／`logical_merge_` 块＋`phi(false@lhs_end, next@rhs_end)`，与 `generateShortCircuitLogical` 同形。
+  - ★R-230 失败根因：当时自建 `isset_multi_ok_*` 块名，AST-direct 标签发射器不认识 ⇒ `[AST-DIRECT-FAIL] unprocessed blocks`；本轮复用 `logical_*` 前缀后 3+ 实参与赋值/if 上下文全部通过。
+
+### 148.3 读数
+| 腿 | 读数 |
+|---|---|
+| C279（11 臂） | 自证 **11 CF**；实跑 **11/11 SAME** 48 s（R-230 基线为 4 SAME / 7 DIFF） |
+| 邻居 | C276 **12/12**、C277 **12/12**、C267 **14/14**、C268 **20/20**（逐臂零转移） |
+| 主回归 | **PASS=68 FAIL=0**、`SELF_CHECK_OK rows=68 uniq=68`（`c292_regression_R241_tmp.log`） |
+| `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/zigtest_R241.log`） |
+| 代次锚 | `irg 09b2e6aa8d886a1ac0c695f5ef0b9911`（唯一变化）／`tpl 2286fe87…`／`nlk d58543cd…`／`ir 5b99795…`／`parser 70e80f18…`／`opt 745e4bd4…`（源已随 `e56f569` 提交；本记录后补） |
+
+### 148.4 边界 / 新登记
+- **F-151 新立（P2）**：`isset` 链基座为未定义变量时仍告警——`isset($undef->p)`、`isset($undef['k'])` 在 AOT 打印 `Warning: Undefined variable`，PHP 全静默；单实参与多实参同形（**R-241 前后一致，非本批引入**）。修法属发射侧静默基座读取，需与属性/元素读静默族同批设计。
+- 嵌套元素链 `isset($a['x']['y'], …)` 的内层缺失键同样可能告警（与 F-151 同族）。
+- `.safe_property_access`（`?->`）不在接管面内，走通用路径；C279 未覆盖，实测 null 基座两形与 PHP 一致。
+- 多实参接管要求全部实参形合法；任一非常规形回落旧通用路径（保持 R-230 之前行为，不引入新崩溃面）。
+
+## 149. ★R-242 落地记录（F-152 闭环：`intval($value, $base)` 真实现；F2I 门转全绿）
+
+### 149.1 契约（PHP 8.5.8 实测，3 组探针）
+| 形 | PHP |
+|---|---|
+| `intval("101",2)`／`("777",8)`／`("0x1A",16)`／`("z",36)` | `5`／`511`／`26`／`35`（大小写 digit 等价） |
+| 显式 base=16/2 的 `0x`／`0b` 前缀 | **剥前缀**（`intval("0b11",2)=3`） |
+| base=0 | 自动识别：`0x…`⇒16、`0b…`⇒2、其余前导 `0`⇒8；**不认** `0o`；无前缀按十进制 digit（**不认**指数/小数点：`"1e3"=1`、`"0.5"=0`） |
+| 非法 base（1／37／-1） | **恒 0，零诊断**（不抛异常） |
+| 非法 digit／尾随垃圾 | 首个非法字符处截断（`"101abc",2=5`、`"9",9=0`） |
+| 正负号/空白 | `"-101",2=-5`；前后空白可忽略 |
+| 溢出 | 按符号**饱和**（base 36 长串 ⇒ `maxInt`／`minInt`） |
+| 显式 base=10 | 保留既有浮点串/科学记法子路（`"1e3"=1000`、`"1.5"=1`）；`"0x1A",10=0` |
+| 非字符串实参 | **忽略 base**（`intval(42,2)=42`、`intval(2.5,2)=2`、`intval(1e19,2)` ⇒ 回绕值＋Warning、bool/null/array 同单参） |
+| 单实参 | 等价 base=10（既有语义逐字保留） |
+
+### 149.2 实现（模板＋发射器两处）
+- `tpl php_intval`（`:14811`）：签名改 `(val, base)`；非字符串分支在 base 判定之前，完全不变；字符串分支先验 base（非法⇒0），显式 base=10 走原十进制/浮点/科学记法子路（逐字保留），其余走 `intvalParseDigits`。
+- 新 helper `intvalDigitValue`（`:14923`）＋`intvalParseDigits`（`:14931`）：digit 截断、无 digit⇒0、溢出按符号饱和；base=0/16/2 的前缀剥离。
+- `nlk builtin_map` `intval`（`:4588`）：`handler_params = 2`＋`optional_defaults = initInt(10)` ⇒ 1 实参调用由声明式补齐机制补 base=10。
+- `test_runtime_comprehensive.zig` 的 `intval` 测试同步两实参并加 `"101",2 == 5` 断言（模板签名变更后测试编译失败，属配套修复）。
+- 新门 C288（11 臂）覆盖：digit/base0/非法 base/非法 digit/溢出/base10/非字符串/b3 复现/`@` 抑制/对象/单参守卫。
+
+### 149.3 读数
+| 腿 | 读数 |
+|---|---|
+| C288（新门 11 臂） | 自证 **11 CF**；实跑 **11/11 SAME** 49 s |
+| C062（51 臂） | **51/51 SAME、0 CF、0 diff**（修前 `49 SAME / 1 DIFF(b8) / 1 CF(b3)`；R-231 后 b8 已转绿，本批关 b3）；`aot_warned` 28→**29** |
+| 主回归 | **PASS=68 FAIL=0**、`SELF_CHECK_OK rows=68 uniq=68`（`c293_regression_R242_tmp.log`） |
+| `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/zigtest_R242b.log`） |
+| 代次锚 | `nlk 5010edc48ce55ed0a86f3803c0c17ac5`／`tpl 03ed0f1a9d03f4daeb69cfc85fa5fada`／`irg 09b2e6aa…`（未提交） |
+
+### 149.4 边界 / 新登记
+- **F-152 已闭**：`intval` 的第二形参此前只存在于调用点（2 实参⇒生成码 `expected 1 argument(s), found 2`），并非值错；现为真实现（非截断/打桩）。
+- base 的**显式 null** 未单列：当前 `null.toInt()=0` ⇒ 按自动识别走；PHP 对显式 null 会发 Passing-null Deprecated，属 F-62f-opt 同族（省略 vs 显式 null）未修面。
+- base 传入 float/string/object 的 zpp 口径未纳入本门（`toInt()` 语义）；语料零暴露，后续按 F-62f 形参族统一。
+
+## 150. ★R-243 落地记录（F-151 基座静默＋F-153 非对象接收者；F-151-b 新立）
+
+### 150.1 实测契约（PHP 8.5.8）
+| 形 | PHP |
+|---|---|
+| `isset($undef->p)`／`isset($undef['k'])` | **false，零诊断**（单/多实参、函数内局部同形） |
+| `empty($undef->p)`／`empty($undef['k'])` | **true，零诊断** |
+| `isset(<int|float|bool|string|array|null>->p)` | **false**（原先 int/float/bool/string/array 返回 true；null 已对） |
+| `empty(<int|float|bool|string|array|null>->p)` | **true**（原先多数返回 false） |
+| `$r = &$obj; isset($r->p)` | 按对象处理（true）；`$rs = &$str; isset($rs->p)` ⇒ false／empty true |
+| `isset($o['k'])`（stdClass 非 ArrayAccess） | **抛 Error** `Cannot use object of type stdClass as array`（本批未改；既有 php_array_isset/empty 行为已一致） |
+
+### 150.2 实现
+- `irg generateQuietBaseExpr`（`:6823`）：基座是 `.variable` 且无局部槽 ⇒ `.global_get{no_warn=true}`；其余原样。
+  - 接入 6 处：单实参 isset 属性/元素、多实参 isset 属性/元素（`emitQuietIssetArg`）、empty 属性/元素。
+- `tpl php_object_isset`（`:3358`）：先解引用；非对象 ⇒ **false**（原 `!isNull()`）。
+- `tpl php_object_empty`（`:3419`）：先解引用；非对象 ⇒ **true**（原 `php_empty_val(接收者)`）。
+- 两函数内部方法调用改用解引用后的 `resolved`，保证 ref→object 仍走对象语义。
+
+### 150.3 读数
+| 腿 | 读数 |
+|---|---|
+| C289（新门 8 臂） | 自证 **8 CF**；实跑 **8/8 SAME** 35 s |
+| 邻居 | C276 12/12、C277 12/12、C279 11/11、C267 14/14、C268 20/20（逐臂零转移） |
+| 探针 | `f151/p.php`、`f151/np.php` stdout＋stderr 逐字节 SAME |
+| `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/zigtest_R243.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`c294_regression_R243_tmp.log`） |
+| 代次锚 | `nlk 5010edc4…`（未变）／`tpl 7166338ad4fbfe493c7125a098e6fc1e`／`irg 570e1731946cc5275f512a385e481be8`（未提交） |
+
+### 150.4 边界 / 新登记
+- **F-151-b 新立（P2）**：更深的缺失链仍不静默——`isset($undef['k']['j'])` 内层读取打 2 条 Warning（未定义变量＋array offset），`isset($undef->p->q)` 打 1 条；且魔术方法中继语义不同：`isset($m->p->q)` PHP 调 `__isset('p')`（false 即止），AOT 走 `__get('p')`。修法需“表达式位静默链读取＋__isset 短路”，属独立改造轮。
+- `empty($undef->p->q)` 同属 F-151-b。
+- 非 ArrayAccess 对象的元素 isset/empty 抛 Error 与 PHP 一致，未改动。
