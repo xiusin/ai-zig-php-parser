@@ -7157,6 +7157,34 @@ fn requireArrayParam(fn_name: []const u8, arg_no: usize, param_name: []const u8,
     return rejectParamType(fn_name, arg_no, param_name, "array", val);
 }
 
+/// ★F-149（R-238）：bool 形参族的校验＋弱模式强转。
+///   实测（PHP 8.5.8）：bool/int/float/string 按 PHP 真值（`""` 与 `"0"` 为 false）；
+///   array/object ⇒ TypeError；非 nullable 的 null ⇒ Passing-null Deprecated ＋ false；`?bool` 的 null 合法。
+fn requireBoolParamAs(fn_name: []const u8, arg_no: usize, param_name: []const u8, expected: []const u8, val: Value) ?Value {
+    if (val.isBool()) return val;
+    if (val.isInt()) return Value.initBool(val.toInt() != 0);
+    if (val.isFloat()) return Value.initBool(val.asFloat() != 0.0);
+    if (val.isString()) {
+        const s = val.asString();
+        const truth = !(s.length == 0 or (s.length == 1 and s.data[0] == '0'));
+        return Value.initBool(truth);
+    }
+    if (val.isNull()) {
+        emitDeprecatedPassingNull(fn_name, arg_no, param_name, expected);
+        return Value.initBool(false);
+    }
+    return rejectParamType(fn_name, arg_no, param_name, expected, val);
+}
+
+fn requireBoolParam(fn_name: []const u8, arg_no: usize, param_name: []const u8, val: Value) ?Value {
+    return requireBoolParamAs(fn_name, arg_no, param_name, "bool", val);
+}
+
+fn requireNullableBoolParam(fn_name: []const u8, arg_no: usize, param_name: []const u8, val: Value) ?Value {
+    if (val.isNull()) return val;
+    return requireBoolParamAs(fn_name, arg_no, param_name, "?bool", val);
+}
+
 /// ★F-62 元素族（c 段）：`array_sum`／`array_product` 的**元素级**口径（真值 `/tmp/r172/f62_param_truth3_tmp.php`）：
 ///   · int／float ⇒ 原样计入；bool／null ⇒ **静默**计入 1／0；
 ///   · 完整数值串 ⇒ 按 int／float 语法计入；**前导数值串** ⇒ `Warning: A non-numeric value encountered` 后计入前缀（实测 `array_sum([1,"5a",2])`=8）；
@@ -11010,13 +11038,13 @@ pub fn php_substr(str: Value, start: Value, length: Value, allocator: Allocator)
     //   （实测 `substr("abc",$o)` 返回 "abc"，PHP 抛 `Argument #2 ($offset) must be of type int, stdClass given`）。
     //   null 由 helper 发 `Passing null … of type int is deprecated` 后按 0（实测同句）。
     const start_ok = requireNumParam("substr", 2, "offset", .int_param, start) orelse return Value.initNull();
-    // ★`$length`(#3) 本批刻意**不接**：PHP 声明是 **`?int`**，实测措辞 `must be of type ?int`，
-    //   而 `numParamExpectedText` 只会产 `int`／`float`／`int|float` ⇒ 直接接线会发**错措辞**（工单 §102.3 另登记）。
+    // ★F-62f 余量（R-237）：`$length` 是 `?int`；R-232 起 helper 已能产 `?int` 措辞，故可接线。
+    const length_ok = requireOptionalNumParam("substr", 3, "length", .nullable_int_param, length) orelse return Value.initNull();
     if (!str.isString()) return Value.initNull();
 
     const php_str = str.asString();
     const start_int = start_ok.toInt();
-    const length_int = if (length.isNull()) null else length.toInt();
+    const length_int = if (length_ok.isNull()) null else length_ok.toInt();
 
     const result = try php_str.substring(start_int, length_int, allocator);
     return Value.initString(result);
@@ -11481,7 +11509,10 @@ pub fn php_str_repeat(str: Value, times: Value, allocator: Allocator) !Value {
     const php_str = str.asString();
     const repeat_times = times_ok.toInt();
 
-    if (repeat_times <= 0) return Value.initString(try PHPString.init(allocator, ""));
+    if (repeat_times < 0) {
+        return throwThrowable("ValueError", "str_repeat(): Argument #2 ($times) must be greater than or equal to 0", allocator);
+    }
+    if (repeat_times == 0) return Value.initString(try PHPString.init(allocator, ""));
     if (repeat_times == 1) {
         _ = str.retain();
         return str;
@@ -11507,6 +11538,8 @@ pub fn php_str_repeat(str: Value, times: Value, allocator: Allocator) !Value {
 pub fn php_str_pad(str: Value, length: Value, pad_str: Value, pad_type: Value, allocator: Allocator) !Value {
     // ★F-62f 接线：`$length` 必填 int，修前对象静默 0 ⇒ 原串直接返回（PHP 抛 `Argument #2 ($length) must be of type int`）
     const length_ok = requireNumParam("str_pad", 2, "length", .int_param, length) orelse return Value.initNull();
+    // ★F-62f 余量（R-237）：#4 int $pad_type（省略到达为 STR_PAD_RIGHT=1）
+    const pad_type_ok = requireNumParam("str_pad", 4, "pad_type", .int_param, pad_type) orelse return Value.initNull();
     if (!str.isString()) return str;
 
     const php_str = str.asString();
@@ -11521,7 +11554,7 @@ pub fn php_str_pad(str: Value, length: Value, pad_str: Value, pad_type: Value, a
     };
     defer if (created_pad) pad_string.release(allocator);
 
-    const mode = pad_type.toInt();
+    const mode = pad_type_ok.toInt();
     const pad_len: usize = @intCast(@as(i64, @intCast(target_len)) - @as(i64, @intCast(php_str.length)));
     const left_pad: usize = if (mode == 0)
         pad_len
@@ -13459,7 +13492,11 @@ pub fn php_str_split(str: Value, length: Value, allocator: Allocator) !Value {
     if (!str.isString()) return Value.initArray(try PHPArray.init(allocator));
 
     const php_str = str.asString();
-    const chunk_len = if (length_ok.isNull()) 1 else @max(1, length_ok.toInt());
+    const length_v: i64 = if (length_ok.isNull()) 1 else length_ok.toInt();
+    if (length_v <= 0) {
+        return throwThrowable("ValueError", "str_split(): Argument #2 ($length) must be greater than 0", allocator);
+    }
+    const chunk_len: usize = @intCast(length_v);
 
     const arr = try PHPArray.init(allocator);
 
@@ -13721,7 +13758,9 @@ pub fn php_array_pop_ref(arr_ptr: *Value, allocator: Allocator) !Value {
 pub fn php_in_array(needle: Value, haystack: Value, strict: Value) !Value {
     if (!haystack.isArray()) return Value.initBool(false);
 
-    const use_strict = strict.toBool();
+    // ★F-149（R-238）：#3 bool $strict（省略到达为 false；显式 null ⇒ Passing-null Deprecated）
+    const strict_ok = requireBoolParam("in_array", 3, "strict", strict) orelse return Value.initBool(false);
+    const use_strict = strict_ok.toBool();
     const arr = haystack.asArray();
     var iter = arr.elements.iterator();
 
@@ -13761,13 +13800,14 @@ pub fn php_array_slice(arr: Value, offset: Value, length: Value, preserve_keys: 
     //   ★位置必须在下面两枚早退**之上**：PHP 的参数类型检查发生在函数体执行之前，
     //   若放在空数组早退之后，`array_slice([], $o)` 会被早退吞成 `[]` 而非 TypeError（接线顺序即语义）。
     const offset_ok = requireNumParam("array_slice", 2, "offset", .int_param, offset) orelse return Value.initNull();
-    // ★`$length`(#3) 本批刻意**不接**：PHP 声明是 **`?int`**（实测措辞 `must be of type ?int`），
-    //   `numParamExpectedText` 只会产 int／float／int|float ⇒ 直接接线会发**错措辞**（工单 §102.3，#140）。
+    const length_ok = requireOptionalNumParam("array_slice", 3, "length", .nullable_int_param, length) orelse return Value.initNull();
+    // ★F-149（R-238）：#4 bool $preserve_keys
+    const pk_ok = requireBoolParam("array_slice", 4, "preserve_keys", preserve_keys) orelse return Value.initNull();
     if (!arr.isArray()) return Value.initNull();
 
     const php_arr = arr.asArray();
     const arr_count = php_arr.count();
-    const preserve = preserve_keys.asBool();
+    const preserve = pk_ok.toBool();
 
     if (arr_count == 0) {
         // 空数组，返回空数组
@@ -13787,12 +13827,12 @@ pub fn php_array_slice(arr: Value, offset: Value, length: Value, preserve_keys: 
 
     // 计算结束位置
     const end_idx: usize = blk: {
-        if (length.isNull()) {
+        if (length_ok.isNull()) {
             // 没有指定长度，取到数组末尾
             break :blk arr_count;
         }
 
-        const length_int = length.toInt();
+        const length_int = length_ok.toInt();
         if (length_int >= 0) {
             // 正数长度
             break :blk @min(start_idx + @as(usize, @intCast(length_int)), arr_count);
@@ -14069,8 +14109,10 @@ pub fn php_array_merge_into(target: Value, source: Value, allocator: Allocator) 
 /// $arr = ['a' => 1, 'b' => 2, 0 => 3];
 /// array_keys($arr);  // ['a', 'b', 0]
 /// ```
-pub fn php_array_keys(arr: Value, search: Value, allocator: Allocator) !Value {
+pub fn php_array_keys(arr: Value, search: Value, strict: Value, allocator: Allocator) !Value {
     if (!arr.isArray()) return Value.initNull();
+    // ★F-149（R-238）：#3 bool $strict（省略到达为 false；显式 null ⇒ Passing-null Deprecated）
+    const strict_ok = requireBoolParam("array_keys", 3, "strict", strict) orelse return Value.initNull();
 
     const php_arr = arr.asArray();
     const result = try PHPArray.init(allocator);
@@ -14083,7 +14125,10 @@ pub fn php_array_keys(arr: Value, search: Value, allocator: Allocator) !Value {
 
     while (iter.next()) |entry| {
         if (has_search) {
-            const eq = try php_eq(entry.value_ptr.*, search);
+            const eq = if (strict_ok.toBool())
+                try php_identical(entry.value_ptr.*, search)
+            else
+                try php_eq(entry.value_ptr.*, search);
             if (!eq.asBool()) continue;
         }
 
@@ -24531,7 +24576,12 @@ fn applySrandArgs(fn_name: []const u8, seed: Value, mode: Value) void {
     // ★F-62f 余量（R-232）：#1 ?int seed／#2 int mode；Foo ⇒ TypeError。
     //   ★mode 仅做类型/接受性校验：MT_RAND_PHP(1) 的序列未实现（F-145），当前一律 MT19937。
     const seed_ok = requireOptionalNumParam(fn_name, 1, "seed", .nullable_int_param, seed) orelse return;
-    _ = requireOptionalNumParam(fn_name, 2, "mode", .int_param, mode) orelse return;
+    const mode_ok = requireOptionalNumParam(fn_name, 2, "mode", .int_param, mode) orelse return;
+    // ★F-145：PHP 8.5 对 MT_RAND_PHP(1) 每次调用发一条 Deprecated（双流）；序列差异另见 F-145-b。
+    const mode_val: i64 = if (mode_ok.isNull()) 0 else mode_ok.toInt();
+    if (mode_val == 1) {
+        emitDeprecated("The MT_RAND_PHP variant of Mt19937 is deprecated");
+    }
     if (seed_ok.isNull()) {
         mt_state = MT19937.init(@intCast(@as(u64, @intCast(unixTimestamp())) & 0xFFFFFFFF));
     } else {
@@ -24645,9 +24695,12 @@ pub fn php_array_unshift(arr: Value, values: []const Value, allocator: Allocator
 pub fn php_array_search(needle: Value, haystack: Value, strict: Value) !Value {
     if (!haystack.isArray()) return Value.initBool(false);
 
+    // ★F-149（R-238）：#3 bool $strict
+    const strict_ok = requireBoolParam("array_search", 3, "strict", strict) orelse return Value.initBool(false);
+
     const arr = haystack.asArray();
     var it = arr.elements.iterator();
-    const is_strict = strict.asBool();
+    const is_strict = strict_ok.toBool();
 
     while (it.next()) |entry| {
         const val = entry.value_ptr.*;
@@ -24789,9 +24842,12 @@ pub fn php_array_product(arr: Value) !Value {
 pub fn php_array_reverse(arr: Value, preserve_keys_val: Value, allocator: Allocator) !Value {
     if (!arr.isArray()) return Value.initArray(try PHPArray.init(allocator));
 
+    // ★F-149（R-238）：#2 bool $preserve_keys
+    const pk_ok = requireBoolParam("array_reverse", 2, "preserve_keys", preserve_keys_val) orelse return Value.initNull();
+
     const php_arr = arr.asArray();
     const result = try PHPArray.init(allocator);
-    const preserve_keys = preserve_keys_val.asBool();
+    const preserve_keys = pk_ok.toBool();
 
     if (preserve_keys) {
         // 保留原始键名
@@ -26890,7 +26946,11 @@ pub fn php_chunk_split(body: Value, chunklen: Value, end: Value, allocator: Allo
     // ★F-62f 接线：`$length`（可选 int，PHP 侧默认 76）⇒ 对象/array/坏串必须 TypeError（实测 `Argument #2 ($length) must be of type int`）
     const chunklen_ok = requireOptionalNumParam("chunk_split", 2, "length", .int_param, chunklen) orelse return Value.initNull();
     const body_str = if (body.isString()) body.asString().data else "";
-    const clen: usize = @intCast(@max(1, chunklen_ok.toInt()));
+    const clen_i: i64 = if (chunklen_ok.isNull()) 76 else chunklen_ok.toInt();
+    if (clen_i <= 0) {
+        return throwThrowable("ValueError", "chunk_split(): Argument #2 ($length) must be greater than 0", allocator);
+    }
+    const clen: usize = @intCast(clen_i);
     const end_str = if (end.isString()) end.asString().data else "\r\n";
 
     const num_chunks = (body_str.len + clen - 1) / clen;
@@ -27939,7 +27999,11 @@ pub fn php_json_decode(args: []const Value, allocator: Allocator) !Value {
         return Value.initNull();
     }
 
-    const assoc = if (args.len >= 2) args[1] else Value.initBool(false);
+    // ★F-149（R-238）：#2 ?bool $associative（null 合法 ⇒ 返回对象；标量按 PHP 真值）
+    const assoc_ok = if (args.len >= 2) blk: {
+        const v = requireNullableBoolParam("json_decode", 2, "associative", args[1]) orelse return Value.initNull();
+        break :blk v;
+    } else Value.initBool(false);
     // ★F-62f 第三批：#3 $depth / #4 $flags 为可选 int，Foo ⇒ TypeError；null ⇒ 默认值
     const depth_val = if (args.len >= 3) blk: {
         const v = requireOptionalNumParam("json_decode", 3, "depth", .int_param, args[2]) orelse return Value.initNull();
@@ -27948,7 +28012,7 @@ pub fn php_json_decode(args: []const Value, allocator: Allocator) !Value {
     if (args.len >= 4) {
         _ = requireOptionalNumParam("json_decode", 4, "flags", .int_param, args[3]) orelse return Value.initNull();
     }
-    const is_assoc = if (assoc.isBool()) assoc.asBool() else assoc.toBool();
+    const is_assoc = if (assoc_ok.isNull()) false else assoc_ok.toBool();
     const json_str = json.asString().data;
     var pos: usize = 0;
     const depth_i64 = @max(depth_val.toInt(), 1);
@@ -30220,66 +30284,86 @@ pub fn php_htmlspecialchars_decode(str: Value, flags: Value, allocator: Allocato
     return Value.initString(php_str);
 }
 
+fn wordwrapNextWordLen(input: []const u8, from: usize) usize {
+    var i = from;
+    while (i < input.len and input[i] == ' ') : (i += 1) {}
+    var n: usize = 0;
+    while (i < input.len and input[i] != ' ' and input[i] != '\n') : (i += 1) n += 1;
+    return n;
+}
+
+/// ★F-150：按 PHP 口径硬切超宽段；inclusive 区分“空格/换行处”（切满也发 break）
+/// 与“串尾”（恰好宽度不发 break）。返回是否发生过切分。
+fn wordwrapCutFlush(
+    result: *std.ArrayList(u8),
+    allocator: Allocator,
+    input: []const u8,
+    line_start: *usize,
+    end: usize,
+    width: usize,
+    break_chars: []const u8,
+    enabled: bool,
+    inclusive: bool,
+) !bool {
+    if (!enabled) return false;
+    var moved = false;
+    while (true) {
+        const seg = end - line_start.*;
+        const hit = if (inclusive) seg >= width else seg > width;
+        if (!hit) break;
+        try result.appendSlice(allocator, input[line_start.* .. line_start.* + width]);
+        try result.appendSlice(allocator, break_chars);
+        line_start.* += width;
+        moved = true;
+    }
+    return moved;
+}
+
 /// wordwrap - 将字符串按指定长度换行
+/// ★F-150（R-239）：按 PHP 8.5.8 实测重写——保留原有空格/空行/换行，cut 时按宽度硬切。
 pub fn php_wordwrap(str: Value, width: Value, break_str: Value, cut: Value, allocator: Allocator) !Value {
-    // ★F-62f 接线：`$width`（可选 int，PHP 侧默认 78）⇒ 对象/array/坏串必须 TypeError（实测 `Argument #2 ($width) must be of type int`）
+    // ★F-62f 接线：`$width`（可选 int，PHP 侧默认 75）⇒ 对象/array/坏串必须 TypeError（实测 `Argument #2 ($width) must be of type int`）
     const width_ok = requireOptionalNumParam("wordwrap", 2, "width", .int_param, width) orelse return Value.initNull();
     if (!str.isString()) return error.InvalidArgument;
 
     const input = str.asString().data;
     const wrap_width: usize = @intCast(@max(1, width_ok.toInt()));
     const break_chars = if (break_str.isString()) break_str.asString().data else "\n";
-    const force_cut = cut.toBool();
+    // ★F-149（R-238）：#4 bool $cut_long_words（注意 PHP 形参名不是 $cut）
+    const cut_ok = requireBoolParam("wordwrap", 4, "cut_long_words", cut) orelse return Value.initNull();
+    const force_cut = cut_ok.toBool();
 
     var result = try std.ArrayList(u8).initCapacity(allocator, 0);
     defer result.deinit(allocator);
 
-    var line_len: usize = 0;
-    var word_start: usize = 0;
+    var line_start: usize = 0;
     var i: usize = 0;
-
-    while (i < input.len) {
-        if (input[i] == ' ' or input[i] == '\n') {
-            // 输出单词
-            if (i > word_start) {
-                const word = input[word_start..i];
-                // 检查是否需要换行（含空格分隔符的长度）
-                if (line_len > 0 and line_len + 1 + word.len > wrap_width) {
+    while (i < input.len) : (i += 1) {
+        if (input[i] == '\n') {
+            _ = try wordwrapCutFlush(&result, allocator, input, &line_start, i, wrap_width, break_chars, force_cut, true);
+            try result.appendSlice(allocator, input[line_start..i]);
+            // 已有换行原样保留（不受 $break 影响；实测 PHP 如此）
+            try result.append(allocator, '\n');
+            line_start = i + 1;
+        } else if (input[i] == ' ') {
+            const moved = try wordwrapCutFlush(&result, allocator, input, &line_start, i, wrap_width, break_chars, force_cut, true);
+            if (moved and line_start == i) {
+                // 恰好切满：该空格被丢弃
+                line_start = i + 1;
+            } else if (i + 1 >= input.len or input[i + 1] != ' ') {
+                const seg = i - line_start;
+                const next_len = wordwrapNextWordLen(input, i + 1);
+                if (seg > 0 and seg + 1 + next_len > wrap_width) {
+                    try result.appendSlice(allocator, input[line_start..i]);
                     try result.appendSlice(allocator, break_chars);
-                    line_len = 0;
+                    line_start = i + 1;
                 }
-                // 行首不加空格
-                if (line_len > 0) {
-                    try result.append(allocator, ' ');
-                    line_len += 1;
-                }
-                try result.appendSlice(allocator, word);
-                line_len += word.len;
             }
-            if (input[i] == '\n') {
-                try result.appendSlice(allocator, break_chars);
-                line_len = 0;
-            }
-            word_start = i + 1;
-        } else if (force_cut and line_len >= wrap_width) {
-            try result.appendSlice(allocator, break_chars);
-            line_len = 0;
         }
-        i += 1;
     }
 
-    // 输出剩余单词
-    if (i > word_start) {
-        const word = input[word_start..i];
-        if (line_len > 0 and line_len + 1 + word.len > wrap_width) {
-            try result.appendSlice(allocator, break_chars);
-            line_len = 0;
-        }
-        if (line_len > 0) {
-            try result.append(allocator, ' ');
-        }
-        try result.appendSlice(allocator, word);
-    }
+    _ = try wordwrapCutFlush(&result, allocator, input, &line_start, input.len, wrap_width, break_chars, force_cut, false);
+    try result.appendSlice(allocator, input[line_start..]);
 
     const php_str = try PHPString.init(allocator, result.items);
     return Value.initString(php_str);
@@ -33722,6 +33806,10 @@ pub fn php_mb_substr(str: Value, start: Value, length: Value, encoding: Value, a
     _ = encoding; // 简化实现：忽略encoding参数，默认使用UTF-8
     if (!str.isString()) return Value.initNull();
 
+    // ★F-62f 余量（R-237）：#2 int $start／#3 ?int $length（省略到达为 null）
+    const start_ok = requireOptionalNumParam("mb_substr", 2, "start", .int_param, start) orelse return Value.initNull();
+    const length_ok = requireOptionalNumParam("mb_substr", 3, "length", .nullable_int_param, length) orelse return Value.initNull();
+
     const php_str = str.asString();
     const data = php_str.data;
 
@@ -33751,7 +33839,7 @@ pub fn php_mb_substr(str: Value, start: Value, length: Value, encoding: Value, a
     const total_chars = char_idx;
 
     // 处理start参数
-    const start_int = start.toInt();
+    const start_int = start_ok.toInt();
     const start_char: usize = blk: {
         if (start_int >= 0) {
             const s: usize = @intCast(@min(start_int, @as(i64, @intCast(total_chars))));
@@ -33765,10 +33853,10 @@ pub fn php_mb_substr(str: Value, start: Value, length: Value, encoding: Value, a
 
     // 处理length参数
     const end_char: usize = blk: {
-        if (length.isNull()) {
+        if (length_ok.isNull()) {
             break :blk total_chars;
         }
-        const len_int = length.toInt();
+        const len_int = length_ok.toInt();
         if (len_int < 0) {
             // 负数长度从末尾截断
             const abs_len: usize = @intCast(@min(-len_int, @as(i64, @intCast(total_chars))));
@@ -33908,21 +33996,43 @@ pub fn php_mb_detect_encoding(str_val: Value, encodings: Value, strict: Value, a
 
 /// substr_count - 计算子字符串出现次数
 pub fn php_substr_count(haystack: Value, needle: Value, offset: Value, length: Value) !Value {
-    _ = offset;
-    _ = length;
+    // ★F-62f 余量（R-237）：#3 int $offset／#4 ?int $length；省略到达为 int(0)／null。
+    const offset_ok = requireOptionalNumParam("substr_count", 3, "offset", .int_param, offset) orelse return Value.initInt(0);
+    const length_ok = requireOptionalNumParam("substr_count", 4, "length", .nullable_int_param, length) orelse return Value.initInt(0);
     if (!haystack.isString() or !needle.isString()) return Value.initInt(0);
 
     const hay = haystack.asString();
     const need = needle.asString();
 
-    if (need.length == 0) return Value.initInt(0);
-    if (need.length > hay.length) return Value.initInt(0);
+    // ★实测：空针是 ValueError（不是返回 0）
+    if (need.length == 0) {
+        return throwThrowable("ValueError", "substr_count(): Argument #2 ($needle) must not be empty", runtime_allocator);
+    }
+
+    const hay_len: i64 = @intCast(hay.length);
+    var start_i: i64 = offset_ok.toInt();
+    if (start_i < 0) start_i += hay_len;
+    if (start_i < 0 or start_i > hay_len) {
+        return throwThrowable("ValueError", "substr_count(): Argument #3 ($offset) must be contained in argument #1 ($haystack)", runtime_allocator);
+    }
+
+    var end_i: i64 = hay_len;
+    if (!length_ok.isNull()) {
+        const len_i: i64 = length_ok.toInt();
+        end_i = if (len_i < 0) hay_len + len_i else start_i + len_i;
+        if (end_i < start_i or end_i > hay_len) {
+            return throwThrowable("ValueError", "substr_count(): Argument #4 ($length) must be contained in argument #1 ($haystack)", runtime_allocator);
+        }
+    }
+
+    const window = hay.data[@intCast(start_i)..@intCast(end_i)];
+    if (need.length > window.len) return Value.initInt(0);
 
     var count: i64 = 0;
     var pos: usize = 0;
 
-    while (pos <= hay.length - need.length) {
-        if (std.mem.eql(u8, hay.data[pos .. pos + need.length], need.data)) {
+    while (pos <= window.len - need.length) {
+        if (std.mem.eql(u8, window[pos .. pos + need.length], need.data)) {
             count += 1;
             pos += need.length;
         } else {

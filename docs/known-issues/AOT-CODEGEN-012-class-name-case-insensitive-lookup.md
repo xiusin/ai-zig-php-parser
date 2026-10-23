@@ -8571,7 +8571,7 @@ R-214 曾把“归因里出现 setSourceLocation/PHI/调用行等非局部增删
 - 影子：本批是 **name-table 改动** ⇒ 预期漂移；语料普查 `grep -lE "preg_match_all|mt_srand|(^|[^_a-z])srand\("` 命中**仅 f161**，故 68 行中预期且仅允许 f161 漂移（回归已验证 f161 语义 SAME）。旧二进制未备份 ⇒ 不做双代 md5 差分（按 r110 规则此项证据降级并留痕）。
 
 ### 140.5 边界 / 新登记
-- **F-145（P2）**：`MT_RAND_PHP` 序列＋Deprecated 未实现；AOT 一律 MT19937。
+- **F-145（P2）**：Deprecated 已由 R-236 修复（§143）；**序列**拆为 F-145-b，仍注册红。
 - **F-146（P2，★主面已由 R-233 关闭，见 §141）**：闭包内把外层未声明变量用于 `preg_match(_all)` 第三实参 ⇒ IR 写回走 `global_set`（`ir_generator.zig:7701/7754` 建临时 alloca，`:8125` 判非局部即 global_set）⇒ 外层读到数组且无 Warning；PHP 为局部变量＋外层两流 Warning＋NULL。普通闭包局部赋值无此问题（对照 `leak.php` SAME）。
 - **F-62f-opt**（沿用）：显式 null 与省略不可区分。
 - **F-102**：preg_match/preg_match_all 两枚已对齐（乙案局部），`split` 等仍待裁；旧 `preg_match*` 实现已无 AOT 调用点，删除待批准。
@@ -8646,3 +8646,133 @@ R-214 曾把“归因里出现 setSourceLocation/PHI/调用行等非局部增删
 - C282 扩至 **12 臂**：c7 用户/c8 方法/c9 静态顶层、c10 已定义全局、c11 普通读仍告警、c12 命名实参；自证 **12 CF**，实跑 **12/12 SAME**（61 s）。
 - 邻门：C281 6/7（a7=F-145）、C283 6/6；`zig build test` 326/326；主回归 PASS=68 FAIL=0（c286）。
 - 代次锚：`ir 5b997953…`／`nlk 5a6e13f8…`／`irg 3d04a693…`／`tpl 7320db32…`（未提交）。
+
+## 143. ★R-236 落地记录（F-145-a `MT_RAND_PHP` Deprecated；F-145-b 序列注册红）
+
+### 143.1 真值（PHP 8.5.8）
+| 观测 | mode 0 | mode 1（MT_RAND_PHP） |
+|---|---|---|
+| `srand/mt_srand(...,1)` 诊断 | 无 | 每次调用一条 `Deprecated: The MT_RAND_PHP variant of Mt19937 is deprecated`（stderr `PHP Deprecated:` ＋ stdout 空行 `Deprecated:`） |
+| `mt_rand()` ×3（seed=1） | 895547922, 2141438069, 1546885062 | 1244335972, 15217923, 1546885062 |
+| `mt_rand(0,2147483647)` ×3 | 同上 | 同 mode1 raw |
+| `rand(1,1000)` ×3 | 846, 140, 125 | 580, 8, 721 |
+| 坏 seed/mode 类型 | TypeError | TypeError（**不发 Deprecated**） |
+
+### 143.2 实现（F-145-a）
+- `tpl applySrandArgs`：mode 校验通过后 `mode_val==1 ⇒ emitDeprecated("The MT_RAND_PHP variant of Mt19937 is deprecated")`；随后照旧用 MT19937 设种子（序列差异未实现）。
+- 抑制/处理器路由沿用 `emitDeprecated`（`@` 与 handler 语义与其它 Deprecated 一致）。
+
+### 143.3 归因进度（F-145-b）
+- 用标准 MT19937 复算 mode0 序列**完全一致** ⇒ 状态生成与 mode0 相同。
+- mode1 与 mode0 的 raw 差**恰为固定 `0x7F4BF576` 或 0**（seed 1/12345/777 实测），但 0/C 的谓词不是 G、未回火 Y、raw 的任一单比特，也无索引规律；网络不可达 PHP 源码，暂不臆造。
+- 下一步建议：取得 PHP 8.4/8.5 `ext/random/engine_mt19937.c` 的 legacy range 源码（或从 PHP 5.6 `ext/standard/mt_rand.c` 的 `RAND_RANGE_BADSCALING`）后按源码复刻；在拿到源码前保持 a8 注册红。
+
+### 143.4 读数
+| 腿 | 读数 |
+|---|---|
+| C281（8 臂） | 自证 **8 CF**；实跑 **7 SAME / 1 DIFF**（a8=F-145-b）42 s；a7 Deprecated SAME |
+| C282 / C283 | 12/12、6/6 |
+| 主回归 | PASS=68 FAIL=0（c287） |
+| `zig build test` | 21/21 steps、326/326 |
+| 代次锚 | `tpl 00fe510afbb8e8c4c94ecdea3fd69b18`／`ir 5b99795…`／`nlk 5a6e13f8…`／`irg 3d04a693…`（未提交） |
+
+## 144. ★R-237 落地记录（F-62f 第五批：字符串族形参契约与值域）
+
+### 144.1 真值（PHP 8.5.8）
+| 站点 | 契约 |
+|---|---|
+| `substr #3 $length` | `?int`：对象 ⇒ `must be of type ?int, Foo given`；null 合法 |
+| `mb_substr #2 $start／#3 $length` | `int`／`?int`；省略 length 合法 |
+| `substr_count #3 $offset` | `int`；负值从末尾归一；`|offset|>len` ⇒ `ValueError: … must be contained in argument #1 ($haystack)` |
+| `substr_count #4 $length` | `?int`；负值从末尾截断；窗口越界（end<start 或 end>len）⇒ 同句 `#4 ($length) must be contained…` |
+| `substr_count` 空针 | `ValueError: substr_count(): Argument #2 ($needle) must not be empty`（**原实现返回 0**） |
+| `substr_count` 非重叠 | `substr_count("ccccc","cc")` = 2 |
+| `str_repeat #2 $times` | `int`；`-1` ⇒ `ValueError: … must be greater than or equal to 0`；`0` ⇒ `""` |
+| `str_split #2 $length` | `int`；`<=0` ⇒ `ValueError: … must be greater than 0` |
+| `chunk_split #2 $length` | 同上（省略默认 76） |
+| `str_pad #4 $pad_type` | `int`；对象 ⇒ TypeError（负长度返回原串，不报错） |
+
+### 144.2 实现（纯模板）
+- `substr`：`#3` 用 `.nullable_int_param`（R-232 新增的 `?int` 措辞终于可用）。
+- `mb_substr`：补 `#2 .int_param`／`#3 .nullable_int_param`；`start/length` 改用校验后值。
+- `substr_count`：两参从 `_ =` 丢弃改为真实现——offset 负数归一、length 负数截尾、窗口越界/空针抛可捕获 ValueError；计数窗口内非重叠。
+- `str_repeat/str_split/chunk_split`：去掉 `<=0` 夹取，改 PHP 同文案 ValueError。
+- `str_pad`：`#4 .int_param`。
+- ★校验位置统一放在“非字符串早退”之后，避免改变既有 `#1` 静默返回路径的错误顺序。
+
+### 144.3 读数
+| 腿 | 读数 |
+|---|---|
+| C284（新门 8 臂） | 自证 **8 CF**；实跑 **8/8 SAME** 46 s |
+| 邻居 | C281 7/8（a8=F-145-b）、C282 12/12、C283 6/6 |
+| 主回归 | PASS=68 FAIL=0（c288） |
+| `zig build test` | 21/21 steps、326/326 |
+| 代次锚 | `tpl e0aeb61c120982bf162e9045b314c2eb`（未提交） |
+
+### 144.4 边界 / 新登记
+- `wordwrap #4 bool $cut` 与 `mb_substr #4 ?string $encoding` 未接（bool/string 形参族）。
+- `substr_count` 空针由“0”改 ValueError 属行为修正，若语料依赖旧形需点名。
+
+## 145. ★R-238 落地记录（F-149 bool 形参族；F-150 新立）
+
+### 145.1 真值（PHP 8.5.8）
+| 形参 | 契约 |
+|---|---|
+| 非 nullable `bool` | bool/int/float/string 按 PHP 真值（`""`/`"0"` 为 false）；array/object ⇒ `must be of type bool, X given`；**显式 null ⇒ Passing-null Deprecated ＋ false** |
+| `?bool`（json_decode #2） | 同上，但 **null 合法**（不发 Deprecated，返回对象） |
+| `array_keys #3 $strict` | 宽松 vs 严格比较命中不同；对象 ⇒ `must be of type bool`；`array_keys($a,null,$o)` 也先校验 #3 |
+| `array_slice #3 $length` | `?int`：对象 ⇒ `must be of type ?int` |
+| ★`wordwrap` 形参名 | `$cut_long_words`（不是 `$cut`） |
+
+### 145.2 实现
+- 模板新增 `requireBoolParamAs/requireBoolParam/requireNullableBoolParam`；7 个入口接线（wordwrap/in_array/array_search/array_reverse/array_slice/json_decode/array_keys）。
+- `php_array_keys` 形参扩为 `(arr, search, strict, allocator)`，严格用 `php_identical`；`nlk` 发射分支补 1/2 实参的缺省（null＋false）。
+- 单元测试调用同步适配。
+
+### 145.3 读数
+| 腿 | 读数 |
+|---|---|
+| C285（新门 8 臂） | 自证 **8 CF**；实跑 **8/8 SAME** 37 s |
+| 邻居 | C281 7/8（a8=F-145-b）、C282 12/12、C283 6/6、C284 8/8 |
+| 主回归 | PASS=68 FAIL=0（c289） |
+| `zig build test` | 21/21 steps、326/326 |
+| 代次锚 | `tpl 106a8f5d…`／`nlk d58543cd…`／`irg 3d04a693…`（未提交） |
+
+### 145.4 新登记
+- **F-150（P2）**：`wordwrap` 算法缺口——`cut=true` 不切长词（`"abcdefgh",3,"|",true`：PHP `abc|def|gh`／AOT `abcdefgh`）；多空格被折叠（PHP `"a  b"` 原样）；混合形 `"abc defgh"` 不同。本批只做形参校验。
+- **F-62f-opt（沿用）**：`array_keys` 显式 null 过滤 vs 省略 search 不可区分（null 作哨兵）。
+
+## 146. ★R-239 落地记录（F-150 `wordwrap` 全算法闭环）
+
+### 146.1 实测契约（PHP 8.5.8，51 形矩阵）
+| 形 | PHP |
+|---|---|
+| `wordwrap("The quick brown fox jumped",10)` | 按“下一个词放不下”折行，折行处空格被 break 取代 |
+| `wordwrap("a b c",0/-1)` | 每词一行（宽按 1） |
+| `wordwrap("short verylongword end",6)` | 长词独占一行 |
+| `…,6,true` | 长词按宽硬切（`verylo\nngword`） |
+| `wordwrap("abc defgh ij",3,"|",true)` | `abc\|def\|gh\|ij` |
+| `wordwrap("a  b",10)` / `("aaa   bbb",5)` | 空格保留；折行只丢当前空格 ⇒ `aaa  \nbbb` |
+| `wordwrap("a\n\nb",10)` | 空行保留 |
+| `wordwrap("a\nb",10,"<br>")` | 已有 `\n` **不受 $break 影响** |
+| `wordwrap("abc ",3,"|",true)` / `("abcdef g",3,"|",true)` | 切满处空格被丢弃 ⇒ `abc\|` / `abc\|def\|g` |
+| `wordwrap("abcd ",3,"|",true)` | 余量非空 ⇒ 空格保留 `abc\|d ` |
+| `wordwrap("abc\n",3,"|",true)` | 换行处切满也补 break ⇒ `abc\|\n` |
+| `wordwrap("abc",3,"|",true)` | 串尾恰好宽度不补 break |
+
+### 146.2 实现（纯模板）
+- `wordwrapNextWordLen(input, from)`：跳过连续空格后数下一词（空格/`\n` 终止）。
+- `wordwrapCutFlush(..., inclusive)`：按 width 硬切；空格/换行处 `>=`、串尾 `>`；返回是否切过。
+- `php_wordwrap` 重写：`\n` 恒输出 `'\n'`；空格处“切满则丢该空格；否则仅当下一字符非空格且 `seg+1+next_len>width` 才折行”；串尾 flush 后追加剩余。
+
+### 146.3 读数
+| 腿 | 读数 |
+|---|---|
+| C286（新门 8 臂 × 51 形） | 自证 **8 CF**；实跑 **8/8 SAME** 39 s |
+| 邻居 | C281 7/8（a8=F-145-b）、C282 12/12、C283 6/6、C284 8/8、C285 8/8 |
+| 主回归 | PASS=68 FAIL=0（c290） |
+| `zig build test` | 21/21 steps、326/326 |
+| 代次锚 | `tpl 8535900f…`／`nlk d58543cd…`／`irg 3d04a693…`（未提交） |
+
+### 146.4 边界
+- 多字节按字节计宽（与 PHP 一致）；空 `$break` 未单列（实现可正常处理）。

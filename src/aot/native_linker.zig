@@ -23013,15 +23013,18 @@ pub const NativeLinker = struct {
                                 }
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
                             } else if (std.mem.eql(u8, runtime_name, "php_array_keys")) {
-                                // array_keys(arr, search = null)
+                                // array_keys(arr, search = null, strict = false)
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                 if (op.args.len > 0) {
                                     try self.writeValueArgs(writer, op.args);
                                     if (op.args.len == 1) {
                                         try writer.writeAll(", runtime.Value.initNull()");
                                     }
+                                    if (op.args.len < 3) {
+                                        try writer.writeAll(", runtime.Value.initBool(false)");
+                                    }
                                 } else {
-                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull()");
+                                    try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull(), runtime.Value.initBool(false)");
                                 }
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
                             } else if (std.mem.eql(u8, runtime_name, "php_array_slice")) {

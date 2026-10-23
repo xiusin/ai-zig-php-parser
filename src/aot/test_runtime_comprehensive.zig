@@ -511,7 +511,7 @@ test "数组 - array_keys" {
     try arr.push(allocator, Value.initInt(20));
 
     const arr_val = Value.initArray(arr);
-    const keys = try runtime.php_array_keys(arr_val, Value.initNull(), allocator);
+    const keys = try runtime.php_array_keys(arr_val, Value.initNull(), Value.initBool(false), allocator);
     defer keys.asArray().release(allocator);
 
     try testing.expectEqual(@as(usize, 2), keys.asArray().count());
