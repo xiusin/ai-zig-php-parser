@@ -7025,7 +7025,7 @@ pub const IRGenerator = struct {
             if (call_data.args.len >= 1) {
                 const arg_idx = call_data.args[0];
                 const arg_node = self.getNode(arg_idx);
-                if (arg_node != null and arg_node.?.tag == .property_access) {
+                if (call_data.args.len == 1 and arg_node != null and arg_node.?.tag == .property_access) {
                     const object_reg = try self.generateExpression(arg_node.?.data.property_access.target);
                     const property_name_reg = try self.emitPropertyNameValue(self.getString(arg_node.?.data.property_access.property_name));
                     const isset_args = try self.allocator.alloc(Register, 2);
@@ -7038,7 +7038,7 @@ pub const IRGenerator = struct {
                     } }, .php_value);
                 }
                 // isset($var): 简单变量，避免未定义变量警告
-                if (arg_node != null and arg_node.?.tag == .variable) {
+                if (call_data.args.len == 1 and arg_node != null and arg_node.?.tag == .variable) {
                     const var_name = self.getString(arg_node.?.data.variable.name);
                     // 仅全局变量需要特殊处理（避免 getGlobalVar 的未定义变量警告）
                     // 局部变量走原有路径（直接读寄存器，无警告问题）
@@ -7056,7 +7056,7 @@ pub const IRGenerator = struct {
                     // 局部变量：继续走通用 isset 路径
                 }
                 // isset($arr[$key]): 使用 php_array_isset 避免对非数组值产生警告
-                if (arg_node != null and arg_node.?.tag == .array_access) {
+                if (call_data.args.len == 1 and arg_node != null and arg_node.?.tag == .array_access) {
                     const access = arg_node.?.data.array_access;
                     if (access.index) |key_idx| {
                         const array_reg = try self.generateExpression(access.target);
@@ -7070,6 +7070,11 @@ pub const IRGenerator = struct {
                             .return_type = .php_value,
                         } }, .php_value);
                     }
+                }
+                // isset(G::$p)（F-142）：缺失/不可见/null 都返回 false，不抛未捕获 fatal
+                // 仅单实参走本支：多实参 isset 需全部求值（PHP `isset($a,$b)`），留给通用路径。
+                if (call_data.args.len == 1 and arg_node != null and arg_node.?.tag == .static_property_access) {
+                    return self.emitStaticPropertyQuietCall(arg_node.?, "php_isset_static_property");
                 }
             }
         }
@@ -7090,6 +7095,40 @@ pub const IRGenerator = struct {
                         .args = empty_args,
                         .return_type = .php_value,
                     } }, .php_value);
+                }
+                // empty(G::$p)（F-142）：缺失/不可见按 empty 语义返回 true，不抛未捕获 fatal
+                if (call_data.args.len == 1 and arg_node != null and arg_node.?.tag == .static_property_access) {
+                    return self.emitStaticPropertyQuietCall(arg_node.?, "php_empty_static_property");
+                }
+                // empty($var)（F-142-b）：全局未定义变量静默（PHP empty 对未定义变量为 true、零诊断）
+                if (call_data.args.len == 1 and arg_node != null and arg_node.?.tag == .variable) {
+                    const var_name = self.getString(arg_node.?.data.variable.name);
+                    if (self.getVarRegister(var_name) == null) {
+                        const name_reg = try self.emitPropertyNameValue(var_name);
+                        const var_args = try self.allocator.alloc(Register, 1);
+                        var_args[0] = name_reg;
+                        return self.emitWithResult(.{ .call = .{
+                            .func_name = "php_empty_var",
+                            .args = var_args,
+                            .return_type = .php_value,
+                        } }, .php_value);
+                    }
+                }
+                // empty($arr[$key])（F-142-b）：缺失键静默（PHP empty 对缺失键为 true、零诊断）
+                if (call_data.args.len == 1 and arg_node != null and arg_node.?.tag == .array_access) {
+                    const access = arg_node.?.data.array_access;
+                    if (access.index) |key_idx| {
+                        const arr_reg = try self.generateExpression(access.target);
+                        const key_reg = try self.generateExpression(key_idx);
+                        const arr_args = try self.allocator.alloc(Register, 2);
+                        arr_args[0] = arr_reg;
+                        arr_args[1] = key_reg;
+                        return self.emitWithResult(.{ .call = .{
+                            .func_name = "php_array_empty",
+                            .args = arr_args,
+                            .return_type = .php_value,
+                        } }, .php_value);
+                    }
                 }
             }
         }
@@ -9014,6 +9053,27 @@ prop_name: ?[]const u8 = null,
     }
 
     /// Generate IR for static property access
+    /// ★F-142：isset/empty 的静态属性静默调用（单实参）。动态类名先求值类名变量。
+    fn emitStaticPropertyQuietCall(self: *Self, node: *const Node, func_name: []const u8) !Register {
+        const sp = node.data.static_property_access;
+        const class_name = self.getString(sp.class_name);
+        const class_reg = if (class_name.len > 0 and class_name[0] == '$') blk: {
+            if (self.getVarRegister(class_name)) |ptr_reg| {
+                break :blk try self.emitWithResult(.{ .load = .{ .ptr = ptr_reg, .type_ = .php_value } }, .php_value);
+            }
+            break :blk try self.emitWithResult(.{ .global_get = .{ .name = class_name } }, .php_value);
+        } else try self.emitPropertyNameValue(class_name);
+        const prop_reg = try self.emitPropertyNameValue(self.getString(sp.property_name));
+        const args = try self.allocator.alloc(Register, 2);
+        args[0] = class_reg;
+        args[1] = prop_reg;
+        return self.emitWithResult(.{ .call = .{
+            .func_name = func_name,
+            .args = args,
+            .return_type = .php_value,
+        } }, .php_value);
+    }
+
     fn generateStaticPropertyAccess(self: *Self, node: *const Node) !Register {
         const access_data = node.data.static_property_access;
         var class_name = self.getString(access_data.class_name);

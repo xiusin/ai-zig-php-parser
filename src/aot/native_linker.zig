@@ -3928,9 +3928,12 @@ pub const NativeLinker = struct {
             }
 
             // AOT-CODEGEN-012：trait 注册同样带位置 CI 查重
+            // ★F-74：泛型类型注册块（本函数上方）已经注册过同名 meta（含 is_trait 与静态属性），
+            //   这里若再无脑注册 `{tname}_meta` 会把同一个名字注册两次 ⇒ 运行期 Cannot redeclare trait。
+            //   仅在缺失时注册（正常路径不会进入），同时保留本块为 trait 方法准备的静态属性元数据。
             const escaped_tf = try self.escapeString(td.location.file);
             defer self.allocator.free(escaped_tf);
-            try writer.print("    try runtime.registerClassWithLocation({s}_meta, \"{s}\", {d});\n", .{ tname, escaped_tf, td.location.line });
+            try writer.print("    if (runtime.findClass(\"{s}\") == null) try runtime.registerClassWithLocation(trait_{s}_meta, \"{s}\", {d});\n", .{ tname, tname, escaped_tf, td.location.line });
         }
 
         // 初始化类常量
@@ -4533,7 +4536,7 @@ pub const NativeLinker = struct {
         .{ "sleep", bi(.{ .runtime_name = "php_sleep", .needs_allocator = false }) },
         .{ "usleep", bi(.{ .runtime_name = "php_usleep", .needs_allocator = false }) },
 
-        .{ "srand", .{ .runtime_name = "php_srand", .needs_allocator = false } },
+        .{ "srand", bi(.{ .runtime_name = "php_srand", .needs_allocator = false, .handler_params = 2, .optional_defaults = &.{ "runtime.Value.initNull()", "runtime.Value.initInt(0)" } }) },
         .{ "mt_srand", .{ .runtime_name = "php_mt_srand", .needs_allocator = false } },
         .{ "random_int", .{ .runtime_name = "php_random_int", .needs_allocator = false } },
         .{ "random_bytes", .{ .runtime_name = "php_random_bytes", .needs_allocator = true } },
@@ -4732,6 +4735,10 @@ pub const NativeLinker = struct {
         .{ "php_object_isset", bi(.{ .runtime_name = "php_object_isset", .needs_allocator = false, .may_raise = true }) },
         .{ "php_object_empty", bi(.{ .runtime_name = "php_object_empty", .needs_allocator = false, .may_raise = true }) },
         .{ "php_array_isset", bi(.{ .runtime_name = "php_array_isset", .needs_allocator = false, .may_raise = true }) },
+        .{ "php_isset_static_property", bi(.{ .runtime_name = "php_isset_static_property", .needs_allocator = false, .may_raise = false }) },
+        .{ "php_empty_static_property", bi(.{ .runtime_name = "php_empty_static_property", .needs_allocator = false, .may_raise = false }) },
+        .{ "php_empty_var", bi(.{ .runtime_name = "php_empty_var", .needs_allocator = false, .may_raise = false }) },
+        .{ "php_array_empty", bi(.{ .runtime_name = "php_array_empty", .needs_allocator = true, .may_raise = true }) },
         .{ "php_args_append_spread", bi(.{ .runtime_name = "php_args_append_spread", .needs_allocator = true }) },
         .{ "php_invoke_callable_args_array", bi(.{ .runtime_name = "php_invoke_callable_args_array", .needs_allocator = true }) },
         .{ "php_object_call_safe_args_array", bi(.{ .runtime_name = "php_object_call_safe_args_array", .needs_allocator = true }) },
@@ -23630,6 +23637,18 @@ pub const NativeLinker = struct {
                                     } else {
                                         try writer.writeAll("runtime.Value.initBool(false);\n");
                                     }
+                                } else if (std.mem.eql(u8, runtime_name, "php_empty_var")) {
+                                    // empty($var)（F-142-b）：未定义变量静默，PHP empty 对未定义变量返回 true
+                                    try writer.writeAll("{\n        const __empty_v_");
+                                    try writer.print("{d} = getGlobalVarNoWarn(", .{reg.id});
+                                    if (op.args.len > 0) {
+                                        try self.writePhpValueExpr(writer, @as(std.meta.Tag(IR.Type), op.args[0].type_), op.args[0].id);
+                                        try writer.writeAll(".asString().data);\n");
+                                    } else {
+                                        try writer.writeAll("\"\");\n");
+                                    }
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "runtime.Value.initBool(runtime.php_empty_val(__empty_v_{d}));\n", .{reg.id});
+                                    try writer.print("        __empty_v_{d}.release(runtime.runtime_allocator);\n    }}\n", .{reg.id});
                                 } else if (std.mem.eql(u8, runtime_name, "php_global_unset_var")) {
                                     // unset($var): 从全局变量表中删除
                                     if (op.args.len > 0) {
@@ -25109,7 +25128,7 @@ pub const NativeLinker = struct {
                         // 具体类名：设置 ClassContext
                         try writer.print("    {{\n", .{});
                         try writer.print("        const meta = runtime.findClass(\"{s}\");\n", .{escaped_class});
-                        try writer.writeAll("        const guard = if (meta) |m| runtime.ClassContext.init(m, m) else null;\n");
+                        try writer.writeAll("        const guard = if (meta) |m| runtime.ClassContext.initStaticAccess(m) else null;\n");
                         try writer.writeAll("        defer if (guard) |*g| g.deinit();\n");
                         try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
                         try writer.print("        reg_{d} = try runtime.php_get_static_property(\"{s}\", \"{s}\");\n", .{ reg.id, escaped_class, escaped_prop });
@@ -25148,7 +25167,7 @@ pub const NativeLinker = struct {
                     // 具体类名：设置 ClassContext
                     try writer.print("    {{\n", .{});
                     try writer.print("        const meta = runtime.findClass(\"{s}\");\n", .{escaped_class});
-                    try writer.writeAll("        const guard = if (meta) |m| runtime.ClassContext.init(m, m) else null;\n");
+                    try writer.writeAll("        const guard = if (meta) |m| runtime.ClassContext.initStaticAccess(m) else null;\n");
                     try writer.writeAll("        defer if (guard) |*g| g.deinit();\n");
                     try writer.print("        _ = try runtime.php_set_static_property(\"{s}\", \"{s}\", ", .{ escaped_class, escaped_prop });
                     try self.writePhpValueExpr(writer, value_type_tag, op.value.id);

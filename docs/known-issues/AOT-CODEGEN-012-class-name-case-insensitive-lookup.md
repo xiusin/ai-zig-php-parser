@@ -8240,13 +8240,13 @@ R-214 曾把“归因里出现 setSourceLocation/PHI/调用行等非局部增删
 ### 131.3 读数（纯模板 ⇒ 按策略跑定向门；本批触及核心诊断路径，另跑一次全量回归）
 | 腿 | 读数 |
 |---|---|
-| ERRH 18 臂（含 h7 掩码／h10 handler-true／h11 无处理器 fatal） | **same=17 diff=0 compile_fail=1**（h9 `strlen()` arity＝既知编译期拒）`rc_mismatch=0 residue=0`（80 s）；修前 h7 自 R-218 起就红（旧快照来自早期代次，不可当基线） |
+| ERRH 18 臂（含 h7 掩码／h10 handler-true／h11 无处理器 fatal） | **same=17 diff=0 compile_fail=1**（h9 `strlen()` arity＝既知编译期拒）`rc_mismatch=0 residue=0`（80 s）；h7 在 R-223 首跑为 DIFF，根因＝F-140；**修前最后一份 h7=SAME 快照来自早期代次（非本代基线），无法逐代复证其自 R-218 起的状态**，只记现状 |
 | C271（`error_get_last` 11 臂） | **11/11 SAME**（50 s） |
 | C273（`E_STRICT` 10 臂） | **10/10 SAME**（45 s） |
 | C269（`error_reporting` 14 臂） | **14/14 SAME**（63 s） |
 | 探针矩阵 | `t1 t2 t3 t4 t5 last2` 六枚 + `f97b` + `m/n`（handler 掩码/嵌套恢复）**全部 stdout/stderr/rc 逐字节 SAME** |
 | `zig build test` | 21/21、**326/326**、rc=0 |
-| 主回归 | 首次跑 **PASS=36 FAIL=32**，32 枚全为 `FAIL_COMPILE: NoSpaceLeft` ⇒ **环境失效，整轮作废**（证据 `c274_regression_R223_diskfull_INVALID_tmp.log`）；根因＝`.zig-cache` 74 GB、根分区仅剩 134 MiB。清理缓存并全量重建后重跑，读数回填于下 |
+| 主回归 | 首次跑 **PASS=36 FAIL=32**，32 枚全为 `FAIL_COMPILE: NoSpaceLeft` ⇒ **环境失效，整轮作废**（证据 `c274_regression_R223_diskfull_INVALID_tmp.log`）；根因＝`.zig-cache` 74 GB、根分区仅剩 134 MiB。清理缓存（释放 74 GB）并全量重建后重跑：**PASS=68 FAIL=0**，`SELF_CHECK_OK rows=68 uniq=68`（证据 `c274_regression_R223b_tmp.log`） |
 | 影子 | 纯模板 ⇒ 生成码不变，按加速策略跳过 |
 
 ### 131.4 边界 / 新登记
@@ -8256,3 +8256,284 @@ R-214 曾把“归因里出现 setSourceLocation/PHI/调用行等非局部增删
 - handler 内抛异常（F-98）与注册 handler 返回值的所有权语义仍未收口。
 - `trigger_error` 的非字符串消息（PHP 侧为 TypeError）未实测、未改。
 - 代次锚：`tpl 7132f27576478422cbe632e1a2857eb0`／`nlk f987285cf7cda1cb34c4d03540b6e082`（未提交）。
+
+## 132. ★R-224 落地记录（F-74 主面闭环：带静态属性的 trait 二次注册；F-74-b 新立）
+
+### 132.1 根因（KEEP_TEMP 数生成码，一次取证）
+`trait T { public static $s = 9; } class C { use T; }` 的生成码里：
+- 泛型类型注册块已产出 `const T_meta = ClassMeta.init(...)`、`is_trait = true`、`addProperty(...is_static=true)`、`setStaticProperty("s", ...)`、`registerClassWithLocation(T_meta, file, 2)`；
+- 随后“含静态属性的 trait”专用块又产出 `const trait_T_meta = ...`、重复 addProperty/setStaticProperty，但注册行写的是 **`registerClassWithLocation(T_meta, …)`（泛型 meta，而不是 `trait_T_meta`）** ⇒ 同名 trait 第二次注册 ⇒ 运行期 `Cannot redeclare trait T`、rc=255。
+- 计数实证：`trait_T_meta = ClassMeta.init` 出现 **1** 次；`registerClassRedeclare("T"` 出现 **0** 次（不是甲型“types 重复”，是乙型“专用块注册了错误对象”）。语料 trait 声明 **0** 枚 ⇒ 回归/影子零保护，只能靠门。
+
+### 132.2 实现（发射器一处，不删块）
+- `native_linker.zig` 专用 trait 块末行改为条件注册：
+  `if (runtime.findClass("{T}") == null) try runtime.registerClassWithLocation(trait_{T}_meta, …);`
+- 泛型块已完整注册 trait（含静态属性、方法、魔术方法），正常路径不会进入该条件；专用块保留为“缺失时兜底”，其 `trait_{T}_meta` 仍被 addProperty/setStaticProperty 使用。
+- 仅“trait + 静态属性”文件生成码变化；语料 0 枚 ⇒ 主回归按加速策略跳过（并以 `grep -rlE 'trait [A-Za-z_]'`＝0 记录零暴露）。
+
+### 132.3 读数
+| 腿 | 读数 |
+|---|---|
+| C275（新门 10 臂） | `AOT_BIN=/bin/false` ⇒ **10 CF**；实跑 **9 SAME / 1 DIFF**，唯一 DIFF＝`t7`（注册红 F-74-b）43 s |
+| 覆盖臂 | t1 类访问静态属性、t2 `self::$s`、t3 两类各持一份、t4 写/自增、t5 typed 静态属性＋`static::$n`、t6 实例属性守卫、t8 普通类静态属性守卫、t9 类侧写后 trait 方法读、t10 第二类独立读 |
+| 探针 | `m1/m2/m3/d`：m2/m3 全字节 SAME；m1/d 仅差“直接 `T::$s`”的 Deprecated（值全对） |
+| `zig build test` | 21/21、**326/326**、rc=0 |
+| 主回归/影子 | 跳过：仅 trait+静态属性文件受影响，语料 trait 声明＝0（零暴露，记录在案） |
+| 代次锚 | `nlk 5e7d0cc46139a4ffc30f2201e2a5da1a`／`tpl 7132f27576478422cbe632e1a2857eb0`（未提交） |
+
+### 132.4 边界 / 新登记
+- **F-74 主面关闭**（不再 `Cannot redeclare trait`；类侧读写、`self`/`static`、两类独立、typed 静态、实例属性全部合 PHP）。
+- **F-74-b 新立（P2）**：直接以 trait 名访问静态属性（`T::$s` 的读/写/`++`/`isset`/`empty`/`??`）PHP 每次访问发一条 `Deprecated: Accessing static trait property T::$s is deprecated, it should only be accessed on a class using the trait`；AOT **值全对、零诊断**。`d` 探针八形实测（行号/条数）；修法需在 get/set 运行期入口识别 `meta.is_trait`，并处理 `T::$s++` 的 get+set 双调用只能发一条。
+- 边界：`class D { use T; public static $s = 100; }`（属性定义冲突）AOT 编译期报 `trait property conflict`、PHP 组合期 Fatal，两侧都失败但文案/阶段不同 ⇒ 不入字节门（既存差异）。
+
+## 133. ★R-225 落地记录（F-74-b 闭环：直接以 trait 名访问静态属性的弃用；F-141/F-142 新立）
+
+### 133.1 契约（PHP 8.5.8 实测，`d`／`e`／`h`／`m1`／`scope`／`prot` 探针）
+| 形态 | PHP |
+|---|---|
+| `T::$s`（public）读/写/`++`/`+=`/isset/empty/`??` | **每次访问**一条 `Deprecated: Accessing static trait property T::$s is deprecated, it should only be accessed on a class using the trait`；行号＝访问行 |
+| `T::$s++` / `T::$s += n` | 每表达式**一条**（读改写不重复） |
+| 动态类名 `$c = "T"; $c::$s` | 同样一条 |
+| `@` | 抑制显示；`error_reporting(0)` 亦然；handler 仍收到 8192（F-92/F-140 语义） |
+| `T::$p`（private/protected） | 不发弃用，直接 `Error: Cannot access private/protected property T::$p`（即使在 trait 方法内用 `T::` 亦然） |
+| `isset(T::$nope)`（未声明） | 不发弃用，返回 false |
+| 类侧 `C::$s`、`self::$s`、`static::$s` | **不发**弃用 |
+
+### 133.2 实现（纯模板）
+- 新增 `noteTraitStaticPropertyAccess(meta, prop, from_get)`：`meta.is_trait` ∧ 属性**存在且 public** 才发；消息与 PHP 同款。
+- `php_get_static_property` 在“存在且可见”分支发（`from_get=true`）。
+- `php_set_static_property` 在属性存在时发（`from_get=false`）；若上一条正是**同文件同行的 get**，则去重并消费标记 ⇒ `T::$s++`/`+=` 的 get+set 只发一条。
+- 未声明/非 public 属性路径不发；`self/static/parent` 解析结果 `is_trait=false`，天然不发。
+- 生成码零变化。
+
+### 133.3 读数
+| 腿 | 读数 |
+|---|---|
+| C275（扩至 **13 臂**：新增 t11 handler、t12 `@`、t13 `+=`/isset/empty/`??`） | 自证 **13 CF**；实跑 **13/13 SAME**（56 s），无注册红 |
+| 探针 | `d`（八形）／`m1`／`h`（handler+掩码）／`undef` 全字节 SAME；`priv`/`scope`/`prot` 仅剩既存过接受（见 F-141） |
+| `zig build test` | 21/21、**326/326**、rc=0 |
+| 主回归/影子 | 纯模板 + 对非 trait meta 立即返回；按加速策略跳过（无生成码变化） |
+| 代次锚 | `tpl b53381a63d4b993c738d674a21abe58e`／`nlk 5e7d0cc46139a4ffc30f2201e2a5da1a`（未提交） |
+
+### 133.4 边界 / 新登记
+- **F-74-b 关闭**。
+- **F-141 新立（P1，既存过接受）**：外部访问 **private/protected 静态属性**（trait 与普通类都中）AOT 返回属性值、rc=0；PHP 报 `Error: Cannot access private/protected property G::$p`、rc=255。根因＝发射器给每次静态访问套 `ClassContext(target)`，`checkPropertyAccess` 因而把外部访问误判为类内作用域；`priv`/`cpriv` 探针实测。
+- **F-142 新立（P1，既存）**：`isset()/empty()` 作用于**未声明静态属性**时 AOT 抛未捕获 `Access to undeclared static property` fatal；PHP 返回 `false`/`true`。根因＝isset 路径复用 `php_get_static_property`（后者对缺失属性 throw）；`cisset` 探针实测（普通类亦中）。
+- 去重只按 (file,line) 且仅抑制 set：同一行两条独立语句“先读公共 trait 静态属性、再写”会少发一条（PHP 会发两条）；极窄边界，未处理。
+
+## 134. ★R-226 落地记录（F-142 闭环：静态属性的 isset/empty 静默语义；F-142-b 新立）
+
+### 134.1 契约（PHP 8.5.8 实测，`p`／`in`／`e`／`cisset`／`g` 探针）
+| 形态 | PHP |
+|---|---|
+| `isset(G::$q)` 存在非 null | true；`G::$n = null` ⇒ false；未声明 ⇒ false |
+| `empty(G::$q)` 存在非空 | false；null/未声明 ⇒ true |
+| private/protected 从外部 | `isset` false、`empty` true；**零诊断**（不抛 Error、不发 Deprecated） |
+| 类内 `self::$p`／子类 `self::$r` | 可访问，按值给 true/false |
+| `T::$s`（trait public） | 同普通静态属性，且每次访问一条 trait Deprecated（R-225） |
+| `T::$p`（trait private） | false/true，零 Deprecated |
+| typed 未初始化静态属性 | false / true |
+| 动态类名 `$c = "G"; isset($c::$q)` | true |
+| `isset(G::$q, G::$n)` 多实参 | 全部非 null 才 true（走通用路径） |
+
+### 134.2 实现
+- IR：`isset`／`empty` 的**单实参**且节点为 `.static_property_access` 且类名非 `$` 变量 ⇒ 生成 `php_isset_static_property(class,prop)` / `php_empty_static_property(class,prop)` 调用；多实参与动态类名保持原通用路径。
+- 模板：`resolveStaticPropertyMeta`（self/static/parent 语义与 get/set 一致）；两个 helper 按“解析类 → 找属性声明 → 可见性检查 → 缺失返回 false/true → public 时发 trait 弃用 → 值判空/empty”执行；均返回 `Value`（不抛，`may_raise=false`）。
+- 内置表登记两条（`needs_allocator=false`），生成码不再对缺失静态属性走会 throw 的 `php_get_static_property`。
+
+### 134.3 读数
+| 腿 | 读数 |
+|---|---|
+| C276（新门 **11 臂**：public/null/缺失、private/protected 外部、类内/子类、trait public/private/未声明、typed 未初始化、动态类名、多实参、非静态守卫） | 自证 **11 CF**；实跑 **11/11 SAME**（47 s） |
+| 探针 | `p`（完整矩阵）、`in`（类内/子类/typed）、`e`（trait 边界）、`cisset` 全字节 SAME；`g` 仅剩 `empty($undef)`/`empty($arr[missing])` 的 Warning（F-142-b） |
+| `zig build test` | 21/21、**326/326**、rc=0 |
+| 主回归/影子 | 语料静态 `isset/empty(...::...)` 暴露 **0 枚**；本批触及 IR ⇒ 全量回归 **PASS=68 FAIL=0**、`SELF_CHECK_OK rows=68 uniq=68`（证据 `c277_regression_R226_tmp.log`）；影子按零暴露策略跳过 |
+| 代次锚 | `irg 63353194eafa69d7d28fefca5d9876d7`／`tpl 690b52a5f0dfec723aa2354c35725087`／`nlk 7764578cc3282ac23685964a1e5d05a9`（未提交） |
+
+### 134.4 边界 / 新登记
+- **F-142 主面关闭**。
+- **F-142-b 新立（P2）**：`empty($undef)` / `empty($arr[missing])` 在 AOT 仍发 `Undefined variable` / `Undefined array key` Warning，PHP 静默；根因＝`empty` 只特判了对象属性，变量/数组键仍走普通读取。`g` 探针实测（第 4 行两条）。
+- 多实参中的**缺失静态属性**（`isset(G::$q, G::$missing)`）仍走通用路径 ⇒ 未声明会抛 fatal；单实参已修。归入 F-142-b 同族后续。
+- **F-141 仍开**：外部访问 private/protected 静态属性的**普通读取**仍是过接受；本批只修 isset/empty 的静默语义。
+
+## 135. ★R-227 落地记录（F-142-b 闭环：empty() 静默语义扩展）
+
+### 135.1 契约（PHP 8.5.8 实测，`e`／`g`／`dyn` 探针）
+| 形态 | PHP |
+|---|---|
+| `empty($undef)` | true，**零诊断**；已定义假值（0/""/false/null/[]）true，真值 false |
+| `empty($arr[$k])` | 键存在按值判空；**缺失键 true、零诊断**；null 键另发 Deprecated（既有） |
+| 非数组标量取下标 `empty($i["k"])`／`empty(null["k"])` | true，零诊断 |
+| 字符串偏移 `empty($s["x"])`／`empty($s["0"])` | true / 按字符真值，零诊断 |
+| 非 ArrayAccess 对象当数组 | `Error: Cannot use object of type stdClass as array`（与普通读取一致） |
+| ArrayAccess | `offsetExists` → 若 true 再 `offsetGet`；`empty(offsetGet 值)`；`e4` 的 `EX/GET` 顺序逐字节一致 |
+| 动态类名静态属性 `isset/empty($c::$x)` | 缺失 false/true、零诊断；存在按值（`dyn` 探针） |
+| 普通读取缺键/未定义变量 | **仍必须告警**（反向守卫 e8/e9） |
+
+### 135.2 实现
+- 模板：`php_array_empty(arr,key,allocator)`＝`php_array_get_coalesce`（静默读，含 ArrayAccess/字符串/非数组/对象 Error 语义）→ `php_empty_val`；`php_empty_val` 改 `pub` 供生成码调用。
+- 发射器：`php_empty_var` 专用生成——`getGlobalVarNoWarn(name)` 取全局值 → `php_empty_val` → release（未定义变量静默）。
+- IR：`empty` 单实参新增 `.variable`（无局部槽的全局）与 `.array_access` 分流；静态分支统一走 `emitStaticPropertyQuietCall`（支持 `$c::$x` 动态类名）；`isset` 同步复用该 helper。
+- 内置表：`php_empty_var`（无分配/不抛）、`php_array_empty`（需 allocator/可抛）。
+
+### 135.3 读数
+| 腿 | 读数 |
+|---|---|
+| C277（新门 **12 臂**：变量/数组键/非数组/字符串偏移/ArrayAccess 顺序/对象属性/动态静态/trait 弃用/两条反向守卫/局部变量/非 ArrayAccess 对象/字面量） | 自证 **12 CF**；实跑 **12/12 SAME**（52 s） |
+| C276（静态 isset/empty 11 臂） | **11/11 SAME**（47 s） |
+| C275（trait 静态 13 臂） | **13/13 SAME**（56 s） |
+| 探针 | `e`（empty 全矩阵）、`g`、`dyn` 全字节 SAME |
+| `zig build test` | 21/21、**326/326**、rc=0 |
+| 主回归 | 语料 `empty()` 49 处（21 变量＋3 数组键）⇒ 本批触及 IR/发射器，全量回归 **PASS=68 FAIL=0**、`SELF_CHECK_OK rows=68 uniq=68`（证据 `c278_regression_R227_tmp.log`） |
+| 代次锚 | `irg 0d3d260e831d4be6e74a80025edb81f1`／`tpl 57315972ae3a62b99b9c6158d4336b47`／`nlk 16906dc020aaed28aadf55f50daee18d`（未提交） |
+
+### 135.4 边界
+- **F-142-c 新立（P2）**：多实参中的缺失静态属性/未定义变量（`isset(G::$q, G::$missing)`、`isset($undef, $x)`）仍走通用求值路径 ⇒ 可能 fatal 或发 Warning；单实参已静默（R-226/R-227）。
+- `empty(<非变量表达式>)`（如 `empty(f())`）走通用路径，语义未变。
+- `php_array_get_coalesce` 对 `null` 数组键发 Deprecated、对 `'1abc'` 类字符串键发 Illegal offset——本门只覆盖 `"x"`/`"0"`，其余口径沿用 coalesce 既有契约。
+
+## 136. ★R-228 落地记录（F-141 闭环：静态属性可见性；消息类名对齐）
+
+### 136.1 契约（PHP 8.5.8 实测，`v1`–`v11` 探针）
+| 形态 | PHP |
+|---|---|
+| 外部 public 读/写/自增 | 正常 |
+| 外部 private/protected 读/写 | `Error: Cannot access private/protected property {访问类名}::$p`（**消息用访问类名**：`H::$p` 而非声明类 `G::$p`） |
+| 同类方法内 `self::$p` / `G::$p`（private/protected） | 正常读写 |
+| 子类方法内 `self::$r`（protected） | 正常；子类名访问继承 private（顶层）⇒ Error |
+| 异类方法访问 public | 正常 |
+| 外部 `isset/empty` private/protected | false / true，零诊断（R-226 口径不变） |
+| trait public 直接读 | 值 + Deprecated（R-225 口径不变） |
+
+### 136.2 根因与实现
+- 根因：发射器对**每次显式类名静态属性访问**都套 `ClassContext.init(meta, meta)`，把当前词法作用域强行设成目标类 ⇒ `checkPropertyAccess` 把外部访问误判为类内作用域，private/protected 被过接受。
+- 修法：新增 `ClassContext.initStaticAccess(meta)`——只切换 **called class**、**保留词法作用域**；静态属性 get/set 两处发射点改用它。方法调用入口的 `ClassContext.init(owner...)` 仍建立真实作用域，因此类内 private/子类 protected 不受影响。
+- 消息类名：可见性错误改用 `meta.name`（访问类名），与 PHP `H::$p` 对齐（原用 `decl.class.name`）。
+
+### 136.3 读数
+| 腿 | 读数 |
+|---|---|
+| C278（新门 **11 臂**：public 读写、private/protected 读写外部、同类/子类可访问、子类名访问继承 private、异类 public、isset/empty 守卫、trait public） | 自证 **11 CF**；实跑 **11/11 SAME**（51 s） |
+| C275 / C276 / C277 | 13/13、11/11、12/12 全部复跑 SAME |
+| `zig build test` | 21/21、**326/326**、rc=0 |
+| 主回归 | 发射器改动影响所有静态属性访问 ⇒ 全量回归 **PASS=68 FAIL=0**、`SELF_CHECK_OK rows=68 uniq=68`（证据 `c279_regression_R228_tmp.log`） |
+| 代次锚 | `nlk 73355c86ab98b50bd4b739d6b38b85d5`／`tpl d575314e6b12714895fbf34e45a1eb9c`／`irg 0d3d260e…`（未提交） |
+
+### 136.4 边界 / 新登记
+- **F-141 关闭**。
+- 类方法内“无权访问”的 fatal 栈帧：AOT 只印 `#0 {main}`，PHP 带调用帧（宪法允许的栈帧差异，不入字节门）。
+- `state/static` 等特殊类名路径本就不套 wrapper，仍依赖方法入口真实作用域；本批未改。
+- 多实参 `isset` 的缺失静态属性/未定义变量仍走通用路径（**F-142-c**，见 §135.4）。
+
+## 137. ★R-229 落地记录（F-126＋F-127 闭环：ValueError 族与 32 位值域；模板-only）
+
+### 137.1 契约（PHP 8.5.8 实测，`p` 探针 15 形）
+| 形态 | PHP |
+|---|---|
+| `array_chunk(_,0)`／`(-1)` | `ValueError: array_chunk(): Argument #2 ($length) must be greater than 0` |
+| `array_fill(0,-3,"x")` | `ValueError: array_fill(): Argument #2 ($count) must be greater than or equal to 0` |
+| `random_int(5,1)` | `ValueError: random_int(): Argument #1 ($min) must be less than or equal to argument #2 ($max)` |
+| `hash_pbkdf2(...,0,4)` | `ValueError: hash_pbkdf2(): Argument #4 ($iterations) must be greater than 0`（`-1` 同） |
+| `hash_pbkdf2(...,1,-1)` | `ValueError: hash_pbkdf2(): Argument #5 ($length) must be greater than or equal to 0` |
+| `hash_pbkdf2(...,1,0)` | **哨兵合法**：返回整个摘要（sha256 ⇒ 64 位十六进制） |
+| `base_convert("ff",0,10)`／`(16,37)` | `ValueError: base_convert(): Argument #2/#3 ($from_base/$to_base) must be between 2 and 36 (inclusive)` |
+| `sleep(-1)`／`usleep(-1)` | `ValueError: ... must be greater than or equal to 0` |
+| `long2ip(2^32+1)`／`(-1)` | `'0.0.0.1'`／`'255.255.255.255'`（纯 32 位掩码） |
+| `sleep(2^32)` | `int(0)`（正数按 32 位折叠） |
+| 全部 ValueError | 可被 `try/catch (Throwable)` 捕获，类名/消息逐字节一致 |
+
+### 137.2 实现（纯模板，7 个函数）
+- `throwThrowable("ValueError", …)` 统一抛出（原先 `error.InvalidArgument`／`error.InvalidRange` Zig 外逸）。
+- `array_chunk`：`length<1` 分支改 ValueError（位置在数组检查后）。
+- `array_fill`：去掉 `@max(0,…)`，改负 count ValueError。
+- `random_int`：`min>max` 改 ValueError。
+- `hash_pbkdf2`：`iterations<=0`／`length<0` 各抛 ValueError；**`length=0` 哨兵保留**（仍走整摘要）。
+- `base_convert`：底数 `2..36` 外抛 ValueError（去掉静默夹取）。
+- `long2ip`：`ip_num = @truncate(@as(u64,@bitCast(i64)))`。
+- `sleep`/`usleep`：负数 ValueError；正数 `@truncate` 32 位折叠（`sleep(2^32)=0`）。
+- 注册表 `may_raise` 均为 true（默认）⇒ 调用点异常路由生效；`zig_escape` 归零。
+
+### 137.3 读数
+| 腿 | 读数 |
+|---|---|
+| BLT H/I/J 段（51 臂，`ONLY=b159…b209`） | 自证 **51 CF**；实跑 `same=37 diff=14`、**`zig_escape=0`**、`aot_caught=27`、`repo_build_residue=0`（251 s） |
+| 逐臂 join（vs `c047_r206_snapshot_tmp.tsv`） | **J 段 9 枚 `DIFF→SAME` 恰为 b197–b205＋b208**；`SAME→DIFF=0`；b206/b207/b209 三道守卫保持 SAME；其余 14 枚红（b170–b172＝F-128；b183–b193＝I 段既存）**前后同态** |
+| 探针 | `p.php` 15 形（含 try/catch 类名+消息）**逐字节 SAME** |
+| `zig build test` | 21/21、**326/326**、rc=0 |
+| 主回归 | 模板改动影响多个内置函数 ⇒ 全量回归 **PASS=68 FAIL=0**、`SELF_CHECK_OK rows=68 uniq=68`（证据 `c280_regression_R229_tmp.log`） |
+| 代次锚 | `tpl ef1ede18994758ae1482cded91a387a2`／`nlk 73355c86…`／`irg 0d3d260e…`（未提交） |
+
+### 137.4 边界
+- `array_chunk($nonArray, 0)` 的数组形参检查仍是 `error.InvalidArgument`（F-62f 数组参数面，未在本批）；本批只处理 length 域。
+- `hash_pbkdf2` 的 `iterations` 超出 u32 时按 32 位折叠（PHP 会执行该次数，实际不可测）；已登记为值域边界。
+- F-128（`checkdate` 的 `.may_raise=false`）未动，b170–b172 仍红。
+
+## 138. ★R-230 落地记录（F-143 闭环：对象属性 isset 判值；F-142-c 尝试后撤回，维持开放）
+
+### 138.1 F-143 契约（PHP 8.5.8 实测，`f143/a` 探针）
+| 形态 | PHP |
+|---|---|
+| `isset($o->p)`（值为 1） | true |
+| `isset($o->n)`（值显式 null） | **false**（原 AOT 见声明/动态属性即 true） |
+| `isset($o->x)`（未声明） | false，零诊断 |
+| `isset($c->u)`（typed 无默认值/未初始化） | false |
+
+### 138.2 F-143 实现（纯模板）
+- `php_object_isset`：已声明属性走 `getPropertyDirect` → 解 Ref → **判 `!isNull()`**；动态属性同样取槽判空；`__isset` 分支语义不变。
+- 门 C276 扩 **12 臂**（新增 s12 对象属性矩阵）：自证 12 CF、实跑 **12/12 SAME**；C275 13/13、C277 12/12 复跑全绿。
+
+### 138.3 F-142-c 尝试与撤回（多实参 isset 静默/短路）
+- 尝试形态：IR 内为多实参左值生成静默检查 + 嵌套 `cond_br` + `done` phi，PHP 实测为**从左到右短路**（ArrayAccess 只调第一个 `offsetExists`）。
+- 结果：2 实参直传（m1/m2/m3/m4/m6/m8/m9/m11）可运行且语义对齐；但 **3+ 实参**（m5/m7）以及 **赋值/if 上下文**（m10）在 AST-direct 发射器报
+  `[AST-DIRECT-FAIL] unprocessed blocks: isset_multi_false_* / isset_multi_ok_*` ⇒ 编译失败。
+- 处置：**回退**多实参控制流与两个 helper，保留三条 `call_data.args.len == 1` 守卫。效果：
+  - 多实参不再“只判首参”（旧的 property/variable/array 单实参特判无 len 守卫，会提前 return）；现在走通用 `php_isset` 全参求值；
+  - C279 复跑 **0 compile_fail**，`m7/m8/m10/m11` SAME；仍红 7 枚：`m1 m2 m3 m4 m5 m6 m9`（未定义变量/缺失数组键发 Warning、缺失静态属性 fatal、ArrayAccess 不短路 GET vs EX）。
+- **F-142-c 维持开放（P2）**：需 AST-direct 发射器支持表达式位嵌套条件/phi，或改用运行期短路 helper；C279 作为取证门（头部登记 7 枚已知红，不作全绿判据）。
+
+### 138.4 读数与锚
+| 腿 | 读数 |
+|---|---|
+| C276（12 臂） | 自证 12 CF；实跑 **12/12 SAME**（57 s） |
+| C275 / C277 | 13/13、12/12 |
+| C279（F-142-c 取证门） | 4 SAME / 7 DIFF / **0 CF**（已知红见 §138.3） |
+| `f143/a` 探针 | 逐字节 SAME |
+| `zig build test` | 21/21、**326/326**、rc=0 |
+| 主回归 | 本批触及模板＋IR ⇒ 全量回归 **PASS=68 FAIL=0**、`SELF_CHECK_OK rows=68 uniq=68`（证据 `c281_regression_R230_tmp.log`） |
+| 代次锚 | `nlk 73355c86…`／`tpl e5950a197064fcd9eccfcd2e3e0f32d5`／`irg fa9be7d9a6c45eaefd39b54e3d0d65ce`（未提交） |
+
+## 139. ★R-231 落地记录（F-62f 第三批：chr/count_chars/json_decode/mb_strpos/pathinfo/random_bytes；F-144 新立）
+
+### 139.1 契约（PHP 8.5.8 实测，`c210` 矩阵 ＋ `f62f3/p.php` 补充）
+| 站点 | 真值 |
+|---|---|
+| `chr($o)` | `TypeError … Argument #1 ($codepoint) must be of type int, Foo given` |
+| `count_chars("abc",$o)` | `Argument #2 ($mode) … int`；省略/null ⇒ mode 0（显式 null 另发 Deprecated） |
+| `json_decode(...,$o)` #3/#4 | `Argument #3 ($depth)`／`#4 ($flags) … int`；省略 ⇒ depth 512 / flags 0 |
+| `mb_strpos(...,$o)` #3 | `Argument #3 ($offset) … int`；省略/null ⇒ 0 |
+| `pathinfo($p,$o)` #2 | `Argument #2 ($flags) … int`；省略 ⇒ PATHINFO_ALL(15)；显式 0 ⇒ `""`（★见折衷） |
+| `pathinfo` flags 值域 | 15 ⇒ 数组；否则取最低置位 1/2/4/8；3/7/-1 ⇒ dirname；16 ⇒ `""` |
+| `random_bytes($o)` | `Argument #1 ($length) … int`；**≤0 ⇒ ValueError `must be greater than 0`**（原 `error.InvalidLength` 外逸） |
+| ★`chr(321)` | 值 `"A"` ＋ **Deprecated**「Providing a value not in-between 0 and 255 is deprecated…」⇒ **F-144 新立** |
+
+### 139.2 实现（纯模板）
+- `php_chr`：`requireNumParam("chr",1,"codepoint")`。
+- `php_count_chars`：`requireOptionalNumParam(... #2 mode)`；null/省略 ⇒ 0。
+- `php_json_decode`：args[2]/args[3] 存在时 `requireOptionalNumParam`，null 回落 512/0。
+- `php_mb_strpos`：`requireOptionalNumParam(... #3 offset)` 置于字符串早退之前；null ⇒ 0。
+- `php_pathinfo`：`requireOptionalNumParam(... #2 flags)`；**flags 值域修正**为“15/0 ⇒ 数组、否则最低置位 1/2/4/8、未知位 ⇒ ""”。
+- `php_random_bytes`：`requireNumParam` ＋ `len<=0` 抛可捕获 ValueError 同文案。
+
+### 139.3 读数
+| 腿 | 读数 |
+|---|---|
+| C280（新门 8 臂） | 自证 **8 CF**；实跑 **7 SAME / 1 DIFF**（唯一红＝t8 已登记的 null/0 折衷）35 s |
+| 探针 | `pi.php`（flags 0/1/2/4/8/15/16/3/7/-1）逐字节 SAME；`p.php` 仅剩三条 null Deprecated 缺口 |
+| `zig build test` | 21/21、**326/326**、rc=0 |
+| 主回归 | 模板改动影响高频函数 ⇒ 全量回归 **PASS=68 FAIL=0**、`SELF_CHECK_OK rows=68 uniq=68`（证据 `c282_regression_R231_tmp.log`） |
+| 代次锚 | `tpl e159a2c18d141602403badc82a33050c`／`nlk 73355c86…`／`irg fa9be7d9…`（未提交） |
+
+### 139.4 边界 / 新登记
+- **F-144 新立（P2）**：`chr(<0 或 >255>)` 的值正确（%256）但缺 `Deprecated`；PHP 每次越界调用一条。
+- **F-62f-opt（P2，新立）**：可选形参的“省略 vs 显式 null/0”不可区分——发射器把省略的 `pathinfo #2` 填 `int(0)`，与显式 0 同形 ⇒ 取常用默认（array）；显式 null/0 的 `Deprecated`/`""` 缺口。同类：count_chars/mb_strpos 显式 null 的 Deprecated。
+- **#148 余量**：`preg_match`/`preg_match_all` 的 #4 flags／#5 offset、`srand` #2 mode 尚未接线（下批）。

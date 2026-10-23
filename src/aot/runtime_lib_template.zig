@@ -3380,10 +3380,19 @@ pub fn php_object_isset(obj_val: Value, property_name_val: Value) !Value {
                 }
                 return Value.initBool(false);
             }
+            // ★F-143：已声明属性必须判值——值为 null / 未初始化时 isset=false（原先见声明就 true）
+            if (obj.getPropertyDirect(prop_name)) |pv| {
+                var actual = pv;
+                while (actual.isRef()) actual = actual.asRef().*;
+                return Value.initBool(!actual.isNull());
+            }
+            return Value.initBool(false);
         } else {
             // 属性未声明：先检查动态属性（直接查 HashMap，不触发 __isset），无则尝试 __isset
-            if (obj.properties.contains(prop_name)) {
-                return Value.initBool(true);
+            if (obj.properties.get(prop_name)) |pv| {
+                var actual = pv;
+                while (actual.isRef()) actual = actual.asRef().*;
+                return Value.initBool(!actual.isNull());
             }
             if (meta.findMethodLookup("__isset")) |lookup| {
                 const name_str = try PHPString.init(runtime_allocator, prop_name);
@@ -6953,11 +6962,12 @@ fn throwCannotIncDecError(val: Value, action: []const u8) Value {
 ///     （实测 `intdiv(-5.9,2)`=int -2）；NAN/INF/越界（`1e19`）⇒ `TypeError …, float given`；
 ///   · `int` 形参吃数值串：整值语法 ⇒ int；非整值 ⇒ 同句式但写作 `float-string "5.5"`（★带引号的原文，与 float 版**不同**）；越界（`"1e19"`）⇒ `string given`；
 ///   · `float` 形参吃 int ⇒ 静默加宽。
-const NumParamKind = enum { int_param, float_param, num_param };
+const NumParamKind = enum { int_param, nullable_int_param, float_param, num_param };
 
 fn numParamExpectedText(kind: NumParamKind) []const u8 {
     return switch (kind) {
         .int_param => "int",
+        .nullable_int_param => "?int",
         .float_param => "float",
         .num_param => "int|float",
     };
@@ -7070,7 +7080,7 @@ fn requireNumParamAs(
     null_type: ?[]const u8,
 ) ?Value {
     const expected = numParamExpectedText(kind);
-    const is_int_kind = kind == .int_param;
+    const is_int_kind = kind == .int_param or kind == .nullable_int_param;
 
     if (val.isInt()) return val;
 
@@ -11417,6 +11427,8 @@ pub fn php_strtr(str_val: Value, from_val: Value, to_val: Value, allocator: Allo
 pub fn php_mb_strpos(haystack: Value, needle: Value, offset: Value, encoding: Value, allocator: Allocator) !Value {
     _ = encoding; // 默认 UTF-8，忽略 encoding 参数
     _ = allocator;
+    // ★F-62f 第三批：可选 #3 ($offset)，Foo ⇒ TypeError；null/省略 ⇒ 默认 0
+    const offset_ok = requireOptionalNumParam("mb_strpos", 3, "offset", .int_param, offset) orelse return Value.initBool(false);
     if (!haystack.isString() or !needle.isString()) return Value.initBool(false);
 
     const hay = haystack.asString();
@@ -11426,8 +11438,8 @@ pub fn php_mb_strpos(haystack: Value, needle: Value, offset: Value, encoding: Va
 
     // 解析偏移量
     var start_byte: usize = 0;
-    if (!offset.isNull()) {
-        const off = offset.toInt();
+    if (!offset_ok.isNull()) {
+        const off = offset_ok.toInt();
         if (off < 0) return Value.initBool(false);
         start_byte = @intCast(off);
         if (start_byte > hay.data.len) return Value.initBool(false);
@@ -14683,8 +14695,17 @@ pub fn php_base_convert(number: Value, frombase: Value, tobase: Value, allocator
     if (!number.isString()) return Value.initString(try PHPString.init(allocator, "0"));
 
     const num_str = number.asString().data;
-    const from: u8 = @intCast(@min(@max(frombase_ok.toInt(), 2), 36));
-    const to: u8 = @intCast(@min(@max(tobase_ok.toInt(), 2), 36));
+    // ★F-126（R-229）：底数越界是 ValueError（原先 @min(@max(...)) 静默夹取）
+    const from_raw = frombase_ok.toInt();
+    if (from_raw < 2 or from_raw > 36) {
+        return throwThrowable("ValueError", "base_convert(): Argument #2 ($from_base) must be between 2 and 36 (inclusive)", runtime_allocator);
+    }
+    const to_raw = tobase_ok.toInt();
+    if (to_raw < 2 or to_raw > 36) {
+        return throwThrowable("ValueError", "base_convert(): Argument #3 ($to_base) must be between 2 and 36 (inclusive)", runtime_allocator);
+    }
+    const from: u8 = @intCast(from_raw);
+    const to: u8 = @intCast(to_raw);
 
     // 先将源进制转为十进制整数
     var decimal: u64 = 0;
@@ -20724,6 +20745,18 @@ pub const ClassContext = struct {
         return prev;
     }
 
+    /// ★F-141：显式类名静态属性访问的上下文 —— 只切换 called class，**不覆盖词法作用域**。
+    /// 外部访问时 scope 仍为 null（private/protected 被可见性检查拒绝）；
+    /// 类内访问保留方法入口的真实 scope（same-class private / 子类 protected 仍可用）。
+    pub fn initStaticAccess(called: ?*const ClassMeta) ClassContext {
+        const prev = ClassContext{
+            .prev_called = getCurrentCalledClass(),
+            .prev_scope = getCurrentScopeClass(),
+        };
+        setCurrentCalledClass(called);
+        return prev;
+    }
+
     pub fn deinit(self: *const ClassContext) void {
         setCurrentCalledClass(self.prev_called);
         setCurrentScopeClass(self.prev_scope);
@@ -23328,6 +23361,84 @@ pub fn php_call_static_with_ctx(ctx: Value, class_name: []const u8, method_name:
     return error.MethodNotFound;
 }
 
+/// ★F-74-b：直接以 trait 名访问静态属性（`T::$s`）时，PHP 每次访问发一条 E_DEPRECATED。
+///   仅在“属性存在且可见”的路径调用（PHP 对未声明/不可见属性只报 Error，不发弃用）。
+///   读改写（`T::$s++` / `T::$s += n`）在 AOT 落成 get+set 两次调用：get 发一条，紧随同位置的 set 去重。
+threadlocal var last_trait_static_note_file: []const u8 = "";
+threadlocal var last_trait_static_note_line: u32 = 0;
+threadlocal var last_trait_static_note_was_get: bool = false;
+
+fn noteTraitStaticPropertyAccess(meta: *const ClassMeta, property_name: []const u8, from_get: bool) void {
+    if (!meta.is_trait) return;
+    // PHP 只允许通过 trait 名访问 **public** 静态属性；private/protected 直接报 Error、不发弃用。
+    const decl = findPropertyDeclaringClass(meta, property_name) orelse return;
+    if (!decl.prop.is_public) return;
+    if (!from_get and last_trait_static_note_was_get and
+        last_trait_static_note_line == src_line and
+        std.mem.eql(u8, last_trait_static_note_file, src_file))
+    {
+        last_trait_static_note_was_get = false;
+        return;
+    }
+    var buf: [512]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        &buf,
+        "Accessing static trait property {s}::${s} is deprecated, it should only be accessed on a class using the trait",
+        .{ meta.name, property_name },
+    ) catch return;
+    emitDeprecated(msg);
+    last_trait_static_note_file = src_file;
+    last_trait_static_note_line = src_line;
+    last_trait_static_note_was_get = from_get;
+}
+
+/// ★F-142：静态属性名的统一解析（self/static/parent 语义与 php_get/set_static_property 一致）。
+fn resolveStaticPropertyMeta(class_name: []const u8) ?*ClassMeta {
+    if (std.mem.eql(u8, class_name, "self")) {
+        if (getCurrentScopeClass()) |scope| {
+            if (scope.is_trait) {
+                if (getCurrentCalledClass()) |called| return @constCast(called);
+            }
+            return @constCast(scope);
+        }
+        return @constCast(getCurrentCalledClass() orelse return null);
+    }
+    if (std.mem.eql(u8, class_name, "parent")) {
+        const scope = getCurrentScopeClass() orelse return null;
+        return @constCast(scope.parent orelse return null);
+    }
+    if (std.mem.eql(u8, class_name, "static")) {
+        return @constCast(getCurrentCalledClass() orelse return null);
+    }
+    return findClass(class_name);
+}
+
+/// ★F-142：`isset(G::$p)` —— 缺失/不可见/null 都返回 false；不发 fatal、不发 trait 弃用（非 public）。
+pub fn php_isset_static_property(class_val: Value, prop_val: Value) Value {
+    if (!class_val.isString() or !prop_val.isString()) return Value.initBool(false);
+    const class_name = class_val.asString().data;
+    const property_name = prop_val.asString().data;
+    const meta = resolveStaticPropertyMeta(class_name) orelse return Value.initBool(false);
+    const decl = findPropertyDeclaringClass(meta, property_name) orelse return Value.initBool(false);
+    if (!checkPropertyAccess(decl.class, decl.prop)) return Value.initBool(false);
+    const val = meta.getStaticProperty(property_name) orelse return Value.initBool(false);
+    if (decl.prop.is_public) noteTraitStaticPropertyAccess(meta, property_name, true);
+    return Value.initBool(!val.isNull());
+}
+
+/// ★F-142：`empty(G::$p)` —— 缺失/不可见按 empty 语义返回 true；存在时复用 php_empty_val。
+pub fn php_empty_static_property(class_val: Value, prop_val: Value) Value {
+    if (!class_val.isString() or !prop_val.isString()) return Value.initBool(true);
+    const class_name = class_val.asString().data;
+    const property_name = prop_val.asString().data;
+    const meta = resolveStaticPropertyMeta(class_name) orelse return Value.initBool(true);
+    const decl = findPropertyDeclaringClass(meta, property_name) orelse return Value.initBool(true);
+    if (!checkPropertyAccess(decl.class, decl.prop)) return Value.initBool(true);
+    const val = meta.getStaticProperty(property_name) orelse return Value.initBool(true);
+    if (decl.prop.is_public) noteTraitStaticPropertyAccess(meta, property_name, true);
+    return Value.initBool(php_empty_val(val));
+}
+
 /// 获取静态属性
 pub fn php_get_static_property(class_name: []const u8, property_name: []const u8) !Value {
     const meta = blk: {
@@ -23361,7 +23472,7 @@ pub fn php_get_static_property(class_name: []const u8, property_name: []const u8
         if (decl.prop.is_static and !checkPropertyAccess(decl.class, decl.prop)) {
             var buf: [256]u8 = undefined;
             const vis = if (decl.prop.is_private) "private" else "protected";
-            const msg = std.fmt.bufPrint(&buf, "Cannot access {s} property {s}::${s}", .{ vis, decl.class.name, property_name }) catch "Cannot access property";
+            const msg = std.fmt.bufPrint(&buf, "Cannot access {s} property {s}::${s}", .{ vis, meta.name, property_name }) catch "Cannot access property";
             return throwThrowable("Error", msg, runtime_allocator);
         }
     }
@@ -23381,6 +23492,7 @@ pub fn php_get_static_property(class_name: []const u8, property_name: []const u8
     // retain：调用方（代码生成器）会在寄存器释放时 release，
     // 如果不 retain，release 会减少静态属性本身的引用计数，可能导致数据丢失
     if (val) |v| {
+        noteTraitStaticPropertyAccess(meta, property_name, true); // ★F-74-b：存在且可见才发
         _ = v.retain();
         return v;
     }
@@ -23415,11 +23527,15 @@ pub fn php_set_static_property(class_name: []const u8, property_name: []const u8
         if (decl.prop.is_static and !checkPropertyAccess(decl.class, decl.prop)) {
             var buf: [256]u8 = undefined;
             const vis = if (decl.prop.is_private) "private" else "protected";
-            const msg = std.fmt.bufPrint(&buf, "Cannot access {s} property {s}::${s}", .{ vis, decl.class.name, property_name }) catch "Cannot access property";
+            const msg = std.fmt.bufPrint(&buf, "Cannot access {s} property {s}::${s}", .{ vis, meta.name, property_name }) catch "Cannot access property";
             return throwThrowable("Error", msg, runtime_allocator);
         }
     }
 
+    // ★F-74-b：属性存在且可访问才发弃用（未声明属性 PHP 只报 Error）
+    if (meta.getStaticProperty(property_name) != null) {
+        noteTraitStaticPropertyAccess(meta, property_name, false);
+    }
     try meta.setStaticProperty(property_name, value);
     return Value.initNull();
 }
@@ -24411,11 +24527,15 @@ pub fn php_mt_rand(min: Value, max: Value) !Value {
 /// srand - 设置随机数种子
 ///
 /// @param seed 种子值（可选）
-pub fn php_srand(seed: Value) !Value {
-    if (seed.isNull()) {
+pub fn php_srand(seed: Value, mode: Value) !Value {
+    // ★F-62f 余量（R-232）：#1 ?int seed／#2 int mode；Foo ⇒ TypeError。
+    //   ★mode 仅做类型/接受性校验：MT_RAND_PHP(1) 的序列未实现（登记缺口），当前一律 MT19937。
+    const seed_ok = requireOptionalNumParam("srand", 1, "seed", .nullable_int_param, seed) orelse return Value.initNull();
+    _ = requireOptionalNumParam("srand", 2, "mode", .int_param, mode) orelse return Value.initNull();
+    if (seed_ok.isNull()) {
         mt_state = MT19937.init(@intCast(@as(u64, @intCast(unixTimestamp())) & 0xFFFFFFFF));
     } else {
-        mt_state = MT19937.init(@intCast(@as(u64, @intCast(@abs(seed.toInt()))) & 0xFFFFFFFF));
+        mt_state = MT19937.init(@intCast(@as(u64, @intCast(@abs(seed_ok.toInt()))) & 0xFFFFFFFF));
     }
     return Value.initNull();
 }
@@ -24424,7 +24544,7 @@ pub fn php_srand(seed: Value) !Value {
 ///
 /// @param seed 种子值（可选）
 pub fn php_mt_srand(seed: Value) !Value {
-    return php_srand(seed);
+    return php_srand(seed, Value.initNull());
 }
 
 /// mt_getrandmax - 返回 mt_rand() 的最大值
@@ -24447,8 +24567,9 @@ pub fn php_random_int(min: Value, max: Value) !Value {
     const min_val = min_ok.toInt();
     const max_val = max_ok.toInt();
 
+    // ★F-126（R-229）：PHP 8 对 min>max 抛可捕获 ValueError（原先 Zig error.InvalidRange 外逸）
     if (min_val > max_val) {
-        return error.InvalidRange;
+        return throwThrowable("ValueError", "random_int(): Argument #1 ($min) must be less than or equal to argument #2 ($max)", runtime_allocator);
     }
 
     // 使用密码学安全的随机数生成器
@@ -24462,10 +24583,12 @@ pub fn php_random_int(min: Value, max: Value) !Value {
 /// @param allocator 内存分配器
 /// @return 随机字节字符串
 pub fn php_random_bytes(length: Value, allocator: Allocator) !Value {
-    const len = length.toInt();
+    // ★F-62f 第三批：Foo ⇒ TypeError；≤0 ⇒ 可捕获 ValueError（原 error.InvalidLength 外逸）
+    const len_ok = requireNumParam("random_bytes", 1, "length", .int_param, length) orelse return Value.initNull();
+    const len = len_ok.toInt();
 
-    if (len < 0) {
-        return error.InvalidLength;
+    if (len <= 0) {
+        return throwThrowable("ValueError", "random_bytes(): Argument #1 ($length) must be greater than 0", runtime_allocator);
     }
 
     const byte_len = @as(usize, @intCast(len));
@@ -24829,7 +24952,11 @@ pub fn php_array_fill(start_index: Value, num: Value, value: Value, allocator: A
     const result = try PHPArray.init(allocator);
 
     const start = start_ok.toInt();
-    const count = @max(0, num_ok.toInt());
+    // ★F-126（R-229）：负 count 是 ValueError（原先 @max(0,…) 静默夹取）
+    const count = num_ok.toInt();
+    if (count < 0) {
+        return throwThrowable("ValueError", "array_fill(): Argument #2 ($count) must be greater than or equal to 0", runtime_allocator);
+    }
 
     var i: i64 = 0;
     while (i < count) : (i += 1) {
@@ -25961,14 +26088,18 @@ pub fn php_ord(str: Value) !Value {
 
 /// chr - 返回指定ASCII值对应的字符
 pub fn php_chr(code: Value, allocator: Allocator) !Value {
-    const ascii = @as(u8, @truncate(@as(u64, @intCast(code.toInt() & 0xFF))));
+    // ★F-62f 第三批：`chr(): Argument #1 ($codepoint) must be of type int, Foo given`
+    const code_ok = requireNumParam("chr", 1, "codepoint", .int_param, code) orelse return Value.initNull();
+    const ascii = @as(u8, @truncate(@as(u64, @intCast(code_ok.toInt() & 0xFF))));
     const buffer = [_]u8{ascii};
     const result = try PHPString.init(allocator, &buffer);
     return Value.initString(result);
 }
 
 pub fn php_count_chars(str: Value, mode: Value, allocator: Allocator) !Value {
-    const mode_int = mode.toInt();
+    // ★F-62f 第三批：可选 #2 ($mode)，Foo ⇒ TypeError；null/省略 ⇒ 默认 0（显式 null 的 Deprecated 属 helper 既有折衷）
+    const mode_ok = requireOptionalNumParam("count_chars", 2, "mode", .int_param, mode) orelse return Value.initNull();
+    const mode_int = if (mode_ok.isNull()) 0 else mode_ok.toInt();
     if (!str.isString()) {
         return switch (mode_int) {
             3, 4 => Value.initString(try PHPString.init(allocator, "")),
@@ -26215,7 +26346,9 @@ pub fn php_long2ip(long: Value, allocator: Allocator) !Value {
     const ip_ok = requireNumParam("long2ip", 1, "ip", .int_param, long) orelse return Value.initNull();
     // ★下面的 `@intCast(… u32)` 对 >u32 域是越界转换（实测 `long2ip(4294967296)` PHP 给 '0.0.0.0'，即 32 位掩码）
     //   ——那是独立一枚面（工单 §104.3），本批只接类型拒，不改这里的取模语义。
-    const ip_num: u32 = @intCast(@max(ip_ok.toInt(), 0));
+    // ★F-127（R-229）：long2ip 按 32 位掩码（PHP 实测 2^32+1→'0.0.0.1'、-1→'255.255.255.255'）
+    const ip_bits: u64 = @bitCast(ip_ok.toInt());
+    const ip_num: u32 = @truncate(ip_bits);
 
     const a: u8 = @intCast((ip_num >> 24) & 0xFF);
     const b: u8 = @intCast((ip_num >> 16) & 0xFF);
@@ -27088,10 +27221,13 @@ pub fn php_touch(filename: Value) !Value {
 
 /// pathinfo - 返回文件路径的信息
 pub fn php_pathinfo(path_val: Value, option: Value, allocator: Allocator) !Value {
+    // ★F-62f 第三批：可选 #2 ($flags)，Foo ⇒ TypeError；null/省略 ⇒ 默认 PATHINFO_ALL(15)
+    //   （本运行时无法区分“省略”与显式 null ⇒ 取常用默认；显式 null 的 ""+Deprecated 已登记缺口）
+    const option_ok = requireOptionalNumParam("pathinfo", 2, "flags", .int_param, option) orelse return Value.initNull();
     if (!path_val.isString()) return Value.initString(try PHPString.init(allocator, ""));
 
     const path = path_val.asString().data;
-    const opt = option.toInt();
+    const opt = if (option_ok.isNull()) 15 else option_ok.toInt();
 
     // PATHINFO_DIRNAME = 1, PATHINFO_BASENAME = 2, PATHINFO_EXTENSION = 4, PATHINFO_FILENAME = 8
     const dir = std.fs.path.dirname(path) orelse ".";
@@ -27100,18 +27236,23 @@ pub fn php_pathinfo(path_val: Value, option: Value, allocator: Allocator) !Value
     const ext = if (ext_with_dot.len > 0) ext_with_dot[1..] else "";
     const filename = if (ext_with_dot.len > 0) base[0 .. base.len - ext_with_dot.len] else base;
 
-    if (opt == 1) return Value.initString(try PHPString.init(allocator, dir));
-    if (opt == 2) return Value.initString(try PHPString.init(allocator, base));
-    if (opt == 4) return Value.initString(try PHPString.init(allocator, ext));
-    if (opt == 8) return Value.initString(try PHPString.init(allocator, filename));
-
-    // 默认返回关联数组
-    const arr = try PHPArray.init(allocator);
-    try arr.set(allocator, .{ .string = try PHPString.init(allocator, "dirname") }, Value.initString(try PHPString.init(allocator, dir)));
-    try arr.set(allocator, .{ .string = try PHPString.init(allocator, "basename") }, Value.initString(try PHPString.init(allocator, base)));
-    try arr.set(allocator, .{ .string = try PHPString.init(allocator, "extension") }, Value.initString(try PHPString.init(allocator, ext)));
-    try arr.set(allocator, .{ .string = try PHPString.init(allocator, "filename") }, Value.initString(try PHPString.init(allocator, filename)));
-    return Value.initArray(arr);
+    // ★F-62f 第三批：flags 语义实测（c210 矩阵）：15 或 0 ⇒ 关联数组；否则取**最低置位**的 1/2/4/8；
+    //   未知位（16）⇒ ""；组合（3/7/-1）⇒ dirname。
+    //   ★0 归 array 是**调用约定折衷**：发射器把省略的 #2 填成 int(0)，无法与显式 0 区分；
+    //     省略形（`pathinfo($p)`）远多于显式 0，故取默认语义（显式 0 的 "" 已登记缺口）。
+    if (opt == 15 or opt == 0) {
+        const arr = try PHPArray.init(allocator);
+        try arr.set(allocator, .{ .string = try PHPString.init(allocator, "dirname") }, Value.initString(try PHPString.init(allocator, dir)));
+        try arr.set(allocator, .{ .string = try PHPString.init(allocator, "basename") }, Value.initString(try PHPString.init(allocator, base)));
+        try arr.set(allocator, .{ .string = try PHPString.init(allocator, "extension") }, Value.initString(try PHPString.init(allocator, ext)));
+        try arr.set(allocator, .{ .string = try PHPString.init(allocator, "filename") }, Value.initString(try PHPString.init(allocator, filename)));
+        return Value.initArray(arr);
+    }
+    if ((opt & 1) != 0) return Value.initString(try PHPString.init(allocator, dir));
+    if ((opt & 2) != 0) return Value.initString(try PHPString.init(allocator, base));
+    if ((opt & 4) != 0) return Value.initString(try PHPString.init(allocator, ext));
+    if ((opt & 8) != 0) return Value.initString(try PHPString.init(allocator, filename));
+    return Value.initString(try PHPString.init(allocator, ""));
 }
 
 /// realpath - 返回规范化的绝对路径名
@@ -27794,7 +27935,14 @@ pub fn php_json_decode(args: []const Value, allocator: Allocator) !Value {
     }
 
     const assoc = if (args.len >= 2) args[1] else Value.initBool(false);
-    const depth_val = if (args.len >= 3) args[2] else Value.initInt(512);
+    // ★F-62f 第三批：#3 $depth / #4 $flags 为可选 int，Foo ⇒ TypeError；null ⇒ 默认值
+    const depth_val = if (args.len >= 3) blk: {
+        const v = requireOptionalNumParam("json_decode", 3, "depth", .int_param, args[2]) orelse return Value.initNull();
+        break :blk if (v.isNull()) Value.initInt(512) else v;
+    } else Value.initInt(512);
+    if (args.len >= 4) {
+        _ = requireOptionalNumParam("json_decode", 4, "flags", .int_param, args[3]) orelse return Value.initNull();
+    }
     const is_assoc = if (assoc.isBool()) assoc.asBool() else assoc.toBool();
     const json_str = json.asString().data;
     var pos: usize = 0;
@@ -28176,7 +28324,13 @@ pub fn php_sleep(seconds: Value) !Value {
     // ★F-62f 接线（门 BLT 段 H b168/b169）：实测 `sleep(): Argument #1 ($seconds) must be of type int, Foo given`。
     //   ★位置在 `sleep()` 系统调用**之前** ⇒ 对象入参不再有机会把 `toInt()` 的 0 当成「睡 0 秒」静默放过。
     const secs_ok = requireNumParam("sleep", 1, "seconds", .int_param, seconds) orelse return Value.initNull();
-    const secs: c_uint = @intCast(@max(0, secs_ok.toInt()));
+    const secs_raw = secs_ok.toInt();
+    // ★F-127（R-229）：负数 ValueError；正数按 32 位折叠（PHP 实测 sleep(2^32)=0）
+    if (secs_raw < 0) {
+        return throwThrowable("ValueError", "sleep(): Argument #1 ($seconds) must be greater than or equal to 0", runtime_allocator);
+    }
+    const secs_bits: u64 = @bitCast(secs_raw);
+    const secs: c_uint = @truncate(secs_bits);
     _ = sleep(secs);
     return Value.initInt(0);
 }
@@ -28185,7 +28339,13 @@ pub fn php_sleep(seconds: Value) !Value {
 pub fn php_usleep(microseconds: Value) !Value {
     // ★F-62f 接线（门 BLT 段 H b169）：`usleep(): Argument #1 ($microseconds) must be of type int, Foo given`。
     const usecs_ok = requireNumParam("usleep", 1, "microseconds", .int_param, microseconds) orelse return Value.initNull();
-    const usecs: c_uint = @intCast(@max(0, usecs_ok.toInt()));
+    const usecs_raw = usecs_ok.toInt();
+    // ★F-127（R-229）：负数 ValueError；正数按 32 位折叠
+    if (usecs_raw < 0) {
+        return throwThrowable("ValueError", "usleep(): Argument #1 ($microseconds) must be greater than or equal to 0", runtime_allocator);
+    }
+    const usecs_bits: u64 = @bitCast(usecs_raw);
+    const usecs: c_uint = @truncate(usecs_bits);
     _ = usleep(usecs);
     return Value.initNull();
 }
@@ -28296,7 +28456,15 @@ pub fn php_exit(status: Value) !noreturn {
 }
 
 /// php_empty_val - 纯 bool 版本的 empty 检查（不返回 Value，不触发错误）
-fn php_empty_val(val: Value) bool {
+/// ★F-142-b：`empty($arr[$k])` —— 缺失/不可见/非数组都静默返回 true；有值复用 php_empty_val。
+///   读路径复用 coalesce（ArrayAccess 走 offsetExists→offsetGet；非 ArrayAccess 对象按 PHP 抛 Error）。
+pub fn php_array_empty(arr_val: Value, key_val: Value, allocator: Allocator) !Value {
+    const v = try php_array_get_coalesce(arr_val, key_val, allocator);
+    defer v.release(allocator);
+    return Value.initBool(php_empty_val(v));
+}
+
+pub fn php_empty_val(val: Value) bool {
     if (val.isNull()) return true;
     if (val.isBool()) return !val.asBool();
     if (val.isInt()) return val.asInt() == 0;
@@ -28900,7 +29068,10 @@ pub fn php_array_chunk(arr: Value, size: Value, preserve_keys: Value, allocator:
     if (!arr.isArray()) return error.InvalidArgument;
 
     const chunk_size = size_ok.toInt();
-    if (chunk_size < 1) return error.InvalidArgument;
+    // ★F-126（R-229）：length<1 是 ValueError（原先 error.InvalidArgument 外逸）
+    if (chunk_size < 1) {
+        return throwThrowable("ValueError", "array_chunk(): Argument #2 ($length) must be greater than 0", runtime_allocator);
+    }
 
     const preserve = preserve_keys.toBool();
     const php_arr = arr.asArray();
@@ -29401,7 +29572,10 @@ fn pcreSearchOffset(offset: Value, subject_len: usize) struct { start: usize, ou
 }
 
 pub fn php_preg_match(pattern: Value, subject: Value, matches: *Value, flags: Value, offset: Value, allocator: Allocator) !Value {
-    const flags_val: i64 = if (flags.isNull()) 0 else flags.toInt();
+    // ★F-62f 余量（R-232）：#4 flags／#5 offset 必为 int（Foo ⇒ TypeError，先于 PREG_* 域检查）
+    const flags_ok = requireOptionalNumParam("preg_match", 4, "flags", .int_param, flags) orelse return Value.initBool(false);
+    const offset_ok = requireOptionalNumParam("preg_match", 5, "offset", .int_param, offset) orelse return Value.initBool(false);
+    const flags_val: i64 = if (flags_ok.isNull()) 0 else flags_ok.toInt();
     if (pregMatchFlagsInvalid(flags_val)) {
         matches.* = Value.initArray(try PHPArray.init(allocator));
         throwThrowableDiscardCatch("ValueError", "preg_match(): Argument #4 ($flags) must be a PREG_* constant", allocator);
@@ -29434,7 +29608,7 @@ pub fn php_preg_match(pattern: Value, subject: Value, matches: *Value, flags: Va
         return Value.initBool(false);
     };
 
-    const off = pcreSearchOffset(offset, subject_str.length);
+    const off = pcreSearchOffset(offset_ok, subject_str.length);
     if (off.out_of_range) {
         matches.* = Value.initArray(try PHPArray.init(allocator));
         return Value.initBool(false);
@@ -29550,7 +29724,10 @@ fn pcreGroupColumn(
 }
 
 pub fn php_preg_match_all(pattern: Value, subject: Value, matches: *Value, flags: Value, offset: Value, allocator: Allocator) !Value {
-    const flags_val: i64 = if (flags.isNull()) 0 else flags.toInt();
+    // ★F-62f 余量（R-232）：#4 flags／#5 offset 必为 int（Foo ⇒ TypeError，先于 PREG_* 域检查）
+    const flags_ok = requireOptionalNumParam("preg_match_all", 4, "flags", .int_param, flags) orelse return Value.initBool(false);
+    const offset_ok = requireOptionalNumParam("preg_match_all", 5, "offset", .int_param, offset) orelse return Value.initBool(false);
+    const flags_val: i64 = if (flags_ok.isNull()) 0 else flags_ok.toInt();
     if (pregMatchAllFlagsInvalid(flags_val)) {
         matches.* = Value.initArray(try PHPArray.init(allocator));
         throwThrowableDiscardCatch("ValueError", "preg_match_all(): Argument #4 ($flags) must be a PREG_* constant", allocator);
@@ -29583,7 +29760,7 @@ pub fn php_preg_match_all(pattern: Value, subject: Value, matches: *Value, flags
         return Value.initBool(false);
     };
 
-    const off = pcreSearchOffset(offset, subject_str.length);
+    const off = pcreSearchOffset(offset_ok, subject_str.length);
     if (off.out_of_range) {
         matches.* = Value.initArray(try PHPArray.init(allocator));
         return Value.initBool(false);
@@ -31156,11 +31333,21 @@ pub fn php_hash_pbkdf2(algo: Value, password: Value, salt: Value, iterations: Va
     const length_ok = requireNumParam("hash_pbkdf2", 5, "length", .int_param, length) orelse return Value.initNull();
     if (!algo.isString() or !password.isString() or !salt.isString()) return Value.initBool(false);
 
+    // ★F-126（R-229）：iterations<=0／length<0 是 ValueError；length=0 仍是“整摘要”哨兵
+    const iterations_raw = iterations_ok.toInt();
+    if (iterations_raw <= 0) {
+        return throwThrowable("ValueError", "hash_pbkdf2(): Argument #4 ($iterations) must be greater than 0", runtime_allocator);
+    }
+    const length_raw = length_ok.toInt();
+    if (length_raw < 0) {
+        return throwThrowable("ValueError", "hash_pbkdf2(): Argument #5 ($length) must be greater than or equal to 0", runtime_allocator);
+    }
+
     const algo_str = algo.asString().data;
     const password_str = password.asString().data;
     const salt_str = salt.asString().data;
-    const iterations_count: u32 = @intCast(@max(1, iterations_ok.toInt()));
-    const dklen: usize = @intCast(@max(0, length_ok.toInt()));
+    const iterations_count: u32 = @truncate(@as(u64, @bitCast(iterations_raw)));
+    const dklen: usize = @intCast(length_raw);
     const raw = raw_output.toBool();
 
     // 支持的算法及对应的哈希长度
