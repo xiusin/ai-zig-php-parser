@@ -24527,24 +24527,29 @@ pub fn php_mt_rand(min: Value, max: Value) !Value {
 /// srand - 设置随机数种子
 ///
 /// @param seed 种子值（可选）
-pub fn php_srand(seed: Value, mode: Value) !Value {
+fn applySrandArgs(fn_name: []const u8, seed: Value, mode: Value) void {
     // ★F-62f 余量（R-232）：#1 ?int seed／#2 int mode；Foo ⇒ TypeError。
-    //   ★mode 仅做类型/接受性校验：MT_RAND_PHP(1) 的序列未实现（登记缺口），当前一律 MT19937。
-    const seed_ok = requireOptionalNumParam("srand", 1, "seed", .nullable_int_param, seed) orelse return Value.initNull();
-    _ = requireOptionalNumParam("srand", 2, "mode", .int_param, mode) orelse return Value.initNull();
+    //   ★mode 仅做类型/接受性校验：MT_RAND_PHP(1) 的序列未实现（F-145），当前一律 MT19937。
+    const seed_ok = requireOptionalNumParam(fn_name, 1, "seed", .nullable_int_param, seed) orelse return;
+    _ = requireOptionalNumParam(fn_name, 2, "mode", .int_param, mode) orelse return;
     if (seed_ok.isNull()) {
         mt_state = MT19937.init(@intCast(@as(u64, @intCast(unixTimestamp())) & 0xFFFFFFFF));
     } else {
         mt_state = MT19937.init(@intCast(@as(u64, @intCast(@abs(seed_ok.toInt()))) & 0xFFFFFFFF));
     }
+}
+
+pub fn php_srand(seed: Value, mode: Value) !Value {
+    applySrandArgs("srand", seed, mode);
     return Value.initNull();
 }
 
 /// mt_srand - 设置MT随机数种子
 ///
 /// @param seed 种子值（可选）
-pub fn php_mt_srand(seed: Value) !Value {
-    return php_srand(seed, Value.initNull());
+pub fn php_mt_srand(seed: Value, mode: Value) !Value {
+    applySrandArgs("mt_srand", seed, mode);
+    return Value.initNull();
 }
 
 /// mt_getrandmax - 返回 mt_rand() 的最大值

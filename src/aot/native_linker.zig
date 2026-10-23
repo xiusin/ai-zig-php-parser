@@ -4307,9 +4307,9 @@ pub const NativeLinker = struct {
         .{ "strrev", bi(.{ .runtime_name = "php_strrev", .needs_allocator = true }) },
         .{ "str_shuffle", bi(.{ .runtime_name = "php_str_shuffle", .needs_allocator = true }) },
         .{ "str_contains", bi(.{ .runtime_name = "php_str_contains", .needs_allocator = false }) },
-        .{ "preg_match", bi(.{ .runtime_name = "preg_match", .needs_allocator = true }) },
+        .{ "preg_match", bi(.{ .runtime_name = "php_preg_match", .needs_allocator = true }) },
         .{ "preg_match_with_matches", bi(.{ .runtime_name = "preg_match_with_matches", .needs_allocator = true }) },
-        .{ "preg_match_all", bi(.{ .runtime_name = "preg_match_all", .needs_allocator = true }) },
+        .{ "preg_match_all", bi(.{ .runtime_name = "php_preg_match_all", .needs_allocator = true }) },
         .{ "preg_replace", bi(.{ .runtime_name = "preg_replace", .needs_allocator = true }) },
         .{ "preg_filter", bi(.{ .runtime_name = "preg_filter", .needs_allocator = true }) },
         .{ "preg_replace_callback", bi(.{ .runtime_name = "php_preg_replace_callback", .needs_allocator = true }) },
@@ -4537,7 +4537,7 @@ pub const NativeLinker = struct {
         .{ "usleep", bi(.{ .runtime_name = "php_usleep", .needs_allocator = false }) },
 
         .{ "srand", bi(.{ .runtime_name = "php_srand", .needs_allocator = false, .handler_params = 2, .optional_defaults = &.{ "runtime.Value.initNull()", "runtime.Value.initInt(0)" } }) },
-        .{ "mt_srand", .{ .runtime_name = "php_mt_srand", .needs_allocator = false } },
+        .{ "mt_srand", .{ .runtime_name = "php_mt_srand", .needs_allocator = false, .handler_params = 2, .optional_defaults = &.{ "runtime.Value.initNull()", "runtime.Value.initInt(0)" } } },
         .{ "random_int", .{ .runtime_name = "php_random_int", .needs_allocator = false } },
         .{ "random_bytes", .{ .runtime_name = "php_random_bytes", .needs_allocator = true } },
 
@@ -22748,14 +22748,24 @@ pub const NativeLinker = struct {
                                     // 第3个参数matches（引用）
                                     if (op.args.len >= 3) {
                                         const matches_arg = op.args[2];
-                                        const matches_type = @as(std.meta.Tag(IR.Type), matches_arg.type_);
                                         const is_alloca = if (self.current_alloca_regs) |alloca_regs|
                                             alloca_regs.contains(matches_arg.id)
                                         else
                                             false;
+                                        const is_ref_ptr = if (self.current_ref_ptr_regs) |rpr|
+                                            rpr.contains(matches_arg.id)
+                                        else
+                                            false;
 
-                                        if (matches_type == .ptr or is_alloca) {
-                                            // 指针类型，直接传递
+                                        if (is_alloca) {
+                                            // 真正的 alloca：普通 alloca 为 *Value，引用参数 alloca 为 **Value
+                                            if (self.isRefParamAlloca(matches_arg.id)) {
+                                                try writer.print("reg_{d}.*", .{matches_arg.id});
+                                            } else {
+                                                try writer.print("reg_{d}", .{matches_arg.id});
+                                            }
+                                        } else if (is_ref_ptr) {
+                                            // ref_ptr：reg 本身就是 *Value
                                             try writer.print("reg_{d}", .{matches_arg.id});
                                         } else {
                                             // 非指针类型：检查是否是常量（const.null等）
@@ -22827,14 +22837,23 @@ pub const NativeLinker = struct {
                                             alloca_regs.contains(matches_arg.id)
                                         else
                                             false;
+                                        const is_ref_ptr = if (self.current_ref_ptr_regs) |rpr|
+                                            rpr.contains(matches_arg.id)
+                                        else
+                                            false;
 
                                         if (is_alloca) {
                                             // 真正的alloca寄存器
+                                            if (self.isRefParamAlloca(matches_arg.id)) {
+                                                try writer.print("reg_{d}.*", .{matches_arg.id});
+                                            } else {
+                                                try writer.print("reg_{d}", .{matches_arg.id});
+                                            }
+                                        } else if (is_ref_ptr) {
                                             try writer.print("reg_{d}", .{matches_arg.id});
                                         } else {
-                                            // 非alloca：使用临时变量（因为可能是未定义的ptr寄存器）
-                                            try writer.writeAll("blk: { var tmp = reg_");
-                                            try writer.print("{d}; break :blk &tmp; }}", .{matches_arg.id});
+                                            // mem2reg 提升的局部变量：取地址回填（与通用 by-ref 路径同口径）
+                                            try writer.print("&reg_{d}", .{matches_arg.id});
                                         }
                                     } else {
                                         try writer.writeAll("blk: { var tmp = runtime.Value.initNull(); break :blk &tmp; }");

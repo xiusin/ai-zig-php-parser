@@ -8537,3 +8537,77 @@ R-214 曾把“归因里出现 setSourceLocation/PHI/调用行等非局部增删
 - **F-144 新立（P2）**：`chr(<0 或 >255>)` 的值正确（%256）但缺 `Deprecated`；PHP 每次越界调用一条。
 - **F-62f-opt（P2，新立）**：可选形参的“省略 vs 显式 null/0”不可区分——发射器把省略的 `pathinfo #2` 填 `int(0)`，与显式 0 同形 ⇒ 取常用默认（array）；显式 null/0 的 `Deprecated`/`""` 缺口。同类：count_chars/mb_strpos 显式 null 的 Deprecated。
 - **#148 余量**：`preg_match`/`preg_match_all` 的 #4 flags／#5 offset、`srand` #2 mode 尚未接线（下批）。
+
+## 140. ★R-232 落地记录（F-62f 第四批：preg #4/#5 ＋ srand/mt_srand；F-145/F-146 新立）
+
+### 140.1 契约（PHP 8.5.8 实测）
+| 站点 | 真值 |
+|---|---|
+| `preg_match(...,$flags,$offset)` #4/#5 | `Argument #N ($p) must be of type int, Foo given`（preg_match_all 同文案换函数名） |
+| `PREG_OFFSET_CAPTURE`(256) | 捕获项变 `[text, offset]`；`PREG_SET_ORDER`(2)／`PREG_UNMATCHED_AS_NULL`(512) 同维护版实现 |
+| `srand`/`mt_srand` #1 | `?int $seed`：null ⇒ 随机种子；Foo ⇒ `must be of type ?int, stdClass given` |
+| `srand`/`mt_srand` #2 | `int $mode`；**mode=2/3/-1/99 全部接受且等价 0**；**mode=1（MT_RAND_PHP）** ⇒ 旧序列（seed=1 首值 580 vs 846）＋ 每次一条 Deprecated（双流） |
+| ★重复键胜者 | 实测 `preg_match` 落到 `php_preg_match`，而 **`preg_match_all` 落到旧 `preg_match_all`** ⇒ F-102 的“胜者未定”有了 in-situ 证据 |
+
+### 140.2 实现
+- `tpl php_preg_match`／`php_preg_match_all`：`requireOptionalNumParam(...#4 flags/#5 offset,.int_param)`；offset 走 `pcreSearchOffset(offset_ok,…)`。
+- `tpl applySrandArgs(fn_name,seed,mode)`：srand/mt_srand 共用；`nullable_int_param` 形参名 `?int`。
+- `nlk builtin_map`：`srand`/`mt_srand` `handler_params=2`＋缺省 `initNull()/initInt(0)`；**preg_match(_all) 两条重复条目统一到 `php_*`**（F-102 乙案局部）。
+- `nlk` preg 专用发射：第三参数仅真 alloca（ref_param 用 `reg.*`）／ref_ptr 直传；mem2reg 提升/常量取 `&reg_X`/临时量（旧判定 `type==ptr or alloca` 把提升形当指针 ⇒ `expected *Value, found Value`）。
+- `tpl php_mt_srand` 补齐第二形参（PHP 本来就接受）。
+
+### 140.3 读数
+| 腿 | 读数 |
+|---|---|
+| C281（新门 7 臂） | 自证 **7 CF**；实跑 **6 SAME / 1 DIFF**（唯一 a7＝F-145 注册红）37 s |
+| `f62f4/php.php` 探针 | 除 F-145 两处（Deprecated＋580）外**逐字节 SAME** |
+| PERR 邻门 | 见 §140.4 |
+| 主回归 | **PASS=68 FAIL=0**、`SELF_CHECK_OK rows=68 uniq=68`（证据 `c283_regression_R232_tmp.log`）；`f161`（语料唯一 preg_match_all 使用者）PASS |
+| `zig build test` | 21/21 steps、**326/326**、rc=0（`--summary all`）；`test-aot` 有 6 条**既存**编译错（dependency_resolver/linker，与本批无关） |
+| 代次锚 | `nlk 4700b644a42ffb5bd494da06681b0b0f`／`tpl 7320db321a0b631e73ee293be7b1b081`／`irg fa9be7d9…`（**分段入库**：preg 校验随 `5fbbd7c`；map/byref/srand 余下未提交） |
+
+### 140.4 邻门与影子口径
+- PERR（32 臂）：**same=31 diff=1 compile_fail=0 bad_probe=0 parse_fail=0 residue=0**（274 s）；唯一 DIFF＝既存 `e4`（PCRE 自述常量/ F-117），与 `c093_perr_preR232_snapshot_tmp.tsv` 逐臂 **零转移**（`c093_perr_postR232_tmp.tsv`）。
+- 影子：本批是 **name-table 改动** ⇒ 预期漂移；语料普查 `grep -lE "preg_match_all|mt_srand|(^|[^_a-z])srand\("` 命中**仅 f161**，故 68 行中预期且仅允许 f161 漂移（回归已验证 f161 语义 SAME）。旧二进制未备份 ⇒ 不做双代 md5 差分（按 r110 规则此项证据降级并留痕）。
+
+### 140.5 边界 / 新登记
+- **F-145（P2）**：`MT_RAND_PHP` 序列＋Deprecated 未实现；AOT 一律 MT19937。
+- **F-146（P2，★主面已由 R-233 关闭，见 §141）**：闭包内把外层未声明变量用于 `preg_match(_all)` 第三实参 ⇒ IR 写回走 `global_set`（`ir_generator.zig:7701/7754` 建临时 alloca，`:8125` 判非局部即 global_set）⇒ 外层读到数组且无 Warning；PHP 为局部变量＋外层两流 Warning＋NULL。普通闭包局部赋值无此问题（对照 `leak.php` SAME）。
+- **F-62f-opt**（沿用）：显式 null 与省略不可区分。
+- **F-102**：preg_match/preg_match_all 两枚已对齐（乙案局部），`split` 等仍待裁；旧 `preg_match*` 实现已无 AOT 调用点，删除待批准。
+
+## 141. ★R-233 落地记录（F-146 闭包/函数内 byref 写回归属；F-146-c / F-147 新立）
+
+### 141.1 缺陷与真值（PHP 8.5.8 实测）
+| 形 | PHP | 修前 AOT |
+|---|---|---|
+| `function f(){ h($q); return $q; }`（h 收 `&$v`） | `9`（$q 为函数局部，无 Warning） | `NULL`＋两流 `Undefined variable $q` |
+| 闭包 `function(){ h($q); return $q; }` | `9` | `NULL`＋Warning |
+| 闭包内 `(new C)->m($q)` / `C::s($q)` | `5` / `7` | `NULL`＋Warning（按值传参） |
+| 闭包 `use ($q)` / `use (&$q)` | 局部副本 `9`、外层 `1` 不变 / 外层变 `9` | 均 `9`（修复后一致；修复前 use 形走捕获支已正常） |
+| `use (&$q)` + byref 写回 | 外层 `9` | `9`（修复后保持） |
+| `__main__` 顶层 `h($q)` | `9`，**无 Warning** | `9`＋多一条 Warning（F-146-c） |
+| 引用参数透传 `outer(&$v){ h($v); }` | 原值写回 | 一致（守卫） |
+
+### 141.2 根因与修法
+- 三处 byref 实参构造（普通调用 `:7542`／方法 `:8377`／静态方法 `:8582`）只识别 `reference_params`、局部 `var_registers`、`global_vars/__main__`；**函数内未声明变量**落到按值传参。
+- 三处写回（`:8147`／`:8415`／`:8620`）对非局部变量一律 `global_set`，无“函数内 ⇒ 局部”分派。
+- 修法：①三处 arg 构造新增“未声明 ⇒ `no_optimize` alloca（初值 `const_null`，**不读同名全局**）＋`make_ref`＋登记写回”；②新增 `emitRefWritebackTarget(var_name, new_val)`（`:8157`）：局部⇒`putVarRegister`；函数内未声明非 global⇒`getOrCreateVarRegister`＋store；其余⇒`global_set`；三处写回统一调用。
+- 同批效果：R-232 登记的 preg 第三参数 arrow 形（`preg_match(...,$m,0)`）由“写穿全局/编译失败”转为与 PHP 逐字节 SAME。
+
+### 141.3 读数
+| 腿 | 读数 |
+|---|---|
+| C282（新门 7 臂） | 自证 **7 CF**；实跑 **6 SAME / 1 DIFF**（c7＝F-146-c 注册红）33 s |
+| C281（R-232 门） | 见 §141.4 复跑 |
+| 主回归 | 见 §141.4 |
+| `zig build test` | 21/21 steps、**326/326**、rc=0（`--summary all`） |
+| 代次锚 | `irg 6bc59d18026e5a070349aeafb0a2f646`／`nlk 4700b644…`／`tpl 7320db32…`（未提交） |
+
+### 141.4 邻门与影子口径
+- C281 复跑：待填。
+- 影子：IR 级改动 ⇒ 漂移只应出现在“函数内 byref 未声明变量”形；旧二进制未备份（r110 降级为语料符号普查＋回归点名）。
+
+### 141.5 新登记
+- **F-146-c（P2）**：`__main__` 顶层把未声明变量按引用传参，PHP 不发 Warning，AOT 多一条（值正确）。门 C282 c7。
+- **F-147（P2）**：用户函数名与生成码局部变量同名 ⇒ 编译失败。实测 `g`（`defer if (guard) |*g|`）与 `out`（profiler `const out = …flamegraph.txt`）。修法：生成码局部统一前缀或函数名转义；涉及模板+发射器命名空间。

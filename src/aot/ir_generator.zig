@@ -7538,9 +7538,35 @@ prop_name: ?[]const u8 = null,
                             try ref_writebacks.append(self.allocator, .{ .var_name = var_name, .temp_reg = temp_reg });
                             continue;
                         }
-                    }
 
-                    // 对象属性引用参数：array_splice($obj->prop, ...)
+                        // 函数/闭包内的未声明变量：以引用传参在 PHP 中**创建局部变量**（null 起始，
+                        // 不读同名全局、不告警）。旧行为落到下方按值传参 ⇒ 引用丢失且读全局多打 Warning。
+                        {
+                            const func = self.current_function orelse return error.NoCurrentFunction;
+                            const alloca_type = Type{ .php_value = {} };
+                            const type_ptr = try self.allocator.create(Type);
+                            type_ptr.* = alloca_type;
+                            const ptr_type = Type{ .ptr = type_ptr };
+                            const temp_reg = func.newRegister(ptr_type);
+
+                            const alloca_inst = try self.allocator.create(Instruction);
+                            alloca_inst.* = .{
+                                .result = temp_reg,
+                                .op = .{ .alloca = .{ .type_ = alloca_type, .count = 1, .no_optimize = true } },
+                                .location = self.current_location,
+                            };
+                            try self.entry_allocas.append(self.allocator, alloca_inst);
+
+                            const null_val = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                            _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = null_val } }, null);
+
+                            const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = temp_reg } }, .php_value);
+                            args[i] = ref_reg;
+
+                            try ref_writebacks.append(self.allocator, .{ .var_name = var_name, .temp_reg = temp_reg });
+                            continue;
+                        }
+                    }
                     // 创建临时 alloca 存储当前值，调用后写回
                     if (expr_node != null and (expr_node.?.tag == .property_access or expr_node.?.tag == .safe_property_access)) {
                         const pa = expr_node.?.data.property_access;
@@ -8117,16 +8143,32 @@ prop_name: ?[]const u8 = null,
                     .property_name = wb.prop_name.?,
                     .value = new_val,
                 } }, null);
-            } else if (self.getVarRegister(wb.var_name) != null) {
-                // 局部变量：更新var_registers映射
-                try self.putVarRegister(wb.var_name, new_val);
             } else {
-                // 全局变量：global_set
-                _ = try self.emit(.{ .global_set = .{ .name = wb.var_name, .value = new_val } }, null);
+                try self.emitRefWritebackTarget(wb.var_name, new_val);
             }
         }
 
         return result;
+    }
+
+    /// F-146：byref 参数的写回目标。
+    /// 局部变量 ⇒ 更新 SSA 映射；函数/闭包内未声明的非 global 变量 ⇒ 按 PHP 语义建立局部变量；
+    /// 只有 __main__ 或显式 `global` 名才写回全局。
+    fn emitRefWritebackTarget(self: *Self, var_name: []const u8, new_val: Register) !void {
+        if (self.getVarRegister(var_name) != null) {
+            try self.putVarRegister(var_name, new_val);
+            return;
+        }
+        const is_main = if (self.current_function) |f|
+            std.mem.eql(u8, f.name, "__main__")
+        else
+            true;
+        if (!is_main and !self.global_vars.contains(var_name)) {
+            const var_reg = try self.getOrCreateVarRegister(var_name, .php_value);
+            _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = new_val } }, null);
+            return;
+        }
+        _ = try self.emit(.{ .global_set = .{ .name = var_name, .value = new_val } }, null);
     }
 
     /// Generate IR for method call
@@ -8331,6 +8373,29 @@ prop_name: ?[]const u8 = null,
                         try ref_wbs.append(self.allocator, .{ .var_name = var_name, .temp_reg = temp_reg.id });
                         continue;
                     }
+
+                    // 函数/闭包内未声明变量：以引用传参在 PHP 中创建局部变量（null 起始，不读全局）
+                    {
+                        const func = self.current_function orelse return error.NoCurrentFunction;
+                        const alloca_type = Type.php_value;
+                        const type_ptr = try self.allocator.create(Type);
+                        type_ptr.* = alloca_type;
+                        const ptr_type = Type{ .ptr = type_ptr };
+                        const temp_reg = func.newRegister(ptr_type);
+                        const alloca_inst = try self.allocator.create(Instruction);
+                        alloca_inst.* = .{
+                            .result = temp_reg,
+                            .op = .{ .alloca = .{ .type_ = alloca_type, .count = 1, .no_optimize = true } },
+                            .location = self.current_location,
+                        };
+                        try self.entry_allocas.append(self.allocator, alloca_inst);
+                        const null_val = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                        _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = null_val } }, null);
+                        const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = temp_reg } }, .php_value);
+                        args[i] = ref_reg;
+                        try ref_wbs.append(self.allocator, .{ .var_name = var_name, .temp_reg = temp_reg.id });
+                        continue;
+                    }
                 }
             }
 
@@ -8347,7 +8412,7 @@ prop_name: ?[]const u8 = null,
         for (ref_wbs.items) |wb| {
             if (wb.temp_reg) |tr| {
                 const new_val = try self.emitWithResult(.{ .load = .{ .ptr = .{ .id = tr, .type_ = .php_value }, .type_ = .php_value } }, .php_value);
-                _ = try self.emit(.{ .global_set = .{ .name = wb.var_name, .value = new_val } }, null);
+                try self.emitRefWritebackTarget(wb.var_name, new_val);
             }
         }
 
@@ -8513,6 +8578,29 @@ prop_name: ?[]const u8 = null,
                         try ref_wbs.append(self.allocator, .{ .var_name = var_name, .temp_reg = temp_reg.id });
                         continue;
                     }
+
+                    // 函数/闭包内未声明变量：以引用传参在 PHP 中创建局部变量（null 起始，不读全局）
+                    {
+                        const func = self.current_function orelse return error.NoCurrentFunction;
+                        const alloca_type = Type.php_value;
+                        const type_ptr = try self.allocator.create(Type);
+                        type_ptr.* = alloca_type;
+                        const ptr_type = Type{ .ptr = type_ptr };
+                        const temp_reg = func.newRegister(ptr_type);
+                        const alloca_inst = try self.allocator.create(Instruction);
+                        alloca_inst.* = .{
+                            .result = temp_reg,
+                            .op = .{ .alloca = .{ .type_ = alloca_type, .count = 1, .no_optimize = true } },
+                            .location = self.current_location,
+                        };
+                        try self.entry_allocas.append(self.allocator, alloca_inst);
+                        const null_val = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                        _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = null_val } }, null);
+                        const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = temp_reg } }, .php_value);
+                        args[i] = ref_reg;
+                        try ref_wbs.append(self.allocator, .{ .var_name = var_name, .temp_reg = temp_reg.id });
+                        continue;
+                    }
                 }
             }
 
@@ -8529,12 +8617,7 @@ prop_name: ?[]const u8 = null,
         for (ref_wbs.items) |wb| {
             if (wb.temp_reg) |tr| {
                 const new_val = try self.emitWithResult(.{ .load = .{ .ptr = .{ .id = tr, .type_ = .php_value }, .type_ = .php_value } }, .php_value);
-                if (self.global_vars.contains(wb.var_name)) {
-                    _ = try self.emit(.{ .global_set = .{ .name = wb.var_name, .value = new_val } }, null);
-                } else {
-                    // __main__ 中的变量也通过 global_set 写回
-                    _ = try self.emit(.{ .global_set = .{ .name = wb.var_name, .value = new_val } }, null);
-                }
+                try self.emitRefWritebackTarget(wb.var_name, new_val);
             }
         }
 
