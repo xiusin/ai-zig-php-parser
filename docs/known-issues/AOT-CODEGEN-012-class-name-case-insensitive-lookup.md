@@ -8769,10 +8769,41 @@ R-214 曾把“归因里出现 setSourceLocation/PHI/调用行等非局部增删
 | 腿 | 读数 |
 |---|---|
 | C286（新门 8 臂 × 51 形） | 自证 **8 CF**；实跑 **8/8 SAME** 39 s |
-| 邻居 | C281 7/8（a8=F-145-b）、C282 12/12、C283 6/6、C284 8/8、C285 8/8 |
+| 邻居 | **C285 复跑 8/8**；C281–C284 本批未重跑（仅单函数模板改动） |
 | 主回归 | PASS=68 FAIL=0（c290） |
 | `zig build test` | 21/21 steps、326/326 |
 | 代次锚 | `tpl 8535900f…`／`nlk d58543cd…`／`irg 3d04a693…`（未提交） |
 
 ### 146.4 边界
 - 多字节按字节计宽（与 PHP 一致）；空 `$break` 未单列（实现可正常处理）。
+
+## 147. ★R-240 落地记录（F-144 `chr` 越界 Deprecated 闭环；纯模板轮）
+
+### 147.1 实测契约（PHP 8.5.8）
+| 形 | PHP |
+|---|---|
+| `chr(v)`，0≤v≤255 | 单字节 `v`，零诊断 |
+| `chr(256/257/321/512)` | `%256` 值（`00/01/41/00`）＋**每次调用**一条 Deprecated |
+| `chr(-1/-256/-257)` | `%256` 值（`ff/00/ff`）＋同上 Deprecated |
+| Deprecated 文案 | `chr(): Providing a value not in-between 0 and 255 is deprecated, this is because a byte value must be in the [0, 255] interval. The value used will be constrained using % 256` |
+| `@chr(321)` | stdout/stderr **双流均无**诊断，值仍 `41` |
+| `chr(new stdClass)` | 仅 TypeError（`Argument #1 ($codepoint) must be of type int, stdClass given`），**无** Deprecated |
+| 用户 handler | 收到 `E_DEPRECATED=8192`，消息体同上 |
+
+### 147.2 实现（纯模板，单点）
+- `tpl php_chr`（`:26151`）：在 `requireNumParam` 之后、取值之前插入
+  `if (code_int < 0 or code_int > 255) emitDeprecated("…")`；值路径保持 `code_int & 0xFF`。
+- 抑制与路由复用既有 `emitDeprecated` 单点（R-208/R-92 口径），无新增抑制逻辑。
+- 每次调用判断一次 ⇒ 连续越界调用按调用次序各发一条，与 PHP 一致。
+
+### 147.3 读数
+| 腿 | 读数 |
+|---|---|
+| C287（新门 7 臂：合法域／正越界／负越界／`@`／连续两次／类型守卫／handler 路由） | 自证 **7 CF**；实跑 **7/7 SAME** 30 s（stdout＋stderr＋rc 三流逐字节，行首空白折叠、文件/行号归一） |
+| 主回归 | **PASS=68 FAIL=0**、`SELF_CHECK_OK rows=68 uniq=68`（`c291_regression_R240_tmp.log`） |
+| `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/zigtest_R240.log`） |
+| 代次锚 | `tpl 2286fe876d38501baa87516a1b1c56bb`（R-239 为 `8535900f…`，仅此一枚变化）／`nlk d58543cd…`／`irg 3d04a693…`／`ir 5b99795…`／`parser 70e80f18…`／`opt 745e4bd4…`（全部未提交） |
+
+### 147.4 边界
+- 值域判断用 `i64` 比较，无溢出面；`chr(PHP_INT_MIN)` 仍落 `%256` 路径（PHP 同形）。
+- 文案中的 `% 256` 为字面文本（非格式化占位），不得走 `std.fmt`。

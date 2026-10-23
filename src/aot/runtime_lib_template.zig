@@ -26151,7 +26151,12 @@ pub fn php_ord(str: Value) !Value {
 pub fn php_chr(code: Value, allocator: Allocator) !Value {
     // ★F-62f 第三批：`chr(): Argument #1 ($codepoint) must be of type int, Foo given`
     const code_ok = requireNumParam("chr", 1, "codepoint", .int_param, code) orelse return Value.initNull();
-    const ascii = @as(u8, @truncate(@as(u64, @intCast(code_ok.toInt() & 0xFF))));
+    const code_int = code_ok.toInt();
+    // ★F-144（R-240）：越界值（<0 或 >255）按 %256 约束，并每次调用发一条同文案 Deprecated。
+    if (code_int < 0 or code_int > 255) {
+        emitDeprecated("chr(): Providing a value not in-between 0 and 255 is deprecated, this is because a byte value must be in the [0, 255] interval. The value used will be constrained using % 256");
+    }
+    const ascii = @as(u8, @truncate(@as(u64, @intCast(code_int & 0xFF))));
     const buffer = [_]u8{ascii};
     const result = try PHPString.init(allocator, &buffer);
     return Value.initString(result);

@@ -6724,6 +6724,100 @@ pub const IRGenerator = struct {
         return self.emitWithResult(.{ .phi = .{ .incoming = incoming } }, .php_value);
     }
 
+    /// F-142-c：多实参 isset 的静默求值链（从左到右短路）。
+    /// 逐参用与单实参 isset 相同的静默 helper，再按 && 的左结合块形合并：
+    /// 复用 logical_rhs_/logical_merge_ 标签，AST-direct 标签发射器只识别该形状。
+    fn generateMultiArgIsset(self: *Self, args: []const Node.Index) !Register {
+        var acc = try self.emitQuietIssetArg(args[0]);
+        for (args[1..]) |arg_idx| {
+            const false_val = try self.emitWithResult(.{ .const_bool = false }, .php_value);
+            const rhs_block = try self.createBlock("logical_rhs");
+            const merge_block = try self.createBlock("logical_merge");
+            self.setTerminator(.{ .cond_br = .{
+                .cond = acc,
+                .then_block = rhs_block,
+                .else_block = merge_block,
+            } });
+            const lhs_end_block = self.current_block.?;
+
+            self.setCurrentBlock(rhs_block);
+            const next_reg = try self.emitQuietIssetArg(arg_idx);
+            const rhs_end_block = self.current_block.?;
+            self.setTerminator(.{ .br = merge_block });
+
+            self.setCurrentBlock(merge_block);
+            const incoming = try self.allocator.alloc(Instruction.PhiIncoming, 2);
+            incoming[0] = .{ .value = false_val, .block = lhs_end_block };
+            incoming[1] = .{ .value = next_reg, .block = rhs_end_block };
+            acc = try self.emitWithResult(.{ .phi = .{ .incoming = incoming } }, .php_value);
+        }
+        return acc;
+    }
+
+    /// 单个 isset 左值的静默求值（等价于单实参 isset 的既有特判，供多实参链复用）。
+    fn emitQuietIssetArg(self: *Self, arg_idx: Node.Index) !Register {
+        const node = self.getNode(arg_idx) orelse
+            return try self.emitWithResult(.{ .const_bool = false }, .php_value);
+        switch (node.tag) {
+            .variable => {
+                const var_name = self.getString(node.data.variable.name);
+                if (self.getVarRegister(var_name)) |ptr_reg| {
+                    // 局部变量读的是值本身，isset 的返回值必须是 bool（否则末参值会漏进 phi）。
+                    const loaded = try self.emitWithResult(.{ .load = .{ .ptr = ptr_reg, .type_ = .php_value } }, .php_value);
+                    const is_null_args = try self.allocator.alloc(Register, 1);
+                    is_null_args[0] = loaded;
+                    const is_null_reg = try self.emitWithResult(.{ .call = .{
+                        .func_name = "php_is_null",
+                        .args = is_null_args,
+                        .return_type = .php_value,
+                    } }, .php_value);
+                    const false_reg = try self.emitWithResult(.{ .const_bool = false }, .php_value);
+                    return self.emitWithResult(.{ .eq = .{ .lhs = is_null_reg, .rhs = false_reg } }, .php_value);
+                }
+                const name_reg = try self.emitPropertyNameValue(var_name);
+                const call_args = try self.allocator.alloc(Register, 1);
+                call_args[0] = name_reg;
+                return self.emitWithResult(.{ .call = .{
+                    .func_name = "php_isset_var",
+                    .args = call_args,
+                    .return_type = .php_value,
+                } }, .php_value);
+            },
+            .array_access => {
+                const access = node.data.array_access;
+                if (access.index) |key_idx| {
+                    const array_reg = try self.generateExpression(access.target);
+                    const key_reg = try self.generateExpression(key_idx);
+                    const call_args = try self.allocator.alloc(Register, 2);
+                    call_args[0] = array_reg;
+                    call_args[1] = key_reg;
+                    return self.emitWithResult(.{ .call = .{
+                        .func_name = "php_array_isset",
+                        .args = call_args,
+                        .return_type = .php_value,
+                    } }, .php_value);
+                }
+            },
+            .property_access => {
+                const pa = node.data.property_access;
+                const object_reg = try self.generateExpression(pa.target);
+                const prop_reg = try self.emitPropertyNameValue(self.getString(pa.property_name));
+                const call_args = try self.allocator.alloc(Register, 2);
+                call_args[0] = object_reg;
+                call_args[1] = prop_reg;
+                return self.emitWithResult(.{ .call = .{
+                    .func_name = "php_object_isset",
+                    .args = call_args,
+                    .return_type = .php_value,
+                } }, .php_value);
+            },
+            .static_property_access => return self.emitStaticPropertyQuietCall(node, "php_isset_static_property"),
+            else => {},
+        }
+        // 调用点已按四种左值 tag 预筛，此支不可达；保留通用求值以免未来扩形时崩溃。
+        return try self.generateExpression(arg_idx);
+    }
+
     fn generateTernaryExpr(self: *Self, node: *const Node) !Register {
         const ternary_data = node.data.ternary_expr;
 
@@ -7022,6 +7116,26 @@ pub const IRGenerator = struct {
 
         // isset($obj->prop)：需要调用 php_object_isset 以触发 __isset 魔法方法
         if (func_name.len != 0 and indirect_callee == null and std.mem.eql(u8, func_name, "isset")) {
+            // F-142-c：多实参 isset 逐参静默 + 左到右短路（PHP 语义）。
+            // 仅当全部实参都是 isset 合法左值形时接管；其余形维持原有通用路径。
+            if (call_data.args.len > 1) {
+                var all_quiet_shapes = true;
+                for (call_data.args) |multi_arg_idx| {
+                    const multi_node = self.getNode(multi_arg_idx) orelse {
+                        all_quiet_shapes = false;
+                        break;
+                    };
+                    switch (multi_node.tag) {
+                        .variable, .property_access, .static_property_access => {},
+                        .array_access => {
+                            if (multi_node.data.array_access.index == null) all_quiet_shapes = false;
+                        },
+                        else => all_quiet_shapes = false,
+                    }
+                    if (!all_quiet_shapes) break;
+                }
+                if (all_quiet_shapes) return try self.generateMultiArgIsset(call_data.args);
+            }
             if (call_data.args.len >= 1) {
                 const arg_idx = call_data.args[0];
                 const arg_node = self.getNode(arg_idx);
