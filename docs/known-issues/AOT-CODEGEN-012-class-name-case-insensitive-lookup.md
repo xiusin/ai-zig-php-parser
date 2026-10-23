@@ -8599,15 +8599,50 @@ R-214 曾把“归因里出现 setSourceLocation/PHI/调用行等非局部增删
 | 腿 | 读数 |
 |---|---|
 | C282（新门 7 臂） | 自证 **7 CF**；实跑 **6 SAME / 1 DIFF**（c7＝F-146-c 注册红）33 s |
-| C281（R-232 门） | 见 §141.4 复跑 |
-| 主回归 | 见 §141.4 |
+| C281（R-232 门复跑） | **6 SAME / 1 DIFF**（a7＝F-145），47 s |
+| 主回归 | **PASS=68 FAIL=0**、`SELF_CHECK_OK rows=68 uniq=68`（证据 `c284_regression_R233_tmp.log`） |
 | `zig build test` | 21/21 steps、**326/326**、rc=0（`--summary all`） |
 | 代次锚 | `irg 6bc59d18026e5a070349aeafb0a2f646`／`nlk 4700b644…`／`tpl 7320db32…`（未提交） |
 
 ### 141.4 邻门与影子口径
-- C281 复跑：待填。
+- C281 复跑：6 SAME / 1 DIFF（a7＝F-145 注册红），preg 路径零转移。
 - 影子：IR 级改动 ⇒ 漂移只应出现在“函数内 byref 未声明变量”形；旧二进制未备份（r110 降级为语料符号普查＋回归点名）。
 
 ### 141.5 新登记
-- **F-146-c（P2）**：`__main__` 顶层把未声明变量按引用传参，PHP 不发 Warning，AOT 多一条（值正确）。门 C282 c7。
+- **F-146-c（P2，★已由 R-235 关闭）**：`__main__` 顶层把未声明变量按引用传参，PHP 不发 Warning，AOT 多一条。R-235 给 IR `global_get` 加 `no_warn`，三处 byref 初始化静默读全局；C282 扩至 11 臂全绿（c7–c9 三形 + c10/c11 守卫）。
 - **F-147（P2）**：用户函数名与生成码局部变量同名 ⇒ 编译失败。实测 `g`（`defer if (guard) |*g|`）与 `out`（profiler `const out = …flamegraph.txt`）。修法：生成码局部统一前缀或函数名转义；涉及模板+发射器命名空间。
+
+## 142. ★R-234 落地记录（F-147 用户函数名与生成码标识符冲突；统一 `__fn_` 前缀）
+
+### 142.1 缺陷（实测）
+| 形 | 修前 |
+|---|---|
+| `function g(){...}` | 生成码 `defer if (guard) \|*g\|` 遮蔽顶层 `@"g"` ⇒ Zig：`local capture shadows declaration of 'g'` |
+| `function out(){...}` | profiler 的 `const out = …flamegraph.txt` 遮蔽 ⇒ 同类编译失败 |
+| 一般性 | 任意短名（name/value/args/allocator/ctx/i/s…）或与生成码顶层 `main`/`select`/`go` 同名都可能中招 ⇒ 逐个改名不可穷尽 |
+
+### 142.2 修法
+- `isPlainUserFuncName`：无 `::`、非 `__main__`、非 `__gen_body_` ⇒ 加 `__fn_` 前缀；方法/入口/生成器 body 保持原样。
+- `fnIdentName` 统一产出**未转义**基名，调用方仍走 `escapeString`/`writeEscapedZigString`。
+- 五类引用点全部改走 helper：①声明与生成器 wrapper（`generateFunction`）；②`registerAllFunctions` 指针；③`aot_dispatch_user_function` 返回指针；④直调四形与无返回值语句支；⑤`__declare_function__` 注册（键与标识符分离）。
+- **注册键（PHP 名）不变**：`function_exists`/`ReflectionFunction`/字符串调用/`call_user_func` 继续按 PHP 名解析。
+
+### 142.3 读数
+| 腿 | 读数 |
+|---|---|
+| C283（新门 6 臂） | 自证 **6 CF**；实跑 **6/6 SAME** 28 s（短名族/动态反射/闭包方法/递归/与生成码顶层同名/普通守卫） |
+| C281 / C282 邻门 | **6 SAME / 1 DIFF**（a7=F-145；c7=F-146-c，均为注册红），39 s／33 s |
+| 主回归 | **PASS=68 FAIL=0**、`SELF_CHECK_OK rows=68 uniq=68`（`c285_regression_R234_tmp.log`） |
+| `zig build test` | 21/21 steps、**326/326**、rc=0 |
+| 代次锚 | `nlk 56c22ccc241ec8469f1930c221167c1e`／`irg 6bc59d18…`／`tpl 7320db32…`（未提交） |
+
+### 142.4 邻门与影子口径
+- C281/C282 复跑：均为 6 SAME / 1 DIFF（各自注册红），零转移。
+- 影子：所有含用户函数的 main.zig 都会漂移（标识符前缀），属**机械可归因**；旧二进制未备份 ⇒ 按 r110 降级为“门 + 回归 + 生成码抽查”（抽查：`@"__fn_g"`/`@"__fn___x"` 声明、直调、注册、dispatch 四处一致）。
+
+### 141.6 ★R-235 追加（F-146-c 关闭 ＋ F-148 命名实参 byref 写回关闭）
+- **F-146-c**：IR `GlobalVarOp` 增 `no_warn: bool=false`；三处 byref 的 `is_global/is_main` 初始化与命名实参分支改为 `global_get{no_warn=true}`；`nlk` 发射把 `op.no_warn` 并入 `getGlobalVarNoWarn`。普通读取仍告警（门 c11）。
+- **F-148（同轮关闭）**：命名实参 `h(v: $q)` 的 byref 此前**只传引用、不登记写回** ⇒ 被调写入的值丢失（外层读到 `NULL`＋Warning）。修法＝命名实参全局分支补 `ref_writebacks.append`，复用 R-233 的 `emitRefWritebackTarget`。
+- C282 扩至 **12 臂**：c7 用户/c8 方法/c9 静态顶层、c10 已定义全局、c11 普通读仍告警、c12 命名实参；自证 **12 CF**，实跑 **12/12 SAME**（61 s）。
+- 邻门：C281 6/7（a7=F-145）、C283 6/6；`zig build test` 326/326；主回归 PASS=68 FAIL=0（c286）。
+- 代次锚：`ir 5b997953…`／`nlk 5a6e13f8…`／`irg 3d04a693…`／`tpl 7320db32…`（未提交）。

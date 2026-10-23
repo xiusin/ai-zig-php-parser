@@ -7384,9 +7384,12 @@ prop_name: ?[]const u8 = null,
                                 try self.entry_allocas.append(self.allocator, alloca_inst);
                                 try self.putVarRegister(temp_var_name, temp_reg);
 
-                                // Load全局变量并store到临时变量
-                                const load_reg = try self.emitWithResult(.{ .global_get = .{ .name = var_name } }, .php_value);
+                                // Load全局变量并store到临时变量（F-146-c：按引用传参不告警）
+                                const load_reg = try self.emitWithResult(.{ .global_get = .{ .name = var_name, .no_warn = true } }, .php_value);
                                 _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = load_reg } }, null);
+
+                                // ★F-148：命名实参的 byref 也要登记写回（此前只传引用、不回填 ⇒ 值丢失）
+                                try ref_writebacks.append(self.allocator, .{ .var_name = var_name, .temp_reg = temp_reg });
 
                                 // 创建引用
                                 const r = try self.emitWithResult(.{ .make_ref = .{ .ptr = temp_reg } }, .php_value);
@@ -7487,8 +7490,8 @@ prop_name: ?[]const u8 = null,
                             };
                             try self.entry_allocas.append(self.allocator, alloca_inst);
 
-                            // Store当前值到temp
-                            const current_val = try self.generateExpression(expr_idx);
+                            // Store当前值到temp（F-146-c：按引用传参不告警 ⇒ 静默读全局）
+                            const current_val = try self.emitWithResult(.{ .global_get = .{ .name = var_name, .no_warn = true } }, .php_value);
                             _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = current_val } }, null);
 
                             // 传递make_ref
@@ -8365,7 +8368,8 @@ prop_name: ?[]const u8 = null,
                             .location = self.current_location,
                         };
                         try self.entry_allocas.append(self.allocator, alloca_inst);
-                        const current_val = try self.generateExpression(arg_idx);
+                        // F-146-c：按引用传参不告警 ⇒ 静默读全局
+                        const current_val = try self.emitWithResult(.{ .global_get = .{ .name = var_name, .no_warn = true } }, .php_value);
                         _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = current_val } }, null);
                         const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = temp_reg } }, .php_value);
                         args[i] = ref_reg;
@@ -8570,7 +8574,8 @@ prop_name: ?[]const u8 = null,
                             .location = self.current_location,
                         };
                         try self.entry_allocas.append(self.allocator, alloca_inst);
-                        const current_val = try self.generateExpression(arg_idx);
+                        // F-146-c：按引用传参不告警 ⇒ 静默读全局
+                        const current_val = try self.emitWithResult(.{ .global_get = .{ .name = var_name, .no_warn = true } }, .php_value);
                         _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = current_val } }, null);
                         const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = temp_reg } }, .php_value);
                         args[i] = ref_reg;

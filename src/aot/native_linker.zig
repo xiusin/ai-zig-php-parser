@@ -72,6 +72,16 @@ fn escapeBackslashes(allocator: std.mem.Allocator, str: []const u8) ![]const u8 
     return result;
 }
 
+/// F-147：哪些 IR 函数名可以直接作为 Zig 标识符。
+///   生成码里的局部变量可能取任意短名（`g`/`out`/`name`/`value`…），而 Zig **禁止局部遮蔽容器级声明**
+///   ⇒ 用户顶层函数与闭包统一加 `__fn_` 前缀。方法名含 `::`；`__main__`/`__gen_body_*` 是内部名，保持原样。
+fn isPlainUserFuncName(name: []const u8) bool {
+    if (std.mem.indexOf(u8, name, "::") != null) return false;
+    if (std.mem.eql(u8, name, "__main__")) return false;
+    if (std.mem.startsWith(u8, name, "__gen_body_")) return false;
+    return true;
+}
+
 /// 原生链接器配置
 pub const NativeLinkerConfig = struct {
     /// 目标平台
@@ -2533,7 +2543,11 @@ pub const NativeLinker = struct {
             try writer.writeAll("    try runtime.registerUserFunctionWithLocation(\"");
             try writeEscapedZigString(writer, func.name);
             try writer.writeAll("\", @\"");
-            try writeEscapedZigString(writer, func.name);
+            {
+                const ident = try self.fnIdentName(func.name);
+                defer self.allocator.free(ident);
+                try writeEscapedZigString(writer, ident);
+            }
             try writer.writeAll("\", \"");
             try writeEscapedZigString(writer, func.location.file);
             try writer.print("\", {d});\n", .{func.location.line});
@@ -2607,7 +2621,11 @@ pub const NativeLinker = struct {
             try writeEscapedZigString(writer, func.name);
             try writer.writeAll("\")) {\n");
             try writer.writeAll("        return @\"");
-            try writeEscapedZigString(writer, func.name);
+            {
+                const ident = try self.fnIdentName(func.name);
+                defer self.allocator.free(ident);
+                try writeEscapedZigString(writer, ident);
+            }
             try writer.writeAll("\"(runtime.Value.initNull(), args, allocator);\n");
             try writer.writeAll("    }\n");
         }
@@ -4900,7 +4918,10 @@ pub const NativeLinker = struct {
 
         // 生成函数签名
         // 所有函数都是public的，以便相互调用
-        const escaped_name = try escapeBackslashes(self.allocator, func.name);
+        // F-147：顶层函数/闭包标识符加 `__fn_` 前缀，避免与生成码局部变量同名（Zig 禁止局部遮蔽）。
+        const ident_name = try self.fnIdentName(func.name);
+        defer self.allocator.free(ident_name);
+        const escaped_name = try self.escapeString(ident_name);
         defer self.allocator.free(escaped_name);
 
         if (func.is_generator) {
@@ -22686,7 +22707,11 @@ pub const NativeLinker = struct {
                             if (module.findFunction(declared_name)) |func| {
                                 const escaped_declared_name = try self.escapeString(declared_name);
                                 defer self.allocator.free(escaped_declared_name);
-                                try writer.print("    try runtime.registerUserFunctionWithLocation(\"{s}\", @\"{s}\", \"{s}\", {d});\n", .{ escaped_declared_name, escaped_declared_name, func.location.file, func.location.line });
+                                const declared_ident = try self.fnIdentName(declared_name);
+                                defer self.allocator.free(declared_ident);
+                                const escaped_declared_ident = try self.escapeString(declared_ident);
+                                defer self.allocator.free(escaped_declared_ident);
+                                try writer.print("    try runtime.registerUserFunctionWithLocation(\"{s}\", @\"{s}\", \"{s}\", {d});\n", .{ escaped_declared_name, escaped_declared_ident, func.location.file, func.location.line });
                                 // 注册函数元数据
                                 const pc = func.params.items.len;
                                 var rc: usize = 0;
@@ -23993,7 +24018,9 @@ pub const NativeLinker = struct {
                                 try writer.print("    runtime.php_call_undefined_function(\"{s}\");\n", .{escaped_func_name});
                             } else {
                                 const call_name = canonical_call_name.?;
-                                const escaped_call_name = try self.escapeString(call_name);
+                                const call_ident = try self.fnIdentName(call_name);
+                                defer self.allocator.free(call_ident);
+                                const escaped_call_name = try self.escapeString(call_ident);
                                 defer self.allocator.free(escaped_call_name);
                                 const func_has_return_value = self.func_return_types.get(call_name) orelse false;
                                 const in_try_block = self.current_exception_handler != null;
@@ -24050,7 +24077,11 @@ pub const NativeLinker = struct {
                                 if (module.findFunction(declared_name)) |func| {
                                     const escaped_declared_name = try self.escapeString(declared_name);
                                     defer self.allocator.free(escaped_declared_name);
-                                    try writer.print("    try runtime.registerUserFunctionWithLocation(\"{s}\", @\"{s}\", \"{s}\", {d});\n", .{ escaped_declared_name, escaped_declared_name, func.location.file, func.location.line });
+                                    const declared_ident2 = try self.fnIdentName(declared_name);
+                                    defer self.allocator.free(declared_ident2);
+                                    const escaped_declared_ident2 = try self.escapeString(declared_ident2);
+                                    defer self.allocator.free(escaped_declared_ident2);
+                                    try writer.print("    try runtime.registerUserFunctionWithLocation(\"{s}\", @\"{s}\", \"{s}\", {d});\n", .{ escaped_declared_name, escaped_declared_ident2, func.location.file, func.location.line });
                                     // 注册函数元数据
                                     const pc = func.params.items.len;
                                     var rc: usize = 0;
@@ -24199,7 +24230,12 @@ pub const NativeLinker = struct {
                             }
                         } else {
                             // 用户定义函数
-                            try writer.print("    _ = try @\"{s}\"(runtime.Value.initNull(), ", .{op.func_name});
+                            const void_call_name = self.findUserFunctionCanonical(op.func_name) orelse op.func_name;
+                            const void_ident = try self.fnIdentName(void_call_name);
+                            defer self.allocator.free(void_ident);
+                            const escaped_void = try self.escapeString(void_ident);
+                            defer self.allocator.free(escaped_void);
+                            try writer.print("    _ = try @\"{s}\"(runtime.Value.initNull(), ", .{escaped_void});
                             try self.writeValueArgsArray(writer, op.args);
                             try writer.writeAll(", runtime.runtime_allocator);\n");
                         }
@@ -25273,7 +25309,7 @@ pub const NativeLinker = struct {
                         try writer.print("    const __sw_undef_{d} = !globalVarIsDefined(\"{s}\");\n", .{ reg.id, escaped_name });
                         try self.writeRegAssignmentPrefix(writer, reg.id);
                         try writer.print("getGlobalVarNoWarn(\"{s}\");\n", .{escaped_name});
-                    } else if (is_byref or is_concat_operand or is_coalesce) {
+                    } else if (op.no_warn or is_byref or is_concat_operand or is_coalesce) {
                         try self.writeRegAssignmentPrefix(writer, reg.id);
                         try writer.print("getGlobalVarNoWarn(\"{s}\");\n", .{escaped_name});
                     } else {
@@ -33326,6 +33362,13 @@ pub const NativeLinker = struct {
         var buf: [512]u8 = undefined;
         const txt = try std.fmt.bufPrint(&buf, "{d}", .{v});
         try writer.print("runtime.Value.initFloat({s}{s})", .{ txt, if (std.mem.indexOfScalar(u8, txt, '.') == null) ".0" else "" });
+    }
+
+    /// F-147：用户函数在生成码中的唯一标识符基名（未转义）。
+    ///   调用方仍需走 escapeString/writeEscapedZigString 处理引号与反斜杠。
+    fn fnIdentName(self: *Self, name: []const u8) ![]const u8 {
+        if (!isPlainUserFuncName(name)) return self.allocator.dupe(u8, name);
+        return std.fmt.allocPrint(self.allocator, "__fn_{s}", .{name});
     }
 
     fn escapeString(self: *Self, str: []const u8) ![]const u8 {

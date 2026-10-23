@@ -1087,6 +1087,9 @@ pub const Instruction = struct {
         name: []const u8,
         /// Value register (for global_set)
         value: ?Register = null,
+        /// ★F-146-c：按引用传参的初始化读**不发 Undefined variable**（PHP 语义：传引用创建变量）。
+        ///   发射侧据此走 `getGlobalVarNoWarn`。
+        no_warn: bool = false,
     };
 
     /// Runtime type check
