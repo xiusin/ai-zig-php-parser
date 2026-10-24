@@ -9178,3 +9178,165 @@ R-214 曾把“归因里出现 setSourceLocation/PHI/调用行等非局部增删
 - `findMethodLookup` 也会命中接口链：实现类不覆写接口方法时，`ReflectionMethod('C','im')->getParameters()` 现在给出接口声明参数（PHP 同口径），属正向变化。
 - 方法不存在时构造函数仍不抛（既有形态，未在本批）；`getParameters` 回退 registry 后返回空数组。
 - F-155-b（闭包 `new` 初始化器默认值）仍开。
+
+## 158. ★R-251 落地记录（F-155-b 闭环：闭包形参 `new` 初始化器默认值）＋F-158 新立
+
+### 158.1 契约（PHP 8.5.8）
+| 形 | PHP |
+|---|---|
+| 闭包 `function ($o = new stdClass, $arr = [new stdClass, 2])` | `ReflectionFunction` 参数 `isDefaultValueAvailable=true`；`getDefaultValue()` 每次新实例 |
+| `bindTo` 派生闭包 | 形参默认值元数据保留（名字/avail/取值） |
+| 类内闭包 `function ($q = new stdClass, $s = self::N)` | `self::N` 按类上下文求值 |
+| 闭包无默认值 | `avail=false`；`getDefaultValue()` 抛 `ReflectionException|Internal error…`（原文案） |
+| 普通函数 `new` 默认值 | R-249 面不回归 |
+
+### 158.2 实现
+- `irg generateParameters`：取消闭包排除，折叠失败即合成 `__propdefault_N`；类内闭包保留 `current_class` 供 `self::` 常量解析。
+- `nlk` 闭包注册：`registerFunctionMetaEx` 的工厂数组由 `p.default_func` 生成（此前恒 `&.{}`）。
+- `tpl PHPClosure`：新增 `param_default_factories`；`php_create_closure` 与两处 bind/bindTo 派生点一并带入（切片别名）。
+- `tpl ReflectionFunction::getParameters`：闭包参数若有工厂，则**反持闭包对象**（`setProperty("__closure", …)`，仅工厂形参）。
+- `tpl ReflectionParameter::getDefaultValue`：新增闭包工厂支（`clo.param_default_factories[pos]` 每次调用）。
+
+### 158.3 读数
+| 腿 | 读数 |
+|---|---|
+| C297（新门 5 臂） | 自证 **5 CF**；实跑 **5/5 SAME** 27 s |
+| 邻居 | C295 9/9、C296 7/7、C292 6/6、C012 88 臂 **83/5**（红集合 `i1 i2 f12 f34 d6` 零转移，`repo_build_residue=0`） |
+| `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/r251_test_summary.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r251_regression.log`，`SELF_CHECK_OK rows=68`） |
+| 代次锚 | `nlk 05947e99145562f618dc5e3c5d42b563`／`tpl eca42d370be484838a714ebbd99dec4d`／`irg cd8e0b7305b509365cc7d095bbdd34ff`／`ir e3d7c487…`（未提交） |
+
+### 158.4 边界 / 新登记
+- **F-158 新立（P1，发射器/表达式位）**：**if 体内嵌套三元在 `echo` 实参位丢值**（并可连带吞掉同语句后续实参）。最小复现：
+  ```php
+  function mk() { return new stdClass; }
+  foreach ([1] as $x) { $v = mk(); if (is_object($v)) { echo "M3|", is_object($v) ? get_class($v) : (is_array($v) ? "a" : json_encode($v)), "\n"; } }
+  ```
+  AOT 只输出 `M3|`（值与换行皆失）。矩阵：简单三元在 if 体内正常（M1）；`$s = 嵌套三元;` 在 if 体内连后续 echo 一起消失（M2）；**无循环、仅 if 体**同样失败（M4）；顶层 echo 嵌套三元正常；改成 helper 函数（内部顺序 if）后全部正常（C297 采用此形规避）。
+- F-158 与本轮无关（`mk()` 纯用户代码、不涉反射），但与 F-117（循环体 phi 物化）疑同族；修复需单独审计发射器表达式位 `if`/三元 merge 的 phi 落点，禁与反射批次捆绑。
+- **F-158 归因证据（`--emit-ir` 实测）**：外层三元 `is_object($v) ? get_class($v) : (is_array($v) ? … : …)` 的 IR 中 `ternary_merge_4` 的 phi 有两条 incoming：`reg_7@ternary_then_2` 与 `reg_14@ternary_merge_7`；但块顺序为 `… if_then_0, if_merge_1, ternary_then_2, ternary_else_3, ternary_merge_4, ternary_then_5, ternary_else_6, ternary_merge_7`（merge_4 早于 else 子块的 merge_7）。生成码在 then 臂**没有** `reg_15 = reg_7`，else 臂末尾只有一条无条件 `reg_15 = reg_14`（取自 merge_7），随后 echo 读 reg_15 ⇒ true 路径读到未赋值寄存器（打印空）。顶层同形正常（顺序路径）；if 体内触发。修复属发射器块序/phi 物化设计轮，与 F-117 同族，待老铁裁定后单独落地。
+- 闭包工厂通过形参对象反持闭包实现；仅对“该位置确有工厂”的形参设置，避免普通形参形成闭包引用环。
+
+## 159. ★R-252 落地记录（F-95-c-b 闭环：类常量不可折叠初始化器）
+
+### 159.1 契约（PHP 8.5.8）
+| 形 | PHP |
+|---|---|
+| `class K1 { const A = E_ALL; }` | 读取 `K1::A` = 30719；`ReflectionClass::getConstant('A')` 同值 |
+| `const D = PHP_INT_SIZE` / `const ARR = [E_ALL, 2]` | 数组与内置常量均可进初始化器 |
+| 接口常量 `I1::A = E_ALL` | `I1::A` 与实现类 `C1::A` 均 30719 |
+| 枚举内常量 `enum E1: int { const A = E_ALL; }` | `E1::A` = 30719 |
+| trait 常量 `T1::A = E_ALL`，`class C2 { use T1; }` | `C2::A` = 30719（直接 `T1::A` 是 fatal，见 F-159） |
+| `const Z = self::B + E_ALL` | 30722（混合可折叠/不可折叠） |
+| 纯可折叠常量 / self 引用 | 不变（守卫） |
+
+### 159.2 实现
+- `ir TypeDef.Constant.default_func: ?[]const u8`：`value` 仅为占位（`.null`），注册器必须走工厂。
+- `irg` 4 个收集点（类/接口/枚举/trait）：`evalConstantExprToTypeDef` 失败时用 `generatePropertyDefaultFunc(initializer, class_name)` 合成零参工厂，不再静默丢弃该常量。
+- **第二根因（实测才暴露）**：类常量收集后的 `constant_cache` 构建循环会把占位 `.null` 也缓存进编译期表 ⇒ 所有 `K::A` 读取被折叠成 `const_null`（值恒空）。修法＝`default_func != null` 的常量**禁止进 constant_cache**，读取回退 `static_property_get`。
+- `nlk` 类常量与 trait 常量两处注册点：`default_func` 非空则发 `const cv = try @"<factory>"(...)`，否则走原字面量路径。
+
+### 159.3 读数
+| 腿 | 读数 |
+|---|---|
+| C298（新门 7 臂） | 自证 **7 CF**；实跑 **7/7 SAME** 36 s |
+| 邻居 C073 / C291 | 19/19、10/10（C073 当时 `repo_build_residue=2` 为调试目录，已删） |
+| 门 P（C012，88 臂） | **83/5**，红集合 `i1 i2 f12 f34 d6` 与 R-252 前快照逐臂零转移；清理调试目录后复跑 `repo_build_residue=0` |
+| `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/r252_test_summary.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r252_regression.log`，`SELF_CHECK_OK rows=68`） |
+| 代次锚 | `nlk 4f9c54a065b58e949b59bcdcdb6373d1`／`irg 4015f0f5ee68facdfef20449f47d8589`／`ir fb2bb442ca27b98cf1df7e109a240e1f`／`tpl eca42d37…`（未改变，未提交） |
+
+### 159.4 边界 / 新登记
+- **F-159 新立（P2，过接受）**：直接读取 trait 常量 `T::A` 在 PHP 是 fatal `Error: Cannot access trait constant T::A directly`（rc=255）；AOT 返回组合值并继续（实测 `T|30719|30719` vs PHP `T|30719|` + fatal）。经类读取 `C::A` 已正确。
+- **F-160 新立（P2）**：`constant('K::A')` / `constant('K::B')` 在 AOT 均报 `Error: Undefined constant "K::A"`（foldable 的 B 也一样），PHP 返回常量值；类常量运行期读取需接入 `constant()` 解析（`C::NAME` 拆分 + 可见性/错误文案）。
+- 占位值进入 trait 常量合并比较（`constantsEqual`）时可能与另一不可折叠常量误判相等（PHP 编译期冲突检测）；本批未改变该路径的既有覆盖范围，登记备查。
+- 依赖**后声明**常量的初始化器（`const A = self::B;` 且 B 声明在后）在类注册期按声明顺序求值，可能读到未注册值；PHP 语义允许前向引用，属下一批候选（未建臂）。
+
+## 160. ★R-253 落地记录（F-128 闭环：checkdate 形参契约与 `.may_raise` 配套）
+
+### 160.1 契约（PHP 8.5.8）
+| 形 | PHP |
+|---|---|
+| `checkdate($obj, 1, 2020)` / `(1, $obj, 2020)` / `(1, 1, $obj)` | 可捕获 `TypeError: checkdate(): Argument #N ($month/$day/$year) must be of type int, Foo given` |
+| `checkdate(2, 30, 2020)` / `(2, 29, 2020)` / `(13, 1, 2020)` | `false` / `true` / `false`（值域判定不变） |
+| 数值串/布尔/整值浮点 | 走 F-62f 统一 weak 口径（`requireNumParam`） |
+
+### 160.2 实现（两文件配套）
+- `tpl php_checkdate`：签名 `Value` → `!Value`；三枚形参依次 `requireNumParam("checkdate", N, "month|day|year", .int_param, …)`，拒绝即返回 `initNull()`（pending TypeError 由调用点路由）。
+- `nlk` 注册表：`checkdate` 条目 `.may_raise = false` → `true`。
+- ★旗与签名是**配套约束**：只翻旗不改签名 ⇒ 生成码把 `try` 打在非 error-union 函数上，编译期即错；只改签名不翻旗 ⇒ 异常不在调用点路由（R-194 撤回态）。
+- 普查依据（§104.5，`c207`/`c208` 两遍）：48 枚 `.may_raise=false` 条目中**恰 1 枚**（checkdate）一旦接线就会抛 ⇒ 本批只翻这一枚，不做全表翻新。
+
+### 160.3 读数
+| 腿 | 读数 |
+|---|---|
+| BLT 子集（b168–b178，11 臂） | **11/11 SAME**，`aot_caught=8`、`zig_escape=0`；**b170/b171/b172 由红转绿**，b176/b177/b178 反向守卫保持 |
+| 探针（三 TypeError + 三值域 + `END`） | stdout/stderr/rc 与 PHP 逐字节 SAME |
+| `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/r253_test_summary.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r253_regression.log`，`SELF_CHECK_OK rows=68`） |
+| 代次锚 | `nlk aef85ac8520e0a806d3132a533a1d921`／`tpl 3698a257bda04310229a94dac4263ee6`；`irg 4015f0f5…`／`ir fb2bb442…` 未变（未提交） |
+
+### 160.4 边界
+- 本批只动 `checkdate` 一条；今后任何 `.may_raise=false` 条目接线前必须重跑 `c207`（直接抛点）＋`c208`（间接抛点）两遍普查（§104.5 纪律）。
+- 显式 `null` 形参仍走 helper 的 Passing-null Deprecated + 0（F-62f-opt 同族；省略与显式 null 不可区分）。
+
+## 161. ★R-254 落地记录（F-62f 余量：时间族 ?int 形参契约）
+
+### 161.1 契约（PHP 8.5.8）
+| 形 | PHP |
+|---|---|
+| `mktime($o)` | `TypeError: mktime(): Argument #1 ($hour) must be of type int, stdClass given` |
+| `mktime(0,$o)` / `(0,0,$o)` / `(0,0,0,$o)` / `(0,0,0,1,$o)` / `(0,0,0,1,1,$o)` | `?int` 文案（#2–#6，`$minute/$second/$month/$day/$year`） |
+| `getdate($o)` / `idate("Y",$o)` | `?int` 文案（`$timestamp`） |
+| 固定时间戳 | `mktime(0,0,0,1,1,2020)=1577836800`；`getdate(0)["year"]=1970`；`idate("Y",0)=1970` 不变 |
+| 数值串 / 整值浮点 / bool | 仍按 weak 模式接受 |
+
+### 161.2 实现
+- `tpl php_mktime`：签名 `Value` → `!Value`；6 枚形参依次 `requireOptionalNumParam`（#1 `.int_param`，#2–#6 `.nullable_int_param`），null 原样透传后按原语义取当前分量。
+- `tpl php_getdate` #1、`php_idate` #2：`.nullable_int_param`，null ⇒ 当前时间不变。
+- `nlk` 注册表：`mktime` / `getdate` / `idate` 三条 `.may_raise = true`（r152 配套约束）。
+
+### 161.3 读数
+| 腿 | 读数 |
+|---|---|
+| C299（新门 5 臂） | 自证 **5 CF**；实跑 **5/5 SAME** 27 s（t1 六槽、t2 两函数、t3 值守卫、t4 weak 形、t5 数组拒） |
+| 邻居 | BLT `b183` 1/1 SAME（`aot_caught=1`）；C264 20 臂 **19/0/1**（compile_fail 为既有臂）；C265 7/7 |
+| `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/r254_test_summary.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r254_regression.log`，`SELF_CHECK_OK rows=68`） |
+| 代次锚 | `nlk 555e8ee0b6c99c1b15da16c55b27b25e`／`tpl b983633e661a0c2b118933a3967d5ec3`；`irg 4015f0f5…`／`ir fb2bb442…` 未变（未提交） |
+
+### 161.4 边界
+- 显式 `null` 传给 `mktime #1` 的 Passing-null Deprecated 仍未发（与省略不可区分，F-62f-opt 同族）；本批只做**对象/数组**拒绝与弱模式接受，不改 null 路径。
+- `mktime` 的 0 实参形态（若 PHP 允许）与可选参哨兵仍属 F-62f-opt 面。
+
+## 162. ★R-255 落地记录（F-62f 余量：range / substr_replace 联合类型形参）
+
+### 162.1 契约（PHP 8.5.8）
+| 形 | PHP |
+|---|---|
+| `range($o, 3)` / `range(1, $o)` | `TypeError: range(): Argument #N ($start\|$end) must be of type string\|int\|float, stdClass given` |
+| `range(1, 3, $o)` | `TypeError: range(): Argument #3 ($step) must be of type int\|float, stdClass given` |
+| `substr_replace($o,"x",0)` / `("abc",$o,0)` | `... Argument #1 ($string) / #2 ($replace) must be of type array\|string, stdClass given` |
+| `substr_replace("abc","x",$o)` / `(…,0,$o)` | `... #3 ($offset) array\|int` / `#4 ($length) array\|int\|null` |
+| `substr_replace("abc","x",[0])` / `(…,0,[1])` | `TypeError: ... #3/#4 ... cannot be an array when working on a single string` |
+| 合法守卫（`range(1,3,"a","c",step=3)`、正负 offset） | 值语义不变 |
+
+### 162.2 实现
+- 新增三个联合槽 helper（复用 `rejectParamType`）：`requireArrayOrStringParam`（`array|string`）、`requireRangeBoundParam`（`string|int|float`）、`requireArrayOrIntParam`（`array|int` / `array|int|null`）。
+- `tpl php_range`：三槽接线（#3 走 `requireOptionalNumParam(.num_param)`），null/weak 口径不变。
+- `tpl php_substr_replace`：四槽接线；单字符串 + 数组 offset/length 走 PHP 专用文案（`throwThrowableDiscardCatch("TypeError", …)`）。
+- `nlk`：`range`/`substr_replace` 两条 `.may_raise = true`（r152 配套）。
+
+### 162.3 读数
+| 腿 | 读数 |
+|---|---|
+| C300（新门 4 臂） | 自证 **4 CF**；实跑 **4/4 SAME** 26 s（r1/s1/s2/g1） |
+| 邻居 C299 | 5/5 SAME（R-254 面未回归） |
+| `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/r255_test_summary.log`） |
+| 主回归 | 本轮运行中（完成后回填，日志 `/tmp/r255_regression.log`） |
+| 代次锚 | `nlk 3ef02637cfda03d32234e57c751a8f9c`／`tpl dab046c1b94badd9d0cf129d7eccf2c6`；`irg 4015f0f5…`／`ir fb2bb442…` 未变（未提交） |
+
+### 162.4 边界 / 新登记
+- **F-162 新立（P2）**：`substr_replace` 的**数组形**（`$string`/`$replace` 为数组）未实现；AOT 对数组 #1 返回 NULL，PHP 返回逐元素替换后的数组。本批只接线「单字符串 + 数组 offset/length」的拒绝文案。
+- **F-163 新立（P2）**：`range` 的**浮点步长**被当作 1（`step_val.isInt()` 判定，float 落入 else=1）；PHP `range(0,1,0.25)` 返回含浮点的 5 元素数组。
+- 显式 null 的 Passing-null Deprecated 仍未发（F-62f-opt 同族，本批保持原 null 口径）。

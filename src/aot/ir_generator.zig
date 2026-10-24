@@ -1997,6 +1997,15 @@ pub const IRGenerator = struct {
                         };
                         const key_owned = try self.allocator.dupe(u8, key);
                         try self.constant_cache.put(self.allocator, key_owned, cv);
+                    } else {
+                        // ★F-95-c-b：不可折叠初始化器（E_ALL 等运行期常量）⇒ 类注册期求值
+                        const cfunc = try self.generatePropertyDefaultFunc(const_data.value, class_name);
+                        try constants.append(self.allocator, .{
+                            .name = const_name,
+                            .value = .{ .null = {} },
+                            .visibility = .public,
+                            .default_func = cfunc,
+                        });
                     }
 
                     try self.generateClassConstDecl(member, class_name);
@@ -2064,6 +2073,8 @@ pub const IRGenerator = struct {
 
         // 构建常量缓存：O(1) 查找
         for (type_def.constants) |const_info| {
+            // ★F-95-c-b：运行期求值的常量不得进编译期缓存（占位值会把读取折叠成 null）
+            if (const_info.default_func != null) continue;
             var key_buf: [256]u8 = undefined;
             const key = std.fmt.bufPrint(&key_buf, "{s}::{s}", .{ class_name, const_info.name }) catch continue;
             const key_owned = try self.allocator.dupe(u8, key);
@@ -2174,6 +2185,15 @@ pub const IRGenerator = struct {
                         .name = const_name,
                         .value = cv,
                         .visibility = .public,
+                    });
+                } else {
+                    // ★F-95-c-b：接口常量的运行期初始化器
+                    const cfunc = try self.generatePropertyDefaultFunc(const_data.value, iface_name);
+                    try constants.append(self.allocator, .{
+                        .name = const_name,
+                        .value = .{ .null = {} },
+                        .visibility = .public,
+                        .default_func = cfunc,
                     });
                 }
             }
@@ -2342,6 +2362,15 @@ pub const IRGenerator = struct {
                             .value = cv,
                             .visibility = .public,
                         });
+                    } else {
+                        // ★F-95-c-b：枚举内常量的运行期初始化器
+                        const cfunc = try self.generatePropertyDefaultFunc(const_data.value, enum_name);
+                        try constants.append(self.allocator, .{
+                            .name = const_name,
+                            .value = .{ .null = {} },
+                            .visibility = .public,
+                            .default_func = cfunc,
+                        });
                     }
                     try self.generateClassConstDecl(member, enum_name);
                 },
@@ -2462,6 +2491,15 @@ pub const IRGenerator = struct {
                             .name = const_name,
                             .value = cv,
                             .visibility = .public,
+                        });
+                    } else {
+                        // ★F-95-c-b：trait 常量的运行期初始化器（组合进类时由类注册点求值）
+                        const cfunc = try self.generatePropertyDefaultFunc(const_data.value, trait_name);
+                        try constants.append(self.allocator, .{
+                            .name = const_name,
+                            .value = .{ .null = {} },
+                            .visibility = .public,
+                            .default_func = cfunc,
                         });
                     }
 

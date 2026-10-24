@@ -4123,7 +4123,14 @@ pub const NativeLinker = struct {
                 for (td.constants, 0..) |const_info, const_idx| {
                     // 使用块作用域隔离每个常量
                     try writer.writeAll("    {\n");
-                    try self.writeConstantValueCode(writer, const_info.value, "cv");
+                    // ★F-95-c-b：不可折叠初始化器 ⇒ 类注册期调用合成函数（与属性默认值同一套工厂）
+                    if (const_info.default_func) |cfname| {
+                        const cident = try self.fnIdentName(cfname);
+                        defer self.allocator.free(cident);
+                        try writer.print("        const cv = try @\"{s}\"(runtime.Value.initNull(), &[_]runtime.Value{{}}, runtime.runtime_allocator);\n", .{cident});
+                    } else {
+                        try self.writeConstantValueCode(writer, const_info.value, "cv");
+                    }
                     const escaped_name = try self.escapeString(const_info.name);
                     defer self.allocator.free(escaped_name);
                     _ = const_idx;
@@ -4136,7 +4143,13 @@ pub const NativeLinker = struct {
                 for (trait_constants.items) |trait_const_info| {
                     const const_info = trait_const_info.constant;
                     try writer.writeAll("    {\n");
-                    try self.writeConstantValueCode(writer, const_info.value, "cv");
+                    if (const_info.default_func) |cfname| {
+                        const cident = try self.fnIdentName(cfname);
+                        defer self.allocator.free(cident);
+                        try writer.print("        const cv = try @\"{s}\"(runtime.Value.initNull(), &[_]runtime.Value{{}}, runtime.runtime_allocator);\n", .{cident});
+                    } else {
+                        try self.writeConstantValueCode(writer, const_info.value, "cv");
+                    }
                     const escaped_name = try self.escapeString(const_info.name);
                     defer self.allocator.free(escaped_name);
 
@@ -4428,7 +4441,7 @@ pub const NativeLinker = struct {
         .{ "system", bi(.{ .runtime_name = "php_system", .needs_allocator = true, .may_raise = false, .ref_params = &[_]u8{1} }) },
         .{ "escapeshellarg", bi(.{ .runtime_name = "php_escapeshellarg", .needs_allocator = true, .may_raise = false }) },
         .{ "escapeshellcmd", bi(.{ .runtime_name = "php_escapeshellcmd", .needs_allocator = true, .may_raise = false }) },
-        .{ "substr_replace", bi(.{ .runtime_name = "php_substr_replace", .needs_allocator = true, .may_raise = false }) },
+        .{ "substr_replace", bi(.{ .runtime_name = "php_substr_replace", .needs_allocator = true, .may_raise = true }) },
         .{ "file_put_contents", .{ .runtime_name = "php_file_put_contents", .needs_allocator = true } },
         .{ "file_get_contents", .{ .runtime_name = "php_file_get_contents", .needs_allocator = true } },
         .{ "fopen", .{ .runtime_name = "php_fopen", .needs_allocator = true } },
@@ -4645,7 +4658,7 @@ pub const NativeLinker = struct {
         .{ "uasort", bi(.{ .runtime_name = "php_uasort", .needs_allocator = true }) },
         .{ "uksort", bi(.{ .runtime_name = "php_uksort", .needs_allocator = true }) },
         .{ "array_multisort", bi(.{ .runtime_name = "php_array_multisort", .needs_allocator = true }) },
-        .{ "range", bi(.{ .runtime_name = "php_range", .needs_allocator = true }) },
+        .{ "range", bi(.{ .runtime_name = "php_range", .needs_allocator = true, .may_raise = true }) },
         .{ "current", bi(.{ .runtime_name = "php_current", .needs_allocator = true }) },
         .{ "next", bi(.{ .runtime_name = "php_next", .needs_allocator = true }) },
         .{ "prev", bi(.{ .runtime_name = "php_prev", .needs_allocator = true }) },
@@ -4699,10 +4712,10 @@ pub const NativeLinker = struct {
         .{ "mt_getrandmax", .{ .runtime_name = "php_mt_getrandmax", .needs_allocator = false } },
 
         .{ "time", bi(.{ .runtime_name = "php_time", .needs_allocator = false, .may_raise = false }) },
-        .{ "getdate", bi(.{ .runtime_name = "php_getdate", .needs_allocator = true }) },
-        .{ "idate", bi(.{ .runtime_name = "php_idate", .needs_allocator = true }) },
-        .{ "mktime", bi(.{ .runtime_name = "php_mktime", .needs_allocator = false, .may_raise = false, .handler_params = 6, .optional_defaults = &.{ "runtime.Value.initNull()", "runtime.Value.initNull()", "runtime.Value.initNull()", "runtime.Value.initNull()", "runtime.Value.initNull()" } }) },
-        .{ "checkdate", bi(.{ .runtime_name = "php_checkdate", .needs_allocator = false, .may_raise = false }) },
+        .{ "getdate", bi(.{ .runtime_name = "php_getdate", .needs_allocator = true, .may_raise = true }) },
+        .{ "idate", bi(.{ .runtime_name = "php_idate", .needs_allocator = true, .may_raise = true }) },
+        .{ "mktime", bi(.{ .runtime_name = "php_mktime", .needs_allocator = false, .may_raise = true, .handler_params = 6, .optional_defaults = &.{ "runtime.Value.initNull()", "runtime.Value.initNull()", "runtime.Value.initNull()", "runtime.Value.initNull()", "runtime.Value.initNull()" } }) },
+        .{ "checkdate", bi(.{ .runtime_name = "php_checkdate", .needs_allocator = false, .may_raise = true }) },
         .{ "gmdate", bi(.{ .runtime_name = "php_gmdate", .needs_allocator = true }) },
         .{ "microtime", bi(.{ .runtime_name = "php_microtime", .needs_allocator = true }) },
         .{ "date", bi(.{ .runtime_name = "php_date", .needs_allocator = true }) },

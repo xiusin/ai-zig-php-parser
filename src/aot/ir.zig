@@ -253,6 +253,9 @@ pub const TypeDef = struct {
         name: []const u8,
         value: ConstantValue,
         visibility: Visibility,
+        /// ★F-95-c-b：初始化器不可编译期折叠（如 `const A = E_ALL;`）时，类注册期调用该合成函数求值。
+        /// 非空时 `value` 仅为占位（`.null`），注册器必须走工厂。
+        default_func: ?[]const u8 = null,
     };
 
     pub const ConstantValue = union(enum) {

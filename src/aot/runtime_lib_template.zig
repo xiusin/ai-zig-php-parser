@@ -4090,11 +4090,27 @@ pub fn php_escapeshellcmd(cmd_val: Value, allocator: Allocator) !Value {
 pub fn php_substr_replace(args: []const Value, allocator: Allocator) !Value {
     if (args.len < 2) return Value.initNull();
 
-    const str_val = args[0];
+    // ★F-62f（R-255）：#1/#2 `array|string`；#3/#4 `array|int(|null)`；对象按 PHP 文案拒绝。
+    const str_val = requireArrayOrStringParam("substr_replace", 1, "string", args[0]) orelse return Value.initNull();
+    const replacement_val = requireArrayOrStringParam("substr_replace", 2, "replace", args[1]) orelse return Value.initNull();
+    if (args.len >= 3) {
+        if (args[2].isArray() and str_val.isString()) {
+            throwThrowableDiscardCatch("TypeError", "substr_replace(): Argument #3 ($offset) cannot be an array when working on a single string", runtime_allocator);
+            return Value.initNull();
+        }
+        _ = requireArrayOrIntParam("substr_replace", 3, "offset", "array|int", args[2]) orelse return Value.initNull();
+    }
+    if (args.len >= 4) {
+        if (args[3].isArray() and str_val.isString()) {
+            throwThrowableDiscardCatch("TypeError", "substr_replace(): Argument #4 ($length) cannot be an array when working on a single string", runtime_allocator);
+            return Value.initNull();
+        }
+        _ = requireArrayOrIntParam("substr_replace", 4, "length", "array|int|null", args[3]) orelse return Value.initNull();
+    }
+
     if (!str_val.isString()) return Value.initNull();
     const str = str_val.asString().data;
 
-    const replacement_val = args[1];
     if (!replacement_val.isString()) return Value.initNull();
     const replacement = replacement_val.asString().data;
 
@@ -7213,6 +7229,28 @@ fn requireOptionalNumParam(
 fn requireArrayParam(fn_name: []const u8, arg_no: usize, param_name: []const u8, val: Value) ?Value {
     if (val.isArray()) return val;
     return rejectParamType(fn_name, arg_no, param_name, "array", val);
+}
+
+/// ★F-62f（R-255）：`array|string` 联合槽（substr_replace #1/#2）。
+///   string/array/null 放行；对象等按 PHP 文案拒绝（数组形语义另案）。
+fn requireArrayOrStringParam(fn_name: []const u8, arg_no: usize, param_name: []const u8, val: Value) ?Value {
+    if (val.isString() or val.isArray() or val.isNull()) return val;
+    return rejectParamType(fn_name, arg_no, param_name, "array|string", val);
+}
+
+/// ★F-62f（R-255）：`string|int|float` 联合槽（range #1/#2）。
+///   数值/字符串/bool/null 走原 weak 口径；数组/对象按 PHP 文案拒绝。
+fn requireRangeBoundParam(fn_name: []const u8, arg_no: usize, param_name: []const u8, val: Value) ?Value {
+    if (val.isInt() or val.isFloat() or val.isString() or val.isBool() or val.isNull()) return val;
+    return rejectParamType(fn_name, arg_no, param_name, "string|int|float", val);
+}
+
+/// ★F-62f（R-255）：`array|int` / `array|int|null` 联合槽（substr_replace #3/#4）。
+///   数组与 null 放行；数值/字符串/bool 保留原 weak 口径；对象等按文案拒绝。
+fn requireArrayOrIntParam(fn_name: []const u8, arg_no: usize, param_name: []const u8, expected: []const u8, val: Value) ?Value {
+    if (val.isArray() or val.isNull()) return val;
+    if (val.isInt() or val.isFloat() or val.isBool() or val.isString()) return val;
+    return rejectParamType(fn_name, arg_no, param_name, expected, val);
 }
 
 /// ★F-149（R-238）：bool 形参族的校验＋弱模式强转。
@@ -24501,7 +24539,9 @@ pub fn php_time() Value {
 
 /// getdate - 获取日期/时间信息
 pub fn php_getdate(ts_val: Value, allocator: Allocator) !Value {
-    const timestamp = if (ts_val.isNull()) unixTimestamp() else ts_val.toInt();
+    // ★F-62f 余量（R-254）：#1 ?int；null ⇒ 当前时间（原语义）。
+    const ts_ok = requireOptionalNumParam("getdate", 1, "timestamp", .nullable_int_param, ts_val) orelse return Value.initNull();
+    const timestamp = if (ts_ok.isNull()) unixTimestamp() else ts_ok.toInt();
     const epoch = std.time.epoch.EpochSeconds{ .secs = @intCast(@as(u64, @bitCast(timestamp))) };
     const day_seconds = epoch.getDaySeconds();
     const epoch_day = epoch.getEpochDay();
@@ -24544,7 +24584,9 @@ pub fn php_idate(format_val: Value, ts_val: Value, allocator: Allocator) !Value 
     if (!format_val.isString()) return Value.initInt(0);
     const fmt = format_val.asString().data;
     if (fmt.len == 0) return Value.initInt(0);
-    const timestamp = if (ts_val.isNull()) unixTimestamp() else ts_val.toInt();
+    // ★F-62f 余量（R-254）：#2 ?int；null ⇒ 当前时间（原语义）。
+    const ts_ok = requireOptionalNumParam("idate", 2, "timestamp", .nullable_int_param, ts_val) orelse return Value.initInt(0);
+    const timestamp = if (ts_ok.isNull()) unixTimestamp() else ts_ok.toInt();
     const epoch = std.time.epoch.EpochSeconds{ .secs = @intCast(@as(u64, @bitCast(timestamp))) };
     const day_seconds = epoch.getDaySeconds();
     const epoch_day = epoch.getEpochDay();
@@ -24580,11 +24622,18 @@ pub fn php_idate(format_val: Value, ts_val: Value, allocator: Allocator) !Value 
 }
 
 /// mktime(hour, minute, second, month, day, year) -> Unix timestamp
-pub fn php_mktime(hour: Value, minute: Value, second: Value, month: Value, day: Value, year: Value) Value {
+pub fn php_mktime(hour: Value, minute: Value, second: Value, month: Value, day: Value, year: Value) !Value {
+    // ★F-62f 余量（R-254）：#1 int（不可空）＋#2–#6 ?int 的类型校验；null 语义保持不变。
+    const hour_ok = requireOptionalNumParam("mktime", 1, "hour", .int_param, hour) orelse return Value.initNull();
+    const minute_ok = requireOptionalNumParam("mktime", 2, "minute", .nullable_int_param, minute) orelse return Value.initNull();
+    const second_ok = requireOptionalNumParam("mktime", 3, "second", .nullable_int_param, second) orelse return Value.initNull();
+    const month_ok = requireOptionalNumParam("mktime", 4, "month", .nullable_int_param, month) orelse return Value.initNull();
+    const day_ok = requireOptionalNumParam("mktime", 5, "day", .nullable_int_param, day) orelse return Value.initNull();
+    const year_ok = requireOptionalNumParam("mktime", 6, "year", .nullable_int_param, year) orelse return Value.initNull();
     // ★F-131：PHP 的 6 个形参全部可省略（min=1），省略与显式 null 一律取**当前本地时间**的对应分量。
     //   本模板的时间族统一按 UTC 解释（DateTimeFormatter 同口径），故这里取 UTC 分量。
-    const any_null = hour.isNull() or minute.isNull() or second.isNull() or
-        month.isNull() or day.isNull() or year.isNull();
+    const any_null = hour_ok.isNull() or minute_ok.isNull() or second_ok.isNull() or
+        month_ok.isNull() or day_ok.isNull() or year_ok.isNull();
     var now_mi: i64 = 0;
     var now_s: i64 = 0;
     var now_mon: i64 = 1;
@@ -24604,12 +24653,12 @@ pub fn php_mktime(hour: Value, minute: Value, second: Value, month: Value, day: 
     }
     // ★F-131 真值实测：mktime 的 #1 `$hour` 是**不可空 int**（null ⇒ 0，并带一条 Deprecated），
     //   与 #2–#6 的 `?int`（null ⇒ 当前分量）不同口径。
-    const h = if (hour.isNull()) @as(i64, 0) else hour.toInt();
-    const mi = if (minute.isNull()) now_mi else minute.toInt();
-    const sec = if (second.isNull()) now_s else second.toInt();
-    const mon_in = if (month.isNull()) now_mon else month.toInt();
-    const day_in = if (day.isNull()) now_d else day.toInt();
-    var y = if (year.isNull()) now_y else year.toInt();
+    const h = if (hour_ok.isNull()) @as(i64, 0) else hour_ok.toInt();
+    const mi = if (minute_ok.isNull()) now_mi else minute_ok.toInt();
+    const sec = if (second_ok.isNull()) now_s else second_ok.toInt();
+    const mon_in = if (month_ok.isNull()) now_mon else month_ok.toInt();
+    const day_in = if (day_ok.isNull()) now_d else day_ok.toInt();
+    var y = if (year_ok.isNull()) now_y else year_ok.toInt();
     // PHP: 0-69 => 2000-2069, 70-100 => 1970-2000
     if (y >= 0 and y <= 69) y += 2000;
     if (y >= 70 and y <= 100) y += 1900;
@@ -24631,16 +24680,16 @@ pub fn php_mktime(hour: Value, minute: Value, second: Value, month: Value, day: 
 }
 
 /// checkdate(month, day, year) -> bool: 验证日期合法性
-pub fn php_checkdate(month: Value, day: Value, year: Value) Value {
-    // ★F-62f 接线**已在 R-194 撤回**（门 BLT b170..b172 留红，另立 F-128）：本函数是发射器注册表里
-    //   `.may_raise = false` 的少数条目（`native_linker.zig:4411`），helper 内 `throwThrowable` 置的 pending
-    //   异常**不会在调用点被路由** ⇒ 实测表现为「先印出 try 体的 `RET|`，再在下个检查点跳进 catch」，
-    //   消息与类名全对但控制流错（修前则是静默假值，两态都不合 PHP）。
-    //   正解需**同时**改模板签名 `Value`→`!Value` 与注册表 `may_raise`＝true（动发射器⇒批型改变），
-    //   且 must_raise=false 与签名是**配套约束**（只翻旗不改签名 ⇒ 生成码 `try` 打在非错误并集函数上，编译期即错）。
-    const m = month.toInt();
-    const d = day.toInt();
-    const y = year.toInt();
+pub fn php_checkdate(month: Value, day: Value, year: Value) !Value {
+    // ★F-128（R-253）：三枚 `int` 形参统一走 F-62f 的 `requireNumParam` 契约；配合注册表
+    //   `.may_raise = true`，helper 置的 TypeError 才会在调用点被路由（PHP 实测：
+    //   `checkdate(): Argument #N ($month|$day|$year) must be of type int, Foo given`）。
+    const m_ok = requireNumParam("checkdate", 1, "month", .int_param, month) orelse return Value.initNull();
+    const d_ok = requireNumParam("checkdate", 2, "day", .int_param, day) orelse return Value.initNull();
+    const y_ok = requireNumParam("checkdate", 3, "year", .int_param, year) orelse return Value.initNull();
+    const m = m_ok.toInt();
+    const d = d_ok.toInt();
+    const y = y_ok.toInt();
     if (y < 1 or y > 32767) return Value.initBool(false);
     if (m < 1 or m > 12) return Value.initBool(false);
     if (d < 1) return Value.initBool(false);
@@ -25433,15 +25482,19 @@ pub fn php_array_fill(start_index: Value, num: Value, value: Value, allocator: A
 
 /// range - 创建包含指定范围元素的数组
 pub fn php_range(start: Value, end: Value, step_val: Value, allocator: Allocator) !Value {
+    // ★F-62f（R-255）：#1/#2 `string|int|float`、#3 `int|float`；null 走原口径（F-62f-opt 未发 Deprecated）。
+    const start_ok = requireRangeBoundParam("range", 1, "start", start) orelse return Value.initNull();
+    const end_ok = requireRangeBoundParam("range", 2, "end", end) orelse return Value.initNull();
+    const step_ok = requireOptionalNumParam("range", 3, "step", .num_param, step_val) orelse return Value.initNull();
     const result = try PHPArray.init(allocator);
 
     // 字符串范围：单个字符
-    if (start.isString() and end.isString()) {
-        const ss = start.asString().data;
-        const es = end.asString().data;
+    if (start_ok.isString() and end_ok.isString()) {
+        const ss = start_ok.asString().data;
+        const es = end_ok.asString().data;
         if (ss.len == 1 and es.len == 1) {
-            const step: i64 = if (step_val.isInt()) blk: {
-                const s = step_val.toInt();
+            const step: i64 = if (step_ok.isInt()) blk: {
+                const s = step_ok.toInt();
                 break :blk if (s > 0) s else 1;
             } else 1;
             const sc = ss[0];
@@ -25461,10 +25514,10 @@ pub fn php_range(start: Value, end: Value, step_val: Value, allocator: Allocator
         }
     }
 
-    const start_val = start.toInt();
-    const end_val = end.toInt();
-    const step: i64 = if (step_val.isInt()) blk: {
-        const s = step_val.toInt();
+    const start_val = start_ok.toInt();
+    const end_val = end_ok.toInt();
+    const step: i64 = if (step_ok.isInt()) blk: {
+        const s = step_ok.toInt();
         break :blk if (s > 0) s else 1;
     } else 1;
 
