@@ -9333,10 +9333,73 @@ R-214 曾把“归因里出现 setSourceLocation/PHI/调用行等非局部增删
 | C300（新门 4 臂） | 自证 **4 CF**；实跑 **4/4 SAME** 26 s（r1/s1/s2/g1） |
 | 邻居 C299 | 5/5 SAME（R-254 面未回归） |
 | `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/r255_test_summary.log`） |
-| 主回归 | 本轮运行中（完成后回填，日志 `/tmp/r255_regression.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r255_regression.log`，`SELF_CHECK_OK rows=68`） |
 | 代次锚 | `nlk 3ef02637cfda03d32234e57c751a8f9c`／`tpl dab046c1b94badd9d0cf129d7eccf2c6`；`irg 4015f0f5…`／`ir fb2bb442…` 未变（未提交） |
 
 ### 162.4 边界 / 新登记
 - **F-162 新立（P2）**：`substr_replace` 的**数组形**（`$string`/`$replace` 为数组）未实现；AOT 对数组 #1 返回 NULL，PHP 返回逐元素替换后的数组。本批只接线「单字符串 + 数组 offset/length」的拒绝文案。
 - **F-163 新立（P2）**：`range` 的**浮点步长**被当作 1（`step_val.isInt()` 判定，float 落入 else=1）；PHP `range(0,1,0.25)` 返回含浮点的 5 元素数组。
 - 显式 null 的 Passing-null Deprecated 仍未发（F-62f-opt 同族，本批保持原 null 口径）。
+
+## 163. ★R-256 落地记录（F-163 闭环：range 浮点步长与 ValueError 契约）
+
+### 163.1 契约（PHP 8.5.8，逐形实测）
+| 形 | PHP |
+|---|---|
+| `range(0,1,0.25)` / `(0,1,0.3)` | `0,0.25,0.5,0.75,1.0` / `0,0.3,0.6,0.8999999999999999`（**乘法式取值，异于逐次累加**） |
+| `range(1,0,0.3)` / `(1,0,-0.5)` / `(1,0,0.5)` | 降序均合法，正负步长等价（取绝对值）：`0.10000000000000009` 等乘法值 |
+| `range(0,2,2.0)` / `(0,2,1.0)` / `(0,3,true)` | 整值步长 + 整型边界 ⇒ **int** 元素 |
+| `range(0.0,2.0,1.0)` | 浮点边界 ⇒ **float** 元素 |
+| 等值边界 `range(5,5,2)` / `range(5.0,5.0,2.0)` | 单元素，不报跨度错误 |
+| `range(0,1,0)` | `ValueError: range(): Argument #3 ($step) cannot be 0` |
+| `range(0,1,-1)`（升序负步长） | `ValueError: ... must be greater than 0 for increasing ranges` |
+| `range(0,3,4.0)` / `range(1,0,2.0)` | `ValueError: ... must be less than the range spanned by argument #1 ($start) and argument #2 ($end)` |
+
+### 163.2 实现
+- `tpl php_range`：步长归一为 `f64`；先做 `step==0`／升序负步长／`|step|>span`（仅 span>0）三项 ValueError；再按「整型边界 + 整值步长」走整数路径，否则浮点路径用 `start + i*step` 乘法取值（照 PHP 的末位值）。
+- 字符范围分支保持在数值校验之前（原语义不变）。
+- 依赖 R-255 的 `.may_raise=true` 路由 ValueError。
+
+### 163.3 读数
+| 腿 | 读数 |
+|---|---|
+| C301（新门 5 臂） | 自证 **5 CF**；实跑 **5/5 SAME** 27 s（t1/t2 浮点、t3 四类 ValueError、t4 类型、g1 整数/字符守卫） |
+| 邻居 C300 | 4/4 SAME |
+| `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/r256_test_summary.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r256_regression.log`，`SELF_CHECK_OK rows=68`） |
+| 代次锚 | `tpl da3654bee5bc0c27c9ebb52ce191400b`；`nlk 3ef02637…`／`irg 4015f0f5…`／`ir fb2bb442…` 未变（未提交） |
+
+### 163.4 边界 / 新登记
+- **F-164 新立（P2）**：数值字符串边界 `range("1","3")` 在 PHP 返回**字符串** `'1','2','3'`；AOT 仍返回 int（沿旧路径）。
+- 字符范围 + 浮点步长（`range("a","e",0.5)`）：PHP 发 Warning 并返回 `[0.0]`（异常边角），AOT 保持原字符序列——未在本批处理。
+- 显式/省略 `null` 步长不可区分：PHP 显式 null 发 Deprecated 后按 0 ⇒ ValueError；AOT 按省略处理取 1（F-62f-opt）。
+
+## 164. ★R-257 落地记录（F-164 闭环：range 数值字符串边界与输出类型）
+
+### 164.1 契约（PHP 8.5.8，逐形实测）
+| 形 | PHP |
+|---|---|
+| `range("1","3")` / `("1","3","2")` | 单字节数字串走**字符**路径 ⇒ 字符串元素 `'1','2','3'` / `'1','3'` |
+| `range("1",3)` / `(1,"3")` | 混合 ⇒ **int** 元素 |
+| `range("01","03")` | 多字节整数字符串 ⇒ **int** 元素（1,2,3，无前导零） |
+| `range("1.5","3.5")` / `("1.5","3.5",0.5)` | 浮点串 ⇒ **float** 元素 |
+| `range("1","3",0.5)` | 双数字串 + 非整值步长 ⇒ **float**（不落字符路径） |
+
+### 164.2 实现
+- 新增 `rangeStringBoundKind()`（`isNumericString` + `numericPrefixValue`）：`int_string` / `float_string` / `not_numeric`。
+- 字符路径条件排除「双数字串 + 非整值步长」（PHP 此时走数值浮点）；整值步长仍走字符路径（与 PHP 字符串输出一致）。
+- 数值路径：`force_float = 浮点边界 ∪ float_string` ⇒ 浮点元素；否则整数元素（含 "01" 与混合形）。
+- 复用 R-256 的步长校验与乘法式浮点循环。
+
+### 164.3 读数
+| 腿 | 读数 |
+|---|---|
+| C302（新门 3 臂） | 自证 **3 CF**；实跑 **3/3 SAME** 14 s（t1 七形、t2 双数字串浮点步长、g1 守卫） |
+| 邻居 C301 | 5/5 SAME |
+| `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/r257_test_summary.log`） |
+| 主回归 | 本轮运行中（完成后回填，日志 `/tmp/r257_regression.log`） |
+| 代次锚 | `tpl 20d18a37cf8c941bc1dd10f13e597aab`；`nlk 3ef02637…`／`irg 4015f0f5…`／`ir fb2bb442…` 未变（未提交） |
+
+### 164.4 边界
+- 多字节**非**数字串（`range("a1","a3")`）与空串（`range("","2")`）：PHP 发 Warning 并走字符/0 强转边角，AOT 仍走整数旧路径——未在本批处理（既存边角，无门臂）。
+- 字符范围 + 浮点步长（`range("a","e",0.5)`）的 PHP Warning/[0.0] 边角仍开（R-256 已登记）。

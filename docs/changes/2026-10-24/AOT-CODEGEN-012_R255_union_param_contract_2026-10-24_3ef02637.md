@@ -63,7 +63,7 @@ sequenceDiagram
 - **破坏式变更**：否；合法值/null/weak 口径保持不变。
 - **未知面**：数组形 `substr_replace`（F-162）与浮点步长 `range`（F-163）未实现，本批只负责类型契约。
 - **复测路径**：`bash fuzzy_scripts_720/tmp/c300_union_param_contract_gate_tmp.sh`；邻居 `c299`。
-- **读数**：C300 4/4（自证 4 CF，26 s）／C299 5/5／`zig build test` 326/326。
+- **读数**：C300 4/4（自证 4 CF，26 s）／C299 5/5／`zig build test` 326/326／主回归 **PASS=68 FAIL=0**。
 
 ## 7. 遗留问题
 

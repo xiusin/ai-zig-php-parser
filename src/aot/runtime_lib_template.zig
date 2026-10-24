@@ -25480,6 +25480,15 @@ pub fn php_array_fill(start_index: Value, num: Value, value: Value, allocator: A
     return Value.initArray(result);
 }
 
+/// ★F-164（R-257）：range 数值字符串边界的分类（仅整串为数值串时成立）。
+const RangeBoundKind = enum { int_string, float_string, not_numeric };
+
+fn rangeStringBoundKind(data: []const u8) RangeBoundKind {
+    if (!isNumericString(data)) return .not_numeric;
+    const v = numericPrefixValue(data) orelse return .not_numeric;
+    return if (v.isInt()) .int_string else .float_string;
+}
+
 /// range - 创建包含指定范围元素的数组
 pub fn php_range(start: Value, end: Value, step_val: Value, allocator: Allocator) !Value {
     // ★F-62f（R-255）：#1/#2 `string|int|float`、#3 `int|float`；null 走原口径（F-62f-opt 未发 Deprecated）。
@@ -25487,12 +25496,15 @@ pub fn php_range(start: Value, end: Value, step_val: Value, allocator: Allocator
     const end_ok = requireRangeBoundParam("range", 2, "end", end) orelse return Value.initNull();
     const step_ok = requireOptionalNumParam("range", 3, "step", .num_param, step_val) orelse return Value.initNull();
     const result = try PHPArray.init(allocator);
+    const step_is_null = step_ok.isNull();
+    const step_f: f64 = if (step_is_null) 1.0 else step_ok.toFloat();
+    const step_integral = step_f == @trunc(step_f);
 
-    // 字符串范围：单个字符
+    // 字符串范围：单个字符（双数值串 + 非整值步长除外：PHP 走数值浮点路径）
     if (start_ok.isString() and end_ok.isString()) {
         const ss = start_ok.asString().data;
         const es = end_ok.asString().data;
-        if (ss.len == 1 and es.len == 1) {
+        if (ss.len == 1 and es.len == 1 and !(isNumericString(ss) and isNumericString(es) and !step_integral)) {
             const step: i64 = if (step_ok.isInt()) blk: {
                 const s = step_ok.toInt();
                 break :blk if (s > 0) s else 1;
@@ -25514,22 +25526,62 @@ pub fn php_range(start: Value, end: Value, step_val: Value, allocator: Allocator
         }
     }
 
-    const start_val = start_ok.toInt();
-    const end_val = end_ok.toInt();
-    const step: i64 = if (step_ok.isInt()) blk: {
-        const s = step_ok.toInt();
-        break :blk if (s > 0) s else 1;
-    } else 1;
+    // ★F-163（R-256）：浮点步长按 PHP 语义取值；整值步长 + 整型边界仍走整数路径。
+    if (!step_is_null and step_f == 0.0) {
+        throwThrowableDiscardCatch("ValueError", "range(): Argument #3 ($step) cannot be 0", runtime_allocator);
+        return Value.initNull();
+    }
+    const start_f = start_ok.toFloat();
+    const end_f = end_ok.toFloat();
+    const increasing = start_f <= end_f;
+    const span = @abs(end_f - start_f);
+    if (span > 0.0) {
+        if (increasing and step_f < 0.0) {
+            throwThrowableDiscardCatch("ValueError", "range(): Argument #3 ($step) must be greater than 0 for increasing ranges", runtime_allocator);
+            return Value.initNull();
+        }
+        if (@abs(step_f) > span) {
+            throwThrowableDiscardCatch("ValueError", "range(): Argument #3 ($step) must be less than the range spanned by argument #1 ($start) and argument #2 ($end)", runtime_allocator);
+            return Value.initNull();
+        }
+    }
+    const step_abs = @abs(step_f);
+    const step_int_ok = step_abs == @trunc(step_abs) and
+        step_abs <= @as(f64, @floatFromInt(std.math.maxInt(i64)));
+    // ★F-164（R-257）：数值字符串边界的输出类型——浮点串/浮点边界/非整值步长 ⇒ 浮点元素；
+    //   其余（整型、整数字符串、混合）⇒ 整数元素（PHP 实测 "01".."03" 也是 int）。
+    const start_kind: RangeBoundKind = if (start_ok.isString()) rangeStringBoundKind(start_ok.asString().data) else .not_numeric;
+    const end_kind: RangeBoundKind = if (end_ok.isString()) rangeStringBoundKind(end_ok.asString().data) else .not_numeric;
+    const force_float = start_ok.isFloat() or end_ok.isFloat() or
+        start_kind == .float_string or end_kind == .float_string;
 
-    if (start_val <= end_val) {
-        var i = start_val;
-        while (i <= end_val) : (i += step) {
-            try result.push(allocator, Value.initInt(i));
+    if (!force_float and step_int_ok) {
+        const start_val = start_ok.toInt();
+        const end_val = end_ok.toInt();
+        const step: i64 = if (step_abs == 0.0) 1 else @intFromFloat(step_abs);
+        if (start_val <= end_val) {
+            var i = start_val;
+            while (i <= end_val) : (i += step) {
+                try result.push(allocator, Value.initInt(i));
+            }
+        } else {
+            var i = start_val;
+            while (i >= end_val) : (i -= step) {
+                try result.push(allocator, Value.initInt(i));
+            }
         }
     } else {
-        var i = start_val;
-        while (i >= end_val) : (i -= step) {
-            try result.push(allocator, Value.initInt(i));
+        // PHP 用 start + i*step 的乘法式取值（非逐次累加）：实测 range(1,0,0.3) 末元素 0.10000000000000009。
+        const signed_step: f64 = if (increasing) step_abs else -step_abs;
+        var idx: u64 = 0;
+        while (true) : (idx += 1) {
+            const cur = start_f + @as(f64, @floatFromInt(idx)) * signed_step;
+            if (increasing) {
+                if (!(cur <= end_f)) break;
+            } else {
+                if (!(cur >= end_f)) break;
+            }
+            try result.push(allocator, Value.initFloat(cur));
         }
     }
 
