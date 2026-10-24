@@ -215,6 +215,9 @@ pub const TypeDef = struct {
         is_readonly: bool = false,
         /// PHP attributes (#[...]) on this property
         attributes: []const Attribute = &.{},
+        /// ★F-73b：不可编译期折叠的默认值（如全局常量）→ 合成零参函数的 IR 名；
+        /// 类注册期调用该函数求值。`default_value` 与 `default_func` 至多一个非空。
+        default_func: ?[]const u8 = null,
     };
 
     pub const Method = struct {

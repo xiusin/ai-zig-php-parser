@@ -8915,3 +8915,82 @@ R-214 曾把“归因里出现 setSourceLocation/PHI/调用行等非局部增删
 - **F-151-b 新立（P2）**：更深的缺失链仍不静默——`isset($undef['k']['j'])` 内层读取打 2 条 Warning（未定义变量＋array offset），`isset($undef->p->q)` 打 1 条；且魔术方法中继语义不同：`isset($m->p->q)` PHP 调 `__isset('p')`（false 即止），AOT 走 `__get('p')`。修法需“表达式位静默链读取＋__isset 短路”，属独立改造轮。
 - `empty($undef->p->q)` 同属 F-151-b。
 - 非 ArrayAccess 对象的元素 isset/empty 抛 Error 与 PHP 一致，未改动。
+
+## 151. ★R-244 落地记录（F-151-b 闭环：嵌套 isset/empty 链静默＋`__isset` 中继；纯模板＋发射器）
+
+### 151.1 实测契约（PHP 8.5.8）
+| 形 | PHP |
+|---|---|
+| `isset($u['k']['j'])`／`empty($u['k']['j'])`（`$u` 未定义） | false／true，**零诊断** |
+| `isset($u->p->q)`／`empty($u->p->q)` | false／true，零诊断 |
+| 混合链 `isset($a['k']->p)`／`isset($o->p['k'])` | 逐级判存在，缺失层短路 false |
+| 中间层为 null/缺失 | 短路 false（不继续读） |
+| 魔术类：`__isset` 返回 false | 只调 `__isset('p')`，不调 `__get`，结果 false |
+| 魔术类：`__isset` 返回 true | 先 `__isset` 再 `__get`，再判下一层 |
+| ArrayAccess 嵌套 `isset($aa['x']['y'])` | `EX(x)` → `GET(x)` → `EX(y)`；缺失键只 `EX(z)` 即止 |
+| `empty($aa['z']['y'])` | 只 `EX(z)`，**不** `GET`、**不** `EX(下层的 y)`，结果 true |
+| 静态属性中继 `isset(G::$arr['k']['j'])` | true；`G::$n=null` ⇒ false；均零诊断 |
+
+### 151.2 实现（发射器标记＋模板 helper）
+- `nlk markIssetQuietChain`（`:219`）：isset/empty 实参沿 `property_get_origins`／`array_get_base` 回溯整条链，
+  - 属性读寄存器同时进 `coalesce_nowarn_regs`＋新集合 `isset_chain_regs`；
+  - 纯元素读寄存器进 `coalesce_nowarn_regs`（此前 `IfProperty` 只标属性链，纯元素链被跳过 ⇒ 本案主根因）；
+  - 回溯终点若是 `global_get`，一并标静默（未声明基座）。
+- `quiet_call` 名单补 **`php_array_empty`**（嵌套 empty 的中间层此前未被标记 ⇒ n1/n4/n7 红的直接原因）。
+- `property_get` 发射（`:24768`）：链属性读优先用 **`php_object_get_isset_chain`**，其次 coalesce，再回普通读。
+- `tpl php_object_get_isset_chain`（`:22237`）：先 `objectIssetByName`（`__isset`/可见性/判值），false ⇒ null 短路，true ⇒ `php_object_get_coalesce`（按需 `__get`）；返回借用引用、由发射器 retain。
+- `php_object_isset` 重构为薄壳＋ `objectIssetByName`（两处共用，避免构造临时 Value）；`__isset` 返回值改用 `toBool()` 并释放。
+
+### 151.3 读数
+| 腿 | 读数 |
+|---|---|
+| C290（新门 10 臂） | 自证 **10 CF**；实跑 **10/10 SAME** 47 s |
+| 探针 | `f151b/truth.php`（魔术＋ArrayAccess＋混合链）stdout＋stderr 逐字节 SAME |
+| 邻居 | C289 8/8、C279 11/11、C276 12/12、C277 12/12、C267 14/14、C268 20/20（零转移） |
+| 主回归 | **PASS=68 FAIL=0**（`c295_regression_R244_tmp.log`） |
+| `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/zigtest_R244.log`） |
+| 代次锚 | `nlk fa56d9210fdad6597656e801924f79a5`／`tpl f03b46d4b0c364f026cc29e29e5384eb`／`irg 570e1731…`（未提交） |
+
+### 151.4 边界
+- 标记深度上限 8 级（与既有 coalesce 标记一致）；更深链逐级仍静默但第 9 级起不再回溯（未单列臂）。
+- 普通读（非 isset/empty/`??` 语境）保持告警：n8 用 `@$u['k']['j']` 与普通 `$a['k']['j'] ?? d` 守卫。
+- `php_object_get_coalesce` 的“借用返回＋调用点 retain”契约沿用既有；`isset_chain` 不改变所有权。
+- 静态属性中继沿用既有静默，不需新增标记面（n9 实测）。
+
+## 152. ★R-245 落地记录（F-73b 闭环：属性默认值构造期求值；F-154 新立）
+
+### 152.1 契约（PHP 8.5.8）
+| 形 | PHP |
+|---|---|
+| `public $p = PHP_INT_MIN;` / `public static $sp = PHP_INT_MAX;` | 属性值＝常量值；`ReflectionProperty::getDefaultValue()` 同值 |
+| `-PHP_INT_MIN` / `PHP_INT_MAX - 1` / `PHP_INT_MIN + 1` | 常量表达式按 PHP 整数语义求值 |
+| 浮点常量（`PHP_FLOAT_EPSILON`/`PHP_FLOAT_MAX`） | 位型一致 |
+| trait 属性默认值（实例＋静态） | 与类属性同语义 |
+| 匿名类属性默认值 | 同语义 |
+| `readonly`＋常量默认值 / typed 无默认值 | 常量默认值可读；无默认值访问 ⇒ `Error: Typed property RO::$rd must be accessed before initialization` |
+| 字面量/null/数组/一元/二元/类常量默认值 | 既有行为不变（守卫） |
+
+### 152.2 实现（IR＋发射器；构造期求值）
+- `ir TypeDef.Property.default_func`（`:220`）：不可折叠默认值对应的**合成零参函数**名；与 `default_value` 至多一个非空。
+- `irg generatePropertyDefaultFunc`（`:1578`）：以闭包/属性钩子同一上下文切换法生成 `__propdefault_<N>`（无参数、返回默认表达式值）；
+  - 清空 `$this`、var_registers、entry_allocas、try/finally 栈（匿名类在被调函数内声明时也安全）。
+  - 接入 4 处属性收集：多属性声明、单属性声明、trait、匿名类。
+- `nlk writePropertyDefaultExpr`（`:33363`）：统一 4 处默认值发射——折叠值 → 原表达式；`has_default && default_func` ⇒ `try @"<fn>"(initNull(), &[_]Value{}, allocator)`；否则 `absent`。
+  - 保留 trait `array_new` 的既有 `-1` 标记口径（`array_new_marker` 参数），不改旧行为。
+- `initRuntime` 先于 `registerAllClasses`，故构造期可读运行期常量表（PHP_INT_MIN 等来自 `runtime_lib_template` 唯一表，无第二份硬编码）。
+
+### 152.3 读数
+| 腿 | 读数 |
+|---|---|
+| C291（新门 10 臂） | 自证 **10 CF**；实跑 **10/10 SAME** 45 s |
+| PD2（19 臂） | **19/19 SAME、silent_null=0、refl_gap=0**（修前 17/2，red=`p12 p13`） |
+| P（88 臂） | **82 SAME / 6 DIFF**，现红集合与登记基线一致：`i1 i2 f12 f34 d6 d9`（零转移） |
+| 邻居 | C276 12/12、C277 12/12 |
+| 主回归 | **PASS=68 FAIL=0**（`c296_regression_R245_tmp.log`） |
+| `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/zigtest_R245.log`） |
+| 代次锚 | `nlk 30a4c7363e679e9c02444effa4def235`／`irg 965dbb9f9005bf046ef1d72ef66c7eaa`／`ir e02923dfc85a4c2564dbcf10d35cc8c0`／`tpl f03b46d4…`（未提交） |
+
+### 152.4 边界 / 新登记
+- **F-154 新立（P2）**：`(string)Z::$a`、`(int)Z::$a` 等**转换运算符作用于静态属性**时，解析器把常量 `Z` 当成被转换对象 ⇒ AOT 运行期 `Undefined constant "Z"`（PHP 正常）。先赋值给变量再转换即可绕过。属共享 parser 的优先级问题，跨模式影响面待测，需老裁。
+- 合成函数深度：属性默认值只允许常量表达式；若用户写非法默认值（如函数调用），PHP 在编译期拒绝，AOT 目前由 parser/解析阶段拒绝（未单列臂）。
+- 构造期求值失败（如未定义常量）会以运行期 fatal 形式在类注册阶段暴露；未单列臂。

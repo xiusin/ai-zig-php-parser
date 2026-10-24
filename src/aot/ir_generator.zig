@@ -1572,6 +1572,55 @@ pub const IRGenerator = struct {
         return inst;
     }
 
+    /// ★F-73b（R-245）：为不可编译期折叠的属性默认值合成零参求值函数，类注册期调用。
+    /// 默认值只允许常量表达式，因此不注入 `$this`/捕获；但匿名类可能在被调函数内声明，
+    /// 必须清空 try/finally 上下文，避免常量读取的致命错误被外层 catch 误接。
+    fn generatePropertyDefaultFunc(self: *Self, expr_idx: Node.Index, class_name: []const u8) !?[]const u8 {
+        const module = self.module orelse return null;
+        const func_name = try std.fmt.allocPrint(self.allocator, "__propdefault_{d}", .{module.functions.items.len});
+        const func = try self.allocator.create(Function);
+        func.* = Function.init(self.allocator, func_name);
+        func.name_owned = true;
+        func.location = self.current_location;
+        try module.addFunction(func);
+
+        const prev_function = self.current_function;
+        const prev_class = self.current_class;
+        const prev_block = self.current_block;
+        const prev_var_registers = self.var_registers;
+        const prev_entry_allocas = self.entry_allocas;
+        const prev_block_counter = self.block_counter;
+        const prev_has_this = self.current_has_this_param;
+        const prev_try_stack = self.try_stack;
+        const prev_finally_stack = self.finally_stack;
+
+        self.current_function = func;
+        self.current_class = class_name;
+        self.var_registers = .{ .items = &.{}, .capacity = 0 };
+        self.entry_allocas = .{ .items = &.{}, .capacity = 0 };
+        self.block_counter = 0;
+        self.current_has_this_param = false;
+        self.try_stack = .{ .items = &.{}, .capacity = 0 };
+        self.finally_stack = .{ .items = &.{}, .capacity = 0 };
+        const entry = try func.createBlock("entry");
+        self.setCurrentBlock(entry);
+
+        const value = try self.generateExpression(expr_idx);
+        if (!self.isBlockTerminated()) self.setTerminator(.{ .ret = value });
+
+        self.var_registers.deinit(self.allocator);
+        self.var_registers = prev_var_registers;
+        self.entry_allocas = prev_entry_allocas;
+        self.block_counter = prev_block_counter;
+        self.current_has_this_param = prev_has_this;
+        self.try_stack = prev_try_stack;
+        self.finally_stack = prev_finally_stack;
+        self.current_function = prev_function;
+        self.current_class = prev_class;
+        self.current_block = prev_block;
+        return func_name;
+    }
+
     /// Generate IR for class declaration
     fn generateClassDecl(self: *Self, node: *const Node) !void {
         // 安全检查：class_decl应该使用container_decl数据
@@ -1713,6 +1762,10 @@ pub const IRGenerator = struct {
 
                             var el_type_name: ?[]const u8 = null;
                             var el_type_nullable: bool = false;
+                            var prop_default_func: ?[]const u8 = null;
+                            if (prop_data.default_value) |dv| {
+                                if (default_inst == null) prop_default_func = try self.generatePropertyDefaultFunc(dv, class_name);
+                            }
                             if (prop_data.type) |type_idx| {
                                 const tsi = self.resolveTypeNodeToString(type_idx);
                                 if (tsi.name.len > 0) {
@@ -1725,6 +1778,7 @@ pub const IRGenerator = struct {
                                 .name = prop_name,
                                 .type_ = prop_type,
                                 .default_value = default_inst,
+                                .default_func = prop_default_func,
                                 .is_static = prop_data.modifiers.is_static,
                                 .visibility = visibility,
                                 .type_name = el_type_name,
@@ -1753,6 +1807,10 @@ pub const IRGenerator = struct {
 
                     var pd_type_name: ?[]const u8 = null;
                     var pd_type_nullable: bool = false;
+                    var prop_default_func: ?[]const u8 = null;
+                    if (prop_data.default_value) |dv| {
+                        if (default_inst == null) prop_default_func = try self.generatePropertyDefaultFunc(dv, class_name);
+                    }
                     if (prop_data.type) |type_idx| {
                         const tsi = self.resolveTypeNodeToString(type_idx);
                         if (tsi.name.len > 0) {
@@ -1765,6 +1823,7 @@ pub const IRGenerator = struct {
                         .name = prop_name,
                         .type_ = prop_type,
                         .default_value = default_inst,
+                        .default_func = prop_default_func,
                         .is_static = prop_data.modifiers.is_static,
                         .visibility = visibility,
                         .type_name = pd_type_name,
@@ -2283,6 +2342,10 @@ pub const IRGenerator = struct {
 
                     var tp_type_name: ?[]const u8 = null;
                     var tp_type_nullable: bool = false;
+                    var prop_default_func: ?[]const u8 = null;
+                    if (prop_data.default_value) |dv| {
+                        if (default_inst == null) prop_default_func = try self.generatePropertyDefaultFunc(dv, trait_name);
+                    }
                     if (prop_data.type) |type_idx| {
                         const tsi = self.resolveTypeNodeToString(type_idx);
                         if (tsi.name.len > 0) {
@@ -2295,6 +2358,7 @@ pub const IRGenerator = struct {
                         .name = prop_name,
                         .type_ = prop_type,
                         .default_value = default_inst,
+                        .default_func = prop_default_func,
                         .is_static = prop_data.modifiers.is_static,
                         .visibility = visibility,
                         .type_name = tp_type_name,
@@ -8914,6 +8978,10 @@ prop_name: ?[]const u8 = null,
                         .public;
                     var ac_type_name: ?[]const u8 = null;
                     var ac_type_nullable: bool = false;
+                    var prop_default_func: ?[]const u8 = null;
+                    if (prop_data.default_value) |dv| {
+                        if (default_inst == null) prop_default_func = try self.generatePropertyDefaultFunc(dv, anon_class_name);
+                    }
                     if (prop_data.type) |type_idx| {
                         const tsi = self.resolveTypeNodeToString(type_idx);
                         if (tsi.name.len > 0) {
@@ -8925,6 +8993,7 @@ prop_name: ?[]const u8 = null,
                         .name = prop_name,
                         .type_ = prop_type,
                         .default_value = default_inst,
+                        .default_func = prop_default_func,
                         .is_static = prop_data.modifiers.is_static,
                         .visibility = visibility,
                         .type_name = ac_type_name,

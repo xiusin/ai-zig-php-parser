@@ -3358,15 +3358,17 @@ pub fn php_create_closure(name: Value, captures: Value, is_static_val: Value, al
 pub fn php_object_isset(obj_val: Value, property_name_val: Value) !Value {
     // ★F-153（R-243）：非对象接收者一律 false（PHP 8.5.8 实测 int/float/bool/string/array/null 全 false）；
     //   先解引用，避免 `$r = &$obj; isset($r->p)` 被误判成非对象。
+    if (!property_name_val.isString()) return Value.initBool(false);
+    return Value.initBool(try objectIssetByName(obj_val, property_name_val.asString().data));
+}
+
+/// 按属性名判定 isset（供 `php_object_isset` 与 F-151-b 的链中继共用，避免构造临时 Value）。
+fn objectIssetByName(obj_val: Value, prop_name: []const u8) !bool {
     var resolved = obj_val;
     while (resolved.isRef()) resolved = resolved.asRef().*;
-    if (!Value_isObject(resolved)) return Value.initBool(false);
+    if (!Value_isObject(resolved)) return false;
 
     const obj = Value_asObject(resolved);
-    const prop_name = if (property_name_val.isString())
-        property_name_val.asString().data
-    else
-        return Value.initBool(false);
 
     // 属性可见性检查 + __isset 魔术方法回退
     if (obj.class_meta) |meta| {
@@ -3380,23 +3382,25 @@ pub fn php_object_isset(obj_val: Value, property_name_val: Value) !Value {
                     const args = [_]Value{name_val};
                     const guard = ClassContext.init(meta, lookup.owner);
                     defer guard.deinit();
-                    return try lookup.method.func(resolved, &args, runtime_allocator);
+                    const result = try lookup.method.func(resolved, &args, runtime_allocator);
+                    defer result.release(runtime_allocator);
+                    return result.toBool();
                 }
-                return Value.initBool(false);
+                return false;
             }
             // ★F-143：已声明属性必须判值——值为 null / 未初始化时 isset=false（原先见声明就 true）
             if (obj.getPropertyDirect(prop_name)) |pv| {
                 var actual = pv;
                 while (actual.isRef()) actual = actual.asRef().*;
-                return Value.initBool(!actual.isNull());
+                return !actual.isNull();
             }
-            return Value.initBool(false);
+            return false;
         } else {
             // 属性未声明：先检查动态属性（直接查 HashMap，不触发 __isset），无则尝试 __isset
             if (obj.properties.get(prop_name)) |pv| {
                 var actual = pv;
                 while (actual.isRef()) actual = actual.asRef().*;
-                return Value.initBool(!actual.isNull());
+                return !actual.isNull();
             }
             if (meta.findMethodLookup("__isset")) |lookup| {
                 const name_str = try PHPString.init(runtime_allocator, prop_name);
@@ -3405,13 +3409,15 @@ pub fn php_object_isset(obj_val: Value, property_name_val: Value) !Value {
                 const args = [_]Value{name_val};
                 const guard = ClassContext.init(meta, lookup.owner);
                 defer guard.deinit();
-                return try lookup.method.func(resolved, &args, runtime_allocator);
+                const result = try lookup.method.func(resolved, &args, runtime_allocator);
+                defer result.release(runtime_allocator);
+                return result.toBool();
             }
-            return Value.initBool(false);
+            return false;
         }
     }
 
-    return Value.initBool(obj.hasProperty(prop_name));
+    return obj.hasProperty(prop_name);
 }
 
 /// empty($obj->prop): 先检查 __isset，若属性不存在则视为空
@@ -22223,6 +22229,14 @@ pub fn php_object_get_coalesce(obj_val: Value, property_name: []const u8) !Value
         }
     }
     return obj.getProperty(property_name) orelse Value.initNull();
+}
+
+/// ★F-151-b：isset/empty 链的**属性中继**读取（PHP 语义：先 `__isset`；false ⇒ null 短路，true ⇒ 按需 `__get`）。
+/// 与 `php_object_get_coalesce` 的差别：后者不调 `__isset`、直接 `__get`（`??` 语义）。
+/// 返回借用引用，调用点负责 retain（与 `php_object_get` 同契约）。
+pub fn php_object_get_isset_chain(obj_val: Value, property_name: []const u8) !Value {
+    if (!(try objectIssetByName(obj_val, property_name))) return Value.initNull();
+    return php_object_get_coalesce(obj_val, property_name);
 }
 
 pub fn php_object_get_dynamic(obj_val: Value, prop_name_val: Value) !Value {

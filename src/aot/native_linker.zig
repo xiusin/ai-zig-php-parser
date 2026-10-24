@@ -213,6 +213,31 @@ fn markCoalesceQuietChainIfProperty(
     }
 }
 
+/// ★F-151-b：isset/empty 实参的读链（`isset($u['k']['j'])` / `isset($u->p->q)`）。
+/// 与 `??` 的差别：①纯元素读链也要静默（PHP 对 isset 实参整条按 BP_VAR_IS 求值）；
+/// ②属性中继必须先 `__isset`（false 即止），不能直接 `__get`。
+fn markIssetQuietChain(
+    coalesce_nowarn_regs: *std.AutoHashMap(usize, void),
+    isset_chain_regs: *std.AutoHashMap(usize, void),
+    property_get_origins: *const std.AutoHashMap(usize, PropertyGetOrigin),
+    array_get_base: *const std.AutoHashMap(usize, usize),
+    start_reg_id: usize,
+) !usize {
+    var chain_id = start_reg_id;
+    var depth: usize = 0;
+    while (depth < 8) : (depth += 1) {
+        if (property_get_origins.get(chain_id)) |origin| {
+            try coalesce_nowarn_regs.put(chain_id, {});
+            try isset_chain_regs.put(chain_id, {});
+            chain_id = origin.object_reg_id;
+        } else if (array_get_base.get(chain_id)) |base_id| {
+            try coalesce_nowarn_regs.put(chain_id, {});
+            chain_id = base_id;
+        } else break;
+    }
+    return chain_id;
+}
+
 /// 原生链接器
 /// 与运行期 `isScopeQualifiedClassName`（runtime_lib_template.zig）同一口径：
 /// self / parent / static 是作用域常量，类内经它们调用非静态方法合法。
@@ -309,6 +334,9 @@ pub const NativeLinker = struct {
     current_global_get_names: ?*const std.AutoHashMap(usize, []const u8) = null,
     current_concat_operand_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_coalesce_nowarn_regs: ?*const std.AutoHashMap(usize, void) = null,
+    /// ★F-151-b：isset/empty 实参链上的**属性读**寄存器——发射期改用 `php_object_get_isset_chain`
+    /// （先 `__isset` 再按需 `__get`），与 `??` 链的 `php_object_get_coalesce` 区分。
+    current_isset_chain_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_unset_regs: ?*std.AutoHashMap(usize, void) = null,
     ref_param_alloca_map: ?*std.AutoHashMap(usize, usize) = null,
     current_ref_capture_allocas: ?*const std.AutoHashMap(usize, usize) = null,
@@ -3622,30 +3650,12 @@ pub const NativeLinker = struct {
                 for (td.properties) |prop| {
                     const is_public = prop.visibility == .public;
                     try writer.print("    try {s}_meta.addProperty(.{{ .name = \"{s}\", .default_value = ", .{ short_cname, prop.name });
-                    if (prop.default_value) |dv| {
-                        switch (dv.op) {
-                            .const_int => |v| try writer.print("runtime.Value.initInt({d})", .{v}),
-                            .const_float => |v| try writeFloatValueExpr(writer, v),
-                            .const_bool => |v| try writer.writeAll(if (v) "runtime.Value.initBool(true)" else "runtime.Value.initBool(false)"),
-                            .const_null => try writer.writeAll("runtime.Value.initNull()"),
-                            .const_string => |sid| try writer.print(
-                                "runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, string_table[{d}]))",
-                                .{sid},
-                            ),
-                            .array_new => try writer.writeAll("runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))"),
-                            .const_array => |elements| try self.writeConstantValueInline(writer, .{ .array = elements }),
-                            else => try writer.writeAll("runtime.Value.initNull()"),
-                        }
-                    } else if (!prop.has_default and prop.is_readonly) {
-                        // readonly 属性没有默认值（如 public readonly string $value;）
-                        // 使用 null 表示"无默认值"，initWithMeta 不会初始化该属性
-                        // 这样 isset($this->value) 对未初始化的 readonly 属性返回 false
-                        try writer.writeAll("null");
-                    } else {
-                        // 非 readonly 声明属性或有默认值 null
-                        // 初始化为 null，避免触发 __set/__get 魔术方法
-                        try writer.writeAll("runtime.Value.initNull()");
-                    }
+                    try self.writePropertyDefaultExpr(
+                        writer,
+                        prop,
+                        if (!prop.has_default and prop.is_readonly) "null" else "runtime.Value.initNull()",
+                        false,
+                    );
                     try writer.print(", .is_static = {}, .is_public = {}, .is_protected = {}, .is_private = {}, .is_readonly = {}, .has_default = {}", .{ prop.is_static, is_public, prop.visibility == .protected, prop.visibility == .private, prop.is_readonly, prop.has_default });
                     if (prop.type_name) |tn| {
                         const escaped_tn = try self.escapeString(tn);
@@ -3661,23 +3671,7 @@ pub const NativeLinker = struct {
 
                     if (prop.is_static) {
                         try writer.print("    try {s}_meta.setStaticProperty(\"{s}\", ", .{ short_cname, prop.name });
-                        if (prop.default_value) |dv| {
-                            switch (dv.op) {
-                                .const_int => |v| try writer.print("runtime.Value.initInt({d})", .{v}),
-                                .const_float => |v| try writeFloatValueExpr(writer, v),
-                                .const_bool => |v| try writer.writeAll(if (v) "runtime.Value.initBool(true)" else "runtime.Value.initBool(false)"),
-                                .const_null => try writer.writeAll("runtime.Value.initNull()"),
-                                .const_string => |sid| try writer.print(
-                                    "runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, string_table[{d}]))",
-                                    .{sid},
-                                ),
-                                .array_new => try writer.writeAll("runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))"),
-                                .const_array => |elements| try self.writeConstantValueInline(writer, .{ .array = elements }),
-                                else => try writer.writeAll("runtime.Value.initNull()"),
-                            }
-                        } else {
-                            try writer.writeAll("runtime.Value.initNull()");
-                        }
+                        try self.writePropertyDefaultExpr(writer, prop, "runtime.Value.initNull()", false);
                         try writer.writeAll(");\n");
                     }
                 }
@@ -3692,22 +3686,7 @@ pub const NativeLinker = struct {
                         "        try {s}_meta.addProperty(.{{ .name = \"{s}\", .default_value = ",
                         .{ short_cname, prop.name },
                     );
-                    if (prop.default_value) |dv| {
-                        switch (dv.op) {
-                            .const_int => |v| try writer.print("runtime.Value.initInt({d})", .{v}),
-                            .const_float => |v| try writeFloatValueExpr(writer, v),
-                            .const_bool => |v| try writer.writeAll(if (v) "runtime.Value.initBool(true)" else "runtime.Value.initBool(false)"),
-                            .const_null => try writer.writeAll("runtime.Value.initNull()"),
-                            .const_string => |sid| try writer.print(
-                                "runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, string_table[{d}]))",
-                                .{sid},
-                            ),
-                            .array_new => try writer.writeAll("runtime.Value.initInt(-1)"),
-                            else => try writer.writeAll("runtime.Value.initNull()"),
-                        }
-                    } else {
-                        try writer.writeAll("runtime.Value.initNull()");
-                    }
+                    try self.writePropertyDefaultExpr(writer, prop, "runtime.Value.initNull()", true);
                     try writer.print(", .is_static = {}, .is_public = {}, .is_protected = {}, .is_private = {}, .is_readonly = {}, .has_default = {}", .{ prop.is_static, is_public, prop.visibility == .protected, prop.visibility == .private, prop.is_readonly, prop.has_default });
                     if (prop.type_name) |tn| {
                         const escaped_tn = try self.escapeString(tn);
@@ -3718,23 +3697,7 @@ pub const NativeLinker = struct {
 
                     if (prop.is_static) {
                         try writer.print("        try {s}_meta.setStaticProperty(\"{s}\", ", .{ short_cname, prop.name });
-                        if (prop.default_value) |dv| {
-                            switch (dv.op) {
-                                .const_int => |v| try writer.print("runtime.Value.initInt({d})", .{v}),
-                                .const_float => |v| try writeFloatValueExpr(writer, v),
-                                .const_bool => |v| try writer.writeAll(if (v) "runtime.Value.initBool(true)" else "runtime.Value.initBool(false)"),
-                                .const_null => try writer.writeAll("runtime.Value.initNull()"),
-                                .const_string => |sid| try writer.print(
-                                    "runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, string_table[{d}]))",
-                                    .{sid},
-                                ),
-                                .array_new => try writer.writeAll("runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))"),
-                                .const_array => |elements| try self.writeConstantValueInline(writer, .{ .array = elements }),
-                                else => try writer.writeAll("runtime.Value.initNull()"),
-                            }
-                        } else {
-                            try writer.writeAll("runtime.Value.initNull()");
-                        }
+                        try self.writePropertyDefaultExpr(writer, prop, "runtime.Value.initNull()", false);
                         try writer.writeAll(");\n");
                     }
                     try writer.writeAll("    }\n");
@@ -6274,9 +6237,11 @@ pub const NativeLinker = struct {
         var global_get_names = std.AutoHashMap(usize, []const u8).init(self.allocator);
         var concat_operand_regs = std.AutoHashMap(usize, void).init(self.allocator);
         var coalesce_nowarn_regs = std.AutoHashMap(usize, void).init(self.allocator);
+        var isset_chain_regs = std.AutoHashMap(usize, void).init(self.allocator);
         defer global_get_names.deinit();
         defer concat_operand_regs.deinit();
         defer coalesce_nowarn_regs.deinit();
+        defer isset_chain_regs.deinit();
         // 第一遍：收集 global_get 和 const_null 寄存器
         var global_get_reg_set = std.AutoHashMap(usize, void).init(self.allocator);
         defer global_get_reg_set.deinit();
@@ -6397,13 +6362,24 @@ pub const NativeLinker = struct {
                 const quiet_call = std.mem.eql(u8, inst_isset.op.call.func_name, "php_object_isset") or
                     std.mem.eql(u8, inst_isset.op.call.func_name, "php_array_isset") or
                     std.mem.eql(u8, inst_isset.op.call.func_name, "php_object_empty") or
+                    std.mem.eql(u8, inst_isset.op.call.func_name, "php_array_empty") or
                     std.mem.eql(u8, inst_isset.op.call.func_name, "php_empty") or
                     // 通用分支：内置名在 IR 里仍是 "isset"/"empty"（发射期才映射成 php_*）
                     std.mem.eql(u8, inst_isset.op.call.func_name, "isset") or
                     std.mem.eql(u8, inst_isset.op.call.func_name, "empty");
                 if (!quiet_call) continue;
                 if (inst_isset.op.call.args.len == 0) continue;
-                try markCoalesceQuietChainIfProperty(&coalesce_nowarn_regs, &property_get_origins, &array_get_base, inst_isset.op.call.args[0].id);
+                // ★F-151-b：整条实参读链（含纯元素链）静默；属性中继走 __isset 语义。
+                const chain_terminal = try markIssetQuietChain(
+                    &coalesce_nowarn_regs,
+                    &isset_chain_regs,
+                    &property_get_origins,
+                    &array_get_base,
+                    inst_isset.op.call.args[0].id,
+                );
+                if (global_get_reg_set.contains(chain_terminal)) {
+                    try coalesce_nowarn_regs.put(chain_terminal, {});
+                }
             }
         }
         self.current_global_get_names = &global_get_names;
@@ -6412,6 +6388,8 @@ pub const NativeLinker = struct {
         defer self.current_concat_operand_regs = null;
         self.current_coalesce_nowarn_regs = &coalesce_nowarn_regs;
         defer self.current_coalesce_nowarn_regs = null;
+        self.current_isset_chain_regs = &isset_chain_regs;
+        defer self.current_isset_chain_regs = null;
 
         self.current_unset_regs = &unset_registers;
         defer self.current_unset_regs = null;
@@ -24721,8 +24699,13 @@ pub const NativeLinker = struct {
                     defer self.allocator.free(escaped_prop);
                     const result_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(reg.id) else false;
                     const object_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.object.id) else false;
-                    // ★F-86：`??` 语境（被标记）走静默变体；普通读维持 php_object_get
-                    const get_fn = if (self.current_coalesce_nowarn_regs) |m|
+                    // ★F-86：`??` 语境（被标记）走静默变体；★F-151-b：isset/empty 链的属性中继走 __isset 语义
+                    const get_fn = if (self.current_isset_chain_regs) |m|
+                        (if (m.contains(reg.id)) "php_object_get_isset_chain" else if (self.current_coalesce_nowarn_regs) |cm|
+                            (if (cm.contains(reg.id)) "php_object_get_coalesce" else "php_object_get")
+                        else
+                            "php_object_get")
+                    else if (self.current_coalesce_nowarn_regs) |m|
                         (if (m.contains(reg.id)) "php_object_get_coalesce" else "php_object_get")
                     else
                         "php_object_get";
@@ -33372,6 +33355,49 @@ pub const NativeLinker = struct {
     fn fnIdentName(self: *Self, name: []const u8) ![]const u8 {
         if (!isPlainUserFuncName(name)) return self.allocator.dupe(u8, name);
         return std.fmt.allocPrint(self.allocator, "__fn_{s}", .{name});
+    }
+
+    /// ★F-73b（R-245）：属性默认值表达式。
+    /// 折叠值优先；不可折叠但声明了默认值 ⇒ 调合成求值函数（类注册期执行）；
+    /// 否则写 `absent`（readonly 无默认值传 `null`、普通缺省传 `initNull()`）。
+    fn writePropertyDefaultExpr(
+        self: *Self,
+        writer: anytype,
+        prop: IR.TypeDef.Property,
+        absent: []const u8,
+        array_new_marker: bool,
+    ) !void {
+        if (prop.default_value) |dv| {
+            switch (dv.op) {
+                .const_int => |v| try writer.print("runtime.Value.initInt({d})", .{v}),
+                .const_float => |v| try writeFloatValueExpr(writer, v),
+                .const_bool => |v| try writer.writeAll(if (v) "runtime.Value.initBool(true)" else "runtime.Value.initBool(false)"),
+                .const_null => try writer.writeAll("runtime.Value.initNull()"),
+                .const_string => |sid| try writer.print(
+                    "runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, string_table[{d}]))",
+                    .{sid},
+                ),
+                .array_new => if (array_new_marker)
+                    try writer.writeAll("runtime.Value.initInt(-1)")
+                else
+                    try writer.writeAll("runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))"),
+                .const_array => |elements| if (array_new_marker)
+                    try writer.writeAll("runtime.Value.initNull()")
+                else
+                    try self.writeConstantValueInline(writer, .{ .array = elements }),
+                else => try writer.writeAll(absent),
+            }
+            return;
+        }
+        if (prop.has_default) {
+            if (prop.default_func) |fname| {
+                const ident = try self.fnIdentName(fname);
+                defer self.allocator.free(ident);
+                try writer.print("try @\"{s}\"(runtime.Value.initNull(), &[_]runtime.Value{{}}, runtime.runtime_allocator)", .{ident});
+                return;
+            }
+        }
+        try writer.writeAll(absent);
     }
 
     fn escapeString(self: *Self, str: []const u8) ![]const u8 {
