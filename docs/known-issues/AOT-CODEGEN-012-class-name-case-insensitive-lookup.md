@@ -8875,7 +8875,7 @@ R-214 曾把“归因里出现 setSourceLocation/PHI/调用行等非局部增删
 | C062（51 臂） | **51/51 SAME、0 CF、0 diff**（修前 `49 SAME / 1 DIFF(b8) / 1 CF(b3)`；R-231 后 b8 已转绿，本批关 b3）；`aot_warned` 28→**29** |
 | 主回归 | **PASS=68 FAIL=0**、`SELF_CHECK_OK rows=68 uniq=68`（`c293_regression_R242_tmp.log`） |
 | `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/zigtest_R242b.log`） |
-| 代次锚 | `nlk 5010edc48ce55ed0a86f3803c0c17ac5`／`tpl 03ed0f1a9d03f4daeb69cfc85fa5fada`／`irg 09b2e6aa…`（未提交） |
+| 代次锚 | `nlk 5010edc48ce55ed0a86f3803c0c17ac5`／`tpl 03ed0f1a9d03f4daeb69cfc85fa5fada`／`irg 09b2e6aa…`（源已随 `4bbc641` 提交） |
 
 ### 149.4 边界 / 新登记
 - **F-152 已闭**：`intval` 的第二形参此前只存在于调用点（2 实参⇒生成码 `expected 1 argument(s), found 2`），并非值错；现为真实现（非截断/打桩）。
@@ -8909,7 +8909,7 @@ R-214 曾把“归因里出现 setSourceLocation/PHI/调用行等非局部增删
 | 探针 | `f151/p.php`、`f151/np.php` stdout＋stderr 逐字节 SAME |
 | `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/zigtest_R243.log`） |
 | 主回归 | **PASS=68 FAIL=0**（`c294_regression_R243_tmp.log`） |
-| 代次锚 | `nlk 5010edc4…`（未变）／`tpl 7166338ad4fbfe493c7125a098e6fc1e`／`irg 570e1731946cc5275f512a385e481be8`（未提交） |
+| 代次锚 | `nlk 5010edc4…`（未变）／`tpl 7166338ad4fbfe493c7125a098e6fc1e`／`irg 570e1731946cc5275f512a385e481be8`（源已随 `4bbc641` 提交） |
 
 ### 150.4 边界 / 新登记
 - **F-151-b 新立（P2）**：更深的缺失链仍不静默——`isset($undef['k']['j'])` 内层读取打 2 条 Warning（未定义变量＋array offset），`isset($undef->p->q)` 打 1 条；且魔术方法中继语义不同：`isset($m->p->q)` PHP 调 `__isset('p')`（false 即止），AOT 走 `__get('p')`。修法需“表达式位静默链读取＋__isset 短路”，属独立改造轮。
@@ -8949,7 +8949,7 @@ R-214 曾把“归因里出现 setSourceLocation/PHI/调用行等非局部增删
 | 邻居 | C289 8/8、C279 11/11、C276 12/12、C277 12/12、C267 14/14、C268 20/20（零转移） |
 | 主回归 | **PASS=68 FAIL=0**（`c295_regression_R244_tmp.log`） |
 | `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/zigtest_R244.log`） |
-| 代次锚 | `nlk fa56d9210fdad6597656e801924f79a5`／`tpl f03b46d4b0c364f026cc29e29e5384eb`／`irg 570e1731…`（未提交） |
+| 代次锚 | `nlk fa56d9210fdad6597656e801924f79a5`／`tpl f03b46d4b0c364f026cc29e29e5384eb`／`irg 570e1731…`（源与本文档已随 `ed878b2` 提交） |
 
 ### 151.4 边界
 - 标记深度上限 8 级（与既有 coalesce 标记一致）；更深链逐级仍静默但第 9 级起不再回溯（未单列臂）。
@@ -8988,9 +8988,193 @@ R-214 曾把“归因里出现 setSourceLocation/PHI/调用行等非局部增删
 | 邻居 | C276 12/12、C277 12/12 |
 | 主回归 | **PASS=68 FAIL=0**（`c296_regression_R245_tmp.log`） |
 | `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/zigtest_R245.log`） |
-| 代次锚 | `nlk 30a4c7363e679e9c02444effa4def235`／`irg 965dbb9f9005bf046ef1d72ef66c7eaa`／`ir e02923dfc85a4c2564dbcf10d35cc8c0`／`tpl f03b46d4…`（未提交） |
+| 代次锚 | `nlk 30a4c7363e679e9c02444effa4def235`／`irg 965dbb9f9005bf046ef1d72ef66c7eaa`／`ir e02923dfc85a4c2564dbcf10d35cc8c0`／`tpl f03b46d4…`（源已随 `ed878b2` 提交；本记录后补） |
 
 ### 152.4 边界 / 新登记
 - **F-154 新立（P2）**：`(string)Z::$a`、`(int)Z::$a` 等**转换运算符作用于静态属性**时，解析器把常量 `Z` 当成被转换对象 ⇒ AOT 运行期 `Undefined constant "Z"`（PHP 正常）。先赋值给变量再转换即可绕过。属共享 parser 的优先级问题，跨模式影响面待测，需老裁。
 - 合成函数深度：属性默认值只允许常量表达式；若用户写非法默认值（如函数调用），PHP 在编译期拒绝，AOT 目前由 parser/解析阶段拒绝（未单列臂）。
 - 构造期求值失败（如未定义常量）会以运行期 fatal 形式在类注册阶段暴露；未单列臂。
+
+## 153. ★R-246 落地记录（F-118b 闭环：方法形参的 `new` 初始化器默认值；F-155/F-156 新立）
+
+### 153.1 契约（PHP 8.5.8）
+| 形 | PHP |
+|---|---|
+| `function m($x = new stdClass)` 的 `ReflectionMethod::getParameters()[0]` | `isDefaultValueAvailable()=true`；`getDefaultValue()` 返回 stdClass |
+| 同一形参连续两次 `getDefaultValue()` | **两个不同实例**（`$a === $b` 为 false；`new` 初始化器每人一份） |
+| `$y = [new stdClass, 2]` | 反射得到长度 2 的数组，元素 0 为 stdClass |
+| 静态方法/构造器形参 | 同语义 |
+| 调用期省略该实参 | 每次调用新实例；显式实参覆盖默认 |
+| 可折叠默认值（int/string/array/null） | 反射返回值与字面量一致（守卫） |
+| 无默认值形参 | `isDefaultValueAvailable()=false`；`getDefaultValue()` 抛 `ReflectionException|Internal error: Failed to retrieve the default value` |
+
+### 153.2 实现（复用 R-245 的合成零参函数）
+- `ir TypeDef.Method.param_default_funcs`（`:241`）：与 `param_defaults` 同序，仅“折叠不出”的默认值非空。
+- `irg getMethodMeta`（`:2519`）新增 `class_name` 参数（4 个调用点同步：类/枚举/trait/匿名类）；折叠失败且存在默认值 ⇒ `generatePropertyDefaultFunc` 合成 `__propdefault_<N>`。
+- `nlk emitMethodRegistrationFull`：新增 `.param_default_factories = &.{ … &@"__fn___propdefault_N" … }`（全 null 时省略）。
+- `tpl ClassMethod.param_default_factories: []const ?MethodFn`（`:15349`）；`getParameters` 在方法路径为每个参数记录 `__owner_class`/`__owner_method`（+已有 `__position`）。
+- `tpl ReflectionParameter::getDefaultValue`（`:19435`）：`__default_value` 优先；否则经 owner 回查 `param_default_factories[pos]` 并**每次调用重新求值**（返回新实例）；无工厂仍抛原 ReflectionException。
+
+### 153.3 读数
+| 腿 | 读数 |
+|---|---|
+| C292（新门 6 臂） | 自证 **6 CF**；实跑 **6/6 SAME** 31 s |
+| P（88 臂） | **83 SAME / 5 DIFF**；`d9` 转绿，现红集合 `i1 i2 f12 f34 d6`（与基线相比仅少 d9，零新增） |
+| 探针 | `f118b/m.php`（实例/静态/构造器 + 身份比较 + 调用期）stdout＋stderr 逐字节 SAME |
+| `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/zigtest_R246.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`c297_regression_R246_tmp.log`） |
+| 代次锚 | `nlk cb516ffd9c46887003c003d4528d7981`／`tpl cde4e7ed647fd6fc01d78a7b339bcf26`／`irg 2008cfe49b35ae31592cd44d63fe151b`／`ir bcf6823a6855fb6255856347008d76c2`（未提交） |
+
+### 153.4 边界 / 新登记
+- **F-155 新立（P2）**：函数级反射默认值元数据缺失——`(new ReflectionFunction('f'))->getParameters()[i]->getDefaultValue()` 对**可折叠**默认值也抛 ReflectionException（ReflectionFunction 的 getParameters 从不装填 `__default_value`）；`new ReflectionParameter('f', 0)` 构造路径完全不解析函数元数据（`isDefaultValueAvailable()` 亦为 false）。另 trait 组合方法走 `emitMethodRegistration`（简化注册），不带 param_default_* 元数据。
+- **F-156 新立（P2）**：接口方法的 `ReflectionMethod('I','m')` 报 `Method I::m() does not exist`（PHP 可反射接口方法）。
+- 工厂在类注册期只保存函数指针，不预求值 ⇒ `new` 默认值不会在启动时创建对象，符合 PHP“按调用/按反射取值”语义。
+
+## 154. ★R-247 落地记录（F-156 闭环：接口/抽象方法反射；F-156-b 新立）
+
+### 154.1 契约（PHP 8.5.8）
+| 形 | PHP |
+|---|---|
+| `new ReflectionMethod('I','m')`（接口方法） | 可构造；`getName()='m'`、`isAbstract()=true`、`isStatic()` 按声明、`getDeclaringClass()->getName()='I'` |
+| 接口方法 `getParameters()[i]->getDefaultValue()` | 与声明一致（如 `5`） |
+| `invoke()` 抽象/接口方法 | 抛 `ReflectionException|Trying to invoke abstract method I::m()` |
+| `interface J extends I`，`ReflectionMethod('J','m')` | 可解析，**声明类仍是 I** |
+| 实现类 `C implements I` | `isAbstract()=false`、声明类 `C`、invoke 正常 |
+| 接口静态方法 | `isStatic()=true`，invoke 仍抛抽象异常 |
+| 抽象类：`abstract m()` / 具体 `c()` | `isAbstract()` 分别 true / false；invoke 抽象方法抛同文案 |
+| 接口常量 | 读取/`ReflectionClass::getConstant` 不变（守卫） |
+
+### 154.2 实现
+- `irg generateAbstractMethodFunction`（`:1627`）：为每个接口方法合成 `<Iface>::<m>` 函数，体内 `throwThrowable("Error", "Cannot call abstract method X::m()")`；上下文切换同 R-245/R-246（清 `$this`/try-finally）。
+- `irg generateInterfaceDecl`（`:2145`）：收集 `method_decl` → `getMethodMeta(member, iface_name)` 并强制 `is_abstract=true`，写入 `TypeDef.methods`（此前恒为 `&.{}` ⇒ 反射必然 `Method I::m() does not exist`）。
+- `tpl ClassMeta.findMethodLookup`：父类链之外新增 **interfaces 链**递归（接口继承解析）。
+- `tpl ReflectionMethod.__construct`：记录 `__is_abstract`（方法级）与 `__declaring_class`（`lookup.owner.name`）。
+- `tpl ReflectionMethod::isAbstract`：优先 `__is_abstract`（不再误用类级 `is_abstract`；抽象类的具体方法因此正确为 false）。
+- `tpl ReflectionMethod::getDeclaringClass`：优先 `__declaring_class`（继承接口方法返回声明接口）。
+- `tpl ReflectionMethod::invoke`：抽象方法先抛 `ReflectionException|Trying to invoke abstract method X::m()`。
+
+### 154.3 读数
+| 腿 | 读数 |
+|---|---|
+| C293（新门 7 臂） | 自证 **7 CF**；实跑 **7/7 SAME** 32 s |
+| 探针 | `f156/p.php`、`f156/a.php`（接口/继承/实现类/抽象类）stdout＋stderr 逐字节 SAME |
+| P（88 臂） | **83 SAME / 5 DIFF**，红集合仍 `i1 i2 f12 f34 d6`（零转移） |
+| `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/zigtest_R247.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`c298_regression_R247_tmp.log`） |
+| 代次锚 | `irg a8bd2b75979b4442ee89676362cafc8b`／`tpl 9fee311c257eea3c5b673fa74eaee451`／`nlk cb516ffd…`（未变）／`ir bcf6823a…`（未提交） |
+
+### 154.4 边界 / 新登记
+- **F-156-b 新立（P2）**：直接静态调用接口方法 `I::m()` 时，PHP 抛**可被 try/catch 捕获**的 `Error|Cannot call abstract method I::m()`；AOT 文案相同但表现为**未捕获 fatal（rc=255）**，try/catch 接不住。合成函数的 `.throw` 在直接静态分发路径未按调用点 handler 路由，需与 throw 路由族一并处理。
+- 接口方法 attributes/返回值类型元数据沿用 `getMethodMeta`；未单列臂。
+- 类实现接口但漏实现的方法（PHP 编译期即拒绝）在 AOT 会经接口链找到抽象方法并抛错；属非法输入路径，未单列臂。
+
+## 155. ★R-248 落地记录（F-156-b＋F-156-c 闭环：抽象方法直接调用可捕获）
+
+### 155.1 契约（PHP 8.5.8）
+| 形 | PHP |
+|---|---|
+| `try { I::m(); } catch (Throwable $e)`（接口实例方法直接静态调用） | 捕获 `Error|Cannot call abstract method I::m()`，后续代码继续执行 |
+| `try { A::sm(); }`（抽象类静态抽象方法） | 同上（`Cannot call abstract method A::sm()`） |
+| `try { A::m(); }`（抽象类实例抽象方法静态调用） | **仍报 abstract 措辞**（而不是 `Non-static method`） |
+| 普通静态方法 try 内/外 | 正常返回 |
+| try/finally 包裹抽象调用 | finally 先执行，异常继续向上 |
+| 封装函数内调用抽象方法 | 异常传播到调用方 catch |
+| `ReflectionMethod::invoke` 抽象方法 | `ReflectionException|Trying to invoke abstract method`（R-247 守卫） |
+
+### 155.2 实现
+- **F-156-b（try 语境直调）**：`nlk static_method_call` 直调分支原先恒 `try @"C::m"(…)`；Zig error 会穿过 PHP catch（跨帧 throw 不可捕获，与 :19492 注释同因）。现按 `current_exception_handler` 分叉：
+  - try 内 ⇒ `@"C::m"(…) catch Value.initNull()`（或 `catch {}` 无返回值），随后既有 `hasException()` 路由；
+  - try 外 ⇒ 保持 `try`（异常冒到 main 成 fatal，与 PHP 未捕获一致）。
+- **F-156-c（抽象类方法体）**：`irg generateMethodDecl` 在创建函数前检查 `modifiers.is_abstract and body == null` ⇒ 走 `generateAbstractMethodFunction`（抛 `Error: Cannot call abstract method X::m()`），不再生成静默返回 null 的空体。
+- **措辞优先级**：`nlk isAbstractMethod`（扫 IR 类型表）＋静态直调分支在 `staticEmitCallIsIllegal` **之前**判定抽象 ⇒ 报 abstract 措辞；错误同样按 try 内/外分叉路由。
+
+### 155.3 读数
+| 腿 | 读数 |
+|---|---|
+| C294（新门 7 臂） | 自证 **7 CF**；实跑 **7/7 SAME** 31 s |
+| 邻居 | C293 7/7、C276 12/12 |
+| `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/zigtest_R248.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`c299_regression_R248_tmp.log`） |
+| 代次锚 | `nlk 15514e9f7e90fcca640c1274c3ddc6c4`／`irg f4f2ae15b02f61615115ed5d1732479c`／`tpl 9fee311c…`（未变）／`ir bcf6823a…`（未提交） |
+
+### 155.4 边界
+- 直调分支的 try 外路径仍让 Zig error 冒到 main（PHP 未捕获 fatal，OK）；try 内路径改为“置 null + hasException 路由”。
+- 该批改动了**所有** try 内静态直调（不只抽象方法）⇒ 已跑全量回归；行为方向为“异常可被 PHP catch 接住”，与 PHP 一致。
+- 动态类名静态调用（`$c::m()`）仍走 `php_call_static` 旧形态（既有 F-18 登记，不在本批）。
+
+## 156. ★R-249 落地记录（F-155 闭环：函数级/闭包/变参/trait 组合的形参元数据）
+
+### 156.1 契约（PHP 8.5.8）
+| 形 | PHP |
+|---|---|
+| `ReflectionFunction('f')->getParameters()` | 每个参数给出真名/位置/`isOptional`/`isDefaultValueAvailable`/`getDefaultValue` |
+| `new ReflectionParameter('f', 1)` / `('f', 'c')` | 位置或**参数名**均可；默认值可直接取 |
+| `new ReflectionParameter('f', 99)` / `('f', 'nope')` | `ReflectionException`：`The parameter specified by its offset/name could not be found` |
+| `function g($o = new stdClass)` | `isDefaultValueAvailable()=true`；`getDefaultValue()` 每次返回**新实例** |
+| `function h($a = 1, ...$rest)` | `rest`：`isOptional=true`、`isDefaultValueAvailable=false`、`isVariadic=true` |
+| 闭包 `function ($x = 3)` 的 `ReflectionFunction` | 同具名函数（含默认值取值） |
+| trait 组合方法（含 trait 套 trait、静态方法） | `ReflectionMethod('C','m')` 参数默认值与声明 trait 一致；`new` 默认值每次新实例 |
+| `new ReflectionParameter(['C','m'], 0|‘x')` / `([$obj,'m'], 0)` | 支持类名/对象两宿主；继承方法按继承链解析 |
+| 宿主类/方法/位置/参数名非法 | 四类 `ReflectionException` 文案（见 156.2） |
+
+### 156.2 实现
+- **IR（`ir.zig`）**：`Parameter.default_func`；`Method.param_variadic`。
+- **irg**：`generateParameters` 对顶层函数的不可折叠默认值复用 `generatePropertyDefaultFunc`（闭包不合成）；`getMethodMeta` 收集变参位。
+- **模板（`runtime_lib_template.zig`）**：
+  - `FunctionMeta` 扩为 `param_default_values / param_default_known / param_default_factories / variadic_index`；`registerFunctionMetaEx` 承接，旧 `registerFunctionMeta` 委托空表＋`0xFFFF`。
+  - `PHPClosure` 增加三片默认值元数据与 `variadic_index`，`php_create_closure` 从注册表带入（切片别名，生命周期同注册表）。
+  - `ReflectionFunction::getParameters`：名字/默认值/工厂/变参一次解析；`__has_default = i >= required && !variadic`（★不能用 known 位：`new` 默认值 known=false 但确实有默认值）。
+  - `ReflectionParameter::__construct`：函数名形态解析 registry；`[类名|对象, 方法名]` 形态走 `findMethodLookup`（含继承）并给出四类 PHP 文案；形参位置越界/名字不存在同样抛。
+  - `ReflectionMethod::getParameters`：主路径与 registry 回退路径均补 `__is_variadic` 且 `has_default` 排除变参。
+  - `getDefaultValue`：新增 `__owner_func` 工厂支（每次调用重新求值）。
+  - **附带**：方法 `getParameters` 的两处 owner 字符串与默认值属性此前 `setProperty` 之外又 retain/未释放 ⇒ 每参数一次泄漏，现改为借用＋`defer release`。
+- **发射器（`native_linker.zig`）**：顶层函数/闭包在「有默认值或变参」时发 `registerFunctionMetaEx`（运行期分配值/可知位数组；工厂数组仅函数有）；`emitMethodRegistrationFull` 增 `.param_variadic` 与可见性/静态性 override；trait 组合方法按 provider trait 的 `TypeDef.Method` 走 Full（抽象方法仍走简化路径）。
+
+### 156.3 读数
+| 腿 | 读数 |
+|---|---|
+| C295（新门 9 臂） | 自证 **9 CF**；实跑 **9/9 SAME** 67 s |
+| 邻居 C292 / C293 / C294 | 6/6、7/7、7/7（全 SAME） |
+| 邻居 PD2（C073） | 19/19 SAME（`refl_gap=0`、`silent_null=0`） |
+| 门 P（C012，88 臂） | **83 SAME / 5 DIFF**，红集合 `i1 i2 f12 f34 d6` 与 R-249 前快照**逐臂零转移** |
+| `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/r249_test_summary.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r249_regression.log`，`SELF_CHECK_OK rows=68 uniq=68 total=68`） |
+| 代次锚 | `nlk b701caa977e68e016570c9fb10e02ef1`／`tpl 13e737b33fd313c898c876edf9e38acc`／`irg 3e935200b14117cecce8cf788c038d42`／`ir e3d7c4877b42b4c7f823f72fdf0eedca`（未提交） |
+
+### 156.4 边界 / 新登记
+- **F-155-b 新立（P2）**：闭包的 `new` 初始化器默认值仍取不到（`getDefaultValue` 抛 `Internal error`）：`generateParameters` 为闭包跳过工厂合成，registry 的 known 位为 false 且无工厂。foldable 闭包默认值已绿。
+- **F-157 新立（P2）**：`ReflectionMethod('Child','inheritedMethod')->getParameters()` 为空（构造函数只查自身 `ClassMeta.methods`）；而 `new ReflectionParameter(['Child','inheritedMethod'], i)` 已正确（走 `findMethodLookup`）。
+- 内置函数（`strlen` 等）的 `ReflectionFunction`/`ReflectionParameter` 仍无参数名/默认值（既存 F-12 面，registry 仅登记用户函数）。
+- `isDefaultValueAvailable` 与 known 位**语义不同**：前者由 `required_params`＋变参位决定，后者仅表示"折叠出常量值"；混用会把 `new` 默认值误报为无默认。
+
+## 157. ★R-250 落地记录（F-157 闭环：继承方法的反射参数元数据）
+
+### 157.1 契约（PHP 8.5.8）
+| 形 | PHP |
+|---|---|
+| `class C extends P`，`ReflectionMethod('C','pm')->getParameters()` | 与 P 上声明一致（名字/optional/avail/默认值） |
+| 继承方法的 `new` 初始化器默认值 | `getDefaultValue()` 每次新实例（身份比较 false） |
+| 多级继承 `A<-B<-C` | 取 A 的方法元数据 |
+| 父类 trait 组合方法 | 经子类反射同样可解析 |
+| 继承构造器 | `ReflectionMethod('C','__construct')` 参数完整 |
+| 子类覆写 | 必须取**子类**元数据（守卫） |
+| 抽象父类方法 + 抽象子类 | 参数名/optional/avail/variadic 与声明一致 |
+
+### 157.2 实现
+- `tpl ReflectionMethod::getParameters` 主路径：`cmeta.methods.get(name)` → `cmeta.findMethodLookup(name)`（父类链/接口链统一解析）。
+- owner 元数据改取 `lookup.owner.name` 与 `m.name`（原取查询起点 `__class_name`/`__method_name`）——继承方法的工厂在**声明类**元数据里，用子类名回查会得到 null ⇒ `getDefaultValue` 静默抛 `Internal error`。
+- 方法归属与工厂路径因此同时归正：foldable 默认值走 `m.param_default_values`，`new` 初始化器走 `m.param_default_factories`。
+
+### 157.3 读数
+| 腿 | 读数 |
+|---|---|
+| C296（新门 7 臂） | 自证 **7 CF**；实跑 **7/7 SAME** 41 s |
+| 邻居 C292 / C012 | 6/6 SAME；P 88 臂 **83/5**，与前快照**逐臂零转移** |
+| `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/r250_test_summary.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r250_regression.log`，`SELF_CHECK_OK rows=68`） |
+| 代次锚 | `tpl 3a98c34e8caa615b3b2393f4a9c07ada`；`nlk b701caa9…`／`irg 3e935200…`／`ir e3d7c487…` 未变（未提交） |
+
+### 157.4 边界
+- `findMethodLookup` 也会命中接口链：实现类不覆写接口方法时，`ReflectionMethod('C','im')->getParameters()` 现在给出接口声明参数（PHP 同口径），属正向变化。
+- 方法不存在时构造函数仍不抛（既有形态，未在本批）；`getParameters` 回退 registry 后返回空数组。
+- F-155-b（闭包 `new` 初始化器默认值）仍开。

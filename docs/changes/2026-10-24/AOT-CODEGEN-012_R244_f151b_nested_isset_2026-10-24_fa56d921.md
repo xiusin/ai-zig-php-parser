@@ -1,8 +1,8 @@
 # AOT-CODEGEN-012 R-244：F-151-b 嵌套 isset/empty 链静默与 `__isset` 中继
 
 - 日期：2026-10-24（R-244；F-151-b 闭环）
-- 代次锚：`nlk fa56d9210fdad6597656e801924f79a5`／`tpl f03b46d4b0c364f026cc29e29e5384eb`／`irg 570e1731…`／`ir 5b99795…`／`parser 70e80f18…`／`opt 745e4bd4…`（未提交）
-- 状态：全部**未提交**
+- 代次锚：`nlk fa56d9210fdad6597656e801924f79a5`／`tpl f03b46d4b0c364f026cc29e29e5384eb`／`irg 570e1731…`／`ir 5b99795…`／`parser 70e80f18…`／`opt 745e4bd4…`（提交 `ed878b2`）
+- 状态：源与本文档已随 `ed878b2` 提交
 
 ## 1. 高层摘要（TL;DR）
 

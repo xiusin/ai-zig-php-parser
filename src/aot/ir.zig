@@ -233,9 +233,14 @@ pub const TypeDef = struct {
         param_types: []const []const u8 = &.{},
         /// 参数是否允许 null（nullable 类型或无类型声明）
         param_nullable: []const bool = &.{},
+        /// ★F-155：参数是否变参（与 param_names 同序）
+        param_variadic: []const bool = &.{},
         /// AOT-CODEGEN-012 F-118：与 `param_names` 同序的**默认值常量指令**（折叠不出常量则为 null）。
         /// 形状照 `Property.default_value: ?*Instruction`（:205），发射期共用同一条常量序列化支。
         param_defaults: []const ?*Instruction = &.{},
+        /// ★F-118b（R-246）：与 `param_defaults` 同序的合成求值函数名（仅“折叠不出”的默认值非空）；
+        /// ReflectionParameter::getDefaultValue() 每次调用都重新求值（PHP 的 `new` 初始化器每人一份）。
+        param_default_funcs: []const ?[]const u8 = &.{},
         /// 返回类型字符串（无返回类型声明时为 null）
         return_type: ?[]const u8 = null,
         /// 返回类型是否 nullable
@@ -442,6 +447,8 @@ pub const Parameter = struct {
     /// AOT-CODEGEN-012 F-118：默认值的**常量指令**（折叠不出常量则为 null）。
     /// 带默认值 ⇒ 与 `TypeDef.Method.param_defaults` 同口径；缺失即不猜。
     default_value: ?*Instruction = null,
+    /// ★F-155（R-249）：不可折叠默认值的合成求值函数名（函数级反射按次求值）。
+    default_func: ?[]const u8 = null,
 };
 
 /// 循环元数据 - 为循环块提供显式的结构化引用

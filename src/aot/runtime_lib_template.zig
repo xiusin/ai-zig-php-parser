@@ -83,6 +83,13 @@ pub const FunctionMeta = struct {
     param_count: u16 = 0,
     required_params: u16 = 0,
     param_names: []const []const u8 = &.{},
+    /// ★F-155（R-249）：函数级形参默认值，三数组与 param_names 同序（口径同 ClassMethod）。
+    param_default_values: []const Value = &.{},
+    param_default_known: []const bool = &.{},
+    param_default_factories: []const ?MethodFn = &.{},
+    /// ★F-155：变参形参下标（无变参＝0xFFFF）。变参不计入 required_params，
+    /// 因此 `i >= required_params` 不能用来判 isDefaultValueAvailable。
+    variadic_index: u16 = 0xFFFF,
 };
 pub var function_meta_registry: ?std.StringHashMap(FunctionMeta) = null;
 
@@ -91,8 +98,30 @@ pub var function_meta_registry: ?std.StringHashMap(FunctionMeta) = null;
 /// 但本函数一直没有名字形参 ⇒ 恒空。全部 4 处调用点均已显式传名（不设默认值：
 /// Zig 0.16 对「切片的切片」形参默认值在此处解析失败）。
 pub fn registerFunctionMeta(name: []const u8, param_count: u16, required_params: u16, param_names: []const []const u8) void {
+    registerFunctionMetaEx(name, param_count, required_params, param_names, &.{}, &.{}, &.{}, 0xFFFF);
+}
+
+/// ★F-155：带默认值（折叠值/工厂）的函数元数据。三条平行数组与 param_names 同序。
+pub fn registerFunctionMetaEx(
+    name: []const u8,
+    param_count: u16,
+    required_params: u16,
+    param_names: []const []const u8,
+    param_default_values: []const Value,
+    param_default_known: []const bool,
+    param_default_factories: []const ?MethodFn,
+    variadic_index: u16,
+) void {
     if (function_meta_registry) |*registry| {
-        registry.put(name, .{ .param_count = param_count, .required_params = required_params, .param_names = param_names }) catch {};
+        registry.put(name, .{
+            .param_count = param_count,
+            .required_params = required_params,
+            .param_names = param_names,
+            .param_default_values = param_default_values,
+            .param_default_known = param_default_known,
+            .param_default_factories = param_default_factories,
+            .variadic_index = variadic_index,
+        }) catch {};
     }
 }
 
@@ -2991,6 +3020,12 @@ pub const PHPClosure = struct {
     /// AOT-CODEGEN-012 F-12b：闭包形参名（与 function_meta_registry 中同一份切片的别名，由创建点
     /// 从注册表带入 ⇒ 生命周期同注册表，不额外持有）。供 ReflectionFunction 读真名。
     param_names: []const []const u8 = &.{},
+    /// ★F-155：形参默认值/可知位/变参下标（同 param_names，registry 切片的别名）。
+    param_default_values: []const Value = &.{},
+    param_default_known: []const bool = &.{},
+    /// ★F-155-b：不可折叠默认值的工厂（同 registry 切片别名）
+    param_default_factories: []const ?MethodFn = &.{},
+    variadic_index: u16 = 0xFFFF,
     bound_this: Value = Value.initNull(), // Closure::bind/bindTo 绑定的 $this
     bound_scope: ?*const ClassMeta = null, // Closure::bind/bindTo 绑定的作用域类
     is_static: bool = false, // static closure 不能绑定 $this
@@ -3347,6 +3382,11 @@ pub fn php_create_closure(name: Value, captures: Value, is_static_val: Value, al
             closure.required_params = meta.required_params;
             // AOT-CODEGEN-012 F-12b：一并带入形参名（注册表切片的别名）
             closure.param_names = meta.param_names;
+            // ★F-155：形参默认值/变参（同一份 registry 切片）
+            closure.param_default_values = meta.param_default_values;
+            closure.param_default_known = meta.param_default_known;
+            closure.param_default_factories = meta.param_default_factories;
+            closure.variadic_index = meta.variadic_index;
         }
     }
     closure.is_static = is_static;
@@ -5818,6 +5858,11 @@ pub fn php_closure_bind(closure_val: Value, new_this: Value, scope_val: Value) !
         // AOT-CODEGEN-012 F-12b：bindTo/bind 派生闭包必须保留形参名
         //（PHPClosure 新字段有默认值 &.{} ⇒ 漏写就是静默丢名字，ReflectionFunction 退回 param{i}）
         .param_names = orig.param_names,
+        // ★F-155：bind 派生闭包同样保留默认值元数据（否则反射 getDefaultValue 静默退化）
+        .param_default_values = orig.param_default_values,
+        .param_default_known = orig.param_default_known,
+        .param_default_factories = orig.param_default_factories,
+        .variadic_index = orig.variadic_index,
         .bound_this = bound_this,
         .bound_scope = bound_scope,
         .is_static = orig.is_static or new_this.isNull(),
@@ -15337,6 +15382,8 @@ pub const ClassMethod = struct {
     param_types: []const []const u8 = &.{},
     /// 参数是否允许 null（nullable 类型或无类型声明）
     param_nullable: []const bool = &.{},
+    /// ★F-155：参数是否变参（与 param_names 同序）
+    param_variadic: []const bool = &.{},
     /// AOT-CODEGEN-012 F-118：形参默认值（与 `param_names` 同序）。
     /// ★拆成「值数组 + 可知位数组」两条平行数组，而非 `[]?Value`——模板里今天没有
     ///   `&[_]?Value{…}` 的发射先例，上一版那样发会让 string 默认值读回成 `float(2.1e-314)`（工单 §99）。
@@ -15344,6 +15391,9 @@ pub const ClassMethod = struct {
     /// `param_default_known[i]` ＝ true 表示 `param_default_values[i]` 是**编译期折叠出来**的真默认值；
     /// false 表示「有默认值但折叠不出常量」或「根本没有默认值」——两者都由反射侧按 PHP 口径抛异常，禁当成 null。
     param_default_known: []const bool = &.{},
+    /// ★F-118b（R-246）：`param_default_factories[i]` 非空 ⇒ 该形参默认值不可编译期折叠
+    ///（如 `new stdClass`），反射每次 `getDefaultValue()` 调用它重新求值（PHP 每人一份新实例）。
+    param_default_factories: []const ?MethodFn = &.{},
     /// 返回类型字符串（无返回类型声明时为 null）
     return_type: ?[]const u8 = null,
     /// 返回类型是否 nullable
@@ -15486,6 +15536,14 @@ pub const ClassMeta = struct {
         if (self.parent) |parent| {
             if (parent.findMethodLookup(name)) |lookup| {
                 return lookup;
+            }
+        }
+        // ★F-156：接口方法可经 implements/extends 的接口链解析（声明类仍是接口 owner）。
+        for (self.interfaces) |iface_name| {
+            if (findClass(iface_name)) |iface_meta| {
+                if (iface_meta.findMethodLookup(name)) |lookup| {
+                    return lookup;
+                }
             }
         }
         // AOT-CODEGEN-012 R-131：方法名 CI（PHP 方法名不区分大小写）——精确链全 miss 后
@@ -16938,6 +16996,11 @@ pub const ClassMeta = struct {
                         .required_params = orig_closure.required_params,
                         // AOT-CODEGEN-012 F-12b：bind 派生新闭包时保留形参名，否则反射退化回 param{i}
                         .param_names = orig_closure.param_names,
+                        // ★F-155：bind/bindTo 派生闭包保留默认值元数据
+                        .param_default_values = orig_closure.param_default_values,
+                        .param_default_known = orig_closure.param_default_known,
+                        .param_default_factories = orig_closure.param_default_factories,
+                        .variadic_index = orig_closure.variadic_index,
                         .bound_this = bound_this,
                         .bound_scope = bound_scope,
                         .is_static = orig_closure.is_static,
@@ -18856,6 +18919,9 @@ pub const ClassMeta = struct {
                     };
                     try this.setProperty("__class_name", Value.initString(try PHPString.init(alloc, cmeta.name)));
                     try this.setProperty("__method_name", Value.initString(try PHPString.init(alloc, lookup.method.name)));
+                    // ★F-156：方法级 abstract 与声明类（接口继承时声明类仍是父接口）。
+                    try this.setProperty("__is_abstract", Value.initBool(lookup.method.is_abstract));
+                    try this.setProperty("__declaring_class", Value.initString(try PHPString.init(alloc, lookup.owner.name)));
                     return Value.initNull();
                 }
             }.call,
@@ -18882,11 +18948,13 @@ pub const ClassMeta = struct {
                 fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
                     if (!Value_isObject(ctx)) return Value.initNull();
                     const this = Value_asObject(ctx);
-                    const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initNull();
+                    // ★F-156：继承接口的方法，声明类是 owner 接口（不是查询起点）。
+                    const declaring = this.getPropertyDirect("__declaring_class") orelse
+                        (this.getPropertyDirect("__class_name") orelse return Value.initNull());
                     if (findClass("ReflectionClass")) |rc_cls| {
                         const rc_obj = try PHPObject.initWithMeta(alloc, rc_cls);
-                        try rc_obj.setProperty("__class_name", cname_val);
-                        _ = cname_val.retain();
+                        try rc_obj.setProperty("__class_name", declaring);
+                        _ = declaring.retain();
                         return Value_initObject(rc_obj);
                     }
                     return Value.initNull();
@@ -19032,6 +19100,14 @@ pub const ClassMeta = struct {
                         throwThrowableDiscardCatch("ReflectionException", m, alloc);
                         return error.ReflectionMethodNotFound;
                     };
+                    // ★F-156：抽象/接口方法 invoke ⇒ ReflectionException（PHP 实测文案）。
+                    if (lookup.method.is_abstract) {
+                        var ab: [256]u8 = undefined;
+                        const am = std.fmt.bufPrint(&ab, "Trying to invoke abstract method {s}::{s}()", .{ lookup.owner.name, lookup.method.name }) catch
+                            "Trying to invoke abstract method";
+                        throwThrowableDiscardCatch("ReflectionException", am, alloc);
+                        return error.ReflectionAbstractMethod;
+                    }
                     // AOT-CODEGEN-012 R-138 重落 R-137c：静态方法原样返回 null（g6 实测空输出）
                     // ⇒ 静态走 func(Value.initNull(), ...)（口径同静态分发 :4616）。
                     if (lookup.method.is_static) {
@@ -19064,8 +19140,10 @@ pub const ClassMeta = struct {
                     if (!cname_val.isString() or !mname_val.isString()) return Value.initArray(try PHPArray.init(alloc));
                     const arr = try PHPArray.init(alloc);
                     // 优先从 ClassMethod 元数据获取参数信息
+                    // ★F-157：走 findMethodLookup（父类链/接口链），继承方法的元数据不再为空
                     if (findClass(cname_val.asString().data)) |cmeta| {
-                        if (cmeta.methods.get(mname_val.asString().data)) |m| {
+                        if (cmeta.findMethodLookup(mname_val.asString().data)) |lookup| {
+                            const m = lookup.method;
                             var i: usize = 0;
                             while (i < m.param_count) : (i += 1) {
                                 if (findClass("ReflectionParameter")) |rp_cls| {
@@ -19088,16 +19166,31 @@ pub const ClassMeta = struct {
                                     // AOT-CODEGEN-012 F-8：是否有默认值 ⇒ 位置 ≥ required_params
                                     //（PHP: 前 required_params 个为无默认必填，其后各带默认值）。
                                     // 同时补齐 __is_optional（PHP 口径 = 有默认值 或 变参）。
-                                    const has_def = i >= m.required_params;
+                                    // ★F-155：变参可省略但**没有默认值**，必须单列。
+                                    var has_def = i >= m.required_params;
+                                    var is_variadic = false;
+                                    if (i < m.param_variadic.len and m.param_variadic[i]) {
+                                        is_variadic = true;
+                                        has_def = false;
+                                    }
                                     try rp_obj.setProperty("__has_default", Value.initBool(has_def));
-                                    try rp_obj.setProperty("__is_optional", Value.initBool(has_def));
+                                    try rp_obj.setProperty("__is_optional", Value.initBool(i >= m.required_params));
+                                    try rp_obj.setProperty("__is_variadic", Value.initBool(is_variadic));
+                                    // ★F-118b：记录 owner，getDefaultValue() 可回查工厂（new 初始化器每次新实例）。
+                                    // ★F-157：owner 取真实声明类（继承方法在父类元数据里，用查询起点会查不到工厂）。
+                                    // setProperty 自带 retain ⇒ 本地 +1 由 defer 归还（原写法两处均漏还）。
+                                    const owner_cls_str = try PHPString.init(alloc, lookup.owner.name);
+                                    defer owner_cls_str.release(alloc);
+                                    try rp_obj.setProperty("__owner_class", Value.initString(owner_cls_str));
+                                    const owner_mth_str = try PHPString.init(alloc, m.name);
+                                    defer owner_mth_str.release(alloc);
+                                    try rp_obj.setProperty("__owner_method", Value.initString(owner_mth_str));
                                     // AOT-CODEGEN-012 F-118：仅在发射期折叠出常量时装填（可知位为真）。
                                     //   不可知 ⇒ 不写属性 ⇒ getDefaultValue() 走 PHP 的抛异常支，禁静默给 null。
                                     if (i < m.param_default_known.len and i < m.param_default_values.len) {
                                         if (m.param_default_known[i]) {
-                                            const dv = m.param_default_values[i];
-                                            _ = dv.retain();
-                                            try rp_obj.setProperty("__default_value", dv);
+                                            // 借用值，setProperty 负责 +1（额外的 retain 是每参数一次泄漏）
+                                            try rp_obj.setProperty("__default_value", m.param_default_values[i]);
                                         }
                                     }
                                     try arr.push(alloc, Value_initObject(rp_obj));
@@ -19120,9 +19213,15 @@ pub const ClassMeta = struct {
                                         try rp_obj.setProperty("__name", Value.initString(try PHPString.init(alloc, meta.param_names[i])));
                                     }
                                     // AOT-CODEGEN-012 F-8：回退路径同口径（FunctionMeta 亦带 required_params）
-                                    const has_def = i >= meta.required_params;
+                                    var has_def = i >= meta.required_params;
+                                    var is_var = false;
+                                    if (meta.variadic_index != 0xFFFF and @as(usize, meta.variadic_index) == i) {
+                                        is_var = true;
+                                        has_def = false;
+                                    }
                                     try rp_obj.setProperty("__has_default", Value.initBool(has_def));
-                                    try rp_obj.setProperty("__is_optional", Value.initBool(has_def));
+                                    try rp_obj.setProperty("__is_optional", Value.initBool(i >= meta.required_params));
+                                    try rp_obj.setProperty("__is_variadic", Value.initBool(is_var));
                                     try arr.push(alloc, Value_initObject(rp_obj));
                                 }
                             }
@@ -19191,12 +19290,14 @@ pub const ClassMeta = struct {
                 fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
                     if (!Value_isObject(ctx)) return Value.initBool(false);
                     const this = Value_asObject(ctx);
+                    // ★F-156：方法级 abstract（接口/抽象方法），不再误用类级 is_abstract。
+                    if (this.getPropertyDirect("__is_abstract")) |v| return Value.initBool(v.toBool());
                     const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initBool(false);
                     const mname_val = this.getPropertyDirect("__method_name") orelse return Value.initBool(false);
                     if (cname_val.isString() and mname_val.isString()) {
                         if (findClass(cname_val.asString().data)) |cmeta| {
-                            if (cmeta.methods.get(mname_val.asString().data)) |m| {
-                                return Value.initBool(m.is_abstract);
+                            if (cmeta.findMethodLookup(mname_val.asString().data)) |lookup| {
+                                return Value.initBool(lookup.method.is_abstract);
                             }
                         }
                     }
@@ -19332,14 +19433,138 @@ pub const ClassMeta = struct {
                 fn call(ctx: Value, args: []const Value, alloc: Allocator) anyerror!Value {
                     if (args.len < 2) return Value.initNull();
                     const this = Value_asObject(ctx);
+                    // ★F-155：宿主形 `[类名|对象, 方法名]`（PHP ReflectionParameter 支持三形）
+                    if (args[0].isArray()) {
+                        const host = args[0].asArray();
+                        const cls_v = host.elements.get(.{ .integer = 0 }) orelse return Value.initNull();
+                        const mth_v = host.elements.get(.{ .integer = 1 }) orelse return Value.initNull();
+                        var cls_owned: ?*PHPString = null;
+                        defer if (cls_owned) |s| s.release(alloc);
+                        const cls_name = if (Value_isObject(cls_v)) Value_asObject(cls_v).class_name else blk: {
+                            const s = try cls_v.toString(alloc);
+                            cls_owned = s;
+                            break :blk s.data;
+                        };
+                        const mth_owned = try mth_v.toString(alloc);
+                        defer mth_owned.release(alloc);
+                        const cmeta = findClass(cls_name) orelse {
+                            var b: [256]u8 = undefined;
+                            const msg = std.fmt.bufPrint(&b, "Class \"{s}\" does not exist", .{cls_name}) catch "Class does not exist";
+                            throwThrowableDiscardCatch("ReflectionException", msg, alloc);
+                            return error.ReflectionClassNotFound;
+                        };
+                        // 继承/trait 组合方法同样命中（PHP 口径：方法沿继承链解析）
+                        const lookup = cmeta.findMethodLookup(mth_owned.data) orelse {
+                            var b: [256]u8 = undefined;
+                            const msg = std.fmt.bufPrint(&b, "Method {s}::{s}() does not exist", .{ cmeta.name, mth_owned.data }) catch "Method does not exist";
+                            throwThrowableDiscardCatch("ReflectionException", msg, alloc);
+                            return error.ReflectionMethodNotFound;
+                        };
+                        const m = lookup.method;
+                        const owner_cls_str = try PHPString.init(alloc, lookup.owner.name);
+                        defer owner_cls_str.release(alloc);
+                        try this.setProperty("__owner_class", Value.initString(owner_cls_str));
+                        const owner_mth_str = try PHPString.init(alloc, m.name);
+                        defer owner_mth_str.release(alloc);
+                        try this.setProperty("__owner_method", Value.initString(owner_mth_str));
+                        var pos: i64 = 0;
+                        if (args[1].isInt()) {
+                            pos = args[1].toInt();
+                            if (pos < 0 or @as(usize, @intCast(pos)) >= m.param_count) {
+                                throwThrowableDiscardCatch("ReflectionException", "The parameter specified by its offset could not be found", alloc);
+                                return error.ReflectionParamOffsetNotFound;
+                            }
+                        } else {
+                            const pname = try args[1].toString(alloc);
+                            defer pname.release(alloc);
+                            var found = false;
+                            for (m.param_names, 0..) |pn, pi| {
+                                if (std.mem.eql(u8, pn, pname.data)) {
+                                    pos = @intCast(pi);
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if (!found) {
+                                throwThrowableDiscardCatch("ReflectionException", "The parameter specified by its name could not be found", alloc);
+                                return error.ReflectionParamNameNotFound;
+                            }
+                            try this.setProperty("__name", Value.initString(pname));
+                        }
+                        try this.setProperty("__position", Value.initInt(pos));
+                        const idx: usize = @intCast(pos);
+                        if (this.getPropertyDirect("__name") == null and idx < m.param_names.len) {
+                            const ns = try PHPString.init(alloc, m.param_names[idx]);
+                            defer ns.release(alloc);
+                            try this.setProperty("__name", Value.initString(ns));
+                        }
+                        const is_var = idx < m.param_variadic.len and m.param_variadic[idx];
+                        const has_def = @as(u16, @intCast(idx)) >= m.required_params and !is_var;
+                        try this.setProperty("__has_default", Value.initBool(has_def));
+                        try this.setProperty("__is_optional", Value.initBool(@as(u16, @intCast(idx)) >= m.required_params));
+                        try this.setProperty("__is_variadic", Value.initBool(is_var));
+                        if (idx < m.param_default_known.len and idx < m.param_default_values.len and m.param_default_known[idx]) {
+                            try this.setProperty("__default_value", m.param_default_values[idx]);
+                        }
+                        return Value.initNull();
+                    }
                     const func_str = try args[0].toString(alloc);
+                    defer func_str.release(alloc);
                     try this.setProperty("__func_name", Value.initString(func_str));
+                    // ★F-155：字符串宿主形态直接解析函数元数据（支持 `new ReflectionParameter('f', 0|'x')`）
+                    var owner_fn: ?FunctionMeta = null;
+                    if (function_meta_registry) |reg| {
+                        if (reg.get(func_str.data)) |fm| owner_fn = fm;
+                    }
+                    var pos: i64 = 0;
                     if (args[1].isInt()) {
-                        try this.setProperty("__position", args[1]);
+                        pos = args[1].toInt();
+                        if (owner_fn) |fm| {
+                            if (pos < 0 or @as(usize, @intCast(pos)) >= fm.param_count) {
+                                throwThrowableDiscardCatch("ReflectionException", "The parameter specified by its offset could not be found", alloc);
+                                return error.ReflectionParamOffsetNotFound;
+                            }
+                        }
                     } else {
                         const pname = try args[1].toString(alloc);
+                        defer pname.release(alloc);
                         try this.setProperty("__name", Value.initString(pname));
-                        try this.setProperty("__position", Value.initInt(0));
+                        if (owner_fn) |fm| {
+                            var found = false;
+                            for (fm.param_names, 0..) |pn, pi| {
+                                if (std.mem.eql(u8, pn, pname.data)) {
+                                    pos = @intCast(pi);
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if (!found) {
+                                throwThrowableDiscardCatch("ReflectionException", "The parameter specified by its name could not be found", alloc);
+                                return error.ReflectionParamNameNotFound;
+                            }
+                        }
+                    }
+                    try this.setProperty("__position", Value.initInt(pos));
+                    if (owner_fn) |fm| {
+                        if (pos >= 0 and @as(usize, @intCast(pos)) < fm.param_count) {
+                            const idx: usize = @intCast(pos);
+                            if (this.getPropertyDirect("__name") == null and idx < fm.param_names.len) {
+                                const ns = try PHPString.init(alloc, fm.param_names[idx]);
+                                defer ns.release(alloc);
+                                try this.setProperty("__name", Value.initString(ns));
+                            }
+                            const has_def = @as(u16, @intCast(idx)) >= fm.required_params and
+                                !(fm.variadic_index != 0xFFFF and @as(usize, fm.variadic_index) == idx);
+                            try this.setProperty("__has_default", Value.initBool(has_def));
+                            try this.setProperty("__is_optional", Value.initBool(@as(u16, @intCast(idx)) >= fm.required_params));
+                            try this.setProperty("__is_variadic", Value.initBool(fm.variadic_index != 0xFFFF and @as(usize, fm.variadic_index) == idx));
+                            const owner_str = try PHPString.init(alloc, func_str.data);
+                            defer owner_str.release(alloc);
+                            try this.setProperty("__owner_func", Value.initString(owner_str));
+                            if (idx < fm.param_default_known.len and idx < fm.param_default_values.len and fm.param_default_known[idx]) {
+                                try this.setProperty("__default_value", fm.param_default_values[idx]);
+                            }
+                        }
                     }
                     return Value.initNull();
                 }
@@ -19416,6 +19641,56 @@ pub const ClassMeta = struct {
                         if (this.getPropertyDirect("__default_value")) |v| {
                             _ = v.retain();
                             return v;
+                        }
+                        // ★F-155-b：闭包形参的工厂（形参在 getParameters 时反持闭包，按次求值）
+                        if (this.getPropertyDirect("__closure")) |cv| {
+                            if (cv.isFunction()) {
+                                if (this.getPropertyDirect("__position")) |position| {
+                                    const clo = cv.asFunction();
+                                    const pos_i = position.toInt();
+                                    if (pos_i >= 0 and @as(usize, @intCast(pos_i)) < clo.param_default_factories.len) {
+                                        if (clo.param_default_factories[@intCast(pos_i)]) |factory| {
+                                            return try factory(Value.initNull(), &[_]Value{}, alloc);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // ★F-118b：不可折叠默认值（`new` 等）⇒ 每次调用工厂重新求值（PHP 每人一份）。
+                        if (this.getPropertyDirect("__owner_class")) |owner_class| {
+                            if (this.getPropertyDirect("__owner_method")) |owner_method| {
+                                if (this.getPropertyDirect("__position")) |position| {
+                                    if (owner_class.isString() and owner_method.isString()) {
+                                        if (findClass(owner_class.asString().data)) |cmeta| {
+                                            if (cmeta.methods.get(owner_method.asString().data)) |m| {
+                                                const pos_i = position.toInt();
+                                                if (pos_i >= 0 and @as(usize, @intCast(pos_i)) < m.param_default_factories.len) {
+                                                    if (m.param_default_factories[@intCast(pos_i)]) |factory| {
+                                                        return try factory(Value.initNull(), &[_]Value{}, alloc);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // ★F-155：函数形参（ReflectionFunction::getParameters 或直接构造）同口径
+                        if (this.getPropertyDirect("__owner_func")) |owner_func| {
+                            if (owner_func.isString()) {
+                                if (this.getPropertyDirect("__position")) |position| {
+                                    if (function_meta_registry) |reg| {
+                                        if (reg.get(owner_func.asString().data)) |fm| {
+                                            const pos_i = position.toInt();
+                                            if (pos_i >= 0 and @as(usize, @intCast(pos_i)) < fm.param_default_factories.len) {
+                                                if (fm.param_default_factories[@intCast(pos_i)]) |factory| {
+                                                    return try factory(Value.initNull(), &[_]Value{}, alloc);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                     throwThrowableDiscardCatch("ReflectionException", "Internal error: Failed to retrieve the default value", alloc);
@@ -20097,19 +20372,22 @@ pub const ClassMeta = struct {
                             //   ③ 两处都无数据才回退合成 param{i}
                             var resolved_name: ?[]const u8 = null;
                             const idx: usize = @intCast(i);
+                            var clo_meta: ?*PHPClosure = null;
                             if (this.getPropertyDirect("__closure")) |cval| {
                                 if (cval.isFunction()) {
                                     const clo = cval.asFunction();
+                                    clo_meta = clo;
                                     if (idx < clo.param_names.len) resolved_name = clo.param_names[idx];
                                 }
                             }
-                            if (resolved_name == null) {
-                                if (this.getPropertyDirect("__func_name")) |fname_val| {
-                                    if (fname_val.isString()) {
-                                        if (function_meta_registry) |reg| {
-                                            if (reg.get(fname_val.asString().data)) |fm| {
-                                                if (idx < fm.param_names.len) resolved_name = fm.param_names[idx];
-                                            }
+                            // ★F-155：registry 条目一次查找同时供名字/默认值/工厂
+                            var rf_fm: ?FunctionMeta = null;
+                            if (this.getPropertyDirect("__func_name")) |fname_val| {
+                                if (fname_val.isString()) {
+                                    if (function_meta_registry) |reg| {
+                                        if (reg.get(fname_val.asString().data)) |fm| {
+                                            rf_fm = fm;
+                                            if (resolved_name == null and idx < fm.param_names.len) resolved_name = fm.param_names[idx];
                                         }
                                     }
                                 }
@@ -20121,10 +20399,46 @@ pub const ClassMeta = struct {
                                 try param_obj.setProperty("__name", Value.initString(try PHPString.init(alloc, param_name)));
                             }
                             // AOT-CODEGEN-012 F-8：ReflectionFunction 路径同口径（构造时已存 __required_params）
+                            // ★F-155：变参不计入 required_params，必须按 registered 变参下标单独判 has_default
                             const rf_req = (this.getPropertyDirect("__required_params") orelse pc_val).toInt();
-                            const rf_has_def = i >= rf_req;
+                            var rf_has_def = i >= rf_req;
+                            var rf_is_variadic = false;
+                            if (clo_meta) |clo| {
+                                if (clo.variadic_index != 0xFFFF and @as(usize, clo.variadic_index) == idx) {
+                                    rf_is_variadic = true;
+                                    rf_has_def = false;
+                                }
+                            } else if (rf_fm) |fm| {
+                                if (fm.variadic_index != 0xFFFF and @as(usize, fm.variadic_index) == idx) {
+                                    rf_is_variadic = true;
+                                    rf_has_def = false;
+                                }
+                            }
                             try param_obj.setProperty("__has_default", Value.initBool(rf_has_def));
-                            try param_obj.setProperty("__is_optional", Value.initBool(rf_has_def));
+                            try param_obj.setProperty("__is_optional", Value.initBool(i >= rf_req));
+                            try param_obj.setProperty("__is_variadic", Value.initBool(rf_is_variadic));
+                            // ★F-155：默认值面——折叠值直接装填，不可折叠的留给 getDefaultValue 现查工厂
+                            if (clo_meta) |clo| {
+                                if (idx < clo.param_default_known.len and clo.param_default_known[idx]) {
+                                    try param_obj.setProperty("__default_value", clo.param_default_values[idx]);
+                                } else if (idx < clo.param_default_factories.len and clo.param_default_factories[idx] != null) {
+                                    // ★F-155-b：工厂不可折叠 ⇒ 形参反持闭包，getDefaultValue 现查工厂
+                                    if (this.getPropertyDirect("__closure")) |cv| {
+                                        try param_obj.setProperty("__closure", cv);
+                                    }
+                                }
+                            } else if (rf_fm) |fm| {
+                                if (this.getPropertyDirect("__func_name")) |fname_val| {
+                                    if (fname_val.isString()) {
+                                        const owner_fn_str = try PHPString.init(alloc, fname_val.asString().data);
+                                        defer owner_fn_str.release(alloc);
+                                        try param_obj.setProperty("__owner_func", Value.initString(owner_fn_str));
+                                    }
+                                }
+                                if (idx < fm.param_default_known.len and idx < fm.param_default_values.len and fm.param_default_known[idx]) {
+                                    try param_obj.setProperty("__default_value", fm.param_default_values[idx]);
+                                }
+                            }
                             try arr.push(alloc, Value_initObject(param_obj));
                         } else {
                             // 没注册 ReflectionParameter，返回 position 整数

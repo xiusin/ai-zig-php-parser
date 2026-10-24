@@ -1,8 +1,8 @@
 # AOT-CODEGEN-012 R-242：F-152 `intval($value, $base)` 真实现（F2I 门转全绿）
 
 - 日期：2026-10-23（R-242；F-152 闭环）
-- 代次锚：`nlk 5010edc48ce55ed0a86f3803c0c17ac5`／`tpl 03ed0f1a9d03f4daeb69cfc85fa5fada`／`irg 09b2e6aa…`／`ir 5b99795…`／`parser 70e80f18…`／`opt 745e4bd4…`（未提交）
-- 状态：全部**未提交**
+- 代次锚：`nlk 5010edc48ce55ed0a86f3803c0c17ac5`／`tpl 03ed0f1a9d03f4daeb69cfc85fa5fada`／`irg 09b2e6aa…`／`ir 5b99795…`／`parser 70e80f18…`／`opt 745e4bd4…`（提交 `4bbc641`）
+- 状态：源与本文档已随 `4bbc641` 提交
 
 ## 1. 高层摘要（TL;DR）
 

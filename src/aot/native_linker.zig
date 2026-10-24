@@ -2585,11 +2585,63 @@ pub const NativeLinker = struct {
             for (func.params.items) |p| {
                 if (!p.has_default and !p.is_variadic) required_count += 1;
             }
-            try writer.writeAll("    runtime.registerFunctionMeta(\"");
-            try writeEscapedZigString(writer, func.name);
-            try writer.print("\", {d}, {d}", .{ param_count, required_count });
-            try self.writeFunctionMetaParamNames(writer, func.params.items);
-            try writer.writeAll(");\n");
+            var has_param_defaults = false;
+            var has_param_factories = false;
+            var variadic_index: usize = 0xFFFF;
+            for (func.params.items, 0..) |p, i| {
+                if (p.default_value != null) has_param_defaults = true;
+                if (p.default_func != null) {
+                    has_param_factories = true;
+                    has_param_defaults = true;
+                }
+                if (p.is_variadic) variadic_index = i;
+            }
+            if (!has_param_defaults and variadic_index == 0xFFFF) {
+                try writer.writeAll("    runtime.registerFunctionMeta(\"");
+                try writeEscapedZigString(writer, func.name);
+                try writer.print("\", {d}, {d}", .{ param_count, required_count });
+                try self.writeFunctionMetaParamNames(writer, func.params.items);
+                try writer.writeAll(");\n");
+            } else {
+                // ★F-155：带默认值/变参的函数元数据（折叠值 + 可知位 + 工厂 + 变参下标）。
+                try writer.writeAll("    runtime.registerFunctionMetaEx(\"");
+                try writeEscapedZigString(writer, func.name);
+                try writer.print("\", {d}, {d}", .{ param_count, required_count });
+                try self.writeFunctionMetaParamNames(writer, func.params.items);
+                try writer.print(", blk_fdef_vals: {{\n        const fdef_vals = try runtime.runtime_allocator.alloc(runtime.Value, {d});\n", .{param_count});
+                for (func.params.items, 0..) |p, i| {
+                    try writer.print("        fdef_vals[{d}] = ", .{i});
+                    if (p.default_value) |dv| {
+                        try self.writeConstInstrValueExpr(writer, dv);
+                    } else {
+                        try writer.writeAll("runtime.Value.initNull()");
+                    }
+                    try writer.writeAll(";\n");
+                }
+                try writer.writeAll("        break :blk_fdef_vals fdef_vals;\n    }");
+                try writer.print(", blk_fdef_known: {{\n        const fdef_known = try runtime.runtime_allocator.alloc(bool, {d});\n", .{param_count});
+                for (func.params.items, 0..) |p, i| {
+                    try writer.print("        fdef_known[{d}] = {};\n", .{ i, p.default_value != null });
+                }
+                try writer.writeAll("        break :blk_fdef_known fdef_known;\n    }");
+                if (has_param_factories) {
+                    try writer.writeAll(", &.{");
+                    for (func.params.items, 0..) |p, i| {
+                        if (i > 0) try writer.writeAll(", ");
+                        if (p.default_func) |fname| {
+                            const ident = try self.fnIdentName(fname);
+                            defer self.allocator.free(ident);
+                            try writer.print("&@\"{s}\"", .{ident});
+                        } else {
+                            try writer.writeAll("null");
+                        }
+                    }
+                    try writer.writeAll("}");
+                } else {
+                    try writer.writeAll(", &.{}");
+                }
+                try writer.print(", {d});\n", .{variadic_index});
+            }
         }
 
         // 为闭包函数也注册元数据（闭包不走 register_at_startup 但需要反射元数据）
@@ -2597,14 +2649,64 @@ pub const NativeLinker = struct {
             if (std.mem.startsWith(u8, func.name, "__closure_") or std.mem.startsWith(u8, func.name, "__arrow_")) {
                 const cpc = func.params.items.len;
                 var crc: usize = 0;
-                for (func.params.items) |p| {
+                var c_has_defaults = false;
+                var c_has_factories = false;
+                var c_variadic: usize = 0xFFFF;
+                for (func.params.items, 0..) |p, i| {
                     if (!p.has_default and !p.is_variadic) crc += 1;
+                    if (p.default_value != null) c_has_defaults = true;
+                    if (p.default_func != null) {
+                        c_has_factories = true;
+                        c_has_defaults = true;
+                    }
+                    if (p.is_variadic) c_variadic = i;
                 }
-                try writer.writeAll("    runtime.registerFunctionMeta(\"");
-                try writeEscapedZigString(writer, func.name);
-                try writer.print("\", {d}, {d}", .{ cpc, crc });
-                try self.writeFunctionMetaParamNames(writer, func.params.items);
-                try writer.writeAll(");\n");
+                if (!c_has_defaults and c_variadic == 0xFFFF) {
+                    try writer.writeAll("    runtime.registerFunctionMeta(\"");
+                    try writeEscapedZigString(writer, func.name);
+                    try writer.print("\", {d}, {d}", .{ cpc, crc });
+                    try self.writeFunctionMetaParamNames(writer, func.params.items);
+                    try writer.writeAll(");\n");
+                } else {
+                    // ★F-155：闭包形参默认值/变参（工厂函数不合成 ⇒ new 初始化器默认值仍不可取）
+                    try writer.writeAll("    runtime.registerFunctionMetaEx(\"");
+                    try writeEscapedZigString(writer, func.name);
+                    try writer.print("\", {d}, {d}", .{ cpc, crc });
+                    try self.writeFunctionMetaParamNames(writer, func.params.items);
+                    try writer.print(", blk_cdef_vals: {{\n        const cdef_vals = try runtime.runtime_allocator.alloc(runtime.Value, {d});\n", .{cpc});
+                    for (func.params.items, 0..) |p, i| {
+                        try writer.print("        cdef_vals[{d}] = ", .{i});
+                        if (p.default_value) |dv| {
+                            try self.writeConstInstrValueExpr(writer, dv);
+                        } else {
+                            try writer.writeAll("runtime.Value.initNull()");
+                        }
+                        try writer.writeAll(";\n");
+                    }
+                    try writer.writeAll("        break :blk_cdef_vals cdef_vals;\n    }");
+                    try writer.print(", blk_cdef_known: {{\n        const cdef_known = try runtime.runtime_allocator.alloc(bool, {d});\n", .{cpc});
+                    for (func.params.items, 0..) |p, i| {
+                        try writer.print("        cdef_known[{d}] = {};\n", .{ i, p.default_value != null });
+                    }
+                    try writer.writeAll("        break :blk_cdef_known cdef_known;\n    }");
+                    if (c_has_factories) {
+                        try writer.writeAll(", &.{");
+                        for (func.params.items, 0..) |p, i| {
+                            if (i > 0) try writer.writeAll(", ");
+                            if (p.default_func) |fname| {
+                                const ident = try self.fnIdentName(fname);
+                                defer self.allocator.free(ident);
+                                try writer.print("&@\"{s}\"", .{ident});
+                            } else {
+                                try writer.writeAll("null");
+                            }
+                        }
+                        try writer.writeAll("}");
+                    } else {
+                        try writer.writeAll(", &.{}");
+                    }
+                    try writer.print(", {d});\n", .{c_variadic});
+                }
             }
         }
 
@@ -3310,6 +3412,17 @@ pub const NativeLinker = struct {
         return self.emitMethodRegistrationEx(writer, meta_name, exposed_name, function_trait, original_name, visibility, is_static, false, false, &.{});
     }
 
+    /// ★F-155：trait 组合方法的元数据在 provider trait 的 TypeDef 里；找到则按完整形态注册。
+    fn findTraitMethodMeta(ir_module: *const IR.Module, trait_name: []const u8, method_name: []const u8) ?IR.TypeDef.Method {
+        for (ir_module.types.items) |td_ptr| {
+            if (!std.mem.eql(u8, td_ptr.name, trait_name)) continue;
+            for (td_ptr.methods) |m| {
+                if (std.mem.eql(u8, m.name, method_name)) return m;
+            }
+        }
+        return null;
+    }
+
     fn emitMethodRegistrationFull(
         self: *Self,
         writer: anytype,
@@ -3318,7 +3431,11 @@ pub const NativeLinker = struct {
         function_trait: []const u8,
         original_name: []const u8,
         method: IR.TypeDef.Method,
+        visibility_override: ?IR.TypeDef.Visibility,
+        static_override: ?bool,
     ) !void {
+        const effective_visibility = visibility_override orelse method.visibility;
+        const effective_static = static_override orelse method.is_static;
         const full_method_name = try std.fmt.allocPrint(
             self.allocator,
             "{s}::{s}",
@@ -3338,10 +3455,10 @@ pub const NativeLinker = struct {
                 meta_name,
                 exposed_name,
                 escaped_method_name,
-                method.is_static,
-                method.visibility == .public,
-                method.visibility == .protected,
-                method.visibility == .private,
+                effective_static,
+                effective_visibility == .public,
+                effective_visibility == .protected,
+                effective_visibility == .private,
                 method.is_abstract,
                 method.is_final,
                 method.param_count,
@@ -3386,6 +3503,30 @@ pub const NativeLinker = struct {
             }
             try writer.writeAll("            break :blk_pdef_known pdef_known;\n        }");
         }
+        // ★F-118b：折叠不出的默认值 ⇒ 每次反射取值重新调用合成函数（new 初始化器语义）。
+        if (method.param_default_funcs.len > 0) {
+            var any_factory = false;
+            for (method.param_default_funcs) |f| {
+                if (f != null) {
+                    any_factory = true;
+                    break;
+                }
+            }
+            if (any_factory) {
+                try writer.writeAll(", .param_default_factories = &.{");
+                for (method.param_default_funcs, 0..) |f, i| {
+                    if (i > 0) try writer.writeAll(", ");
+                    if (f) |fname| {
+                        const ident = try self.fnIdentName(fname);
+                        defer self.allocator.free(ident);
+                        try writer.print("&@\"{s}\"", .{ident});
+                    } else {
+                        try writer.writeAll("null");
+                    }
+                }
+                try writer.writeAll("}");
+            }
+        }
         // 生成 param_types 数组
         if (method.param_types.len > 0) {
             try writer.writeAll(", .param_types = &[_][]const u8{");
@@ -3403,6 +3544,15 @@ pub const NativeLinker = struct {
             for (method.param_nullable, 0..) |pn, i| {
                 if (i > 0) try writer.writeAll(", ");
                 try writer.print("{}", .{pn});
+            }
+            try writer.writeAll("}");
+        }
+        // 生成 param_variadic 数组（★F-155：变参数组的反射元数据）
+        if (method.param_variadic.len > 0) {
+            try writer.writeAll(", .param_variadic = &[_]bool{");
+            for (method.param_variadic, 0..) |pv, i| {
+                if (i > 0) try writer.writeAll(", ");
+                try writer.print("{}", .{pv});
             }
             try writer.writeAll("}");
         }
@@ -3711,6 +3861,8 @@ pub const NativeLinker = struct {
                         full_cname,
                         method.name,
                         method,
+                        null,
+                        null,
                     );
                     // 生成方法级 PHP attributes (#[...])
                     if (method.attributes.len > 0) {
@@ -3722,15 +3874,43 @@ pub const NativeLinker = struct {
                         "    if ({s}_meta.methods.get(\"{s}\") == null) ",
                         .{ short_cname, method.exposed_name },
                     );
-                    try self.emitMethodRegistration(
-                        writer,
-                        short_cname,
-                        method.exposed_name,
-                        method.function_trait,
-                        method.original_name,
-                        method.visibility,
-                        method.is_static,
-                    );
+                    // ★F-155：trait 组合方法沿用简化的可见性/静态性（adaptation 结果），
+                    //   但参数元数据取自 provider trait 的 TypeDef.Method（含默认值/工厂）。
+                    const trait_method_meta = findTraitMethodMeta(ir_module, method.function_trait, method.original_name);
+                    if (trait_method_meta) |tm| {
+                        if (!tm.is_abstract) {
+                            try self.emitMethodRegistrationFull(
+                                writer,
+                                short_cname,
+                                method.exposed_name,
+                                method.function_trait,
+                                method.original_name,
+                                tm,
+                                method.visibility,
+                                method.is_static,
+                            );
+                        } else {
+                            try self.emitMethodRegistration(
+                                writer,
+                                short_cname,
+                                method.exposed_name,
+                                method.function_trait,
+                                method.original_name,
+                                method.visibility,
+                                method.is_static,
+                            );
+                        }
+                    } else {
+                        try self.emitMethodRegistration(
+                            writer,
+                            short_cname,
+                            method.exposed_name,
+                            method.function_trait,
+                            method.original_name,
+                            method.visibility,
+                            method.is_static,
+                        );
+                    }
                 }
             }
 
@@ -4092,6 +4272,19 @@ pub const NativeLinker = struct {
         if (std.mem.startsWith(u8, func_name, "__declare_function__::")) return false;
         if (builtinInfo(func_name)) |info| return info.may_raise;
         return true;
+    }
+
+    /// ★F-156-c：静态直调前判定“目标是抽象方法”（PHP 优先报 Cannot call abstract method，
+    /// 即使该方法同时是非静态的）。仅扫描 IR 类型表，调用点稀少。
+    fn isAbstractMethod(self: *const Self, class_name: []const u8, method_name: []const u8) bool {
+        const module = self.ir_module orelse return false;
+        for (module.types.items) |type_def| {
+            if (!std.ascii.eqlIgnoreCase(type_def.name, class_name)) continue;
+            for (type_def.methods) |method| {
+                if (std.ascii.eqlIgnoreCase(method.name, method_name)) return method.is_abstract;
+            }
+        }
+        return false;
     }
 
     /// 检查是否是内置函数
@@ -24952,6 +25145,33 @@ pub const NativeLinker = struct {
                     defer self.allocator.free(escaped_direct);
                     const has_return = self.func_return_types.get(direct_name) orelse false;
 
+                    // ★F-156-c：抽象方法优先于“非静态方法静态调用”判定（PHP 实测措辞）。
+                    if (self.isAbstractMethod(op.class_name, op.method_name)) {
+                        const msg_cls = try escapeBackslashes(self.allocator, op.class_name);
+                        defer self.allocator.free(msg_cls);
+                        const msg_m = try escapeBackslashes(self.allocator, op.method_name);
+                        defer self.allocator.free(msg_m);
+                        const msg_lit = std.fmt.allocPrint(
+                            self.allocator,
+                            "Cannot call abstract method {s}::{s}()",
+                            .{ msg_cls, msg_m },
+                        ) catch return error.OutOfMemory;
+                        defer self.allocator.free(msg_lit);
+                        try writer.print("    _ = runtime.throwThrowable(\"Error\", \"{s}\", runtime.runtime_allocator) catch {{}};\n", .{msg_lit});
+                        try writer.writeAll("    if (runtime.hasException()) {\n");
+                        try writer.writeAll("        @branchHint(.unlikely);\n");
+                        try self.generateCleanupCode(writer);
+                        if (self.current_exception_handler) |handler_idx| {
+                            try writer.print("            current_block = {d};\n", .{handler_idx});
+                            try writer.writeAll("            continue;\n");
+                        } else {
+                            try writer.writeAll("        return runtime.Value.initNull();\n");
+                            self.return_generated = true;
+                        }
+                        try writer.writeAll("    }\n");
+                        break :blk;
+                    }
+
                     // F-1 发射面闸门：直调分支绕过 `php_call_static_with_ctx`，故在此补同一道判定。
                     //   判据只取编译期已知事实（被调/调用双方的 is_static 来自 method_is_static_map，
                     //   调用方所属类取自 current_function_for_resolve 的 "Class::method" 前缀），
@@ -25006,19 +25226,39 @@ pub const NativeLinker = struct {
                         try writer.print("        reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ reg.id, star });
                         // 静态方法无 $this，ref_params 索引不含 $this 偏移，param_offset = 0
                         if (has_return) {
-                            try writer.print("        reg_{d}{s} = try @\"{s}\"(runtime.Value.initNull(), ", .{ reg.id, star, escaped_direct });
+                            if (self.current_exception_handler != null) {
+                                // ★F-156-b：try 语境不能裸 `try`（Zig error 会穿过 PHP catch）；
+                                //   与 :19492 同形态——置 null 后由下方 hasException 路由。
+                                try writer.print("        reg_{d}{s} = @\"{s}\"(runtime.Value.initNull(), ", .{ reg.id, star, escaped_direct });
+                                try self.writeValueArgsArrayWithRefsOffset(writer, op.args, direct_name, ref_params, 0);
+                                try writer.writeAll(", runtime.runtime_allocator) catch runtime.Value.initNull();\n");
+                            } else {
+                                try writer.print("        reg_{d}{s} = try @\"{s}\"(runtime.Value.initNull(), ", .{ reg.id, star, escaped_direct });
+                                try self.writeValueArgsArrayWithRefsOffset(writer, op.args, direct_name, ref_params, 0);
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            }
+                        } else {
+                            if (self.current_exception_handler != null) {
+                                try writer.print("        _ = @\"{s}\"(runtime.Value.initNull(), ", .{escaped_direct});
+                                try self.writeValueArgsArrayWithRefsOffset(writer, op.args, direct_name, ref_params, 0);
+                                try writer.writeAll(", runtime.runtime_allocator) catch {};\n");
+                            } else {
+                                try writer.print("        _ = try @\"{s}\"(runtime.Value.initNull(), ", .{escaped_direct});
+                                try self.writeValueArgsArrayWithRefsOffset(writer, op.args, direct_name, ref_params, 0);
+                                try writer.writeAll(", runtime.runtime_allocator);\n");
+                            }
+                            try writer.print("        reg_{d}{s} = runtime.Value.initNull();\n", .{ reg.id, star });
+                        }
+                    } else {
+                        if (self.current_exception_handler != null) {
+                            try writer.print("        _ = @\"{s}\"(runtime.Value.initNull(), ", .{escaped_direct});
                             try self.writeValueArgsArrayWithRefsOffset(writer, op.args, direct_name, ref_params, 0);
-                            try writer.writeAll(", runtime.runtime_allocator);\n");
+                            try writer.writeAll(", runtime.runtime_allocator) catch {};\n");
                         } else {
                             try writer.print("        _ = try @\"{s}\"(runtime.Value.initNull(), ", .{escaped_direct});
                             try self.writeValueArgsArrayWithRefsOffset(writer, op.args, direct_name, ref_params, 0);
                             try writer.writeAll(", runtime.runtime_allocator);\n");
-                            try writer.print("        reg_{d}{s} = runtime.Value.initNull();\n", .{ reg.id, star });
                         }
-                    } else {
-                        try writer.print("        _ = try @\"{s}\"(runtime.Value.initNull(), ", .{escaped_direct});
-                        try self.writeValueArgsArrayWithRefsOffset(writer, op.args, direct_name, ref_params, 0);
-                        try writer.writeAll(", runtime.runtime_allocator);\n");
                     }
 
                     try writer.writeAll("        if (runtime.hasException()) {\n");

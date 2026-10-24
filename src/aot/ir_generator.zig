@@ -1188,15 +1188,27 @@ pub const IRGenerator = struct {
 
             const param_index: u32 = @intCast(func.params.items.len);
 
+            // AOT-CODEGEN-012 F-118：与属性侧同一个 helper 折叠默认值（发射期由 `addMethod` 落成
+            //   `param_default_values/param_default_known` 两条**平行数组**，见 §99.5 的形状说明）。
+            // ★F-155：顶层函数的不可折叠默认值再合成求值函数（函数级反射按次求值）。
+            var pf_default_value: ?*Instruction = null;
+            var pf_default_func: ?[]const u8 = null;
+            if (param_data.default_value) |dv| {
+                pf_default_value = try self.tryMakeConstInstruction(dv);
+                // ★F-155-b：闭包也合成工厂（反射路径按次求值）；类内闭包保留类上下文供 self:: 常量解析
+                if (pf_default_value == null and !func.is_method) {
+                    pf_default_func = try self.generatePropertyDefaultFunc(dv, self.current_class orelse "");
+                }
+            }
+
             try func.addParam(.{
                 .name = param_name,
                 .type_ = param_type,
                 .has_default = param_data.default_value != null,
                 .is_variadic = param_data.is_variadic,
                 .is_reference = param_data.is_reference,
-                // AOT-CODEGEN-012 F-118：与属性侧同一个 helper 折叠默认值（发射期由 `addMethod` 落成
-                //   `param_default_values/param_default_known` 两条**平行数组**，见 §99.5 的形状说明）。
-                .default_value = if (param_data.default_value) |dv| try self.tryMakeConstInstruction(dv) else null,
+                .default_value = pf_default_value,
+                .default_func = pf_default_func,
             });
 
             // 记录引用参数索引
@@ -1621,6 +1633,68 @@ pub const IRGenerator = struct {
         return func_name;
     }
 
+    /// ★F-156（R-247）：接口/抽象方法没有函数体，但方法元数据必须携带可调用指针。
+    /// 生成“抛 Error: Cannot call abstract method X::m()”的函数（与 PHP 直接调用口径一致）；
+    /// 反射 invoke 会在调用前拦截并抛 ReflectionException（模板侧）。
+    fn generateAbstractMethodFunction(self: *Self, class_name: []const u8, method_name: []const u8) !void {
+        const module = self.module orelse return;
+        const full_name = try std.fmt.allocPrint(self.allocator, "{s}::{s}", .{ class_name, method_name });
+        const func = try self.allocator.create(Function);
+        func.* = Function.init(self.allocator, full_name);
+        func.name_owned = true;
+        func.is_method = true;
+        func.class_name = class_name;
+        func.location = self.current_location;
+        try module.addFunction(func);
+
+        const prev_function = self.current_function;
+        const prev_class = self.current_class;
+        const prev_block = self.current_block;
+        const prev_var_registers = self.var_registers;
+        const prev_entry_allocas = self.entry_allocas;
+        const prev_block_counter = self.block_counter;
+        const prev_has_this = self.current_has_this_param;
+        const prev_try_stack = self.try_stack;
+        const prev_finally_stack = self.finally_stack;
+
+        self.current_function = func;
+        self.current_class = class_name;
+        self.var_registers = .{ .items = &.{}, .capacity = 0 };
+        self.entry_allocas = .{ .items = &.{}, .capacity = 0 };
+        self.block_counter = 0;
+        self.current_has_this_param = false;
+        self.try_stack = .{ .items = &.{}, .capacity = 0 };
+        self.finally_stack = .{ .items = &.{}, .capacity = 0 };
+        const entry = try func.createBlock("entry");
+        self.setCurrentBlock(entry);
+
+        const error_class_id = try module.internString("Error");
+        const error_class_reg = try self.emitWithResult(.{ .const_string = error_class_id }, .php_value);
+        const msg = try std.fmt.allocPrint(self.allocator, "Cannot call abstract method {s}::{s}()", .{ class_name, method_name });
+        const error_msg_id = try module.internString(msg);
+        const error_msg_reg = try self.emitWithResult(.{ .const_string = error_msg_id }, .php_value);
+        const call_args = try self.allocator.alloc(Register, 2);
+        call_args[0] = error_class_reg;
+        call_args[1] = error_msg_reg;
+        const exception_reg = try self.emitWithResult(.{ .call = .{
+            .func_name = "throwThrowable",
+            .args = call_args,
+            .return_type = .php_value,
+        } }, .php_value);
+        self.setTerminator(.{ .throw = exception_reg });
+
+        self.var_registers.deinit(self.allocator);
+        self.var_registers = prev_var_registers;
+        self.entry_allocas = prev_entry_allocas;
+        self.block_counter = prev_block_counter;
+        self.current_has_this_param = prev_has_this;
+        self.try_stack = prev_try_stack;
+        self.finally_stack = prev_finally_stack;
+        self.current_function = prev_function;
+        self.current_class = prev_class;
+        self.current_block = prev_block;
+    }
+
     /// Generate IR for class declaration
     fn generateClassDecl(self: *Self, node: *const Node) !void {
         // 安全检查：class_decl应该使用container_decl数据
@@ -1694,7 +1768,7 @@ pub const IRGenerator = struct {
             const member = self.getNode(member_idx) orelse continue;
             switch (member.tag) {
                 .method_decl => {
-                    try methods.append(self.allocator, try self.getMethodMeta(member));
+                    try methods.append(self.allocator, try self.getMethodMeta(member, class_name));
                     // Constructor promotion: promoted params become properties
                     const md = member.data.method_decl;
                     if (std.mem.eql(u8, self.getString(md.name), "__construct")) {
@@ -2080,8 +2154,16 @@ pub const IRGenerator = struct {
 
         // 收集接口常量（接口方法是抽象的，不生成函数体）
         var constants = std.ArrayListUnmanaged(TypeDef.Constant){ .items = &.{}, .capacity = 0 };
+        // ★F-156：接口方法也要进入类型元数据（反射可查）；函数体为“调用即抛 Error”的合成函数。
+        var methods = std.ArrayListUnmanaged(TypeDef.Method){ .items = &.{}, .capacity = 0 };
         for (iface_data.members) |member_idx| {
             const member = self.getNode(member_idx) orelse continue;
+            if (member.tag == .method_decl) {
+                var method_meta = try self.getMethodMeta(member, iface_name);
+                method_meta.is_abstract = true;
+                try methods.append(self.allocator, method_meta);
+                try self.generateAbstractMethodFunction(iface_name, method_meta.name);
+            }
             if (member.tag == .const_decl) {
                 const const_data = member.data.const_decl;
                 const const_name = self.getString(const_data.name);
@@ -2106,7 +2188,7 @@ pub const IRGenerator = struct {
             .traits = &.{},
             .trait_adaptations = &.{},
             .properties = &.{},
-            .methods = &.{},
+            .methods = try self.allocator.dupe(TypeDef.Method, methods.items),
             .constants = try self.allocator.dupe(TypeDef.Constant, constants.items),
             .location = self.current_location,
         };
@@ -2246,7 +2328,7 @@ pub const IRGenerator = struct {
                     });
                 },
                 .method_decl => {
-                    try methods.append(self.allocator, try self.getMethodMeta(member));
+                    try methods.append(self.allocator, try self.getMethodMeta(member, enum_name));
                     try self.generateMethodDecl(member, enum_name);
                 },
                 .const_decl => {
@@ -2321,7 +2403,7 @@ pub const IRGenerator = struct {
             const member = self.getNode(member_idx) orelse continue;
             switch (member.tag) {
                 .method_decl => {
-                    try methods.append(self.allocator, try self.getMethodMeta(member));
+                    try methods.append(self.allocator, try self.getMethodMeta(member, trait_name));
                     const prev_in_trait = self.is_in_trait;
                     self.is_in_trait = true;
                     defer self.is_in_trait = prev_in_trait;
@@ -2516,7 +2598,7 @@ pub const IRGenerator = struct {
         return try attrs.toOwnedSlice(self.allocator);
     }
 
-    fn getMethodMeta(self: *Self, node: *const Node) !TypeDef.Method {
+    fn getMethodMeta(self: *Self, node: *const Node, class_name: []const u8) !TypeDef.Method {
         const method_data = node.data.method_decl;
         // 统计参数信息
         var param_count: u16 = 0;
@@ -2524,8 +2606,11 @@ pub const IRGenerator = struct {
         var param_name_list = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
         var param_type_list = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
         var param_nullable_list = std.ArrayListUnmanaged(bool){ .items = &.{}, .capacity = 0 };
+        // ★F-155：变参位（与 param_names 同序；反射 isVariadic 与 has_default 均依赖它）
+        var param_variadic_list = std.ArrayListUnmanaged(bool){ .items = &.{}, .capacity = 0 };
         // AOT-CODEGEN-012 F-118：与 param_names 同序收集默认值常量指令（折叠不出 ⇒ null）
         var param_default_list = std.ArrayListUnmanaged(?*Instruction){ .items = &.{}, .capacity = 0 };
+        var param_default_funcs = std.ArrayListUnmanaged(?[]const u8){ .items = &.{}, .capacity = 0 };
         for (method_data.params) |param_idx| {
             if (self.getNode(param_idx)) |param_node| {
                 if (param_node.tag == .parameter) {
@@ -2544,6 +2629,15 @@ pub const IRGenerator = struct {
                     else
                         null;
                     param_default_list.append(self.allocator, pdefault_inst) catch {};
+                    // ★F-118b：折叠不出的默认值（`new` 初始化器等）合成零参函数；反射每次取值时重新求值。
+                    var pdefault_func: ?[]const u8 = null;
+                    if (pdefault_inst == null) {
+                        if (param_node.data.parameter.default_value) |dv| {
+                            pdefault_func = try self.generatePropertyDefaultFunc(dv, class_name);
+                        }
+                    }
+                    param_default_funcs.append(self.allocator, pdefault_func) catch {};
+                    param_variadic_list.append(self.allocator, param_node.data.parameter.is_variadic) catch {};
                     // 提取参数类型信息
                     if (param_node.data.parameter.type) |type_idx| {
                         const type_info = self.resolveTypeNodeToString(type_idx);
@@ -2581,7 +2675,9 @@ pub const IRGenerator = struct {
             .param_names = self.allocator.dupe([]const u8, param_name_list.items) catch &.{},
             .param_types = self.allocator.dupe([]const u8, param_type_list.items) catch &.{},
             .param_nullable = self.allocator.dupe(bool, param_nullable_list.items) catch &.{},
+            .param_variadic = self.allocator.dupe(bool, param_variadic_list.items) catch &.{},
             .param_defaults = self.allocator.dupe(?*Instruction, param_default_list.items) catch &.{},
+            .param_default_funcs = self.allocator.dupe(?[]const u8, param_default_funcs.items) catch &.{},
             .return_type = ret_type,
             .return_nullable = ret_nullable,
             .attributes = try self.collectAttributes(method_data.attributes),
@@ -2669,6 +2765,12 @@ pub const IRGenerator = struct {
     fn generateMethodDecl(self: *Self, node: *const Node, class_name: []const u8) !void {
         const method_data = node.data.method_decl;
         const method_name = self.getString(method_data.name);
+
+        // ★F-156-c：抽象类方法（无 body）也必须“调用即抛 Error”，不能生成静默返回 null 的函数体。
+        if (method_data.modifiers.is_abstract and method_data.body == null) {
+            try self.generateAbstractMethodFunction(class_name, method_name);
+            return;
+        }
 
         // Create function with mangled name
         var buf: [256]u8 = undefined;
@@ -8962,7 +9064,7 @@ prop_name: ?[]const u8 = null,
             const member = self.getNode(member_idx) orelse continue;
             switch (member.tag) {
                 .method_decl => {
-                    try methods.append(self.allocator, try self.getMethodMeta(member));
+                    try methods.append(self.allocator, try self.getMethodMeta(member, anon_class_name));
                     try self.generateMethodDecl(member, anon_class_name);
                 },
                 .property_decl => {
