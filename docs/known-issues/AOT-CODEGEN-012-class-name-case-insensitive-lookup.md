@@ -10289,6 +10289,8 @@ R-214 曾把“归因里出现 setSourceLocation/PHI/调用行等非局部增删
 | C325（新门 5 臂） | 自证 **5 CF**；实跑 **5/5 SAME** 22 s |
 | **普查 C321** | **24/24 SAME**（`t19_disk` 由 DIFF→SAME；行转移计数 2＝该臂＋DONE 行） |
 | 邻居 C322／C323／C324 | 各 **5/5 SAME**，`shifted=0` |
+| `zig build test` | 21/21 steps、**326/326**、rc=0（`/tmp/r279_buildtest.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r279_regression.log`，`SELF_CHECK_OK rows=68 uniq=68`） |
 | 代次锚 | `nlk 0743f368302060217701fa4f4260fe25`／`tpl 6993030cd720c3c32d4af6ac4bf1559f`；`irg 0b710633…`／`ir bb2bb442…` 未变（均未提交） |
 
 ### 187.5 备注 / 遗留
@@ -10296,3 +10298,45 @@ R-214 曾把“归因里出现 setSourceLocation/PHI/调用行等非局部增删
 - 剩余小尾巴 **F-178-b**（P3）：`readdir(null)` 的「回退到最近打开的目录流」语义仍未实现（需 last-opened 全局栈）。
 - `strerror` 取系统措辞（不做硬编码映射），跨平台文案随 libc 一致；`std.c._errno().*` 在 statfs 失败后**立即**读取（中间无其它 libc 调用）。
 - 绝对字节数是**易变值**，任何门都不得比较其数值（C325 只比关系）。
+
+## 188. ★R-280 落地记录（F-178-b：readdir／rewinddir／closedir(null) 的 last-opened 回退）
+
+### 188.1 契约（PHP 8.5.8 实测）
+| 形 | PHP |
+|---|---|
+| 三个函数传 `null` 且有「最后打开的目录流」 | `Deprecated: <fn>(): Passing null is deprecated, instead the last opened directory stream should be provided`（**无** `parameter #1` 段）后按该流执行（`readdir` 读下一项、`rewinddir` 复位、`closedir` 关闭） |
+| 无可用流（从未 `opendir` / 已 `closedir` / 引用已归零未注册表） | 同上 Deprecated + `TypeError: No resource supplied`（**可捕获**） |
+| `@` 抑制 | 只压 Deprecated，`TypeError` 照抛（门臂 `s4` 钉死） |
+| 「最后打开」的设定点 | **仅 `opendir` 成功时**；`readdir($h)` 等显式用法不改变它 |
+| 替换 | 后一次 `opendir` 覆盖前一次；`closedir` 命中该流时清除（`closedir(非 last)` 不清） |
+| 生命周期 | ★该回退流**不随用户引用归零而释放**：`unset($h)`/`unset($h2)` 后 `readdir(null)` 仍可继续读（注册表持引用）；`closedir` 才真正关闭 |
+| 流句柄不干扰 | `opendir($d)` 之后再 `fopen(...)`，`readdir(null)` 仍指向目录流 |
+
+### 188.2 实现
+| 文件 | 变更点 |
+|---|---|
+| `src/aot/runtime_lib_template.zig` | `last_opened_dir: ?*Value.PHPResource`（`:5099`）＋`setLastOpenedDir`（`:5101`，替换时释放旧注册表引用、新流 `retain`）＋`clearLastOpenedDir`（`:5111`，identity 判定后释放，**必须是 closedir 的最后一步**）；`dirArgCheck` 的 null 分支（`:5129` 起：Deprecated 原文 → 无流则 `TypeError "No resource supplied"`）；`php_opendir` 成功后 `setLastOpenedDir`（`:5184`）；`php_closedir`（`:5315`）尾部 `clearLastOpenedDir`；`initRuntime` 复位（`:511`）、`deinitRuntime` 释放注册表引用（`:864`） |
+| `fuzzy_scripts_720/tmp/c326_dir_null_fallback_gate_tmp.sh` | 新永久门 5 臂（32 s） |
+
+### 188.3 读数
+| 腿 | 读数 |
+|---|---|
+| C326（新门 5 臂） | 自证 **5 CF**；实跑 **5/5 SAME** 32 s（12 条 Deprecated 逐字、三档 TypeError、`@` 抑制、替换/清除/unset 生命周期） |
+| 邻居 C324 | 5/5 SAME（29 s） |
+| 普查 C321 | **24/24 SAME**（112 s） |
+| `zig build test` | 21/21 steps、**326/326**、rc=0（`/tmp/r280_buildtest.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r280_regression.log`，`SELF_CHECK_OK rows=68 uniq=68`） |
+| 代次锚 | `tpl c86b228e2bf08047aaf2c9ab37703091`；`nlk 0743f368…`／`irg 0b710633…`／`ir bb2bb442…` 未变（均未提交） |
+
+### 188.4 新登记 F-180（P1，内存安全）：关闭资源后 `PHPResource` 引用不归零
+- 量具：`ZIGPHP_ALLOC_STATS=1` + `N=1000/3000` 双跑（`sfield` 取 `live_bytes`/`live_allocs`）。
+- 实测（本代次）：
+  | 形状 | Δlive_bytes / ΔN=2000 | Δlive_allocs |
+  |---|---|---|
+  | `$f = fopen(...); fclose($f);` | +96 000（**48 B/次**） | +4000（**2/次**） |
+  | `$f = fopen(...); fclose($f); unset($f);` | 同上（unset 不改变结论） | 同上 |
+  | `$h = opendir($d); closedir($h);` | +80 000（**40 B/次**） | +2000（**1/次**） |
+  | `$h = opendir($d); unset($h);`（不关） | **0（FLAT）** | 0 |
+  | `$h = opendir($d); readdir($h);`（不关） | **0（FLAT）** | 0 |
+- 定位：`php_closedir` 入口 `res.ref_count == 4`（期望 2：局部变量 + 注册表），`clearLastOpenedDir` 后仍残留一个无人释放的引用 ⇒ `release()` 永不到 0，`PHPResource`（`@sizeOf = 40`）随之泄漏；`fclose` 同形（还多漏一个 8 B 的文件句柄）⇒ **与本批无关的既存缺陷**，`opendir/closedir` 只是同族新面孔。
+- 下一步：查生成码里资源值的 retain/release 配对（`$h = opendir(); closedir($h);` 形态），定档为独立批次，禁与 F-178-b 捆绑修。

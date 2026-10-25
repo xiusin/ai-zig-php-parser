@@ -508,6 +508,7 @@ fn deltaU64(current: u64, base: u64) u64 {
 pub fn initRuntime(allocator: Allocator) !void {
     alloc_counters = .{};
     alloc_baseline = .{};
+    last_opened_dir = null;
     stats_allocator = StatsAllocator.init(allocator);
     runtime_allocator = stats_allocator.allocator();
 
@@ -859,6 +860,11 @@ pub fn php_handle_uncaught_exception() void {
 /// 清理运行时
 pub fn deinitRuntime() void {
     // std.debug.print("deinitRuntime: start\n", .{});
+    // ★F-178-b：先摘掉 last-opened 目录流的注册表引用（否则该资源在关门时泄漏一个对象）
+    if (last_opened_dir) |res| {
+        last_opened_dir = null;
+        res.release(runtime_allocator);
+    }
     concurrency.shutdownScheduler();
     cleanupAllClasses();
     if (user_function_registry) |*registry| {
@@ -5087,6 +5093,28 @@ const PhpDirHandle = struct {
     dot_state: u8 = 0,
 };
 
+/// ★F-178-b：`readdir/rewinddir/closedir(null)` 回退到「最后打开的目录流」。
+///   PHP 实测：该回退流**不随用户引用归零而释放**（`unset($h)` 后 `readdir(null)` 仍返回下一项）
+///   ⇒ 注册表自己持一个引用；`closedir`（含 null 形）或新的 `opendir` 才摘掉。
+var last_opened_dir: ?*Value.PHPResource = null;
+
+fn setLastOpenedDir(res: *Value.PHPResource) void {
+    if (last_opened_dir) |old| {
+        if (old == res) return;
+        old.release(runtime_allocator);
+    }
+    res.retain();
+    last_opened_dir = res;
+}
+
+/// 摘掉注册表引用。★调用后不得再触碰 `res`（可能是最后一个引用）。
+fn clearLastOpenedDir(res: *Value.PHPResource) void {
+    if (last_opened_dir == res) {
+        last_opened_dir = null;
+        res.release(runtime_allocator);
+    }
+}
+
 /// ★R-278：目录句柄实参三档分诊（PHP 实测三套措辞）：
 ///   非 resource ⇒ ZPP「must be of type resource or null, {type} given」；
 ///   已关闭     ⇒ 「must be an open stream resource」；
@@ -5097,6 +5125,15 @@ const DirArg = union(enum) {
 };
 
 fn dirArgCheck(handle: Value, fn_name: []const u8) DirArg {
+    // ★F-178-b：null ⇒ Deprecated（原文无 `parameter #1` 段）＋回退最后打开的目录流；无流 ⇒ TypeError。
+    if (handle.isNull()) {
+        var b: [320]u8 = undefined;
+        const msg = std.fmt.bufPrint(&b, "{s}(): Passing null is deprecated, instead the last opened directory stream should be provided", .{fn_name}) catch "";
+        emitDeprecated(msg);
+        const last = last_opened_dir orelse
+            return .{ .thrown = throwThrowable("TypeError", "No resource supplied", runtime_allocator) catch Value.initNull() };
+        return .{ .res = last };
+    }
     if (!handle.isResource()) {
         var b: [256]u8 = undefined;
         if (handle.hasResourceType()) {
@@ -5144,6 +5181,7 @@ pub fn php_opendir(dirname: Value, context: Value, allocator: Allocator) !Value 
         return Value.initBool(false);
     };
     res.* = .{ .ref_count = 1, .file_handle = null, .type_name = "stream", .dir_handle = dh };
+    setLastOpenedDir(res);
     return Value.initResource(res);
 }
 
@@ -5284,6 +5322,8 @@ pub fn php_closedir(handle: Value) !Value {
     runtime_allocator.destroy(dh);
     res.dir_handle = null;
     res.closed = true;
+    // ★F-178-b：摘注册表引用必须是最后一步（res 可能因此被释放）
+    clearLastOpenedDir(res);
     return Value.initNull();
 }
 
@@ -8611,10 +8651,8 @@ pub fn php_check_param_type(
         if (is_nullable) return;
         // 非 nullable 类型收到 null → TypeError
         const got_type = "null";
-        var buf: [512]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "{s}(): Argument #{d} (${s}) must be of type {s}, {s} given", .{
-            func_name, arg_index + 1, bare_param_name, expected_type, got_type,
-        }) catch "TypeError";
+        var buf: [768]u8 = undefined;
+        const msg = paramTypeErrorText(&buf, func_name, arg_index, bare_param_name, expected_type, got_type);
         try throwThrowableDiscard("TypeError", msg, runtime_allocator);
         return;
     }
@@ -8623,13 +8661,33 @@ pub fn php_check_param_type(
     const got_type = phpGetValueTypeName(arg);
     const matches = checkTypeMatch(expected_type, got_type, arg);
     if (!matches) {
-        var buf: [512]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "{s}(): Argument #{d} (${s}) must be of type {s}, {s} given", .{
-            func_name, arg_index + 1, bare_param_name, expected_type, got_type,
-        }) catch "TypeError";
+        var buf: [768]u8 = undefined;
+        const msg = paramTypeErrorText(&buf, func_name, arg_index, bare_param_name, expected_type, got_type);
         try throwThrowableDiscard("TypeError", msg, runtime_allocator);
         return;
     }
+}
+
+/// ★R-281（F-182）：用户函数/方法的形参 TypeError 措辞带调用点后缀。
+///   PHP 实测：`f(): Argument #1 ($x) must be of type Throwable, int given, called in <file> on line <N>`
+///   —— 后缀只在**用户函数/方法**的形参校验里出现（内置函数的 ZPP 错误没有）。
+///   `src_file/src_line` 在调用语句处由发射器写入，形参校验发生在被调函数第一条语句之前 ⇒ 仍是调用点。
+fn paramTypeErrorText(
+    buf: []u8,
+    func_name: []const u8,
+    arg_index: usize,
+    param_name: []const u8,
+    expected_type: []const u8,
+    got_type: []const u8,
+) []const u8 {
+    if (src_file.len > 0 and src_line > 0) {
+        return std.fmt.bufPrint(buf, "{s}(): Argument #{d} (${s}) must be of type {s}, {s} given, called in {s} on line {d}", .{
+            func_name, arg_index + 1, param_name, expected_type, got_type, src_file, src_line,
+        }) catch "TypeError";
+    }
+    return std.fmt.bufPrint(buf, "{s}(): Argument #{d} (${s}) must be of type {s}, {s} given", .{
+        func_name, arg_index + 1, param_name, expected_type, got_type,
+    }) catch "TypeError";
 }
 
 /// 弱类型模式下的值强制转换（PHP 非严格模式）
@@ -18038,9 +18096,17 @@ pub const ClassMeta = struct {
         try registerClass(imm_meta);
     }
 
+    /// ★R-281：Throwable/Stringable 是伪接口（未注册 ClassMeta）⇒ 以静态字面量挂在两个根类上。
+    const EXCEPTION_ROOT_INTERFACES = [_][]const u8{ "Stringable", "Throwable" };
+
     /// 注册内置 Exception 类
+    /// ★R-281：`Throwable extends Stringable` 是接口不是基类 ⇒ 两个根（Exception／Error）各挂一次；
+    ///   子类经 `parent` 递归继承（`implementInterface` 自带 parent 递归）。
     pub fn registerExceptionClass(allocator: Allocator) !void {
         const meta = try ClassMeta.init(allocator, "Exception");
+        // ★R-281（F-181）：PHP 实测 `class_implements('Exception') = {Stringable, Throwable}`。
+        //   形参类型检查走 `implementsInterface`（`instanceof` 另有伪接口特判）⇒ 两枚伪接口必须显式登记。
+        meta.interfaces = &EXCEPTION_ROOT_INTERFACES;
 
         // __construct($message = "", $code = 0, $previous = null)
         try meta.addMethod(.{
@@ -18179,87 +18245,59 @@ pub const ClassMeta = struct {
 
         try registerClass(meta);
 
-        // AOT-CODEGEN-012 R-137：ReflectionException extends Exception
-        //（ReflectionClass 构造失败 / ReflectionMethod::invoke(null) 抛出，catch 可捕获）
-        const ref_ex_meta = try ClassMeta.init(allocator, "ReflectionException");
-        ref_ex_meta.parent = meta;
-        try registerClass(ref_ex_meta);
-
-        // Register standard PHP exception subclasses (flat: extends Exception)
-        const exception_subclasses = [_][]const u8{
-            "RuntimeException",
-            "LogicException",
-            "BadMethodCallException",
-            "BadFunctionCallException",
-            "DomainException",
-            "InvalidArgumentException",
-            "LengthException",
-            "OutOfRangeException",
-            "OverflowException",
-            "RangeException",
-            "UnderflowException",
-            "UnexpectedValueException",
+        // ★R-281（F-181）：内置异常族按 PHP 8.5.8 实测层级建树（`get_parent_class` ＋ `class_implements`
+        //   逐枚核对）。此前 `Error extends Exception`、其余全部平铺在 Exception 下 ⇒
+        //   ① `f(Throwable)` 全拒（无 Throwable 接口登记）；② `f(Exception)` 错收 Error 族；
+        //   ③ `catch (LogicException)`／`catch (RuntimeException)` 抓不到子类。
+        const ExceptionSpec = struct { name: []const u8, parent: []const u8 };
+        const exception_specs = [_]ExceptionSpec{
+            .{ .name = "ReflectionException", .parent = "Exception" },
+            .{ .name = "ErrorException", .parent = "Exception" },
+            .{ .name = "JsonException", .parent = "Exception" },
+            .{ .name = "RuntimeException", .parent = "Exception" },
+            .{ .name = "LogicException", .parent = "Exception" },
+            .{ .name = "BadFunctionCallException", .parent = "LogicException" },
+            .{ .name = "BadMethodCallException", .parent = "BadFunctionCallException" },
+            .{ .name = "DomainException", .parent = "LogicException" },
+            .{ .name = "InvalidArgumentException", .parent = "LogicException" },
+            .{ .name = "LengthException", .parent = "LogicException" },
+            .{ .name = "OutOfRangeException", .parent = "LogicException" },
+            .{ .name = "OutOfBoundsException", .parent = "RuntimeException" },
+            .{ .name = "OverflowException", .parent = "RuntimeException" },
+            .{ .name = "RangeException", .parent = "RuntimeException" },
+            .{ .name = "UnderflowException", .parent = "RuntimeException" },
+            .{ .name = "UnexpectedValueException", .parent = "RuntimeException" },
+            // Error 树：PHP 里 Error 与 Exception **平级**（各自 implements Throwable）
+            .{ .name = "Error", .parent = "" },
+            .{ .name = "TypeError", .parent = "Error" },
+            .{ .name = "ValueError", .parent = "Error" },
+            .{ .name = "UnhandledMatchError", .parent = "Error" },
+            .{ .name = "ArithmeticError", .parent = "Error" },
+            .{ .name = "DivisionByZeroError", .parent = "ArithmeticError" },
         };
-        for (exception_subclasses) |name| {
-            const child = try ClassMeta.init(allocator, name);
-            child.parent = meta;
+        for (exception_specs) |spec| {
+            const child = try ClassMeta.init(allocator, spec.name);
+            if (spec.parent.len == 0) {
+                child.interfaces = &EXCEPTION_ROOT_INTERFACES;
+                // Error 与 Exception 平级 ⇒ 继承不到 Exception 的 Throwable 方法实现（PHP 里两棵树各有一份）。
+                // 本实现把 Throwable 的方法体写在 Exception 上，故 Error 根显式拷一份（含登记序）。
+                var mit = meta.methods.iterator();
+                while (mit.next()) |entry| {
+                    try child.putMethodOrdered(.{
+                        .name = entry.key_ptr.*,
+                        .func = entry.value_ptr.func,
+                        .is_static = entry.value_ptr.is_static,
+                    });
+                }
+            } else {
+                const registry = class_registry orelse return error.ClassRegistryNotInitialized;
+                child.parent = registry.get(spec.parent) orelse return error.ParentExceptionClassMissing;
+            }
+            // 内建异常都继承 Exception 的 __construct/__toString（ReflectionException 曾漏拷 ⇒ Stringable 失配）
             child.magic_construct = meta.magic_construct;
             child.magic_toString = meta.magic_toString;
             try registerClass(child);
         }
-
-        // Register Error hierarchy (separate from Exception in PHP)
-        // Error extends Exception in our implementation for simplicity
-        const error_meta = try ClassMeta.init(allocator, "Error");
-        error_meta.parent = meta;
-        error_meta.magic_construct = meta.magic_construct;
-        error_meta.magic_toString = meta.magic_toString;
-        try registerClass(error_meta);
-
-        // ErrorException extends Exception
-        const errorexception_meta = try ClassMeta.init(allocator, "ErrorException");
-        errorexception_meta.parent = meta;
-        errorexception_meta.magic_construct = meta.magic_construct;
-        errorexception_meta.magic_toString = meta.magic_toString;
-        try registerClass(errorexception_meta);
-
-        // JsonException extends Exception
-        const jsonexception_meta = try ClassMeta.init(allocator, "JsonException");
-        jsonexception_meta.parent = meta;
-        jsonexception_meta.magic_construct = meta.magic_construct;
-        jsonexception_meta.magic_toString = meta.magic_toString;
-        try registerClass(jsonexception_meta);
-
-        // OutOfBoundsException extends RuntimeException
-        const oob_meta = try ClassMeta.init(allocator, "OutOfBoundsException");
-        oob_meta.parent = meta; // simplified: parent = Exception
-        oob_meta.magic_construct = meta.magic_construct;
-        oob_meta.magic_toString = meta.magic_toString;
-        try registerClass(oob_meta);
-
-        // TypeError, ValueError extend Error
-        const error_subclasses = [_][]const u8{ "TypeError", "ValueError", "UnhandledMatchError" };
-        for (error_subclasses) |name| {
-            const child = try ClassMeta.init(allocator, name);
-            child.parent = error_meta;
-            child.magic_construct = meta.magic_construct;
-            child.magic_toString = meta.magic_toString;
-            try registerClass(child);
-        }
-
-        // ArithmeticError extends Error
-        const arith_meta = try ClassMeta.init(allocator, "ArithmeticError");
-        arith_meta.parent = error_meta;
-        arith_meta.magic_construct = meta.magic_construct;
-        arith_meta.magic_toString = meta.magic_toString;
-        try registerClass(arith_meta);
-
-        // DivisionByZeroError extends ArithmeticError
-        const divzero_meta = try ClassMeta.init(allocator, "DivisionByZeroError");
-        divzero_meta.parent = arith_meta;
-        divzero_meta.magic_construct = meta.magic_construct;
-        divzero_meta.magic_toString = meta.magic_toString;
-        try registerClass(divzero_meta);
 
         // Register Closure class (Closure::bind, Closure::fromCallable)
         try registerClosureClass(allocator);
@@ -24774,12 +24812,17 @@ pub fn php_instanceof(obj_val: Value, class_name: Value) !Value {
 }
 
 /// 获取父类名
+/// get_parent_class — 接受对象**或类名字符串**（PHP 两者皆可；★R-281 前只认对象，
+///   `get_parent_class("ErrorException")` 恒 false）。
 pub fn php_get_parent_class(obj_val: Value, allocator: Allocator) !Value {
-    if (!Value_isObject(obj_val)) return Value.initBool(false);
-
-    const obj = Value_asObject(obj_val);
-    if (obj.class_meta) |meta| {
-        if (meta.parent) |parent| {
+    var meta: ?*ClassMeta = null;
+    if (Value_isObject(obj_val)) {
+        meta = Value_asObject(obj_val).class_meta;
+    } else if (obj_val.isString()) {
+        meta = findClass(obj_val.asString().data);
+    }
+    if (meta) |m| {
+        if (m.parent) |parent| {
             const parent_name = try PHPString.init(allocator, parent.name);
             return Value.initString(parent_name);
         }
