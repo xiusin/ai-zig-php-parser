@@ -9337,7 +9337,7 @@ R-214 曾把“归因里出现 setSourceLocation/PHI/调用行等非局部增删
 | 代次锚 | `nlk 3ef02637cfda03d32234e57c751a8f9c`／`tpl dab046c1b94badd9d0cf129d7eccf2c6`；`irg 4015f0f5…`／`ir fb2bb442…` 未变（未提交） |
 
 ### 162.4 边界 / 新登记
-- **F-162 新立（P2）**：`substr_replace` 的**数组形**（`$string`/`$replace` 为数组）未实现；AOT 对数组 #1 返回 NULL，PHP 返回逐元素替换后的数组。本批只接线「单字符串 + 数组 offset/length」的拒绝文案。
+- **F-162 新立（P2，已由 R-258 关闭，见 §165）**：`substr_replace` 的**数组形**（`$string`/`$replace` 为数组）未实现；AOT 对数组 #1 返回 NULL，PHP 返回逐元素替换后的数组。本批只接线「单字符串 + 数组 offset/length」的拒绝文案。
 - **F-163 新立（P2）**：`range` 的**浮点步长**被当作 1（`step_val.isInt()` 判定，float 落入 else=1）；PHP `range(0,1,0.25)` 返回含浮点的 5 元素数组。
 - 显式 null 的 Passing-null Deprecated 仍未发（F-62f-opt 同族，本批保持原 null 口径）。
 
@@ -9397,9 +9397,902 @@ R-214 曾把“归因里出现 setSourceLocation/PHI/调用行等非局部增删
 | C302（新门 3 臂） | 自证 **3 CF**；实跑 **3/3 SAME** 14 s（t1 七形、t2 双数字串浮点步长、g1 守卫） |
 | 邻居 C301 | 5/5 SAME |
 | `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/r257_test_summary.log`） |
-| 主回归 | 本轮运行中（完成后回填，日志 `/tmp/r257_regression.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r257_regression.log`，`SELF_CHECK_OK rows=68`） |
 | 代次锚 | `tpl 20d18a37cf8c941bc1dd10f13e597aab`；`nlk 3ef02637…`／`irg 4015f0f5…`／`ir fb2bb442…` 未变（未提交） |
 
 ### 164.4 边界
 - 多字节**非**数字串（`range("a1","a3")`）与空串（`range("","2")`）：PHP 发 Warning 并走字符/0 强转边角，AOT 仍走整数旧路径——未在本批处理（既存边角，无门臂）。
 - 字符范围 + 浮点步长（`range("a","e",0.5)`）的 PHP Warning/[0.0] 边角仍开（R-256 已登记）。
+
+## 165. ★R-258 落地记录（F-162 闭环：substr_replace 数组形语义）
+
+### 165.1 契约（PHP 8.5.8，探针 `/tmp/f162b.php` 十形逐字节实测）
+| 形 | 输入 | PHP 输出 |
+|---|---|---|
+| a | `substr_replace(["abcdef","uvwxyz"], "X", 1, 2)` | 逐元素同一替换 ⇒ `['aXdef','uXxyz']` |
+| b | `(["abcdef","uvwxyz"], "X", [1,2], [2,3])` | offset/length **按位置**配对 ⇒ `['aXdef','uvXz']` |
+| c | `("abcdef", ["X","Y"], 1, 2)` | 标量 + 数组 replace ⇒ **首元素** `'aXdef'` |
+| d | `(["abcdef","uvwxyz"], ["X","Y"], 1, 2)` | 数组 + 数组 replace ⇒ 逐位置配对 `['aXdef','uYxyz']` |
+| e | `(["abcdef","uvwxyz"], ["X"], 1, 2)` | replace 短数组 ⇒ 缺位补 `""` ⇒ `['aXdef','uxyz']` |
+| f | `(["abcdef"], "X", [1,2])` | offset 数组多出的位置**忽略** ⇒ `['aX']` |
+| g | `(["abcdef","uvwxyz"], "X", 1, [2])` | length 短数组 ⇒ 缺位按**剩余全段** ⇒ `['aXdef','uX']` |
+| h | `([], "X", 1)` | 空数组 ⇒ 空数组 |
+| i | `(["k1"=>"abcdef","k2"=>"uvwxyz"], "X", 1, 2)` | **字符串键保留** |
+| j | `(["abcdef","uvwxyz"], "X", [1], [2,3])` | offset 短数组 ⇒ 缺位按 **0** ⇒ `['aXdef','Xxyz']` |
+
+要点：数组各形按**位置序**配对（不看键）；缺省 offset ⇒ 0、缺省 length ⇒ 剩余全段；标量 `$string` + 数组 `$offset/$length` 是 TypeError（R-255 已接，文案见 g1 臂）。
+
+### 165.2 实现（`src/aot/runtime_lib_template.zig`）
+- `php_substr_replace`（`:4090`）：四槽联合校验后，`str_val.isArray()` 分支逐元素替换。
+  - 迭代 `str_val.asArray().elements.iterator()`：字符串元素替换，非字符串元素**跳过**；键原样迁移（字符串键 `PHPString.init` 拷贝后 `set`，因 `PHPArray.set` 对键/值都 retain ⇒ defer release 配对）。
+  - 标量路径 `repl = substrReplaceReplacement(replacement_val, 0)` 取数组首元素。
+- 新 helper（`:4144`–`:4209`）：
+  - `arrayNthValue(arr, idx)`：按插入位置取第 idx 个元素值。
+  - `substrReplaceReplacement/Offset/Length(arg, idx)`：数组按位置取、缺位分别回落 `""` / 0 / null（null ⇒ 剩余全段）；非数组按标量解释。
+  - `substrReplaceString(...)`：负索引/负长度归一 + 拼接核心（原内联逻辑抽取，语义不变）。
+
+### 165.3 读数
+| 腿 | 读数 |
+|---|---|
+| C303（新门 4 臂） | 自证 **4 CF**；实跑 **4/4 SAME** 19 s（t1 数组 string＋键保留/空数组、t2 数组 replace、t3 缺省位配对、g1 标量守卫＋两条 TypeError 文案） |
+| 探针 `/tmp/f162b.php` | 十形 **10/10 SAME**（PHP vs AOT 逐字节） |
+| 邻居 C300（联合槽门） | 4/4 SAME |
+| `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/r258_test_summary.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r258_regression.log`，`SELF_CHECK_OK rows=68`） |
+| 代次锚 | `tpl f9449afc47a53c3332b3c4d332c5a03e`；`nlk 3ef02637…`／`irg 4015f0f5…`／`ir fb2bb442…` 未变（未提交） |
+
+### 165.4 边界
+- 数组元素**非字符串**（如整数/嵌套数组）：本批直接跳过（AOT）；PHP 对该形的强制转换/告警面未逐一实测，无门臂，登记为 P3 边角。
+- 标量 `$string` + 数组 `$replace` 只取首元素（实测形 c）；数组 `$string` 的 replace 缺位补空串（形 e）。
+- `$offset/$length` 数组元素为非整数时的 `toInt()` 强转口径沿用既有标量路径，未另测。
+- R-256 已登记的 `range` 字符范围 + 浮点步长边角仍开（与本轮无关）。
+
+## 166. ★R-259 落地记录（F-165 闭环：preg_replace／preg_filter 数组形与形参契约；F-166 缓冲溢出同轮关闭）
+
+### 166.1 契约（PHP 8.5.8，探针 `/tmp/f62f_preg_array.php` 19 形 + 门 C304 逐字节实测）
+| 形 | PHP |
+|---|---|
+| 数组 pattern + 数组 replacement（标量主题） | 按**位置序**配对；replacement 缺位补 `""`（`(["/a/","/b/"],["X"],"abc")` ⇒ `'Xc'`） |
+| 数组 pattern + **标量** replacement | 标量**广播**到全部模式（`(["/a/","/b/"],"X","ab")` ⇒ `'XX'`） |
+| 数组 pattern + 单元素 replacement 数组 | 只取首元素（`(["/a/"],["X","Y"],"abc")` ⇒ `'Xbc'`） |
+| 标量 pattern + 数组 replacement | **TypeError #1 专用文案**：`…Argument #1 ($pattern) must be of type array when argument #2 ($replacement) is an array, string given`（m1/m2/m5 实测：pattern 为 int／带 `__toString` 对象亦同） |
+| 主题数组 | 逐元素替换，**键保留**；元素经 PHP 字符串强转（int→`"42"`、null→`""`、true→`"1"`、嵌套数组→`"Array"`＋Warning） |
+| limit（标量/数组主题） | 每个模式**各自**限次；`(["/a/","/b/"],"X"[,"Y"],"ab",1)` ⇒ `"XY"` |
+| 空 pattern 数组 | 主题原样（仅 `$string` 强转后返回） |
+| 数组元素为对象 | `Error: Object of class X could not be converted to string`（非 TypeError） |
+| 槽类型 | #1/#2/#3 `array|string`（标量 int/float/bool/null 与带 `__toString` 对象按 weak 放行；其余对象 ⇒ TypeError 原文）；#4 `int` |
+| 显式 null | #1/#2/#3 各发一条 Passing-null Deprecated（类型名 `array|string`）；空 pattern 数组 + null replacement 也发 |
+| preg_filter | 标量主题未命中 ⇒ `NULL`；数组主题**只保留命中元素**且**键保留**；limit 同 preg_replace |
+| preg_filter #4 | 形参契约存在（`int $limit = -1`），AOT 此前 4 参调用编不过 |
+
+补充：`substitute` 的返回值是**替换计数**——无匹配为 `0`（不是 `PCRE2_ERROR_NOMATCH`），故 `preg_filter` 的"是否命中"必须用 `rc > 0`。
+
+### 166.2 实现（`src/aot/runtime_lib_template.zig` + `src/aot/native_linker.zig`）
+- 共享内核：
+  - `requirePregArgParam`：`array|string` 槽（数组/标量/null/带 `__toString` 对象放行；`valueHasToStringMethod` 查 `ClassMeta.magic_toString`）。
+  - `pregCollectArgStrings`：槽展开成字符串列表（数组按插入序、键忽略；元素走 `Value.toString`，对象无 `__toString` ⇒ `Error`）。
+  - `pregReplaceOnce(fn_name, pattern, replacement, subject, limit, allocator)`：单模式 × 单主题，返回 `{data, matched}` 或 `null`（非法模式/编译失败/PCRE 真错误）。
+  - `pregReplaceSequence`：多模式序列（替换按位置配对、缺位 `""`，`broadcast` 时标量替换广播）。
+  - ★**F-166（同轮关闭）**：limit<0 支的 `pcre2_substitute_8` 初估 `2*subject+1` 在替换串更长时必报 `PCRE2_ERROR_NOMEMORY`（旧实现把它当"真错误"⇒ 返回 NULL）；改为带 `PCRE2_SUBSTITUTE_OVERFLOW_LENGTH` 跑一次，按回写的所需字节数 `realloc` 后重跑。`PCRE2_ERROR_NOMEMORY = -48` 常量按头文件登记。
+- `preg_replace`：四槽校验（#4 null/缺省 ⇒ -1，与原口径一致）→ 混合形 TypeError → 主题数组/标量两路；主题元素与结果键迁移方式同 R-258（值 `defer release`，字符串键深拷贝）。
+- `preg_filter`：同四槽＋`$limit` 形参（新第 4 形参）；数组主题只收命中元素且保留键（**修复旧实现字符串键被 `push` 丢键**）。
+- `native_linker.zig`：`preg_filter` 登记 `.handler_params = 4`、`.optional_defaults = &.{"runtime.Value.initInt(-1)"}`（3 参调用由发射器补 -1；语料 0 处 `preg_filter` ⇒ 发射面零暴露）。
+
+### 166.3 读数
+| 腿 | 读数 |
+|---|---|
+| C304（新门 9 臂） | 自证 **9 CF**；实跑 **9/9 SAME** 51 s（t1/t2 四槽 TypeError、t3 合法数组形、t4 limit、t5 元素强转/键、t6 混合形/`__toString`、t7 null Deprecated、t8 数组主题元素级失败、g1 弱形守卫） |
+| 探针 `/tmp/f62f_preg_array.php` | 19 形 **19/19 SAME**（含 a11 数组内 null、b3/b4 元素强转、f5 键保留） |
+| 邻居 C072 PMOD | **15/15 SAME**，与修前基线逐臂零转移 |
+| 邻居 C093 PERR | 32 臂 **31 SAME / 1 DIFF**，残余恰为 `e4`（F-117）；**修前基线逐臂零转移**；★首跑曾把 `b10`（`preg_filter` 数组主题 + 坏 UTF-8）打红 ⇒ 据此补出三态错误分流（见 166.2），复跑归 SAME |
+| 邻居 C281（preg/srand） | 8 臂 **7 SAME / 1 DIFF**，DIFF 仍为 `a8`（修前基线同项，非本轮引入） |
+| 邻居 C300（联合槽） | 4/4 SAME |
+| `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/r259_test_summary.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r259_regression.log`，`SELF_CHECK_OK rows=68`） |
+| 代次锚 | `nlk 7e7b5d8a21d28699c8cb3d94ff54776c`／`tpl 5e8b1663ab6ca22c38cde932aece9977`；`irg 4015f0f5…`／`ir fb2bb442…` 未变（未提交） |
+
+### 166.4 边界 / 新登记
+- **F-166 已闭环（同轮）**：`pcre2_substitute` 输出缓冲 `2*subject+1` 初估在替换串更长时 NOMEMORY；改 `OVERFLOW_LENGTH` 回写实需后重跑。
+- **F-167 新立（P2，已由 R-260 关闭，见 §167）**：limit<0 支走 PCRE2 substitute，其替换串语法与 PHP 不完全一致——`preg_replace("/a/", "$$", "aba")` PHP 得 `'$$b$$'`，AOT 得 `'$b$'`；而 limit>0 手写支把 `$$` 当字面 ⇒ 同一函数两条路径不一致（旧实现即如此，非本轮引入）。
+- **数组主题的元素级失败**：编译失败/坏 UTF-8 均**丢弃该元素**（两函数；实测 `preg_replace(["/[/"],"X",["abc","abd"])` ⇒ `array()`），标量主题则整调用 NULL —— 已按三态实现并由 C304 `t8` 常驻守护。
+- 显式 null `$limit` 的 Passing-null Deprecated 未发（省略与显式 null 不可区分，F-62f-opt 同族）。
+- `preg_replace_callback` 的数组形未在轮内（其回调契约另案）。
+- 数组 pattern 中**对象元素**无 `__toString` ⇒ `Error`（非 TypeError），由 `Value.toString` 自然抛出，C304 `t6` 已覆盖带 `__toString` 的正例。
+
+## 167. ★R-260 落地记录（F-167 闭环：preg 替换串语法统一到 PHP）
+
+### 167.1 契约（PHP 8.5.8，`/(a)(b)?/` + 主题 `"ab-a"` 与 10 组探针逐形实测）
+| 替换串（字节） | PHP 结果 |
+|---|---|
+| `plain-X` | 字面；两处匹配各替换 |
+| `$1` / `${1}` / `\1` | 组 1 |
+| `$0` | 整个匹配 |
+| `$1$2`（第 2 组未参与） | 组 1（未参与组 ⇒ 空串） |
+| `$$` | 字面 `$$`（**不折叠**） |
+| `\$` | 字面 `$` |
+| `\\$` | `\` + `$` |
+| `\\n` | `\n`（`\\` 折叠为单个反斜杠） |
+| `\n`（单个反斜杠 + n） | `\n`（反斜杠**保留**） |
+| `\x` | `\x`（保留反斜杠） |
+| `$x` / `a$b` / `$<1>` | 原样字面（无组引用） |
+| `${n}` | 原样字面 |
+| 尾部单 `$` / 单 `\` | 原样保留 |
+| 10 组：`$10` / `\10` / `${10}` | 第 10 组 |
+| 10 组：`$11` | 空串（组不存在 ⇒ 空，**不回退**成「组1+字面 1」） |
+| 中间（`(a)(b)?` 3 组以内）：`$10` | 空串 |
+
+### 167.2 实现（`src/aot/runtime_lib_template.zig`，纯模板）
+- `pregReplaceOnce` 分流：替换串含 `$` **或** `\` ⇒ 走手写拼接支（PHP 语法）；否则维持 `pcre2_substitute` 快路（字面字节语义已与 PHP 一致）——既修语义又不牺牲常见字面替换的路径。
+- `pregReplaceProcessBackrefs` 按上表重写：多位数字组（`$NN`/`\NN`/`${NN}`）、`$$`/`\$`/`\\` 折叠、其他反斜杠保留、尾部单字符保留；越界/未参与组一律空串。
+- 新 helper `pregIsDigits`／`pregAppendGroupRef`（越界与 `PCRE2_UNSET` 双守卫）。
+- limit<0 且含 meta 时 `limit_usize = maxInt(usize)`（等价无限制）；`limit==0` 由循环自然 0 次处理（结果＝主题）。
+
+### 167.3 读数
+| 腿 | 读数 |
+|---|---|
+| C305（新门 4 臂） | 自证 **4 CF**；实跑 **4/4 SAME** 23 s（t1 17 形矩阵、t2 多位组/尾部字符、t3 快路/数组/limit、g1 preg_filter） |
+| 探针 `/tmp/f167.php` | 17 形 **17/17 SAME**（修前：`\$`/`$10`/`$<1>`/`a$b` 等 7 形为 NULL，`$$`/`\\` 两形错值） |
+| 邻居 C093 PERR | 32 臂 **31 SAME / 1 DIFF**，残余 `e4`（F-117）；与 R-259 代次逐臂**零转移** |
+| 邻居 C072 PMOD | **15/15 SAME**，与 R-259 代次零转移 |
+| 邻居 C304（preg 数组门） | **9/9 SAME** |
+| 邻居 C281（preg/srand） | 8 臂 **7 SAME / 1 DIFF**，DIFF 仍为 `a8`（修前基线同项） |
+| `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/r260_test_summary.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r260_regression.log`，`SELF_CHECK_OK rows=68`） |
+| 代次锚 | `tpl c916b98ea42479770f626dcc19540dc5`；`nlk 7e7b5d8a…`／`irg 4015f0f5…`／`ir fb2bb442…` 未变（未提交） |
+
+### 167.4 边界
+- 具名组（`${name}`）不展开（PHP 本机实测 `${n}` 亦为字面）；`$<1>` 字面。
+- 手写支性能低于 substitute 快路，但仅对含 `$`/`\` 的替换串生效；纯字面替换仍走快路。
+- 显式 null `$limit` 的 Deprecated 未发（F-62f-opt 同族，未变）。
+
+## 168. ★R-261 落地记录（F-62f 余量：password 族与 hash_pbkdf2 的形参/options 契约）
+
+### 168.1 契约（PHP 8.5.8，`/tmp/f168.php` 25 形 + 门 C306 逐字节实测）
+| 形 | PHP |
+|---|---|
+| 算法常量 | `PASSWORD_BCRYPT`／`PASSWORD_DEFAULT` 均为**字符串 `'2y'`**；`password_algos()` = 2y,argon2i,argon2id |
+| `$algo` 接受 | `null`／int `0`/`1`（weak 转 int；float 截断）／字符串 `'2y'`；`'bcrypt'`、`'1'`、`'md5'` ⇒ `ValueError: password_hash(): Argument #2 ($algo) must be a valid password hashing algorithm` |
+| `options['cost']` | 缺省 **12**；int 或数值串生效；非数值串 ⇒ 0；**4..31 之外** ⇒ `ValueError: Invalid bcrypt cost parameter specified: N`（含 3／0／100） |
+| `options` 其他键 | 忽略（`['foo'=>1]` ⇒ cost 12） |
+| `$options` 类型 | 严格 array：显式 `null`/字符串 ⇒ `TypeError: … Argument #3 ($options) must be of type array, null given` |
+| `password_hash($password)` | 标量 weak 转字符串（int 123 ⇒ 按 `"123"` 哈希）；数组 ⇒ `TypeError: … Argument #1 ($password) must be of type string, array given` |
+| `password_needs_rehash` | 成本比较用 options（缺省 12）；**cost 不校验值域**（3/100/"abc" 均只是 ⇒ true）；无效 algo ⇒ **false**；argon2id ⇒ true（无法核对） |
+| `hash_pbkdf2` #1–#3 | string 槽（weak）；#1 未知算法 ⇒ `ValueError: hash_pbkdf2(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm` |
+| `hash_pbkdf2` #7 | 严格 array（显式 null/字符串 ⇒ TypeError）；**内容忽略**（`['x'=>1]` 与 `[]` 同结果） |
+| `hash_pbkdf2` #4/#5 | 沿用 R-229（iterations>0、length≥0 的 ValueError；length=0 合法哨兵） |
+
+### 168.2 实现
+- `src/aot/runtime_lib_template.zig`
+  - 新 helper：`requireStringParamWeak`（`string` 槽）、`requireStringOrIntOrNullParam`（`string|int|null` 槽）、`phpArrayGetStringOption`、`phpOptionToInt`、`passwordBcryptCost`、`PasswordAlgoKind`/`passwordAlgoKind`。
+  - `php_password_hash(password, algo, options, allocator)`：三槽校验 → 算法族判定（非 bcrypt ⇒ 显式 ValueError，**不再静默回落 bcrypt**）→ cost 值域校验 → `rounds_log = cost`。
+  - `php_password_needs_rehash(hash, algo, options, allocator)`：三槽校验；无效 algo ⇒ false、argon ⇒ true；bcrypt 读存储 cost 与目标 cost 比较（目标不校验值域）。
+  - `php_hash_pbkdf2(..., options, allocator)`：#1–#3 weak string、#7 严格 array；未知算法改 `ValueError`（旧为 false）；已实现子集 sha256/sha1/md5。
+- `src/aot/ir_generator.zig`：删除 `password_hash` 的 **options 截断**（`args[0..2]`），IR 保留第三实参。
+- `src/aot/native_linker.zig`
+  - 注册表：`password_hash`/`password_needs_rehash` 各 `handler_params=3` + 缺省空数组；`hash_pbkdf2` `handler_params=7` + `[0,false,空数组]` 三位缺省。
+  - 两处发射特例（赋值/表达式语句）：`password_hash` 补第 3 参；新增 `password_needs_rehash` 特例；`hash_pbkdf2` 两处补齐 options。
+  - ★缺省 options 发射为 `runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))`（真空数组）——用 `null` 会被模板按「显式 null ⇒ TypeError」拒绝，而省略在 PHP 侧是合法缺省。
+
+### 168.3 读数
+| 腿 | 读数 |
+|---|---|
+| C306（新门 4 臂） | 自证 **4 CF**；实跑 **4/4 SAME** 29 s（t1 15 形、t2 9 形、t3 8 形、g1 4 形） |
+| 探针 `/tmp/f168.php` | 25 行中 **24 SAME**；唯一差异为 `PASSWORD_BCRYPT`/`PASSWORD_DEFAULT` 的值（AOT `1` vs PHP `'2y'`，F-101 家族） |
+| 邻居 C047 BLT | 209 臂 **208 SAME / 1 DIFF**，DIFF＝`b5`（`bcadd` 对象面，既存红，非本轮） |
+| 邻居 C065 arity | 66 臂；相对默认 TSV：`hash_pbkdf2` COMPILE_FAIL→SAME（本轮），另 4 项 CF→SAME 属此前轮次（默认 TSV 陈旧），无 SAME→DIFF |
+| `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/r261_test_summary.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r261_regression.log`，`SELF_CHECK_OK rows=68`） |
+| 代次锚 | `nlk a0338c9a0199dd4b75ea8f37b6410b1e`／`tpl c97e05d73b7fabc9b21a0cfd72f1279c`／`irg 0b7106338d5ffe1342caee961734b8d8`；`ir fb2bb442…` 未变（未提交） |
+
+### 168.4 边界 / 新登记
+- **F-168 新立（P2）**：AOT 未实现 argon2i/argon2id（Zig std 提供 `std.crypto.pwhash.argon2` 的 PHC 编码，但 `password_verify` 也需同步支持）；当前 argon 请求显式 `ValueError`，不再静默回落 bcrypt。
+- **F-169 新立（P2）**：`hash_pbkdf2` 仅实现 sha256/sha1/md5；PHP 合法算法 sha512/sha224/sha384/sha512-256 等现显式 `ValueError`（旧为 `false`）。
+- **F-101 家族**：`PASSWORD_DEFAULT`/`PASSWORD_BCRYPT` 仍为 int `1`（PHP 8.5 为字符串 `'2y'`）；常量表结构仅支持整数，需与版本自述一并改造。
+- 显式 null 传入 optional array（`$options`/`$limit`）的 Passing-null Deprecated 未发（F-62f-opt 同族；这里 `$options` 显式 null 已按 PHP 报 TypeError）。
+
+## 169. ★R-262 落地记录（F-169：hash_pbkdf2 算法族补齐）
+
+### 169.1 契约（PHP 8.5.8 实测，`/tmp/f169.php` 29 行）
+| 算法 | PHP `hash_pbkdf2("pw","salt",1,8)` | AOT |
+|---|---|---|
+| sha1 / sha224 / sha256 | `95c9338e` / `3fb9a44a` / `6f4ad8c7` | 同 |
+| sha384 / sha512 | `fb5db6b4` / `9bbcdf4f` | 同 |
+| sha512/256 / sha512/224 | `45ced3e3` / `6e98b237` | 同 |
+| md5 | `9887054c` | 同 |
+| sha3-224 / sha3-256 / sha3-384 / sha3-512 | `124553de` / `8a394eee` / `daee2742` / `808499de` | 同 |
+| 整摘要（length 省略）、二进制（`raw=true`）、跨块长输出（length=100） | 逐字节 | 同 |
+| ripemd160 / ripemd128 / whirlpool / tiger / gost / haval | 合法 | **ValueError**（F-170） |
+| crc32b / fnv1a64 | ValueError `must be a valid cryptographic hashing algorithm` | 同 |
+| #4=0 / #5<0 | ValueError（R-229 已接） | 同 |
+
+### 169.2 实现（`src/aot/runtime_lib_template.zig`，纯模板）
+- 新增 `Pbkdf2Algo` 枚举、`pbkdf2AlgoFromName`（含 PHP 的双拼写：`sha512/256` 与 `sha512-256` 等）、`pbkdf2AlgoHlen`（摘要长度表）。
+- 新增泛型 `pbkdf2Fill(comptime Hash, ...)`：主循环与 HMAC 抽取复用 std 同名哈希（`std.crypto.auth.hmac.Hmac(Hash)`），块数由 `dk.len` 推出；原「sha256/sha1/md5 三分支 + `[64]u8` 上界」手写循环删除。
+- `php_hash_pbkdf2`：算法 → 类型 `switch` 分发（Sha1／Sha224／Sha256／Sha384／Sha512／Sha512_224／Sha512_256／Sha3_224／Sha3_256／Sha3_384／Sha3_512／Md5）；未知算法仍按 PHP 原文案 ValueError。
+
+### 169.3 读数
+| 腿 | 读数 |
+|---|---|
+| C307（新门 4 臂） | 自证 **4 CF**；实跑 **4/4 SAME** 23 s（t1 12 族 h8、t2 12 族整摘要、t3 二进制/跨块长输出、g1 非法算法/iterations 守卫） |
+| 探针 `/tmp/f169.php` | 29 行中 **28 SAME**；唯一差异 `ripemd160`（PHP 合法、AOT ValueError → F-170） |
+| 邻居 C047 BLT（`ONLY` 5 臂：b179 b180 b200 b201 b206） | **5/5 SAME**，aot_caught=4 |
+| 邻居 C306 | 4/4 SAME |
+| 邻居 C065 | 66 臂读数与 R-261 一致（14 SAME / 7 DIFF / 38 CF，无转移） |
+| `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/r262_test_summary.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r262_regression.log`，`SELF_CHECK_OK rows=68`） |
+| 代次锚 | `tpl 7f1b833d90be9fabaef40473083b2960`；`nlk a0338c9a…`／`irg 0b710633…`／`ir fb2bb442…` 未变（未提交） |
+
+### 169.4 边界 / 新登记
+- **F-170 新立（P2）**：std 无 RIPEMD-160/128、Whirlpool、Tiger、GOST、HAVAL 实现 ⇒ `hash_pbkdf2` 对它们报「无效算法」。★同族既有缺陷：`php_hash` 的 `ripemd128` 分支用 **MD5 冒充**（静默错值），与 PHP 真实 RIPEMD-128 不符，修 RIPEMD 时须一并处理。
+- `sha512/256` 与 `sha512-256`、`sha512/224` 与 `sha512-224` 双拼写均接受（PHP 只列前者；AOT 多接受别名属宽松面）。
+- PHP `hash_pbkdf2` 对 `sha3-*` 的接受面已覆盖；`crc32b`/`fnv1a64` 与 PHP 同为 ValueError。
+
+## 170. ★R-263 落地记录（F-168：password argon2i/argon2id）
+
+### 170.1 契约（PHP 8.5.8 实测 + 跨语言互操作）
+| 形 | PHP |
+|---|---|
+| 默认参数 | `$argon2id$v=19$m=65536,t=4,p=1$…`（argon2i 同参数，算法段不同） |
+| options | `memory_cost`/`time_cost`/`threads` 覆盖（数值串亦生效）；bcrypt 的 `cost` 被**忽略** |
+| 参数校验 | `memory_cost<8`（或 <8*p）⇒ `ValueError: Memory cost is outside of allowed memory range`；`time_cost<1` ⇒ `Time cost is outside of allowed time range`；`threads<1` ⇒ `Invalid number of threads` |
+| verify | argon2i/id PHC 哈希可校验（正/反）；AOT 生成的哈希**PHP 可验证**、PHP 生成的哈希 AOT 可验证 |
+| needs_rehash | 同模式同参数 ⇒ false；缺省参数（m=65536）或改参 ⇒ true；模式不符（argon2i↔id）⇒ true |
+
+### 170.2 实现（`src/aot/runtime_lib_template.zig`，纯模板）
+- 新 helper：`Argon2ParamsOpt`、`passwordArgon2Params`（options → m/t/p，缺省 65536/4/1）、`passwordArgon2StoredParams`（解析 PHC 参数段）。
+- `php_password_hash`：`kind != bcrypt` 分支改为 argon 实现——参数边界按 PHP 文案校验后调用 `std.crypto.pwhash.argon2.strHash(..., .encoding = .phc)`。
+- `php_password_verify`：识别 `$argon2i$`/`$argon2id$` 前缀，走 `std.crypto.pwhash.argon2.strVerify`（allocator 直传）；bcrypt 路径不变。
+- `php_password_needs_rehash`：argon 分支比较**模式 + m/t/p**（不再一律 true）。
+- 哈希串计算上移到模式判定之前（argon 分支需要原始 hash）。
+
+### 170.3 读数
+| 腿 | 读数 |
+|---|---|
+| C308（新门 4 臂） | 自证 **4 CF**；实跑 **4/4 SAME** 24 s（t1 参数前缀、t2 固定哈希 verify/needs_rehash、t3 参数错误/roundtrip、x1 AOT→PHP 互操作） |
+| 探针 `/tmp/f168b.php` | 全形 SAME（含 PHP 生成的 argon2i/id 固定哈希在 AOT 侧校验） |
+| 互操作 | AOT 生成的 argon2id/argon2i 哈希经 **PHP** `password_verify` ⇒ true/true，`needs_rehash` 同参 ⇒ false |
+| 邻居 C306 | 4/4 SAME |
+| 邻居 C047 BLT `b192` | SAME |
+| `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/r263_test_summary.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r263_regression.log`，`SELF_CHECK_OK rows=68`） |
+| 代次锚 | `tpl b0edfd94288565f6d43977082f24ed7f`；`nlk a0338c9a…`／`irg 0b710633…`／`ir fb2bb442…` 未变（未提交） |
+
+### 170.4 边界 / 新登记
+- **F-171 新立（P2）**：`PASSWORD_ARGON2I`/`PASSWORD_ARGON2ID` 常量在 AOT **未定义**（常量表仅支持整数，PHP 值为字符串 `'argon2i'/'argon2id'`）⇒ 使用常量的脚本仍会未定义常量 fatal；需与 F-101 的常量表字符串化一并解决。
+- argon2 的 `version` 固定 v=19（与 PHP 一致）；`secret`/`ad` 选项未开放（PHP 亦不暴露）。
+- 大参数（如默认 m=65536）在 AOT 与 PHP 同成本；门内用 m=256 保持速读。
+- F-170（RIPEMD 族）、F-158/F-117（P0）仍开。
+
+## 171. ★R-264 落地记录（F-171 关闭：PASSWORD_* 常量族；F-101 家族的一个面）
+
+### 171.1 契约（PHP 8.5.8，`get_defined_constants` 逐枚实测）
+| 常量 | 类型 | 值 |
+|---|---|---|
+| `PASSWORD_DEFAULT` / `PASSWORD_BCRYPT` | string | `'2y'` |
+| `PASSWORD_ARGON2I` / `PASSWORD_ARGON2ID` | string | `'argon2i'` / `'argon2id'` |
+| `PASSWORD_ARGON2_PROVIDER` | string | `'standard'` |
+| `PASSWORD_BCRYPT_DEFAULT_COST` | int | 12 |
+| `PASSWORD_ARGON2_DEFAULT_MEMORY_COST` / `_TIME_COST` / `_THREADS` | int | 65536 / 4 / 1 |
+
+修前 AOT：`PASSWORD_DEFAULT`/`PASSWORD_BCRYPT` 为 **int 1**，其余 7 枚**未定义**（脚本用常量名调 argon 直接 fatal）。
+
+### 171.2 实现（`src/aot/runtime_lib_template.zig`，纯模板）
+- int 表：删除 `PASSWORD_DEFAULT=1`/`PASSWORD_BCRYPT=1`；改为 4 枚整数默认成本常量。
+- str 表（已存在 `StrConst` 机制，无需扩结构）：新增 5 枚字符串常量。
+- 兼容性：`passwordAlgoKind` 早已接受 `'2y'/'argon2i'/'argon2id'`，故常量改字符串后 hash/verify/needs_rehash 全链无需改动即可工作（C306/C308 复证）。
+
+### 171.3 读数
+| 腿 | 读数 |
+|---|---|
+| C309（新门 3 臂） | 自证 **3 CF**；实跑 **3/3 SAME** 14 s（t1 9 常量的值/defined、t2 常量作算法实参、t3 类型/同值/未定义守卫） |
+| 探针 `/tmp/f171.php` | 全形 SAME（9 常量 + bcrypt/default/argon2id/argon2i 实参 + needs_rehash） |
+| 邻居 C306 | 4/4 SAME（PASSWORD_BCRYPT 由 int 1 变 '2y' 后链路不变） |
+| 邻居 C308 | 4/4 SAME（含 PHP 互操作臂） |
+| 邻居 C047 BLT `b192` | SAME |
+| `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/r264_test_summary.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r264_regression.log`，`SELF_CHECK_OK rows=68`） |
+| 代次锚 | `tpl 84a4fa6f92f7cbe1bb57cedd7d7840f8`；`nlk a0338c9a…`／`irg 0b710633…`／`ir fb2bb442…` 未变（未提交） |
+
+### 171.4 边界 / F-101 余量
+- F-171 **已关闭**；F-101 剩两面仍待裁：`PHP_VERSION`/`PHP_VERSION_ID`/`PHP_MAJOR/MINOR/RELEASE` 自述 8.4.8（真值 8.5.8/80508）与 `PHP_BINDIR`/`PHP_OS` 硬编码。
+- 常量字符串化机制本轮已实证（`StrConst` 表可直接承载），后续版本自述改造无需扩结构。
+
+## 172. ★R-265 落地记录（F-101 主体：版本自述与 OS 常量）
+
+### 172.1 契约（PHP 8.5.8 实测）
+| 常量 | PHP |
+|---|---|
+| `PHP_VERSION` | `'8.5.8'` |
+| `PHP_VERSION_ID` | `80508`（= major*10000+minor*100+release） |
+| `PHP_MAJOR_VERSION` / `PHP_MINOR_VERSION` / `PHP_RELEASE_VERSION` | 8 / 5 / 8 |
+| `PHP_EXTRA_VERSION` | `''` |
+| `PHP_OS` | macOS `'Darwin'`（Linux `'Linux'`、Windows `'WINNT'`） |
+| `PHP_OS_FAMILY` | macOS `'Darwin'`（Linux `'Linux'`、Windows `'Windows'`、BSD 族 `'BSD'`、illumos `'Solaris'`） |
+| `PHP_SAPI` / `PHP_INT_SIZE` | `'cli'` / 8 |
+
+修前：两处注册源互相矛盾（常量表 `minor=3`、运行期 `minor=4`），版本 `8.4.8/80408`，`PHP_EXTRA_VERSION` **未定义**，OS 为硬编码 `"Darwin"`。
+
+### 172.2 实现（`src/aot/runtime_lib_template.zig`，纯模板）
+- 新增文件级单一来源：`PHP_VER_MAJOR/MINOR/RELEASE/EXTRA/STRING/ID`；两处注册点（`initPredefinedConstants` 与常量表）全部改为引用，删除散落字面量；`phpversion()` 同步引用 `PHP_VER_STRING`。
+- 新增 `PHP_OS_NAME`/`PHP_OS_FAMILY_NAME`：按 `builtin.os.tag` **计算**（不再硬编码 Darwin），覆盖 macOS/Linux/Windows/BSD/illumos，未知平台回退 `@tagName`/`"Unknown"`。
+- 新增 `PHP_EXTRA_VERSION` 注册（运行期与常量表共用 `PHP_VER_EXTRA`）。
+- `PHP_BINDIR`/`PHP_BINARY` 未动：其值取决于 PHP 安装路径（本机真值 `/opt/homebrew/Cellar/php/8.5.8/bin`），AOT 无对应安装，留待产品口径裁定。
+
+### 172.3 读数
+| 腿 | 读数 |
+|---|---|
+| C310（新门 3 臂） | 自证 **3 CF**；实跑 **3/3 SAME** 14 s（t1 10 常量、t2 phpversion/ID 一致性、t3 类型/守卫） |
+| 探针 `/tmp/f101.php` | 全形 SAME（含 `id` 恒等式、`extra` 为空、OS/SAPI 类型） |
+| 邻居 C265（arity，含 `get_defined_constants`） | **7/7 SAME** |
+| `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/r265_test_summary.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r265_regression.log`，`SELF_CHECK_OK rows=68`） |
+| 代次锚 | `tpl 96a30d6759f1bcc8d7b63dad857e9561`；`nlk a0338c9a…`／`irg 0b710633…`／`ir bb…` 未变（未提交） |
+
+### 172.4 边界 / F-101 余量
+- 版本与 OS 常量已与 PHP 8.5.8 对齐；**两处注册源合并为单一来源**（原 minor 3/4 矛盾消除），重复注册保留但值同源。
+- `PHP_OS`/`PHP_OS_FAMILY` 改为按目标平台**计算**（macOS⇒Darwin、Linux⇒Linux、Windows⇒WINNT/Windows、BSD 族⇒BSD、illumos⇒Solaris/Solaris），未知平台回退 `@tagName`/`Unknown`。
+- 仍开：`PHP_BINDIR`/`PHP_BINARY`（安装路径依赖，产品口径待裁）；F-170（RIPEMD 族）、F-158/F-117（P0）。
+
+## 173. ★R-266 落地记录（F-170：RIPEMD-160/128）
+
+### 173.1 契约（PHP 8.5.8 实测；`hash`/`hash_hmac`/`hash_pbkdf2` 三入口同源）
+| 形 | PHP |
+|---|---|
+| `hash('ripemd160', …)` | 40 位十六进制；空串 `9c1185a5…`、`abc` `8eb208f7…`（与规范向量一致） |
+| `hash('ripemd128', …)` | 32 位十六进制；空串 `cdf26213…`、`abc` `c14a1219…`（**修前 AOT 用 MD5 冒充 ⇒ 静默错值**） |
+| raw 输出（第 3 参 true） | 二进制摘要 |
+| `hash_hmac('ripemd160/128', …)` | 与 PHP 一致（含 >64 字节键：先哈希再补零） |
+| `hash_pbkdf2('ripemd160/128', …)` | 与 PHP 一致（整摘要/指定长度/二进制） |
+
+### 173.2 实现（`src/aot/runtime_lib_template.zig`，纯模板）
+- 新增 RIPEMD 核心：80/64 轮双线压缩（`rmd160Compress`/`rmd128Compress`）、共享 `rmdF` 与 r/r′/s/s′ 表、`rmdFinishBlocks`（小端 64 位比特长度填充）、`ripemd160Hash`/`ripemd128Hash`。
+- 新增一次性哈希 HMAC（`hmacOneShot`，块长 64；键 >64 先哈希）与自定义 PBKDF2 主循环 `pbkdf2FillCustom`。
+- `php_hash`：删除 `ripemd128` 的 MD5 假实现，改真实算法；新增 `ripemd160`；两者按 `raw_output` 返回十六进制/二进制（`hashValueFromBytes`）。
+- `php_hash_hmac`：新增 ripemd160/128 分支。
+- `php_hash_pbkdf2`：`Pbkdf2Algo` 增 `ripemd160`/`ripemd128`（hlen 20/16），分派到 `pbkdf2FillCustom`。
+
+### 173.3 读数
+| 腿 | 读数 |
+|---|---|
+| C311（新门 4 臂） | 自证 **4 CF**；实跑 **4/4 SAME** 19 s（t1 七形 hash、t2 raw、t3 hmac 短/长键、t4 pbkdf2 两算法） |
+| 探针 `/tmp/f170.php` | 全形 SAME（含 1000 字节跨块、多字节、空串、raw、hmac>64 字节键、pbkdf2 整摘要/二进制） |
+| 邻居 C307 | 4/4 SAME |
+| `zig build test` | 21/21 steps、326/326、rc=0（`/tmp/r266_test_summary.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r266_regression.log`，`SELF_CHECK_OK rows=68`） |
+| 代次锚 | `tpl 87be9b4bf352f60ec808318b5dc0a41f`；`nlk a0338c9a…`／`irg 0b710633…`／`ir bb…` 未变（未提交） |
+
+### 173.4 边界 / 新登记
+- **F-172 新立（P3）**：`php_hash` 的既有 sha224/384/512/sha3-* 分支仍**忽略 `raw_output`**（恒返回十六进制）；本轮只让新增 ripemd 分支按 raw 返回，既有分支留作独立小批。
+- **F-170 尾（仍开）**：`ripemd256`/`ripemd320`（PHP 支持、AOT 未实现）；`hash_hmac` 的 `binary` 形参在 AOT 签名中缺失（同属 F-172 族）。
+- RIPEMD 实现为规范表直译，已用七形 + 规范向量（空/abc）+ hmac/pbkdf2 交叉验证。
+
+## 174. ★R-267 落地记录（F-172 闭：hash 全算法族 raw 口径 + hash_hmac binary；顺带 F-172-b crc32 算法）
+
+### 174.1 契约（PHP 8.5.8，逐形实测）
+| 形 | PHP |
+|---|---|
+| `hash($algo, $data, true)` | 二进制摘要（md5/sha1/sha224/256/384/512、sha512/224、sha512/256、sha3-224/256/384/512、ripemd160/128 全覆盖） |
+| `hash('crc32', 'abc', true)` | `73bb8c64`（CRC-32/BZIP2，非反射，32 位值**小端**写出） |
+| `hash('crc32b', 'abc', true)` | `352441c2`（反射 CRC-32，大端写出） |
+| `hash('adler32', 'abc', true)` | `024d0127`（大端） |
+| `hash_hmac($algo, $data, $key, true)` | 二进制 HMAC（第 4 参缺省＝false） |
+| `hash_hmac` 超块长键 | 先哈希再补零（sha512 块 128、sha3 按 rate） |
+| `hash_hmac('crc32b'|'adler32'|'nope', …)` | **ValueError**：`must be a valid cryptographic hashing algorithm`（未接线 ⇒ F-172-b） |
+
+### 174.2 实现
+| 文件 | 变更点 |
+|---|---|
+| `src/aot/runtime_lib_template.zig` | `php_hash`：`raw` 单点提取（`:32478`），14 个既有分支改走 `hashValueFromBytes`；新增 sha512/224 与 sha3-224/256/384/512（`:32504`–`:32523`）；`crc32` 与 `crc32b` **拆开**（`:32524`/`:32530`）；新增 `crc32Bzip2Table()`＋`CRC32_BZIP2_TABLE`（`:32447`/`:32462`）与 `crc32Bzip2()`（`:32466`，table-driven、`@setEvalBranchQuota(4096)`） |
+| 同上 | 新增 `hmacStd()`（`:32550`，binary 口径单点）；`php_hash_hmac` 增第 4 参 `binary`（`:32560`），覆盖 sha256/sha1/md5/sha512/sha384/sha224/sha512-256/sha512-224/sha3-224/256/384/512 与 ripemd160/128 |
+| `src/aot/native_linker.zig` | `hash_hmac` 注册项 `handler_params = 4` ＋ `optional_defaults = initBool(false)`（`:4844`），3 实参调用补缺省 |
+
+### 174.3 读数
+| 腿 | 读数 |
+|---|---|
+| C312（新门 5 臂） | 自证 **5 CF**；实跑 **5/5 SAME** 27 s（t1 hash raw 17 算法 × 4 输入、t2 hmac raw 14 算法、t3 超块长键、t4 hmac 三口径、t5 hash 缺省/显式 false） |
+| 邻居 C307 | 4/4 SAME |
+| 邻居 C311 | 4/4 SAME |
+| `zig build test` | 21/21 steps、**326/326**、rc=0（`/tmp/r267_buildtest.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r267_regression.log`，`SELF_CHECK_OK rows=68 uniq=68`） |
+| 代次锚 | `nlk d23236d9cd6661d253d6281d61cd8f83`／`tpl 14353f170cf2e2e7c9e3ae10b0636e51`；`irg 0b710633…`／`ir bb2bb442…` 未变（均未提交） |
+
+### 174.4 边界 / 新登记
+- **F-172 已闭**（raw/binary 面）：`php_hash` 17 条分支（md5/sha1 委托既有实现，其余 15 条统一 `hashValueFromBytes`）与 `hash_hmac` 14 条分支统一按 PHP `raw` 口径；`hash_hmac` 的 `binary` 形参在发射器/注册表/模板三处补齐（3 实参调用不再错位）。
+- **F-172-b 新立（P3）**：未知算法名与非加密算法（crc32b/adler32/fnv*/joaat/xxh*/murmur3…）在 `hash()`／`hash_hmac()`／`hash_pbkdf2()` 三入口 PHP 均抛 **ValueError**（已实测三族措辞），AOT 仍返回 `false`。**不可直接改成 throw**：AOT 的 `hash_algos()` 现值仅 10 项且缺 sha3-*/ripemd*/sha512-*（更缺 PHP 支持的 whirlpool/tiger/gost/haval/md2/md4/fnv*/joaat/xxh*/murmur3），无"PHP 侧合法算法全集"就会把 PHP 支持的算法误抛 ⇒ 先补算法注册表，再接线 ValueError（含 `.may_raise` 与 catch 路由复证，见 F-128 教训）。
+- **F-170 尾（仍开）**：`ripemd256`/`ripemd320`（PHP 支持、AOT 未实现）。
+- **观察（未定性，P3）**：首轮 C312 的 t1/t5 报 `executable generation failed: FileNotFound` 且**无 Zig 诊断**；同一 `main.zig` 手工 `zig build-exe` 暴露真实原因是模板 comptime 分支配额超限（1000 上限）。配额修正后同输入正常；事后**故意还原配额**复测，报的是 `CompilationFailed`＋完整 Zig 诊断 ⇒ `FileNotFound` 未能复现（同批 t2/t3/t4 正常），不写入缺陷，留观察。
+- `crc32()`（PHP 函数，返回 int）与 `hash('crc32')` 是两套口径，本轮只动后者；`php_crc32` 未改（其值域由 `crc32b` 族覆盖）。
+
+## 175. ★R-268 落地记录（F-172-b 闭：算法注册表、大小写与三入口 ValueError）
+
+### 175.1 契约（PHP 8.5.8 实测）
+| 形 | PHP |
+|---|---|
+| `hash_algos()` | **60** 项，原序（md2,md4,md5,…,gost-crypto,adler32,…,haval*）；顺序即返回顺序 |
+| `hash_hmac_algos()` | **44** 项（＝加密集）：60 项去掉 adler32/crc32/crc32b/crc32c/fnv*/joaat/murmur*/xxh* |
+| `hash_hmac()`／`hash_pbkdf2()` 的算法集 | **与 `hash_hmac_algos()` 完全一致**（44 项；非加密算法实测均抛 ValueError） |
+| 算法名大小写 | **不敏感**（`hash("SHA256",…)`／`Sha3-256`／`RIPEMD160` 均合法） |
+| 空白 | **不裁剪**（`" SHA256"`／`"SHA256 "` ⇒ ValueError） |
+| 未知算法 | 三入口均抛 `ValueError`，措辞：`hash(): Argument #1 ($algo) must be a valid hashing algorithm`／`hash_hmac()`／`hash_pbkdf2()` 为 `…must be a valid cryptographic hashing algorithm` |
+| 非加密算法进 hmac/pbkdf2 | 同上「cryptographic」措辞的 ValueError（`crc32b`/`adler32` 实测） |
+| 可选性 | ValueError 可被 `try/catch(\ValueError)` 捕获，且**不触发** `set_error_handler` |
+
+### 175.2 实现
+| 文件 | 变更点 |
+|---|---|
+| `src/aot/runtime_lib_template.zig` | 新增 `HASH_ALGOS`（60，原序，`:32850`）／`HASH_CRYPTO_ALGOS`（44，原序，`:32865`）／`hashAlgoInList`（`:32876`）／`hashAlgosToArray`；`php_hash_algos` 改由全集生成（`:32892`），新增 `php_hash_hmac_algos`（`:32897`） |
+| 同上 | `hashAlgoLower`（`:32474`，栈上 128B 小写化，>128 原样比较）接入三入口：`php_hash`／`php_hash_hmac`／`php_hash_pbkdf2` |
+| 同上 | 三处尾支分诊：`php_hash` 不在 60 全集 ⇒ ValueError（`:32558`）；`php_hash_hmac` 不在 44 加密集 ⇒ ValueError（`:32623`）；`php_hash_pbkdf2` 的 `pbkdf2AlgoFromName` 失败时再查加密集，**不在集内才抛**（`:32781`），集内但未实现 ⇒ 返回 false |
+| `src/aot/native_linker.zig` | 新增 `hash_hmac_algos` 注册项（`:4848`） |
+| `fuzzy_scripts_720/tmp/c313_hash_algos_gate_tmp.sh` | 新门 5 臂 |
+
+### 175.3 读数
+| 腿 | 读数 |
+|---|---|
+| C313（新门 5 臂） | 自证 **5 CF**；实跑 **5/5 SAME** 42 s（t1 两表全序、t2 十形 ValueError＋可捕获＋handler 静默、t3 大小写、t4 已实现算法值、t5 反向守卫不误抛） |
+| 邻居 C312 | 5/5 SAME |
+| 邻居 C307 | 4/4 SAME |
+| 邻居 C311 | 4/4 SAME |
+| `zig build test` | 21/21 steps、**326/326**、rc=0（`/tmp/r268_buildtest.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r268_regression.log`，`SELF_CHECK_OK rows=68 uniq=68`） |
+| 代次锚 | `nlk c9d1385fb7fffb355332f5ddb060a2b3`／`tpl 004172242604433ef5edf959ed2a9b27`；`irg 0b710633…`／`ir bb2bb442…` 未变（均未提交） |
+
+### 175.4 边界 / 新登记
+- **F-172-b 已闭**：`hash_algos()`／`hash_hmac_algos()` 与 PHP 全表同序；三入口的未知算法 ValueError 可捕获且不惊动错误处理器；算法名大小写不敏感（原 AOT 对 `SHA256` 直接返回 false）。
+- **★过度致命风险已封死**：`hash_pbkdf2` 在 R-262 曾把 PHP 支持但 AOT 未实现的算法（whirlpool/tiger/gost/haval/snefru/md2/md4/ripemd256/320）**当无效算法抛 ValueError**——本轮改为「先查 PHP 注册表，集内但未实现 ⇒ false」，C313 t5 8 算法 × 3 入口反向守卫。
+- **F-170 尾（仍开，范围收窄）**：上述「PHP 支持、AOT 未实现」的算法值面（返回 false 而非摘要）；`hash_algos()` 已如实列出，用户遍历时会看到 false。
+- **未动面**：`hash_file()` 仍是 2 形参（PHP 为 algo/filename/binary/options，属 F-62f 形参族）；`hash_init/update/final` 未实现；动态调用 `$f='hash'` 未接派发（既存缺口）。
+
+## 176. ★R-269 落地记录（hash_file 四形参与错误契约；顺带修复 file/file_get_contents 不可编译）
+
+### 176.1 契约（PHP 8.5.8 实测）
+| 形 | PHP |
+|---|---|
+| `hash_file(algo, filename)` / `(…, binary)` / `(…, binary, options)` | 摘要；`binary=true` 为二进制；options 内容**忽略** |
+| 算法名 | 大小写不敏感（`SHA256` 合法） |
+| 未知算法 | **ValueError**：`hash_file(): Argument #1 ($algo) must be a valid hashing algorithm`，且**先于开文件**校验（文件不存在 + 算法非法 ⇒ ValueError 而非 Warning） |
+| 文件不存在 | `Warning: hash_file(<path>): Failed to open stream: No such file or directory` + `false`；`@` 可抑制 |
+| 空文件 | 空内容摘要（`md5` ⇒ `d41d8cd9…`） |
+| PHP 认可但 AOT 未实现（whirlpool 等） | **不抛**（PHP 返回摘要） |
+
+### 176.2 实现
+| 文件 | 变更点 |
+|---|---|
+| `src/aot/runtime_lib_template.zig` | 抽出 `hashBytes()` 字节入口（`:32490`；`php_hash` 与 `php_hash_file` 共用，md5/sha1 直接走 std）＋ `php_hash` 包装（`:32563`） |
+| 同上 | 新增 `warnOpenStream()`（`:36003`，统一 `{fn}({path}): Failed to open stream: {reason}`，`FileNotFound`/`AccessDenied` 有专门文案） |
+| 同上 | `php_hash_file` 重写为四形参（`:36017`）：算法名小写化 → 注册表 ValueError → 读文件（失败告警 + false）→ `hashBytes`；**原实现调用 `php_hash` 少传 `raw_output` ⇒ 任何 hash_file 调用都编译失败** |
+| 同上 | ★顺带 P1：`php_file_get_contents`（`:4269`）与 `php_file`（`:4710`）的 `readFileAlloc` 第四参是裸 `int`，Zig 0.16 要求 `Io.Limit` ⇒ **两函数只要被调用就编译失败**；本轮补 `.limited(...)` 并加打开失败 Warning |
+| `src/aot/native_linker.zig` | `hash_file` 注册项 `handler_params=4` ＋ 缺省 `false`/空数组（`:4971`）；专用发射分支补位（`:24152`） |
+| `fuzzy_scripts_720/tmp/c314_hash_file_gate_tmp.sh` | 新门 6 臂 |
+
+### 176.3 读数
+| 腿 | 读数 |
+|---|---|
+| C314（新门 6 臂） | 自证 **6 CF**；实跑 **6/6 SAME** 32 s（四形参/大写/空文件/跨块/crc32、缺文件警告与 `@`、ValueError 两形、反向守卫、自洽 9 算法、file/file_get_contents） |
+| 邻居 C313 | 5/5 SAME |
+| 邻居 C312 | 5/5 SAME |
+| 邻居 C307 | 4/4 SAME |
+| 邻居 C308 | 4/4 SAME |
+| `zig build test` | 21/21 steps、**326/326**、rc=0（`/tmp/r269_buildtest.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r269_regression.log`，`SELF_CHECK_OK rows=68 uniq=68`） |
+| 代次锚 | `nlk 32d899d270d279c03900afc24c74788c`／`tpl 41ddf903bb3673f2524b46518eaa350e`；`irg 0b710633…`／`ir bb2bb442…` 未变（均未提交） |
+
+### 176.4 边界 / 新登记
+- **F-173 新立（P2）**：`file_get_contents` 的 `offset`/`maxlen` 与 stream context、`file()` 的 `FILE_IGNORE_NEW_LINES`/`FILE_SKIP_EMPTY_LINES`/context、`fopen` 的 stream 语义均未接（本轮只修「不可编译 + 缺打开失败 Warning」两枚硬缺陷）。
+- **F-172 族收口状态**：`hash`/`hash_hmac`/`hash_pbkdf2`/`hash_file` 四入口的形参、raw、算法注册表与 ValueError 已一致；`hash_init/update/final` 仍未实现。
+- **F-170 尾（仍开）**：PHP 支持但 AOT 未实现的算法值面（四入口都返回 false）。
+- 动态调用 `$f='hash_file'` 未接派发（既存缺口，全族同）。
+
+## 177. ★R-270 落地记录（F-173 主体：file_get_contents 的 offset/length、file() 的 flags）
+
+### 177.1 契约（PHP 8.5.8 实测）
+| 形 | PHP |
+|---|---|
+| `file_get_contents($f)` | 全内容 |
+| `…, false, null, 3` | 从第 3 字节起 |
+| `…, false, null, -3` | **末 3 字节** |
+| `…, false, null, 100`（超过长度） | **空串**（不是 false） |
+| `…, false, null, -100`（越过文件头） | `Warning: file_get_contents(): Failed to seek to position -100 in the stream` + `false` |
+| `…, false, null, 0, 2)`／`(…, 2, 4)` | 长度截取（offset 与 length 可组合） |
+| `length = 0` | 空串 |
+| `length < 0` | `ValueError: file_get_contents(): Argument #5 ($length) must be greater than or equal to 0` |
+| `file($f)` | 每行保留 `\n`；**末行无换行时不补**（`"a\nbc"` ⇒ `["a\n","bc"]`） |
+| `FILE_IGNORE_NEW_LINES`(2) | 去掉行尾 `\n` |
+| `FILE_SKIP_EMPTY_LINES`(4) | **单独使用时空白行仍以 `"\n"` 返回**（实测 `["\n","\n","a\n","\n"]`）；与 2 同用才只剩非空行 |
+| 空文件 | `file() ⇒ []` |
+| `FILE_USE_INCLUDE_PATH`(1) | 值为 1（AOT 无 include_path，仅登记常量） |
+
+### 177.2 实现
+| 文件 | 变更点 |
+|---|---|
+| `src/aot/runtime_lib_template.zig` | `php_file_get_contents` 五形参（`:4272`）：offset 负值自尾部、越过头部 ⇒ seek Warning+false；length null/0/正数/负数 ValueError；顺带补上 `content` 释放 |
+| 同上 | `php_file` 三形参（`:4747`）：改用「按 `\n` 定位 + 是否换行结尾」扫描，修正末行补 `\n` 与 skip-empty 语义；`line_with_newline` 不再泄漏 |
+| 同上 | 常量补 `FILE_USE_INCLUDE_PATH = 1`（`:9510`） |
+| `src/aot/native_linker.zig` | `file_get_contents` 两处注册（`:4446`／`:4766`）`handler_params=5`＋缺省 `false,null,0,null`；`file`（`:4462`）`handler_params=3`＋缺省 `0,null` |
+| `fuzzy_scripts_720/tmp/c315_file_opts_gate_tmp.sh` | 新门 5 臂 |
+
+### 177.3 读数
+| 腿 | 读数 |
+|---|---|
+| C315（新门 5 臂） | 自证 **5 CF**；实跑 **5/5 SAME** 27 s |
+| 邻居 C314 | 6/6 SAME |
+| 邻居 C313 | 5/5 SAME |
+| `zig build test` | 21/21 steps、**326/326**、rc=0（`/tmp/r270_buildtest.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r270_regression.log`，`SELF_CHECK_OK rows=68 uniq=68`） |
+| 代次锚 | `nlk 9d7510a06e5da4d28135c4c5147bbd66`／`tpl a502765c3371ea7d0dec24840f1efc69`；`irg 0b710633…`／`ir bb2bb442…` 未变（均未提交） |
+
+### 177.4 边界 / 新登记
+- **F-173 主体已闭**：offset/length、file() 的两标志与行尾语义、常量 `FILE_USE_INCLUDE_PATH`。
+- **F-173 尾（仍开，非 AOT 能力面）**：`use_include_path`（AOT 无 include_path 机制）、stream context（无 stream 模型）、`fopen/fgets/fread/fwrite` 语义。
+- 观察：`file_get_contents` 在 `native_linker.zig` 有**两处重复注册**（`:4446`／`:4766`，F-102 同族）——两处必须同步改，否则按调用点不同取到不同形参数。
+
+## 178. ★R-271 落地记录（F-170 尾第二段：RIPEMD-256 / RIPEMD-320）
+
+### 178.1 契约（PHP 8.5.8 实测 + 规范对照）
+| 形 | PHP |
+|---|---|
+| `hash('ripemd256', '')` | `02ba4c4e5f8ecd1877fc52d64d30e37a2d9774fb1e5d026380ae0168e3c5522d` |
+| `hash('ripemd320', '')` | `22d65d5661536cdc75c1fdf5c6de7b41b9f27325ebc61e8557177d705a0ec880151c3a32a00899b8` |
+| `hash('ripemd256', 'abc')` | `afbd6e228b9d8cbbcef5ca2d03e6dba10ac0bc7dcbe4680e1e42d2e975459b65` |
+| `hash('ripemd320', 'abc')` | `de4c01b3054f8930a79d09ae738e92301e5a17085beffdc1b8d116713e74f82fa942d64cdbc4682d` |
+| raw / `hash_hmac` / `hash_pbkdf2` | 三者均支持（二进制、>64B 键、指定长度） |
+| 名字 | 只有 `ripemd256`／`ripemd320`（`RipeMD-320` 连字符形 ⇒ ValueError，仅大小写可变） |
+
+### 178.2 实现（规范来源：RustCrypto `ripemd/src/c256.rs`、`c320.rs`，非凭记忆）
+| 文件 | 变更点 |
+|---|---|
+| `src/aot/runtime_lib_template.zig` | `rmd256Compress`（`:32446`）：两条 4 寄存器线，128 轮函数＋`RMD_R160/RP160/S160/SP160`（复用）＋`RMD_K128L/R`；每轮末**按物理下标** `swap(bb[r], bbb[r])`（r=0..3） |
+| 同上 | `rmd320Compress`（`:32484`）：两条 5 寄存器线，160 轮函数（`c=rotl(c,10)`）＋`RMD_K160L/R`；轮末 `swap(bb[r], bbb[r])`（r=0..4） |
+| 同上 | `ripemd256Hash`（`:32522`）／`ripemd320Hash`（`:32533`）：8/10 个初值，复用 `rmdFinishBlocks`（小端 64 位比特长度填充） |
+| 同上 | `hashBytes` 两分支（`:32718`/`:32720`）；`php_hash_hmac` 两分支（`hmacOneShot` 32/40）；`Pbkdf2Algo` 增 `ripemd256`/`ripemd320`＋hlen 32/40＋`pbkdf2FillCustom` 分派（`:32881`/`:33006`） |
+| `fuzzy_scripts_720/tmp/c316_ripemd256_320_gate_tmp.sh` | 新门 5 臂 |
+
+### 178.3 读数
+| 腿 | 读数 |
+|---|---|
+| C316（新门 5 臂） | 自证 **5 CF**；实跑 **5/5 SAME** 30 s（hash 八形／raw／hmac 短长键与二进制／pbkdf2 六形／注册表与大小写） |
+| 邻居 C313 | 5/5 SAME（反向守卫中 `ripemd320` 已转为真值面） |
+| 邻居 C312 | 5/5 SAME |
+| 邻居 C311 | 4/4 SAME |
+| 邻居 C307 | 4/4 SAME |
+| `zig build test` | 21/21 steps、**326/326**、rc=0（`/tmp/r271_buildtest.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r271_regression.log`，`SELF_CHECK_OK rows=68 uniq=68`） |
+| 代次锚 | `tpl e38ad1f63462c61091ebd82361c20337`；`nlk 9d7510a0…`／`irg 0b710633…`／`ir bb2bb442…` 未变（均未提交） |
+
+### 178.4 边界 / 教训
+- **F-170 尾（仍开）**：whirlpool／tiger\*／gost\*／haval\*／snefru\*／md2／md4／fnv\*／joaat／murmur\*／xxh\* 仍未实现（四入口返回 false）。
+- ★**首版算法形态错误**：我按 RIPEMD-128 的「逻辑寄存器轮转」改写，而规范的交换操作是**按物理下标** `swap(bb[r], bbb[r])` ⇒ 角色与下标错位，空串向量即全错。改为「每步只写 a 槽 + 物理下标轮转」后一次对齐。**教训：并行线的交换语义必须对照参考实现的存储形态，不能凭等价性直觉改写**（已写入记忆）。
+- 附带发现：连字符变体（`RipeMD-320`）在 PHP 亦属未知算法 ⇒ C316 t5 改为 try/catch 比较消息，避免不可比对的未捕获栈帧（AGENTS.md §七.5）。
+
+## 179. ★R-272 落地记录（F-170 尾第三段：crc32c／fnv132／fnv1a32／fnv164／fnv1a64／joaat）
+
+### 179.1 契约（PHP 8.5.8 实测）
+| 形 | PHP |
+|---|---|
+| `hash($a, …)` 六算法 | 4B/4B/4B/8B/8B/4B 的**大端**十六进制；raw 与 hex 字节同序 |
+| `'crc32c'` | CRC-32C（Castagnoli，反射 poly 0x82F63B78，init/xorout 全 1）：`abc ⇒ 364b3fb7` |
+| `'fnv132'` / `'fnv1a32'` | `abc ⇒ 439c2f4b` / `1a47e90b`；空串均 `811c9dc5` |
+| `'fnv164'` / `'fnv1a64'` | `abc ⇒ d8dcca186bafadcb` / `e71fa2190541574b`；空串均 `cbf29ce484222325` |
+| `'joaat'` | Jenkins one-at-a-time：`abc ⇒ ed131f5b` |
+| `hash_file` | 同值可用（含 raw） |
+| `hash_hmac` / `hash_pbkdf2` | **均 ValueError**（非加密族，`must be a valid cryptographic hashing algorithm`） |
+| 名字 | 大小写不敏感（`CRC32C`／`FnV1A64`／`JOAAT` 等价） |
+
+### 179.2 实现
+| 文件 | 变更点 |
+|---|---|
+| `src/aot/runtime_lib_template.zig` | `crc32cTable`＋`CRC32C_TABLE`＋`crc32cHash`（`:32631`/`:32646`/`:32648`）；`fnv1_32`/`fnv1a_32`/`fnv1_64`/`fnv1a_64`（`:32657`–`:32692`）；`joaatHash`（`:32693`） |
+| 同上 | `hashBytes` 六分支，统一**大端**写出（`:32787`–`:32811`） |
+| `fuzzy_scripts_720/tmp/c317_checksum_gate_tmp.sh` | 新门 5 臂 |
+
+### 179.3 读数
+| 腿 | 读数 |
+|---|---|
+| C317（新门 5 臂） | 自证 **5 CF**；实跑 **5/5 SAME** 32 s（六算法×七输入／raw／hash_file／hmac+pbkdf2 拒绝矩阵／大小写与注册表） |
+| 邻居 C316 | 5/5 SAME |
+| 邻居 C313 | 5/5 SAME |
+| 邻居 C312 | 5/5 SAME |
+| `zig build test` | 21/21 steps、**326/326**、rc=0（`/tmp/r272_buildtest.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r272_regression.log`，`SELF_CHECK_OK rows=68 uniq=68`） |
+| 代次锚 | `tpl ff6298bf7504eca858766528ca2b8624`；`nlk 9d7510a0…`／`irg 0b710633…`／`ir bb2bb442…` 未变（均未提交） |
+
+### 179.4 边界 / 备注
+- **F-170 尾（收窄）**：仍缺 whirlpool／tiger\*／gost\*／haval\*／snefru\*／md2／md4／murmur\*／xxh\*。
+- 非加密族天然被 hmac/pbkdf2 拒绝（`HASH_CRYPTO_ALGOS` 不含它们）——C317 t4 以 12 形（6 算法 × 2 入口）反向守卫。
+- `crc32cTable` 与 `crc32Bzip2Table` 均为 comptime 建表（`@setEvalBranchQuota(4096)`）；两表不可合并（poly 与反射方向不同）。
+
+## 180. ★R-273 落地记录（F-170 尾第四段：md4／murmur3a·c·f／xxh32·64）
+
+### 180.1 契约（PHP 8.5.8 实测；规范来源 RFC 1320、smhasher `MurmurHash3.cpp`、xxHash `xxhash.h`）
+| 形 | PHP |
+|---|---|
+| `hash('md4', …)` | RFC 1320 向量（空 `31d6cfe0…`、`abc` `a448017a…`）；**属加密族**（hmac/pbkdf2 均支持） |
+| `hash('murmur3a', …)` | MurmurHash3 x86_32(seed 0)：`abc ⇒ b3dd93fa`（大端 4B） |
+| `hash('murmur3c', …)` | x86_128(seed 0)：4 个 u32 **分别大端**（`abc ⇒ 75cdc6d1 a2b006a5 a2b006a5 a2b006a5`） |
+| `hash('murmur3f', …)` | x64_128(seed 0)：2 个 u64 **分别大端**（`abc ⇒ b4963f3f… 3ba27441…`） |
+| `hash('xxh32'/'xxh64', …)` | XXH32/XXH64 seed=0：`abc ⇒ 32d153ff` / `44bc2cf5ad770999`（大端） |
+| 尾长与跨块 | 0..16、31/32、64、1000 字节与多字节输入全部逐字节一致 |
+| hmac/pbkdf2 | **仅 md4 支持**；murmur3*/xxh* ⇒ ValueError（非加密族） |
+
+### 180.2 实现
+| 文件 | 变更点 |
+|---|---|
+| `src/aot/runtime_lib_template.zig` | `md4Hash`/`md4Compress`（`:32711`/`:32737`，小端填充＋三组 r/s 表） |
+| 同上 | `murmurFmix32`/`murmurFmix64`、`murmur3aHash`（`:32806`）、`murmur3cHash`（`:32842`）、`murmur3fHash`（`:32973`），尾部按 C 的「落穿」语义改写为 `if (tl>=n)` 链 |
+| 同上 | `xxh32Hash`（`:33051`）／`xxh64Hash`（`:33092`），含 ≥16/≥32 的四路并行主体、`mergeRound` 与雪崩尾 |
+| 同上 | `hashBytes` 六分支（`:33255` 起）；`php_hash_hmac`＋`Pbkdf2Algo` 增 md4（hlen 16） |
+| `fuzzy_scripts_720/tmp/c318_hash_more_gate_tmp.sh` | 新门 5 臂 |
+
+### 180.3 读数
+| 腿 | 读数 |
+|---|---|
+| C318（新门 5 臂） | 自证 **5 CF**；实跑 **5/5 SAME** 37 s（6 算法×14 输入／raw／md4 的 hmac+pbkdf2 与 10 形拒绝／hash_file／大小写与注册表） |
+| 邻居 C317 | 5/5 SAME |
+| 邻居 C316 | 5/5 SAME |
+| 邻居 C313 | 5/5 SAME |
+| `zig build test` | 21/21 steps、**326/326**、rc=0（`/tmp/r273_buildtest.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r273_regression.log`，`SELF_CHECK_OK rows=68 uniq=68`） |
+| 代次锚 | `tpl 0b8faa9418bb5409d21d62c51dcea99a`；`nlk 9d7510a0…`／`irg 0b710633…`／`ir bb2bb442…` 未变（均未提交） |
+
+### 180.4 边界 / 备注
+- **F-170 尾（收窄为 5 项）**：whirlpool／tiger\*／gost\*／haval\*／snefru\*（及 xxh3／xxh128 两种新式算法）仍未实现。
+- MurmurHash3 的尾部处理照 C 的 switch 落穿改写为 `if (tl >= n)` 链——Zig 无落穿，直接照抄 switch 会漏掉低字节累积。
+- murmur3c/f 的 128 位输出在 PHP 里是**逐字大端**（不是整体字节反转），实现按字写出，已由 raw 指纹复证。
+
+## 181. ★R-274 落地记录（F-173 尾第一段：流族 feof/ftell/fseek/rewind/fgetc/fgets·length；文件系统 API 漂移）
+
+### 181.1 契约（PHP 8.5.8 实测）
+| 形 | PHP |
+|---|---|
+| `feof($h)` | 读之前恒 `false`；一次读尝试触到 EOF 后恒 `true`（读到无换行的末行也算） |
+| `fgets($h)` / `fgets($h, $len)` | 读到换行或 EOF；给了 `$len` ⇒ 最多读 **`len-1`** 字节（`fgets($f,3)` ⇒ 2 字节）；EOF ⇒ `false` |
+| `fgetc($h)` | 1 字节；EOF ⇒ `false` |
+| `fread($h, $len)` | `$len > 0` 否则 **ValueError**（`fread(): Argument #2 ($length) must be greater than 0`）；EOF ⇒ `""`（不是 false） |
+| `ftell($h)` | 当前位置（SEEK_CUR 查询，不改位置） |
+| `fseek($h, $off, $whence = SEEK_SET)` | 成功 `0`/失败 `-1`；成功后**清除 EOF 标志**；`SEEK_SET/CUR/END = 0/1/2` |
+| `rewind($h)` | 回 0 并清 EOF；返回 `true` |
+| `file_put_contents($f, $d, $flags = 0, $context = null)` | `FILE_APPEND`(8) 追加（不存在则创建）；返回写入字节数 |
+| `mkdir($p, 0777, false)` | 非递归要求父目录存在 |
+| 文件系统族 | `file_exists/is_file/is_dir/filesize/copy/rename/unlink/rmdir/scandir/getcwd` 成功路径值 |
+
+### 181.2 实现
+| 文件 | 变更点 |
+|---|---|
+| `src/aot/runtime_lib_template.zig` | `php_file_put_contents` 四形参（`:4254`，FILE_APPEND 经 `streamLseek` 定位末尾）；`php_fread`（`:4381`，len>0 ValueError、EOF `""`、补 buffer 释放）；`php_fgets` 两形参（`:4417`）；新增 `php_fgetc`（`:4452`）／`php_feof`（`:4466`）／`streamLseek`（`:4473`，Zig 0.16 `Io.File` 无 seek ⇒ 走 `std.c.lseek`）／`php_ftell`（`:4480`）；`php_fseek` 三形参（`:4489`）；`php_rewind` 改 resource 版（`:36795`） |
+| 同上 | `PHPResource` 增 `eof: bool = false`；新增常量 `SEEK_SET/CUR/END` |
+| 同上 | ★API 漂移修复：`php_file_exists`（`:28137`，`access(io,…)`）、`php_mkdir`（`:28150`，`createDir/createDirPath`＋`Permissions` 是 `enum(mode_t)`）、`php_rmdir`（`:28171`）、`php_rename`（`:28183`）、`php_copy`（`:28197`）、`php_getcwd`（`:4528`，`realPathFileAlloc`）、`php_unlink`（`deleteFile(io,…)`）、两处目录迭代器 `next(io)`（`:4516`／`:27615`）、`php_unlink`（`:4555`） |
+| `src/aot/native_linker.zig` | 新增 `feof`/`ftell`/`fgetc` 注册；`fgets` 2 槽、`fseek` 3 槽、`file_put_contents` 4 槽（两处注册同步）；`file_put_contents` 专用发射分支改为 4 槽补位 |
+| `fuzzy_scripts_720/tmp/c319_stream_fs_gate_tmp.sh` | 新门 5 臂 |
+
+### 181.3 读数
+| 腿 | 读数 |
+|---|---|
+| C319（新门 5 臂） | 自证 **5 CF**；实跑 **5/5 SAME** 37 s（流语义 14 形／文件系统 11 形／file_put_contents 6 形／缺省形 4 形／反向守卫 3 形） |
+| 邻居 C314 | 6/6 SAME |
+| 邻居 C315 | 5/5 SAME |
+| `zig build test` | 21/21 steps、**326/326**、rc=0（`/tmp/r274_buildtest.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r274_regression.log`，`SELF_CHECK_OK rows=68 uniq=68`） |
+| 代次锚 | `nlk a90c34994de41a3b95bc2dc0c0356c8d`／`tpl 7b6e7174ffd006cf35d424a7a1e73a92`；`irg 0b710633…`／`ir bb2bb442…` 未变（均未提交） |
+
+### 181.4 边界 / 新登记
+- **P1 族（本轮修复）**：`feof` 完全未实现（调用即 `undefined function` 致命）；`rewind` 把 resource 当整数指针（恒 false）；`fseek` 触发 `Io.File` 无 `seekTo` 的编译错；`mkdir` 因运行时切片拼接**编译失败**；`file_exists/rmdir/rename/copy/unlink/getcwd/scandir` 因 Zig 0.16 Dir API 漂移**全部编译失败**。
+- **F-175 新立（P2）**：文件系统族失败路径**缺 PHP 警告**（`mkdir/rename/copy/unlink/rmdir/filesize/scandir` 均静默返回 false；PHP 会打 `Warning: …`），C319 已用成功路径臂规避该面。
+- **F-176 新立（P3）**：`scandir()` 返回集不含 `"."`/`".."` 且未排序（PHP 三者俱全、默认按字母序）。
+- **F-173 尾（仍开）**：`fopen` 仅支持 `r`/`w`/`a`（`r+`/`w+`/`a+`/`x`/`c` 等未实现）；`LOCK_EX` 未建模；stream context 仍未建模。
+
+## 182. ★R-275 落地记录（F-175 闭：文件系统失败警告；F-176 闭：scandir 语义；fopen 全模式）
+
+### 182.1 契约（PHP 8.5.8 实测）
+| 形 | PHP |
+|---|---|
+| `mkdir` 失败 | `Warning: mkdir(): File exists`（已存在）／`mkdir(): No such file or directory`（父目录缺）；返回 false |
+| `rename` 失败 | `rename(<old>,<new>): No such file or directory` |
+| `copy` 失败 | `copy(<src>): Failed to open stream: No such file or directory` |
+| `unlink` 失败 | `unlink(<path>): No such file or directory` |
+| `rmdir` 失败 | `rmdir(<path>): No such file or directory`／`rmdir(<path>): Directory not empty` |
+| `filesize` 失败 | `filesize(): stat failed for <path>` |
+| `scandir` 现有目录 | `[".","..",…]`，**按字节序升序** |
+| `scandir` 失败 | **两条**：`scandir(<path>): Failed to open directory: …` ＋ `scandir(): (errno N): …`；false |
+| `fopen` | `r/r+/w/w+/a/a+/x/x+/c/c+`（`b`/`t` 后缀可忽略）；`a/a+` 写前定位末尾、读位置仍在 0；`c` 不截断；`x` 排他创建 |
+| `@` | 上述失败全部静默，返回值不变 |
+
+### 182.2 实现
+| 文件 | 变更点 |
+|---|---|
+| `src/aot/runtime_lib_template.zig` | `php_fopen` 全模式重写（`:4339`）＋失败 `warnPf`；`fsErrText`（`:4426`）／`warnPf`（`:4439`）公共文案表；`php_fwrite` 的 append 定位（`:4451`，`PHPResource.append`（`:2492`）） |
+| 同上 | `php_scandir` 重写（`:4593`）：`.`/`..`＋字节序排序＋失败两连警告；`php_unlink`（`:4672`）／`php_filesize`（`:4684`，改 `statFile`）／`php_mkdir`（`:28276`）／`php_rmdir`（`:28307`）／`php_rename`（`:28322`）／`php_copy`（`:28339`）全部补 PHP 措辞警告 |
+| `fuzzy_scripts_720/tmp/c320_fs_warn_gate_tmp.sh` | 新门 5 臂 |
+
+### 182.3 读数
+| 腿 | 读数 |
+|---|---|
+| C320（新门 5 臂） | 自证 **5 CF**；实跑 **5/5 SAME** 31 s（6 类失败警告／10 种 fopen 模式／`@` 抑制／scandir 排序与两连警告／成功路径守卫） |
+| 邻居 C319 | 5/5 SAME |
+| 邻居 C314 | 6/6 SAME |
+| 邻居 C315 | 5/5 SAME |
+| `zig build test` | 21/21 steps、**326/326**、rc=0（`/tmp/r275_buildtest.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r275_regression.log`，`SELF_CHECK_OK rows=68 uniq=68`） |
+| 代次锚 | `tpl e121d277ebeab7e0e202b18e039e6133`；`nlk a90c3499…`／`irg 0b710633…`／`ir bb2bb442…` 未变（均未提交） |
+
+### 182.4 边界 / 备注
+- **F-175 已闭**：7 个文件系统函数的失败文案（含 `errno` 映射：ENOENT 2／EACCES 13／ENOTDIR 20）。
+- **F-176 已闭**：`scandir` 现返回 `[".","..",…]` 且按字节序排序（`scandir($d, $order)` 的排序参数与 context 仍未接，属 F-173 尾）。
+- **F-173 尾（收窄）**：`fopen` 的 `e`（close-on-exec）后缀、`LOCK_EX`、stream context 仍未建模；`x+` 已实现但门内未覆盖（PHP 的 `x+` 与 `x` 差异仅在读权限）。
+- 实现注意：`fwrite` 的 append 语义必须**每次写前**重新定位（`a+` 读后写也一样），不能只在 open 时定位一次。
+
+## 183. ★R-275 顺带结论（文件族现状清单）
+| 面 | 状态 |
+|---|---|
+| 读 | `file_get_contents`（offset/length）、`file`（两标志）、`fread`/`fgets`/`fgetc`/`feof`/`ftell`/`fseek`/`rewind` 已对齐 |
+| 写 | `file_put_contents`（FILE_APPEND）、`fwrite`（append 模式）已对齐；`LOCK_EX` 未建模 |
+| 目录 | `mkdir`（递归/非递归）、`rmdir`、`scandir`（默认排序）、`getcwd` 已对齐 |
+| 元信息 | `file_exists`/`is_file`/`is_dir`/`filesize` 已对齐 |
+| 未接 | `stat`/`lstat`/`touch`/`chmod`/`filemtime`/`glob`/`readfile`/`fpassthru` 等（未普查，下一轮可做一次「文件族 API 存在性普查」） |
+
+## 184. ★R-276 落地记录（F-177：stat 族与剩余文件系统 API；普查 C321 首证 17 枚缺失）
+
+### 184.1 普查读数（C321，24 臂）
+| 判定 | 数量 | 明细 |
+|---|---|---|
+| SAME | 6 | `touch`／`realpath`／`glob`／`tempnam`／`fnmatch`／`pathinfo` |
+| 未定义（本轮修复） | 16 | `stat`／`lstat`／`filetype`／`fileperms`／`is_link`／`chmod`／`readfile`／`fpassthru`／`flock`／`ftruncate`／`fstat`／`fsync`／`umask`／`symlink`／`readlink`／`clearstatcache`（另有 `filectime` **有实现但无注册**，同轮补注册） |
+| 仍缺（记 F-178） | 3 臂/5 函数 | `fgetcsv`/`fputcsv`、`disk_free_space`/`disk_total_space`、`opendir`/`readdir`/`closedir` |
+
+### 184.2 契约（PHP 8.5.8 实测）
+| 形 | PHP |
+|---|---|
+| `stat($f)` | **26 键**：0..12（dev/ino/mode/nlink/uid/gid/rdev/size/atime/mtime/ctime/blksize/blocks）＋同名串键；失败 `Warning: stat(): stat failed for <path>` + false |
+| `lstat($f)` | 同上但不跟随链接；失败措辞是 **`Lstat failed`**（大写 L） |
+| `filetype` | `file`／`dir`／`link`／`fifo`／`char`／`block`／`socket`／`unknown`（走 lstat 语义） |
+| `fileperms` | 完整 mode（含文件类型位，如 `33188`） |
+| `is_link` | lstat 后判 `S_IFLNK` |
+| `readfile` | 输出内容 + 返回字节数；失败 `readfile(<path>): Failed to open stream: …` + false |
+| `fpassthru` | 从当前位置输出剩余内容 + 返回字节数 |
+| `fstat`/`ftruncate`/`fsync`/`flock` | 与 fd 语义一致；`LOCK_SH/EX/UN/NB = 1/2/3/4` |
+| `umask` | 无参返回当前掩码且**不改**；带参设置并返回旧值 |
+| `symlink`／`readlink` | 失败措辞 `symlink(): File exists`／`readlink(): No such file or directory`（均不含路径） |
+| `clearstatcache` | AOT 无 stat 缓存 ⇒ no-op（2 形参吞下） |
+
+### 184.3 实现
+| 文件 | 变更点 |
+|---|---|
+| `src/aot/runtime_lib_template.zig` | `fsStatRaw`（`:4646`，`std.c.fstatat`＋`AT.SYMLINK_NOFOLLOW`）／`phpStatValue`（`:4656`，26 键）／`php_stat`（`:4673`）／`php_lstat`（`:4685`）／`php_filetype`（`:4698`，`std.c.S.IFMT` 分类）／`php_fileperms`（`:4722`）／`php_is_link`（`:4728`）／`php_chmod`（`:4735`）／`php_readfile`（`:4750`）／`php_fpassthru`（`:4762`）／`php_fstat`（`:4780`）／`php_ftruncate`（`:4789`）／`php_fsync`（`:4796`）／`php_flock`（`:4803`）／`php_umask`（`:4810`，查询用「置 0 取旧再恢复」）／`php_symlink`（`:4822`）／`php_readlink`（`:4839`）／`php_clearstatcache`（`:4856`） |
+| 同上 | 常量补 `LOCK_UN=3`／`LOCK_NB=4` |
+| `src/aot/native_linker.zig` | 17 个注册项（`:4456`–`:4472`，两处表同步；`filectime` 复用既有 1 形参实现 ⇒ `needs_allocator=false`） |
+| `fuzzy_scripts_720/tmp/c321_fs_api_census_tmp.sh` | 普查侧门（24 臂，保留为残缺口台账） |
+| `fuzzy_scripts_720/tmp/c322_stat_family_gate_tmp.sh` | 新门 5 臂（绿） |
+
+### 184.4 读数
+| 腿 | 读数 |
+|---|---|
+| C322（新门 5 臂） | 自证 **5 CF**；实跑 **5/5 SAME** 36 s（26 键结构／三类型／readfile+fpassthru／fstat+truncate+fsync+flock／umask+symlink+readlink+clearstatcache） |
+| 邻居 C319 | 5/5 SAME |
+| 邻居 C320 | 5/5 SAME |
+| 邻居 C314 | 6/6 SAME |
+| `zig build test` | 21/21 steps、**326/326**、rc=0（`/tmp/r276_buildtest.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r276_regression.log`，`SELF_CHECK_OK rows=68 uniq=68`） |
+| 代次锚 | `nlk a9508e317484cf4eec5747b6165506e9`／`tpl 672cee68dee4ca14f7adf359274407ff`；`irg 0b710633…`／`ir bb2bb442…` 未变（均未提交） |
+
+### 184.5 边界 / 新登记
+- **F-177 主体已闭**：16 枚函数＋`filectime` 注册，值与文案均与 PHP 一致；`stat` 的 13 键值域用 `std.c.Stat`（`dev/ino/mode/nlink/uid/gid/rdev/size/atime()/mtime()/ctime()/blksize/blocks`，跨平台字段经访问器收口）。
+- **F-178 新立（P2）**：`opendir`/`readdir`/`closedir` 仍缺（C321 t24 红）；`fgetcsv`/`fputcsv` 仍缺（t13 红，且 PHP 8.5.8 两者均带 `$escape` Deprecated）；`disk_free_space`/`disk_total_space` 仍缺（t19 红，需 statfs）。
+- 备注：`filectime` 原本**有实现但无注册**（调用即 undefined）——与 R-274 的「实现存在但 API 漂移」同族，普查是唯一能发现这类缺口的手段。
+
+## 185. ★R-277 落地记录（F-178 第一段：CSV 族 fgetcsv／fputcsv）
+
+### 185.1 契约（PHP 8.5.8 实测）
+| 形 | PHP |
+|---|---|
+| `fgetcsv($h)` | 每行数组；`"x,y"` → 单字段；`""` 转义 → `"`；引号内换行保留；空行 ⇒ **`[null]`**；EOF ⇒ `false` |
+| `fgetcsv($h, $length, …)` | `$length` 限定最多读取字节数（截断即返回部分行） |
+| `fgetcsv(…, $escape)` 省略 | **每次调用**发 `Deprecated: fgetcsv(): the $escape parameter must be provided as its default value will change`，行为仍用 `\` |
+| `fputcsv($h, $fields)` | 需引号的字符集：分隔符、引号、`\n`、`\r`、`\t`、**空格**、escape；字段内引号**加倍**；返回写入字节数（含 EOL） |
+| `fputcsv(…, $escape)` 省略 | 同上 Deprecated（`fputcsv(): …`） |
+| `fputcsv` 自定义 enclosure/eol | 按参数生效（`'nl\nhere'`、`\r\n` 行尾） |
+| 非 resource 实参 | `TypeError: <fn>(): Argument #1 ($stream) must be of type resource, string given`（ZPP 措辞） |
+| **已关闭** resource | `TypeError: <fn>(): Argument #1 ($stream) must be an open stream resource`（函数体措辞） |
+
+### 185.2 实现
+| 文件 | 变更点 |
+|---|---|
+| `src/aot/runtime_lib_template.zig` | `Value.hasResourceType`（`:2673`，只看类型位 ⇒ 关闭后仍为 true，用于区分两套 TypeError）；`csvParamChar`（`:4875`）／`csvReadLine`（`:4881`，引号感知逻辑行）／`csvParseLine`（`:4898`，`[null]` 空行、双引号/escape 处理）／`php_fgetcsv`（`:4956`）／`php_fputcsv`（`:5000`） |
+| 同上 | 参数以 **null 作「未提供」哨兵**：省略 `$escape` ⇒ `emitDeprecated(...)` 后按 `\` 处理（与 PHP 逐次告警一致） |
+| `src/aot/native_linker.zig` | `fgetcsv` 5 槽／`fputcsv` 6 槽注册（`:4473` 起，两处表同步；缺省全 null） |
+| `fuzzy_scripts_720/tmp/c323_csv_gate_tmp.sh` | 新门 5 臂（heredoc 写法，规避 shell 转义陷阱） |
+
+### 185.3 读数
+| 腿 | 读数 |
+|---|---|
+| C323（新门 5 臂） | 自证 **5 CF**；实跑 **5/5 SAME** 33 s（读矩阵 7 形／写矩阵 5 形＋原始字节／往返／显式 escape＋自定义分隔符＋length／EOF 与两套 TypeError） |
+| 邻居 C322 | 5/5 SAME |
+| 邻居 C319 | 5/5 SAME |
+| 邻居 C320 | 5/5 SAME |
+| `zig build test` | 21/21 steps、**326/326**、rc=0（`/tmp/r277_buildtest.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r277_regression.log`，`SELF_CHECK_OK rows=68 uniq=68`） |
+| 代次锚 | `nlk 8f1fced47758920d5018b29d71e6116d`／`tpl d8e5e3074d9cc734511a82a1c3a70c05`；`irg 0b710633…`／`ir bb2bb442…` 未变（均未提交） |
+
+### 185.4 边界 / 备注
+- **F-178 收窄**：CSV 两函数已闭；剩余 `opendir`/`readdir`/`closedir` 与 `disk_free_space`/`disk_total_space`（C321 台账仍红，后者需 statfs 平台字段）。
+- ★**两套 TypeError 措辞**：ZPP（非 resource）与函数体（已关闭 resource）文案不同；`Value.isResource()` 把「已关闭」也当 false ⇒ 新增 `hasResourceType()` 才可区分。该模式对其它接受 stream 的函数同样适用（后续可复用）。
+- `$escape` 的「未提供」用 null 哨兵编码（发射器补缺省 null）；显式传 `""` 也按 PHP 视为空 escape（当前按 null 处理并告警，属已知小差异）。
+- gate 用 heredoc 写臂：此前 printf+多层引号转义导致两枚臂**静默产出空脚本**（DIFF 而非语法错），已记入回归规则。
+
+## 186. ★R-278 落地记录（F-178 第二段：目录句柄族 opendir／readdir／rewinddir／closedir）
+
+### 186.1 契约（PHP 8.5.8 实测）
+| 形 | PHP |
+|---|---|
+| `opendir($d)` | 成功返回 resource；不存在目录/普通文件 ⇒ **Warning** `opendir(<path>): Failed to open directory: …` + false |
+| `readdir($h)` | 依次返回 `"."`、`".."`、各条目（**原始目录项顺序**）；读完 ⇒ `false`（重复调用仍 false） |
+| `rewinddir($h)` | 游标复位到开头；返回 **NULL** |
+| `closedir($h)` | 关闭；返回 **NULL** |
+| 非 resource 实参 | `TypeError: X(): Argument #1 ($dir_handle) must be of type resource or null, string given` |
+| 普通文件句柄 | `TypeError: X(): Argument #1 ($dir_handle) must be a valid Directory resource` |
+| 已关闭句柄 | `TypeError: X(): Argument #1 ($dir_handle) must be an open stream resource` |
+| 两个句柄并行 | 游标互不干扰 |
+
+### 186.2 实现
+| 文件 | 变更点 |
+|---|---|
+| `src/aot/runtime_lib_template.zig` | `PHPResource.dir_handle`（`:2494`）＋`release` 时关闭目录（防泄漏）；`PhpDirHandle`（`:5083`，dir＋iterator＋`.`/`..` 状态位）；`dirArgCheck`（`:5099`，三档措辞）；`php_opendir`（`:5125`）／`php_readdir`（`:5151`）／`php_rewinddir`（`:5172`）／`php_closedir`（`:5184`） |
+| `src/aot/native_linker.zig` | `opendir` 2 槽（context 缺省 null）／`readdir`／`rewinddir`／`closedir` 注册（`:4475` 起，两处表同步） |
+| `fuzzy_scripts_720/tmp/c324_dir_handle_gate_tmp.sh` | 新门 5 臂 |
+
+### 186.3 读数
+| 腿 | 读数 |
+|---|---|
+| C324（新门 5 臂） | 自证 **5 CF**；实跑 **5/5 SAME** 26 s（条目集合/EOF/复位/关闭返回值、双句柄、失败与三档 TypeError、三层递归遍历、空目录与关闭后） |
+| 邻居 C322 | 5/5 SAME |
+| 邻居 C323 | 5/5 SAME |
+| **普查 C321** | **23/24 SAME**（仅 `t19_disk` 红；`t13_csv`／`t24_readDir` 本轮转绿） |
+| `zig build test` | 21/21 steps、**326/326**、rc=0（`/tmp/r278_buildtest.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r278_regression.log`，`SELF_CHECK_OK rows=68 uniq=68`） |
+| 代次锚 | `nlk aaac4a9d47c39e1f6c1fde06a1c660c5`／`tpl 47b67aab49ed01930ad8f32deb712bc8`；`irg 0b710633…`／`ir bb2bb442…` 未变（均未提交） |
+
+### 186.4 边界 / 备注
+- **F-178 仅剩一项**：`disk_free_space` / `disk_total_space`（C321 `t19_disk` 仍红；需 statfs 平台结构，Zig std 未提供 `statfs` 封装，需自行 extern 声明并按 macOS/Linux 区分结构体）。
+- `readdir(null)` 的 PHP 行为是 **Deprecated + TypeError（`No resource supplied`）**（「回退到最近打开的目录流」），本轮未实现（要求 last-opened 全局栈），登记为 F-178-b。
+- `PhpDirHandle` 与 resource 同一分配器（runtime_allocator），`closedir` 立即释放、`release` 兜底关闭 ⇒ 无目录句柄泄漏。
+- 递归遍历臂（t4）证明用户函数 + 目录句柄组合可用（`walk()` 内开/关嵌套句柄）。
+
+## 187. ★R-279 落地记录（F-178 尾：disk_free_space／disk_total_space）
+
+### 187.1 契约（PHP 8.5.8 实测）
+| 形 | PHP |
+|---|---|
+| 成功 | 返回 **float** 字节数；`total >= free` 恒成立（同一路径两次调用 total 全等） |
+| 路径写法 | `"/tmp"`／`"/tmp/"`／`"/tmp/../tmp"`／`"."` 等价（后者的 free 与 `getcwd()` 相同） |
+| 常规文件路径 | 正常返回所在文件系统的数值（不报错） |
+| 空串 / `false`（强转成空串） | **静默 false**（无 Warning） |
+| `null` | `Deprecated: <fn>(): Passing null to parameter #1 ($directory) of type string is deprecated` 后 **false**（同样无 Warning） |
+| int / float / bool | weak 强转成十进制文本再 statfs ⇒ `Warning: <fn>(): No such file or directory` + false（`true`→`"1"`） |
+| 不存在路径 / `" "` | `Warning: <fn>(): <strerror(errno)>` + false |
+| array / 无 `__toString` 对象 | `TypeError: <fn>(): Argument #1 ($directory) must be of type string, array given`（可捕获） |
+| 带 `__toString` 对象 | 取 `__toString` 结果作为路径（`new S()`→`"/tmp"` 时 `is_float(...) === true`） |
+
+### 187.2 实现
+| 文件 | 变更点 |
+|---|---|
+| `src/aot/runtime_lib_template.zig` | `StatFsDarwin`（`:5189`）／`StatVfsLinux`（`:5200`）＋`extern "c" statfs/statvfs`／`strerror`（`:5216`）；`diskQuery`（`:5218`，返回 `ok/skip/fail(errno)` 联合）；`diskSpaceValue`（`:5240`，共用 weak-string 形参口径）；`php_disk_free_space`（`:5267`）／`php_disk_total_space`（`:5272`） |
+| `src/aot/native_linker.zig` | 两处注册表各两枚：`:4479-4480`、`:4824-4825`（`needs_allocator=false`） |
+| `fuzzy_scripts_720/tmp/c325_disk_space_gate_tmp.sh` | 新门 5 臂（不比较绝对字节数，只比类型/正性/大小关系） |
+
+### 187.3 归因留痕：结构体尾部少 8 字节 ⇒ `statfs` 越界写栈帧
+- 首版声明 `StatFsDarwin{ f_bsize, f_iosize, f_blocks, f_bfree, f_bavail, _tail:[2128]u8 }`。前缀实为 **32 B**（4+4+8+8+8），总长 2160 B，而 macOS `sizeof(struct statfs) = 2168`（clang 实测 `sizeof=2168 bsize=0 blocks=8 bavail=24`）⇒ `statfs` 每次写满 2168 B，**尾部越界 8 B 踩栈帧**。
+- 症状形态：单次调用正常（`d1.php`），但 `var_dump(disk_total_space("/tmp") >= disk_free_space("/tmp"))` 稳定 **SIGSEGV（rc=139）**，且不同语句组合表现不一致（栈布局敏感）；临时加 `std.debug.print` 后崩溃反而消失 —— 典型的栈越界、非逻辑错。
+- 修法：`_tail` 改为 **2144**（32+2144=2176 ≥ 2168）；Linux 侧 `40+112=152 ≥ 112` 本已安全。两侧都在注释里钉死「真实 sizeof」与「必须 ≥」不变量。
+- 教训：`extern struct` 只声明所需前缀没问题，但**尾部填充必须按真实 sizeof 留足余量**；用 clang `sizeof`/`offsetof` 取真值，不要手算。
+
+### 187.4 读数
+| 腿 | 读数 |
+|---|---|
+| C325（新门 5 臂） | 自证 **5 CF**；实跑 **5/5 SAME** 22 s |
+| **普查 C321** | **24/24 SAME**（`t19_disk` 由 DIFF→SAME；行转移计数 2＝该臂＋DONE 行） |
+| 邻居 C322／C323／C324 | 各 **5/5 SAME**，`shifted=0` |
+| 代次锚 | `nlk 0743f368302060217701fa4f4260fe25`／`tpl 6993030cd720c3c32d4af6ac4bf1559f`；`irg 0b710633…`／`ir bb2bb442…` 未变（均未提交） |
+
+### 187.5 备注 / 遗留
+- **F-178 全族收口**（第一段 CSV R-277／第二段目录句柄 R-278／尾段 disk_* R-279）；C321 文件系统 API 普查 24/24。
+- 剩余小尾巴 **F-178-b**（P3）：`readdir(null)` 的「回退到最近打开的目录流」语义仍未实现（需 last-opened 全局栈）。
+- `strerror` 取系统措辞（不做硬编码映射），跨平台文案随 libc 一致；`std.c._errno().*` 在 statfs 失败后**立即**读取（中间无其它 libc 调用）。
+- 绝对字节数是**易变值**，任何门都不得比较其数值（C325 只比关系）。

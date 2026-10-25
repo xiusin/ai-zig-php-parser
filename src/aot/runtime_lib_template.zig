@@ -24,6 +24,40 @@ pub const flamegraph = @import("flamegraph.zig");
 pub const pprof = @import("pprof.zig");
 
 // ============================================================================
+// PHP 自述（★F-101/R-265：版本与 OS 常量的**单一来源**，禁再散落字面量）
+// ============================================================================
+const PHP_VER_MAJOR: i64 = 8;
+const PHP_VER_MINOR: i64 = 5;
+const PHP_VER_RELEASE: i64 = 8;
+const PHP_VER_EXTRA: []const u8 = "";
+const PHP_VER_STRING: []const u8 = "8.5.8";
+const PHP_VER_ID: i64 = PHP_VER_MAJOR * 10000 + PHP_VER_MINOR * 100 + PHP_VER_RELEASE;
+
+/// `PHP_OS`：按目标平台计算（PHP 实测：macOS ⇒ "Darwin"、Linux ⇒ "Linux"、Windows ⇒ "WINNT"）。
+const PHP_OS_NAME: []const u8 = switch (builtin.os.tag) {
+    .macos => "Darwin",
+    .ios => "Darwin",
+    .linux => "Linux",
+    .windows => "WINNT",
+    .freebsd => "FreeBSD",
+    .openbsd => "OpenBSD",
+    .netbsd => "NetBSD",
+    .dragonfly => "DragonFly",
+    .illumos => "SunOS",
+    else => @tagName(builtin.os.tag),
+};
+
+/// `PHP_OS_FAMILY`：PHP 实测分类（Darwin 单列；BSD 各族统一 "BSD"；Solaris 家族 "Solaris"）。
+const PHP_OS_FAMILY_NAME: []const u8 = switch (builtin.os.tag) {
+    .macos, .ios => "Darwin",
+    .linux => "Linux",
+    .windows => "Windows",
+    .freebsd, .openbsd, .netbsd, .dragonfly => "BSD",
+    .illumos => "Solaris",
+    else => "Unknown",
+};
+
+// ============================================================================
 // 随机数辅助函数（替代 std.crypto.random，兼容 Zig 0.16）
 // ============================================================================
 
@@ -529,17 +563,19 @@ fn initPredefinedConstants() !void {
     // PHP版本和浮点常量
     {
         const ver_key = try runtime_allocator.dupe(u8, "PHP_VERSION");
-        const ver_str = try PHPString.init(runtime_allocator, "8.4.8");
+        const ver_str = try PHPString.init(runtime_allocator, PHP_VER_STRING);
         try constants.put(ver_key, Value.initString(ver_str));
         const ver_id_key = try runtime_allocator.dupe(u8, "PHP_VERSION_ID");
-        try constants.put(ver_id_key, Value.initInt(80408));
+        try constants.put(ver_id_key, Value.initInt(PHP_VER_ID));
+        const extra_key = try runtime_allocator.dupe(u8, "PHP_EXTRA_VERSION");
+        try constants.put(extra_key, Value.initString(try PHPString.init(runtime_allocator, PHP_VER_EXTRA)));
         const release_key = try runtime_allocator.dupe(u8, "PHP_RELEASE_VERSION");
-        try constants.put(release_key, Value.initInt(8));
+        try constants.put(release_key, Value.initInt(PHP_VER_RELEASE));
 
         const major_key = try runtime_allocator.dupe(u8, "PHP_MAJOR_VERSION");
-        try constants.put(major_key, Value.initInt(8));
+        try constants.put(major_key, Value.initInt(PHP_VER_MAJOR));
         const minor_key = try runtime_allocator.dupe(u8, "PHP_MINOR_VERSION");
-        try constants.put(minor_key, Value.initInt(4));
+        try constants.put(minor_key, Value.initInt(PHP_VER_MINOR));
 
         const fmax_key = try runtime_allocator.dupe(u8, "PHP_FLOAT_MAX");
         try constants.put(fmax_key, Value.initFloat(std.math.floatMax(f64)));
@@ -2451,6 +2487,11 @@ pub const Value = struct {
         file_handle: ?*std.Io.File,
         type_name: []const u8,
         closed: bool = false,
+        eof: bool = false,
+        /// ★R-275：`fopen(..., 'a'|'a+')` ⇒ 每次写前定位到末尾（PHP 的 append 语义）
+        append: bool = false,
+        /// ★R-278：`opendir()` 的目录句柄（readdir/rewinddir/closedir 共用）
+        dir_handle: ?*PhpDirHandle = null,
 
         pub fn retain(self: *PHPResource) void {
             self.ref_count += 1;
@@ -2462,6 +2503,10 @@ pub const Value = struct {
                 if (self.ref_count == 0) {
                     if (self.file_handle) |fh| {
                         allocator.destroy(fh);
+                    }
+                    if (self.dir_handle) |dh| {
+                        dh.dir.close(getIo());
+                        allocator.destroy(dh);
                     }
                     allocator.destroy(self);
                 }
@@ -2627,6 +2672,14 @@ pub const Value = struct {
         if ((self.val & (SIGN_BIT | QNAN)) != QNAN) return false;
         if ((self.val & TYPE_MASK) != TYPE_RESOURCE) return false;
         return !self.asResource().closed;
+    }
+
+    /// ★R-277：只判「类型位是 resource」——关闭后的 resource 也返回 true，
+    ///   用于区分 PHP 的两套 TypeError 措辞（ZPP「must be of type resource」 vs 函数体「must be an open stream resource」）。
+    pub fn hasResourceType(self: Value) bool {
+        const v = if (self.isRef()) derefVal(self) else self;
+        if ((v.val & (SIGN_BIT | QNAN)) != QNAN) return false;
+        return (v.val & TYPE_MASK) == TYPE_RESOURCE;
     }
 
     // ========================================================================
@@ -4108,14 +4161,77 @@ pub fn php_substr_replace(args: []const Value, allocator: Allocator) !Value {
         _ = requireArrayOrIntParam("substr_replace", 4, "length", "array|int|null", args[3]) orelse return Value.initNull();
     }
 
+    const start_arg: Value = if (args.len >= 3) args[2] else Value.initNull();
+    const length_arg: Value = if (args.len >= 4) args[3] else Value.initNull();
+
+    // ★F-162（R-257）：数组形 $string ⇒ 逐元素替换并保留键；标量 $string + 数组 $replace 取首元素。
+    if (str_val.isArray()) {
+        const out = try PHPArray.init(allocator);
+        var it = str_val.asArray().elements.iterator();
+        var idx: usize = 0;
+        while (it.next()) |entry| : (idx += 1) {
+            if (!entry.value_ptr.*.isString()) continue;
+            const repl = substrReplaceReplacement(replacement_val, idx);
+            const start = substrReplaceOffset(start_arg, idx);
+            const length = substrReplaceLength(length_arg, idx);
+            const v = try substrReplaceString(entry.value_ptr.*.asString().data, repl, start, length, allocator);
+            defer v.release(allocator);
+            const key = entry.key_ptr.*;
+            if (key == .string) {
+                const ks = try PHPString.init(allocator, key.string.data);
+                defer ks.release(allocator);
+                try out.set(allocator, .{ .string = ks }, v);
+            } else {
+                try out.set(allocator, key, v);
+            }
+        }
+        return Value.initArray(out);
+    }
     if (!str_val.isString()) return Value.initNull();
-    const str = str_val.asString().data;
 
-    if (!replacement_val.isString()) return Value.initNull();
-    const replacement = replacement_val.asString().data;
+    const repl = substrReplaceReplacement(replacement_val, 0);
+    return substrReplaceString(str_val.asString().data, repl, substrReplaceOffset(start_arg, 0), substrReplaceLength(length_arg, 0), allocator);
+}
 
-    const start = if (args.len >= 3) args[2].toInt() else 0;
-    const length = if (args.len >= 4) args[3].toInt() else @as(i64, @intCast(str.len));
+/// ★F-162（R-257）：数组形实参按**位置序**取第 idx 个元素（PHP 实测按序配对，不看键）。
+fn arrayNthValue(arr: *PHPArray, idx: usize) ?Value {
+    var it = arr.elements.iterator();
+    var i: usize = 0;
+    while (it.next()) |entry| : (i += 1) {
+        if (i == idx) return entry.value_ptr.*;
+    }
+    return null;
+}
+
+fn substrReplaceReplacement(replacement: Value, idx: usize) []const u8 {
+    if (replacement.isString()) return replacement.asString().data;
+    if (replacement.isArray()) {
+        if (arrayNthValue(replacement.asArray(), idx)) |v| {
+            if (v.isString()) return v.asString().data;
+        }
+    }
+    return "";
+}
+
+fn substrReplaceOffset(offset: Value, idx: usize) i64 {
+    if (offset.isArray()) {
+        if (arrayNthValue(offset.asArray(), idx)) |v| return v.toInt();
+        return 0;
+    }
+    return offset.toInt();
+}
+
+fn substrReplaceLength(length: Value, idx: usize) ?i64 {
+    if (length.isArray()) {
+        if (arrayNthValue(length.asArray(), idx)) |v| return v.toInt();
+        return null;
+    }
+    if (length.isNull()) return null;
+    return length.toInt();
+}
+
+fn substrReplaceString(str: []const u8, replacement: []const u8, start: i64, length_in: ?i64, allocator: Allocator) !Value {
+    const length = length_in orelse @as(i64, @intCast(str.len));
 
     // 处理负数索引
     const actual_start = if (start < 0)
@@ -4149,7 +4265,10 @@ pub fn php_substr_replace(args: []const Value, allocator: Allocator) !Value {
 // 文件I/O函数
 // ============================================================================
 
-pub fn php_file_put_contents(filename: Value, data: Value, allocator: Allocator) !Value {
+/// file_put_contents - PHP 契约：filename, data, flags=0, context=null
+///   ★R-274：补 `FILE_APPEND`(8)（原实现恒截断）；`LOCK_EX` 与 context 未建模（仅吞下）。
+pub fn php_file_put_contents(filename: Value, data: Value, flags: Value, context: Value, allocator: Allocator) !Value {
+    _ = context;
     if (!filename.isString()) return Value.initBool(false);
     const fname = filename.asString().data;
 
@@ -4161,25 +4280,84 @@ pub fn php_file_put_contents(filename: Value, data: Value, allocator: Allocator)
         break :blk temp.data;
     };
 
+    const flag_bits = flags.toInt();
+    const append = (flag_bits & 8) != 0;
+    if (append) {
+        var ofile = std.Io.Dir.cwd().openFile(getIo(), fname, .{ .mode = .write_only }) catch {
+            // PHP 实测：FILE_APPEND 下文件不存在则创建
+            const nf = std.Io.Dir.cwd().createFile(getIo(), fname, .{}) catch return Value.initBool(false);
+            defer nf.close(getIo());
+            fileWriteAll(nf.handle, content_str);
+            return Value.initInt(@intCast(content_str.len));
+        };
+        defer ofile.close(getIo());
+        _ = streamLseek(&ofile, 0, 2) catch return Value.initBool(false);
+        fileWriteAll(ofile.handle, content_str);
+        return Value.initInt(@intCast(content_str.len));
+    }
+
     const file = std.Io.Dir.cwd().createFile(getIo(), fname, .{}) catch return Value.initBool(false);
     defer file.close(getIo());
     fileWriteAll(file.handle, content_str);
     return Value.initInt(@intCast(content_str.len));
 }
 
-pub fn php_file_get_contents(filename: Value, allocator: Allocator) !Value {
+/// file_get_contents - PHP 契约：filename, use_include_path=false, context=null, offset=0, length=null
+///   ★F-173（R-270）：补 offset（负值自尾部）/length（null＝至末尾、0＝空串、负数 ValueError）与 seek 失败告警；
+///   `use_include_path`/`context` 未建模（AOT 无 include_path、无 stream context）⇒ 仅吞下。
+pub fn php_file_get_contents(filename: Value, use_include_path: Value, context: Value, offset: Value, length: Value, allocator: Allocator) !Value {
+    _ = use_include_path;
+    _ = context;
     if (!filename.isString()) return Value.initBool(false);
     const fname = filename.asString().data;
 
-    const content = std.Io.Dir.cwd().readFileAlloc(getIo(), fname, allocator, 10 * 1024 * 1024) catch return Value.initBool(false);
-    const output = try PHPString.init(allocator, content);
+    const content = std.Io.Dir.cwd().readFileAlloc(getIo(), fname, allocator, .limited(10 * 1024 * 1024)) catch |err| {
+        warnOpenStream("file_get_contents", fname, err);
+        return Value.initBool(false);
+    };
+    defer allocator.free(content); // ★原有代码未释放（PHPString.init 会拷贝）
+
+    const off = offset.toInt();
+    var start: usize = 0;
+    if (off < 0) {
+        const len_i: i64 = @intCast(content.len);
+        if (len_i + off < 0) {
+            var mbuf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&mbuf, "file_get_contents(): Failed to seek to position {d} in the stream", .{off}) catch return Value.initBool(false);
+            emitWarning(msg);
+            return Value.initBool(false);
+        }
+        start = @intCast(len_i + off);
+    } else if (off > 0) {
+        const off_u: u64 = @intCast(off);
+        start = if (off_u >= content.len) content.len else @intCast(off_u);
+    }
+
+    var end: usize = content.len;
+    if (!length.isNull()) {
+        const len_arg = length.toInt();
+        if (len_arg < 0) {
+            return throwThrowable("ValueError", "file_get_contents(): Argument #5 ($length) must be greater than or equal to 0", runtime_allocator);
+        }
+        const len_u: u64 = @intCast(len_arg);
+        const remain = content.len - start;
+        end = if (len_u >= remain) content.len else start + @as(usize, @intCast(len_u));
+    }
+
+    const output = try PHPString.init(allocator, content[start..end]);
     return Value.initString(output);
 }
 
+/// fopen - ★R-275：补齐 r+/w+/a+/x/x+/c/c+ 与 `b`/`t` 后缀；打开失败发 PHP 措辞 Warning。
+///   语义要点（PHP 实测）：`a`/`a+` 每次写前定位末尾（读位置仍在 0）；`c` 不截断；`x` 排他创建。
 pub fn php_fopen(filename: Value, mode: Value, allocator: Allocator) !Value {
     if (!filename.isString() or !mode.isString()) return Value.initBool(false);
     const fname = filename.asString().data;
-    const fmode = mode.asString().data;
+    var fmode = mode.asString().data;
+    if (fmode.len > 1) {
+        const last = fmode[fmode.len - 1];
+        if (last == 'b' or last == 't') fmode = fmode[0 .. fmode.len - 1];
+    }
 
     // 特殊处理php://流
     if (std.mem.startsWith(u8, fname, "php://")) {
@@ -4188,14 +4366,65 @@ pub fn php_fopen(filename: Value, mode: Value, allocator: Allocator) !Value {
         return Value.initResource(res);
     }
 
-    const file = if (std.mem.eql(u8, fmode, "r"))
-        std.Io.Dir.cwd().openFile(getIo(), fname, .{}) catch return Value.initBool(false)
-    else if (std.mem.eql(u8, fmode, "w"))
-        std.Io.Dir.cwd().createFile(getIo(), fname, .{}) catch return Value.initBool(false)
-    else if (std.mem.eql(u8, fmode, "a"))
-        std.Io.Dir.cwd().createFile(getIo(), fname, .{ .truncate = false }) catch return Value.initBool(false)
-    else
+    const io = getIo();
+    const cwd = std.Io.Dir.cwd();
+    var file: std.Io.File = undefined;
+    var append = false;
+    if (std.mem.eql(u8, fmode, "r")) {
+        file = cwd.openFile(io, fname, .{}) catch |err| {
+            warnPf("fopen", fname, err);
+            return Value.initBool(false);
+        };
+    } else if (std.mem.eql(u8, fmode, "r+")) {
+        file = cwd.openFile(io, fname, .{ .mode = .read_write }) catch |err| {
+            warnPf("fopen", fname, err);
+            return Value.initBool(false);
+        };
+    } else if (std.mem.eql(u8, fmode, "w")) {
+        file = cwd.createFile(io, fname, .{}) catch |err| {
+            warnPf("fopen", fname, err);
+            return Value.initBool(false);
+        };
+    } else if (std.mem.eql(u8, fmode, "w+")) {
+        file = cwd.createFile(io, fname, .{ .read = true }) catch |err| {
+            warnPf("fopen", fname, err);
+            return Value.initBool(false);
+        };
+    } else if (std.mem.eql(u8, fmode, "a")) {
+        file = cwd.createFile(io, fname, .{ .truncate = false }) catch |err| {
+            warnPf("fopen", fname, err);
+            return Value.initBool(false);
+        };
+        append = true;
+    } else if (std.mem.eql(u8, fmode, "a+")) {
+        file = cwd.createFile(io, fname, .{ .truncate = false, .read = true }) catch |err| {
+            warnPf("fopen", fname, err);
+            return Value.initBool(false);
+        };
+        append = true;
+    } else if (std.mem.eql(u8, fmode, "x")) {
+        file = cwd.createFile(io, fname, .{ .exclusive = true }) catch |err| {
+            warnPf("fopen", fname, err);
+            return Value.initBool(false);
+        };
+    } else if (std.mem.eql(u8, fmode, "x+")) {
+        file = cwd.createFile(io, fname, .{ .exclusive = true, .read = true }) catch |err| {
+            warnPf("fopen", fname, err);
+            return Value.initBool(false);
+        };
+    } else if (std.mem.eql(u8, fmode, "c")) {
+        file = cwd.createFile(io, fname, .{ .truncate = false }) catch |err| {
+            warnPf("fopen", fname, err);
+            return Value.initBool(false);
+        };
+    } else if (std.mem.eql(u8, fmode, "c+")) {
+        file = cwd.createFile(io, fname, .{ .truncate = false, .read = true }) catch |err| {
+            warnPf("fopen", fname, err);
+            return Value.initBool(false);
+        };
+    } else {
         return Value.initBool(false);
+    }
 
     const handle = allocator.create(std.Io.File) catch return Value.initBool(false);
     handle.* = file;
@@ -4203,14 +4432,39 @@ pub fn php_fopen(filename: Value, mode: Value, allocator: Allocator) !Value {
         allocator.destroy(handle);
         return Value.initBool(false);
     };
-    res.* = .{ .ref_count = 1, .file_handle = handle, .type_name = "stream" };
+    res.* = .{ .ref_count = 1, .file_handle = handle, .type_name = "stream", .append = append };
     return Value.initResource(res);
+}
+
+/// ★R-275：文件系统失败文案（PHP 措辞的公共 reason 表）。
+fn fsErrText(err: anyerror) []const u8 {
+    return switch (err) {
+        error.FileNotFound => "No such file or directory",
+        error.PathAlreadyExists => "File exists",
+        error.DirNotEmpty => "Directory not empty",
+        error.AccessDenied => "Permission denied",
+        error.NotDir => "Not a directory",
+        error.IsDir => "Is a directory",
+        else => @errorName(err),
+    };
+}
+
+/// ★R-275：`fopen`/`copy` 共用 `{fn}({path}): Failed to open stream: {reason}`。
+fn warnPf(func_name: []const u8, fname: []const u8, err: anyerror) void {
+    var mbuf: [1024]u8 = undefined;
+    const msg = std.fmt.bufPrint(&mbuf, "{s}({s}): Failed to open stream: {s}", .{ func_name, fname, fsErrText(err) }) catch return;
+    emitWarning(msg);
 }
 
 pub fn php_fwrite(handle: Value, data: Value, allocator: Allocator) !Value {
     if (!handle.isResource()) return Value.initBool(false);
     const res = handle.asResource();
     const fh = res.file_handle orelse return Value.initInt(0); // 虚拟句柄
+
+    // ★R-275：a/a+ 的每次写都定位到末尾
+    if (res.append) {
+        _ = streamLseek(fh, 0, 2) catch return Value.initBool(false);
+    }
 
     const content = if (data.isString()) data.asString().data else blk: {
         const temp = try data.toString(allocator);
@@ -4225,21 +4479,19 @@ pub fn php_fwrite(handle: Value, data: Value, allocator: Allocator) !Value {
 pub fn php_fread(handle: Value, length: Value, allocator: Allocator) !Value {
     if (!handle.isResource() or !length.isInt()) return Value.initBool(false);
     const res = handle.asResource();
-    const fh = res.file_handle orelse return Value.initString(try PHPString.init(allocator, try allocator.dupe(u8, ""))); // 虚拟句柄
+    if (res.file_handle == null) return Value.initString(try PHPString.init(allocator, "")); // 虚拟句柄
 
+    // ★R-274：PHP 8 的 fread length 必须 > 0（0/-1 抛 ValueError）；到达 EOF 返回 ""（不是 false）
     const len = length.asInt();
-
+    if (len <= 0) {
+        return throwThrowable("ValueError", "fread(): Argument #2 ($length) must be greater than 0", runtime_allocator);
+    }
+    const fh = res.file_handle.?;
     const buffer = allocator.alloc(u8, @intCast(len)) catch return Value.initBool(false);
-    const bytes_read = std.posix.read(fh.handle, buffer) catch {
-        allocator.free(buffer);
-        return Value.initBool(false);
-    };
-
-    const content = allocator.realloc(buffer, bytes_read) catch {
-        allocator.free(buffer);
-        return Value.initBool(false);
-    };
-    const output = try PHPString.init(allocator, content);
+    defer allocator.free(buffer);
+    const bytes_read = std.posix.read(fh.handle, buffer) catch return Value.initBool(false);
+    if (bytes_read < buffer.len) res.eof = true;
+    const output = try PHPString.init(allocator, buffer[0..bytes_read]);
     return Value.initString(output);
 }
 
@@ -4258,17 +4510,29 @@ pub fn php_is_resource(val: Value) !Value {
     return Value.initBool(val.isResource());
 }
 
-pub fn php_fgets(handle: Value) !Value {
+/// fgets - PHP 契约：fgets($h, ?int $length = null)；EOF 返回 false，并置 feof。
+///   `$length` 给定时最多读 `length - 1` 字节（PHP 实测：fgets($f,3) ⇒ 2 字节）。
+pub fn php_fgets(handle: Value, length: Value) !Value {
     if (!handle.isResource()) return Value.initBool(false);
     const res = handle.asResource();
     const fh = res.file_handle orelse return Value.initBool(false);
 
+    var limit: usize = 4096;
+    if (!length.isNull()) {
+        const l = length.toInt();
+        if (l <= 0) return Value.initBool(false);
+        limit = @intCast(@min(l - 1, 4096));
+    }
+
     var buf: [4096]u8 = undefined;
     var pos: usize = 0;
 
-    while (pos < buf.len) {
+    while (pos < limit) {
         const n = std.posix.read(fh.handle, buf[pos .. pos + 1]) catch break;
-        if (n == 0) break;
+        if (n == 0) {
+            res.eof = true;
+            break;
+        }
         pos += 1;
         if (buf[pos - 1] == '\n') break;
     }
@@ -4282,27 +4546,106 @@ pub fn php_fgets(handle: Value) !Value {
     return Value.initString(output);
 }
 
-pub fn php_fseek(handle: Value, offset: Value) !Value {
+/// fgetc - 读 1 字节；EOF 返回 false 并置 feof。
+pub fn php_fgetc(handle: Value, allocator: Allocator) !Value {
+    if (!handle.isResource()) return Value.initBool(false);
+    const res = handle.asResource();
+    const fh = res.file_handle orelse return Value.initBool(false);
+    var buf: [1]u8 = undefined;
+    const n = std.posix.read(fh.handle, &buf) catch return Value.initBool(false);
+    if (n == 0) {
+        res.eof = true;
+        return Value.initBool(false);
+    }
+    return Value.initString(try PHPString.init(allocator, &buf));
+}
+
+/// feof - 仅当一次读尝试已触到 EOF 后为 true（PHP 实测：未读前恒 false）。
+pub fn php_feof(handle: Value) !Value {
+    if (!handle.isResource()) return Value.initBool(false);
+    const res = handle.asResource();
+    return Value.initBool(res.closed or res.eof);
+}
+
+/// lseek 封装（Zig 0.16 的 Io.File 无 seek 方法；经 libc lseek 走 fd）。
+fn streamLseek(fh: *std.Io.File, offset: i64, whence: c_int) !u64 {
+    const r = std.c.lseek(fh.handle, @intCast(offset), whence);
+    if (r < 0) return error.SeekFailed;
+    return @intCast(r);
+}
+
+/// ftell - 返回当前读写位置（SEEK_CUR 查询，不改位置）。
+pub fn php_ftell(handle: Value) !Value {
+    if (!handle.isResource()) return Value.initBool(false);
+    const res = handle.asResource();
+    const fh = res.file_handle orelse return Value.initBool(false);
+    const pos = streamLseek(fh, 0, 1) catch return Value.initBool(false);
+    return Value.initInt(@intCast(pos));
+}
+
+/// fseek - PHP 契约：fseek($h, $offset, $whence = SEEK_SET) ⇒ 成功 0 / 失败 -1；成功后清除 EOF 标志。
+pub fn php_fseek(handle: Value, offset: Value, whence: Value) !Value {
     if (!handle.isResource() or !offset.isInt()) return Value.initInt(-1);
     const res = handle.asResource();
     const fh = res.file_handle orelse return Value.initInt(-1);
 
     const off = offset.asInt();
-    fh.seekTo(@intCast(off)) catch return Value.initInt(-1);
+    const w = if (whence.isInt()) whence.asInt() else 0;
+    const whence_c: c_int = switch (w) {
+        0 => 0, // SEEK_SET
+        1 => 1, // SEEK_CUR
+        2 => 2, // SEEK_END
+        else => return Value.initInt(-1),
+    };
+    _ = streamLseek(fh, off, whence_c) catch return Value.initInt(-1);
+    res.eof = false;
     return Value.initInt(0);
 }
 
+/// scandir - ★R-275（F-176）：返回 `["." , "..", …siblings]` 且按**字节序升序**（PHP 默认 SCANDIR_SORT_ASCENDING）；
+///   打开失败按 PHP 打**两条**警告（`scandir(<path>): Failed to open directory: …` 与 `scandir(): (errno N): …`）。
 pub fn php_scandir(dir: Value, allocator: Allocator) !Value {
     if (!dir.isString()) return Value.initBool(false);
     const dirname = dir.asString().data;
 
-    var dir_handle = std.Io.Dir.cwd().openDir(getIo(), dirname, .{ .iterate = true }) catch return Value.initBool(false);
+    var dir_handle = std.Io.Dir.cwd().openDir(getIo(), dirname, .{ .iterate = true }) catch |err| {
+        const text = fsErrText(err);
+        var b1: [1024]u8 = undefined;
+        const m1 = std.fmt.bufPrint(&b1, "scandir({s}): Failed to open directory: {s}", .{ dirname, text }) catch "";
+        emitWarning(m1);
+        const errno: u32 = switch (err) {
+            error.FileNotFound => 2,
+            error.AccessDenied => 13,
+            error.NotDir => 20,
+            else => 0,
+        };
+        var b2: [512]u8 = undefined;
+        const m2 = std.fmt.bufPrint(&b2, "scandir(): (errno {d}): {s}", .{ errno, text }) catch "";
+        emitWarning(m2);
+        return Value.initBool(false);
+    };
     defer dir_handle.close(getIo());
 
-    var arr = try PHPArray.init(allocator);
+    var names = std.ArrayList([]const u8).empty;
+    defer {
+        for (names.items) |n| allocator.free(n);
+        names.deinit(allocator);
+    }
+    try names.append(allocator, try allocator.dupe(u8, "."));
+    try names.append(allocator, try allocator.dupe(u8, ".."));
+
     var iter = dir_handle.iterate();
-    while (iter.next() catch null) |entry| {
-        const name = try allocator.dupe(u8, entry.name);
+    while (iter.next(getIo()) catch null) |entry| {
+        try names.append(allocator, try allocator.dupe(u8, entry.name));
+    }
+    std.mem.sort([]const u8, names.items, {}, struct {
+        fn lt(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lt);
+
+    var arr = try PHPArray.init(allocator);
+    for (names.items) |name| {
         const str = try PHPString.init(allocator, name);
         try arr.push(allocator, Value.initString(str));
     }
@@ -4310,11 +4653,648 @@ pub fn php_scandir(dir: Value, allocator: Allocator) !Value {
 }
 
 // ============================================================================
+// ★F-177（R-276）：stat 族与剩余文件系统 API（普查 C321 揭示 17 枚缺失）
+// ============================================================================
+
+/// stat/lstat 原始结构（失败返回 null，由调用方决定告警文案）。
+fn fsStatRaw(allocator: Allocator, path: []const u8, nofollow: bool) ?std.c.Stat {
+    const z = allocator.dupeZ(u8, path) catch return null;
+    defer allocator.free(z);
+    var st: std.c.Stat = undefined;
+    const flags: u32 = if (nofollow) @intCast(std.c.AT.SYMLINK_NOFOLLOW) else 0;
+    if (std.c.fstatat(std.c.AT.FDCWD, z, &st, flags) != 0) return null;
+    return st;
+}
+
+/// PHP `stat()` 的 26 键结构：0..12 与同名串键（dev/ino/mode/nlink/uid/gid/rdev/size/atime/mtime/ctime/blksize/blocks）。
+fn phpStatValue(st: std.c.Stat, allocator: Allocator) !Value {
+    const names = [13][]const u8{ "dev", "ino", "mode", "nlink", "uid", "gid", "rdev", "size", "atime", "mtime", "ctime", "blksize", "blocks" };
+    const vals = [13]i64{
+        @intCast(st.dev),     @intCast(st.ino),      @intCast(st.mode),
+        @intCast(st.nlink),   @intCast(st.uid),      @intCast(st.gid),
+        @intCast(st.rdev),    @intCast(st.size),     @intCast(st.atime().sec),
+        @intCast(st.mtime().sec), @intCast(st.ctime().sec), @intCast(st.blksize),
+        @intCast(st.blocks),
+    };
+    const arr = try PHPArray.init(allocator);
+    for (0..13) |i| {
+        try arr.set(allocator, ArrayKey{ .integer = @intCast(i) }, Value.initInt(vals[i]));
+        try arr.set(allocator, ArrayKey{ .string = try PHPString.init(allocator, names[i]) }, Value.initInt(vals[i]));
+    }
+    return Value.initArray(arr);
+}
+
+pub fn php_stat(filename: Value, allocator: Allocator) !Value {
+    if (!filename.isString()) return Value.initBool(false);
+    const path = filename.asString().data;
+    const st = fsStatRaw(allocator, path, false) orelse {
+        var b: [1024]u8 = undefined;
+        const msg = std.fmt.bufPrint(&b, "stat(): stat failed for {s}", .{path}) catch "";
+        emitWarning(msg);
+        return Value.initBool(false);
+    };
+    return phpStatValue(st, allocator);
+}
+
+pub fn php_lstat(filename: Value, allocator: Allocator) !Value {
+    if (!filename.isString()) return Value.initBool(false);
+    const path = filename.asString().data;
+    const st = fsStatRaw(allocator, path, true) orelse {
+        var b: [1024]u8 = undefined;
+        // ★PHP 实测：这里是大写 L（`lstat(): Lstat failed for …`）
+        const msg = std.fmt.bufPrint(&b, "lstat(): Lstat failed for {s}", .{path}) catch "";
+        emitWarning(msg);
+        return Value.initBool(false);
+    };
+    return phpStatValue(st, allocator);
+}
+
+pub fn php_filetype(filename: Value, allocator: Allocator) !Value {
+    if (!filename.isString()) return Value.initBool(false);
+    // PHP 的 filetype 走 lstat 语义（符号链接 ⇒ "link"）
+    const st = fsStatRaw(allocator, filename.asString().data, true) orelse return Value.initBool(false);
+    const fmt: u32 = @as(u32, @intCast(st.mode)) & std.c.S.IFMT;
+    const name: []const u8 = if (fmt == std.c.S.IFREG)
+        "file"
+    else if (fmt == std.c.S.IFDIR)
+        "dir"
+    else if (fmt == std.c.S.IFLNK)
+        "link"
+    else if (fmt == std.c.S.IFIFO)
+        "fifo"
+    else if (fmt == std.c.S.IFCHR)
+        "char"
+    else if (fmt == std.c.S.IFBLK)
+        "block"
+    else if (fmt == std.c.S.IFSOCK)
+        "socket"
+    else
+        "unknown";
+    return Value.initString(try PHPString.init(allocator, name));
+}
+
+pub fn php_fileperms(filename: Value, allocator: Allocator) !Value {
+    if (!filename.isString()) return Value.initBool(false);
+    const st = fsStatRaw(allocator, filename.asString().data, false) orelse return Value.initBool(false);
+    return Value.initInt(@intCast(st.mode));
+}
+
+pub fn php_is_link(filename: Value) !Value {
+    if (!filename.isString()) return Value.initBool(false);
+    const st = fsStatRaw(runtime_allocator, filename.asString().data, true) orelse return Value.initBool(false);
+    const fmt: u32 = @as(u32, @intCast(st.mode)) & std.c.S.IFMT;
+    return Value.initBool(fmt == std.c.S.IFLNK);
+}
+
+pub fn php_chmod(filename: Value, permissions: Value) !Value {
+    if (!filename.isString()) return Value.initBool(false);
+    const path = filename.asString().data;
+    const mode: std.c.mode_t = if (permissions.isInt()) @intCast(permissions.asInt() & 0o7777) else 0o666;
+    const z = runtime_allocator.dupeZ(u8, path) catch return Value.initBool(false);
+    defer runtime_allocator.free(z);
+    if (std.c.chmod(z, mode) != 0) {
+        var b: [1024]u8 = undefined;
+        const msg = std.fmt.bufPrint(&b, "chmod(): {s}", .{"Operation not permitted"}) catch "";
+        emitWarning(msg);
+        return Value.initBool(false);
+    }
+    return Value.initBool(true);
+}
+
+pub fn php_readfile(filename: Value, allocator: Allocator) !Value {
+    if (!filename.isString()) return Value.initBool(false);
+    const path = filename.asString().data;
+    const content = std.Io.Dir.cwd().readFileAlloc(getIo(), path, allocator, .limited(64 * 1024 * 1024)) catch |err| {
+        warnPf("readfile", path, err);
+        return Value.initBool(false);
+    };
+    defer allocator.free(content);
+    fileWriteAll(1, content);
+    return Value.initInt(@intCast(content.len));
+}
+
+pub fn php_fpassthru(handle: Value) !Value {
+    if (!handle.isResource()) return Value.initBool(false);
+    const res = handle.asResource();
+    const fh = res.file_handle orelse return Value.initInt(0);
+    var buf: [8192]u8 = undefined;
+    var total: usize = 0;
+    while (true) {
+        const n = std.posix.read(fh.handle, &buf) catch return Value.initBool(false);
+        if (n == 0) {
+            res.eof = true;
+            break;
+        }
+        fileWriteAll(1, buf[0..n]);
+        total += n;
+    }
+    return Value.initInt(@intCast(total));
+}
+
+pub fn php_fstat(handle: Value, allocator: Allocator) !Value {
+    if (!handle.isResource()) return Value.initBool(false);
+    const res = handle.asResource();
+    const fh = res.file_handle orelse return Value.initBool(false);
+    var st: std.c.Stat = undefined;
+    if (std.c.fstat(fh.handle, &st) != 0) return Value.initBool(false);
+    return phpStatValue(st, allocator);
+}
+
+pub fn php_ftruncate(handle: Value, size: Value) !Value {
+    if (!handle.isResource() or !size.isInt()) return Value.initBool(false);
+    const res = handle.asResource();
+    const fh = res.file_handle orelse return Value.initBool(false);
+    return Value.initBool(std.c.ftruncate(fh.handle, @intCast(size.asInt())) == 0);
+}
+
+pub fn php_fsync(handle: Value) !Value {
+    if (!handle.isResource()) return Value.initBool(false);
+    const res = handle.asResource();
+    const fh = res.file_handle orelse return Value.initBool(false);
+    return Value.initBool(std.c.fsync(fh.handle) == 0);
+}
+
+pub fn php_flock(handle: Value, operation: Value) !Value {
+    if (!handle.isResource() or !operation.isInt()) return Value.initBool(false);
+    const res = handle.asResource();
+    const fh = res.file_handle orelse return Value.initBool(false);
+    return Value.initBool(std.c.flock(fh.handle, @intCast(operation.asInt() & 0xFFFF)) == 0);
+}
+
+pub fn php_umask(mode: Value) !Value {
+    if (mode.isNull()) {
+        // 查询：先置 0 取旧值，再恢复（无全局状态破坏）
+        const old = std.c.umask(0);
+        _ = std.c.umask(old);
+        return Value.initInt(@intCast(old));
+    }
+    const m: std.c.mode_t = if (mode.isInt()) @intCast(mode.asInt() & 0o777) else 0;
+    const old = std.c.umask(m);
+    return Value.initInt(@intCast(old));
+}
+
+pub fn php_symlink(target: Value, linkpath: Value) !Value {
+    if (!target.isString() or !linkpath.isString()) return Value.initBool(false);
+    const zt = runtime_allocator.dupeZ(u8, target.asString().data) catch return Value.initBool(false);
+    defer runtime_allocator.free(zt);
+    const zl = runtime_allocator.dupeZ(u8, linkpath.asString().data) catch return Value.initBool(false);
+    defer runtime_allocator.free(zl);
+    if (std.c.symlink(zt, zl) != 0) {
+        var b: [1024]u8 = undefined;
+        // 以「目标已存在」区分 EEXIST（避免依赖 errno API 的平台差异）
+        const reason = if (fsStatRaw(runtime_allocator, linkpath.asString().data, true) != null) "File exists" else "Operation not permitted";
+        const msg = std.fmt.bufPrint(&b, "symlink(): {s}", .{reason}) catch "";
+        emitWarning(msg);
+        return Value.initBool(false);
+    }
+    return Value.initBool(true);
+}
+
+pub fn php_readlink(path: Value, allocator: Allocator) !Value {
+    if (!path.isString()) return Value.initBool(false);
+    const z = allocator.dupeZ(u8, path.asString().data) catch return Value.initBool(false);
+    defer allocator.free(z);
+    var buf: [4096]u8 = undefined;
+    const n = std.c.readlink(z, &buf, buf.len);
+    if (n < 0) {
+        var b: [512]u8 = undefined;
+        const reason = if (fsStatRaw(allocator, path.asString().data, true) == null) "No such file or directory" else "Invalid argument";
+        const msg = std.fmt.bufPrint(&b, "readlink(): {s}", .{reason}) catch "";
+        emitWarning(msg);
+        return Value.initBool(false);
+    }
+    return Value.initString(try PHPString.init(allocator, buf[0..@intCast(n)]));
+}
+
+/// clearstatcache - AOT 不做 stat 缓存 ⇒ 纯 no-op（参数按 PHP 签名吞下）。
+pub fn php_clearstatcache(clear_realpath: Value, filename: Value) !Value {
+    _ = clear_realpath;
+    _ = filename;
+    return Value.initNull();
+}
+
+// ============================================================================
+// ★F-178（R-277）：CSV 族（fgetcsv / fputcsv）
+//   参数以 null 作「未提供」哨兵：$escape 未提供时 PHP 8.5 会发 E_DEPRECATED 并沿用 "\\"。
+// ============================================================================
+
+fn csvParamChar(v: Value, default: u8) u8 {
+    if (v.isString() and v.asString().data.len > 0) return v.asString().data[0];
+    return default;
+}
+
+/// 读一条 CSV 逻辑行（引号内的换行不算行尾）。返回 0 表示 EOF（无内容）。
+fn csvReadLine(fh: *std.Io.File, encl: u8, out: *std.ArrayList(u8), allocator: Allocator) !usize {
+    var in_quotes = false;
+    while (true) {
+        var b: [1]u8 = undefined;
+        const n = std.posix.read(fh.handle, &b) catch return error.ReadFailed;
+        if (n == 0) {
+            if (out.items.len == 0) return 0;
+            break;
+        }
+        try out.append(allocator, b[0]);
+        if (b[0] == encl) in_quotes = !in_quotes;
+        if (b[0] == '\n' and !in_quotes) break;
+    }
+    return out.items.len;
+}
+
+/// 解析一行到字段数组（空行 ⇒ `[null]`，与 PHP 一致）。
+fn csvParseLine(line: []const u8, sep: u8, encl: u8, esc: ?u8, allocator: Allocator) !Value {
+    var body = line;
+    if (body.len > 0 and body[body.len - 1] == '\n') body = body[0 .. body.len - 1];
+    if (body.len > 0 and body[body.len - 1] == '\r') body = body[0 .. body.len - 1];
+
+    const arr = try PHPArray.init(allocator);
+    if (body.len == 0) {
+        try arr.push(allocator, Value.initNull());
+        return Value.initArray(arr);
+    }
+
+    var i: usize = 0;
+    while (true) {
+        var field = std.ArrayList(u8).empty;
+        defer field.deinit(allocator);
+
+        if (i < body.len and body[i] == encl) {
+            i += 1;
+            while (i < body.len) {
+                if (esc) |e| {
+                    if (body[i] == e and i + 1 < body.len) {
+                        const nxt = body[i + 1];
+                        if (nxt == encl or nxt == e) {
+                            try field.append(allocator, nxt);
+                            i += 2;
+                            continue;
+                        }
+                    }
+                }
+                if (body[i] == encl) {
+                    if (i + 1 < body.len and body[i + 1] == encl) {
+                        try field.append(allocator, encl);
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                try field.append(allocator, body[i]);
+                i += 1;
+            }
+            // 收尾引号之后、分隔符之前的残余字面量（PHP 语义）
+            while (i < body.len and body[i] != sep) : (i += 1) try field.append(allocator, body[i]);
+        } else {
+            while (i < body.len and body[i] != sep) : (i += 1) try field.append(allocator, body[i]);
+        }
+
+        try arr.push(allocator, Value.initString(try PHPString.init(allocator, field.items)));
+        if (i < body.len and body[i] == sep) {
+            i += 1;
+            continue;
+        }
+        break;
+    }
+    return Value.initArray(arr);
+}
+
+/// fgetcsv - PHP 契约：fgetcsv($stream, ?int $length = null, string $separator = ",", string $enclosure = '"', string $escape = "\\")
+pub fn php_fgetcsv(handle: Value, length: Value, separator: Value, enclosure: Value, escape: Value, allocator: Allocator) !Value {
+    // ★PHP 8.5：**非 resource** 与**已关闭 resource** 是两套措辞（ZPP vs 函数体）
+    if (!handle.isResource()) {
+        if (handle.hasResourceType()) {
+            return throwThrowable("TypeError", "fgetcsv(): Argument #1 ($stream) must be an open stream resource", runtime_allocator);
+        }
+        var ebuf: [256]u8 = undefined;
+        const tname = if (Value_isObject(handle)) Value_asObject(handle).class_name else valueTypeName(handle);
+        const msg = std.fmt.bufPrint(&ebuf, "fgetcsv(): Argument #1 ($stream) must be of type resource, {s} given", .{tname}) catch "fgetcsv(): Argument #1 ($stream) must be of type resource";
+        return throwThrowable("TypeError", msg, runtime_allocator);
+    }
+    const res = handle.asResource();
+    if (res.closed or res.file_handle == null) {
+        return throwThrowable("TypeError", "fgetcsv(): Argument #1 ($stream) must be an open stream resource", runtime_allocator);
+    }
+    var esc_opt: ?u8 = null;
+    if (escape.isNull()) {
+        // ★PHP 8.5：省略 $escape 会逐次调用发 E_DEPRECATED，行为仍用 "\\"
+        emitDeprecated("fgetcsv(): the $escape parameter must be provided as its default value will change");
+        esc_opt = '\\';
+    } else if (escape.isString() and escape.asString().data.len > 0) {
+        esc_opt = escape.asString().data[0];
+    }
+    const sep = csvParamChar(separator, ',');
+    const encl = csvParamChar(enclosure, '"');
+    const fh = res.file_handle.?;
+
+    var line = std.ArrayList(u8).empty;
+    defer line.deinit(allocator);
+    const n = csvReadLine(fh, encl, &line, allocator) catch return Value.initBool(false);
+    if (n == 0) {
+        res.eof = true;
+        return Value.initBool(false);
+    }
+    // $length 给定时截断（PHP：最多读 length 字节）
+    var effective = line.items;
+    if (!length.isNull()) {
+        const lim = length.toInt();
+        if (lim > 0 and @as(usize, @intCast(lim)) < effective.len) effective = effective[0..@intCast(lim)];
+    }
+    return csvParseLine(effective, sep, encl, esc_opt, allocator);
+}
+
+/// fputcsv - PHP 契约：fputcsv($stream, array $fields, string $separator = ",", string $enclosure = '"', string $escape = "\\", string $eol = "\n")
+pub fn php_fputcsv(handle: Value, fields: Value, separator: Value, enclosure: Value, escape: Value, eol: Value, allocator: Allocator) !Value {
+    // ★PHP 8.5：**非 resource** 与**已关闭 resource** 是两套措辞（ZPP vs 函数体）
+    if (!handle.isResource()) {
+        if (handle.hasResourceType()) {
+            return throwThrowable("TypeError", "fputcsv(): Argument #1 ($stream) must be an open stream resource", runtime_allocator);
+        }
+        var ebuf: [256]u8 = undefined;
+        const tname = if (Value_isObject(handle)) Value_asObject(handle).class_name else valueTypeName(handle);
+        const msg = std.fmt.bufPrint(&ebuf, "fputcsv(): Argument #1 ($stream) must be of type resource, {s} given", .{tname}) catch "fputcsv(): Argument #1 ($stream) must be of type resource";
+        return throwThrowable("TypeError", msg, runtime_allocator);
+    }
+    const res = handle.asResource();
+    if (res.closed or res.file_handle == null) {
+        return throwThrowable("TypeError", "fputcsv(): Argument #1 ($stream) must be an open stream resource", runtime_allocator);
+    }
+    if (!fields.isArray()) return Value.initBool(false);
+    var esc_opt: ?u8 = null;
+    if (escape.isNull()) {
+        emitDeprecated("fputcsv(): the $escape parameter must be provided as its default value will change");
+        esc_opt = '\\';
+    } else if (escape.isString() and escape.asString().data.len > 0) {
+        esc_opt = escape.asString().data[0];
+    }
+    const sep = csvParamChar(separator, ',');
+    const encl = csvParamChar(enclosure, '"');
+    const eol_str: []const u8 = if (eol.isString()) eol.asString().data else "\n";
+    const fh = res.file_handle.?;
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(allocator);
+
+    const arr = fields.asArray();
+    var idx: usize = 0;
+    while (idx < arr.count()) : (idx += 1) {
+        if (idx > 0) try out.append(allocator, sep);
+        const val = arr.get(ArrayKey{ .integer = @intCast(idx) }) orelse Value.initNull();
+        const s = if (val.isString()) val.asString().data else blk: {
+            const tmp = val.toString(allocator) catch break :blk "";
+            defer tmp.release(allocator);
+            break :blk try allocator.dupe(u8, tmp.data);
+        };
+        defer if (!val.isString() and s.len > 0) allocator.free(s);
+
+        var needs_quote = false;
+        for (s) |c| {
+            if (c == sep or c == encl or c == '\n' or c == '\r' or c == '\t' or c == ' ') {
+                needs_quote = true;
+                break;
+            }
+            if (esc_opt) |e| {
+                if (c == e) {
+                    needs_quote = true;
+                    break;
+                }
+            }
+        }
+        if (needs_quote) {
+            try out.append(allocator, encl);
+            for (s) |c| {
+                if (c == encl) try out.append(allocator, encl);
+                try out.append(allocator, c);
+            }
+            try out.append(allocator, encl);
+        } else {
+            try out.appendSlice(allocator, s);
+        }
+    }
+    try out.appendSlice(allocator, eol_str);
+    fileWriteAll(fh.handle, out.items);
+    return Value.initInt(@intCast(out.items.len));
+}
+
+// ============================================================================
+// ★R-278（F-178 第二段）：目录句柄族 opendir / readdir / rewinddir / closedir
+//   PHP 实测：readdir 含 "." 与 ".."（原始目录项顺序）；rewinddir/closedir 返回 NULL。
+// ============================================================================
+
+const PhpDirHandle = struct {
+    dir: std.Io.Dir,
+    iter: std.Io.Dir.Iterator,
+    /// 0 ⇒ 下一个返回 "."；1 ⇒ ".."；2 ⇒ 交给真实迭代器
+    dot_state: u8 = 0,
+};
+
+/// ★R-278：目录句柄实参三档分诊（PHP 实测三套措辞）：
+///   非 resource ⇒ ZPP「must be of type resource or null, {type} given」；
+///   已关闭     ⇒ 「must be an open stream resource」；
+///   非目录资源 ⇒ 「must be a valid Directory resource」。
+const DirArg = union(enum) {
+    res: *Value.PHPResource,
+    thrown: Value,
+};
+
+fn dirArgCheck(handle: Value, fn_name: []const u8) DirArg {
+    if (!handle.isResource()) {
+        var b: [256]u8 = undefined;
+        if (handle.hasResourceType()) {
+            const msg = std.fmt.bufPrint(&b, "{s}(): Argument #1 ($dir_handle) must be an open stream resource", .{fn_name}) catch "";
+            return .{ .thrown = throwThrowable("TypeError", msg, runtime_allocator) catch Value.initNull() };
+        }
+        const tname = if (Value_isObject(handle)) Value_asObject(handle).class_name else valueTypeName(handle);
+        const msg = std.fmt.bufPrint(&b, "{s}(): Argument #1 ($dir_handle) must be of type resource or null, {s} given", .{ fn_name, tname }) catch "";
+        return .{ .thrown = throwThrowable("TypeError", msg, runtime_allocator) catch Value.initNull() };
+    }
+    const res = handle.asResource();
+    if (res.closed) {
+        var b: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&b, "{s}(): Argument #1 ($dir_handle) must be an open stream resource", .{fn_name}) catch "";
+        return .{ .thrown = throwThrowable("TypeError", msg, runtime_allocator) catch Value.initNull() };
+    }
+    if (res.dir_handle == null) {
+        var b: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&b, "{s}(): Argument #1 ($dir_handle) must be a valid Directory resource", .{fn_name}) catch "";
+        return .{ .thrown = throwThrowable("TypeError", msg, runtime_allocator) catch Value.initNull() };
+    }
+    return .{ .res = res };
+}
+
+/// opendir - PHP 契约：opendir(string $directory, ?resource $context = null): resource|false
+pub fn php_opendir(dirname: Value, context: Value, allocator: Allocator) !Value {
+    _ = context;
+    _ = allocator; // 句柄与资源对象统一用 runtime_allocator（与 closedir/release 配对）
+    if (!dirname.isString()) return Value.initBool(false);
+    const path = dirname.asString().data;
+    const dir = std.Io.Dir.cwd().openDir(getIo(), path, .{ .iterate = true }) catch |err| {
+        var b: [1024]u8 = undefined;
+        const msg = std.fmt.bufPrint(&b, "opendir({s}): Failed to open directory: {s}", .{ path, fsErrText(err) }) catch "";
+        emitWarning(msg);
+        return Value.initBool(false);
+    };
+    const dh = runtime_allocator.create(PhpDirHandle) catch {
+        dir.close(getIo());
+        return Value.initBool(false);
+    };
+    dh.* = .{ .dir = dir, .iter = dir.iterate(), .dot_state = 0 };
+    const res = runtime_allocator.create(Value.PHPResource) catch {
+        dir.close(getIo());
+        runtime_allocator.destroy(dh);
+        return Value.initBool(false);
+    };
+    res.* = .{ .ref_count = 1, .file_handle = null, .type_name = "stream", .dir_handle = dh };
+    return Value.initResource(res);
+}
+
+/// readdir - 逐个返回条目（先 "." 与 ".."）；读完返回 false。
+pub fn php_readdir(handle: Value, allocator: Allocator) !Value {
+    const res = switch (dirArgCheck(handle, "readdir")) {
+        .thrown => |v| return v,
+        .res => |r| r,
+    };
+    const dh = res.dir_handle.?;
+    if (dh.dot_state == 0) {
+        dh.dot_state = 1;
+        return Value.initString(try PHPString.init(allocator, "."));
+    }
+    if (dh.dot_state == 1) {
+        dh.dot_state = 2;
+        return Value.initString(try PHPString.init(allocator, ".."));
+    }
+    if (dh.iter.next(getIo()) catch null) |entry| {
+        return Value.initString(try PHPString.init(allocator, entry.name));
+    }
+    return Value.initBool(false);
+}
+
+/// rewinddir - 游标回到开头（返回 NULL，与 PHP 一致）。
+pub fn php_rewinddir(handle: Value) !Value {
+    const res = switch (dirArgCheck(handle, "rewinddir")) {
+        .thrown => |v| return v,
+        .res => |r| r,
+    };
+    const dh = res.dir_handle.?;
+    dh.iter = dh.dir.iterate();
+    dh.dot_state = 0;
+    return Value.initNull();
+}
+
+// ============================================================================
+// ★F-178 尾（R-279）：disk_free_space / disk_total_space
+//   平台差异：macOS 用 `statfs`（f_bsize 为 u32），Linux 用 `statvfs`（f_bsize 为 c_ulong）。
+//   结构体只声明所需前缀 + 尾部填充（≥ 真实 sizeof），避免布局错误越界。
+// ============================================================================
+
+const StatFsDarwin = extern struct {
+    f_bsize: u32,
+    f_iosize: i32,
+    f_blocks: u64,
+    f_bfree: u64,
+    f_bavail: u64,
+    // 前缀 32B + 尾部 2144B = 2176B ≥ macOS 真实 sizeof(struct statfs)=2168B。
+    // 尾部必须 ≥ 真实尺寸：statfs 会写满整个结构，少 1 字节即越界踩栈帧。
+    _tail: [2144]u8,
+};
+
+const StatVfsLinux = extern struct {
+    f_bsize: c_ulong,
+    f_frsize: c_ulong,
+    f_blocks: c_ulong,
+    f_bfree: c_ulong,
+    f_bavail: c_ulong,
+    // 前缀 40B + 尾部 112B = 152B ≥ Linux x86_64 真实 sizeof(struct statvfs)=112B。
+    _tail: [112]u8,
+};
+
+extern "c" fn statfs(path: [*:0]const u8, buf: *StatFsDarwin) c_int;
+extern "c" fn statvfs(path: [*:0]const u8, buf: *StatVfsLinux) c_int;
+
+const DiskSpace = struct { total: f64, free: f64 };
+const DiskQuery = union(enum) { ok: DiskSpace, skip, fail: c_int };
+
+extern "c" fn strerror(errnum: c_int) [*:0]const u8;
+
+fn diskQuery(path: []const u8) DiskQuery {
+    if (path.len == 0) return .skip;
+    const z = runtime_allocator.dupeZ(u8, path) catch return .skip;
+    defer runtime_allocator.free(z);
+    if (comptime builtin.os.tag == .macos or builtin.os.tag == .ios) {
+        var buf: StatFsDarwin = undefined;
+        if (statfs(z, &buf) != 0) return .{ .fail = std.c._errno().* };
+        const unit: f64 = @floatFromInt(@as(u64, buf.f_bsize));
+        return .{ .ok = .{ .total = unit * @as(f64, @floatFromInt(buf.f_blocks)), .free = unit * @as(f64, @floatFromInt(buf.f_bavail)) } };
+    } else {
+        var buf: StatVfsLinux = undefined;
+        if (statvfs(z, &buf) != 0) return .{ .fail = std.c._errno().* };
+        const frs: u64 = if (buf.f_frsize != 0) @intCast(buf.f_frsize) else @intCast(buf.f_bsize);
+        const unit: f64 = @floatFromInt(frs);
+        return .{ .ok = .{ .total = unit * @as(f64, @floatFromInt(buf.f_blocks)), .free = unit * @as(f64, @floatFromInt(buf.f_bavail)) } };
+    }
+}
+
+/// disk_* 共用实现（PHP 8.5.8 实测口径）：
+///   · 形参 `$directory` weak string：标量强转、stringable 对象取 __toString、其它类型 TypeError；
+///   · null ⇒ `Passing null … of type string is deprecated` 后按空串处理；
+///   · 空路径 ⇒ **静默** false（PHP 不打 Warning）；statfs 失败 ⇒ `Warning: <fn>(): <strerror>` + false。
+fn diskSpaceValue(fn_name: []const u8, directory: Value, want_total: bool) !Value {
+    var v = directory;
+    while (v.isRef()) v = v.asRef().*;
+    _ = requireStringParamWeak(fn_name, 1, "directory", v) orelse return Value.initNull();
+    var tmp: ?*PHPString = null;
+    defer if (tmp) |t| t.release(runtime_allocator);
+    const path: []const u8 = if (v.isString()) v.asString().data else blk: {
+        if (v.isNull()) {
+            emitDeprecatedPassingNull(fn_name, 1, "directory", "string");
+            break :blk "";
+        }
+        tmp = try v.toString(runtime_allocator);
+        break :blk tmp.?.data;
+    };
+    switch (diskQuery(path)) {
+        .skip => return Value.initBool(false),
+        .fail => |e| {
+            var mbuf: [512]u8 = undefined;
+            const msg = std.fmt.bufPrint(&mbuf, "{s}(): {s}", .{ fn_name, std.mem.span(strerror(e)) }) catch return Value.initBool(false);
+            emitWarning(msg);
+            return Value.initBool(false);
+        },
+        .ok => |ds| return Value.initFloat(if (want_total) ds.total else ds.free),
+    }
+}
+
+/// disk_free_space - 返回可用字节数（float）；失败措辞见 diskSpaceValue。
+pub fn php_disk_free_space(directory: Value) !Value {
+    return diskSpaceValue("disk_free_space", directory, false);
+}
+
+/// disk_total_space - 返回总字节数（float）；失败措辞见 diskSpaceValue。
+pub fn php_disk_total_space(directory: Value) !Value {
+    return diskSpaceValue("disk_total_space", directory, true);
+}
+
+/// closedir - 关闭目录句柄（返回 NULL）。
+pub fn php_closedir(handle: Value) !Value {
+    const res = switch (dirArgCheck(handle, "closedir")) {
+        .thrown => |v| return v,
+        .res => |r| r,
+    };
+    const dh = res.dir_handle.?;
+    dh.dir.close(getIo());
+    runtime_allocator.destroy(dh);
+    res.dir_handle = null;
+    res.closed = true;
+    return Value.initNull();
+}
+
+// ============================================================================
 // 系统信息函数
 // ============================================================================
 
 pub fn php_getcwd(allocator: Allocator) !Value {
-    const cwd = std.Io.Dir.cwd().realpathAlloc(allocator, ".") catch return Value.initBool(false);
+    // ★R-274：Zig 0.16 的 Dir 无 `realpathAlloc`（旧 API）；改走 `realPathFileAlloc(io, path, alloc)`。
+    const cwd = std.Io.Dir.cwd().realPathFileAlloc(getIo(), ".", allocator) catch return Value.initBool(false);
+    defer allocator.free(cwd);
     const output = try PHPString.init(allocator, cwd);
     return Value.initString(output);
 }
@@ -4341,17 +5321,26 @@ pub fn php_uname(allocator: Allocator) !Value {
 pub fn php_unlink(filename: Value) !Value {
     if (!filename.isString()) return Value.initBool(false);
     const fname = filename.asString().data;
-    std.Io.Dir.cwd().deleteFile(fname) catch return Value.initBool(false);
+    std.Io.Dir.cwd().deleteFile(getIo(), fname) catch |err| {
+        var mbuf: [1024]u8 = undefined;
+        const msg = std.fmt.bufPrint(&mbuf, "unlink({s}): {s}", .{ fname, fsErrText(err) }) catch "";
+        emitWarning(msg);
+        return Value.initBool(false);
+    };
     return Value.initBool(true);
 }
 
 pub fn php_filesize(filename: Value) !Value {
     if (!filename.isString()) return Value.initBool(false);
     const fname = filename.asString().data;
-    const file = std.Io.Dir.cwd().openFile(getIo(), fname, .{}) catch return Value.initBool(false);
-    defer file.close(getIo());
-    const stat = file.stat(getIo()) catch return Value.initBool(false);
-    return Value.initInt(@intCast(stat.size));
+    // ★R-275：PHP 走 stat；失败文案是 `filesize(): stat failed for <path>`
+    const st = std.Io.Dir.cwd().statFile(getIo(), fname, .{}) catch {
+        var mbuf: [1024]u8 = undefined;
+        const msg = std.fmt.bufPrint(&mbuf, "filesize(): stat failed for {s}", .{fname}) catch "";
+        emitWarning(msg);
+        return Value.initBool(false);
+    };
+    return Value.initInt(@intCast(st.size));
 }
 
 pub fn php_is_file(filename: Value) !Value {
@@ -4604,21 +5593,48 @@ pub fn php_sys_get_temp_dir(allocator: Allocator) !Value {
     return Value.initString(output);
 }
 
-pub fn php_file(filename: Value, allocator: Allocator) !Value {
+/// file - PHP 契约：filename, flags=0, context=null
+///   ★F-173（R-270）：支持 `FILE_IGNORE_NEW_LINES`(2)／`FILE_SKIP_EMPTY_LINES`(4)；
+///   ★行尾语义：末行**无换行**时不补 `\n`（PHP 实测 `"a\nbc"` ⇒ `["a\n","bc"]`）；
+///   `FILE_USE_INCLUDE_PATH`(1) 与 context 未建模 ⇒ 仅吞下。
+pub fn php_file(filename: Value, flags: Value, context: Value, allocator: Allocator) !Value {
+    _ = context;
     if (!filename.isString()) return Value.initBool(false);
     const fname = filename.asString().data;
 
-    const content = std.Io.Dir.cwd().readFileAlloc(getIo(), fname, allocator, 10 * 1024 * 1024) catch return Value.initBool(false);
+    // ★R-269：同 `php_file_get_contents`——补 `Io.Limit`（原裸 int 只有实例化时才编译失败）
+    const content = std.Io.Dir.cwd().readFileAlloc(getIo(), fname, allocator, .limited(10 * 1024 * 1024)) catch |err| {
+        warnOpenStream("file", fname, err);
+        return Value.initBool(false);
+    };
     defer allocator.free(content);
 
+    const flag_bits = flags.toInt();
+    const ignore_new_lines = (flag_bits & 2) != 0;
+    const skip_empty_lines = (flag_bits & 4) != 0;
+
     const arr = try PHPArray.init(allocator);
-    var lines = std.mem.splitScalar(u8, content, '\n');
     var idx: i64 = 0;
-    while (lines.next()) |line| {
-        if (line.len == 0 and lines.rest().len == 0) break; // 最后的空行
-        const line_with_newline = try std.fmt.allocPrint(allocator, "{s}\n", .{line});
-        const line_str = try PHPString.init(allocator, line_with_newline);
-        try arr.set(allocator, ArrayKey{ .integer = idx }, Value.initString(line_str));
+    var pos: usize = 0;
+    while (pos < content.len) {
+        const nl = std.mem.indexOfScalarPos(u8, content, pos, '\n');
+        const line_end = nl orelse content.len;
+        const line = content[pos..line_end];
+        const had_newline = nl != null;
+        pos = if (had_newline) line_end + 1 else content.len;
+
+        // ★PHP 实测：FILE_SKIP_EMPTY_LINES **只在**同时忽略换行（或行本身为空）时才生效——
+        //   单独使用时空白行仍以 "\n" 返回（`["\n","\n","a\n","\n"]`），两标志同用 ⇒ 只剩 "a"。
+        if (skip_empty_lines and ignore_new_lines and line.len == 0) continue;
+
+        if (!ignore_new_lines and had_newline) {
+            const line_with_newline = try std.fmt.allocPrint(allocator, "{s}\n", .{line});
+            const line_str = try PHPString.init(allocator, line_with_newline);
+            allocator.free(line_with_newline);
+            try arr.set(allocator, ArrayKey{ .integer = idx }, Value.initString(line_str));
+        } else {
+            try arr.set(allocator, ArrayKey{ .integer = idx }, Value.initString(try PHPString.init(allocator, line)));
+        }
         idx += 1;
     }
     return Value.initArray(arr);
@@ -7231,6 +8247,145 @@ fn requireArrayParam(fn_name: []const u8, arg_no: usize, param_name: []const u8,
     return rejectParamType(fn_name, arg_no, param_name, "array", val);
 }
 
+/// ★F-62f（R-261）：`string` 形参的 weak 口径（标量与带 `__toString` 对象放行，其余按原文案拒）。
+fn requireStringParamWeak(fn_name: []const u8, arg_no: usize, param_name: []const u8, val: Value) ?Value {
+    var v = val;
+    while (v.isRef()) v = v.asRef().*;
+    if (v.isString() or v.isInt() or v.isFloat() or v.isBool() or v.isNull()) return v;
+    if (Value_isObject(v) and valueHasToStringMethod(v)) return v;
+    return rejectParamType(fn_name, arg_no, param_name, "string", v);
+}
+
+/// ★F-62f（R-261）：`string|int|null` 槽（password 族 `$algo`）；float/bool 走 weak 转 int。
+fn requireStringOrIntOrNullParam(fn_name: []const u8, arg_no: usize, param_name: []const u8, val: Value) ?Value {
+    var v = val;
+    while (v.isRef()) v = v.asRef().*;
+    if (v.isString() or v.isInt() or v.isNull() or v.isFloat() or v.isBool()) return v;
+    if (Value_isObject(v) and valueHasToStringMethod(v)) return v;
+    return rejectParamType(fn_name, arg_no, param_name, "string|int|null", v);
+}
+
+/// ★F-62f（R-261）：PHP options 关联数组按字符串键取值。
+fn phpArrayGetStringOption(arr: *PHPArray, name: []const u8) ?Value {
+    var it = arr.elements.iterator();
+    while (it.next()) |entry| {
+        if (entry.key_ptr.* == .string and std.mem.eql(u8, entry.key_ptr.string.data, name)) return entry.value_ptr.*;
+    }
+    return null;
+}
+
+/// 选项值的弱 int 口径（PHP 实测：int；float 截断；bool 1/0；数值串解析；非数值串 ⇒ 0）。
+fn phpOptionToInt(v: Value) i64 {
+    var val = v;
+    while (val.isRef()) val = val.asRef().*;
+    if (val.isInt()) return val.asInt();
+    if (val.isFloat()) {
+        const f = val.asFloat();
+        if (!std.math.isFinite(f)) return 0;
+        return @intFromFloat(@trunc(f));
+    }
+    if (val.isBool()) return if (val.asBool()) 1 else 0;
+    if (val.isString()) {
+        const data = val.asString().data;
+        if (strictIntFromTrimmed(data)) |i| return i;
+        const t = trimNumericWhitespace(data);
+        const f = std.fmt.parseFloat(f64, t) catch return 0;
+        if (!std.math.isFinite(f)) return 0;
+        return @intFromFloat(@trunc(f));
+    }
+    return 0;
+}
+
+/// 选项里的 bcrypt cost；缺省 12（PHP 8.5 默认）。
+fn passwordBcryptCost(options_val: Value) i64 {
+    if (options_val.isArray()) {
+        if (phpArrayGetStringOption(options_val.asArray(), "cost")) |cv| return phpOptionToInt(cv);
+    }
+    return 12;
+}
+
+const PasswordAlgoKind = enum { bcrypt, argon2i, argon2id, invalid };
+fn passwordAlgoKind(algo: Value) PasswordAlgoKind {
+    if (algo.isNull()) return .bcrypt;
+    if (algo.isBool()) return .bcrypt;
+    if (algo.isInt()) {
+        return switch (algo.asInt()) {
+            0, 1 => .bcrypt,
+            2 => .argon2i,
+            3 => .argon2id,
+            else => .invalid,
+        };
+    }
+    if (algo.isFloat()) {
+        const f = algo.asFloat();
+        if (!std.math.isFinite(f)) return .invalid;
+        return passwordAlgoKind(Value.initInt(@intFromFloat(@trunc(f))));
+    }
+    if (algo.isString()) {
+        const s = algo.asString().data;
+        if (std.mem.eql(u8, s, "2y")) return .bcrypt;
+        if (std.mem.eql(u8, s, "argon2i")) return .argon2i;
+        if (std.mem.eql(u8, s, "argon2id")) return .argon2id;
+    }
+    return .invalid;
+}
+
+/// ★F-168（R-263）：argon2 的 options（PHP 缺省 m=65536,t=4,p=1）。
+const Argon2ParamsOpt = struct { m: i64, t: i64, p: i64 };
+
+fn passwordArgon2Params(options_val: Value) Argon2ParamsOpt {
+    var m: i64 = 65536;
+    var t: i64 = 4;
+    var p: i64 = 1;
+    if (options_val.isArray()) {
+        const arr = options_val.asArray();
+        if (phpArrayGetStringOption(arr, "memory_cost")) |v| m = phpOptionToInt(v);
+        if (phpArrayGetStringOption(arr, "time_cost")) |v| t = phpOptionToInt(v);
+        if (phpArrayGetStringOption(arr, "threads")) |v| p = phpOptionToInt(v);
+    }
+    return .{ .m = m, .t = t, .p = p };
+}
+
+/// 从 `$argon2x$v=19$m=..,t=..,p=..$...` 解析参数；格式不符 ⇒ null。
+fn passwordArgon2StoredParams(hash_str: []const u8) ?Argon2ParamsOpt {
+    var idx: usize = 0;
+    var dollars: usize = 0;
+    while (idx < hash_str.len) : (idx += 1) {
+        if (hash_str[idx] == '$') {
+            dollars += 1;
+            if (dollars == 3) break;
+        }
+    }
+    if (dollars != 3) return null;
+    const start = idx + 1;
+    var end = start;
+    while (end < hash_str.len and hash_str[end] != '$') end += 1;
+    if (end >= hash_str.len) return null;
+
+    var m: i64 = 0;
+    var t: i64 = 0;
+    var p: i64 = 0;
+    var found_m = false;
+    var found_t = false;
+    var found_p = false;
+    var it = std.mem.splitScalar(u8, hash_str[start..end], ',');
+    while (it.next()) |kv| {
+        const eq = std.mem.indexOfScalar(u8, kv, '=') orelse continue;
+        const n = std.fmt.parseInt(i64, kv[eq + 1 ..], 10) catch continue;
+        if (std.mem.eql(u8, kv[0..eq], "m")) {
+            m = n;
+            found_m = true;
+        } else if (std.mem.eql(u8, kv[0..eq], "t")) {
+            t = n;
+            found_t = true;
+        } else if (std.mem.eql(u8, kv[0..eq], "p")) {
+            p = n;
+            found_p = true;
+        }
+    }
+    if (!found_m or !found_t or !found_p) return null;
+    return .{ .m = m, .t = t, .p = p };
+}
 /// ★F-62f（R-255）：`array|string` 联合槽（substr_replace #1/#2）。
 ///   string/array/null 放行；对象等按 PHP 文案拒绝（数组形语义另案）。
 fn requireArrayOrStringParam(fn_name: []const u8, arg_no: usize, param_name: []const u8, val: Value) ?Value {
@@ -9204,11 +10359,17 @@ pub fn registerPHPPredefinedConstants(allocator: Allocator) !void {
         .{ .name = "PREG_JIT_STACKLIMIT_ERROR", .value = 6 },
         .{ .name = "PREG_GREP_INVERT", .value = 1 },
         // 文件
+        .{ .name = "SEEK_SET", .value = 0 },
+        .{ .name = "SEEK_CUR", .value = 1 },
+        .{ .name = "SEEK_END", .value = 2 },
         .{ .name = "FILE_APPEND", .value = 8 },
+        .{ .name = "FILE_USE_INCLUDE_PATH", .value = 1 },
         .{ .name = "FILE_IGNORE_NEW_LINES", .value = 2 },
         .{ .name = "FILE_SKIP_EMPTY_LINES", .value = 4 },
         .{ .name = "LOCK_EX", .value = 2 },
         .{ .name = "LOCK_SH", .value = 1 },
+        .{ .name = "LOCK_UN", .value = 3 },
+        .{ .name = "LOCK_NB", .value = 4 },
         .{ .name = "LOCK_UN", .value = 3 },
         .{ .name = "SEEK_SET", .value = 0 },
         .{ .name = "SEEK_CUR", .value = 1 },
@@ -9239,12 +10400,14 @@ pub fn registerPHPPredefinedConstants(allocator: Allocator) !void {
         .{ .name = "PHP_INT_MAX", .value = 9223372036854775807 },
         .{ .name = "PHP_INT_MIN", .value = -9223372036854775808 },
         .{ .name = "PHP_INT_SIZE", .value = 8 },
-        .{ .name = "PHP_MAJOR_VERSION", .value = 8 },
-        .{ .name = "PHP_MINOR_VERSION", .value = 3 },
-        .{ .name = "PHP_RELEASE_VERSION", .value = 0 },
-        // 密码
-        .{ .name = "PASSWORD_DEFAULT", .value = 1 },
-        .{ .name = "PASSWORD_BCRYPT", .value = 1 },
+        .{ .name = "PHP_MAJOR_VERSION", .value = PHP_VER_MAJOR },
+        .{ .name = "PHP_MINOR_VERSION", .value = PHP_VER_MINOR },
+        .{ .name = "PHP_RELEASE_VERSION", .value = PHP_VER_RELEASE },
+        // 密码（★F-171/R-264：PHP 8.5 的算法常量是**字符串**；整型默认参在 int 表）
+        .{ .name = "PASSWORD_BCRYPT_DEFAULT_COST", .value = 12 },
+        .{ .name = "PASSWORD_ARGON2_DEFAULT_MEMORY_COST", .value = 65536 },
+        .{ .name = "PASSWORD_ARGON2_DEFAULT_TIME_COST", .value = 4 },
+        .{ .name = "PASSWORD_ARGON2_DEFAULT_THREADS", .value = 1 },
         // 输出缓冲
         .{ .name = "PHP_OUTPUT_HANDLER_START", .value = 1 },
         .{ .name = "PHP_OUTPUT_HANDLER_WRITE", .value = 0 },
@@ -9287,13 +10450,20 @@ pub fn registerPHPPredefinedConstants(allocator: Allocator) !void {
     const str_consts = [_]StrConst{
         .{ .name = "PHP_EOL", .value = "\n" },
         .{ .name = "PHP_SAPI", .value = "cli" },
-        .{ .name = "PHP_OS", .value = "Darwin" },
-        .{ .name = "PHP_OS_FAMILY", .value = "Darwin" },
-        .{ .name = "PHP_VERSION", .value = "8.4.8" },
+        .{ .name = "PHP_OS", .value = PHP_OS_NAME },
+        .{ .name = "PHP_OS_FAMILY", .value = PHP_OS_FAMILY_NAME },
+        .{ .name = "PHP_VERSION", .value = PHP_VER_STRING },
+        .{ .name = "PHP_EXTRA_VERSION", .value = PHP_VER_EXTRA },
         .{ .name = "DIRECTORY_SEPARATOR", .value = "/" },
         .{ .name = "PATH_SEPARATOR", .value = ":" },
         .{ .name = "PHP_EXTENSION_DIR", .value = "" },
         .{ .name = "PHP_BINDIR", .value = "/usr/local/bin" },
+        // 密码算法（★F-171/R-264：PHP 8.5 实测值；BCRYPT/DEFAULT 均为 '2y'）
+        .{ .name = "PASSWORD_DEFAULT", .value = "2y" },
+        .{ .name = "PASSWORD_BCRYPT", .value = "2y" },
+        .{ .name = "PASSWORD_ARGON2I", .value = "argon2i" },
+        .{ .name = "PASSWORD_ARGON2ID", .value = "argon2id" },
+        .{ .name = "PASSWORD_ARGON2_PROVIDER", .value = "standard" },
     };
 
     // 布尔常量
@@ -12106,6 +13276,7 @@ const PCRE2_ERROR_UTF8_ERR1: c_int = -3; // pcre2.h:355（UTF8_ERR1..ERR21 = -3�
 const PCRE2_ERROR_UTF8_ERR21: c_int = -23; // pcre2.h:375
 const PCRE2_ERROR_JIT_STACKLIMIT: c_int = -46; // pcre2.h:410
 const PCRE2_ERROR_MATCHLIMIT: c_int = -47; // pcre2.h:411
+const PCRE2_ERROR_NOMEMORY: c_int = -48; // pcre2.h:412（substitute 输出缓冲不足）
 const PCRE2_ERROR_DEPTHLIMIT: c_int = -53; // pcre2.h:417（:418 的 RECURSIONLIMIT 是其 obsolete synonym）
 // ★R-186：`pcre2_config_8` 的请求码（头名＋行号，禁裸数字）
 const PCRE2_CONFIG_JIT_REQUEST: c_uint = 1; // pcre2.h:477
@@ -12704,79 +13875,137 @@ pub fn preg_match_all(pattern_val: Value, subject_val: Value, matches_ref: *Valu
 
 /// preg_match_all - 返回所有匹配和捕获组
 /// 返回: [match_count, [[full_match, group1, group2, ...], ...]]
-pub fn preg_replace(pattern_val: Value, replacement_val: Value, subject_val: Value, limit_val: Value, allocator: Allocator) !Value {
-    if (!pattern_val.isString() or !replacement_val.isString() or !subject_val.isString()) {
-        return Value.initNull();
+/// ★F-165（R-259）：`array|string` 形参的 zpp 口径——数组与标量放行，
+///   带 `__toString` 的对象按 PHP weak 模式放行，其余按原文案抛 TypeError。
+fn requirePregArgParam(fn_name: []const u8, arg_no: usize, param_name: []const u8, val: Value) ?Value {
+    var v = val;
+    while (v.isRef()) v = v.asRef().*;
+    if (v.isArray() or v.isString() or v.isInt() or v.isFloat() or v.isBool() or v.isNull()) return v;
+    if (Value_isObject(v) and valueHasToStringMethod(v)) return v;
+    return rejectParamType(fn_name, arg_no, param_name, "array|string", v);
+}
+
+fn valueHasToStringMethod(val: Value) bool {
+    if (!Value_isObject(val)) return false;
+    const meta = Value_asObject(val).class_meta orelse return false;
+    return meta.magic_toString != null;
+}
+
+/// 把一个槽的实参展开成字符串列表（数组按插入位置序、键忽略）；每项为独立拷贝。
+fn pregCollectArgStrings(val: Value, allocator: Allocator, out: *std.ArrayList([]const u8)) !void {
+    if (val.isArray()) {
+        var it = val.asArray().elements.iterator();
+        while (it.next()) |entry| {
+            const s = try entry.value_ptr.*.toString(allocator);
+            defer s.release(allocator);
+            try out.append(allocator, try allocator.dupe(u8, s.data));
+        }
+        return;
     }
+    const s = try val.toString(allocator);
+    defer s.release(allocator);
+    try out.append(allocator, try allocator.dupe(u8, s.data));
+}
 
-    const pattern_str = pattern_val.asString();
-    const replacement_str = replacement_val.asString();
-    const subject_str = subject_val.asString();
+fn pregFreeStringList(list: *std.ArrayList([]const u8), allocator: Allocator) void {
+    for (list.items) |s| allocator.free(s);
+    list.deinit(allocator);
+}
 
-    const limit: i64 = if (limit_val.isNull()) -1 else limit_val.toInt();
+const PregOutcome = struct { data: []u8, matched: bool };
 
-    if (limit == 0) return subject_val;
+/// ★F-165：单次处理的三态——`ok`；`pcre_error`（匹配/替换运行期错误，如坏 UTF-8）；
+///   `fatal`（模式非法/编译失败）。**数组主题**两者都只是丢弃该元素，**标量主题**两者都整调用 NULL。
+const PregOnceResult = union(enum) {
+    ok: PregOutcome,
+    pcre_error: void,
+    fatal: void,
+};
 
-    const parsed = parsePHPRegexPattern(pattern_str.data);
+const PregSeqResult = union(enum) {
+    ok: PregOutcome,
+    pcre_error: void,
+    fatal: void,
+};
+
+/// 单模式 × 单主题。`null` ＝ 整调用失败（非法模式/编译失败/PCRE 真错误）。
+fn pregReplaceOnce(
+    fn_name: []const u8,
+    pattern_str: []const u8,
+    replacement_str: []const u8,
+    subject_str: []const u8,
+    limit: i64,
+    allocator: Allocator,
+) !PregOnceResult {
+    const parsed = parsePHPRegexPattern(pattern_str);
     // ★F-50（R-163）：非法分隔符/修饰符 ⇒ 按 PHP 口径发 Warning 后返回本族错误值（实测见工单 §38.1），不进 PCRE。
     if (parsed.issue != .none) {
-        emitRegexPatternWarning("preg_replace", parsed);
-        return Value.initNull();
+        emitRegexPatternWarning(fn_name, parsed);
+        return .{ .fatal = {} };
     }
 
-    // 使用缓存获取编译后的正则
-    // ★F-79d：实测 PHP `preg_replace` 编译失败 ⇒ **`null`** ＋ Warning（旧返回未替换的 subject＝静默错值方向）；
-    //   模式为**数组**时任一枚失败也是**整次**返回 `null`（实测），故下面的数组支同样直接出参。
-    const re = compileRegexOrWarn("preg_replace", parsed, allocator) orelse return Value.initNull();
+    // ★F-79d：编译失败 ⇒ 标量主题整调用 `null`；数组主题按元素丢弃（R-259 实测）。
+    const re = compileRegexOrWarn(fn_name, parsed, allocator) orelse return .{ .fatal = {} };
 
-    const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse return subject_val;
+    const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse
+        return .{ .ok = .{ .data = try allocator.dupe(u8, subject_str), .matched = false } };
     defer pcre2_match_data_free_8(match_data);
 
-    if (limit < 0) {
+    // ★F-167（R-260）：替换串含 `$`/`\` 时 PCRE2 substitute 的语法与 PHP 不同（`$$` 被吃成 `$`，
+    //   `\$`／`$10`／`$<1>` 等直接 BADREPLACEMENT ⇒ 旧实现整调用 NULL）⇒ 这类替换串走手写支；
+    //   纯字面替换仍走 substitute 快路（字节语义与 PHP 一致）。
+    const repl_has_meta = std.mem.indexOfAny(u8, replacement_str, "$\\") != null;
+    if (limit < 0 and !repl_has_meta) {
         // 替换全部 — 使用 PCRE2_SUBSTITUTE_GLOBAL
-        const output_len: usize = subject_str.length * 2 + 1;
-        const output = try allocator.alloc(u8, output_len);
+        // ★F-165：初估 `2*subject+1` 在替换串比主题长时必然不够（PCRE2 报 NOMEMORY）；
+        //   带 OVERFLOW_LENGTH 跑一次，`output_size` 会被改写成**所需字节数**，扩到实需后重跑。
+        var output_len: usize = subject_str.len * 2 + 1;
+        var output = try allocator.alloc(u8, output_len);
         errdefer allocator.free(output);
 
         var output_size: usize = output_len;
-        const rc = pcre2_substitute_8(re, subject_str.data.ptr, subject_str.length, 0, PCRE2_SUBSTITUTE_GLOBAL, match_data, null, replacement_str.data.ptr, replacement_str.length, output.ptr, @ptrCast(&output_size));
+        var rc = pcre2_substitute_8(re, subject_str.ptr, subject_str.len, 0, PCRE2_SUBSTITUTE_GLOBAL | PCRE2_SUBSTITUTE_OVERFLOW_LENGTH, match_data, null, replacement_str.ptr, replacement_str.len, output.ptr, @ptrCast(&output_size));
+        if (rc == PCRE2_ERROR_NOMEMORY) {
+            output_len = output_size;
+            output = try allocator.realloc(output, output_len);
+            output_size = output_len;
+            rc = pcre2_substitute_8(re, subject_str.ptr, subject_str.len, 0, PCRE2_SUBSTITUTE_GLOBAL, match_data, null, replacement_str.ptr, replacement_str.len, output.ptr, @ptrCast(&output_size));
+        }
         // ★F-116（R-184）：substitute 的返回码语义与 match 侧同形（`>=0`＝替换数、`-1`＝没匹配、其余负值＝错误）
-        //   ⇒ 复用同一映射点即可。此前本支**完全不经记点**（站点清单按 `grep pcre2_match_8` 定的必然漏口），
-        //   门 PERR 臂 `b5` 实测坏 UTF-8 读回 `PLE#0`。
+        //   ⇒ 复用同一映射点即可。
         recordPcreMatchResult(rc);
 
         if (rc == PCRE2_ERROR_NOMATCH) {
             allocator.free(output);
-            return subject_val;
+            return .{ .ok = .{ .data = try allocator.dupe(u8, subject_str), .matched = false } };
         }
-        // ★F-90（R-184）＋F-116：旧把"没匹配"与"真错误"并成一支 ⇒ 错误也"原样返回主题"。PHP 实测真错误返回 **null**。
+        // ★F-90（R-184）＋F-116：真错误（不能"原样返回主题"）；R-259 起与编译失败分开报给调用方。
         if (rc < 0) {
             allocator.free(output);
-            return Value.initNull();
+            return .{ .pcre_error = {} };
         }
 
-        const result = try allocator.realloc(output, output_size);
-        return Value.initString(try PHPString.init(allocator, result));
+        // ★F-165（R-259）：substitute 的返回值是**替换计数**——无匹配时为 0（实测），
+        //   故 `matched` 必须用 `rc > 0`；用 `rc >= 0` 会让 preg_filter 把未命中元素当命中。
+        return .{ .ok = .{ .data = try allocator.realloc(output, output_size), .matched = rc > 0 } };
     }
 
-    // limit > 0: 在原始 subject 中查找匹配位置，替换前 limit 个匹配
-    // 使用 pcre2_match 逐个查找，手动构建结果字符串以正确处理 limit 和反向引用
-    const limit_usize: usize = @intCast(limit);
+    // limit > 0 或替换串含 `$`/`\`：在原始 subject 中逐个查找匹配并手写拼接（PHP 替换语法）
+    const limit_usize: usize = if (limit < 0) std.math.maxInt(usize) else @intCast(limit);
 
-    var result_buf = try std.ArrayList(u8).initCapacity(allocator, subject_str.length + 64);
+    var result_buf = try std.ArrayList(u8).initCapacity(allocator, subject_str.len + 64);
     defer result_buf.deinit(allocator);
 
     var last_end: usize = 0;
     var search_offset: usize = 0;
     var replacements_done: usize = 0;
 
-    while (replacements_done < limit_usize and search_offset <= subject_str.length) {
-        const rc = pcre2_match_8(re, subject_str.data.ptr, subject_str.length, @intCast(search_offset), 0, match_data, null);
+    while (replacements_done < limit_usize and search_offset <= subject_str.len) {
+        const rc = pcre2_match_8(re, subject_str.ptr, subject_str.len, @intCast(search_offset), 0, match_data, null);
         recordPcreMatchResult(rc);
         if (rc == PCRE2_ERROR_NOMATCH) break;
-        // ★F-90（R-184）：真错误 ⇒ 整调用 **null**（preg_replace 契约；编译失败支 R-176 已按同一型别收口）。
-        //   ★早退安全：`result_buf` 挂 `defer result_buf.deinit(allocator)`。
-        if (rc < 0) return Value.initNull();
+        // ★F-90（R-184）：真错误 ⇒ 早退（`result_buf` 挂 defer）；R-259 起按三态上报。
+        if (rc < 0) return .{ .pcre_error = {} };
 
         const ovec = pcre2_get_ovector_pointer_8(match_data);
         const match_start = ovec[0];
@@ -12785,19 +14014,19 @@ pub fn preg_replace(pattern_val: Value, replacement_val: Value, subject_val: Val
 
         // 复制匹配前的文本
         if (match_start > last_end) {
-            try result_buf.appendSlice(allocator, subject_str.data[last_end..match_start]);
+            try result_buf.appendSlice(allocator, subject_str[last_end..match_start]);
         }
 
         // 处理替换字符串中的反向引用 ($0, $1, ${1}, \0, \1 等)
-        try pregReplaceProcessBackrefs(&result_buf, allocator, replacement_str.data, subject_str.data, ovec, num_groups);
+        try pregReplaceProcessBackrefs(&result_buf, allocator, replacement_str, subject_str, ovec, num_groups);
 
         last_end = match_end;
         replacements_done += 1;
 
         if (match_end == match_start) {
             // 空匹配 — 前进 1 字符避免无限循环
-            if (match_end < subject_str.length) {
-                try result_buf.appendSlice(allocator, subject_str.data[match_end .. match_end + 1]);
+            if (match_end < subject_str.len) {
+                try result_buf.appendSlice(allocator, subject_str[match_end .. match_end + 1]);
             }
             last_end = match_end + 1;
             search_offset = match_end + 1;
@@ -12807,17 +14036,119 @@ pub fn preg_replace(pattern_val: Value, replacement_val: Value, subject_val: Val
     }
 
     // 复制最后一段未匹配文本
-    if (last_end < subject_str.length) {
-        try result_buf.appendSlice(allocator, subject_str.data[last_end..]);
+    if (last_end < subject_str.len) {
+        try result_buf.appendSlice(allocator, subject_str[last_end..]);
     }
 
-    if (replacements_done == 0) return subject_val;
+    if (replacements_done == 0) return .{ .ok = .{ .data = try allocator.dupe(u8, subject_str), .matched = false } };
 
-    const result_str = try result_buf.toOwnedSlice(allocator);
-    return Value.initString(try PHPString.init(allocator, result_str));
+    return .{ .ok = .{ .data = try result_buf.toOwnedSlice(allocator), .matched = true } };
 }
 
-/// 处理替换字符串中的反向引用: $0, $1-$9, ${N}, \0-\9
+/// 多模式序列：替换按位置配对（缺位补 `""`；标量替换广播到全部模式），模式按序作用在上一步结果上。
+fn pregReplaceSequence(
+    patterns: []const []const u8,
+    replacements: []const []const u8,
+    subject_str: []const u8,
+    limit: i64,
+    broadcast: bool,
+    fn_name: []const u8,
+    allocator: Allocator,
+) !PregSeqResult {
+    var current = try allocator.dupe(u8, subject_str);
+    errdefer allocator.free(current);
+
+    var matched = false;
+    for (patterns, 0..) |pat, i| {
+        const repl: []const u8 = if (broadcast)
+            (if (replacements.len > 0) replacements[0] else "")
+        else if (i < replacements.len) replacements[i] else "";
+        const once = try pregReplaceOnce(fn_name, pat, repl, current, limit, allocator);
+        switch (once) {
+            .ok => |outcome| {
+                allocator.free(current);
+                current = outcome.data;
+                matched = matched or outcome.matched;
+            },
+            .pcre_error => {
+                allocator.free(current);
+                return .{ .pcre_error = {} };
+            },
+            .fatal => {
+                allocator.free(current);
+                return .{ .fatal = {} };
+            },
+        }
+    }
+    return .{ .ok = .{ .data = current, .matched = matched } };
+}
+
+pub fn preg_replace(pattern_val: Value, replacement_val: Value, subject_val: Value, limit_val: Value, allocator: Allocator) !Value {
+    const pat = requirePregArgParam("preg_replace", 1, "pattern", pattern_val) orelse return Value.initNull();
+    if (pat.isNull()) emitDeprecatedPassingNull("preg_replace", 1, "pattern", "array|string");
+    const rep = requirePregArgParam("preg_replace", 2, "replacement", replacement_val) orelse return Value.initNull();
+    if (rep.isNull()) emitDeprecatedPassingNull("preg_replace", 2, "replacement", "array|string");
+    const subj = requirePregArgParam("preg_replace", 3, "subject", subject_val) orelse return Value.initNull();
+    if (subj.isNull()) emitDeprecatedPassingNull("preg_replace", 3, "subject", "array|string");
+    const limit: i64 = if (limit_val.isNull() or limit_val.isMissing()) -1 else blk: {
+        const lv = requireNumParam("preg_replace", 4, "limit", .int_param, limit_val) orelse return Value.initNull();
+        break :blk lv.asInt();
+    };
+    // ★F-165：PHP 在 zpp 之后才检查「replacement 是数组而 pattern 不是」
+    if (rep.isArray() and !pat.isArray()) {
+        throwThrowableDiscardCatch("TypeError", "preg_replace(): Argument #1 ($pattern) must be of type array when argument #2 ($replacement) is an array, string given", runtime_allocator);
+        return Value.initNull();
+    }
+
+    var patterns: std.ArrayList([]const u8) = .empty;
+    defer pregFreeStringList(&patterns, allocator);
+    var replacements: std.ArrayList([]const u8) = .empty;
+    defer pregFreeStringList(&replacements, allocator);
+    try pregCollectArgStrings(pat, allocator, &patterns);
+    try pregCollectArgStrings(rep, allocator, &replacements);
+
+    if (subj.isArray()) {
+        const out = try PHPArray.init(allocator);
+        var it = subj.asArray().elements.iterator();
+        while (it.next()) |entry| {
+            const s = try entry.value_ptr.*.toString(allocator);
+            defer s.release(allocator);
+            const seq = try pregReplaceSequence(patterns.items, replacements.items, s.data, limit, !rep.isArray(), "preg_replace", allocator);
+            // 数组主题：元素级失败（编译/PCRE 错误）⇒ 丢弃该元素（PHP 实测返回不含该键的数组）
+            const outcome = switch (seq) {
+                .ok => |o| o,
+                .pcre_error, .fatal => continue,
+            };
+            defer allocator.free(outcome.data);
+            const res_str = try PHPString.init(allocator, outcome.data);
+            const v = Value.initString(res_str);
+            defer v.release(allocator);
+            const key = entry.key_ptr.*;
+            if (key == .string) {
+                const ks = try PHPString.init(allocator, key.string.data);
+                defer ks.release(allocator);
+                try out.set(allocator, .{ .string = ks }, v);
+            } else {
+                try out.set(allocator, key, v);
+            }
+        }
+        return Value.initArray(out);
+    }
+
+    const s = try subj.toString(allocator);
+    defer s.release(allocator);
+    const seq = try pregReplaceSequence(patterns.items, replacements.items, s.data, limit, !rep.isArray(), "preg_replace", allocator);
+    const outcome = switch (seq) {
+        .ok => |o| o,
+        .pcre_error, .fatal => return Value.initNull(),
+    };
+    defer allocator.free(outcome.data);
+    return Value.initString(try PHPString.init(allocator, outcome.data));
+}
+
+/// ★F-167（R-260）：PHP 替换串语法（实测 PHP 8.5.8）——
+///   `$N`／`$NN`／`${N}`／`\N`／`\NN` 取组（组不存在或未参与 ⇒ 空串，**不回退**成「组1+字面数字」）；
+///   `$$` ⇒ 字面 `$$`；`\$` ⇒ 字面 `$`；其余 `\x` 保留反斜杠；尾部单个 `$`／`\` 原样。
 fn pregReplaceProcessBackrefs(
     result_buf: *std.ArrayList(u8),
     allocator: Allocator,
@@ -12828,185 +14159,155 @@ fn pregReplaceProcessBackrefs(
 ) !void {
     var i: usize = 0;
     while (i < replacement.len) {
-        if (replacement[i] == '$' and i + 1 < replacement.len) {
-            if (replacement[i + 1] == '{') {
-                // ${N} 形式
+        const c = replacement[i];
+        if (c == '$') {
+            if (i + 1 < replacement.len and replacement[i + 1] == '{') {
                 var j = i + 2;
                 while (j < replacement.len and replacement[j] != '}') j += 1;
                 if (j < replacement.len) {
-                    const group_str = replacement[i + 2 .. j];
-                    const group_num = std.fmt.parseInt(usize, group_str, 10) catch {
+                    const inner = replacement[i + 2 .. j];
+                    if (pregIsDigits(inner)) {
+                        try pregAppendGroupRef(result_buf, allocator, inner, subject, ovec, num_groups);
+                    } else {
                         try result_buf.appendSlice(allocator, replacement[i .. j + 1]);
-                        i = j + 1;
-                        continue;
-                    };
-                    if (group_num < num_groups) {
-                        const start = ovec[group_num * 2];
-                        const end = ovec[group_num * 2 + 1];
-                        if (start != std.math.maxInt(usize) and end != std.math.maxInt(usize) and start < subject.len and end <= subject.len) {
-                            try result_buf.appendSlice(allocator, subject[start..end]);
-                        }
                     }
                     i = j + 1;
                     continue;
                 }
-            } else if (replacement[i + 1] >= '0' and replacement[i + 1] <= '9') {
-                // $N 形式（单个数字）
-                const group_num: usize = replacement[i + 1] - '0';
-                if (group_num < num_groups) {
-                    const start = ovec[group_num * 2];
-                    const end = ovec[group_num * 2 + 1];
-                    if (start != std.math.maxInt(usize) and end != std.math.maxInt(usize) and start < subject.len and end <= subject.len) {
-                        try result_buf.appendSlice(allocator, subject[start..end]);
-                    }
-                }
-                i += 2;
+                // 未闭合 ⇒ 原样 `${...`
+                try result_buf.appendSlice(allocator, replacement[i..]);
+                return;
+            }
+            if (i + 1 < replacement.len and replacement[i + 1] >= '0' and replacement[i + 1] <= '9') {
+                var j = i + 1;
+                while (j < replacement.len and replacement[j] >= '0' and replacement[j] <= '9') j += 1;
+                try pregAppendGroupRef(result_buf, allocator, replacement[i + 1 .. j], subject, ovec, num_groups);
+                i = j;
                 continue;
             }
             try result_buf.append(allocator, '$');
             i += 1;
-        } else if (replacement[i] == '\\' and i + 1 < replacement.len) {
-            if (replacement[i + 1] >= '0' and replacement[i + 1] <= '9') {
-                // \N 形式
-                const group_num: usize = replacement[i + 1] - '0';
-                if (group_num < num_groups) {
-                    const start = ovec[group_num * 2];
-                    const end = ovec[group_num * 2 + 1];
-                    if (start != std.math.maxInt(usize) and end != std.math.maxInt(usize) and start < subject.len and end <= subject.len) {
-                        try result_buf.appendSlice(allocator, subject[start..end]);
-                    }
-                }
-                i += 2;
+            continue;
+        }
+        if (c == '\\' and i + 1 < replacement.len) {
+            const n = replacement[i + 1];
+            if (n >= '0' and n <= '9') {
+                var j = i + 1;
+                while (j < replacement.len and replacement[j] >= '0' and replacement[j] <= '9') j += 1;
+                try pregAppendGroupRef(result_buf, allocator, replacement[i + 1 .. j], subject, ovec, num_groups);
+                i = j;
                 continue;
-            } else if (replacement[i + 1] == '$') {
+            }
+            if (n == '$') {
                 try result_buf.append(allocator, '$');
                 i += 2;
                 continue;
             }
-            try result_buf.append(allocator, replacement[i]);
+            if (n == '\\') {
+                // ★F-167：`\\` 折叠为单个反斜杠（`\x` 则保留反斜杠——PHP 实测两形不同）
+                try result_buf.append(allocator, '\\');
+                i += 2;
+                continue;
+            }
+            try result_buf.append(allocator, '\\');
             i += 1;
-        } else {
-            try result_buf.append(allocator, replacement[i]);
-            i += 1;
+            continue;
         }
+        try result_buf.append(allocator, c);
+        i += 1;
     }
 }
 
+fn pregIsDigits(s: []const u8) bool {
+    if (s.len == 0) return false;
+    for (s) |c| {
+        if (c < '0' or c > '9') return false;
+    }
+    return true;
+}
+
+fn pregAppendGroupRef(
+    buf: *std.ArrayList(u8),
+    allocator: Allocator,
+    digits: []const u8,
+    subject: []const u8,
+    ovec: [*]usize,
+    num_groups: usize,
+) !void {
+    const group_num = std.fmt.parseInt(usize, digits, 10) catch return;
+    if (group_num >= num_groups) return;
+    const start = ovec[group_num * 2];
+    const end = ovec[group_num * 2 + 1];
+    if (start == std.math.maxInt(usize) or end == std.math.maxInt(usize) or start > end or end > subject.len) return;
+    try buf.appendSlice(allocator, subject[start..end]);
+}
+
 /// preg_filter - 类似 preg_replace，但只返回匹配的元素
-pub fn preg_filter(pattern_val: Value, replacement_val: Value, subject_val: Value, allocator: Allocator) !Value {
-    // 处理数组输入
-    if (subject_val.isArray()) {
-        const subject_arr = subject_val.asArray();
-        const result_arr = try PHPArray.init(allocator);
+/// preg_filter - 类似 preg_replace，但只返回匹配的元素
+pub fn preg_filter(pattern_val: Value, replacement_val: Value, subject_val: Value, limit_val: Value, allocator: Allocator) !Value {
+    const pat = requirePregArgParam("preg_filter", 1, "pattern", pattern_val) orelse return Value.initNull();
+    if (pat.isNull()) emitDeprecatedPassingNull("preg_filter", 1, "pattern", "array|string");
+    const rep = requirePregArgParam("preg_filter", 2, "replacement", replacement_val) orelse return Value.initNull();
+    if (rep.isNull()) emitDeprecatedPassingNull("preg_filter", 2, "replacement", "array|string");
+    const subj = requirePregArgParam("preg_filter", 3, "subject", subject_val) orelse return Value.initNull();
+    if (subj.isNull()) emitDeprecatedPassingNull("preg_filter", 3, "subject", "array|string");
+    const limit: i64 = if (limit_val.isNull() or limit_val.isMissing()) -1 else blk: {
+        const lv = requireNumParam("preg_filter", 4, "limit", .int_param, limit_val) orelse return Value.initNull();
+        break :blk lv.asInt();
+    };
+    // ★F-165：PHP 在 zpp 之后才检查「replacement 是数组而 pattern 不是」
+    if (rep.isArray() and !pat.isArray()) {
+        throwThrowableDiscardCatch("TypeError", "preg_filter(): Argument #1 ($pattern) must be of type array when argument #2 ($replacement) is an array, string given", runtime_allocator);
+        return Value.initNull();
+    }
 
-        var iter = subject_arr.elements.iterator();
-        while (iter.next()) |entry| {
-            if (entry.value_ptr.isString()) {
-                const subject_str = entry.value_ptr.asString();
+    var patterns: std.ArrayList([]const u8) = .empty;
+    defer pregFreeStringList(&patterns, allocator);
+    var replacements: std.ArrayList([]const u8) = .empty;
+    defer pregFreeStringList(&replacements, allocator);
+    try pregCollectArgStrings(pat, allocator, &patterns);
+    try pregCollectArgStrings(rep, allocator, &replacements);
 
-                if (pattern_val.isString() and replacement_val.isString()) {
-                    const pattern_str = pattern_val.asString();
-                    const parsed = parsePHPRegexPattern(pattern_str.data);
-                    // ★F-50（R-163）：非法分隔符/修饰符 ⇒ 按 PHP 口径发 Warning 后返回本族错误值（实测见工单 §38.1），不进 PCRE。
-                    if (parsed.issue != .none) {
-                        emitRegexPatternWarning("preg_filter", parsed);
-                        continue;
-                    }
-
-                    // ★F-79d：数组里任一枚编不过 ⇒ 整次调用返回 `null`（实测），不再"跳过这一枚"继续
-                    const re = compileRegexOrWarn("preg_filter", parsed, allocator) orelse return Value.initNull();
-                    const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse continue;
-                    defer pcre2_match_data_free_8(match_data);
-
-                    // 检查是否有匹配
-                    const rc_check = pcre2_match_8(re, subject_str.data.ptr, subject_str.length, 0, 0, match_data, null);
-                    recordPcreMatchResult(rc_check);
-
-                    // 只有匹配时才进行替换并添加到结果
-                    if (rc_check >= 0) {
-                        const replacement_str = replacement_val.asString();
-                        const output_len: usize = subject_str.length * 2;
-                        const output = allocator.alloc(u8, output_len) catch continue;
-                        errdefer allocator.free(output);
-
-                        var output_size: usize = output_len;
-                        const rc = pcre2_substitute_8(re, subject_str.data.ptr, subject_str.length, 0, PCRE2_SUBSTITUTE_GLOBAL, match_data, null, replacement_str.data.ptr, replacement_str.length, output.ptr, @ptrCast(&output_size));
-                        // ★F-116（R-184）：补记点。返回契约本支现状即合实测（数组主题 ⇒ 数组，门臂 `b10` 已 SAME），故**不动返回值**。
-                        recordPcreMatchResult(rc);
-
-                        if (rc >= 0) {
-                            const result = allocator.realloc(output, output_size) catch {
-                                allocator.free(output);
-                                continue;
-                            };
-                            const result_val = Value.initString(PHPString.init(allocator, result) catch {
-                                allocator.free(result);
-                                continue;
-                            });
-
-                            // 保持原始键
-                            switch (entry.key_ptr.*) {
-                                .integer => result_arr.set(allocator, entry.key_ptr.*, result_val) catch {},
-                                .string => result_arr.push(allocator, result_val) catch {},
-                            }
-                        } else {
-                            allocator.free(output);
-                        }
-                    }
-                }
+    if (subj.isArray()) {
+        const out = try PHPArray.init(allocator);
+        var it = subj.asArray().elements.iterator();
+        while (it.next()) |entry| {
+            const s = try entry.value_ptr.*.toString(allocator);
+            defer s.release(allocator);
+            const seq = try pregReplaceSequence(patterns.items, replacements.items, s.data, limit, !rep.isArray(), "preg_filter", allocator);
+            // 数组主题：元素级失败（编译/PCRE 错误）⇒ 丢弃该元素（PHP 实测）
+            const outcome = switch (seq) {
+                .ok => |o| o,
+                .pcre_error, .fatal => continue,
+            };
+            defer allocator.free(outcome.data);
+            // preg_filter 特性：只保留有命中的元素（未命中标量主题 ⇒ NULL）
+            if (!outcome.matched) continue;
+            const res_str = try PHPString.init(allocator, outcome.data);
+            const v = Value.initString(res_str);
+            defer v.release(allocator);
+            const key = entry.key_ptr.*;
+            if (key == .string) {
+                const ks = try PHPString.init(allocator, key.string.data);
+                defer ks.release(allocator);
+                try out.set(allocator, .{ .string = ks }, v);
+            } else {
+                try out.set(allocator, key, v);
             }
         }
-
-        return Value.initArray(result_arr);
+        return Value.initArray(out);
     }
 
-    // 处理字符串输入
-    if (!pattern_val.isString() or !replacement_val.isString() or !subject_val.isString()) {
-        return Value.initNull();
-    }
-
-    const pattern_str = pattern_val.asString();
-    const replacement_str = replacement_val.asString();
-    const subject_str = subject_val.asString();
-
-    const parsed = parsePHPRegexPattern(pattern_str.data);
-    // ★F-50（R-163）：非法分隔符/修饰符 ⇒ 按 PHP 口径发 Warning 后返回本族错误值（实测见工单 §38.1），不进 PCRE。
-    if (parsed.issue != .none) {
-        emitRegexPatternWarning("preg_filter", parsed);
-        return Value.initNull();
-    }
-    // ★F-79d：失败值本就是 `null`（与实测一致），本处只补"发 Warning"这一段
-    const re = compileRegexOrWarn("preg_filter", parsed, allocator) orelse return Value.initNull();
-
-    const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse return Value.initNull();
-    defer pcre2_match_data_free_8(match_data);
-
-    // 检查是否有匹配
-    const rc_check = pcre2_match_8(re, subject_str.data.ptr, subject_str.length, 0, 0, match_data, null);
-    recordPcreMatchResult(rc_check);
-
-    // 如果没有匹配，返回 null（preg_filter 的特性）
-    if (rc_check == PCRE2_ERROR_NOMATCH or rc_check < 0) {
-        return Value.initNull();
-    }
-
-    // 有匹配，执行替换
-    const output_len: usize = subject_str.length * 2;
-    const output = try allocator.alloc(u8, output_len);
-    errdefer allocator.free(output);
-
-    var output_size: usize = output_len;
-    const rc = pcre2_substitute_8(re, subject_str.data.ptr, subject_str.length, 0, PCRE2_SUBSTITUTE_GLOBAL, match_data, null, replacement_str.data.ptr, replacement_str.length, output.ptr, @ptrCast(&output_size));
-    // ★F-116（R-184）：补记点（标量主题分支的 `NOMATCH` 与真错误在 PHP 实测里同为 null ⇒ 返回值不动）。
-    recordPcreMatchResult(rc);
-
-    if (rc < 0) {
-        allocator.free(output);
-        return Value.initNull();
-    }
-
-    const result = try allocator.realloc(output, output_size);
-    return Value.initString(try PHPString.init(allocator, result));
+    const s = try subj.toString(allocator);
+    defer s.release(allocator);
+    const seq = try pregReplaceSequence(patterns.items, replacements.items, s.data, limit, !rep.isArray(), "preg_filter", allocator);
+    const outcome = switch (seq) {
+        .ok => |o| o,
+        .pcre_error, .fatal => return Value.initNull(),
+    };
+    defer allocator.free(outcome.data);
+    if (!outcome.matched) return Value.initNull();
+    return Value.initString(try PHPString.init(allocator, outcome.data));
 }
 
 /// preg_split - 正则分割 (pattern, subject, limit=-1, flags=0, allocator)
@@ -27088,7 +28389,7 @@ pub fn php_glob(pattern: Value, allocator: Allocator) !Value {
     defer dir.close(getIo());
 
     var dir_iter = dir.iterate();
-    while (dir_iter.next() catch null) |entry| {
+    while (dir_iter.next(getIo()) catch null) |entry| {
         if (globMatch(file_pattern, entry.name)) {
             const full_path = if (std.mem.eql(u8, dir_path, "."))
                 try PHPString.init(allocator, entry.name)
@@ -27614,7 +28915,7 @@ pub fn php_file_exists(filename: Value) !Value {
     if (!filename.isString()) return Value.initBool(false);
 
     const path = filename.asString().data;
-    std.Io.Dir.cwd().access(path, .{}) catch {
+    std.Io.Dir.cwd().access(getIo(), path, .{}) catch {
         return Value.initBool(false);
     };
 
@@ -27627,32 +28928,27 @@ pub fn php_mkdir(dirname: Value, permissions: Value, recursive: Value) !Value {
     if (!dirname.isString()) return Value.initBool(false);
 
     const path = dirname.asString().data;
-    const mode = if (permissions.isInt()) @as(u32, @intCast(permissions.asInt() & 0o777)) else 0o777;
+    // Zig 0.16 的 Permissions 是 `enum(mode_t)`（非穷尽）⇒ 用 @enumFromInt
+    const mode_bits: std.posix.mode_t = if (permissions.isInt()) @intCast(permissions.asInt() & 0o777) else 0o777;
+    const mode: std.Io.Dir.Permissions = @enumFromInt(mode_bits);
     const is_recursive = if (recursive.isBool()) recursive.asBool() else false;
 
-    _ = mode; // 权限在不同平台上处理不同，暂时忽略
-
+    // ★R-274：原实现用 `sliceAsBytes(x) ++ &[_]u8{0}` 拼运行时 C 串 ⇒ 编译期即报
+    //   「slice being concatenated must be comptime-known」；改走 Zig 0.16 的 Dir API。
     if (is_recursive) {
-        // 递归创建目录（逐级创建）
-        var start: usize = 0;
-        while (start < path.len) {
-            if (path[start] == '/') {
-                start += 1;
-                continue;
-            }
-            const end = if (std.mem.indexOfScalarPos(u8, path, start, '/')) |i| i else path.len;
-            const component = path[0..end];
-            const z_path = std.mem.sliceAsBytes(component) ++ &[_]u8{0};
-            _ = std.posix.system.mkdir(z_path.ptr, 0o755);
-            start = end + 1;
-        }
-    } else {
-        // 非递归创建
-        const z_path = std.mem.sliceAsBytes(path) ++ &[_]u8{0};
-        const rc = std.posix.system.mkdir(z_path.ptr, 0o755);
-        if (@as(i32, @intCast(rc)) < 0) {
+        std.Io.Dir.cwd().createDirPath(getIo(), path) catch |err| {
+            var mbuf: [1024]u8 = undefined;
+            const msg = std.fmt.bufPrint(&mbuf, "mkdir(): {s}", .{fsErrText(err)}) catch "";
+            emitWarning(msg);
             return Value.initBool(false);
-        }
+        };
+    } else {
+        std.Io.Dir.cwd().createDir(getIo(), path, mode) catch |err| {
+            var mbuf: [1024]u8 = undefined;
+            const msg = std.fmt.bufPrint(&mbuf, "mkdir(): {s}", .{fsErrText(err)}) catch "";
+            emitWarning(msg);
+            return Value.initBool(false);
+        };
     }
 
     return Value.initBool(true);
@@ -27663,7 +28959,10 @@ pub fn php_rmdir(dirname: Value) !Value {
     if (!dirname.isString()) return Value.initBool(false);
 
     const path = dirname.asString().data;
-    std.Io.Dir.cwd().deleteDir(path) catch {
+    std.Io.Dir.cwd().deleteDir(getIo(), path) catch |err| {
+        var mbuf: [1024]u8 = undefined;
+        const msg = std.fmt.bufPrint(&mbuf, "rmdir({s}): {s}", .{ path, fsErrText(err) }) catch "";
+        emitWarning(msg);
         return Value.initBool(false);
     };
 
@@ -27677,7 +28976,10 @@ pub fn php_rename(oldname: Value, newname: Value) !Value {
     const old_path = oldname.asString().data;
     const new_path = newname.asString().data;
 
-    std.Io.Dir.cwd().rename(old_path, new_path) catch {
+    std.Io.Dir.cwd().rename(old_path, std.Io.Dir.cwd(), new_path, getIo()) catch |err| {
+        var mbuf: [1024]u8 = undefined;
+        const msg = std.fmt.bufPrint(&mbuf, "rename({s},{s}): {s}", .{ old_path, new_path, fsErrText(err) }) catch "";
+        emitWarning(msg);
         return Value.initBool(false);
     };
 
@@ -27691,7 +28993,8 @@ pub fn php_copy(source: Value, dest: Value) !Value {
     const source_path = source.asString().data;
     const dest_path = dest.asString().data;
 
-    std.Io.Dir.cwd().copyFile(source_path, std.fs.cwd, dest_path, .{}) catch {
+    std.Io.Dir.cwd().copyFile(source_path, std.Io.Dir.cwd(), dest_path, getIo(), .{}) catch |err| {
+        warnPf("copy", source_path, err);
         return Value.initBool(false);
     };
 
@@ -27751,7 +29054,7 @@ pub fn php_getmygid() Value {
 
 /// phpversion - 返回PHP版本号
 pub fn php_phpversion(allocator: Allocator) !Value {
-    return Value.initString(try PHPString.init(allocator, "8.4.8"));
+    return Value.initString(try PHPString.init(allocator, PHP_VER_STRING));
 }
 
 /// extension_loaded - 检查扩展是否加载
@@ -31583,55 +32886,97 @@ pub fn php_sha1(str: Value, raw_output: Value, allocator: Allocator) !Value {
 }
 
 /// password_hash - 创建密码哈希
-/// 使用bcrypt算法 (PASSWORD_DEFAULT = PASSWORD_BCRYPT = 1)
-/// 签名: password_hash(password, algo, options = []) — options忽略，使用默认cost
-pub fn php_password_hash(password: Value, algo: Value, allocator: Allocator) !Value {
-    if (!password.isString()) return error.InvalidArgument;
+/// 签名: password_hash(password, algo, options = []) — bcrypt（`options['cost']` 生效）
+pub fn php_password_hash(password: Value, algo: Value, options_val: Value, allocator: Allocator) !Value {
+    const pass_ok = requireStringParamWeak("password_hash", 1, "password", password) orelse return Value.initNull();
+    const algo_ok = requireStringOrIntOrNullParam("password_hash", 2, "algo", algo) orelse return Value.initNull();
+    const options_ok = requireArrayParam("password_hash", 3, "options", options_val) orelse return Value.initNull();
 
-    const pwd = password.asString().data;
-    const algo_val = algo.toInt();
+    // ★F-62f（R-261）／F-168（R-263）：合法算法 = 2y / argon2i / argon2id；bcrypt 与 argon 双实现
+    const kind = passwordAlgoKind(algo_ok);
+    if (kind == .invalid) {
+        return throwThrowable("ValueError", "password_hash(): Argument #2 ($algo) must be a valid password hashing algorithm", runtime_allocator);
+    }
+    if (kind != .bcrypt) {
+        const ap = passwordArgon2Params(options_ok);
+        // ★PHP 实测文案与边界：memory ≥8 且 ≥8*p；time ≥1；threads 1..0xFFFFFF
+        if (ap.m < 8 or ap.m > 0xFFFFFFFF or ap.m < 8 * ap.p) {
+            return throwThrowable("ValueError", "Memory cost is outside of allowed memory range", runtime_allocator);
+        }
+        if (ap.t < 1 or ap.t > 0xFFFFFFFF) {
+            return throwThrowable("ValueError", "Time cost is outside of allowed time range", runtime_allocator);
+        }
+        if (ap.p < 1 or ap.p > 0xFFFFFF) {
+            return throwThrowable("ValueError", "Invalid number of threads", runtime_allocator);
+        }
 
-    // 使用默认cost=12
-    const cost: u6 = 12;
-
-    // 使用bcrypt (algo=1 是 PASSWORD_BCRYPT)
-    if (algo_val == 1 or algo_val == 0) { // 0 = PASSWORD_DEFAULT
-        var hash_buf: [128]u8 = undefined;
-        const hash_result = try std.crypto.pwhash.bcrypt.strHash(pwd, .{
+        const pwd_php_argon = try pass_ok.toString(allocator);
+        defer pwd_php_argon.release(allocator);
+        const mode: std.crypto.pwhash.argon2.Mode = if (kind == .argon2i) .argon2i else .argon2id;
+        var argon_buf: [512]u8 = undefined;
+        const argon_hash = std.crypto.pwhash.argon2.strHash(pwd_php_argon.data, .{
             .allocator = allocator,
-            .params = .{ .rounds_log = cost, .silently_truncate_password = true },
-            .encoding = .crypt,
-        }, &hash_buf, getIo());
-
-        // Zig生成$2b$前缀，PHP使用$2y$前缀，替换以保持兼容
-        var result_buf: [128]u8 = undefined;
-        const result_str = blk: {
-            if (hash_result.len >= 4 and hash_result[0] == '$' and hash_result[1] == '2' and hash_result[2] == 'b' and hash_result[3] == '$') {
-                result_buf[0] = '$';
-                result_buf[1] = '2';
-                result_buf[2] = 'y';
-                @memcpy(result_buf[3..hash_result.len], hash_result[3..]);
-                break :blk result_buf[0..hash_result.len];
-            }
-            break :blk hash_result;
-        };
-
-        const php_str = try PHPString.init(allocator, result_str);
-        return Value.initString(php_str);
+            .params = .{ .t = @intCast(ap.t), .m = @intCast(ap.m), .p = @intCast(ap.p) },
+            .mode = mode,
+            .encoding = .phc,
+        }, &argon_buf, getIo()) catch
+            return throwThrowable("ValueError", "password_hash(): Failed to hash password", runtime_allocator);
+        return Value.initString(try PHPString.init(allocator, argon_hash));
     }
 
-    return error.InvalidArgument;
+    // ★PHP 实测：4..31 之外 ⇒ `Invalid bcrypt cost parameter specified: N`（非数值 ⇒ 0）；缺省 12
+    const cost_raw = passwordBcryptCost(options_ok);
+    if (cost_raw < 4 or cost_raw > 31) {
+        var msg_buf: [96]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "Invalid bcrypt cost parameter specified: {d}", .{cost_raw}) catch
+            return throwThrowable("ValueError", "Invalid bcrypt cost parameter specified", runtime_allocator);
+        return throwThrowable("ValueError", msg, runtime_allocator);
+    }
+    const cost: u6 = @intCast(cost_raw);
+
+    const pwd_php = try pass_ok.toString(allocator);
+    defer pwd_php.release(allocator);
+    const pwd = pwd_php.data;
+
+    var hash_buf: [128]u8 = undefined;
+    const hash_result = try std.crypto.pwhash.bcrypt.strHash(pwd, .{
+        .allocator = allocator,
+        .params = .{ .rounds_log = cost, .silently_truncate_password = true },
+        .encoding = .crypt,
+    }, &hash_buf, getIo());
+
+    // Zig生成$2b$前缀，PHP使用$2y$前缀，替换以保持兼容
+    var result_buf: [128]u8 = undefined;
+    const result_str = blk: {
+        if (hash_result.len >= 4 and hash_result[0] == '$' and hash_result[1] == '2' and hash_result[2] == 'b' and hash_result[3] == '$') {
+            result_buf[0] = '$';
+            result_buf[1] = '2';
+            result_buf[2] = 'y';
+            @memcpy(result_buf[3..hash_result.len], hash_result[3..]);
+            break :blk result_buf[0..hash_result.len];
+        }
+        break :blk hash_result;
+    };
+
+    const php_str = try PHPString.init(allocator, result_str);
+    return Value.initString(php_str);
 }
 
 /// password_verify - 验证密码是否匹配哈希
 pub fn php_password_verify(password: Value, hash: Value, allocator: Allocator) !Value {
-    _ = allocator;
     if (!password.isString() or !hash.isString()) {
         return Value.initBool(false);
     }
 
     const pwd = password.asString().data;
     const hash_str = hash.asString().data;
+
+    // ★F-168（R-263）：argon2i/id（PHC 编码）走 std 校验
+    if (std.mem.startsWith(u8, hash_str, "$argon2i$") or std.mem.startsWith(u8, hash_str, "$argon2id$")) {
+        std.crypto.pwhash.argon2.strVerify(hash_str, pwd, .{ .allocator = allocator }, getIo()) catch
+            return Value.initBool(false);
+        return Value.initBool(true);
+    }
 
     // PHP使用$2y$前缀，Zig期望$2b$前缀，需要转换
     var converted_buf: [128]u8 = undefined;
@@ -31704,30 +33049,43 @@ pub fn php_password_get_info(hash_val: Value, allocator: Allocator) !Value {
 
 /// password_needs_rehash - 检查哈希是否需要重新生成
 /// password_needs_rehash(hash, algo, options=[])
-pub fn php_password_needs_rehash(hash_val: Value, algo: Value, allocator: Allocator) !Value {
-    _ = allocator;
-    if (!hash_val.isString()) return Value.initBool(true);
+pub fn php_password_needs_rehash(hash_val: Value, algo: Value, options_val: Value, allocator: Allocator) !Value {
+    const hash_ok = requireStringParamWeak("password_needs_rehash", 1, "hash", hash_val) orelse return Value.initNull();
+    const algo_ok = requireStringOrIntOrNullParam("password_needs_rehash", 2, "algo", algo) orelse return Value.initNull();
+    const options_ok = requireArrayParam("password_needs_rehash", 3, "options", options_val) orelse return Value.initNull();
 
-    const hash_str = hash_val.asString().data;
-    const algo_val = algo.toInt();
+    const hash_php = try hash_ok.toString(allocator);
+    defer hash_php.release(allocator);
+    const hash_str = hash_php.data;
 
-    // PASSWORD_DEFAULT(0) 和 PASSWORD_BCRYPT(1) 都使用bcrypt
-    if (algo_val == 0 or algo_val == 1) {
-        // 检查是否是bcrypt格式
-        if (hash_str.len >= 7 and hash_str[0] == '$' and hash_str[1] == '2' and
-            (hash_str[2] == 'y' or hash_str[2] == 'b' or hash_str[2] == 'a') and hash_str[3] == '$')
-        {
-            // 提取cost值
-            var cost: i64 = 0;
-            if (hash_str[4] >= '0' and hash_str[4] <= '9') cost = cost * 10 + @as(i64, hash_str[4] - '0');
-            if (hash_str[5] >= '0' and hash_str[5] <= '9') cost = cost * 10 + @as(i64, hash_str[5] - '0');
-            // 默认cost=12，如果匹配则不需要rehash
-            return Value.initBool(cost != 12);
+    // ★F-62f（R-261）PHP 实测：无效算法 ⇒ false；F-168（R-263）：argon 比较模式与参数
+    const kind = passwordAlgoKind(algo_ok);
+    if (kind == .invalid) return Value.initBool(false);
+    if (kind != .bcrypt) {
+        if (kind == .argon2i) {
+            if (!std.mem.startsWith(u8, hash_str, "$argon2i$")) return Value.initBool(true);
+        } else {
+            if (!std.mem.startsWith(u8, hash_str, "$argon2id$")) return Value.initBool(true);
         }
-        // 不是bcrypt格式，需要rehash
-        return Value.initBool(true);
+        const stored = passwordArgon2StoredParams(hash_str) orelse return Value.initBool(true);
+        const want = passwordArgon2Params(options_ok);
+        return Value.initBool(stored.m != want.m or stored.t != want.t or stored.p != want.p);
     }
 
+    // needs_rehash 的 cost **不校验值域**（PHP 实测 3/100/"abc" 均只是 ⇒ true）
+    const target_cost = passwordBcryptCost(options_ok);
+
+    // 检查是否是bcrypt格式
+    if (hash_str.len >= 7 and hash_str[0] == '$' and hash_str[1] == '2' and
+        (hash_str[2] == 'y' or hash_str[2] == 'b' or hash_str[2] == 'a') and hash_str[3] == '$')
+    {
+        // 提取cost值
+        var cost: i64 = 0;
+        if (hash_str[4] >= '0' and hash_str[4] <= '9') cost = cost * 10 + @as(i64, hash_str[4] - '0');
+        if (hash_str[5] >= '0' and hash_str[5] <= '9') cost = cost * 10 + @as(i64, hash_str[5] - '0');
+        return Value.initBool(cost != target_cost);
+    }
+    // 不是bcrypt格式，需要rehash
     return Value.initBool(true);
 }
 
@@ -31777,126 +33135,1103 @@ pub fn php_sha256(str: Value, allocator: Allocator) !Value {
 }
 
 /// hash - 生成哈希值
-pub fn php_hash(algorithm: Value, data: Value, raw_output: Value, allocator: Allocator) !Value {
-    if (!algorithm.isString() or !data.isString()) return Value.initBool(false);
+// ============================================================================
+// ★F-170（R-266）：RIPEMD-160 / RIPEMD-128（Bosselaers 规范；PHP hash/hmac/pbkdf2 同源）
+// ============================================================================
+const RMD_R160 = [80]u8{
+    0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15,
+    7,  4,  13, 1,  10, 6,  15, 3,  12, 0,  9,  5,  2,  14, 11, 8,
+    3,  10, 14, 4,  9,  15, 8,  1,  2,  7,  0,  6,  13, 11, 5,  12,
+    1,  9,  11, 10, 0,  8,  12, 4,  13, 3,  7,  15, 14, 5,  6,  2,
+    4,  0,  5,  9,  7,  12, 2,  10, 14, 1,  3,  8,  11, 6,  15, 13,
+};
+const RMD_RP160 = [80]u8{
+    5,  14, 7,  0,  9,  2,  11, 4,  13, 6,  15, 8,  1,  10, 3,  12,
+    6,  11, 3,  7,  0,  13, 5,  10, 14, 15, 8,  12, 4,  9,  1,  2,
+    15, 5,  1,  3,  7,  14, 6,  9,  11, 8,  12, 2,  10, 0,  4,  13,
+    8,  6,  4,  1,  3,  11, 15, 0,  5,  12, 2,  13, 9,  7,  10, 14,
+    12, 15, 10, 4,  1,  5,  8,  7,  6,  2,  13, 14, 0,  3,  9,  11,
+};
+const RMD_S160 = [80]u8{
+    11, 14, 15, 12, 5,  8,  7,  9,  11, 13, 14, 15, 6,  7,  9,  8,
+    7,  6,  8,  13, 11, 9,  7,  15, 7,  12, 15, 9,  11, 7,  13, 12,
+    11, 13, 6,  7,  14, 9,  13, 15, 14, 8,  13, 6,  5,  12, 7,  5,
+    11, 12, 14, 15, 14, 15, 9,  8,  9,  14, 5,  6,  8,  6,  5,  12,
+    9,  15, 5,  11, 6,  8,  13, 12, 5,  12, 13, 14, 11, 8,  5,  6,
+};
+const RMD_SP160 = [80]u8{
+    8,  9,  9,  11, 13, 15, 15, 5,  7,  7,  8,  11, 14, 14, 12, 6,
+    9,  13, 15, 7,  12, 8,  9,  11, 7,  7,  12, 7,  6,  15, 13, 11,
+    9,  7,  15, 11, 8,  6,  6,  14, 12, 13, 5,  14, 13, 13, 7,  5,
+    15, 5,  8,  11, 14, 14, 6,  14, 6,  9,  12, 9,  12, 5,  15, 8,
+    8,  5,  12, 9,  12, 5,  14, 6,  8,  13, 6,  5,  15, 13, 11, 11,
+};
+const RMD_K160L = [5]u32{ 0x00000000, 0x5a827999, 0x6ed9eba1, 0x8f1bbcdc, 0xa953fd4e };
+const RMD_K160R = [5]u32{ 0x50a28be6, 0x5c4dd124, 0x6d703ef3, 0x7a6d76e9, 0x00000000 };
+const RMD_K128L = [4]u32{ 0x00000000, 0x5a827999, 0x6ed9eba1, 0x8f1bbcdc };
+const RMD_K128R = [4]u32{ 0x50a28be6, 0x5c4dd124, 0x6d703ef3, 0x00000000 };
 
-    const algo = algorithm.asString().data;
+fn rmdF(round: usize, x: u32, y: u32, z: u32) u32 {
+    return switch (round) {
+        0 => x ^ y ^ z,
+        1 => (x & y) | (~x & z),
+        2 => (x | ~y) ^ z,
+        3 => (x & z) | (y & ~z),
+        else => x ^ (y | ~z),
+    };
+}
 
-    const input = data.asString().data;
+fn rmdReadBlock(block: *const [64]u8) [16]u32 {
+    var x: [16]u32 = undefined;
+    for (0..16) |i| {
+        x[i] = @as(u32, block[i * 4]) | (@as(u32, block[i * 4 + 1]) << 8) |
+            (@as(u32, block[i * 4 + 2]) << 16) | (@as(u32, block[i * 4 + 3]) << 24);
+    }
+    return x;
+}
 
+fn rmd160Compress(h: *[5]u32, block: *const [64]u8) void {
+    const x = rmdReadBlock(block);
+    var al = h[0];
+    var bl = h[1];
+    var cl = h[2];
+    var dl = h[3];
+    var el = h[4];
+    var ar = al;
+    var br = bl;
+    var cr = cl;
+    var dr = dl;
+    var er = el;
+
+    var j: usize = 0;
+    while (j < 80) : (j += 1) {
+        const rnd = j / 16;
+        const tl = std.math.rotl(u32, al +% rmdF(rnd, bl, cl, dl) +% x[RMD_R160[j]] +% RMD_K160L[rnd], @as(u5, @intCast(RMD_S160[j]))) +% el;
+        al = el;
+        el = dl;
+        dl = std.math.rotl(u32, cl, 10);
+        cl = bl;
+        bl = tl;
+
+        const tr = std.math.rotl(u32, ar +% rmdF(4 - rnd, br, cr, dr) +% x[RMD_RP160[j]] +% RMD_K160R[rnd], @as(u5, @intCast(RMD_SP160[j]))) +% er;
+        ar = er;
+        er = dr;
+        dr = std.math.rotl(u32, cr, 10);
+        cr = br;
+        br = tr;
+    }
+
+    const t = h[1] +% cl +% dr;
+    h[1] = h[2] +% dl +% er;
+    h[2] = h[3] +% el +% ar;
+    h[3] = h[4] +% al +% br;
+    h[4] = h[0] +% bl +% cr;
+    h[0] = t;
+}
+
+fn rmd128Compress(h: *[4]u32, block: *const [64]u8) void {
+    const x = rmdReadBlock(block);
+    var al = h[0];
+    var bl = h[1];
+    var cl = h[2];
+    var dl = h[3];
+    var ar = al;
+    var br = bl;
+    var cr = cl;
+    var dr = dl;
+
+    var j: usize = 0;
+    while (j < 64) : (j += 1) {
+        const rnd = j / 16;
+        const tl = std.math.rotl(u32, al +% rmdF(rnd, bl, cl, dl) +% x[RMD_R160[j]] +% RMD_K128L[rnd], @as(u5, @intCast(RMD_S160[j])));
+        al = dl;
+        dl = cl;
+        cl = bl;
+        bl = tl;
+
+        const tr = std.math.rotl(u32, ar +% rmdF(3 - rnd, br, cr, dr) +% x[RMD_RP160[j]] +% RMD_K128R[rnd], @as(u5, @intCast(RMD_SP160[j])));
+        ar = dr;
+        dr = cr;
+        cr = br;
+        br = tr;
+    }
+
+    const t = h[1] +% cl +% dr;
+    h[1] = h[2] +% dl +% ar;
+    h[2] = h[3] +% al +% br;
+    h[3] = h[0] +% bl +% cr;
+    h[0] = t;
+}
+
+fn rmdFinishBlocks(input: []const u8, comptime compressFn: anytype, h: anytype) void {
+    var block: [64]u8 = undefined;
+    var i: usize = 0;
+    while (i + 64 <= input.len) : (i += 64) {
+        @memcpy(&block, input[i..][0..64]);
+        compressFn(h, &block);
+    }
+    const rem = input.len - i;
+    @memset(&block, 0);
+    @memcpy(block[0..rem], input[i..]);
+    block[rem] = 0x80;
+    if (rem >= 56) {
+        compressFn(h, &block);
+        @memset(&block, 0);
+    }
+    var lenbuf: [8]u8 = undefined;
+    std.mem.writeInt(u64, &lenbuf, @as(u64, input.len) * 8, .little);
+    @memcpy(block[56..64], &lenbuf);
+    compressFn(h, &block);
+}
+
+fn ripemd160Hash(input: []const u8) [20]u8 {
+    var h = [5]u32{ 0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0 };
+    rmdFinishBlocks(input, rmd160Compress, &h);
+    var out: [20]u8 = undefined;
+    for (h, 0..) |v, k| std.mem.writeInt(u32, out[k * 4 ..][0..4], v, .little);
+    return out;
+}
+
+fn ripemd128Hash(input: []const u8) [16]u8 {
+    var h = [4]u32{ 0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476 };
+    rmdFinishBlocks(input, rmd128Compress, &h);
+    var out: [16]u8 = undefined;
+    for (h, 0..) |v, k| std.mem.writeInt(u32, out[k * 4 ..][0..4], v, .little);
+    return out;
+}
+
+/// ★F-170 尾（R-271）：RIPEMD-256（Bosselaers 规范，RustCrypto `ripemd/src/c256.rs` 对照）：
+///   两条 4 寄存器线并行（bb＝h0..3，bbb＝h4..7），128 轮函数与 RMD_R160/RP160/S160/SP160 同源，
+///   每轮（16 步）结束后**交换两线的第 r 个寄存器**（0..3），末态分别累加回 h0..3／h4..7（无 RIPEMD-128 的交叉折叠）。
+fn rmd256Compress(h: *[8]u32, block: *const [64]u8) void {
+    const x = rmdReadBlock(block);
+    var bb = [4]u32{ h[0], h[1], h[2], h[3] };
+    var bbb = [4]u32{ h[4], h[5], h[6], h[7] };
+
+    // ★引用实现按**物理下标**轮转（每步只写 a 槽位），轮末再交换同一下标的两个寄存器
+    //   ⇒ 不可改写成「逻辑寄存器轮转」，否则交换下标与逻辑角色错位（本批首版即因此全错）。
+    var j: usize = 0;
+    while (j < 64) : (j += 1) {
+        const rnd = j / 16;
+        const k = (4 - (j % 4)) % 4;
+        const la = k;
+        const lb = (k + 1) % 4;
+        const lc = (k + 2) % 4;
+        const ld = (k + 3) % 4;
+        bb[la] = std.math.rotl(u32, bb[la] +% rmdF(rnd, bb[lb], bb[lc], bb[ld]) +% x[RMD_R160[j]] +% RMD_K128L[rnd], @as(u5, @intCast(RMD_S160[j])));
+
+        const ra = k;
+        const rb = (k + 1) % 4;
+        const rc = (k + 2) % 4;
+        const rd = (k + 3) % 4;
+        bbb[ra] = std.math.rotl(u32, bbb[ra] +% rmdF(3 - rnd, bbb[rb], bbb[rc], bbb[rd]) +% x[RMD_RP160[j]] +% RMD_K128R[rnd], @as(u5, @intCast(RMD_SP160[j])));
+
+        if (j % 16 == 15) {
+            const idx = j / 16;
+            std.mem.swap(u32, &bb[idx], &bbb[idx]);
+        }
+    }
+
+    for (0..4) |k| {
+        h[k] = h[k] +% bb[k];
+        h[4 + k] = h[4 + k] +% bbb[k];
+    }
+}
+
+/// ★F-170 尾（R-271）：RIPEMD-320（RustCrypto `ripemd/src/c320.rs` 对照）：
+///   两条 5 寄存器线并行（bb＝h0..4，bbb＝h5..9），160 轮函数（含 `c=rotl(c,10)`），RMD_R160/RP160/S160/SP160
+///   与 K160L/K160R 直接复用；每轮结束交换两线第 r 个寄存器（0..4）。
+fn rmd320Compress(h: *[10]u32, block: *const [64]u8) void {
+    const x = rmdReadBlock(block);
+    var bb = [5]u32{ h[0], h[1], h[2], h[3], h[4] };
+    var bbb = [5]u32{ h[5], h[6], h[7], h[8], h[9] };
+
+    // ★同 RIPEMD-256：物理下标轮转（每步只写 a 槽、并把 c 左旋 10），轮末按下标交换。
+    var j: usize = 0;
+    while (j < 80) : (j += 1) {
+        const rnd = j / 16;
+        const k = (5 - (j % 5)) % 5;
+        const la = k;
+        const lb = (k + 1) % 5;
+        const lc = (k + 2) % 5;
+        const ld = (k + 3) % 5;
+        const le = (k + 4) % 5;
+        bb[la] = std.math.rotl(u32, bb[la] +% rmdF(rnd, bb[lb], bb[lc], bb[ld]) +% x[RMD_R160[j]] +% RMD_K160L[rnd], @as(u5, @intCast(RMD_S160[j]))) +% bb[le];
+        bb[lc] = std.math.rotl(u32, bb[lc], 10);
+
+        const ra = k;
+        const rb = (k + 1) % 5;
+        const rc = (k + 2) % 5;
+        const rd = (k + 3) % 5;
+        const re = (k + 4) % 5;
+        bbb[ra] = std.math.rotl(u32, bbb[ra] +% rmdF(4 - rnd, bbb[rb], bbb[rc], bbb[rd]) +% x[RMD_RP160[j]] +% RMD_K160R[rnd], @as(u5, @intCast(RMD_SP160[j]))) +% bbb[re];
+        bbb[rc] = std.math.rotl(u32, bbb[rc], 10);
+
+        if (j % 16 == 15) {
+            const idx = j / 16;
+            std.mem.swap(u32, &bb[idx], &bbb[idx]);
+        }
+    }
+
+    for (0..5) |k| {
+        h[k] = h[k] +% bb[k];
+        h[5 + k] = h[5 + k] +% bbb[k];
+    }
+}
+
+fn ripemd256Hash(input: []const u8) [32]u8 {
+    var h = [8]u32{
+        0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476,
+        0x76543210, 0xfedcba98, 0x89abcdef, 0x01234567,
+    };
+    rmdFinishBlocks(input, rmd256Compress, &h);
+    var out: [32]u8 = undefined;
+    for (h, 0..) |v, k| std.mem.writeInt(u32, out[k * 4 ..][0..4], v, .little);
+    return out;
+}
+
+fn ripemd320Hash(input: []const u8) [40]u8 {
+    var h = [10]u32{
+        0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0,
+        0x76543210, 0xfedcba98, 0x89abcdef, 0x01234567, 0x3c2d1e0f,
+    };
+    rmdFinishBlocks(input, rmd320Compress, &h);
+    var out: [40]u8 = undefined;
+    for (h, 0..) |v, k| std.mem.writeInt(u32, out[k * 4 ..][0..4], v, .little);
+    return out;
+}
+
+fn hashValueFromBytes(comptime N: usize, hash: [N]u8, raw: bool, allocator: Allocator) !Value {
+    if (raw) return Value.initString(try PHPString.init(allocator, &hash));
+    var hex: [N * 2]u8 = undefined;
+    const chars = "0123456789abcdef";
+    for (hash, 0..) |b, i| {
+        hex[i * 2] = chars[b >> 4];
+        hex[i * 2 + 1] = chars[b & 0x0f];
+    }
+    return Value.initString(try PHPString.init(allocator, &hex));
+}
+
+/// HMAC over a one-shot hash（RIPEMD 无 std Hash 接口）；块长固定 64（RIPEMD 规范）。
+fn hmacOneShot(comptime Hlen: usize, comptime hashFn: anytype, key: []const u8, data: []const u8, out: *[Hlen]u8, allocator: Allocator) !void {
+    var kbuf: [64]u8 = [_]u8{0} ** 64;
+    if (key.len > 64) {
+        const kh = hashFn(key);
+        @memcpy(kbuf[0..Hlen], kh[0..Hlen]);
+    } else {
+        @memcpy(kbuf[0..key.len], key);
+    }
+    var ipad: [64]u8 = undefined;
+    var opad: [64]u8 = undefined;
+    for (0..64) |i| {
+        ipad[i] = kbuf[i] ^ 0x36;
+        opad[i] = kbuf[i] ^ 0x5c;
+    }
+    const inner = try allocator.alloc(u8, 64 + data.len);
+    defer allocator.free(inner);
+    @memcpy(inner[0..64], &ipad);
+    @memcpy(inner[64..], data);
+    const ih = hashFn(inner);
+    const outer = try allocator.alloc(u8, 64 + Hlen);
+    defer allocator.free(outer);
+    @memcpy(outer[0..64], &opad);
+    @memcpy(outer[64..], ih[0..Hlen]);
+    out.* = hashFn(outer);
+}
+
+/// PBKDF2 主循环（一次性哈希版；与 pbkdf2Fill 同算法）。
+fn pbkdf2FillCustom(comptime Hlen: usize, comptime hashFn: anytype, password: []const u8, salt_str: []const u8, iterations: u32, dk: []u8, allocator: Allocator) !void {
+    const num_blocks: usize = (dk.len + Hlen - 1) / Hlen;
+    var block_index: u32 = 1;
+    while (block_index <= num_blocks) : (block_index += 1) {
+        var salt_block = try allocator.alloc(u8, salt_str.len + 4);
+        defer allocator.free(salt_block);
+        @memcpy(salt_block[0..salt_str.len], salt_str);
+        salt_block[salt_str.len] = @intCast((block_index >> 24) & 0xFF);
+        salt_block[salt_str.len + 1] = @intCast((block_index >> 16) & 0xFF);
+        salt_block[salt_str.len + 2] = @intCast((block_index >> 8) & 0xFF);
+        salt_block[salt_str.len + 3] = @intCast(block_index & 0xFF);
+
+        var u_prev: [Hlen]u8 = undefined;
+        var u_curr: [Hlen]u8 = undefined;
+        try hmacOneShot(Hlen, hashFn, password, salt_block, &u_prev, allocator);
+
+        const offset = (block_index - 1) * Hlen;
+        @memcpy(dk[offset .. offset + Hlen], &u_prev);
+
+        var iter: u32 = 1;
+        while (iter < iterations) : (iter += 1) {
+            try hmacOneShot(Hlen, hashFn, password, &u_prev, &u_curr, allocator);
+            for (0..Hlen) |j| dk[offset + j] ^= u_curr[j];
+            u_prev = u_curr;
+        }
+    }
+}
+
+/// ★F-172-b（R-267）：CRC-32/BZIP2（非反射，poly 0x04C11DB7，init/xorout 全 1）。
+///   PHP `hash('crc32', …)` 用这套算法，并把 32 位值按**小端**写出（与 crc32b 的反射实现不同）。
+fn crc32Bzip2Table() [256]u32 {
+    @setEvalBranchQuota(4096);
+    var table: [256]u32 = undefined;
+    var i: u32 = 0;
+    while (i < 256) : (i += 1) {
+        var c: u32 = i << 24;
+        var k: u32 = 0;
+        while (k < 8) : (k += 1) {
+            c = if (c & 0x80000000 != 0) (c << 1) ^ 0x04C11DB7 else c << 1;
+        }
+        table[i] = c;
+    }
+    return table;
+}
+
+const CRC32_BZIP2_TABLE = crc32Bzip2Table();
+
+/// ★F-170 尾（R-272）：CRC-32C（Castagnoli，反射 poly 0x82F63B78，init/xorout 全 1）。
+fn crc32cTable() [256]u32 {
+    @setEvalBranchQuota(4096);
+    var table: [256]u32 = undefined;
+    var i: u32 = 0;
+    while (i < 256) : (i += 1) {
+        var c: u32 = i;
+        var k: u32 = 0;
+        while (k < 8) : (k += 1) {
+            c = if (c & 1 != 0) (c >> 1) ^ 0x82F63B78 else c >> 1;
+        }
+        table[i] = c;
+    }
+    return table;
+}
+
+const CRC32C_TABLE = crc32cTable();
+
+fn crc32cHash(input: []const u8) u32 {
+    var crc: u32 = 0xFFFFFFFF;
+    for (input) |b| {
+        crc = (crc >> 8) ^ CRC32C_TABLE[(crc ^ @as(u32, b)) & 0xFF];
+    }
+    return crc ^ 0xFFFFFFFF;
+}
+
+/// ★F-170 尾（R-272）：FNV-1 / FNV-1a（32/64 位）与 Jenkins one-at-a-time（joaat）。
+fn fnv1_32(input: []const u8) u32 {
+    var h: u32 = 0x811c9dc5;
+    for (input) |b| {
+        h *%= 0x01000193;
+        h ^= b;
+    }
+    return h;
+}
+
+fn fnv1a_32(input: []const u8) u32 {
+    var h: u32 = 0x811c9dc5;
+    for (input) |b| {
+        h ^= b;
+        h *%= 0x01000193;
+    }
+    return h;
+}
+
+fn fnv1_64(input: []const u8) u64 {
+    var h: u64 = 0xcbf29ce484222325;
+    for (input) |b| {
+        h *%= 0x100000001b3;
+        h ^= b;
+    }
+    return h;
+}
+
+fn fnv1a_64(input: []const u8) u64 {
+    var h: u64 = 0xcbf29ce484222325;
+    for (input) |b| {
+        h ^= b;
+        h *%= 0x100000001b3;
+    }
+    return h;
+}
+
+fn joaatHash(input: []const u8) u32 {
+    var h: u32 = 0;
+    for (input) |b| {
+        h +%= b;
+        h +%= h << 10;
+        h ^= h >> 6;
+    }
+    h +%= h << 3;
+    h ^= h >> 11;
+    h +%= h << 15;
+    return h;
+}
+
+// ============================================================================
+// ★F-170 尾（R-273）：MD4（RFC 1320）与 MurmurHash3（x86_32/x86_128/x64_128）、XXH32/XXH64（seed=0）
+//   规范来源：RFC 1320、aappleby/smhasher `MurmurHash3.cpp`、Cyan4973/xxHash `xxhash.h`
+// ============================================================================
+
+fn md4Hash(input: []const u8) [16]u8 {
+    var h = [4]u32{ 0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476 };
+    var block: [64]u8 = undefined;
+    var i: usize = 0;
+    while (i + 64 <= input.len) : (i += 64) {
+        @memcpy(&block, input[i..][0..64]);
+        md4Compress(&h, &block);
+    }
+    const rem = input.len - i;
+    @memset(&block, 0);
+    @memcpy(block[0..rem], input[i..]);
+    block[rem] = 0x80;
+    if (rem >= 56) {
+        md4Compress(&h, &block);
+        @memset(&block, 0);
+    }
+    var lenbuf: [8]u8 = undefined;
+    std.mem.writeInt(u64, &lenbuf, @as(u64, input.len) * 8, .little);
+    @memcpy(block[56..64], &lenbuf);
+    md4Compress(&h, &block);
+
+    var out: [16]u8 = undefined;
+    for (h, 0..) |v, k| std.mem.writeInt(u32, out[k * 4 ..][0..4], v, .little);
+    return out;
+}
+
+fn md4Compress(h: *[4]u32, block: *const [64]u8) void {
+    var x: [16]u32 = undefined;
+    for (0..16) |k| {
+        x[k] = std.mem.readInt(u32, block[k * 4 ..][0..4], .little);
+    }
+    var a = h[0];
+    var b = h[1];
+    var c = h[2];
+    var d = h[3];
+
+    const S1 = [4]u5{ 3, 7, 11, 19 };
+    var k: usize = 0;
+    while (k < 16) : (k += 1) {
+        const t = std.math.rotl(u32, a +% ((b & c) | (~b & d)) +% x[k], S1[k % 4]);
+        a = d;
+        d = c;
+        c = b;
+        b = t;
+    }
+
+    const md4_g = [16]u8{ 0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15 };
+    const S2 = [4]u5{ 3, 5, 9, 13 };
+    k = 0;
+    while (k < 16) : (k += 1) {
+        const t = std.math.rotl(u32, a +% ((b & c) | (b & d) | (c & d)) +% x[md4_g[k]] +% 0x5a827999, S2[k % 4]);
+        a = d;
+        d = c;
+        c = b;
+        b = t;
+    }
+
+    const md4_h = [16]u8{ 0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15 };
+    const S3 = [4]u5{ 3, 9, 11, 15 };
+    k = 0;
+    while (k < 16) : (k += 1) {
+        const t = std.math.rotl(u32, a +% (b ^ c ^ d) +% x[md4_h[k]] +% 0x6ed9eba1, S3[k % 4]);
+        a = d;
+        d = c;
+        c = b;
+        b = t;
+    }
+
+    h[0] = h[0] +% a;
+    h[1] = h[1] +% b;
+    h[2] = h[2] +% c;
+    h[3] = h[3] +% d;
+}
+
+fn murmurFmix32(v: u32) u32 {
+    var h = v;
+    h ^= h >> 16;
+    h *%= 0x85ebca6b;
+    h ^= h >> 13;
+    h *%= 0xc2b2ae35;
+    h ^= h >> 16;
+    return h;
+}
+
+fn murmurFmix64(v: u64) u64 {
+    var k = v;
+    k ^= k >> 33;
+    k *%= 0xff51afd7ed558ccd;
+    k ^= k >> 33;
+    k *%= 0xc4ceb9fe1a85ec53;
+    k ^= k >> 33;
+    return k;
+}
+
+/// MurmurHash3 x86_32（seed 0）
+fn murmur3aHash(input: []const u8) u32 {
+    const c1: u32 = 0xcc9e2d51;
+    const c2: u32 = 0x1b873593;
+    var h1: u32 = 0;
+    const nblocks = input.len / 4;
+
+    var i: usize = 0;
+    while (i < nblocks) : (i += 1) {
+        var k1 = std.mem.readInt(u32, input[i * 4 ..][0..4], .little);
+        k1 *%= c1;
+        k1 = std.math.rotl(u32, k1, 15);
+        k1 *%= c2;
+        h1 ^= k1;
+        h1 = std.math.rotl(u32, h1, 13);
+        h1 = h1 *% 5 +% 0xe6546b64;
+    }
+
+    // 尾部（等价于 C 的 switch 落穿：拼满 k1 后再混合）
+    const tail = input[nblocks * 4 ..];
+    const tl = tail.len;
+    var k1: u32 = 0;
+    if (tl >= 3) k1 ^= @as(u32, tail[2]) << 16;
+    if (tl >= 2) k1 ^= @as(u32, tail[1]) << 8;
+    if (tl >= 1) {
+        k1 ^= tail[0];
+        k1 *%= c1;
+        k1 = std.math.rotl(u32, k1, 15);
+        k1 *%= c2;
+        h1 ^= k1;
+    }
+
+    h1 ^= @intCast(input.len);
+    return murmurFmix32(h1);
+}
+
+/// MurmurHash3 x86_128（seed 0）：返回 h1..h4（PHP 按大端逐字输出）
+fn murmur3cHash(input: []const u8) [16]u8 {
+    const c1: u32 = 0x239b961b;
+    const c2: u32 = 0xab0e9789;
+    const c3: u32 = 0x38b34ae5;
+    const c4: u32 = 0xa1e38b93;
+    var h1: u32 = 0;
+    var h2: u32 = 0;
+    var h3: u32 = 0;
+    var h4: u32 = 0;
+    const nblocks = input.len / 16;
+
+    var i: usize = 0;
+    while (i < nblocks) : (i += 1) {
+        var k1 = std.mem.readInt(u32, input[i * 16 + 0 ..][0..4], .little);
+        var k2 = std.mem.readInt(u32, input[i * 16 + 4 ..][0..4], .little);
+        var k3 = std.mem.readInt(u32, input[i * 16 + 8 ..][0..4], .little);
+        var k4 = std.mem.readInt(u32, input[i * 16 + 12 ..][0..4], .little);
+
+        k1 *%= c1;
+        k1 = std.math.rotl(u32, k1, 15);
+        k1 *%= c2;
+        h1 ^= k1;
+        h1 = std.math.rotl(u32, h1, 19);
+        h1 +%= h2;
+        h1 = h1 *% 5 +% 0x561ccd1b;
+
+        k2 *%= c2;
+        k2 = std.math.rotl(u32, k2, 16);
+        k2 *%= c3;
+        h2 ^= k2;
+        h2 = std.math.rotl(u32, h2, 17);
+        h2 +%= h3;
+        h2 = h2 *% 5 +% 0x0bcaa747;
+
+        k3 *%= c3;
+        k3 = std.math.rotl(u32, k3, 17);
+        k3 *%= c4;
+        h3 ^= k3;
+        h3 = std.math.rotl(u32, h3, 15);
+        h3 +%= h4;
+        h3 = h3 *% 5 +% 0x96cd1c35;
+
+        k4 *%= c4;
+        k4 = std.math.rotl(u32, k4, 18);
+        k4 *%= c1;
+        h4 ^= k4;
+        h4 = std.math.rotl(u32, h4, 13);
+        h4 +%= h1;
+        h4 = h4 *% 5 +% 0x32ac3b17;
+    }
+
+    const tail = input[nblocks * 16 ..];
+    var k1: u32 = 0;
+    var k2: u32 = 0;
+    var k3: u32 = 0;
+    var k4: u32 = 0;
+    const tl = tail.len;
+    if (tl >= 13) {
+        if (tl >= 15) k4 |= @as(u32, tail[14]) << 16;
+        if (tl >= 14) k4 |= @as(u32, tail[13]) << 8;
+        k4 |= tail[12];
+        k4 *%= c4;
+        k4 = std.math.rotl(u32, k4, 18);
+        k4 *%= c1;
+        h4 ^= k4;
+    }
+    if (tl >= 9) {
+        if (tl >= 12) k3 |= @as(u32, tail[11]) << 24;
+        if (tl >= 11) k3 |= @as(u32, tail[10]) << 16;
+        if (tl >= 10) k3 |= @as(u32, tail[9]) << 8;
+        k3 |= tail[8];
+        k3 *%= c3;
+        k3 = std.math.rotl(u32, k3, 17);
+        k3 *%= c4;
+        h3 ^= k3;
+    }
+    if (tl >= 5) {
+        if (tl >= 8) k2 |= @as(u32, tail[7]) << 24;
+        if (tl >= 7) k2 |= @as(u32, tail[6]) << 16;
+        if (tl >= 6) k2 |= @as(u32, tail[5]) << 8;
+        k2 |= tail[4];
+        k2 *%= c2;
+        k2 = std.math.rotl(u32, k2, 16);
+        k2 *%= c3;
+        h2 ^= k2;
+    }
+    if (tl >= 1) {
+        if (tl >= 4) k1 |= @as(u32, tail[3]) << 24;
+        if (tl >= 3) k1 |= @as(u32, tail[2]) << 16;
+        if (tl >= 2) k1 |= @as(u32, tail[1]) << 8;
+        k1 |= tail[0];
+        k1 *%= c1;
+        k1 = std.math.rotl(u32, k1, 15);
+        k1 *%= c2;
+        h1 ^= k1;
+    }
+
+    const len32: u32 = @intCast(input.len);
+    h1 ^= len32;
+    h2 ^= len32;
+    h3 ^= len32;
+    h4 ^= len32;
+
+    h1 +%= h2;
+    h1 +%= h3;
+    h1 +%= h4;
+    h2 +%= h1;
+    h3 +%= h1;
+    h4 +%= h1;
+
+    h1 = murmurFmix32(h1);
+    h2 = murmurFmix32(h2);
+    h3 = murmurFmix32(h3);
+    h4 = murmurFmix32(h4);
+
+    h1 +%= h2;
+    h1 +%= h3;
+    h1 +%= h4;
+    h2 +%= h1;
+    h3 +%= h1;
+    h4 +%= h1;
+
+    var out: [16]u8 = undefined;
+    std.mem.writeInt(u32, out[0..4], h1, .big);
+    std.mem.writeInt(u32, out[4..8], h2, .big);
+    std.mem.writeInt(u32, out[8..12], h3, .big);
+    std.mem.writeInt(u32, out[12..16], h4, .big);
+    return out;
+}
+
+/// MurmurHash3 x64_128（seed 0）：返回 h1/h2（PHP 按大端逐 64 位字输出）
+fn murmur3fHash(input: []const u8) [16]u8 {
+    const c1: u64 = 0x87c37b91114253d5;
+    const c2: u64 = 0x4cf5ad432745937f;
+    var h1: u64 = 0;
+    var h2: u64 = 0;
+    const nblocks = input.len / 16;
+
+    var i: usize = 0;
+    while (i < nblocks) : (i += 1) {
+        var k1 = std.mem.readInt(u64, input[i * 16 + 0 ..][0..8], .little);
+        var k2 = std.mem.readInt(u64, input[i * 16 + 8 ..][0..8], .little);
+
+        k1 *%= c1;
+        k1 = std.math.rotl(u64, k1, 31);
+        k1 *%= c2;
+        h1 ^= k1;
+        h1 = std.math.rotl(u64, h1, 27);
+        h1 +%= h2;
+        h1 = h1 *% 5 +% 0x52dce729;
+
+        k2 *%= c2;
+        k2 = std.math.rotl(u64, k2, 33);
+        k2 *%= c1;
+        h2 ^= k2;
+        h2 = std.math.rotl(u64, h2, 31);
+        h2 +%= h1;
+        h2 = h2 *% 5 +% 0x38495ab5;
+    }
+
+    const tail = input[nblocks * 16 ..];
+    const tl = tail.len;
+    var k1: u64 = 0;
+    var k2: u64 = 0;
+    if (tl >= 9) {
+        if (tl >= 15) k2 |= @as(u64, tail[14]) << 48;
+        if (tl >= 14) k2 |= @as(u64, tail[13]) << 40;
+        if (tl >= 13) k2 |= @as(u64, tail[12]) << 32;
+        if (tl >= 12) k2 |= @as(u64, tail[11]) << 24;
+        if (tl >= 11) k2 |= @as(u64, tail[10]) << 16;
+        if (tl >= 10) k2 |= @as(u64, tail[9]) << 8;
+        k2 |= tail[8];
+        k2 *%= c2;
+        k2 = std.math.rotl(u64, k2, 33);
+        k2 *%= c1;
+        h2 ^= k2;
+    }
+    if (tl >= 1) {
+        if (tl >= 8) k1 |= @as(u64, tail[7]) << 56;
+        if (tl >= 7) k1 |= @as(u64, tail[6]) << 48;
+        if (tl >= 6) k1 |= @as(u64, tail[5]) << 40;
+        if (tl >= 5) k1 |= @as(u64, tail[4]) << 32;
+        if (tl >= 4) k1 |= @as(u64, tail[3]) << 24;
+        if (tl >= 3) k1 |= @as(u64, tail[2]) << 16;
+        if (tl >= 2) k1 |= @as(u64, tail[1]) << 8;
+        k1 |= tail[0];
+        k1 *%= c1;
+        k1 = std.math.rotl(u64, k1, 31);
+        k1 *%= c2;
+        h1 ^= k1;
+    }
+
+    const len64: u64 = @intCast(input.len);
+    h1 ^= len64;
+    h2 ^= len64;
+    h1 +%= h2;
+    h2 +%= h1;
+    h1 = murmurFmix64(h1);
+    h2 = murmurFmix64(h2);
+    h1 +%= h2;
+    h2 +%= h1;
+
+    var out: [16]u8 = undefined;
+    std.mem.writeInt(u64, out[0..8], h1, .big);
+    std.mem.writeInt(u64, out[8..16], h2, .big);
+    return out;
+}
+
+/// XXH32（seed=0）
+fn xxh32Hash(input: []const u8) u32 {
+    const p1: u32 = 0x9E3779B1;
+    const p2: u32 = 0x85EBCA77;
+    const p3: u32 = 0xC2B2AE3D;
+    const p4: u32 = 0x27D4EB2F;
+    const p5: u32 = 0x165667B1;
+    var p: usize = 0;
+    const len = input.len;
+    var h: u32 = undefined;
+
+    if (len >= 16) {
+        var v1: u32 = p1 +% p2;
+        var v2: u32 = p2;
+        var v3: u32 = 0;
+        var v4: u32 = 0 -% p1;
+        while (p + 16 <= len) : (p += 16) {
+            v1 = std.math.rotl(u32, v1 +% std.mem.readInt(u32, input[p..][0..4], .little) *% p2, 13) *% p1;
+            v2 = std.math.rotl(u32, v2 +% std.mem.readInt(u32, input[p + 4 ..][0..4], .little) *% p2, 13) *% p1;
+            v3 = std.math.rotl(u32, v3 +% std.mem.readInt(u32, input[p + 8 ..][0..4], .little) *% p2, 13) *% p1;
+            v4 = std.math.rotl(u32, v4 +% std.mem.readInt(u32, input[p + 12 ..][0..4], .little) *% p2, 13) *% p1;
+        }
+        h = std.math.rotl(u32, v1, 1) +% std.math.rotl(u32, v2, 7) +% std.math.rotl(u32, v3, 12) +% std.math.rotl(u32, v4, 18);
+    } else {
+        h = p5;
+    }
+    h +%= @intCast(len);
+    while (p + 4 <= len) : (p += 4) {
+        h = std.math.rotl(u32, h +% std.mem.readInt(u32, input[p..][0..4], .little) *% p3, 17) *% p4;
+    }
+    while (p < len) : (p += 1) {
+        h = std.math.rotl(u32, h +% @as(u32, input[p]) *% p5, 11) *% p1;
+    }
+    h ^= h >> 15;
+    h *%= p2;
+    h ^= h >> 13;
+    h *%= p3;
+    h ^= h >> 16;
+    return h;
+}
+
+/// XXH64（seed=0）
+fn xxh64Hash(input: []const u8) u64 {
+    const p1: u64 = 0x9E3779B185EBCA87;
+    const p2: u64 = 0xC2B2AE3D27D4EB4F;
+    const p3: u64 = 0x165667B19E3779F9;
+    const p4: u64 = 0x85EBCA77C2B2AE63;
+    const p5: u64 = 0x27D4EB2F165667C5;
+    var p: usize = 0;
+    const len = input.len;
+    var h: u64 = undefined;
+
+    if (len >= 32) {
+        var v1: u64 = p1 +% p2;
+        var v2: u64 = p2;
+        var v3: u64 = 0;
+        var v4: u64 = 0 -% p1;
+        while (p + 32 <= len) : (p += 32) {
+            v1 = std.math.rotl(u64, v1 +% std.mem.readInt(u64, input[p..][0..8], .little) *% p2, 31) *% p1;
+            v2 = std.math.rotl(u64, v2 +% std.mem.readInt(u64, input[p + 8 ..][0..8], .little) *% p2, 31) *% p1;
+            v3 = std.math.rotl(u64, v3 +% std.mem.readInt(u64, input[p + 16 ..][0..8], .little) *% p2, 31) *% p1;
+            v4 = std.math.rotl(u64, v4 +% std.mem.readInt(u64, input[p + 24 ..][0..8], .little) *% p2, 31) *% p1;
+        }
+        h = std.math.rotl(u64, v1, 1) +% std.math.rotl(u64, v2, 7) +% std.math.rotl(u64, v3, 12) +% std.math.rotl(u64, v4, 18);
+        const vs = [4]u64{ v1, v2, v3, v4 };
+        for (vs) |v| {
+            const k = std.math.rotl(u64, v *% p2, 31) *% p1;
+            h ^= k;
+            h = h *% p1 +% p4;
+        }
+    } else {
+        h = p5;
+    }
+    h +%= @intCast(len);
+    while (p + 8 <= len) : (p += 8) {
+        const k = std.math.rotl(u64, std.mem.readInt(u64, input[p..][0..8], .little) *% p2, 31) *% p1;
+        h ^= k;
+        h = std.math.rotl(u64, h, 27) *% p1 +% p4;
+    }
+    if (p + 4 <= len) {
+        h ^= @as(u64, std.mem.readInt(u32, input[p..][0..4], .little)) *% p1;
+        h = std.math.rotl(u64, h, 23) *% p2 +% p3;
+        p += 4;
+    }
+    while (p < len) : (p += 1) {
+        h ^= @as(u64, input[p]) *% p5;
+        h = std.math.rotl(u64, h, 11) *% p1;
+    }
+    h ^= h >> 33;
+    h *%= p2;
+    h ^= h >> 29;
+    h *%= p3;
+    h ^= h >> 32;
+    return h;
+}
+
+fn crc32Bzip2(input: []const u8) u32 {
+    var crc: u32 = 0xFFFFFFFF;
+    for (input) |b| {
+        crc = (crc << 8) ^ CRC32_BZIP2_TABLE[((crc >> 24) ^ @as(u32, b)) & 0xFF];
+    }
+    return crc ^ 0xFFFFFFFF;
+}
+
+/// ★F-172-b（R-268）：PHP 的算法名**大小写不敏感**（`hash("SHA256",…)` 合法）但**不去空白**
+///   （`" SHA256"`／`"SHA256 "` 均 ValueError）。超过栈缓冲的名字按原样比较 ⇒ 落「未知算法」。
+fn hashAlgoLower(name: []const u8, buf: *[128]u8) []const u8 {
+    if (name.len > buf.len) return name;
+    for (name, 0..) |c, i| buf[i] = std.ascii.toLower(c);
+    return buf[0..name.len];
+}
+
+/// ★R-269：哈希核心按**字节**入参（`hash()`／`hash_file()` 共用，避免字符串往返与泄漏）。
+///   调用方负责算法名小写化与注册表判定；本函数只回答「AOT 会不会算」，未实现 ⇒ false。
+fn hashBytes(algo: []const u8, input: []const u8, raw: bool, allocator: Allocator) !Value {
     if (std.mem.eql(u8, algo, "md5")) {
-        return php_md5(data, raw_output, allocator);
+        var digest: [16]u8 = undefined;
+        std.crypto.hash.Md5.hash(input, &digest, .{});
+        return hashValueFromBytes(16, digest, raw, allocator);
     } else if (std.mem.eql(u8, algo, "sha1")) {
-        return php_sha1(data, raw_output, allocator);
+        var digest: [20]u8 = undefined;
+        std.crypto.hash.Sha1.hash(input, &digest, .{});
+        return hashValueFromBytes(20, digest, raw, allocator);
     } else if (std.mem.eql(u8, algo, "sha256")) {
-        return php_sha256(data, allocator);
+        var hash: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(input, &hash, .{});
+        return hashValueFromBytes(32, hash, raw, allocator);
     } else if (std.mem.eql(u8, algo, "sha224")) {
         var hash: [28]u8 = undefined;
         std.crypto.hash.sha2.Sha224.hash(input, &hash, .{});
-        var hex_str: [56]u8 = undefined;
-        for (hash, 0..) |byte, i| {
-            _ = std.fmt.bufPrint(hex_str[i * 2 .. i * 2 + 2], "{x:0>2}", .{byte}) catch return Value.initBool(false);
-        }
-        return Value.initString(try PHPString.init(allocator, &hex_str));
+        return hashValueFromBytes(28, hash, raw, allocator);
     } else if (std.mem.eql(u8, algo, "sha384")) {
         var hash: [48]u8 = undefined;
         std.crypto.hash.sha2.Sha384.hash(input, &hash, .{});
-        var hex_str: [96]u8 = undefined;
-        for (hash, 0..) |byte, i| {
-            _ = std.fmt.bufPrint(hex_str[i * 2 .. i * 2 + 2], "{x:0>2}", .{byte}) catch return Value.initBool(false);
-        }
-        return Value.initString(try PHPString.init(allocator, &hex_str));
+        return hashValueFromBytes(48, hash, raw, allocator);
     } else if (std.mem.eql(u8, algo, "sha512")) {
         var hash: [64]u8 = undefined;
         std.crypto.hash.sha2.Sha512.hash(input, &hash, .{});
-        var hex_str: [128]u8 = undefined;
-        for (hash, 0..) |byte, i| {
-            _ = std.fmt.bufPrint(hex_str[i * 2 .. i * 2 + 2], "{x:0>2}", .{byte}) catch return Value.initBool(false);
-        }
-        return Value.initString(try PHPString.init(allocator, &hex_str));
+        return hashValueFromBytes(64, hash, raw, allocator);
     } else if (std.mem.eql(u8, algo, "sha512/256") or std.mem.eql(u8, algo, "sha512256")) {
         var hash: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha512_256.hash(input, &hash, .{});
-        var hex_str: [64]u8 = undefined;
-        for (hash, 0..) |byte, i| {
-            _ = std.fmt.bufPrint(hex_str[i * 2 .. i * 2 + 2], "{x:0>2}", .{byte}) catch return Value.initBool(false);
-        }
-        return Value.initString(try PHPString.init(allocator, &hex_str));
-    } else if (std.mem.eql(u8, algo, "crc32") or std.mem.eql(u8, algo, "crc32b")) {
-        const crc = std.hash.Crc32.hash(input);
-        var hex_buf: [8]u8 = undefined;
-        _ = std.fmt.bufPrint(&hex_buf, "{x:0>8}", .{crc}) catch return Value.initBool(false);
-        return Value.initString(try PHPString.init(allocator, &hex_buf));
+        return hashValueFromBytes(32, hash, raw, allocator);
+    } else if (std.mem.eql(u8, algo, "sha512/224") or std.mem.eql(u8, algo, "sha512224")) {
+        var hash: [28]u8 = undefined;
+        std.crypto.hash.sha2.Sha512_224.hash(input, &hash, .{});
+        return hashValueFromBytes(28, hash, raw, allocator);
+    } else if (std.mem.eql(u8, algo, "sha3-224")) {
+        var hash: [28]u8 = undefined;
+        std.crypto.hash.sha3.Sha3_224.hash(input, &hash, .{});
+        return hashValueFromBytes(28, hash, raw, allocator);
+    } else if (std.mem.eql(u8, algo, "sha3-256")) {
+        var hash: [32]u8 = undefined;
+        std.crypto.hash.sha3.Sha3_256.hash(input, &hash, .{});
+        return hashValueFromBytes(32, hash, raw, allocator);
+    } else if (std.mem.eql(u8, algo, "sha3-384")) {
+        var hash: [48]u8 = undefined;
+        std.crypto.hash.sha3.Sha3_384.hash(input, &hash, .{});
+        return hashValueFromBytes(48, hash, raw, allocator);
+    } else if (std.mem.eql(u8, algo, "sha3-512")) {
+        var hash: [64]u8 = undefined;
+        std.crypto.hash.sha3.Sha3_512.hash(input, &hash, .{});
+        return hashValueFromBytes(64, hash, raw, allocator);
+    } else if (std.mem.eql(u8, algo, "crc32")) {
+        // ★F-172-b（R-267）：PHP `crc32` 是 CRC-32/BZIP2（非反射、init/xorout 全 1），
+        //   且**按小端字节序**输出（"123456789" ⇒ 值 0xFC891918 ⇒ "181989fc"）；原实现误用 crc32b。
+        var le: [4]u8 = undefined;
+        std.mem.writeInt(u32, &le, crc32Bzip2(input), .little);
+        return hashValueFromBytes(4, le, raw, allocator);
+    } else if (std.mem.eql(u8, algo, "crc32b")) {
+        var be: [4]u8 = undefined;
+        std.mem.writeInt(u32, &be, std.hash.Crc32.hash(input), .big);
+        return hashValueFromBytes(4, be, raw, allocator);
     } else if (std.mem.eql(u8, algo, "adler32")) {
-        const adler = std.hash.Adler32.hash(input);
-        var hex_buf: [8]u8 = undefined;
-        _ = std.fmt.bufPrint(&hex_buf, "{x:0>8}", .{adler}) catch return Value.initBool(false);
-        return Value.initString(try PHPString.init(allocator, &hex_buf));
+        var be: [4]u8 = undefined;
+        std.mem.writeInt(u32, &be, std.hash.Adler32.hash(input), .big);
+        return hashValueFromBytes(4, be, raw, allocator);
+    } else if (std.mem.eql(u8, algo, "crc32c")) {
+        // ★F-170 尾（R-272）：CRC-32C；与 fnv*/joaat 同属「PHP 认可但 hash_hmac/pbkdf2 拒绝」的非加密族
+        var be: [4]u8 = undefined;
+        std.mem.writeInt(u32, &be, crc32cHash(input), .big);
+        return hashValueFromBytes(4, be, raw, allocator);
+    } else if (std.mem.eql(u8, algo, "fnv132")) {
+        var be: [4]u8 = undefined;
+        std.mem.writeInt(u32, &be, fnv1_32(input), .big);
+        return hashValueFromBytes(4, be, raw, allocator);
+    } else if (std.mem.eql(u8, algo, "fnv1a32")) {
+        var be: [4]u8 = undefined;
+        std.mem.writeInt(u32, &be, fnv1a_32(input), .big);
+        return hashValueFromBytes(4, be, raw, allocator);
+    } else if (std.mem.eql(u8, algo, "fnv164")) {
+        var be: [8]u8 = undefined;
+        std.mem.writeInt(u64, &be, fnv1_64(input), .big);
+        return hashValueFromBytes(8, be, raw, allocator);
+    } else if (std.mem.eql(u8, algo, "fnv1a64")) {
+        var be: [8]u8 = undefined;
+        std.mem.writeInt(u64, &be, fnv1a_64(input), .big);
+        return hashValueFromBytes(8, be, raw, allocator);
+    } else if (std.mem.eql(u8, algo, "joaat")) {
+        var be: [4]u8 = undefined;
+        std.mem.writeInt(u32, &be, joaatHash(input), .big);
+        return hashValueFromBytes(4, be, raw, allocator);
+    } else if (std.mem.eql(u8, algo, "md4")) {
+        // ★F-170 尾（R-273）：RFC 1320；属加密族（hmac/pbkdf2 亦支持）
+        return hashValueFromBytes(16, md4Hash(input), raw, allocator);
+    } else if (std.mem.eql(u8, algo, "murmur3a")) {
+        var be: [4]u8 = undefined;
+        std.mem.writeInt(u32, &be, murmur3aHash(input), .big);
+        return hashValueFromBytes(4, be, raw, allocator);
+    } else if (std.mem.eql(u8, algo, "murmur3c")) {
+        return hashValueFromBytes(16, murmur3cHash(input), raw, allocator);
+    } else if (std.mem.eql(u8, algo, "murmur3f")) {
+        return hashValueFromBytes(16, murmur3fHash(input), raw, allocator);
+    } else if (std.mem.eql(u8, algo, "xxh32")) {
+        var be: [4]u8 = undefined;
+        std.mem.writeInt(u32, &be, xxh32Hash(input), .big);
+        return hashValueFromBytes(4, be, raw, allocator);
+    } else if (std.mem.eql(u8, algo, "xxh64")) {
+        var be: [8]u8 = undefined;
+        std.mem.writeInt(u64, &be, xxh64Hash(input), .big);
+        return hashValueFromBytes(8, be, raw, allocator);
     } else if (std.mem.eql(u8, algo, "ripemd128")) {
-        // RIPEMD-128: 使用 MD5 作为基础（简化实现）
-        var hash: [16]u8 = undefined;
-        std.crypto.hash.Md5.hash(input, &hash, .{});
-        var hex_str: [32]u8 = undefined;
-        for (hash, 0..) |byte, i| {
-            _ = std.fmt.bufPrint(hex_str[i * 2 .. i * 2 + 2], "{x:0>2}", .{byte}) catch return Value.initBool(false);
-        }
-        return Value.initString(try PHPString.init(allocator, &hex_str));
+        // ★F-170（R-266）：真实 RIPEMD-128（原实现用 MD5 冒充，静默错值）
+        return hashValueFromBytes(16, ripemd128Hash(input), raw, allocator);
+    } else if (std.mem.eql(u8, algo, "ripemd160")) {
+        return hashValueFromBytes(20, ripemd160Hash(input), raw, allocator);
+    } else if (std.mem.eql(u8, algo, "ripemd256")) {
+        // ★F-170 尾（R-271）
+        return hashValueFromBytes(32, ripemd256Hash(input), raw, allocator);
+    } else if (std.mem.eql(u8, algo, "ripemd320")) {
+        return hashValueFromBytes(40, ripemd320Hash(input), raw, allocator);
     }
 
-    // PHP hash() 对不支持的算法发出警告并返回 false
     return Value.initBool(false);
 }
 
-/// hash_hmac - 生成HMAC哈希
-pub fn php_hash_hmac(algorithm: Value, data: Value, key: Value, allocator: Allocator) !Value {
+pub fn php_hash(algorithm: Value, data: Value, raw_output: Value, allocator: Allocator) !Value {
+    if (!algorithm.isString() or !data.isString()) return Value.initBool(false);
+
+    var algo_buf: [128]u8 = undefined;
+    const algo = hashAlgoLower(algorithm.asString().data, &algo_buf);
+    // ★F-172-b（R-268）：PHP 8 对**不认识**的算法名抛 ValueError；PHP 认识但 AOT 尚未实现的
+    //   （whirlpool/tiger/gost/haval/snefru/md2/md4/fnv*/joaat/xxh*/murmur3/ripemd256/320）不能抛——
+    //   PHP 会返回摘要，抛错属过度致命 ⇒ 仍返回 false，缺口登记在 F-170 尾。
+    if (!hashAlgoInList(algo, &HASH_ALGOS)) {
+        return throwThrowable("ValueError", "hash(): Argument #1 ($algo) must be a valid hashing algorithm", runtime_allocator);
+    }
+    return hashBytes(algo, data.asString().data, raw_output.toBool(), allocator);
+}
+
+/// ★F-172（R-267）：std 哈希族 HMAC 单点（binary 口径统一）。
+fn hmacStd(comptime Hash: type, key: []const u8, input: []const u8, raw: bool, allocator: Allocator) !Value {
+    const Hlen = Hash.digest_length;
+    var hash: [Hlen]u8 = undefined;
+    var hmac = std.crypto.auth.hmac.Hmac(Hash).init(key);
+    hmac.update(input);
+    hmac.final(&hash);
+    return hashValueFromBytes(Hlen, hash, raw, allocator);
+}
+
+/// hash_hmac - 生成HMAC哈希（第 4 参 `binary` 为 PHP 契约）
+pub fn php_hash_hmac(algorithm: Value, data: Value, key: Value, binary: Value, allocator: Allocator) !Value {
     if (!algorithm.isString() or !data.isString() or !key.isString()) return Value.initBool(false);
 
-    const algo = algorithm.asString().data;
+    var algo_buf: [128]u8 = undefined;
+    const algo = hashAlgoLower(algorithm.asString().data, &algo_buf);
     const input = data.asString().data;
     const key_str = key.asString().data;
+    const raw = binary.toBool();
+
+    const Sha2 = std.crypto.hash.sha2;
+    const Sha3 = std.crypto.hash.sha3;
 
     if (std.mem.eql(u8, algo, "sha256")) {
-        var hmac = std.crypto.auth.hmac.Hmac(std.crypto.hash.sha2.Sha256).init(key_str);
-        hmac.update(input);
-        var hash: [32]u8 = undefined;
-        hmac.final(&hash);
-        var hex_str: [64]u8 = undefined;
-        for (hash, 0..) |byte, i| {
-            _ = std.fmt.bufPrint(hex_str[i * 2 .. i * 2 + 2], "{x:0>2}", .{byte}) catch return Value.initBool(false);
-        }
-        return Value.initString(try PHPString.init(allocator, &hex_str));
+        return hmacStd(Sha2.Sha256, key_str, input, raw, allocator);
     } else if (std.mem.eql(u8, algo, "sha1")) {
-        var hmac = std.crypto.auth.hmac.Hmac(std.crypto.hash.Sha1).init(key_str);
-        hmac.update(input);
-        var hash: [20]u8 = undefined;
-        hmac.final(&hash);
-        var hex_str: [40]u8 = undefined;
-        for (hash, 0..) |byte, i| {
-            _ = std.fmt.bufPrint(hex_str[i * 2 .. i * 2 + 2], "{x:0>2}", .{byte}) catch return Value.initBool(false);
-        }
-        return Value.initString(try PHPString.init(allocator, &hex_str));
+        return hmacStd(std.crypto.hash.Sha1, key_str, input, raw, allocator);
     } else if (std.mem.eql(u8, algo, "md5")) {
-        var hmac = std.crypto.auth.hmac.Hmac(std.crypto.hash.Md5).init(key_str);
-        hmac.update(input);
-        var hash: [16]u8 = undefined;
-        hmac.final(&hash);
-        var hex_str: [32]u8 = undefined;
-        for (hash, 0..) |byte, i| {
-            _ = std.fmt.bufPrint(hex_str[i * 2 .. i * 2 + 2], "{x:0>2}", .{byte}) catch return Value.initBool(false);
-        }
-        return Value.initString(try PHPString.init(allocator, &hex_str));
+        return hmacStd(std.crypto.hash.Md5, key_str, input, raw, allocator);
     } else if (std.mem.eql(u8, algo, "sha512")) {
-        var hmac = std.crypto.auth.hmac.Hmac(std.crypto.hash.sha2.Sha512).init(key_str);
-        hmac.update(input);
-        var hash: [64]u8 = undefined;
-        hmac.final(&hash);
-        var hex_str: [128]u8 = undefined;
-        for (hash, 0..) |byte, i| {
-            _ = std.fmt.bufPrint(hex_str[i * 2 .. i * 2 + 2], "{x:0>2}", .{byte}) catch return Value.initBool(false);
-        }
-        return Value.initString(try PHPString.init(allocator, &hex_str));
+        return hmacStd(Sha2.Sha512, key_str, input, raw, allocator);
+    } else if (std.mem.eql(u8, algo, "sha384")) {
+        return hmacStd(Sha2.Sha384, key_str, input, raw, allocator);
+    } else if (std.mem.eql(u8, algo, "sha224")) {
+        return hmacStd(Sha2.Sha224, key_str, input, raw, allocator);
+    } else if (std.mem.eql(u8, algo, "sha512/256") or std.mem.eql(u8, algo, "sha512256")) {
+        return hmacStd(Sha2.Sha512_256, key_str, input, raw, allocator);
+    } else if (std.mem.eql(u8, algo, "sha512/224") or std.mem.eql(u8, algo, "sha512224")) {
+        return hmacStd(Sha2.Sha512_224, key_str, input, raw, allocator);
+    } else if (std.mem.eql(u8, algo, "sha3-224")) {
+        return hmacStd(Sha3.Sha3_224, key_str, input, raw, allocator);
+    } else if (std.mem.eql(u8, algo, "sha3-256")) {
+        return hmacStd(Sha3.Sha3_256, key_str, input, raw, allocator);
+    } else if (std.mem.eql(u8, algo, "sha3-384")) {
+        return hmacStd(Sha3.Sha3_384, key_str, input, raw, allocator);
+    } else if (std.mem.eql(u8, algo, "sha3-512")) {
+        return hmacStd(Sha3.Sha3_512, key_str, input, raw, allocator);
+    } else if (std.mem.eql(u8, algo, "ripemd160")) {
+        var hash: [20]u8 = undefined;
+        try hmacOneShot(20, ripemd160Hash, key_str, input, &hash, allocator);
+        return hashValueFromBytes(20, hash, raw, allocator);
+    } else if (std.mem.eql(u8, algo, "ripemd128")) {
+        var hash: [16]u8 = undefined;
+        try hmacOneShot(16, ripemd128Hash, key_str, input, &hash, allocator);
+        return hashValueFromBytes(16, hash, raw, allocator);
+    } else if (std.mem.eql(u8, algo, "ripemd256")) {
+        // ★F-170 尾（R-271）
+        var hash: [32]u8 = undefined;
+        try hmacOneShot(32, ripemd256Hash, key_str, input, &hash, allocator);
+        return hashValueFromBytes(32, hash, raw, allocator);
+    } else if (std.mem.eql(u8, algo, "ripemd320")) {
+        var hash: [40]u8 = undefined;
+        try hmacOneShot(40, ripemd320Hash, key_str, input, &hash, allocator);
+        return hashValueFromBytes(40, hash, raw, allocator);    } else if (std.mem.eql(u8, algo, "md4")) {
+        // ★F-170 尾（R-273）：md4 属加密族（PHP hash_hmac/pbkdf2 均支持）
+        var hash: [16]u8 = undefined;
+        try hmacOneShot(16, md4Hash, key_str, input, &hash, allocator);
+        return hashValueFromBytes(16, hash, raw, allocator);
     }
 
+    // ★F-172-b（R-268）：非加密算法（crc32*/adler32/fnv*/joaat/xxh*/murmur3）与未知名字 ⇒ ValueError；
+    //   PHP 认可但 AOT 未实现的加密算法仍返回 false（F-170 尾）。
+    if (!hashAlgoInList(algo, &HASH_CRYPTO_ALGOS)) {
+        return throwThrowable("ValueError", "hash_hmac(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm", runtime_allocator);
+    }
     return Value.initBool(false);
 }
 
@@ -31918,51 +34253,68 @@ pub fn php_hash_equals(str1: Value, str2: Value) !Value {
     return Value.initBool(result == 0);
 }
 
-/// hash_pbkdf2 - PBKDF2 密钥派生函数
-pub fn php_hash_pbkdf2(algo: Value, password: Value, salt: Value, iterations: Value, length: Value, raw_output: Value, allocator: Allocator) !Value {
-    // ★F-62f 接线第四批（门 BLT 段 I b179/b180，R-195）：#4 `$iterations`／#5 `$length` 实测都是**裸 `int`**（工单 §104.5）。
-    //   ★同样置于下面三枚 string 早退**之上**：PHP 的参数类型检查先于函数体 ⇒ `hash_pbkdf2("x","y","z",$o)` 必须抛而不是返回 false。
-    //   ★**只接类型拒**：`@max(1,…)`／`@max(0,…)` 两处夹取是另一枚面——实测 PHP 给
-    //   `ValueError: hash_pbkdf2(): Argument #4 ($iterations) must be greater than 0`（`-1`／`0` 都抛）与
-    //   `Argument #5 ($length) must be greater than or equal to 0`（`-1` 抛），
-    //   而 ★`length=0` 是**合法哨兵**（PHP 返回整个摘要＝64 位十六进制，门臂 b206）⇒ 禁当越界夹掉；两形都属 F-126（#142）。
-    const iterations_ok = requireNumParam("hash_pbkdf2", 4, "iterations", .int_param, iterations) orelse return Value.initNull();
-    const length_ok = requireNumParam("hash_pbkdf2", 5, "length", .int_param, length) orelse return Value.initNull();
-    if (!algo.isString() or !password.isString() or !salt.isString()) return Value.initBool(false);
+/// ★F-169（R-262）：`hash_pbkdf2` 支持的算法集（std 能覆盖的加密哈希）。
+const Pbkdf2Algo = enum {
+    sha1,
+    sha224,
+    sha256,
+    sha384,
+    sha512,
+    sha512_224,
+    sha512_256,
+    sha3_224,
+    sha3_256,
+    sha3_384,
+    sha3_512,
+    md5,
+    ripemd160,
+    ripemd128,
+    ripemd256,
+    ripemd320,
+    md4,
+};
 
-    // ★F-126（R-229）：iterations<=0／length<0 是 ValueError；length=0 仍是“整摘要”哨兵
-    const iterations_raw = iterations_ok.toInt();
-    if (iterations_raw <= 0) {
-        return throwThrowable("ValueError", "hash_pbkdf2(): Argument #4 ($iterations) must be greater than 0", runtime_allocator);
-    }
-    const length_raw = length_ok.toInt();
-    if (length_raw < 0) {
-        return throwThrowable("ValueError", "hash_pbkdf2(): Argument #5 ($length) must be greater than or equal to 0", runtime_allocator);
-    }
+fn pbkdf2AlgoFromName(name: []const u8) ?Pbkdf2Algo {
+    if (std.mem.eql(u8, name, "sha1")) return .sha1;
+    if (std.mem.eql(u8, name, "sha224")) return .sha224;
+    if (std.mem.eql(u8, name, "sha256")) return .sha256;
+    if (std.mem.eql(u8, name, "sha384")) return .sha384;
+    if (std.mem.eql(u8, name, "sha512")) return .sha512;
+    if (std.mem.eql(u8, name, "sha512/224") or std.mem.eql(u8, name, "sha512-224")) return .sha512_224;
+    if (std.mem.eql(u8, name, "sha512/256") or std.mem.eql(u8, name, "sha512-256")) return .sha512_256;
+    if (std.mem.eql(u8, name, "sha3-224")) return .sha3_224;
+    if (std.mem.eql(u8, name, "sha3-256")) return .sha3_256;
+    if (std.mem.eql(u8, name, "sha3-384")) return .sha3_384;
+    if (std.mem.eql(u8, name, "sha3-512")) return .sha3_512;
+    if (std.mem.eql(u8, name, "md5")) return .md5;
+    if (std.mem.eql(u8, name, "ripemd160")) return .ripemd160;
+    if (std.mem.eql(u8, name, "ripemd128")) return .ripemd128;
+    if (std.mem.eql(u8, name, "ripemd256")) return .ripemd256;
+    if (std.mem.eql(u8, name, "ripemd320")) return .ripemd320;
+    if (std.mem.eql(u8, name, "md4")) return .md4;
+    return null;
+}
 
-    const algo_str = algo.asString().data;
-    const password_str = password.asString().data;
-    const salt_str = salt.asString().data;
-    const iterations_count: u32 = @truncate(@as(u64, @bitCast(iterations_raw)));
-    const dklen: usize = @intCast(length_raw);
-    const raw = raw_output.toBool();
+fn pbkdf2AlgoHlen(kind: Pbkdf2Algo) usize {
+    return switch (kind) {
+        .sha1 => 20,
+        .sha224, .sha512_224, .sha3_224 => 28,
+        .sha256, .sha512_256, .sha3_256 => 32,
+        .sha384, .sha3_384 => 48,
+        .sha512, .sha3_512 => 64,
+        .md5, .ripemd128 => 16,
+        .ripemd160 => 20,
+        .ripemd256 => 32,
+        .ripemd320 => 40,
+        .md4 => 16,
+    };
+}
 
-    // 支持的算法及对应的哈希长度
-    const HmacSha256 = std.crypto.auth.hmac.Hmac(std.crypto.hash.sha2.Sha256);
-    const HmacSha1 = std.crypto.auth.hmac.Hmac(std.crypto.hash.Sha1);
-    const HmacMd5 = std.crypto.auth.hmac.Hmac(std.crypto.hash.Md5);
-
-    const hlen: usize = if (std.mem.eql(u8, algo_str, "sha256")) 32 else if (std.mem.eql(u8, algo_str, "sha1")) 20 else if (std.mem.eql(u8, algo_str, "md5")) 16 else return Value.initBool(false);
-
-    // PHP: length 参数在 binary=false 时是十六进制字符串长度，实际字节数为 length/2
-    // 在 binary=true 时是原始字节长度
-    const raw_dklen: usize = if (dklen == 0) hlen else if (raw) dklen else (dklen + 1) / 2;
-    const actual_dklen = raw_dklen;
-
-    // PBKDF2 算法
-    const num_blocks: usize = (actual_dklen + hlen - 1) / hlen;
-    var dk = try allocator.alloc(u8, num_blocks * hlen);
-    defer allocator.free(dk);
+/// ★F-169（R-262）：PBKDF2 主循环（HMAC 取 std 同名哈希；`dk.len` 决定块数）。
+fn pbkdf2Fill(comptime Hash: type, password: []const u8, salt_str: []const u8, iterations: u32, dk: []u8, allocator: Allocator) !void {
+    const Hlen = Hash.digest_length;
+    const Hmac = std.crypto.auth.hmac.Hmac(Hash);
+    const num_blocks: usize = (dk.len + Hlen - 1) / Hlen;
 
     var block_index: u32 = 1;
     while (block_index <= num_blocks) : (block_index += 1) {
@@ -31975,49 +34327,112 @@ pub fn php_hash_pbkdf2(algo: Value, password: Value, salt: Value, iterations: Va
         salt_block[salt_str.len + 2] = @intCast((block_index >> 8) & 0xFF);
         salt_block[salt_str.len + 3] = @intCast(block_index & 0xFF);
 
-        var u_prev: [64]u8 = undefined; // 最大哈希长度
-        var u_curr: [64]u8 = undefined;
-
-        if (std.mem.eql(u8, algo_str, "sha256")) {
-            var hmac = HmacSha256.init(password_str);
-            hmac.update(salt_block);
-            hmac.final(u_prev[0..32]);
-        } else if (std.mem.eql(u8, algo_str, "sha1")) {
-            var hmac = HmacSha1.init(password_str);
-            hmac.update(salt_block);
-            hmac.final(u_prev[0..20]);
-        } else {
-            var hmac = HmacMd5.init(password_str);
-            hmac.update(salt_block);
-            hmac.final(u_prev[0..16]);
-        }
+        var u_prev: [Hlen]u8 = undefined;
+        var u_curr: [Hlen]u8 = undefined;
+        var hmac = Hmac.init(password);
+        hmac.update(salt_block);
+        hmac.final(&u_prev);
 
         // T = U1
-        const offset = (block_index - 1) * hlen;
-        @memcpy(dk[offset .. offset + hlen], u_prev[0..hlen]);
+        const offset = (block_index - 1) * Hlen;
+        @memcpy(dk[offset .. offset + Hlen], &u_prev);
 
         // U2...Uc, XOR into T
         var iter: u32 = 1;
-        while (iter < iterations_count) : (iter += 1) {
-            if (std.mem.eql(u8, algo_str, "sha256")) {
-                var hmac = HmacSha256.init(password_str);
-                hmac.update(u_prev[0..32]);
-                hmac.final(u_curr[0..32]);
-            } else if (std.mem.eql(u8, algo_str, "sha1")) {
-                var hmac = HmacSha1.init(password_str);
-                hmac.update(u_prev[0..20]);
-                hmac.final(u_curr[0..20]);
-            } else {
-                var hmac = HmacMd5.init(password_str);
-                hmac.update(u_prev[0..16]);
-                hmac.final(u_curr[0..16]);
-            }
-
-            for (0..hlen) |j| {
-                dk[offset + j] ^= u_curr[j];
-            }
-            @memcpy(u_prev[0..hlen], u_curr[0..hlen]);
+        while (iter < iterations) : (iter += 1) {
+            var hm = Hmac.init(password);
+            hm.update(&u_prev);
+            hm.final(&u_curr);
+            for (0..Hlen) |j| dk[offset + j] ^= u_curr[j];
+            u_prev = u_curr;
         }
+    }
+}
+
+/// hash_pbkdf2 - PBKDF2 密钥派生函数
+pub fn php_hash_pbkdf2(algo: Value, password: Value, salt: Value, iterations: Value, length: Value, raw_output: Value, options_val: Value, allocator: Allocator) !Value {
+    // ★F-62f 接线第四批（门 BLT 段 I b179/b180，R-195）：#4 `$iterations`／#5 `$length` 实测都是**裸 `int`**（工单 §104.5）。
+    //   ★同样置于下面三枚 string 早退**之上**：PHP 的参数类型检查先于函数体 ⇒ `hash_pbkdf2("x","y","z",$o)` 必须抛而不是返回 false。
+    //   ★**只接类型拒**：`@max(1,…)`／`@max(0,…)` 两处夹取是另一枚面——实测 PHP 给
+    //   `ValueError: hash_pbkdf2(): Argument #4 ($iterations) must be greater than 0`（`-1`／`0` 都抛）与
+    //   `Argument #5 ($length) must be greater than or equal to 0`（`-1` 抛），
+    //   而 ★`length=0` 是**合法哨兵**（PHP 返回整个摘要＝64 位十六进制，门臂 b206）⇒ 禁当越界夹掉；两形都属 F-126（#142）。
+    // ★F-62f（R-261）：#1/#2/#3 是 string 槽（weak 接受标量）；#1 的「非已知算法」是 ValueError
+    const algo_ok = requireStringParamWeak("hash_pbkdf2", 1, "algo", algo) orelse return Value.initNull();
+    const password_ok = requireStringParamWeak("hash_pbkdf2", 2, "password", password) orelse return Value.initNull();
+    const salt_ok = requireStringParamWeak("hash_pbkdf2", 3, "salt", salt) orelse return Value.initNull();
+    const iterations_ok = requireNumParam("hash_pbkdf2", 4, "iterations", .int_param, iterations) orelse return Value.initNull();
+    const length_ok = requireNumParam("hash_pbkdf2", 5, "length", .int_param, length) orelse return Value.initNull();
+    // ★F-62f（R-261）：#7 `$options` 是严格 array（显式 null 也拒）；内容 PHP 实测忽略
+    const options_ok = requireArrayParam("hash_pbkdf2", 7, "options", options_val) orelse return Value.initNull();
+    _ = options_ok;
+
+    // ★F-126（R-229）：iterations<=0／length<0 是 ValueError；length=0 仍是“整摘要”哨兵
+    const iterations_raw = iterations_ok.toInt();
+    if (iterations_raw <= 0) {
+        return throwThrowable("ValueError", "hash_pbkdf2(): Argument #4 ($iterations) must be greater than 0", runtime_allocator);
+    }
+    const length_raw = length_ok.toInt();
+    if (length_raw < 0) {
+        return throwThrowable("ValueError", "hash_pbkdf2(): Argument #5 ($length) must be greater than or equal to 0", runtime_allocator);
+    }
+
+    const algo_php = try algo_ok.toString(allocator);
+    defer algo_php.release(allocator);
+    const password_php = try password_ok.toString(allocator);
+    defer password_php.release(allocator);
+    const salt_php = try salt_ok.toString(allocator);
+    defer salt_php.release(allocator);
+    var algo_name_buf: [128]u8 = undefined;
+    const algo_str = hashAlgoLower(algo_php.data, &algo_name_buf);
+    const password_str = password_php.data;
+    const salt_str = salt_php.data;
+    const iterations_count: u32 = @truncate(@as(u64, @bitCast(iterations_raw)));
+    const dklen: usize = @intCast(length_raw);
+    const raw = raw_output.toBool();
+
+    // ★F-169（R-262）：算法族与摘要长度。★F-172-b（R-268）已把「不支持」的处置改成分诊（见下）。
+    // ★F-172-b（R-268）：先按 PHP 注册表分诊——不在 `hash_hmac_algos()` 里的名字才抛 ValueError；
+    //   PHP 认可但 AOT 未实现的（whirlpool/tiger/gost/haval/snefru/md2/md4/ripemd256/320）**不能抛**
+    //   （PHP 会返回派生值，抛错＝过度致命）⇒ 返回 false，缺口登记 F-170 尾。
+    const kind = pbkdf2AlgoFromName(algo_str) orelse {
+        if (!hashAlgoInList(algo_str, &HASH_CRYPTO_ALGOS)) {
+            return throwThrowable("ValueError", "hash_pbkdf2(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm", runtime_allocator);
+        }
+        return Value.initBool(false);
+    };
+    const hlen = pbkdf2AlgoHlen(kind);
+
+    // PHP: length 参数在 binary=false 时是十六进制字符串长度，实际字节数为 length/2
+    // 在 binary=true 时是原始字节长度
+    const raw_dklen: usize = if (dklen == 0) hlen else if (raw) dklen else (dklen + 1) / 2;
+    const actual_dklen = raw_dklen;
+
+    // PBKDF2 算法（按哈希类型泛化）
+    const num_blocks: usize = (actual_dklen + hlen - 1) / hlen;
+    var dk = try allocator.alloc(u8, num_blocks * hlen);
+    defer allocator.free(dk);
+
+    const Sha2 = std.crypto.hash.sha2;
+    const Sha3 = std.crypto.hash.sha3;
+    switch (kind) {
+        .sha1 => try pbkdf2Fill(std.crypto.hash.Sha1, password_str, salt_str, iterations_count, dk, allocator),
+        .sha224 => try pbkdf2Fill(Sha2.Sha224, password_str, salt_str, iterations_count, dk, allocator),
+        .sha256 => try pbkdf2Fill(Sha2.Sha256, password_str, salt_str, iterations_count, dk, allocator),
+        .sha384 => try pbkdf2Fill(Sha2.Sha384, password_str, salt_str, iterations_count, dk, allocator),
+        .sha512 => try pbkdf2Fill(Sha2.Sha512, password_str, salt_str, iterations_count, dk, allocator),
+        .sha512_224 => try pbkdf2Fill(Sha2.Sha512_224, password_str, salt_str, iterations_count, dk, allocator),
+        .sha512_256 => try pbkdf2Fill(Sha2.Sha512_256, password_str, salt_str, iterations_count, dk, allocator),
+        .sha3_224 => try pbkdf2Fill(Sha3.Sha3_224, password_str, salt_str, iterations_count, dk, allocator),
+        .sha3_256 => try pbkdf2Fill(Sha3.Sha3_256, password_str, salt_str, iterations_count, dk, allocator),
+        .sha3_384 => try pbkdf2Fill(Sha3.Sha3_384, password_str, salt_str, iterations_count, dk, allocator),
+        .sha3_512 => try pbkdf2Fill(Sha3.Sha3_512, password_str, salt_str, iterations_count, dk, allocator),
+        .md5 => try pbkdf2Fill(std.crypto.hash.Md5, password_str, salt_str, iterations_count, dk, allocator),
+        .ripemd160 => try pbkdf2FillCustom(20, ripemd160Hash, password_str, salt_str, iterations_count, dk, allocator),
+        .ripemd128 => try pbkdf2FillCustom(16, ripemd128Hash, password_str, salt_str, iterations_count, dk, allocator),
+        .ripemd256 => try pbkdf2FillCustom(32, ripemd256Hash, password_str, salt_str, iterations_count, dk, allocator),
+        .ripemd320 => try pbkdf2FillCustom(40, ripemd320Hash, password_str, salt_str, iterations_count, dk, allocator),
+        .md4 => try pbkdf2FillCustom(16, md4Hash, password_str, salt_str, iterations_count, dk, allocator),
     }
 
     if (raw) {
@@ -32051,17 +34466,58 @@ pub fn php_crc32(str: Value) !Value {
     return Value.initInt(@intCast(crc));
 }
 
-/// hash_algos - 返回支持的哈希算法列表
-pub fn php_hash_algos(allocator: Allocator) !Value {
-    const algos = [_][]const u8{
-        "md5",        "sha1",  "sha224", "sha256",  "sha384", "sha512",
-        "sha512/256", "crc32", "crc32b", "adler32",
-    };
+/// ★F-172-b（R-268）：PHP 8.5.8 `hash_algos()` 的注册表（**原序**，非字母序）。
+///   本表只回答「PHP 认不认这个名字」，不代表 AOT 已实现；未实现的（whirlpool/tiger/gost/haval/
+///   snefru/md2/md4/fnv*/joaat/xxh*/murmur3/ripemd256/320）走 false，缺口登记在 F-170 尾。
+const HASH_ALGOS = [_][]const u8{
+    "md2",         "md4",         "md5",       "sha1",        "sha224",      "sha256",
+    "sha384",      "sha512/224",  "sha512/256", "sha512",     "sha3-224",    "sha3-256",
+    "sha3-384",    "sha3-512",    "ripemd128", "ripemd160",   "ripemd256",   "ripemd320",
+    "whirlpool",   "tiger128,3",  "tiger160,3", "tiger192,3", "tiger128,4",  "tiger160,4",
+    "tiger192,4",  "snefru",      "snefru256", "gost",        "gost-crypto", "adler32",
+    "crc32",       "crc32b",      "crc32c",    "fnv132",      "fnv1a32",     "fnv164",
+    "fnv1a64",     "joaat",       "murmur3a",  "murmur3c",    "murmur3f",    "xxh32",
+    "xxh64",       "xxh3",        "xxh128",    "haval128,3",  "haval160,3",  "haval192,3",
+    "haval224,3",  "haval256,3",  "haval128,4", "haval160,4", "haval192,4",  "haval224,4",
+    "haval256,4",  "haval128,5",  "haval160,5", "haval192,5", "haval224,5",  "haval256,5",
+};
+
+/// ★F-172-b（R-268）：`hash_hmac_algos()` 的注册表（原序）；`hash_hmac`/`hash_pbkdf2` 只认这一集
+///   ——非加密算法（adler32/crc32*/crc32c/fnv*/joaat/murmur*/xxh*）实测都抛 ValueError。
+const HASH_CRYPTO_ALGOS = [_][]const u8{
+    "md2",        "md4",        "md5",        "sha1",       "sha224",      "sha256",
+    "sha384",     "sha512/224", "sha512/256", "sha512",     "sha3-224",    "sha3-256",
+    "sha3-384",   "sha3-512",   "ripemd128",  "ripemd160",  "ripemd256",   "ripemd320",
+    "whirlpool",  "tiger128,3", "tiger160,3", "tiger192,3", "tiger128,4",  "tiger160,4",
+    "tiger192,4", "snefru",     "snefru256",  "gost",       "gost-crypto", "haval128,3",
+    "haval160,3", "haval192,3", "haval224,3", "haval256,3", "haval128,4",  "haval160,4",
+    "haval192,4", "haval224,4", "haval256,4", "haval128,5", "haval160,5",  "haval192,5",
+    "haval224,5", "haval256,5",
+};
+
+fn hashAlgoInList(name: []const u8, list: []const []const u8) bool {
+    for (list) |algo| {
+        if (std.mem.eql(u8, algo, name)) return true;
+    }
+    return false;
+}
+
+fn hashAlgosToArray(algos: []const []const u8, allocator: Allocator) !Value {
     const arr = try PHPArray.init(allocator);
     for (algos) |algo| {
         try arr.push(allocator, Value.initString(try PHPString.init(allocator, algo)));
     }
     return Value.initArray(arr);
+}
+
+/// hash_algos - 返回 PHP 认可的哈希算法列表（原序）
+pub fn php_hash_algos(allocator: Allocator) !Value {
+    return hashAlgosToArray(&HASH_ALGOS, allocator);
+}
+
+/// hash_hmac_algos - 返回 PHP 认可的加密哈希算法列表（原序）
+pub fn php_hash_hmac_algos(allocator: Allocator) !Value {
+    return hashAlgosToArray(&HASH_CRYPTO_ALGOS, allocator);
 }
 
 /// base64_encode - 使用MIME base64编码数据
@@ -35128,13 +37584,14 @@ fn wrapBuiltin_stripslashes(ctx: Value, args: []const Value, allocator: Allocato
 // ============================================================================
 
 /// rewind - 倒回文件指针的位置
+/// ★R-274：原实现把句柄当**整数指针**（`handle.isInt()`），与 AOT 的 resource 模型不符 ⇒ 恒 false；
+///   改为 resource 版：lseek 到 0 并清除 EOF。
 pub fn php_rewind(handle: Value) !Value {
-    if (!handle.isInt()) return Value.initBool(false);
-    const handle_ptr = handle.asInt();
-    if (handle_ptr <= 1) return Value.initBool(false);
-
-    const file_handle: *std.Io.File = @ptrFromInt(@as(usize, @intCast(handle_ptr)));
-    file_handle.seekTo(0) catch return Value.initBool(false);
+    if (!handle.isResource()) return Value.initBool(false);
+    const res = handle.asResource();
+    const fh = res.file_handle orelse return Value.initBool(false);
+    _ = streamLseek(fh, 0, 0) catch return Value.initBool(false);
+    res.eof = false;
     return Value.initBool(true);
 }
 
@@ -35151,26 +37608,39 @@ pub fn php_gethostbyaddr(ip: Value, allocator: Allocator) !Value {
 }
 
 /// hash_file - 使用给定文件的内容生成哈希值
-pub fn php_hash_file(algo: Value, filename: Value, allocator: Allocator) !Value {
+/// ★R-269：文件读取失败的统一告警（PHP 措辞：`{fn}({path}): Failed to open stream: {reason}`）。
+fn warnOpenStream(func_name: []const u8, fname: []const u8, err: anyerror) void {
+    var mbuf: [1024]u8 = undefined;
+    const reason: []const u8 = switch (err) {
+        error.FileNotFound => "No such file or directory",
+        error.AccessDenied => "Permission denied",
+        else => @errorName(err),
+    };
+    const msg = std.fmt.bufPrint(&mbuf, "{s}({s}): Failed to open stream: {s}", .{ func_name, fname, reason }) catch return;
+    emitWarning(msg);
+}
+
+/// hash_file - 计算文件内容的哈希（PHP 契约：algo, filename, binary=false, options=[]）
+///   ★R-269：原实现只收 2 形参且内部调用 `php_hash` 少传 `raw_output`（任何调用都会编译失败）；
+///   且算法名校验必须**先于开文件**（PHP 实测：文件不存在 + 算法非法 ⇒ ValueError 而不是 Warning）。
+pub fn php_hash_file(algo: Value, filename: Value, binary: Value, options_val: Value, allocator: Allocator) !Value {
+    _ = options_val; // PHP 实测忽略 options 内容
     if (!algo.isString() or !filename.isString()) return Value.initBool(false);
 
-    const algo_str = algo.asString().data;
+    var algo_buf: [128]u8 = undefined;
+    const algo_str = hashAlgoLower(algo.asString().data, &algo_buf);
+    if (!hashAlgoInList(algo_str, &HASH_ALGOS)) {
+        return throwThrowable("ValueError", "hash_file(): Argument #1 ($algo) must be a valid hashing algorithm", runtime_allocator);
+    }
     const fname = filename.asString().data;
 
-    // 读取文件内容
-    const file = std.Io.Dir.cwd().openFile(getIo(), fname, .{}) catch return Value.initBool(false);
-    defer file.close(getIo());
-
-    const content = file.readToEndAlloc(allocator, 10 * 1024 * 1024) catch return Value.initBool(false);
+    const content = std.Io.Dir.cwd().readFileAlloc(getIo(), fname, allocator, .limited(10 * 1024 * 1024)) catch |err| {
+        warnOpenStream("hash_file", fname, err);
+        return Value.initBool(false);
+    };
     defer allocator.free(content);
 
-    // 复用已有的 php_hash 逻辑
-    const content_val = Value.initString(try PHPString.init(allocator, content));
-    return php_hash(
-        Value.initString(try PHPString.init(allocator, algo_str)),
-        content_val,
-        allocator,
-    );
+    return hashBytes(algo_str, content, binary.toBool(), allocator);
 }
 
 /// get_resource_type - 返回资源类型

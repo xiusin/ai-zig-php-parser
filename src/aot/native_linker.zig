@@ -4442,8 +4442,8 @@ pub const NativeLinker = struct {
         .{ "escapeshellarg", bi(.{ .runtime_name = "php_escapeshellarg", .needs_allocator = true, .may_raise = false }) },
         .{ "escapeshellcmd", bi(.{ .runtime_name = "php_escapeshellcmd", .needs_allocator = true, .may_raise = false }) },
         .{ "substr_replace", bi(.{ .runtime_name = "php_substr_replace", .needs_allocator = true, .may_raise = true }) },
-        .{ "file_put_contents", .{ .runtime_name = "php_file_put_contents", .needs_allocator = true } },
-        .{ "file_get_contents", .{ .runtime_name = "php_file_get_contents", .needs_allocator = true } },
+        .{ "file_put_contents", .{ .runtime_name = "php_file_put_contents", .needs_allocator = true, .handler_params = 4, .optional_defaults = &.{ "runtime.Value.initInt(0)", "runtime.Value.initNull()" } } },
+        .{ "file_get_contents", .{ .runtime_name = "php_file_get_contents", .needs_allocator = true, .handler_params = 5, .optional_defaults = &.{ "runtime.Value.initBool(false)", "runtime.Value.initNull()", "runtime.Value.initInt(0)", "runtime.Value.initNull()" } } },
         .{ "fopen", .{ .runtime_name = "php_fopen", .needs_allocator = true } },
         .{ "fwrite", .{ .runtime_name = "php_fwrite", .needs_allocator = true } },
         .{ "fread", .{ .runtime_name = "php_fread", .needs_allocator = true } },
@@ -4453,16 +4453,44 @@ pub const NativeLinker = struct {
         .{ "php_sapi_name", .{ .runtime_name = "php_sapi_name", .needs_allocator = true } },
         .{ "php_uname", .{ .runtime_name = "php_uname", .needs_allocator = true } },
         .{ "unlink", .{ .runtime_name = "php_unlink", .needs_allocator = false } },
+        .{ "stat", .{ .runtime_name = "php_stat", .needs_allocator = true } },
+        .{ "lstat", .{ .runtime_name = "php_lstat", .needs_allocator = true } },
+        .{ "filectime", .{ .runtime_name = "php_filectime", .needs_allocator = false } },
+        .{ "filetype", .{ .runtime_name = "php_filetype", .needs_allocator = true } },
+        .{ "fileperms", .{ .runtime_name = "php_fileperms", .needs_allocator = true } },
+        .{ "is_link", .{ .runtime_name = "php_is_link", .needs_allocator = false } },
+        .{ "chmod", .{ .runtime_name = "php_chmod", .needs_allocator = false } },
+        .{ "readfile", .{ .runtime_name = "php_readfile", .needs_allocator = true } },
+        .{ "fpassthru", .{ .runtime_name = "php_fpassthru", .needs_allocator = false } },
+        .{ "fstat", .{ .runtime_name = "php_fstat", .needs_allocator = true } },
+        .{ "ftruncate", .{ .runtime_name = "php_ftruncate", .needs_allocator = false } },
+        .{ "fsync", .{ .runtime_name = "php_fsync", .needs_allocator = false } },
+        .{ "flock", .{ .runtime_name = "php_flock", .needs_allocator = false } },
+        .{ "umask", .{ .runtime_name = "php_umask", .needs_allocator = false, .handler_params = 1, .optional_defaults = &.{"runtime.Value.initNull()"} } },
+        .{ "symlink", .{ .runtime_name = "php_symlink", .needs_allocator = false } },
+        .{ "readlink", .{ .runtime_name = "php_readlink", .needs_allocator = true } },
+        .{ "clearstatcache", .{ .runtime_name = "php_clearstatcache", .needs_allocator = false, .handler_params = 2, .optional_defaults = &.{ "runtime.Value.initBool(false)", "runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, \"\"))" } } },
+        .{ "fgetcsv", .{ .runtime_name = "php_fgetcsv", .needs_allocator = true, .handler_params = 5, .optional_defaults = &.{ "runtime.Value.initNull()", "runtime.Value.initNull()", "runtime.Value.initNull()", "runtime.Value.initNull()" } } },
+        .{ "fputcsv", .{ .runtime_name = "php_fputcsv", .needs_allocator = true, .handler_params = 6, .optional_defaults = &.{ "runtime.Value.initNull()", "runtime.Value.initNull()", "runtime.Value.initNull()", "runtime.Value.initNull()" } } },
+        .{ "opendir", .{ .runtime_name = "php_opendir", .needs_allocator = true, .handler_params = 2, .optional_defaults = &.{"runtime.Value.initNull()"} } },
+        .{ "readdir", .{ .runtime_name = "php_readdir", .needs_allocator = true } },
+        .{ "rewinddir", .{ .runtime_name = "php_rewinddir", .needs_allocator = false } },
+        .{ "closedir", .{ .runtime_name = "php_closedir", .needs_allocator = false } },
+        .{ "disk_free_space", .{ .runtime_name = "php_disk_free_space", .needs_allocator = false } },
+        .{ "disk_total_space", .{ .runtime_name = "php_disk_total_space", .needs_allocator = false } },
         .{ "filesize", .{ .runtime_name = "php_filesize", .needs_allocator = false } },
         .{ "is_file", .{ .runtime_name = "php_is_file", .needs_allocator = false } },
         .{ "is_dir", .{ .runtime_name = "php_is_dir", .needs_allocator = false } },
         .{ "is_readable", .{ .runtime_name = "php_is_readable", .needs_allocator = false } },
         .{ "is_writable", .{ .runtime_name = "php_is_writable", .needs_allocator = false } },
         .{ "sys_get_temp_dir", .{ .runtime_name = "php_sys_get_temp_dir", .needs_allocator = true } },
-        .{ "file", .{ .runtime_name = "php_file", .needs_allocator = true } },
+        .{ "file", .{ .runtime_name = "php_file", .needs_allocator = true, .handler_params = 3, .optional_defaults = &.{ "runtime.Value.initInt(0)", "runtime.Value.initNull()" } } },
         .{ "file_exists", .{ .runtime_name = "php_file_exists", .needs_allocator = false } },
-        .{ "fgets", .{ .runtime_name = "php_fgets", .needs_allocator = false } },
-        .{ "fseek", .{ .runtime_name = "php_fseek", .needs_allocator = false } },
+        .{ "fgets", .{ .runtime_name = "php_fgets", .needs_allocator = false, .handler_params = 2, .optional_defaults = &.{"runtime.Value.initNull()"} } },
+        .{ "fseek", .{ .runtime_name = "php_fseek", .needs_allocator = false, .handler_params = 3, .optional_defaults = &.{"runtime.Value.initInt(0)"} } },
+        .{ "feof", .{ .runtime_name = "php_feof", .needs_allocator = false } },
+        .{ "ftell", .{ .runtime_name = "php_ftell", .needs_allocator = false } },
+        .{ "fgetc", .{ .runtime_name = "php_fgetc", .needs_allocator = true } },
         .{ "scandir", .{ .runtime_name = "php_scandir", .needs_allocator = true } },
         .{ "function_exists", bi(.{ .runtime_name = "aot_function_exists", .needs_allocator = false, .may_raise = false }) },
         .{ "gc_enable", bi(.{ .runtime_name = "php_gc_enable", .needs_allocator = true, .may_raise = false }) },
@@ -4498,7 +4526,7 @@ pub const NativeLinker = struct {
         .{ "preg_match_with_matches", bi(.{ .runtime_name = "preg_match_with_matches", .needs_allocator = true }) },
         .{ "preg_match_all", bi(.{ .runtime_name = "php_preg_match_all", .needs_allocator = true }) },
         .{ "preg_replace", bi(.{ .runtime_name = "preg_replace", .needs_allocator = true }) },
-        .{ "preg_filter", bi(.{ .runtime_name = "preg_filter", .needs_allocator = true }) },
+        .{ "preg_filter", bi(.{ .runtime_name = "preg_filter", .needs_allocator = true, .handler_params = 4, .optional_defaults = &.{"runtime.Value.initInt(-1)"} }) },
         .{ "preg_replace_callback", bi(.{ .runtime_name = "php_preg_replace_callback", .needs_allocator = true }) },
         .{ "preg_split", bi(.{ .runtime_name = "preg_split", .needs_allocator = true }) },
         .{ "preg_grep", bi(.{ .runtime_name = "preg_grep", .needs_allocator = true }) },
@@ -4560,10 +4588,10 @@ pub const NativeLinker = struct {
         .{ "base64_decode", bi(.{ .runtime_name = "php_base64_decode", .needs_allocator = true }) },
         .{ "md5", bi(.{ .runtime_name = "php_md5", .needs_allocator = true }) },
         .{ "sha1", bi(.{ .runtime_name = "php_sha1", .needs_allocator = true }) },
-        .{ "password_hash", bi(.{ .runtime_name = "php_password_hash", .needs_allocator = true }) },
+        .{ "password_hash", bi(.{ .runtime_name = "php_password_hash", .needs_allocator = true, .handler_params = 3, .optional_defaults = &.{"runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))"} }) },
         .{ "password_verify", bi(.{ .runtime_name = "php_password_verify", .needs_allocator = true }) },
         .{ "password_get_info", bi(.{ .runtime_name = "php_password_get_info", .needs_allocator = true }) },
-        .{ "password_needs_rehash", bi(.{ .runtime_name = "php_password_needs_rehash", .needs_allocator = true }) },
+        .{ "password_needs_rehash", bi(.{ .runtime_name = "php_password_needs_rehash", .needs_allocator = true, .handler_params = 3, .optional_defaults = &.{"runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))"} }) },
         .{ "uniqid", bi(.{ .runtime_name = "php_uniqid", .needs_allocator = true }) },
         .{ "ord", bi(.{ .runtime_name = "php_ord", .needs_allocator = false }) },
         .{ "chr", bi(.{ .runtime_name = "php_chr", .needs_allocator = true }) },
@@ -4763,13 +4791,38 @@ pub const NativeLinker = struct {
         .{ "exit", .{ .runtime_name = "php_exit", .needs_allocator = false } },
         .{ "die", .{ .runtime_name = "php_exit", .needs_allocator = false } },
 
-        .{ "file_get_contents", .{ .runtime_name = "php_file_get_contents", .needs_allocator = true } },
-        .{ "file_put_contents", .{ .runtime_name = "php_file_put_contents", .needs_allocator = true } },
+        .{ "file_get_contents", .{ .runtime_name = "php_file_get_contents", .needs_allocator = true, .handler_params = 5, .optional_defaults = &.{ "runtime.Value.initBool(false)", "runtime.Value.initNull()", "runtime.Value.initInt(0)", "runtime.Value.initNull()" } } },
+        .{ "file_put_contents", .{ .runtime_name = "php_file_put_contents", .needs_allocator = true, .handler_params = 4, .optional_defaults = &.{ "runtime.Value.initInt(0)", "runtime.Value.initNull()" } } },
         .{ "file_exists", .{ .runtime_name = "php_file_exists", .needs_allocator = false } },
         .{ "is_file", .{ .runtime_name = "php_is_file", .needs_allocator = false } },
         .{ "is_dir", .{ .runtime_name = "php_is_dir", .needs_allocator = false } },
         .{ "filesize", .{ .runtime_name = "php_filesize", .needs_allocator = false } },
         .{ "unlink", .{ .runtime_name = "php_unlink", .needs_allocator = false } },
+        .{ "stat", .{ .runtime_name = "php_stat", .needs_allocator = true } },
+        .{ "lstat", .{ .runtime_name = "php_lstat", .needs_allocator = true } },
+        .{ "filectime", .{ .runtime_name = "php_filectime", .needs_allocator = false } },
+        .{ "filetype", .{ .runtime_name = "php_filetype", .needs_allocator = true } },
+        .{ "fileperms", .{ .runtime_name = "php_fileperms", .needs_allocator = true } },
+        .{ "is_link", .{ .runtime_name = "php_is_link", .needs_allocator = false } },
+        .{ "chmod", .{ .runtime_name = "php_chmod", .needs_allocator = false } },
+        .{ "readfile", .{ .runtime_name = "php_readfile", .needs_allocator = true } },
+        .{ "fpassthru", .{ .runtime_name = "php_fpassthru", .needs_allocator = false } },
+        .{ "fstat", .{ .runtime_name = "php_fstat", .needs_allocator = true } },
+        .{ "ftruncate", .{ .runtime_name = "php_ftruncate", .needs_allocator = false } },
+        .{ "fsync", .{ .runtime_name = "php_fsync", .needs_allocator = false } },
+        .{ "flock", .{ .runtime_name = "php_flock", .needs_allocator = false } },
+        .{ "umask", .{ .runtime_name = "php_umask", .needs_allocator = false, .handler_params = 1, .optional_defaults = &.{"runtime.Value.initNull()"} } },
+        .{ "symlink", .{ .runtime_name = "php_symlink", .needs_allocator = false } },
+        .{ "readlink", .{ .runtime_name = "php_readlink", .needs_allocator = true } },
+        .{ "clearstatcache", .{ .runtime_name = "php_clearstatcache", .needs_allocator = false, .handler_params = 2, .optional_defaults = &.{ "runtime.Value.initBool(false)", "runtime.Value.initString(try runtime.PHPString.init(runtime.runtime_allocator, \"\"))" } } },
+        .{ "fgetcsv", .{ .runtime_name = "php_fgetcsv", .needs_allocator = true, .handler_params = 5, .optional_defaults = &.{ "runtime.Value.initNull()", "runtime.Value.initNull()", "runtime.Value.initNull()", "runtime.Value.initNull()" } } },
+        .{ "fputcsv", .{ .runtime_name = "php_fputcsv", .needs_allocator = true, .handler_params = 6, .optional_defaults = &.{ "runtime.Value.initNull()", "runtime.Value.initNull()", "runtime.Value.initNull()", "runtime.Value.initNull()" } } },
+        .{ "opendir", .{ .runtime_name = "php_opendir", .needs_allocator = true, .handler_params = 2, .optional_defaults = &.{"runtime.Value.initNull()"} } },
+        .{ "readdir", .{ .runtime_name = "php_readdir", .needs_allocator = true } },
+        .{ "rewinddir", .{ .runtime_name = "php_rewinddir", .needs_allocator = false } },
+        .{ "closedir", .{ .runtime_name = "php_closedir", .needs_allocator = false } },
+        .{ "disk_free_space", .{ .runtime_name = "php_disk_free_space", .needs_allocator = false } },
+        .{ "disk_total_space", .{ .runtime_name = "php_disk_total_space", .needs_allocator = false } },
         .{ "rename", .{ .runtime_name = "php_rename", .needs_allocator = false } },
         .{ "copy", .{ .runtime_name = "php_copy", .needs_allocator = false } },
         .{ "mkdir", .{ .runtime_name = "php_mkdir", .needs_allocator = false } },
@@ -4841,10 +4894,11 @@ pub const NativeLinker = struct {
 
         // 哈希
         .{ "hash", bi(.{ .runtime_name = "php_hash", .needs_allocator = true }) },
-        .{ "hash_hmac", bi(.{ .runtime_name = "php_hash_hmac", .needs_allocator = true }) },
+        .{ "hash_hmac", bi(.{ .runtime_name = "php_hash_hmac", .needs_allocator = true, .handler_params = 4, .optional_defaults = &.{"runtime.Value.initBool(false)"} }) },
         .{ "hash_equals", bi(.{ .runtime_name = "php_hash_equals", .needs_allocator = false }) },
-        .{ "hash_pbkdf2", bi(.{ .runtime_name = "php_hash_pbkdf2", .needs_allocator = true }) },
+        .{ "hash_pbkdf2", bi(.{ .runtime_name = "php_hash_pbkdf2", .needs_allocator = true, .handler_params = 7, .optional_defaults = &.{ "runtime.Value.initInt(0)", "runtime.Value.initBool(false)", "runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))" } }) },
         .{ "hash_algos", bi(.{ .runtime_name = "php_hash_algos", .needs_allocator = true }) },
+        .{ "hash_hmac_algos", bi(.{ .runtime_name = "php_hash_hmac_algos", .needs_allocator = true }) },
 
         // 文件系统
         .{ "filemtime", bi(.{ .runtime_name = "php_filemtime", .needs_allocator = false }) },
@@ -4967,7 +5021,7 @@ pub const NativeLinker = struct {
         .{ "error_get_last", bi(.{ .runtime_name = "php_error_get_last", .needs_allocator = true, .may_raise = false }) },
         .{ "rewind", bi(.{ .runtime_name = "php_rewind", .needs_allocator = false }) },
         .{ "gethostbyaddr", bi(.{ .runtime_name = "php_gethostbyaddr", .needs_allocator = true }) },
-        .{ "hash_file", bi(.{ .runtime_name = "php_hash_file", .needs_allocator = true }) },
+        .{ "hash_file", bi(.{ .runtime_name = "php_hash_file", .needs_allocator = true, .handler_params = 4, .optional_defaults = &.{ "runtime.Value.initBool(false)", "runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))" } }) },
         .{ "get_resource_type", bi(.{ .runtime_name = "php_get_resource_type", .needs_allocator = true }) },
         .{ "stream_register_wrapper", bi(.{ .runtime_name = "php_stream_register_wrapper", .needs_allocator = true }) },
         .{ "stream_wrapper_register", bi(.{ .runtime_name = "php_stream_register_wrapper", .needs_allocator = true }) },
@@ -23664,19 +23718,24 @@ pub const NativeLinker = struct {
                                         }
                                         try writer.writeAll(", runtime.runtime_allocator);\n");
                                     } else if (std.mem.eql(u8, runtime_name, "php_hash_pbkdf2")) {
-                                        // hash_pbkdf2(algo, password, salt, iterations, length=0, binary=false, allocator)
+                                        // hash_pbkdf2(algo, password, salt, iterations, length=0, binary=false, options=[])
                                         try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                         try self.writeValueArgs(writer, op.args);
                                         if (op.args.len <= 4) {
-                                            try writer.writeAll(", runtime.Value.initInt(0), runtime.Value.initBool(false)");
+                                            try writer.writeAll(", runtime.Value.initInt(0), runtime.Value.initBool(false), runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
                                         } else if (op.args.len == 5) {
-                                            try writer.writeAll(", runtime.Value.initBool(false)");
+                                            try writer.writeAll(", runtime.Value.initBool(false), runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
+                                        } else if (op.args.len == 6) {
+                                            try writer.writeAll(", runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
                                         }
                                         try writer.writeAll(", runtime.runtime_allocator);\n");
                                     } else if (std.mem.eql(u8, runtime_name, "php_file_put_contents")) {
-                                        const max_args = @min(op.args.len, 2);
+                                        // file_put_contents(filename, data, flags = 0, context = null)　★R-274 四槽
+                                        const max_args = @min(op.args.len, 4);
                                         try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                         try self.writeValueArgs(writer, op.args[0..max_args]);
+                                        if (op.args.len < 3) try writer.writeAll(", runtime.Value.initInt(0)");
+                                        if (op.args.len < 4) try writer.writeAll(", runtime.Value.initNull()");
                                         try writer.writeAll(", runtime.runtime_allocator);\n");
                                     } else if (std.mem.eql(u8, runtime_name, "php_str_word_count")) {
                                         // str_word_count(str, format=0, charlist=null, allocator)
@@ -24105,15 +24164,33 @@ pub const NativeLinker = struct {
                                     }
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
                                 } else if (std.mem.eql(u8, runtime_name, "php_password_hash")) {
-                                    // password_hash(password, algo) — IR已截断到2个参数，补齐不足的
+                                    // password_hash(password, algo, options=[]) — 缺省 options 补真正的空数组（PHP 显式 null ⇒ TypeError）
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                    if (op.args.len >= 2) {
+                                    if (op.args.len >= 3) {
+                                        try self.writeValueArgs(writer, op.args[0..3]);
+                                    } else if (op.args.len == 2) {
                                         try self.writeValueArgs(writer, op.args[0..2]);
+                                        try writer.writeAll(", runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
                                     } else if (op.args.len == 1) {
                                         try self.writeValueArgs(writer, op.args);
-                                        try writer.writeAll(", runtime.Value.initInt(1)");
+                                        try writer.writeAll(", runtime.Value.initInt(1), runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
                                     } else {
-                                        try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(1)");
+                                        try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(1), runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
+                                    }
+                                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                                } else if (std.mem.eql(u8, runtime_name, "php_password_needs_rehash")) {
+                                    // password_needs_rehash(hash, algo, options=[])
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                    if (op.args.len >= 3) {
+                                        try self.writeValueArgs(writer, op.args[0..3]);
+                                    } else if (op.args.len == 2) {
+                                        try self.writeValueArgs(writer, op.args[0..2]);
+                                        try writer.writeAll(", runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
+                                    } else if (op.args.len == 1) {
+                                        try self.writeValueArgs(writer, op.args);
+                                        try writer.writeAll(", runtime.Value.initInt(1), runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
+                                    } else {
+                                        try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(1), runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
                                     }
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
                                 } else if (std.mem.eql(u8, runtime_name, "php_hash")) {
@@ -24129,9 +24206,19 @@ pub const NativeLinker = struct {
                                     }
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
                                 } else if (std.mem.eql(u8, runtime_name, "php_hash_file")) {
-                                    // hash_file(algo, filename, binary = false)
+                                    // hash_file(algo, filename, binary = false, options = [])　★R-269 四槽
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                    try self.writeValueArgs(writer, op.args);
+                                    if (op.args.len > 0) {
+                                        try self.writeValueArgs(writer, op.args);
+                                        if (op.args.len < 3) {
+                                            try writer.writeAll(", runtime.Value.initBool(false)");
+                                        }
+                                        if (op.args.len < 4) {
+                                            try writer.writeAll(", runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
+                                        }
+                                    } else {
+                                        try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull(), runtime.Value.initBool(false), runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
+                                    }
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
                                 } else if (std.mem.eql(u8, runtime_name, "php_new_object_dynamic")) {
                                     // php_new_object_dynamic(class_name_val, ...args, allocator)
@@ -24169,13 +24256,15 @@ pub const NativeLinker = struct {
                                     }
                                     try writer.writeAll(");\n");
                                 } else if (std.mem.eql(u8, runtime_name, "php_hash_pbkdf2")) {
-                                    // hash_pbkdf2(algo, password, salt, iterations, length=0, binary=false, allocator)
+                                    // hash_pbkdf2(algo, password, salt, iterations, length=0, binary=false, options=[])
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     try self.writeValueArgs(writer, op.args);
                                     if (op.args.len <= 4) {
-                                        try writer.writeAll(", runtime.Value.initInt(0), runtime.Value.initBool(false)");
+                                        try writer.writeAll(", runtime.Value.initInt(0), runtime.Value.initBool(false), runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
                                     } else if (op.args.len == 5) {
-                                        try writer.writeAll(", runtime.Value.initBool(false)");
+                                        try writer.writeAll(", runtime.Value.initBool(false), runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
+                                    } else if (op.args.len == 6) {
+                                        try writer.writeAll(", runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
                                     }
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
                                 } else {
@@ -24337,15 +24426,33 @@ pub const NativeLinker = struct {
                                         try writer.writeAll("    _ = runtime.Value.initNull();\n");
                                     }
                                 } else if (std.mem.eql(u8, runtime_name, "php_password_hash")) {
-                                    // password_hash(password, algo) — IR已截断到2个参数，补齐不足的
+                                    // password_hash(password, algo, options=[]) — 缺省 options 补真正的空数组
                                     try writer.print("    _ = try runtime.{s}(", .{runtime_name});
-                                    if (op.args.len >= 2) {
+                                    if (op.args.len >= 3) {
+                                        try self.writeValueArgs(writer, op.args[0..3]);
+                                    } else if (op.args.len == 2) {
                                         try self.writeValueArgs(writer, op.args[0..2]);
+                                        try writer.writeAll(", runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
                                     } else if (op.args.len == 1) {
                                         try self.writeValueArgs(writer, op.args);
-                                        try writer.writeAll(", runtime.Value.initInt(1)");
+                                        try writer.writeAll(", runtime.Value.initInt(1), runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
                                     } else {
-                                        try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(1)");
+                                        try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(1), runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
+                                    }
+                                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                                } else if (std.mem.eql(u8, runtime_name, "php_password_needs_rehash")) {
+                                    // password_needs_rehash(hash, algo, options=[])
+                                    try writer.print("    _ = try runtime.{s}(", .{runtime_name});
+                                    if (op.args.len >= 3) {
+                                        try self.writeValueArgs(writer, op.args[0..3]);
+                                    } else if (op.args.len == 2) {
+                                        try self.writeValueArgs(writer, op.args[0..2]);
+                                        try writer.writeAll(", runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
+                                    } else if (op.args.len == 1) {
+                                        try self.writeValueArgs(writer, op.args);
+                                        try writer.writeAll(", runtime.Value.initInt(1), runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
+                                    } else {
+                                        try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(1), runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
                                     }
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
                                 } else if (std.mem.eql(u8, runtime_name, "php_ob_get_status")) {

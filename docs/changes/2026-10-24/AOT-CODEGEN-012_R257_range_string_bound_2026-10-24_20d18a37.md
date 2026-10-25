@@ -61,7 +61,7 @@ sequenceDiagram
 - **破坏式变更**：数值字符串边界的元素类型与 PHP 对齐；整数/字符/浮点步长面由 C301 守卫复证。
 - **边角未处理**：多字节非数字串与空串（PHP Warning + 特殊强转）保持旧路径；字符范围 + 浮点步长仍为已知边角。
 - **复测路径**：`bash fuzzy_scripts_720/tmp/c302_range_string_bound_gate_tmp.sh`；邻居 `c301`。
-- **读数**：C302 3/3（自证 3 CF，14 s）／C301 5/5／`zig build test` 326/326。
+- **读数**：C302 3/3（自证 3 CF，14 s）／C301 5/5／`zig build test` 326/326／主回归 **PASS=68 FAIL=0**。
 
 ## 7. 遗留问题
 
