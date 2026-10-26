@@ -10684,10 +10684,79 @@ R-286 收口后按 §194.6 继续查 F-192a（by-ref 数组环 `gc_collect_cycle
 | C333（新门 7 臂＝6 语义 + s1 泄漏） | **7/7 SAME**（32 s）；s1 `LEAKFLAT lb=19408/19408 la=106/106`；自证 `AOT_BIN=/bin/false` **7 CF** |
 | 邻居 | C332 **13/13**、C331 **7/7**、C330 **5/5**、C328 **6/6**、C329 **4/8**（a1/a2/a3/a5＝F-191 既有红，零转移） |
 | `zig build test` | **21/21 steps、326/326**（`/tmp/f201b_buildtest.log`） |
-| 主回归 | __REGRESSION_LINE__ |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/f201b_regression.log`，`SELF_CHECK_OK rows=68 uniq=68`） |
 
 ### 197.4 代次锚
 `nlk 07357ddfd5295e1ffee4cd3667813f7e`；`tpl 3d7ac9775929e26416c189ad4d0353b3`（未改运行时）；`irg 0b7106338d5ffe1342caee961734b8d8`；`ir fb2bb442ca27b98cf1df7e109a240e1f`。（均未提交；HEAD `b30690b`）
 
 ### 197.5 残余：F-203（P1，新立，既存）
-`$b = $a` **没有被物化为独立变量槽**：IR 里只有一个 alloca，`$b` 只剩一个 borrow 临时。经副本变量写（`$b["x"] = 9`）会改到 `$a`——实测 `ca=2`（PHP 1），**单层元素写就错**；嵌套只是同族。本轮修复对「经属主变量写」的形状正确；经副本写的形状在 F-203 修好前仍错（C333 门头已注明）。修法方向：变量 home 槽（禁止把副本变量折叠成单个 borrow 临时，或在 mem2reg 时保证写回一致），属 IR 改造轮。
+`$b = $a` **没有被物化为独立变量槽**：IR 里只有一个 alloca，`$b` 只剩一个 borrow 临时。经副本变量写（`$b["x"] = 9`）会改到 `$a`——实测 `ca=2`（PHP 1），**单层元素写就错**；嵌套只是同族。本轮修复对「经属主变量写」的形状正确；经副本写的形状在 F-203 修好前仍错（C333 门头已注明）。（**已由 R-290 关闭，见 §198**）
+
+## 198. ★R-290 落地记录（F-203 副本变量 home 槽，已闭）
+
+### 198.1 根因
+mem2reg 把 `$b = $a` 提升：`$b` 没有 alloca（home 槽），IR 里只剩一个 borrow 临时；对 `$b` 的元素写因此直接落在 `$a` 的共享数组上（PHP `ca=1` / AOT 修前 `ca=2`）。mem2reg 里原本有一条"数组变量不提升"的守卫（`optimizer.zig:2331`），但只认 `op.value.type_ == .php_array`；`$b = $a` 的值是 **load 结果（php_value）**，漏过守卫。
+
+### 198.2 修法（仅 `optimizer.zig`）
+`isPromotable` 补一条窄守卫，配套两组预扫：
+1. `load_result_regs`：全函数 `.load` 结果寄存器集合（识别"副本赋值"的值来源）。
+2. `mut_receiver_regs`：`array.set`／`array.set_nested`(outer)／`array.ensure`／`array.push`／`array.unset` 的接收者，并沿 `cast`/`move` 链回溯到不动点。
+判定：若 alloca 有 `store(ptr=alloca, value∈load_result_regs)`（副本赋值），且它的某个 `load` 结果 ∈ `mut_receiver_regs`（被当可变数组用）⇒ **禁止提升**，保留 alloca 走内存路径（含 F-201/F-201-b 的 COW）。只读副本与标量副本不受影响。
+
+★方向先用「全局关闭 mem2reg」实验证实：关掉后 c1（`$b["x"]=9`）与 n7（`$b["k"][0]=7`）逐字节 SAME；`--emit-ir` 显示预优化 IR 确有两个 alloca 与 `store(load $a) → alloca_b`。实验后 `optimizer.zig` 已逐字还原（`git diff` 为空）再实施窄守卫。
+
+### 198.3 读数
+| 腿 | 读数 |
+|---|---|
+| C334（新门 8 臂＝7 语义 + s1 泄漏） | **8/8 SAME**（36 s）；s1 `LEAKFLAT lb=18984/18984 la=105/105`；自证 `AOT_BIN=/bin/false` **8 CF** |
+| 邻居 | C333 **7/7**、C332 **13/13**、C331 **7/7**、C330 **5/5**、C328 **6/6**、C329 **4/8**（a1/a2/a3/a5＝F-191 既有红，零转移） |
+| `zig build test` | **21/21 steps、326/326**（`/tmp/f203_buildtest.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/f203_regression.log`，`SELF_CHECK_OK rows=68 uniq=68`） |
+
+### 198.4 代次锚
+`nlk 07357ddfd5295e1ffee4cd3667813f7e`；`tpl 3d7ac9775929e26416c189ad4d0353b3`；`irg 0b7106338d5ffe1342caee961734b8d8`；`ir fb2bb442ca27b98cf1df7e109a240e1f` 均未变；**`opti 202cc7f18ac63ffc5a454da88d5a084a`**（本轮唯一改动，新增锚）。（均未提交；HEAD `b30690b`）
+
+### 198.5 边界
+- 守卫依据「副本 store + 可变数组接收者」两个语法条件；未来新增容器变更 op 时需同步扩展 `mut_receiver_regs`（C334 a1/a2 兜底）。
+- 只读副本仍会被提升（安全）；标量副本不受影响（C334 a5/a6 守卫）。
+
+## 199. ★R-291 落地记录（F-192a `gc_collect_cycles()` 计数口径，已闭）
+
+### 199.1 根因
+旧实现 `const collected = white_items.items.len;`——返回**整片 white 闭包**大小。而 AOT 的 root buffer 里既有真实环、也有 rc→0 被缓冲的**普通垃圾**（F-191 机制）⇒ 普通垃圾、嵌套树、按值互指全被计入（PHP 全为 0）。
+
+### 199.2 PHP 口径（实测矩阵钉死）
+| 形状 | PHP | 修前 AOT | 修后 |
+|---|---|---|---|
+| 普通数组/对象垃圾 | 0 | 1 | **0** |
+| 普通嵌套树 | 0 | 2 | **0** |
+| 按值互指数组 | 0 | 4 | **0** |
+| 自引用对象 | 1 | 1 | 1 |
+| 双对象环 | 2 | 2 | 2 |
+| 双对象环+子对象 | **3** | 4 | **3** |
+| 双对象环+子数组 | **2** | 3 | **2** |
+| 自引用对象+子对象 | **2** | ? | **2** |
+| 数组+对象环 | **2** | 3 | **2** |
+| 纯数组 `&` 环（p1/p3/m1/m2） | 1/1/1/2 | 2/4/2/4 | 0/0/0/0（F-199 残余） |
+
+口径：**数组只在环成员（自环或 SCC>1）时计数；对象/闭包只要落在含环连通分量里就计数；无环垃圾及其子树一律 0。**
+
+### 199.3 修法（仅 tpl）
+- `gcWhiteIndex`：Value 解引用 → 白集合节点下标。
+- `gcCountCollectedPhpRule`：白集合内建双向邻接 → **Kosaraju**（迭代两趟 DFS）标 SCC 与环成员 → 从环成员 BFS 得含环分量 → 按口径计数。
+- `gcCollectCycles` 的 `collected` 改调该函数；**任一分配失败退回旧口径**（white 闭包大小），释放循环 `gcCollectWhiteKnown` 原样不动。
+
+### 199.4 读数
+| 腿 | 读数 |
+|---|---|
+| C335（新门 14 臂＝a1–a13 + s1 回收敏感度） | **14/14 SAME**（66 s）；s1 `RECLAIM_FLAT lb=65740/65740 la=102/102`；自证 `AOT_BIN=/bin/false` **14 CF** |
+| 邻居 | C334 8/8、C333 7/7、C332 13/13、C331 7/7、C330 5/5、C328 6/6、C329 4/8（a1/a2/a3/a5＝F-191，零转移） |
+| `zig build test` | **21/21 steps、326/326**（`/tmp/f192c_buildtest.log`） |
+| 主回归 | __REGRESSION_LINE__ |
+
+### 199.5 代次锚
+`nlk 07357ddfd5295e1ffee4cd3667813f7e`；**`tpl 99bf4564f446276dfa6717c4a7ff6569`**；`irg 0b7106338d5ffe1342caee961734b8d8`；`ir fb2bb442ca27b98cf1df7e109a240e1f`；`opti 202cc7f18ac63ffc5a454da88d5a084a`。（均未提交；HEAD `b30690b`）
+
+### 199.6 边界
+- 纯数组 `&` 环仍计 0：AOT 的 `&` 数组元素按值拷贝（F-199），没有真环；F-199 落地后 C335 需补这 4 臂。
+- 本批只改计数，未改回收时机（F-191 仍开）。

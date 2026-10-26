@@ -1858,11 +1858,72 @@ pub const IROptimizer = struct {
             }
         }
 
+        // ★F-203（R-290）：副本变量（`$b = $a`）不得提升。提升后 `$b` 没有 home 槽，
+        //   对 `$b` 的元素写会直接落在 `$a` 的共享数组上（`$b["x"]=9` 改掉 `$a`）。
+        //   判定：该 alloca 有「值来自另一 alloca 的 load」的 store，且它的某个 load
+        //   被当作**可变数组接收者**（array.set/ensure/set_nested/push/unset）使用。
+        //   只读用途（array.get 等）不受影响，仍然可以提升。
+        var load_result_regs = std.AutoHashMap(u32, void).init(self.allocator);
+        defer load_result_regs.deinit();
+        for (func.blocks.items) |block_scan| {
+            for (block_scan.instructions.items) |inst_scan| {
+                if (inst_scan.*.op == .load) {
+                    if (inst_scan.result) |res| {
+                        try load_result_regs.put(res.id, {});
+                    }
+                }
+            }
+        }
+        var mut_receiver_regs = std.AutoHashMap(u32, void).init(self.allocator);
+        defer mut_receiver_regs.deinit();
+        for (func.blocks.items) |block_scan| {
+            for (block_scan.instructions.items) |inst_scan| {
+                switch (inst_scan.*.op) {
+                    .array_set => |op| try mut_receiver_regs.put(op.array.id, {}),
+                    .array_set_nested => |op| try mut_receiver_regs.put(op.outer_array.id, {}),
+                    .array_ensure => |op| try mut_receiver_regs.put(op.array.id, {}),
+                    .array_push => |op| try mut_receiver_regs.put(op.array.id, {}),
+                    .array_unset => |op| try mut_receiver_regs.put(op.array.id, {}),
+                    else => {},
+                }
+            }
+        }
+        // cast/move 可能夹在 load 与可变用途之间：把该链一并纳入（迭代到不动点）
+        {
+            var changed = true;
+            while (changed) {
+                changed = false;
+                for (func.blocks.items) |block_scan| {
+                    for (block_scan.instructions.items) |inst_scan| {
+                        switch (inst_scan.*.op) {
+                            .cast => |op| {
+                                if (inst_scan.result) |res| {
+                                    if (mut_receiver_regs.contains(res.id) and !mut_receiver_regs.contains(op.value.id)) {
+                                        try mut_receiver_regs.put(op.value.id, {});
+                                        changed = true;
+                                    }
+                                }
+                            },
+                            .move => |op| {
+                                if (inst_scan.result) |res| {
+                                    if (mut_receiver_regs.contains(res.id) and !mut_receiver_regs.contains(op.operand.id)) {
+                                        try mut_receiver_regs.put(op.operand.id, {});
+                                        changed = true;
+                                    }
+                                }
+                            },
+                            else => {},
+                        }
+                    }
+                }
+            }
+        }
+
         // Scan entry block for allocas
         if (func.getEntryBlock()) |entry| {
             for (entry.instructions.items) |inst| {
                 if (inst.*.op == .alloca) {
-                    if (self.isPromotable(inst, func, &property_get_result_regs, &handler_reachable)) {
+                    if (self.isPromotable(inst, func, &property_get_result_regs, &handler_reachable, &load_result_regs, &mut_receiver_regs)) {
                         try promotable_allocas.append(self.allocator, inst);
                         try def_blocks.put(inst, .{ .items = &.{}, .capacity = 0 });
                         if (inst.result) |res| {
@@ -2288,7 +2349,7 @@ pub const IROptimizer = struct {
     }
 
     /// Check if alloca is promotable
-    fn isPromotable(self: *Self, alloca: *Instruction, func: *Function, property_get_regs: *const std.AutoHashMap(u32, void), handler_reachable: *const std.DynamicBitSet) bool {
+    fn isPromotable(self: *Self, alloca: *Instruction, func: *Function, property_get_regs: *const std.AutoHashMap(u32, void), handler_reachable: *const std.DynamicBitSet, load_result_regs: *const std.AutoHashMap(u32, void), mut_receiver_regs: *const std.AutoHashMap(u32, void)) bool {
         // Check if marked as no_optimize
         if (alloca.op == .alloca and alloca.op.alloca.no_optimize) {
             return false;
@@ -2297,6 +2358,11 @@ pub const IROptimizer = struct {
         // Result must be used
         const result_reg = alloca.result orelse return false;
         const result_id = result_reg.id;
+
+        // F-203：副本变量（store 的值来自另一个 alloca 的 load）一旦被当作可变数组
+        // 接收者使用，就不能提升——提升后没有 home 槽，元素写会改到源变量的数组。
+        var has_copy_store = false;
+        var has_mut_load = false;
 
         // Check all uses
         for (func.blocks.items) |block| {
@@ -2313,6 +2379,10 @@ pub const IROptimizer = struct {
                             if (handler_reachable.isSet(block.index)) {
                                 return false;
                             }
+                            // F-203：该 load 的值被当作可变数组接收者使用（array.set/ensure/…）
+                            if (inst.result) |r| {
+                                if (mut_receiver_regs.contains(r.id)) has_mut_load = true;
+                            }
                         }
                     },
                     .store => |op| {
@@ -2322,6 +2392,8 @@ pub const IROptimizer = struct {
                                 // std.debug.print("  reg_{d} NOT promotable: storing pointer to itself\n", .{result_id});
                                 return false;
                             }
+                            // F-203：副本赋值（值来自另一个 alloca 的 load）记为副本 store
+                            if (load_result_regs.contains(op.value.id)) has_copy_store = true;
                             // property_get 结果赋值给变量时不可提升：
                             // $new = $this->data 后 usort($new, ...) 需 val_assign 做 COW 克隆
                             // 若 mem2reg 消除 store，COW 丢失，usort 原地修改共享数组
@@ -2365,6 +2437,8 @@ pub const IROptimizer = struct {
                 }
             }
         }
+        // F-203：副本变量又被当可变数组用 ⇒ 无 home 槽会写穿源变量的数组，禁止提升。
+        if (has_copy_store and has_mut_load) return false;
         return true;
     }
 

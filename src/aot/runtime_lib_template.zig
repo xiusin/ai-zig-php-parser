@@ -1192,7 +1192,7 @@ fn gcCollectCycles(force: bool) usize {
         gcGatherWhite(r, &white_items, &seen_arrays, &seen_objects, &seen_closures);
     }
 
-    const collected = white_items.items.len;
+    const collected = gcCountCollectedPhpRule(white_items.items, &seen_arrays, &seen_objects, &seen_closures) orelse white_items.items.len;
     for (white_items.items) |r| {
         gcCollectWhiteKnown(r, &seen_arrays, &seen_objects, &seen_closures);
     }
@@ -1462,6 +1462,213 @@ fn gcGatherWhiteValue(
     } else if (dv.isFunction()) {
         gcGatherWhite(.{ .closure = dv.asFunction() }, white_items, seen_arrays, seen_objects, seen_closures);
     }
+}
+
+fn gcWhiteIndex(
+    v: Value,
+    idx_arrays: *const std.AutoHashMap(*PHPArray, u32),
+    idx_objects: *const std.AutoHashMap(*PHPObject, u32),
+    idx_closures: *const std.AutoHashMap(*PHPClosure, u32),
+) ?u32 {
+    const dv = gcDerefValue(v);
+    if (dv.isArray()) return idx_arrays.get(dv.asArray());
+    if (Value_isObject(dv)) return idx_objects.get(Value_asObject(dv));
+    if (dv.isFunction()) return idx_closures.get(dv.asFunction());
+    return null;
+}
+
+/// ★R-291：`gc_collect_cycles()` 的 PHP 计数口径（实测矩阵）：
+///   · **数组**只在**环成员**（自环或 SCC>1）时计数——数组值按 COW/级联释放，普通子数组不单计；
+///   · **对象/闭包**只要落在**含环的连通分量**里就计数（含环的子对象）；
+///   · 无环普通垃圾及其整棵子树一律不计（本仓 rc→0 缓冲的普通垃圾也被 white 闭包收进来）。
+/// 实现：白集合内建邻接 → Kosaraju 标环成员 → 从环成员 BFS 得含环分量。
+/// OOM 时返回 null，调用方退回旧口径（white 闭包大小）。
+fn gcCountCollectedPhpRule(
+    white_items: []const CycleRoot,
+    seen_arrays: *const std.AutoHashMap(*PHPArray, void),
+    seen_objects: *const std.AutoHashMap(*PHPObject, void),
+    seen_closures: *const std.AutoHashMap(*PHPClosure, void),
+) ?usize {
+    _ = seen_arrays;
+    _ = seen_objects;
+    _ = seen_closures;
+    const n = white_items.len;
+    if (n == 0) return 0;
+    const allocator = runtime_allocator;
+
+    var idx_arrays = std.AutoHashMap(*PHPArray, u32).init(allocator);
+    defer idx_arrays.deinit();
+    var idx_objects = std.AutoHashMap(*PHPObject, u32).init(allocator);
+    defer idx_objects.deinit();
+    var idx_closures = std.AutoHashMap(*PHPClosure, u32).init(allocator);
+    defer idx_closures.deinit();
+    for (white_items, 0..) |r, i| switch (r) {
+        .array => |a| idx_arrays.put(a, @intCast(i)) catch return null,
+        .object => |o| idx_objects.put(o, @intCast(i)) catch return null,
+        .closure => |c| idx_closures.put(c, @intCast(i)) catch return null,
+    };
+
+    const adj = allocator.alloc(std.ArrayListUnmanaged(u32), n) catch return null;
+    defer {
+        for (adj) |*l| l.deinit(allocator);
+        allocator.free(adj);
+    }
+    const radj = allocator.alloc(std.ArrayListUnmanaged(u32), n) catch return null;
+    defer {
+        for (radj) |*l| l.deinit(allocator);
+        allocator.free(radj);
+    }
+    for (adj) |*l| l.* = .{ .items = &.{}, .capacity = 0 };
+    for (radj) |*l| l.* = .{ .items = &.{}, .capacity = 0 };
+
+    const addEdge = struct {
+        fn f(al: Allocator, a: *std.ArrayListUnmanaged(u32), r: *std.ArrayListUnmanaged(u32), from: u32, to: u32) bool {
+            a.append(al, to) catch return false;
+            r.append(al, from) catch return false;
+            return true;
+        }
+    }.f;
+
+    for (white_items, 0..) |r, i| {
+        const from: u32 = @intCast(i);
+        switch (r) {
+            .array => |a| {
+                var it = a.elements.iterator();
+                while (it.next()) |e| {
+                    if (gcWhiteIndex(e.value_ptr.*, &idx_arrays, &idx_objects, &idx_closures)) |j| {
+                        if (!addEdge(allocator, &adj[from], &radj[j], from, j)) return null;
+                    }
+                }
+            },
+            .object => |o| {
+                var it = o.properties.iterator();
+                while (it.next()) |e| {
+                    if (gcWhiteIndex(e.value_ptr.*, &idx_arrays, &idx_objects, &idx_closures)) |j| {
+                        if (!addEdge(allocator, &adj[from], &radj[j], from, j)) return null;
+                    }
+                }
+            },
+            .closure => |c| {
+                for (c.captures) |cap| {
+                    if (gcWhiteIndex(cap, &idx_arrays, &idx_objects, &idx_closures)) |j| {
+                        if (!addEdge(allocator, &adj[from], &radj[j], from, j)) return null;
+                    }
+                }
+            },
+        }
+    }
+
+    const visited = allocator.alloc(bool, n) catch return null;
+    defer allocator.free(visited);
+    @memset(visited, false);
+    var order = std.ArrayListUnmanaged(u32).empty;
+    defer order.deinit(allocator);
+    var stack: std.ArrayListUnmanaged(struct { v: u32, next: u32 }) = .empty;
+    defer stack.deinit(allocator);
+    var start: u32 = 0;
+    while (start < n) : (start += 1) {
+        if (visited[start]) continue;
+        visited[start] = true;
+        stack.append(allocator, .{ .v = start, .next = 0 }) catch return null;
+        while (stack.items.len > 0) {
+            const top = &stack.items[stack.items.len - 1];
+            const v = top.v;
+            if (top.next < adj[v].items.len) {
+                const w = adj[v].items[top.next];
+                top.next += 1;
+                if (!visited[w]) {
+                    visited[w] = true;
+                    stack.append(allocator, .{ .v = w, .next = 0 }) catch return null;
+                }
+            } else {
+                order.append(allocator, v) catch return null;
+                stack.items.len -= 1;
+            }
+        }
+    }
+
+    const comp = allocator.alloc(u32, n) catch return null;
+    defer allocator.free(comp);
+    for (comp) |*c| c.* = 0xFFFFFFFF;
+    const is_cycle = allocator.alloc(bool, n) catch return null;
+    defer allocator.free(is_cycle);
+    @memset(is_cycle, false);
+    var members = std.ArrayListUnmanaged(u32).empty;
+    defer members.deinit(allocator);
+    var ci: u32 = 0;
+    var oi: usize = order.items.len;
+    while (oi > 0) {
+        oi -= 1;
+        const s = order.items[oi];
+        if (comp[s] != 0xFFFFFFFF) continue;
+        members.items.len = 0;
+        comp[s] = ci;
+        members.append(allocator, s) catch return null;
+        stack.items.len = 0;
+        stack.append(allocator, .{ .v = s, .next = 0 }) catch return null;
+        while (stack.items.len > 0) {
+            const top = &stack.items[stack.items.len - 1];
+            const v = top.v;
+            if (top.next < radj[v].items.len) {
+                const w = radj[v].items[top.next];
+                top.next += 1;
+                if (comp[w] == 0xFFFFFFFF) {
+                    comp[w] = ci;
+                    members.append(allocator, w) catch return null;
+                    stack.append(allocator, .{ .v = w, .next = 0 }) catch return null;
+                }
+            } else {
+                stack.items.len -= 1;
+            }
+        }
+        var cyclic = members.items.len > 1;
+        if (!cyclic) {
+            const only = members.items[0];
+            for (adj[only].items) |w| {
+                if (w == only) {
+                    cyclic = true;
+                    break;
+                }
+            }
+        }
+        if (cyclic) {
+            for (members.items) |m| is_cycle[m] = true;
+        }
+        ci += 1;
+    }
+
+    const in_comp = allocator.alloc(bool, n) catch return null;
+    defer allocator.free(in_comp);
+    @memset(in_comp, false);
+    var q = std.ArrayListUnmanaged(u32).empty;
+    defer q.deinit(allocator);
+    for (0..n) |i| {
+        if (is_cycle[i]) {
+            in_comp[i] = true;
+            q.append(allocator, @intCast(i)) catch return null;
+        }
+    }
+    var qi: usize = 0;
+    while (qi < q.items.len) : (qi += 1) {
+        const v = q.items[qi];
+        for (adj[v].items) |w| {
+            if (!in_comp[w]) {
+                in_comp[w] = true;
+                q.append(allocator, w) catch return null;
+            }
+        }
+    }
+
+    var collected: usize = 0;
+    for (white_items, 0..) |r, i| switch (r) {
+        .array => {
+            if (is_cycle[i]) collected += 1;
+        },
+        .object, .closure => {
+            if (in_comp[i]) collected += 1;
+        },
+    };
+    return collected;
 }
 
 fn gcCollectWhiteKnown(
