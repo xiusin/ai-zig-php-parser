@@ -1865,11 +1865,18 @@ pub const IROptimizer = struct {
         //   只读用途（array.get 等）不受影响，仍然可以提升。
         var load_result_regs = std.AutoHashMap(u32, void).init(self.allocator);
         defer load_result_regs.deinit();
+        var const_string_result_regs = std.AutoHashMap(u32, void).init(self.allocator);
+        defer const_string_result_regs.deinit();
         for (func.blocks.items) |block_scan| {
             for (block_scan.instructions.items) |inst_scan| {
                 if (inst_scan.*.op == .load) {
                     if (inst_scan.result) |res| {
                         try load_result_regs.put(res.id, {});
+                    }
+                }
+                if (inst_scan.*.op == .const_string) {
+                    if (inst_scan.result) |res| {
+                        try const_string_result_regs.put(res.id, {});
                     }
                 }
             }
@@ -1923,7 +1930,7 @@ pub const IROptimizer = struct {
         if (func.getEntryBlock()) |entry| {
             for (entry.instructions.items) |inst| {
                 if (inst.*.op == .alloca) {
-                    if (self.isPromotable(inst, func, &property_get_result_regs, &handler_reachable, &load_result_regs, &mut_receiver_regs)) {
+                    if (self.isPromotable(inst, func, &property_get_result_regs, &handler_reachable, &load_result_regs, &const_string_result_regs, &mut_receiver_regs)) {
                         try promotable_allocas.append(self.allocator, inst);
                         try def_blocks.put(inst, .{ .items = &.{}, .capacity = 0 });
                         if (inst.result) |res| {
@@ -2349,7 +2356,7 @@ pub const IROptimizer = struct {
     }
 
     /// Check if alloca is promotable
-    fn isPromotable(self: *Self, alloca: *Instruction, func: *Function, property_get_regs: *const std.AutoHashMap(u32, void), handler_reachable: *const std.DynamicBitSet, load_result_regs: *const std.AutoHashMap(u32, void), mut_receiver_regs: *const std.AutoHashMap(u32, void)) bool {
+    fn isPromotable(self: *Self, alloca: *Instruction, func: *Function, property_get_regs: *const std.AutoHashMap(u32, void), handler_reachable: *const std.DynamicBitSet, load_result_regs: *const std.AutoHashMap(u32, void), const_string_result_regs: *const std.AutoHashMap(u32, void), mut_receiver_regs: *const std.AutoHashMap(u32, void)) bool {
         // Check if marked as no_optimize
         if (alloca.op == .alloca and alloca.op.alloca.no_optimize) {
             return false;
@@ -2362,6 +2369,7 @@ pub const IROptimizer = struct {
         // F-203：副本变量（store 的值来自另一个 alloca 的 load）一旦被当作可变数组
         // 接收者使用，就不能提升——提升后没有 home 槽，元素写会改到源变量的数组。
         var has_copy_store = false;
+        var has_const_string_store = false;
         var has_mut_load = false;
 
         // Check all uses
@@ -2394,6 +2402,9 @@ pub const IROptimizer = struct {
                             }
                             // F-203：副本赋值（值来自另一个 alloca 的 load）记为副本 store
                             if (load_result_regs.contains(op.value.id)) has_copy_store = true;
+                            // ★F-202（R-292）：字符串变量由 const.string 初始化时也要保留 home 槽——
+                            //   字符串偏移写是替换式，寄存器提升后早期别名（cast/常量 CSE）会读到旧串。
+                            if (const_string_result_regs.contains(op.value.id)) has_const_string_store = true;
                             // property_get 结果赋值给变量时不可提升：
                             // $new = $this->data 后 usort($new, ...) 需 val_assign 做 COW 克隆
                             // 若 mem2reg 消除 store，COW 丢失，usort 原地修改共享数组
@@ -2438,7 +2449,8 @@ pub const IROptimizer = struct {
             }
         }
         // F-203：副本变量又被当可变数组用 ⇒ 无 home 槽会写穿源变量的数组，禁止提升。
-        if (has_copy_store and has_mut_load) return false;
+        // F-202：const.string 初始化的字符串变量被当可变数组（字符串偏移）接收者 ⇒ 同样保留 home。
+        if ((has_copy_store or has_const_string_store) and has_mut_load) return false;
         return true;
     }
 

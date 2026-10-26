@@ -24750,11 +24750,50 @@ pub const NativeLinker = struct {
                 try self.writeRegRef(writer, op.value.id);
                 try writer.writeAll("});\n");
                 try writer.writeAll("        } else if (__arr_deref.isString()) {\n");
-                try writer.writeAll("            try runtime.php_string_offset_set(&__arr_deref, ");
-                try self.writeRegRef(writer, op.key.id);
-                try writer.writeAll(", ");
-                try self.writeRegRef(writer, op.value.id);
-                try writer.writeAll(", runtime.runtime_allocator);\n");
+                // ★F-202（R-292）：字符串偏移写是**替换式**（php_string_offset_set 释放旧串、装入新串），
+                //   旧实现只改 `__arr_deref`（操作数的临时拷贝）⇒ 尾随 store/global.set 仍写回旧串。
+                //   两种处理：
+                //   ① 引用载体（引用形参 / ref_ptr / 引用赋值落点）：写穿引用目标，reg 仍持 Ref，
+                //      尾随 store 复存同一 Ref（幂等）；
+                //   ② 普通存储（alloca 的 load 临时 / 全局或属性读）：先给拷贝 retain 一份，
+                //      替换后把新串交还操作数寄存器（release 旧 → 赋值），由尾随 store/global.set 落盘。
+                const str_arr_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.array.id) else false;
+                const str_arr_is_ref_ptr = if (self.current_ref_ptr_regs) |rpr| rpr.contains(op.array.id) else false;
+                const str_arr_is_ref_param = str_arr_is_alloca and self.isRefParamAlloca(op.array.id);
+                const str_arr_is_ref_carrying = str_arr_is_ref_ptr or
+                    (str_arr_is_alloca and self.isRefCarryingAlloca(op.array.id));
+                if (str_arr_is_ref_carrying) {
+                    try writer.writeAll("            try runtime.php_string_offset_set(");
+                    if (str_arr_is_ref_param) {
+                        try writer.print("runtime.val_deref(reg_{d}.*), ", .{op.array.id});
+                    } else {
+                        try writer.print("runtime.val_deref(reg_{d}), ", .{op.array.id});
+                    }
+                    try self.writeRegRef(writer, op.key.id);
+                    try writer.writeAll(", ");
+                    try self.writeRegRef(writer, op.value.id);
+                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                } else {
+                    try writer.writeAll("            _ = __arr_deref.retain();\n");
+                    try writer.writeAll("            try runtime.php_string_offset_set(&__arr_deref, ");
+                    try self.writeRegRef(writer, op.key.id);
+                    try writer.writeAll(", ");
+                    try self.writeRegRef(writer, op.value.id);
+                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                    try writer.print("            reg_{d}.release(runtime.runtime_allocator);\n", .{op.array.id});
+                    try writer.print("            reg_{d} = __arr_deref;\n", .{op.array.id});
+                }
+                // 空串赋偏移会抛可捕获 `Error`（F-202 契约）⇒ 字符串分支内补异常路由
+                try writer.writeAll("            if (runtime.hasException()) {\n");
+                try writer.writeAll("                @branchHint(.unlikely);\n");
+                try self.generateCleanupCode(writer);
+                if (self.current_exception_handler) |handler_idx| {
+                    try writer.print("                current_block = {d};\n", .{handler_idx});
+                    try writer.writeAll("                continue;\n");
+                } else {
+                    try writer.writeAll("                return error.RuntimeError;\n");
+                }
+                try writer.writeAll("            }\n");
                 try writer.writeAll("        } else if (__arr_deref.isArray()) {\n");
                 // ★F-201（R-288）：局部变量的元素写必须先 COW 再落盘。
                 //   `$a[$k] = v` 的常规 IR 是「load 出临时 → array.set → store 回 alloca」；

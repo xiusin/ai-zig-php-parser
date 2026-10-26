@@ -13425,32 +13425,51 @@ pub fn php_str_shuffle(str: Value, allocator: Allocator) !Value {
 /// 字符串索引赋值 - PHP: $str[$i] = 'x'
 /// 修改字符串中指定位置的字符，返回修改后的新字符串
 pub fn php_string_offset_set(str_val: *Value, index_val: Value, char_val: Value, allocator: Allocator) !void {
-    if (!str_val.isString()) return;
-    const php_str = str_val.asString();
-    const idx = index_val.toInt();
-    if (idx < 0 or idx >= @as(i64, @intCast(php_str.length))) return;
+    // ★F-202（R-292）：PHP 8.5.8 实测契约：
+    //   · 赋值值先转字符串取**首字节**；空串 ⇒ 可捕获 `Error("Cannot assign an empty string to a string offset")`；
+    //     多字节 ⇒ Warning("Only the first byte will be assigned to the string offset")；
+    //   · 偏移为负从尾部计（-1＝末字节）；仍越界 ⇒ Warning("Illegal string offset <原值>") 且不改；
+    //   · offset == len ⇒ 追加；offset > len ⇒ 中间补空格后追加。
+    const target = val_deref(str_val);
+    if (!target.isString()) return;
+    const php_str = target.asString();
+
+    const val_str = try char_val.toString(allocator);
+    defer val_str.release(allocator);
+    if (val_str.length == 0) {
+        _ = try throwThrowable("Error", "Cannot assign an empty string to a string offset", allocator);
+        return;
+    }
+    if (val_str.length > 1) {
+        emitWarning("Only the first byte will be assigned to the string offset");
+    }
+    const new_char: u8 = val_str.data[0];
+
+    const raw_idx = index_val.toInt();
+    var idx = raw_idx;
+    if (idx < 0) idx += @intCast(php_str.length);
+    if (idx < 0) {
+        var msg_buf: [64]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "Illegal string offset {d}", .{raw_idx}) catch "Illegal string offset";
+        emitWarning(msg);
+        return;
+    }
     const pos: usize = @intCast(idx);
 
-    // 获取要设置的字符
-    var new_char: u8 = 0;
-    if (char_val.isString()) {
-        const char_str = char_val.asString();
-        if (char_str.length > 0) {
-            new_char = char_str.data[0];
-        }
-    } else {
-        new_char = @as(u8, @intCast(char_val.toInt() & 0xFF));
+    const old_len = php_str.length;
+    const new_len = @max(old_len, pos + 1);
+    const new_data = try allocator.alloc(u8, new_len);
+    errdefer allocator.free(new_data);
+    @memcpy(new_data[0..old_len], php_str.data[0..old_len]);
+    if (new_len > old_len) {
+        for (new_data[old_len..pos]) |*b| b.* = ' ';
     }
-
-    // 创建新字符串（COW语义）
-    const new_data = try allocator.alloc(u8, php_str.length);
-    @memcpy(new_data, php_str.data[0..php_str.length]);
     new_data[pos] = new_char;
 
     const new_str = try PHPString.init(allocator, new_data);
     allocator.free(new_data);
-    str_val.release(allocator);
-    str_val.* = Value.initString(new_str);
+    target.release(allocator);
+    target.* = Value.initString(new_str);
 }
 
 /// str_contains - 检查字符串是否包含子串 (PHP 8.0+)

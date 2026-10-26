@@ -10752,7 +10752,7 @@ mem2reg 把 `$b = $a` 提升：`$b` 没有 alloca（home 槽），IR 里只剩�
 | C335（新门 14 臂＝a1–a13 + s1 回收敏感度） | **14/14 SAME**（66 s）；s1 `RECLAIM_FLAT lb=65740/65740 la=102/102`；自证 `AOT_BIN=/bin/false` **14 CF** |
 | 邻居 | C334 8/8、C333 7/7、C332 13/13、C331 7/7、C330 5/5、C328 6/6、C329 4/8（a1/a2/a3/a5＝F-191，零转移） |
 | `zig build test` | **21/21 steps、326/326**（`/tmp/f192c_buildtest.log`） |
-| 主回归 | __REGRESSION_LINE__ |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/f192c_regression.log`，`SELF_CHECK_OK rows=68 uniq=68`） |
 
 ### 199.5 代次锚
 `nlk 07357ddfd5295e1ffee4cd3667813f7e`；**`tpl 99bf4564f446276dfa6717c4a7ff6569`**；`irg 0b7106338d5ffe1342caee961734b8d8`；`ir fb2bb442ca27b98cf1df7e109a240e1f`；`opti 202cc7f18ac63ffc5a454da88d5a084a`。（均未提交；HEAD `b30690b`）
@@ -10760,3 +10760,50 @@ mem2reg 把 `$b = $a` 提升：`$b` 没有 alloca（home 槽），IR 里只剩�
 ### 199.6 边界
 - 纯数组 `&` 环仍计 0：AOT 的 `&` 数组元素按值拷贝（F-199），没有真环；F-199 落地后 C335 需补这 4 臂。
 - 本批只改计数，未改回收时机（F-191 仍开）。
+
+## 200. ★R-292 落地记录（F-202 字符串偏移写，已闭；新立 F-204）
+
+### 200.1 缺陷三层（缺一不可）
+
+| # | 层 | 缺陷 |
+|---|---|---|
+| 1 | 发射器 `.array_set` 字符串分支（`native_linker.zig`） | 只对操作数的**临时拷贝** `__arr_deref` 调 `php_string_offset_set`，此后既无 store 回写也无寄存器交还 ⇒ 尾随 `store`／`setGlobalVar` 把**旧串**落盘。函数内、全局、引用形参三条路全丢写 |
+| 2 | 运行期 `php_string_offset_set`（`runtime_lib_template.zig`） | 契约残缺：只处理 `0 <= i < len` 的替换；负偏移、`i >= len`、空串值全**静默返回**；多字节值无 Warning；非串值走 `toInt() & 0xFF`（PHP 是 **toString 首字节**）；`str_val` 未解引用 ⇒ 引用形参写不进 |
+| 3 | 优化器 mem2reg（`optimizer.zig`） | `$s = "ab"` 的 `const.string` store 被提升后，字符串变量没有 home 槽；`array_set` 的接收者读的是提升寄存器，常量 CSE 又会把后续读别名回 `const.string` ⇒ 替换结果不可见。守卫形状与 F-203 同构：**const.string 来源的 store ＋ 该 alloca 的 load 被当可变接收者 ⇒ 拒绝提升** |
+
+### 200.2 PHP 8.5.8 实测契约（C336 逐字节钉死）
+
+| 形状 | PHP 行为 |
+|---|---|
+| 值转换 | 先 `toString` 再取**首字节**（`1.9`→`"1.9"`→`0x31`；`5`→`"5"`→`0x35`） |
+| 空串（`""`／`false`／`null`） | 抛**可捕获** `Error("Cannot assign an empty string to a string offset")`，变量不变 |
+| 多字节值（`"xy"`） | Warning `Only the first byte will be assigned to the string offset`，取首字节 |
+| 负偏移 | 从尾部计（`-1`＝末字节）；仍越界 ⇒ Warning `Illegal string offset <原值>` 且不变 |
+| `offset == len` | 追加（`"ab"[2]="Z"` ⇒ `abZ`） |
+| `offset > len` | 中间补空格后追加（`"ab"[5]="x"` ⇒ `ab   x`，len=6） |
+| 数字字符串偏移（`"0"`） | 同整数 0 |
+
+### 200.3 修法（三处）
+
+- **发射器**：字符串分支按载体分两路——
+  ① 引用载体（引用形参 alloca／`ref_ptr`／`isRefCarryingAlloca`）：写穿 `runtime.val_deref(...)`，寄存器仍持 Ref，尾随 store 复存同一 Ref（幂等）；
+  ② 普通存储（load 临时／全局或属性读）：先 `__arr_deref.retain()`，替换后 `reg.release(); reg = __arr_deref;` 把新串交还操作数，由尾随 store／`setGlobalVar` 落盘。
+  分支内补 `hasException()` 路由（`generateCleanupCode` + handler／`return error.RuntimeError`），使空串 `Error` 可捕获。
+- **运行期**：按 §200.2 重写 `php_string_offset_set`（`val_deref` 起手；`toString`＋首字节；空串抛 `Error`；多字节 Warning；负偏移回绕；`>len` 补空格；`errdefer` 覆盖分配失败）。
+- **优化器**：新增 `const_string_result_regs` 预扫；`has_const_string_store ∧ has_mut_load ⇒ 拒绝提升`（与 F-203 同一收口条件）。
+
+★所有权账目（实测归因）：普通存储路径 `retain → 替换 → release 旧 → 交还` 与旧的「无条件 release 后赋值」在**抛出路径**上等价（后者本身就完成了所有权转移，`A/B` 读数完全相同）；因此**不引入**额外的异常路径归还，保持最小 diff。真正的每抛出泄漏是既存 **F-204**（见 §200.6）。
+
+### 200.4 读数
+
+<!-- R292_READINGS -->
+
+### 200.5 代次锚
+
+`nlk 436db4fc07ccae00023cd631238f5bb5`；`tpl 407c44d5f7ce5869d89a9d4fea299068`；`opti 553a2e540da638f3766911b1f0941dd1`；`irg 0b7106338d5ffe1342caee961734b8d8`／`ir fb2bb442ca27b98cf1df7e109a240e1f` 未变（均未提交；HEAD `b15d135`）。
+
+### 200.6 边界与残余
+
+- **F-204（P1，新立，既存）**：helper（`throwThrowable` 路径，如 `intdiv(1,0)`）抛出的异常在循环内被 `catch` 时，**每次抛出泄漏约 8 次分配／510 B**（`intdiv(1,0)` 基线 N=2000/6000：`live_allocs 16108→48110`、`live_bytes 1030712→3061680`；HEAD `b15d135` 与 R-292 代次读数**完全一致**）。同函数内 `throw new RuntimeException` 内联抛出**不泄漏**（4000 轮 +288 allocs ≈ 0.07/轮）⇒ 缺口在「helper 抛出 → 调用点路由 → catch」这条链，不在 catch 机器本身。C336 `s2` 作为常驻复现器**保留为已知红**（非本门判据）。
+- **残余（未覆盖，待立）**：`$r = &$s; $r[0]="x"`（源变量未绑定到引用单元，属于 F-199 族）、`$a["s"][0]="x"`（嵌套字符串写，`.array_ensure` 无字符串分支）、`$o->s[0]="x"`（属性载体未实测）、`$s[0] .= "x"`（复合赋值未实测）。
+- **PHP 解释器对比口径**：a8/a9 的 Warning 行与 `bin2hex` 结果逐字节一致；`offset` 越界告警打印的是**原值**（含负号）。
