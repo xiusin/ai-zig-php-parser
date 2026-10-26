@@ -10340,3 +10340,45 @@ R-214 曾把“归因里出现 setSourceLocation/PHI/调用行等非局部增删
   | `$h = opendir($d); readdir($h);`（不关） | **0（FLAT）** | 0 |
 - 定位：`php_closedir` 入口 `res.ref_count == 4`（期望 2：局部变量 + 注册表），`clearLastOpenedDir` 后仍残留一个无人释放的引用 ⇒ `release()` 永不到 0，`PHPResource`（`@sizeOf = 40`）随之泄漏；`fclose` 同形（还多漏一个 8 B 的文件句柄）⇒ **与本批无关的既存缺陷**，`opendir/closedir` 只是同族新面孔。
 - 下一步：查生成码里资源值的 retain/release 配对（`$h = opendir(); closedir($h);` 形态），定档为独立批次，禁与 F-178-b 捆绑修。
+
+## 189. ★R-281 收口（内置异常族继承链 F-181/F-182/F-183 + 门 C327 揪出的 F-184～F-188）
+
+> 承接 §188 之后：R-281 主体（伪接口 Throwable/Stringable、Error 与 Exception 平级、
+> `exception_specs` 全父子表、形参 TypeError `, called in` 后缀、`get_parent_class` 字符串形）
+> 已随 `20afbc5` 入库；本节记录**验收链**（门 C327 首跑 1/5 → 修复五个新缺陷 → 5/5 全绿）。
+
+### 189.1 门 C327 首跑读数（2026-10-25）
+`C327EXC_DONE arms=5 same=1 diff=3 compile_fail=1`——交接文档声称的"已与 PHP 全矩阵对齐"
+仅覆盖探针 `/tmp/th6.php` 的形状；永久门 5 臂里 4 臂红，逐臂归因如下（全部为 AOT 缺陷，
+标准 PHP 皆可运行，按宪法 §7.8 禁止降级、必须修 AOT）。
+
+### 189.2 新缺陷与修复（F-184～F-188）
+| 编号 | 级别 | 现象（C327 臂） | 根因 | 修复 |
+|---|---|---|---|---|
+| F-184 | P2 行为 | t1/t5：`echo $异常对象` 输出**空串**；拼接 `\"X\".$e` 得 `XException: boom`（类名错、缺尾巴） | ① `php_echo` 无对象分支（静默落空）；② 内置异常 `__toString` 硬编码 `\"Exception: \"` 前缀、无 ` in file:line\nStack trace:\n#0 {main}`；③ file/line 只在 `setException`（抛出点）盖章，PHP 在**构造点** | `php_echo` 补对象分支（`magic_toString`/`methods.__toString` 双谓词，与 instanceof-Stringable 同口径；无 `__toString` ⇒ `throwThrowableDiscardCatch(\"Error\", \"Object of class X could not be converted to string\")`，由调用点 hasException 轮询分派）；`__toString` 重写为 PHP 8.5 实测格式（**无**尾换行）；`__construct` 构造点盖 file/line 章（所有权照 setException 口径：init → setProperty(retain) → defer release） |
+| F-185 | P1 编译 | t2：foreach 内 try/catch + `new $n(...)` ⇒ 生成码 `reg = runtime.php_new_object_dynamic(...)` 裸赋 `!Value` ⇒ Zig 编译失败 | `native_linker` 三处 `php_new_object_dynamic` 发射点在 try 区故意去掉 `try` 前缀但**没配 `catch initNull()` 也没配 hasException 轮询** | 镜像 `.new_object`（:24990）既有模式：try 区 `catch runtime.Value.initNull()` + `generateCleanupCodeExcept` + 轮询跳 handler；try 区外维持 `try`。三处同修（`:23688`/`:24025`/`:24259`），第 4 处语句形态 `_ = try` 与其余内置一致不动 |
+| F-186 | P1 行为 | t4：`catch (\\LogicException)` 抓不中**直接子类** BadFunctionCallException 却抓得中孙辈 BadMethodCallException（距离 1 不中、距离 2 中） | CSE 把同串 const.string 跨块转发（支配性在\"CFG 无异常边 ⇒ 不可达块恒被支配\"的空洞下成立）；catch 派发块 `instanceof %exc, %类名` 的类名寄存器被**异常边清理/块出口死值释放**清 null ⇒ instanceof 恒 false。`collectHandlerSubgraphUsedRegs`→`collectBlockUsedRegs` 与 `emitMissingConstStrings` 的 used_regs **都漏 `.instanceof`**（F-132 修 catch 体型时漏了派发型） | 两处收集器补 `.instanceof => { object, class_name }`：前者治本（try 体异常边清理豁免类名寄存器），后者兜底（catch 块入口重物化 const.string） |
+| F-187 | P2 行为 | t5：`get_parent_class('NoSuchClass')` 应抛 `TypeError: ...must be an object or a valid class name, string given`（可捕获、未捕获为 Fatal rc=255），旧版静默 `false` | 实现只走 `findClass` miss → false，无 ZPP 校验 | 照 `get_class_methods`（:6512）样板：对象恒不抛；字符串未注册/非对象非字符串 ⇒ `throwThrowable(\"TypeError\", msg)`（`phpArgTypeWord` 类型词；实测 int 同样抛）。消息无 `, called in`（内置 ZPP 无此后缀，F-182 只管用户函数） |
+| F-188 | P2 行为 | t5：未捕获致命错误的栈帧形状——PHP 打 `#0 /path/t5.php(6): get_parent_class('NoSuchClass')` + `#1 {main}`，AOT 恒 `#0 {main}` | AOT 无栈回溯，`php_handle_uncaught_exception` 硬编码 `#0 {main}` | 抛出帧自报机制：`last_throw_frame`（静态 512B 缓冲 + `setLastThrowFrame(fn, args)`，实参渲染照 PHP debug 回溯：字符串 >15 截断加 `...`、`NULL`/`Array` 大写、`true/false`、`Object(类名)`）；`setException` **先清帧**、抛出点在 `throwThrowable` **之后**自报（顺序铁律，首版踩过：先报后被清）；打印器有帧 ⇒ `#0 file(line): frame` + `#1 {main}`，无帧维持近似。`in file:line` 改用异常自身 file/line（构造/抛出点，PHP 语义），`thrown in` 尾巴仍用当前 src。本代次仅 `get_parent_class` 站点接入，其余内置抛出点（get_class_methods 等）**未接入**（避免扰动已绿门，后续增量） |
+
+### 189.3 读数（验收链全绿）
+| 门/测试 | 结果 |
+|---|---|
+| C327 首跑 | 1/5（same=1 diff=3 compile_fail=1） |
+| C327 修复后 | **5/5 SAME**（44 s，rc/stdout/stderr 逐字节一致） |
+| C327 自证（AOT_BIN=/bin/false） | **5 CF**（门活性确认） |
+| 邻居 C326/C324/C321 | 5/5、5/5、**24/24** |
+| `zig build test` | **21/21 steps、326/326 tests** |
+| 主回归 `run_regression.sh` | 见 §189.4（本节补录） |
+
+### 189.4 主回归读数
+`/tmp/r281_regression.log`（tail 判读）：**PASS=68 FAIL=0**、`SELF_CHECK_OK rows=68 uniq=68 total=68`，RC=0。
+
+### 189.5 代次锚（R-281 收口后）
+`nlk eb91f1be62c7225b8c883fa12e62c941`；`tpl 459f20aa839b0bd16c4a045d6251f00e`；
+`irg 0b7106338d5ffe1342caee961734b8d8`；`ir fb2bb442ca27b98cf1df7e109a240e1f`。
+
+### 189.6 边界 / 遗留
+- `__toString` 的 `Stack trace:` 恒 `#0 {main}`（不随真实调用深度变化，与既有未捕获打印器同近似）；多帧回溯仍非目标。
+- F-188 帧机制仅 `get_parent_class` 抛出点接入；`get_class_methods`/`get_class_vars` 等同族内置 TypeError 未接入（它们当前门全绿，接入与否看后续红门需要）。
+- 工作区含未提交改动：`?*const ClassMeta` 一行（HEAD `20afbc5` 编译不过的修复）+ 本批 F-184～F-188 全部实现，**入库前禁 checkout**。

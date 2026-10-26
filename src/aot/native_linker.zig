@@ -800,6 +800,13 @@ pub const NativeLinker = struct {
                         try set.put(arg.id, {});
                     }
                 },
+                // ★F-186（R-281 收口，门 C327 t4）：catch 派发块由 instanceof 做类型匹配，
+                //   类名常量寄存器常定义在前序 try/catch 块（CSE 跨块转发）。漏收集 ⇒
+                //   异常边清理把它当死值清 null ⇒ instanceof 恒 false ⇒ 子类不中被当未捕获。
+                .instanceof => |op| {
+                    try set.put(op.object.id, {});
+                    try set.put(op.class_name.id, {});
+                },
                 .channel_send => |op| {
                     try set.put(op.channel.id, {});
                     try set.put(op.value.id, {});
@@ -19877,6 +19884,11 @@ pub const NativeLinker = struct {
                         used_regs.put(arg.id, {}) catch {};
                     }
                 },
+                // ★F-186：catch 派发块的 instanceof 类名常量同样要补物化（与 concat/call 同理）
+                .instanceof => |op| {
+                    used_regs.put(op.object.id, {}) catch {};
+                    used_regs.put(op.class_name.id, {}) catch {};
+                },
                 else => {},
             }
         }
@@ -23688,6 +23700,10 @@ pub const NativeLinker = struct {
                                 } else if (std.mem.eql(u8, runtime_name, "php_new_object_dynamic")) {
                                     // php_new_object_dynamic(class_name_val, ...args, allocator)
                                     // 第一个参数是类名Value，后面的参数打包为 []const Value
+                                    // ★F-185（R-281 收口，门 C327 t2）：try 区内裸调用（无 try/catch）
+                                    //   把 `!Value` 赋给 Value 寄存器 ⇒ 生成码 Zig 编译失败。
+                                    //   镜像 .new_object 的既有模式：try 区 `catch initNull()` 吸收
+                                    //   Zig 错误 + hasException 轮询跳 handler；try 区外维持 `try`。
                                     const new_in_try = self.current_exception_handler != null;
                                     if (new_in_try) {
                                         try self.writeRegAssignmentFmt(writer, reg.id, "runtime.{s}(", .{runtime_name});
@@ -23707,7 +23723,21 @@ pub const NativeLinker = struct {
                                     } else {
                                         try writer.writeAll("runtime.Value.initNull(), &[_]runtime.Value{}");
                                     }
-                                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    if (new_in_try) {
+                                        try writer.writeAll(", runtime.runtime_allocator) catch runtime.Value.initNull();\n");
+                                        try writer.writeAll("    if (runtime.hasException()) {\n");
+                                        try writer.writeAll("        @branchHint(.unlikely);\n");
+                                        try self.generateCleanupCodeExcept(writer, reg.id);
+                                        if (self.current_exception_handler) |handler_idx| {
+                                            try writer.print("        current_block = {d};\n", .{handler_idx});
+                                            try writer.writeAll("        continue;\n");
+                                        } else {
+                                            try writer.writeAll("        return error.RuntimeError;\n");
+                                        }
+                                        try writer.writeAll("    }\n");
+                                    } else {
+                                        try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    }
                                 } else if (op.args.len > 0) {
                                     // 特殊处理：strstr 可选第3参数 before_needle
                                     if (std.mem.eql(u8, runtime_name, "php_strstr")) {
@@ -24007,6 +24037,10 @@ pub const NativeLinker = struct {
                                 } else if (std.mem.eql(u8, runtime_name, "php_new_object_dynamic")) {
                                     // php_new_object_dynamic(class_name_val, ...args, allocator)
                                     // 第一个参数是类名Value，后面的参数打包为 []const Value
+                                    // ★F-185（R-281 收口，门 C327 t2）：try 区内裸调用（无 try/catch）
+                                    //   把 `!Value` 赋给 Value 寄存器 ⇒ 生成码 Zig 编译失败。
+                                    //   镜像 .new_object 的既有模式：try 区 `catch initNull()` 吸收
+                                    //   Zig 错误 + hasException 轮询跳 handler；try 区外维持 `try`。
                                     const new_in_try = self.current_exception_handler != null;
                                     if (new_in_try) {
                                         try self.writeRegAssignmentFmt(writer, reg.id, "runtime.{s}(", .{runtime_name});
@@ -24026,7 +24060,21 @@ pub const NativeLinker = struct {
                                     } else {
                                         try writer.writeAll("runtime.Value.initNull(), &[_]runtime.Value{}");
                                     }
-                                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    if (new_in_try) {
+                                        try writer.writeAll(", runtime.runtime_allocator) catch runtime.Value.initNull();\n");
+                                        try writer.writeAll("    if (runtime.hasException()) {\n");
+                                        try writer.writeAll("        @branchHint(.unlikely);\n");
+                                        try self.generateCleanupCodeExcept(writer, reg.id);
+                                        if (self.current_exception_handler) |handler_idx| {
+                                            try writer.print("        current_block = {d};\n", .{handler_idx});
+                                            try writer.writeAll("        continue;\n");
+                                        } else {
+                                            try writer.writeAll("        return error.RuntimeError;\n");
+                                        }
+                                        try writer.writeAll("    }\n");
+                                    } else {
+                                        try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    }
                                 } else if (std.mem.eql(u8, runtime_name, "php_is_a")) {
                                     // is_a(value, class, allow_string = false)
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
@@ -24223,6 +24271,10 @@ pub const NativeLinker = struct {
                                 } else if (std.mem.eql(u8, runtime_name, "php_new_object_dynamic")) {
                                     // php_new_object_dynamic(class_name_val, ...args, allocator)
                                     // 第一个参数是类名Value，后面的参数打包为 []const Value
+                                    // ★F-185（R-281 收口，门 C327 t2）：try 区内裸调用（无 try/catch）
+                                    //   把 `!Value` 赋给 Value 寄存器 ⇒ 生成码 Zig 编译失败。
+                                    //   镜像 .new_object 的既有模式：try 区 `catch initNull()` 吸收
+                                    //   Zig 错误 + hasException 轮询跳 handler；try 区外维持 `try`。
                                     const new_in_try = self.current_exception_handler != null;
                                     if (new_in_try) {
                                         try self.writeRegAssignmentFmt(writer, reg.id, "runtime.{s}(", .{runtime_name});
@@ -24242,7 +24294,21 @@ pub const NativeLinker = struct {
                                     } else {
                                         try writer.writeAll("runtime.Value.initNull(), &[_]runtime.Value{}");
                                     }
-                                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    if (new_in_try) {
+                                        try writer.writeAll(", runtime.runtime_allocator) catch runtime.Value.initNull();\n");
+                                        try writer.writeAll("    if (runtime.hasException()) {\n");
+                                        try writer.writeAll("        @branchHint(.unlikely);\n");
+                                        try self.generateCleanupCodeExcept(writer, reg.id);
+                                        if (self.current_exception_handler) |handler_idx| {
+                                            try writer.print("        current_block = {d};\n", .{handler_idx});
+                                            try writer.writeAll("        continue;\n");
+                                        } else {
+                                            try writer.writeAll("        return error.RuntimeError;\n");
+                                        }
+                                        try writer.writeAll("    }\n");
+                                    } else {
+                                        try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    }
                                 } else if (std.mem.eql(u8, runtime_name, "php_array_search")) {
                                     // array_search(needle, haystack, strict=false)
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});

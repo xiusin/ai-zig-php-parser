@@ -755,6 +755,8 @@ pub fn getAllocStats() AllocStats {
 
 /// 设置异常
 pub fn setException(ex: Value) void {
+    // ★F-188：新异常不带旧抛出帧（内置抛出点会在本调用之后自报新帧）
+    last_throw_frame = null;
     if (has_exception) {
         current_exception.release(runtime_allocator);
     }
@@ -802,6 +804,107 @@ pub fn getException() Value {
     return Value.initNull();
 }
 
+// ============================================================================
+// ★F-188（R-281 收口，门 C327 t5）：未捕获致命错误的抛出帧自报
+// PHP 的 Uncaught 栈打 `#0 <file>(<line>): fn(args)`；AOT 无栈回溯 ⇒ 由内置抛出点
+// 把帧文本渲染进静态缓冲；null ⇒ 维持 `#0 {main}` 近似。
+// 生命周期：setException 清空（新异常不带旧帧）；抛出点在 setException 之后设置。
+// 实参渲染照 PHP debug 回溯：字符串 >15 字符截断加 `...`；NULL/Array 大写；
+// true/false 小写；对象 Object(类名)。
+// ============================================================================
+var last_throw_frame_buf: [512]u8 = undefined;
+pub var last_throw_frame: ?[]const u8 = null;
+
+fn appendFrameArgText(buf: []u8, pos: usize, v: Value) usize {
+    var p = pos;
+    if (p >= buf.len) return p;
+    if (v.isString()) {
+        const d = v.asString().data;
+        buf[p] = '\'';
+        p += 1;
+        const shown = if (d.len > 15) d[0..15] else d;
+        if (p + shown.len <= buf.len) {
+            @memcpy(buf[p .. p + shown.len], shown);
+            p += shown.len;
+        }
+        if (d.len > 15 and p + 3 <= buf.len) {
+            @memcpy(buf[p .. p + 3], "...");
+            p += 3;
+        }
+        if (p < buf.len) {
+            buf[p] = '\'';
+            p += 1;
+        }
+    } else if (v.isInt()) {
+        if (std.fmt.bufPrint(buf[p..], "{d}", .{v.asInt()})) |s| {
+            p += s.len;
+        } else |_| {}
+    } else if (v.isBool()) {
+        const word: []const u8 = if (v.asBool()) "true" else "false";
+        if (p + word.len <= buf.len) {
+            @memcpy(buf[p .. p + word.len], word);
+            p += word.len;
+        }
+    } else if (v.isNull()) {
+        if (p + 4 <= buf.len) {
+            @memcpy(buf[p .. p + 4], "NULL");
+            p += 4;
+        }
+    } else if (v.isArray()) {
+        if (p + 5 <= buf.len) {
+            @memcpy(buf[p .. p + 5], "Array");
+            p += 5;
+        }
+    } else if (Value_isObject(v)) {
+        const cn = Value_asObject(v).class_name;
+        if (p + 8 + cn.len <= buf.len) {
+            @memcpy(buf[p .. p + 7], "Object(");
+            p += 7;
+            @memcpy(buf[p .. p + cn.len], cn);
+            p += cn.len;
+            buf[p] = ')';
+            p += 1;
+        }
+    } else {
+        if (p + 7 <= buf.len) {
+            @memcpy(buf[p .. p + 7], "unknown");
+            p += 7;
+        }
+    }
+    return p;
+}
+
+/// 由内置抛出点自报帧文本（fn 名 + PHP debug 风格实参）；须在 setException 之后调用
+pub fn setLastThrowFrame(fn_name: []const u8, args: []const Value) void {
+    const buf = &last_throw_frame_buf;
+    var p: usize = 0;
+    if (fn_name.len <= buf.len) {
+        @memcpy(buf[0..fn_name.len], fn_name);
+        p = fn_name.len;
+    } else {
+        @memcpy(buf[0..buf.len], fn_name[0..buf.len]);
+        p = buf.len;
+    }
+    if (p < buf.len) {
+        buf[p] = '(';
+        p += 1;
+    }
+    for (args, 0..) |a, i| {
+        if (p + 2 >= buf.len) break;
+        if (i > 0) {
+            buf[p] = ',';
+            buf[p + 1] = ' ';
+            p += 2;
+        }
+        p = appendFrameArgText(buf, p, a);
+    }
+    if (p < buf.len) {
+        buf[p] = ')';
+        p += 1;
+    }
+    last_throw_frame = buf[0..p];
+}
+
 /// 查看当前异常但不消费（用于 catch 类型分派）
 pub fn peekException() Value {
     if (has_exception) {
@@ -818,6 +921,10 @@ pub fn php_handle_uncaught_exception() void {
 
         var class_name: []const u8 = "Exception";
         var message: []const u8 = "";
+        // ★F-184/F-188：`in <file>:<line>` 用异常自身的构造/抛出点（PHP 语义），
+        //   兜底 src_file/src_line；`thrown in` 尾巴仍用当前 src（最后一帧语义）。
+        var ex_file: []const u8 = src_file;
+        var ex_line: i64 = src_line;
 
         if (Value_isObject(ex)) {
             const obj = Value_asObject(ex);
@@ -827,28 +934,46 @@ pub fn php_handle_uncaught_exception() void {
                     message = msg_val.asString().data;
                 }
             }
+            if (obj.getProperty("file")) |fv| {
+                if (fv.isString()) ex_file = fv.asString().data;
+            }
+            if (obj.getProperty("line")) |lv| {
+                if (lv.isInt()) ex_line = lv.asInt();
+            }
         } else if (ex.isString()) {
             message = ex.asString().data;
         }
 
+        // ★F-188：内置抛出点自报帧 ⇒ `#0 <file>(<line>): fn(args)` + `#1 {main}`；
+        //   无帧（用户 throw 等）维持 `#0 {main}` 近似。
+        var trace_buf: [768]u8 = undefined;
+        const trace: []const u8 = if (last_throw_frame) |frame|
+            std.fmt.bufPrint(
+                &trace_buf,
+                "#0 {s}({d}): {s}\n#1 {{main}}",
+                .{ ex_file, ex_line, frame },
+            ) catch "#0 {main}"
+        else
+            "#0 {main}";
+
         // PHP 输出顺序：先 stderr，再 stdout；★F-95：error_reporting 掩掉 E_ERROR 时完全静默（rc 仍 255）
         if ((E_ERROR & global_error_types) != 0) {
-            var ebuf: [1024]u8 = undefined;
+            var ebuf: [1536]u8 = undefined;
             const emsg = std.fmt.bufPrint(
                 &ebuf,
                 "PHP Fatal error:  Uncaught {s}: {s} in {s}:{d}\n" ++
-                    "Stack trace:\n#0 {{main}}\n" ++
+                    "Stack trace:\n{s}\n" ++
                     "  thrown in {s} on line {d}\n",
-                .{ class_name, message, src_file, src_line, src_file, src_line },
+                .{ class_name, message, ex_file, ex_line, trace, src_file, src_line },
             ) catch "";
             fileWriteAll(2, emsg);
-            var buf: [1024]u8 = undefined;
+            var buf: [1536]u8 = undefined;
             const msg = std.fmt.bufPrint(
                 &buf,
                 "\nFatal error: Uncaught {s}: {s} in {s}:{d}\n" ++
-                    "Stack trace:\n#0 {{main}}\n" ++
+                    "Stack trace:\n{s}\n" ++
                     "  thrown in {s} on line {d}\n",
-                .{ class_name, message, src_file, src_line, src_file, src_line },
+                .{ class_name, message, ex_file, ex_line, trace, src_file, src_line },
             ) catch "";
             fileWriteAll(1, msg);
         }
@@ -2809,7 +2934,10 @@ pub const Value = struct {
         } else if (self.isBigInt()) {
             const boxed: *BoxedInt = @ptrFromInt(nanbox_abi.decodePtr(self.val));
             boxed.ref_count += 1;
-        } else if (self.isResource()) {
+        } else if (self.hasResourceType()) {
+            // ★F-180：必须按**类型位**判定（`isResource()` 对已关闭资源返回 false——那是
+            // ZPP「必须是打开的资源」的语义谓词）。旧写用 isResource() ⇒ fclose/closedir
+            // 置 closed=true 后所有 Value.retain 变 no-op，与 release 的 no-op 不对称。
             self.asResource().retain();
         }
         return self;
@@ -2842,7 +2970,12 @@ pub const Value = struct {
                     allocator.destroy(boxed);
                 }
             }
-        } else if (self.isResource()) {
+        } else if (self.hasResourceType()) {
+            // ★F-180（P1，门 C328 实测：fopen+fclose 漏 48B+2alloc/次、opendir+closedir 漏
+            //   40B+1alloc/次）：旧写 `isResource()` 对**已关闭**资源返回 false（ZPP 语义谓词，
+            //   :2805 `!self.asResource().closed`）⇒ fclose/closedir 置 closed=true 之后，
+            //   reg/全局表/形参的全部 Value.release 变 no-op，ref_count 永不归零，
+            //   PHPResource（40B）与 File 句柄（8B）随之泄漏。所有权操作只认类型位。
             self.asResource().release(allocator);
         }
     }
@@ -4506,6 +4639,10 @@ pub fn php_fclose(handle: Value) !Value {
     const res = handle.asResource();
     if (res.file_handle) |fh| {
         fh.close(getIo());
+        // ★F-180：fclose 是该 File 结构的最后一站（置 null 后归零路径不会再 destroy 它）。
+        //   旧写只 close 不 destroy ⇒ 每次 fopen+fclose 恒漏 8B+1alloc（40B 的 PHPResource
+        //   由 F-180 的 Value.release 修复另行归零）。
+        runtime_allocator.destroy(fh);
         res.file_handle = null;
     }
     res.closed = true;
@@ -9847,6 +9984,33 @@ pub fn php_echo(value: Value) !void {
             if (emsg.len > 0) fileWriteAll(2, emsg);
         }
         try php_output_write("Array");
+    } else if (Value_isObject(value)) {
+        // ★F-184（R-281 收口，门 C327 t1/t5 实测）：对象 echo 走 __toString
+        //（异常族 `RuntimeException: m in file:line\nStack trace:\n#0 {main}`）；
+        // 无 __toString ⇒ 抛可 catch 的 Error（PHP 8：Object of class X could not
+        // be converted to string）。旧版无对象分支 ⇒ 静默输出空串。
+        const obj = Value_asObject(value);
+        var has_to_string = false;
+        if (obj.class_meta) |meta| {
+            // 与 php_instanceof 的 Stringable 特判同口径（两谓词共用，禁另造）
+            has_to_string = meta.magic_toString != null or meta.methods.get("__toString") != null;
+        }
+        if (has_to_string) {
+            if (obj.toString(runtime_allocator)) |s| {
+                // toString 按 +1 契约返回，写完归还
+                defer s.release(runtime_allocator);
+                try php_output_write(s.data);
+            } else |_| {}
+        } else {
+            var ebuf: [256]u8 = undefined;
+            const emsg = std.fmt.bufPrint(
+                &ebuf,
+                "Object of class {s} could not be converted to string",
+                .{obj.class_name},
+            ) catch "Object of class could not be converted to string";
+            // setException 后正常返回：由调用点的 hasException 轮询接管分派
+            throwThrowableDiscardCatch("Error", emsg, runtime_allocator);
+        }
     }
 }
 
@@ -18129,6 +18293,18 @@ pub const ClassMeta = struct {
                     } else {
                         try this.setProperty("previous", Value.initNull());
                     }
+                    // ★F-184：PHP 的 file/line 在**构造点**捕获（__toString／getFile/getLine 用它），
+                    // 旧版只在 setException（抛出点）补章 ⇒ 构造与抛出不同行时错位。
+                    // setProperty 会 retain 一份进属性表；init 的这份所有权在此归还（同 setException 口径）。
+                    {
+                        const file_str = PHPString.init(runtime_alloc, src_file) catch null;
+                        if (file_str) |s| {
+                            const file_val = Value.initString(s);
+                            defer file_val.release(runtime_alloc);
+                            this.setProperty("file", file_val) catch {};
+                        }
+                        this.setProperty("line", Value.initInt(@intCast(src_line))) catch {};
+                    }
                     return Value.initNull();
                 }
             }.call,
@@ -18225,17 +18401,31 @@ pub const ClassMeta = struct {
                 fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
                     _ = args;
                     const this = Value_asObject(ctx);
-                    var msg = try PHPString.init(runtime_alloc, "Exception: ");
-
-                    if (this.getProperty("message")) |val| {
-                        if (val.isString()) {
-                            const new_str = try std.fmt.allocPrint(runtime_alloc, "{s}{s}", .{ msg.data, val.asString().data });
-                            defer runtime_alloc.free(new_str);
-                            msg.release(runtime_alloc);
-                            return Value.initString(try PHPString.init(runtime_alloc, new_str));
-                        }
+                    // ★F-184（R-281 收口）：PHP 8.5 实测格式
+                    //   `<类名>: <message> in <file>:<line>\nStack trace:\n#0 {main}`（**无**尾换行）。
+                    //   旧版硬编码 "Exception: " 前缀且缺 file/line/trace 尾巴，类名也不对。
+                    var message: []const u8 = "";
+                    if (this.getProperty("message")) |mv| {
+                        defer mv.release(runtime_alloc);
+                        if (mv.isString()) message = mv.asString().data;
                     }
-                    return Value.initString(msg);
+                    var file: []const u8 = src_file;
+                    if (this.getProperty("file")) |fv| {
+                        defer fv.release(runtime_alloc);
+                        if (fv.isString()) file = fv.asString().data;
+                    }
+                    var line: i64 = @intCast(src_line);
+                    if (this.getProperty("line")) |lv| {
+                        defer lv.release(runtime_alloc);
+                        if (lv.isInt()) line = lv.asInt();
+                    }
+                    const text = try std.fmt.allocPrint(
+                        runtime_alloc,
+                        "{s}: {s} in {s}:{d}\nStack trace:\n#0 {{main}}",
+                        .{ this.class_name, message, file, line },
+                    );
+                    defer runtime_alloc.free(text);
+                    return Value.initString(try PHPString.init(runtime_alloc, text));
                 }
             }.call,
             .is_static = false,
@@ -24814,20 +25004,45 @@ pub fn php_instanceof(obj_val: Value, class_name: Value) !Value {
 /// 获取父类名
 /// get_parent_class — 接受对象**或类名字符串**（PHP 两者皆可；★R-281 前只认对象，
 ///   `get_parent_class("ErrorException")` 恒 false）。
+/// ★F-187（R-281 收口，门 C327 t5）：字符串未注册为类／非对象非字符串 ⇒ PHP 抛
+///   `TypeError: get_parent_class(): Argument #1 ($object_or_class) must be an object
+///    or a valid class name, {type} given`（实测 int 同样抛）；旧版静默 false。
 pub fn php_get_parent_class(obj_val: Value, allocator: Allocator) !Value {
-    var meta: ?*ClassMeta = null;
+    // 对象恒不抛（PHP 对任意对象都有答案）；字符串须注册为类，其余类型直接抛
     if (Value_isObject(obj_val)) {
-        meta = Value_asObject(obj_val).class_meta;
-    } else if (obj_val.isString()) {
-        meta = findClass(obj_val.asString().data);
+        const obj = Value_asObject(obj_val);
+        const m = obj.class_meta orelse findClass(obj.class_name);
+        if (m) |meta| {
+            if (meta.parent) |parent| {
+                const parent_name = try PHPString.init(allocator, parent.name);
+                return Value.initString(parent_name);
+            }
+        }
+        return Value.initBool(false);
     }
-    if (meta) |m| {
-        if (m.parent) |parent| {
-            const parent_name = try PHPString.init(allocator, parent.name);
-            return Value.initString(parent_name);
+    if (obj_val.isString()) {
+        if (findClass(obj_val.asString().data)) |meta| {
+            if (meta.parent) |parent| {
+                const parent_name = try PHPString.init(allocator, parent.name);
+                return Value.initString(parent_name);
+            }
+            return Value.initBool(false);
         }
     }
-    return Value.initBool(false);
+    {
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(
+            &buf,
+            "get_parent_class(): Argument #1 ($object_or_class) must be an object or" ++
+                " a valid class name, {s} given",
+            .{phpArgTypeWord(obj_val)},
+        ) catch "get_parent_class(): Argument #1 must be an object or a valid class name";
+        // ★F-188：自报抛出帧（未捕获时 PHP 打 `#0 file(line): get_parent_class('arg')`）。
+        //   顺序铁律：setException 会清帧 ⇒ 必须在 throwThrowable 之后再自报。
+        const thrown = throwThrowable("TypeError", msg, allocator);
+        setLastThrowFrame("get_parent_class", &.{obj_val});
+        return thrown;
+    }
 }
 
 /// class_implements — 返回类实现的所有接口
@@ -28877,6 +29092,10 @@ pub fn php_gettype(val: Value, allocator: Allocator) !Value {
         "object"
     else if (val.isResource())
         "resource"
+    else if (val.hasResourceType())
+        // ★F-180：PHP 8 对**已关闭**资源给 `resource (closed)`（fclose/closedir 之后）；
+        //   旧写落 "unknown type"。类型位判定（同 retain/release 的 F-180 口径）。
+        "resource (closed)"
     else
         "unknown type";
 
