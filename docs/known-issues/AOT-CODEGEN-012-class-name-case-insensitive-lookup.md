@@ -10382,3 +10382,47 @@ R-214 曾把“归因里出现 setSourceLocation/PHI/调用行等非局部增删
 - `__toString` 的 `Stack trace:` 恒 `#0 {main}`（不随真实调用深度变化，与既有未捕获打印器同近似）；多帧回溯仍非目标。
 - F-188 帧机制仅 `get_parent_class` 抛出点接入；`get_class_methods`/`get_class_vars` 等同族内置 TypeError 未接入（它们当前门全绿，接入与否看后续红门需要）。
 - 工作区含未提交改动：`?*const ClassMeta` 一行（HEAD `20afbc5` 编译不过的修复）+ 本批 F-184～F-188 全部实现，**入库前禁 checkout**。
+
+## 190. ★R-282 落地记录（F-180 资源引用不归零＋F-189 fgets dupe 泄漏＋门 C328）
+
+### 190.1 根因
+| # | 根因 | 证据 |
+|---|---|---|
+| ① 主因 | `Value.retain`/`Value.release` 的资源分支用 **`isResource()`** 判定，而它是 **ZPP 语义谓词**（`:2805` `!closed`）⇒ `fclose`/`closedir` 把 `closed=true` 之后，reg/全局表/形参的**所有** `Value.release` 变 no-op，`PHPResource.ref_count` 永不归零 | 修前 `php_closedir` 入口实测 `ref_count=4`（期望 2）；临时打印 `release` 的 destroy 点**从不触发**；`@sizeOf(Value.PHPResource)=40` 与每轮 Δ 完全吻合 |
+| ② | `php_fclose` 只 `fh.close()` 不 `destroy(fh)`（`res.file_handle=null` 后归零路径也不会再 destroy 它） | `fopen+fclose` 比 `opendir+closedir` 每轮多 8 B + 1 alloc（`std.Io.File` 结构） |
+| ③ | `gettype()` 对已关闭资源落 `unknown type`（PHP 8 是 `resource (closed)`） | b1 臂首跑 DIFF |
+| ④ F-189 | `php_fgets` 先 `runtime_allocator.dupe(...)` 再交 `PHPString.init`，而 `init` 内部本就 `alloc+memcpy` 复制入参 ⇒ dupe 那份**无人释放** | C328 a3 首跑 +2000 B/+2000 allocs（ΔN=2000 ⇒ 恰 1 B+1 alloc/次） |
+
+### 190.2 修法
+| 文件 | 位置 | 变更 |
+|---|---|---|
+| `src/aot/runtime_lib_template.zig` | `:2937`（retain）／`:2973`（release） | 资源分支改判**类型位** `hasResourceType()`（R-277 已备好的谓词）；`isResource()` 语义保持不变（ZPP 用） |
+| 同上 | `:4637` `php_fclose` | `close` 后 `runtime_allocator.destroy(fh)`，再置 null |
+| 同上 | `:29080` `php_gettype` | 新增 `else if (val.hasResourceType()) "resource (closed)"` |
+| 同上 | `:4658` `php_fgets` | 删除 `dupe`，直接传栈缓冲（F-189） |
+
+### 190.3 C328 门设计（`fuzzy_scripts_720/tmp/c328_resource_refcount_gate_tmp.sh`）
+- 泄漏臂 a1–a4：`N=1000/3000` 双跑，判据 **Δlive_bytes==0 ∧ Δlive_allocs==0**（读数取 stderr 的 `ALLOC_STATS` 行）。
+  - a1 `fopen+fclose`、a2 `opendir+closedir`、a3 读写周期（`fopen` 写满 → `fclose` → `fopen` 读 `fread`/`fgets`/`feof` → `fclose`）、a4 `unset`-不关（FLAT 对照）。
+- 行为臂 b1：`fclose`/`closedir` 后 `is_resource()===false`、`gettype()==="resource (closed)"`、`closedir` 后 `readdir(null)` 的 Deprecated+TypeError、以及「关后重开目录流仍可读」——与 PHP 8.5.8 归一化后逐字节比。
+- 敏感度臂 s1：每轮故意保留一枚字符串 ⇒ **Δ>0 必须成立**（量具瞎了门必须红）。
+- ★门构造性记法：a3 把「写入数据量」与「读回内容」都放在同一张臂里，才能在**同一条臂**上同时暴露 `fgets` 的 dupe 泄漏与资源归零；两枚缺陷由此一次抓齐。
+
+### 190.4 读数
+| 腿 | 读数 |
+|---|---|
+| C328（新门 6 臂） | **6/6 SAME** 33 s：a1 `17260/17260、103/103`；a2 `17180/17180、102/102`；a3 `18182/18182、111/111`；a4 `19274/19274、102/102`；b1 行为面全 SAME；s1 敏感度 `lb 2562805→8686453、la 335→351`（Δ>0，量具有效） |
+| 修前基线（同门） | a1 **+96 000 B/+4 000 allocs**、a2 **+80 000 B/+2 000 allocs**、a3 **+2000 B/+2000 allocs**（a3 是 F-189） |
+| 自证 | `AOT_BIN=/bin/false` ⇒ **6 CF**（臂真活着） |
+| 邻居门 | C326 5/5（32 s）、C324 5/5（29 s）、C327 5/5（45 s）、C321 **24/24**（112 s） |
+| `zig build test` | **21/21 steps、326/326**、rc=0（`/tmp/f180_buildtest.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/f180_regression.log`，`SELF_CHECK_OK rows=68 uniq=68`，rc=0） |
+
+### 190.5 代次锚（R-282 后）
+`nlk eb91f1be62c7225b8c883fa12e62c941`；`tpl dbae834cefacbca5eaf6d461b54fa591`；`irg 0b7106338d5ffe1342caee961734b8d8`；`ir fb2bb442ca27b98cf1df7e109a240e1f`。
+★发射器/IR 零改动（nlk/irg/ir 与 R-281 后一致），本批为**纯运行时模板轮**。
+
+### 190.6 边界 / 遗留
+- 泄漏量具只能看见**分配器记账**层面的泄漏；**fd 级**泄漏不可见：`PHPResource.release` 归零时对「未 `fclose` 就释放」的 `file_handle` 只 `destroy` 不 `close`（内存不漏、fd 漏）——登记为 P2 候选。
+- F-188 帧机制目前仅 `get_parent_class` 接入；`get_class_methods`/`get_class_vars` 同族未接（P2 候选，看后续红门需要）。
+- F-117/F-158（循环体三元/merge phi 物化缺口）仍待老铁裁定「甲案收窄条件」后单独改造轮；本批门臂已按纪律**禁止在循环体内用三元实参**。

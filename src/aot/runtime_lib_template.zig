@@ -4682,10 +4682,12 @@ pub fn php_fgets(handle: Value, length: Value) !Value {
 
     if (pos == 0) return Value.initBool(false);
 
-    // 该字符串会进入 Value 生命周期，必须由 runtime 唯一所有者分配，
-    // 否则后续 runtime_allocator.free 构成跨分配器 free
+    // 该字符串会进入 Value 生命周期，必须由 runtime 唯一所有者分配：
+    // init 内部本就 `alloc+memcpy` 复制入参，直接传栈缓冲即可。
+    // ★F-189（门 C328 a3）：旧写先 `dupe` 再传 init ⇒ dupe 的那份无人释放，
+    //   每次 fgets 恒漏 1 alloc（1 字节串时即 +1B，读写周期 N=3000 实测 +2000/+2000）。
     const global_alloc = runtime_allocator;
-    const output = try PHPString.init(global_alloc, try global_alloc.dupe(u8, buf[0..pos]));
+    const output = try PHPString.init(global_alloc, buf[0..pos]);
     return Value.initString(output);
 }
 

@@ -1,0 +1,6 @@
+a1	SAME	lb=17260/17260 la=103/103
+a2	SAME	lb=17180/17180 la=102/102
+a3	SAME	lb=18182/18182 la=111/111
+a4	SAME	lb=19274/19274 la=102/102
+b1	SAME	rc=0	PHP[isres|false|resource (closed) isres_dir|false|resource (closed)  Deprecated: readdir(): Passing null is deprecated, instead the last opened directory stream should be provided in @FILE@ on line @N@ null_after_close|TypeError|No resource supplied reopen|x|false END ]
+s1	SAME	SENS lb=2562805/8686453 la=335/351
