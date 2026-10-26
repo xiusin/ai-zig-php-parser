@@ -10426,3 +10426,268 @@ R-214 曾把“归因里出现 setSourceLocation/PHI/调用行等非局部增删
 - 泄漏量具只能看见**分配器记账**层面的泄漏；**fd 级**泄漏不可见：`PHPResource.release` 归零时对「未 `fclose` 就释放」的 `file_handle` 只 `destroy` 不 `close`（内存不漏、fd 漏）——登记为 P2 候选。
 - F-188 帧机制目前仅 `get_parent_class` 接入；`get_class_methods`/`get_class_vars` 同族未接（P2 候选，看后续红门需要）。
 - F-117/F-158（循环体三元/merge phi 物化缺口）仍待老铁裁定「甲案收窄条件」后单独改造轮；本批门臂已按纪律**禁止在循环体内用三元实参**。
+
+## 191. ★R-283 落地记录（F-190 未关闭资源漏 fd 已闭；F-191 GC 滞留／F-195 预存崩溃 已定性未修）
+
+### 191.1 F-190（已闭）：未 `fclose` 就释放的资源只 destroy 不 close
+| 项 | 内容 |
+|---|---|
+| 根因 | `PHPResource.release`（`:2636`）归零路径对 `file_handle` 只 `allocator.destroy(fh)`，**不 `close`** ⇒ `fopen()+unset()` 每轮漏 1 个 fd。分配器记账与 RSS 都看不见，只有 `/dev/fd` 计数能抓到（PHP 为 0） |
+| 修法 | 归零路径 `fh.close(getIo())` 后再 `destroy`；`php_fclose` 已 close 并置 `file_handle=null` ⇒ 不会二次关闭 |
+| 读数 | `fopen+unset` fd 增量：修前 N=5/100/300 ⇒ **5/100/300**；修后 ⇒ **1/1/1**（每循环结构 1 个常量残留，F-193；`fclose` 路径恒 0） |
+| 门 | C328 6/6 SAME（a1 `17260/17260、103/103`；a2 `17180/17180、102/102`；a3 `18182/18182、111/111`；a4 `19274/19274、102/102`；b1 行为面 SAME；s1 `lb 89799→301787、la 1105→3107`） |
+
+### 191.2 F-191（已定性，未修）：GC 批量滞留 —— **有界平台，不是无界增长**
+- 机制：容器 rc 2→1 时 `gcBuffer*` 入根表；随后 rc→0 因 `buffered=true` 只“重新入队”（`gcBuffer*` 首行 `if buffered return`），只能等 GC（阈值 256 根/4096 事件、**每批 64 个**、`deinitRuntime` 里 `gcCollectCycles(true)` 被注释）。
+- 实测修正（★推翻“无界”初判）：`[1,2,3]` 每轮丢弃在 **N<256** 时表现为逐轮 +320 B（`lb` N=100→300 由 32 560→96 512），但 N=3000/9000 时稳定在 **98 144/95 968**（对象形状 123 271/117 367）⇒ 生产与排空同速，驻留量被钉在 ≈256 容器（~90–120 KB，fd ≤2×阈值）。故定级 **P2（峰值/占用）**，非无界泄漏。
+- 为何不顺手修：见 191.3 —— 提高回收频率会撞 P0。
+
+### 191.3 F-195（★P0 预存崩溃，未修）：GC 自动回收误伤仍存活的数组
+| 项 | 内容 |
+|---|---|
+| 最小复现 | `$keep=[]; for($i=0;$i<255;$i++){ $keep[] = [$i]; } echo count($keep);` ⇒ **SIGSEGV（exit=139）**；N=100/200 正常，**N≥255 崩** |
+| 代次 | **HEAD `b30690b` 同样崩**（本轮两次 GC 改动前就已存在）⇒ 与本批实现无关 |
+| 两次修复尝试的代价 | 甲：rc==0 摘根+立即 deinit ⇒ 主回归 `PASS=43 FAIL=25`（22 个 exit=139：f006/f007/f033/f034/f037…）；乙：阈值 256→32 + 触发即排空全部根 ⇒ C329 `s1` rc=139、`b2` 计数 `7` vs PHP `100` |
+| 疑点 | 运行期存在**未计数借用指针**：`Elements.parent` 回指、`array_internal_pointers`、foreach 快照/迭代器（`ref_lock_count`）、by-ref Ref cell；另 `gcScanBlackValue` 对同一子容器重复 `ref_count += 1` 会扭曲计数 |
+| 结论 | GC 改造必须先做**借用图审计**（列出全部不计数持有者，决定“借用方持引用”或“只从完整根集标记”），属独立设计轮；本轮**已整体撤回 GC 改动**（阈值/批量/退出收集恢复 HEAD 语义） |
+
+### 191.4 门资产与读数
+| 腿 | 读数 |
+|---|---|
+| C328（修 s1 敏感度臂后） | **6/6 SAME** 33 s（s1 改 `"sens".$i` 真分配；判据未放宽） |
+| C329（新，**KNOWN_RED**） | 8 臂：**a1/a2/a3/a5 DIFF**（3000/9000 非平：`98 144/95 968`、`110 399/107 455`、`123 271/117 367`、`85 852/83 596`）、a4/b1/b2 SAME、**s1 rc=139×2（=F-195）**；头部已写明 KNOWN_RED 与两次尝试的数据 |
+| 定向脚本 | f006/f007/f033（上轮回归红样本）重编译后 **rc=0** |
+| `zig build test` | **21/21 steps、326/326**（`/tmp/r283b_buildtest.log`） |
+| 主回归（最终态） | **PASS=68 FAIL=0**（`/tmp/r283b_regression.log`，`SELF_CHECK_OK rows=68 uniq=68`） |
+| 参照：尝试甲的回归 | **PASS=43 FAIL=25**（`/tmp/r283_regression.log`，22 × exit=139） |
+
+### 191.5 代次锚（最终态）
+`nlk eb91f1be62c7225b8c883fa12e62c941`；`tpl 3d7ac9775929e26416c189ad4d0353b3`；`irg 0b7106338d5ffe1342caee961734b8d8`；`ir fb2bb442ca27b98cf1df7e109a240e1f`（发射器/IR 零改动）。
+
+### 191.6 边界 / 遗留
+- **F-195（P0）**：见 191.3，修复前**不要**再提高 GC 频率（会立即触发 22+ 脚本崩溃）。
+- **F-192**：真环残余——数组 by-ref 自引用环 `gc_collect_cycles()` 恒 0（PHP=N=300；HEAD 为 2 且疑似重复入根）；对象环 N≥300 时 `collected` 仅 236/300（批处理尾巴）。
+- **F-193**：每个循环结构残留 1 个语句临时值（AOT `g=1|1` vs PHP `0|0`，有界）。
+- **F-194**：`$b["self"] = &$b;` 之后 `echo …, gc_collect_cycles(), "\n"` 的尾随换行丢失（HEAD 即存在：`b=2c=42END` vs PHP `b=1\nc=42\n`）。
+
+## 192. ★R-284 落地记录（F-196 每轮整表克隆＋F-195 GC 误回收崩溃：发射器 COW 阈值；F-191 复测再否决）
+
+### 192.1 根因
+| # | 事实 |
+|---|---|
+| ① | `$a[] = x` 的**非 alloca** 分支（全局/属性）先把数组读进寄存器：`getGlobalVar`/属性读**已 retain** ⇒ 进入 `array_push` 时 `ref_count = 持有者 1 + 本次读取临时 1 = 2` |
+| ② | 发射器的 COW 判据是 `ref_count > 1` ⇒ **每轮 append 都 `cloneShallow` 整表**（O(N²)），旧数组全部变成 GC buffer 垃圾（F-196） |
+| ③ | 克隆把子数组 rc 抬到 O(N)；GC 每批只处理 64 个根，回收垃圾克隆时与**仍存活的父数组**对子数组计数纠缠 ⇒ 子数组被判白回收 ⇒ 活数组悬垂 ⇒ `$keep[] = [$i]` 在 **N≥255 SIGSEGV**（F-195，HEAD `b30690b` 同样崩） |
+| ④ | 直接证据（临时打点，已移除）：GC 日志里根表同时含 `n=1..127 rc=0` 的**垃圾克隆**与 `n=1 rc 高达 97` 的**子数组**；每轮 pass `whites≈32`，4 个 pass 后崩溃 |
+
+### 192.2 修法（只有一处）
+`src/aot/native_linker.zig` 的 `.array_push` **非 alloca 分支**：COW 阈值 `ref_count > 1` ⇒ **`> 2`**（把“本次读取的临时 retain”计入）。
+- 真实共享时 rc ≥3（持有者 + 读取临时 + 另一持有者）⇒ 仍克隆；
+- **alloca 分支的 load 不 retain**，语义不变，保持 `> 1`；
+- 运行时模板**零改动**（本轮所有 GC 改动被回归否决后撤回，tpl 维持 R-283 终态）。
+
+### 192.3 读数
+| 腿 | 读数 |
+|---|---|
+| 崩溃复现 `$keep[]=[$i]` | 修前：N=255/300/1 000/3 000 **全 SIGSEGV（rc=139）**；修后：N=300/3 000/9 000 **rc=0** |
+| 追加性能 `$a[]=$i` | N=5 000：**826.7 ms → 7.3 ms**；N=20 000：**>10 s（超时）→ 11.0 ms**；PHP 均 0.1 ms |
+| COW 语义矩阵 | 5 形（值拷贝后追加/引用后追加/关联键/连续 append/嵌套子数组）**全部与 PHP 一致**：`b=1 a=2`、`d=2`、`f=1 e=2`、`g=3`、`i=1 h=2` |
+| C329（终态） | **4/8**：a1/a2/a3/a5 **DIFF**（F-191 平台仍在：`98 144/95 968` 等）、a4/b1/b2 SAME、s1 **SENS**（不再崩溃） |
+| C328 | **6/6 SAME**（31 s） |
+| 邻居 | C326 5/5、C324 5/5、C327 5/5、C321 **24/24** |
+| `zig build test` | **21/21 steps、326/326**（`/tmp/r284_buildtest.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r284_regression.log`，`SELF_CHECK_OK rows=68 uniq=68`） |
+
+### 192.4 F-191 复测：**仍有 25 红**，GC 改动再次撤回
+在 COW 修复之后**再试**“rc==0 立即摘根+deinit”（F-191 修法）：主回归 **PASS=43 FAIL=25**，22 个 `exit=139`，与 R-283 同一批脚本（f006/f007/f033/f034/f037…）。⇒ **F-195 的崩溃主体是 COW 克隆churn，但运行时的借用指针问题独立存在**：`rc==0` 不能证明可释放（`Elements.parent` 回指、`array_internal_pointers`、foreach 快照/迭代器 `ref_lock_count`、by-ref `Ref` cell）。F-191 的修复必须先做借用图审计，**禁止再用“提高 GC 频率”试探**。
+
+### 192.5 代次锚
+`nlk c3a4a41a1c3d1f790ef03ae8d847c796`；`tpl 3d7ac9775929e26416c189ad4d0353b3`；`irg 0b7106338d5ffe1342caee961734b8d8`；`ir fb2bb442ca27b98cf1df7e109a240e1f`。
+
+### 192.6 边界 / 遗留
+- 其它 COW 站点（`array_set`、属性写、`array_merge` 族、`maybeCowBreak`）是否同样存在“读取临时抬高 rc”的误克隆，尚未逐一核价（已在变更文档 §8 列为 P2）。
+- F-191／F-192／F-193／F-194 均未修（见上条 §191.6 与 §192.4）。
+
+## 193. ★R-285 落地记录（F-194 echo 尾随实参丢失 ＋ F-197 表达式活操作数被 GC 前置清理清空）
+
+### 193.1 根因（同一处）
+`gc_collect_cycles()` 调用点前，发射器的 `emitPreGcCleanup` 把**所有** cleanup 寄存器 `release + 置 null`（意图：避免临时引用抬高 ref_count 阻止环检测），但**没有任何 liveness 依据**，因此清掉了两类仍要用的寄存器：
+1. **跨语句常量 CSE**：IR 把相同字面量复用同一寄存器（后续语句直接读该 reg，不再发 `const.*`）。被清 null ⇒ 之后每条 echo 丢尾随实参（`"\n"` 消失；`"END\n"` 变 `END`）——**F-194**。
+2. **同一表达式的活操作数**：`echo "a=", PHP_INT_MAX > gc_collect_cycles(), "\n";` 的 `PHP_INT_MAX` 由 `getGlobalVar` 载入，比较在 gc 调用之后执行；被清 null ⇒ `null > 2 == false` ⇒ echo 输出空串——**F-197**（同轮新立同闭）。
+
+### 193.2 修法
+`emitPreGcCleanup` 改为 **liveness 过滤**：
+- 扫描 `func.blocks` 定位当前指令指针的 `(block_idx, inst_idx)`；
+- 仅释放 `!isLiveAfter(...) ∧ !isLiveAtBlockExit(...)` 的寄存器；
+- `current_liveness == null` 或定位失败 ⇒ **一个都不放**（安全优先；旧行为是照清）。
+调用点 `.call` 臂传入 `inst`。
+
+### 193.3 读数
+| 腿 | 读数 |
+|---|---|
+| 探针（stdout vs PHP） | `echo "a=", gc(), "\n"` + by-ref 环 + 后续 3 条 echo：修前 `b=2c=42END`（换行全丢）→ 修后与 PHP 一致（仅 `gc()` 计数 2 vs 1＝F-192a）；`echo "a=", PHP_INT_MAX > gc(), "\n"`：`a=`（空）→ `a=1` |
+| 环检测未退化 | by-ref 数组环 `gc_collect_cycles()` 仍返回 2（与修前一致）；C329 `b2` 对象环守卫仍与 PHP 一致 |
+| C330（新门 5 臂） | **5/5 SAME** 22 s；自证 `AOT_BIN=/bin/false` **5 CF** |
+| C329 | 4/8（a1/a2/a3/a5 DIFF＝F-191；a4/b1/b2/s1 SAME，s1 兼 F-195 崩溃守卫） |
+| C328 / 邻居 | C328 **6/6**；C326 5/5、C324 5/5、C327 5/5、C321 **24/24** |
+| `zig build test` | **21/21 steps、326/326**（`/tmp/r285_buildtest.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r285_regression.log`，`SELF_CHECK_OK rows=68 uniq=68`） |
+
+### 193.4 代次锚
+`nlk 8986ec5c13616967deb6b7b3ddf1930a`；`tpl 3d7ac9775929e26416c189ad4d0353b3`（未改运行时）；`irg 0b7106338d5ffe1342caee961734b8d8`；`ir fb2bb442ca27b98cf1df7e109a240e1f`。
+
+### 193.5 边界 / 遗留
+- 曾实测“直接删掉 emitPreGcCleanup”可以修 F-194/F-197，但 by-ref 数组环会变成 `gc_collect_cycles()==0`（临时引用持环，检测不到）⇒ 必须用 liveness 过滤而非删段。
+- **F-192a**（P3）：数组 by-ref 自引用环计数 AOT=2 / PHP=1（环已收集，只差计数）；对象环 N≥300 尾巴另计。
+- 其它“无 liveness 依据的批量 release”点位尚未普查（建议下轮 grep `cleanup_regs` 全部消费点）。
+
+## 194. ★R-286 落地记录（F-198 异常边操作数普查缺失：两张手写 op 表漏项）
+
+### 194.1 根因（两张表，同一个病）
+异常路径的两处寄存器集合维护者都按"记得住的 op"手写列举：
+1. `collectBlockUsedRegs`（异常边 cleanup 的**豁免表**）只列了 20 余种 op；`.static_method_call` 实参、`.static_property_set` 值、`.array_ensure`、`.array_set_nested`、`.array_key_exists`、`.array_unset`、`.closure_new/bind`、`.implements_interface`、`.type_check`、`.retain/.release/.unset_var`、`.global_unset` 等全落 `else => {}`。
+2. `emitMissingConstStrings`（catch 入口**常量重建**）另有一张更小的表（concat/call/method_call/instanceof）。
+
+IR 的 `const.string` 会**跨块 CSE**（同一字面量在 try 外与 catch 内复用同一寄存器）。于是：
+- **面①**：catch 复用 try 前已赋值的常量 + 未列出 op ⇒ 异常边 cleanup 把它 `release + initNull` ⇒ catch 读到 null。实测 `static.call` 实参：AOT `litgot:` / PHP `litgot:lit`。
+- **面②**：catch 复用 try 内 **throw 之后**才赋值的常量 + 未列出 op ⇒ 常量从未赋值，且重建表也不认这种 op ⇒ AOT `got:` / PHP `got:lit`。
+
+### 194.2 修法
+新增编译期结构递归收集器 `collectRegisterRefs(comptime T, value, set)`：`Register` 直接收、`?Register` 解包、`[]Register` 逐项、结构体逐字段、union `inline else` 展开、**跳过自引用 `Type`**（从不携带寄存器）。`collectBlockUsedRegs` 对 `inst.op` 与 `block.terminator` 各调一次；`emitMissingConstStrings` 删除自己的小表，直接复用 `collectBlockUsedRegs(catch_block)`。手写表从此只剩零张，op 增项不再漏。
+
+### 194.3 普查（§193.5 遗留项，已收口）
+| 点位 | 路径性质 | 结论 |
+|---|---|---|
+| `emitPreGcCleanup` | 中途（gc 前） | R-285 已 liveness 过滤 |
+| `generateCleanupCodeExcept` | 中途（异常边→handler） | 豁免表＝处理器子图使用集；本轮补齐 |
+| `emitMissingConstStrings` | 中途（catch 入口） | 本轮复用同一收集器 |
+| 单块函数尾 4 处（ret/throw/无 terminator） | 终止点（紧接 return/throw） | 无需 liveness |
+| `generateReturnInBlock` | 终止点（紧接 return，仅 alloca） | 无需 liveness |
+| 状态机 `current_cleanup_regs` 设置/恢复 | 不释放 | 无需 liveness |
+
+### 194.4 读数
+| 腿 | 读数 |
+|---|---|
+| 探针（stdout vs PHP） | 面① `litgot:` → `litgot:lit`；面② `got:` → `got:lit`；merge 块复用（u4）本就 SAME |
+| C331（新门 7 臂） | **7/7 SAME** 34 s；自证 `AOT_BIN=/bin/false` **7 CF** |
+| 邻居 | C327 **5/5**、C328 **6/6**、C329 **4/8**（a1/a2/a3/a5 DIFF＝F-191 既有红；a4/b1/b2/s1 SAME，零转移）、C330 **5/5** |
+| 泄漏探针 | catch 每轮复用同一常量：N=1000 与 N=9000 的 `live_bytes/live_allocs` 完全相等（123241/2196）⇒ 非逐轮滞留 |
+| `zig build test` | **21/21 steps、326/326**（`/tmp/f198_buildtest.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/f198_regression.log`，`SELF_CHECK_OK rows=68 uniq=68`） |
+
+### 194.5 代次锚
+`nlk 008e92b845e0b8bd751089280509af89`；`tpl 3d7ac9775929e26416c189ad4d0353b3`（未改运行时）；`irg 0b7106338d5ffe1342caee961734b8d8`；`ir fb2bb442ca27b98cf1df7e109a240e1f`。（均未提交）
+
+### 194.6 边界
+- 递归收集器把 `.retain/.release/.unset_var/.debug_print/.yield_*` 的操作数也纳入豁免表；生成器族不在 AOT 范围，且豁免变多只会让异常路径更保守（函数尾统一回收）。
+- 常量 CSE 的跨块复用规则仍是 IR 层的隐式约定（未做支配性校验）；C331 是它的外层守卫。
+
+## 195. ★R-287 归因轮（F-192a 计数语义细化；新立 F-199／F-199-b／F-201；F-199 尝试已完整撤回）
+
+### 195.1 缘起
+R-286 收口后按 §194.6 继续查 F-192a（by-ref 数组环 `gc_collect_cycles()` AOT=2 / PHP=1）。实测发现"by-ref 环"根本不存在——AOT 把 `$arr[$k] = &$v` 按值拷贝，环是假的；计数差另有根因。本轮的产出一律**未落地代码**（代次锚与 R-286 相同），只入账。
+
+### 195.2 F-192a 细化：`gc_collect_cycles()` 把"被缓冲的普通垃圾"与"级联子容器"都计入
+探针矩阵（PHP 8.5.8 vs AOT，当前代次）：
+
+| 形状 | PHP | AOT |
+|---|---|---|
+| `$x=[1,2,3]; unset($x); gc()` | 0 | **1** |
+| `$o=new stdClass(); unset($o); gc()` | 0 | **1** |
+| `$p=[[1,2]]; unset($p); gc()` | 0 | **2** |
+| `$a=[]; $a["b"]=$b; $a["s"]=&$a; unset($a,$b); gc()` | **1** | 4 |
+| `$a=[]; $a["s"]=&$a; $p=[[1]]; unset($a,$p); gc()` | 1 | 4 |
+| `$a=[]; $b=[]; $a["b"]=$b; $b["a"]=$a; unset($a,$b); gc()` | 0 | 4 |
+
+**PHP 语义**：返回值＝本次从 root buffer 中回收的**环根**数；被环根级联释放的子容器与从不入 buffer 的普通垃圾都不计。
+**AOT 现状**：`gcCollectCycles()` 返回 `white_items.items.len`（整片 white 闭包），而 rc→0 的容器会被缓冲进 `cycle_roots`（F-191 机制）⇒ 普通垃圾与子容器全被计入。
+**插桩证据**（临时改模板、已还原，tpl 锚未变）：`$a["x"]=&$a; unset($a);` 的 roots=1（数组 A，`rc=0`）+ white=2（A + 一个**非根**子数组）⇒ 拷贝语义下 A 是普通垃圾、子数组是它的元素副本。
+**修法方向**：计数只认"white 且来自 root buffer、且参与环"的条目；需要 pre-MarkGray 的 rc 快照区分"普通垃圾根"与其级联子树（不能只做 `pre_rc>0`，否则普通垃圾的子容器会被误计）。
+
+### 195.3 F-199（P1，新立）：`$arr[$k] = &$v` 被按值拷贝，引用语义全丢
+- 证据：`$a=[]; $a["x"]=&$a; $a["x"]["y"]=1; isset($a["y"])` ⇒ PHP **Y** / AOT **N**（`count` 1 vs 2）。
+- 根因：parser 的表达式级赋值路径（`parser.zig:2759`）创建 assignment 节点时**不带 `is_reference`**（裸变量走 `parseAssignment` 才有）；RHS 的 `&` 成为一元 `unary_expr(.ampersand)` 节点 ⇒ IR 生成 `global.get`+`array.set`，拷贝。
+- 另有一枚**潜伏地雷**：`php_array_set_ref`/`php_array_push_ref` 调用的 `PHPArray.setRef`/`pushRef` **从未存在**；只因 IR 从不生成这两个 helper，Zig 不对未引用函数体做语义分析，所以一直静默。F-199 一旦接线必须先实现它们。
+- **尝试记录（已完整撤回，文件 md5 已逐字回到 R-286 代次）**：
+  1. AOT 侧还原（不动共享 parser）：单级数组目标 + 局部变量源 ⇒ 改走 `generateRefAssignment`；补 `setRef`/`pushRef`（原样存 Ref + retain + 旧值释放 + next_index）。
+  2. 读数：函数内写穿 `has_y=Y`、标量别名 `k=9/v=5`、`[]` 追加 `p=b`、数组源 `r=7`、普通拷贝守卫均 **SAME**。
+  3. 撤回原因（硬阻断）：局部变量源用 `make_ref(alloca)` 建的是**栈上 Value 的引用**。真实环形成后帧退出，数组 `rc` 不归零 ⇒ 需 GC 收集；但 AOT 的 root buffer 只在 `release` 使 `rc==0` 时入队（`gcBufferArray`），自引用环的 rc 永远 ≥1 ⇒ **永不入队**。实测 `make()` 300 次后 `gc_collect_cycles()` AOT **0** / PHP **300** ⇒ 每轮调用泄漏一个环，无界增长。
+  4. 正解成本：引用单元改**堆分配**（`php_make_ref_from_value` 已备）+ 源变量标记为 ref var + `release` 时 `rc>0` 也登记 possible root（PHP 语义）+ 环内 Ref 的 MarkGray/Gather 处理 ⇒ 独立改造轮，不能与本轮混做。
+
+### 195.4 F-199-b（P2，新立）：全局变量源的元素引用
+`__main__`/`global_vars` 里的 `$v` 作源时，`generateRefAssignment` 的 null-source 分支只实现**变量目标**（`global_ref_bind`）；元素目标会被静默跳过 ⇒ 上层只能维持拷贝。需要元素级的 name↔cell 绑定设计。
+
+### 195.5 F-201（P1，新立）：局部 alloca 的普通元素写不做 COW
+| 形状（函数内） | PHP | AOT |
+|---|---|---|
+| `$a=[1,2]; $b=$a; $a["x"]=9;` | cb=2 | **cb=3**（`$b` 被连带修改） |
+| `$a=[1,2]; $b=$a; $a[]=9;` | cb=2 | cb=2 ✓（R-284 已修 append） |
+| 全局作用域同形（f9） | cb=2 | cb=2 ✓（`setGlobalVar` 走 COW） |
+
+⇒ 缺口只在**局部 alloca 的 `.array_set`**：发射器原地 `setByValue`，未按 `ref_count>1` 先 `cloneShallow` 并写回 alloca。R-284 的 append 阈值修复没覆盖 `.array_set`。F-199 的 `setRef` 若落地会继承同一缺口（f5 实测 `cb=3`）。
+
+### 195.6 代次
+本轮无代码落地：`nlk 008e92b8…`／`tpl 3d7ac977…`／`irg 0b710633…`／`ir fb2bb442…`（与 §194 相同）。临时插桩与 F-199 改动均已逐字还原（`md5` 复核）。
+
+## 196. ★R-288 落地记录（F-201 局部变量元素写缺 COW 已闭；新立 F-201-b／F-202）
+
+### 196.1 根因
+`$a[$k] = v` 的常规 IR 是「`load` 出临时 → `array.set` → `store` 回 alloca」。发射器的 `.array_set` 数组分支直接在**共享的 `PHPArray`** 上调 `setByValue`，没有任何 COW ⇒ `$b = $a; $a["x"] = 9;` 把 `$b` 一起改（PHP 值语义：cb=2/bx=N；AOT 修前 cb=3/bx=Y）。append（R-284）与全局路径（`setGlobalVar`）本来就正确，缺口只在**局部 alloca 的元素写**。
+
+### 196.2 修法（仅 nlk）
+两个只读判定助手：
+- `isLoadedFromLocalAlloca(reg)`：寄存器是否由"从局部 alloca `load`"定义（排除引用形参 alloca）。
+- `storeBackAllocaAfter(inst, reg)`：`.array_set` 之后是否紧跟 `store reg → 局部 alloca`，返回该 alloca。
+
+`.array_set` 的数组分支按形状 COW：
+- **直接 alloca** 操作数：`ref_count > 1` ⇒ `cloneShallow` 写回 `alloca.*`。
+- **load 临时 + 尾部 store**：`ref_count > 2`（load **恒 retain**，写临时那份也计入）⇒ 克隆后**先 retain 新值**，再归还 alloca 与临时各自对旧数组的引用，最后把两者同步到克隆（retain 新 → release 旧，防 old==new UAF）。
+- 其余形状（全局 / 属性 / 引用形参 / 无尾部 store 的复用临时）一律不变。
+- **引用载体排除** `isRefCarryingAlloca(alloca)`：引用形参 / `make_ref` / 闭包 `use(&$v)` / foreach 引用 / **带 `store{no_cow}` 的引用赋值落点** ⇒ 这类 alloca 的元素写必须写穿共享数组，禁止 COW。
+
+★账目是第一版失败的根因：首版按 `>1` 克隆、且覆盖临时前不归还旧引用 ⇒ 每轮泄漏一个旧数组（探针 N=2000/20000 ⇒ `832000/8349448`、`2105/20110`，≈416 B/轮）。改成 `>2` + 显式归还后，同一探针 `18724/18724`、`101/101`（**完全平坦**）。这也再次验证 r159：COW 判据必须把"读取临时 retain"计入。
+
+★引用链是首轮主回归（FAIL=2）暴露的第二处：`f044_json_deepops_merge_diff` 的 `deepSet`（`$ref = &$data; $ref = &$ref[$k];`）与 `f110_os_sim_process_memory_filesystem` 的 `mkdir/writeFile/listDir`（`$cur = &$this->root; $cur = &$cur[$p];`）都靠引用链写穿；首版把克隆写回引用槽，链被切断 ⇒ 全部丢写。排除引用载体后两枚逐字节 SAME，固化在 C332 `a11`／`a12`。
+
+### 196.3 读数
+| 腿 | 读数 |
+|---|---|
+| C332（新门 13 臂＝12 语义 + s1 泄漏） | **13/13 SAME**（59 s）；s1 `LEAKFLAT lb=18724/18724 la=101/101`；自证 `AOT_BIN=/bin/false` **13 CF** |
+| 邻居 | C331 **7/7**、C330 **5/5**、C328 **6/6**、C329 **4/8**（a1/a2/a3/a5 DIFF＝F-191 既有红，零转移） |
+| `zig build test` | **21/21 steps、326/326**（`/tmp/f201_buildtest.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/f201_regression2.log`，`SELF_CHECK_OK rows=68 uniq=68`）；★首轮曾 **FAIL=2**（f044/f110 引用链），排除引用载体后复跑全绿 |
+
+### 196.4 代次锚
+`nlk d767d4dcd84cbb17e7ea2f1e55b6b50e`；`tpl 3d7ac9775929e26416c189ad4d0353b3`（未改运行时）；`irg 0b7106338d5ffe1342caee961734b8d8`；`ir fb2bb442ca27b98cf1df7e109a240e1f`。（均未提交；HEAD `b30690b`）
+
+### 196.5 残余（本轮新立）
+- **F-201-b（P1）**：嵌套元素写 `$a["k"][0]=9` 走 `.array_set_nested`/`.array_ensure`，不在本轮形状内——实测仍共享（`$b=$a` 后 `bk=9`，PHP `bk=1`）。
+- **F-202（P2，既存）**：字符串偏移写整体失效——`$s="ab"; $s[0]="x";` AOT 仍输出 `ab`（函数内与全局同现）。IR 把 `$s` CSE 成 `const.string`，写落在临时副本且无回落；本轮 diff 零触及该分支。修法需"可写字符串变量落地"（写字符串时先把变量物化为可变副本）。
+- F-199／F-199-b（元素引用赋值）与 F-192a（GC 计数口径）见 §195，仍未修。
+
+## 197. ★R-289 落地记录（F-201-b 嵌套元素写 COW 已闭；新立 F-203）
+
+### 197.1 根因
+`$a[$k][$k2] = v` 的 IR 是「`load` 外层 → `array.ensure[$k]` → `array.set`」，**没有回写 store**；发射器直接在共享子数组上写 ⇒ `$b = $a; $a["k"][0] = 9;` 把 `$b["k"][0]` 一起改（PHP bk=1 / AOT 修前 bk=9）。
+
+### 197.2 修法（仅 nlk，`.array_ensure` 臂）
+- **外层 COW**：外层操作数是「局部 alloca 的 load」且 `ref_count > 2`（alloca + 写临时 + 另一持有者）⇒ `cloneShallow` + 写回 alloca（先 retain 克隆，再归还 alloca/临时对旧数组的引用——同 F-201 账目）。
+- **子数组 COW**：外层**运行期独占**（`arr.ref_count <= 2`，含写临时那份；三层嵌套时外层可能是上一层克隆，编译期不可判定）且子数组 `ref_count > 2` ⇒ 克隆子数组、`setByValue` 写回外层。
+- **所有权转移**：子克隆存入后释放 `elem`（`getByValue` 返回值）对旧子数组的引用，`elem` 改指克隆；返回寄存器持有一份克隆引用，由 cleanup 归还。
+- 新增 `loadSourceAlloca`（`isLoadedFromLocalAlloca` 改由它实现）；引用载体（`isRefCarryingAlloca`）一律排除。
+
+★账目坑：`PHPArray.get`/`getByValue` **恒 retain** ⇒ 独占子数组在检查点 rc=**2**（槽 + 返回引用）。首版按 `>1` ⇒ 每轮误克隆：泄漏臂 `lb=940816→2592104`、`la=3109→9108`（≈1 PHPArray/轮）；改 `>2` + 所有权转移后同一探针 `19408/19408、106/106`（完全平坦），无副本的 s2 亦 `18996/103` 平坦，单写 `18476 B/99 allocs`。
+
+### 197.3 读数
+| 腿 | 读数 |
+|---|---|
+| C333（新门 7 臂＝6 语义 + s1 泄漏） | **7/7 SAME**（32 s）；s1 `LEAKFLAT lb=19408/19408 la=106/106`；自证 `AOT_BIN=/bin/false` **7 CF** |
+| 邻居 | C332 **13/13**、C331 **7/7**、C330 **5/5**、C328 **6/6**、C329 **4/8**（a1/a2/a3/a5＝F-191 既有红，零转移） |
+| `zig build test` | **21/21 steps、326/326**（`/tmp/f201b_buildtest.log`） |
+| 主回归 | __REGRESSION_LINE__ |
+
+### 197.4 代次锚
+`nlk 07357ddfd5295e1ffee4cd3667813f7e`；`tpl 3d7ac9775929e26416c189ad4d0353b3`（未改运行时）；`irg 0b7106338d5ffe1342caee961734b8d8`；`ir fb2bb442ca27b98cf1df7e109a240e1f`。（均未提交；HEAD `b30690b`）
+
+### 197.5 残余：F-203（P1，新立，既存）
+`$b = $a` **没有被物化为独立变量槽**：IR 里只有一个 alloca，`$b` 只剩一个 borrow 临时。经副本变量写（`$b["x"] = 9`）会改到 `$a`——实测 `ca=2`（PHP 1），**单层元素写就错**；嵌套只是同族。本轮修复对「经属主变量写」的形状正确；经副本写的形状在 F-203 修好前仍错（C333 门头已注明）。修法方向：变量 home 槽（禁止把副本变量折叠成单个 borrow 临时，或在 mem2reg 时保证写回一致），属 IR 改造轮。

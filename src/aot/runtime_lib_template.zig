@@ -2633,6 +2633,11 @@ pub const Value = struct {
                 self.ref_count -= 1;
                 if (self.ref_count == 0) {
                     if (self.file_handle) |fh| {
+                        // ★F-190：未 `fclose` 就归零的资源必须由释放路径关掉 fd——旧写只
+                        //   `destroy` 结构体不 `close` ⇒ `fopen()+unset()` 每轮漏 1 个 fd
+                        //   （分配器记账与 RSS 都看不见，只有 `/dev/fd` 计数能抓）。
+                        //   `php_fclose` 已 close 并置 null，此处不会二次关闭。
+                        fh.close(getIo());
                         allocator.destroy(fh);
                     }
                     if (self.dir_handle) |dh| {

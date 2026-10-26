@@ -697,151 +697,45 @@ pub const NativeLinker = struct {
     fn collectBlockUsedRegs(self: *Self, block: *IR.BasicBlock, set: *std.AutoHashMap(usize, void)) !void {
         _ = self;
         for (block.instructions.items) |inst| {
-            // 处理 result 寄存器本身不需要收集（那是定义，不是引用）
-            switch (inst.op) {
-                .add, .sub, .mul, .div, .mod, .pow, .concat, .eq, .ne, .lt, .le, .gt, .ge, .identical, .not_identical, .spaceship, .and_, .or_, .xor_, .bit_and, .bit_or, .bit_xor, .shl, .shr => |bin| {
-                    try set.put(bin.lhs.id, {});
-                    try set.put(bin.rhs.id, {});
-                },
-                .neg, .not, .bit_not, .get_type, .clone, .move => |un| {
-                    try set.put(un.operand.id, {});
-                },
-                .cast => |op| {
-                    try set.put(op.value.id, {});
-                },
-                .box => |op| {
-                    try set.put(op.value.id, {});
-                },
-                .unbox => |op| {
-                    try set.put(op.value.id, {});
-                },
-                .store => |op| {
-                    try set.put(op.ptr.id, {});
-                    try set.put(op.value.id, {});
-                },
-                .load => |op| {
-                    try set.put(op.ptr.id, {});
-                },
-                .call => |op| {
-                    for (op.args) |arg| {
-                        try set.put(arg.id, {});
-                    }
-                },
-                .call_indirect => |op| {
-                    try set.put(op.func_ptr.id, {});
-                    for (op.args) |arg| {
-                        try set.put(arg.id, {});
-                    }
-                },
-                .method_call => |op| {
-                    try set.put(op.object.id, {});
-                    for (op.args) |arg| {
-                        try set.put(arg.id, {});
-                    }
-                },
-                .new_object => |op| {
-                    for (op.args) |arg| {
-                        try set.put(arg.id, {});
-                    }
-                },
-                .array_get => |op| {
-                    try set.put(op.array.id, {});
-                    try set.put(op.key.id, {});
-                },
-                .array_set => |op| {
-                    try set.put(op.array.id, {});
-                    try set.put(op.key.id, {});
-                    try set.put(op.value.id, {});
-                },
-                .array_push => |op| {
-                    try set.put(op.array.id, {});
-                    try set.put(op.value.id, {});
-                },
-                .property_get => |op| {
-                    try set.put(op.object.id, {});
-                },
-                .property_set => |op| {
-                    try set.put(op.object.id, {});
-                    try set.put(op.value.id, {});
-                },
-                .phi => |op| {
-                    for (op.incoming) |inc| {
-                        try set.put(inc.value.id, {});
-                    }
-                },
-                .select => |op| {
-                    try set.put(op.cond.id, {});
-                    try set.put(op.then_value.id, {});
-                    try set.put(op.else_value.id, {});
-                },
-                .interpolate => |op| {
-                    for (op.parts) |part| {
-                        try set.put(part.id, {});
-                    }
-                },
-                .make_ref => |op| {
-                    try set.put(op.ptr.id, {});
-                },
-                .global_set => |op| {
-                    if (op.value) |val| {
-                        try set.put(val.id, {});
-                    }
-                },
-                .global_get_dynamic => |op| {
-                    try set.put(op.name_reg.id, {});
-                },
-                .global_set_dynamic => |op| {
-                    try set.put(op.name_reg.id, {});
-                    try set.put(op.value.id, {});
-                },
-                .parent_call => |op| {
-                    try set.put(op.object.id, {});
-                    for (op.args) |arg| {
-                        try set.put(arg.id, {});
-                    }
-                },
-                // ★F-186（R-281 收口，门 C327 t4）：catch 派发块由 instanceof 做类型匹配，
-                //   类名常量寄存器常定义在前序 try/catch 块（CSE 跨块转发）。漏收集 ⇒
-                //   异常边清理把它当死值清 null ⇒ instanceof 恒 false ⇒ 子类不中被当未捕获。
-                .instanceof => |op| {
-                    try set.put(op.object.id, {});
-                    try set.put(op.class_name.id, {});
-                },
-                .channel_send => |op| {
-                    try set.put(op.channel.id, {});
-                    try set.put(op.value.id, {});
-                },
-                .channel_recv => |op| {
-                    try set.put(op.channel.id, {});
-                },
-                .go_spawn => |op| {
-                    for (op.args) |arg| {
-                        try set.put(arg.id, {});
-                    }
-                },
-                else => {},
-            }
+            try collectRegisterRefs(@TypeOf(inst.op), inst.op, set);
         }
-        // 处理 terminator 中的寄存器引用
         if (block.terminator) |term| {
-            switch (term) {
-                .ret => |ret_reg| {
-                    if (ret_reg) |reg| {
-                        try set.put(reg.id, {});
-                    }
-                },
-                .br => {},
-                .cond_br => |cb| {
-                    try set.put(cb.cond.id, {});
-                },
-                .switch_ => |sw| {
-                    try set.put(sw.value.id, {});
-                },
-                .throw => |reg| {
-                    try set.put(reg.id, {});
-                },
-                else => {},
-            }
+            try collectRegisterRefs(@TypeOf(term), term, set);
+        }
+    }
+
+    /// ★F-198（R-286）：按**类型结构**递归收集操作数寄存器，替代手写 switch。
+    ///   两张手写表（本函数与 emitMissingConstStrings）都按"记得住的 op"列举，每加一个 op 就漏一次：
+    ///   F-186 漏 instanceof 类名（已补），R-286 实测 static.call 实参漏收 ⇒ 异常边 cleanup 把
+    ///   catch 仍在读的常量清成 null（AOT `got:` vs PHP `got:lit`）。
+    ///   泛化后 op 增项无需改表；只多收**真实使用**的寄存器（豁免表变大 ⇒ 异常路径更保守，不漏值）。
+    fn collectRegisterRefs(comptime T: type, value: T, set: *std.AutoHashMap(usize, void)) !void {
+        if (T == IR.Register) {
+            try set.put(value.id, {});
+            return;
+        }
+        // Type 是自引用 union（ptr: *const Type），且从不携带寄存器
+        if (T == IR.Type) return;
+        switch (@typeInfo(T)) {
+            .optional => |opt| {
+                if (value) |inner| try collectRegisterRefs(opt.child, inner, set);
+            },
+            .@"struct" => |st| {
+                inline for (st.fields) |field| {
+                    try collectRegisterRefs(field.type, @field(value, field.name), set);
+                }
+            },
+            .@"union" => {
+                switch (value) {
+                    inline else => |payload| try collectRegisterRefs(@TypeOf(payload), payload, set),
+                }
+            },
+            .pointer => |ptr| {
+                if (ptr.size == .slice and ptr.child == IR.Register) {
+                    for (value) |reg| try set.put(reg.id, {});
+                }
+            },
+            else => {},
         }
     }
 
@@ -898,6 +792,85 @@ pub const NativeLinker = struct {
                     }
                 }
             }
+        }
+        return null;
+    }
+
+    /// ★F-201（R-288）：该 alloca 是否承载“引用变量” ⇒ 对它的元素写必须写穿共享数组，**禁止 COW**。
+    ///   PHP 引用语义：`$ref = &$data; $ref[$k] = v;` 必须改到 `$data`。覆盖四种载体：
+    ///   引用形参、`make_ref` 的 alloca、闭包 use(&$v)、foreach 引用，以及引用赋值的落点
+    ///   （`generateRefAssignment` 用 `store{no_cow=true}` 写入目标 alloca）。
+    fn isRefCarryingAlloca(self: *Self, alloca_id: usize) bool {
+        if (self.isRefParamAlloca(alloca_id)) return true;
+        if (self.current_make_ref_allocas) |s| {
+            if (s.contains(alloca_id)) return true;
+        }
+        if (self.current_ref_capture_allocas) |s| {
+            if (s.contains(alloca_id)) return true;
+        }
+        if (self.current_foreach_ref_allocas) |s| {
+            if (s.contains(alloca_id)) return true;
+        }
+        if (self.current_function_for_resolve) |func| {
+            for (func.blocks.items) |block| {
+                for (block.instructions.items) |inst| {
+                    if (inst.op != .store) continue;
+                    const st = inst.op.store;
+                    if (st.ptr.id == alloca_id and st.no_cow) return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /// ★F-201-b（R-289）：寄存器若由“从局部 alloca load”定义，返回该 alloca id（排除引用载体）。
+    fn loadSourceAlloca(self: *Self, reg_id: usize) ?usize {
+        const func = self.current_function_for_resolve orelse return null;
+        for (func.blocks.items) |block| {
+            for (block.instructions.items) |inst| {
+                const res = inst.result orelse continue;
+                if (res.id != reg_id) continue;
+                if (inst.op != .load) return null;
+                const ptr_id = inst.op.load.ptr.id;
+                const is_alloca = if (self.current_alloca_regs) |regs| regs.contains(ptr_id) else false;
+                if (!is_alloca or self.isRefCarryingAlloca(ptr_id)) return null;
+                return ptr_id;
+            }
+        }
+        return null;
+    }
+
+    /// ★F-201（R-288）：该寄存器是否由“从局部 alloca load”定义——`$a[$k] = v` 的元素写形状。
+    fn isLoadedFromLocalAlloca(self: *Self, reg_id: usize) bool {
+        return self.loadSourceAlloca(reg_id) != null;
+    }
+
+    /// ★F-201（R-288）：`.array_set` 之后紧跟的 `store reg → 局部 alloca` ⇒ 返回该 alloca id。
+    ///   该形状（`$a[$k]=v` 的常规 IR）里元素写的落盘由尾部 store 完成 ⇒ COW 可安全地在
+    ///   alloca 层做（克隆后同步 alloca 与临时寄存器）。没有尾部 store 的「复用旧 load 临时、
+    ///   就地写」形状不在本修复范围（F-201-b）。
+    fn storeBackAllocaAfter(self: *Self, set_inst: *const IR.Instruction, reg_id: usize) ?usize {
+        const func = self.current_function_for_resolve orelse return null;
+        var found_block: ?*IR.BasicBlock = null;
+        var found_idx: usize = 0;
+        outer: for (func.blocks.items) |block| {
+            for (block.instructions.items, 0..) |ins, i| {
+                if (ins == set_inst) {
+                    found_block = block;
+                    found_idx = i;
+                    break :outer;
+                }
+            }
+        }
+        const block = found_block orelse return null;
+        for (block.instructions.items[found_idx + 1 ..]) |ins| {
+            if (ins.op == .nop) continue;
+            if (ins.op != .store) return null;
+            const st = ins.op.store;
+            if (st.value.id != reg_id) return null;
+            const is_alloca = if (self.current_alloca_regs) |regs| regs.contains(st.ptr.id) else false;
+            if (!is_alloca or self.isRefCarryingAlloca(st.ptr.id)) return null;
+            return st.ptr.id;
         }
         return null;
     }
@@ -19864,34 +19837,13 @@ pub const NativeLinker = struct {
         }
 
         // 2. 收集 catch 块中引用的所有寄存器
+        //    ★F-198（R-286）：原先这里还有一张只列 concat/call/method_call/instanceof 的手写表，
+        //    与 collectBlockUsedRegs 的漏项叠加 ⇒ static.call 实参等常量既不被重建、又被清理，
+        //    实测 AOT `got:` vs PHP `got:lit`。改为一律走同一张结构化收集表。
         var used_regs = std.AutoHashMap(usize, void).init(self.allocator);
         defer used_regs.deinit();
         const catch_block = func.blocks.items[catch_block_idx];
-        for (catch_block.instructions.items) |inst| {
-            switch (inst.op) {
-                .concat => |op| {
-                    used_regs.put(op.lhs.id, {}) catch {};
-                    used_regs.put(op.rhs.id, {}) catch {};
-                },
-                .call => |op| {
-                    for (op.args) |arg| {
-                        used_regs.put(arg.id, {}) catch {};
-                    }
-                },
-                .method_call => |op| {
-                    used_regs.put(op.object.id, {}) catch {};
-                    for (op.args) |arg| {
-                        used_regs.put(arg.id, {}) catch {};
-                    }
-                },
-                // ★F-186：catch 派发块的 instanceof 类名常量同样要补物化（与 concat/call 同理）
-                .instanceof => |op| {
-                    used_regs.put(op.object.id, {}) catch {};
-                    used_regs.put(op.class_name.id, {}) catch {};
-                },
-                else => {},
-            }
-        }
+        try self.collectBlockUsedRegs(catch_block, &used_regs);
 
         // 3. 找出在 catch 块中使用但定义在其他块的 const.string
         var emitted = std.AutoHashMap(usize, void).init(self.allocator);
@@ -20493,11 +20445,27 @@ pub const NativeLinker = struct {
         }
     }
 
-    /// GC 收集前释放临时寄存器引用
-    /// 释放所有非 alloca、非 $this、非 ref_ptr 的 cleanup 寄存器
-    /// 避免 getGlobalVar/load 等临时寄存器持有的 retain 导致 ref_count 膨胀
-    fn emitPreGcCleanup(self: *Self, writer: anytype, skip_reg: ?IR.Register) !void {
-        try writer.writeAll("    // Pre-GC cleanup: release temporary register references\n");
+    /// GC 收集前释放临时寄存器引用（**按 liveness 过滤**：只放此点之后已死的）。
+    /// ★F-194/F-197（R-285）：无 liveness 数据时一律不释放（安全优先）——历史版本无条件清空，
+    ///   会把同表达式活操作数与跨语句 CSE 复用寄存器清成 null，导致比较结果为假 / echo 丢实参。
+    fn emitPreGcCleanup(self: *Self, writer: anytype, inst: *const IR.Instruction, skip_reg: ?IR.Register) !void {
+        const liveness = self.current_liveness orelse return;
+        const func = self.current_function_for_resolve orelse return;
+        var bidx: usize = 0;
+        var iidx: usize = 0;
+        var found = false;
+        outer: for (func.blocks.items, 0..) |blk, b_ix| {
+            for (blk.instructions.items, 0..) |in, i_ix| {
+                if (in == inst) {
+                    bidx = b_ix;
+                    iidx = i_ix;
+                    found = true;
+                    break :outer;
+                }
+            }
+        }
+        if (!found) return;
+        try writer.writeAll("    // Pre-GC cleanup: release temporary register references (liveness-filtered)\n");
         if (self.current_cleanup_regs) |regs| {
             for (regs) |reg_id| {
                 if (skip_reg) |sr| {
@@ -20515,6 +20483,9 @@ pub const NativeLinker = struct {
                 if (self.ref_param_alloca_map) |map| {
                     if (map.get(reg_id)) |_| continue;
                 }
+                // 此点之后仍活跃（含块出口）⇒ 不得释放
+                if (liveness.isLiveAfter(bidx, iidx, reg_id)) continue;
+                if (liveness.isLiveAtBlockExit(bidx, reg_id)) continue;
                 if (!self.shouldReleaseReg(reg_id)) continue;
                 try writer.print("    if (!reg_{d}.isNull()) {{ reg_{d}.release(runtime.runtime_allocator); reg_{d} = runtime.Value.initNull(); }}\n", .{ reg_id, reg_id, reg_id });
             }
@@ -22931,9 +22902,12 @@ pub const NativeLinker = struct {
                 }
             },
             .call => |op| {
-                // GC 收集前：释放临时寄存器持有的引用，避免 ref_count 膨胀阻止循环检测
+                // GC 收集前：只释放“**此 GC 调用点之后已死**”的临时寄存器引用，避免 ref_count 膨胀
+                //   阻止循环检测。★F-194/F-197（R-285）：旧实现无 liveness 依据，会把同一表达式的活
+                //   操作数（`PHP_INT_MAX > gc_collect_cycles()` 的 PHP_INT_MAX 寄存器）与后续语句
+                //   CSE 复用的常量寄存器一并清空 ⇒ 比较变 false、echo 尾随实参丢失。
                 if (std.mem.eql(u8, op.func_name, "php_gc_collect_cycles") or std.mem.eql(u8, op.func_name, "gc_collect_cycles")) {
-                    try self.emitPreGcCleanup(writer, inst.result);
+                    try self.emitPreGcCleanup(writer, inst, inst.result);
                 }
                 // @ 错误抑制运算符：直接调用运行时函数
                 if (std.mem.eql(u8, op.func_name, "php_error_suppress_push")) {
@@ -24782,6 +24756,45 @@ pub const NativeLinker = struct {
                 try self.writeRegRef(writer, op.value.id);
                 try writer.writeAll(", runtime.runtime_allocator);\n");
                 try writer.writeAll("        } else if (__arr_deref.isArray()) {\n");
+                // ★F-201（R-288）：局部变量的元素写必须先 COW 再落盘。
+                //   `$a[$k] = v` 的常规 IR 是「load 出临时 → array.set → store 回 alloca」；
+                //   元素写的落盘由尾部 store 完成 ⇒ COW 在 **alloca 层**做（克隆后同步 alloca 与临时）。
+                //   alloca 的 load 不 retain ⇒ 真实共享时 rc>1（读取临时会把阈值抬高，只是多克隆一次，
+                //   语义无害）。引用形参的 alloca 是调用方 cell（写穿语义）不克隆；
+                //   没有尾部 store 的复用临时形状不在此列（F-201-b）。
+                const set_arr_direct_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.array.id) else false;
+                const set_arr_local_load = !set_arr_direct_alloca and self.isLoadedFromLocalAlloca(op.array.id);
+                var cow_alloca: ?usize = null;
+                if (set_arr_direct_alloca) {
+                    if (!self.isRefCarryingAlloca(op.array.id)) cow_alloca = op.array.id;
+                } else if (set_arr_local_load) {
+                    cow_alloca = self.storeBackAllocaAfter(inst, op.array.id);
+                }
+                if (cow_alloca) |ai| {
+                    // 非直接 alloca 形状：操作数是 load 出来的临时，load 恒 retain ⇒ 那份引用也计入
+                    // ref_count。真实共享时 rc ≥ 3（alloca + 写临时 + 另一持有者），故阈值取 `>2`；
+                    // 克隆时先给新值补一份临时引用，再归还 alloca 与临时各自对旧数组的引用
+                    //（顺序：retain 新 → release 旧，防 old==new use-after-free）。
+                    if (set_arr_local_load) {
+                        try writer.print("            if (reg_{d}.*.isArray() and reg_{d}.*.asArray().ref_count > 2) {{\n", .{ ai, ai });
+                        try writer.print("                const __cow_arr = try reg_{d}.*.asArray().cloneShallow(runtime.runtime_allocator);\n", .{ai});
+                        try writer.writeAll("                var __cow_val = runtime.Value.initArray(__cow_arr);\n");
+                        try writer.writeAll("                _ = __cow_val.retain();\n");
+                        try writer.print("                reg_{d}.release(runtime.runtime_allocator);\n", .{op.array.id});
+                        try writer.print("                reg_{d}.*.release(runtime.runtime_allocator);\n", .{ai});
+                        try writer.print("                reg_{d}.* = __cow_val;\n", .{ai});
+                        try writer.print("                reg_{d} = __cow_val;\n", .{op.array.id});
+                        try writer.print("                __arr_deref = reg_{d};\n", .{op.array.id});
+                        try writer.writeAll("            }\n");
+                    } else {
+                        try writer.print("            if (reg_{d}.*.isArray() and reg_{d}.*.asArray().ref_count > 1) {{\n", .{ ai, ai });
+                        try writer.print("                const __cow_arr = try reg_{d}.*.asArray().cloneShallow(runtime.runtime_allocator);\n", .{ai});
+                        try writer.print("                reg_{d}.*.release(runtime.runtime_allocator);\n", .{ai});
+                        try writer.print("                reg_{d}.* = runtime.Value.initArray(__cow_arr);\n", .{ai});
+                        try writer.print("                __arr_deref = reg_{d}.*;\n", .{ai});
+                        try writer.writeAll("            }\n");
+                    }
+                }
                 try writer.writeAll("            try __arr_deref.asArray().setByValue(runtime.runtime_allocator, ");
                 try self.writeRegRef(writer, op.key.id);
                 try writer.writeAll(", ");
@@ -24838,6 +24851,13 @@ pub const NativeLinker = struct {
             .array_ensure => |op| {
                 // 确保数组元素存在（auto-vivification），返回子数组
                 if (inst.result) |reg| {
+                    // ★F-201-b（R-289）：嵌套写 `$a[$k][$k2] = v` 的 IR 是
+                    //   `load $a → array.ensure[$k] → array.set`（没有回写 store）⇒ 两处 COW：
+                    //   ① 外层来自局部 alloca 且被共享（alloca + 写临时 + 另一持有者 ⇒ rc>2）⇒
+                    //      克隆并写回 alloca（临时同步到克隆，引用账目同 F-201）；
+                    //   ② 已存在的子数组仍与副本共享（克隆外层后 rc>1）⇒ 克隆并写回**已独占**的外层，
+                    //      返回的借用指向克隆。外层未克隆（非局部 / 引用载体）时不做 ②，避免改到共享外层。
+                    const ensure_local_alloca = self.loadSourceAlloca(op.array.id);
                     try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
                     try writer.writeAll(
                         \\    {
@@ -24847,6 +24867,20 @@ pub const NativeLinker = struct {
                     try writer.writeAll(
                         \\;
                         \\        while (__ensure_val.isRef()) __ensure_val = __ensure_val.asRef().*;
+                    );
+                    if (ensure_local_alloca) |ai| {
+                        try writer.print("        if (reg_{d}.*.isArray() and reg_{d}.*.asArray().ref_count > 2) {{\n", .{ ai, ai });
+                        try writer.print("            const __cow_outer = try reg_{d}.*.asArray().cloneShallow(runtime.runtime_allocator);\n", .{ai});
+                        try writer.writeAll("            var __cow_outer_val = runtime.Value.initArray(__cow_outer);\n");
+                        try writer.writeAll("            _ = __cow_outer_val.retain();\n");
+                        try writer.print("            reg_{d}.release(runtime.runtime_allocator);\n", .{op.array.id});
+                        try writer.print("            reg_{d}.*.release(runtime.runtime_allocator);\n", .{ai});
+                        try writer.print("            reg_{d}.* = __cow_outer_val;\n", .{ai});
+                        try writer.print("            reg_{d} = __cow_outer_val;\n", .{op.array.id});
+                        try writer.writeAll("            __ensure_val = __cow_outer_val;\n");
+                        try writer.writeAll("        }\n");
+                    }
+                    try writer.writeAll(
                         \\        if (!__ensure_val.isArray()) {
                         \\            runtime.emitWarning("Trying to access array offset on null");
                         \\            reg_
@@ -24870,6 +24904,23 @@ pub const NativeLinker = struct {
                     try writer.writeAll(
                         \\, new_val);
                         \\                elem = new_val;
+                    );
+                    // ② 子数组分离：外层**独占**（`arr.ref_count <= 2`——含写临时那份；三层嵌套时
+                    //    外层可能是上一层的克隆，编译期不可判定，故用运行期判据）才允许把子克隆写回，
+                    //    否则会改到共享外层（宁可不修也不能扩大破坏面）。
+                    try writer.writeAll(
+                        \\            } else if (arr.ref_count <= 2 and elem.?.isArray() and elem.?.asArray().ref_count > 2) {
+                        \\                const __cow_child = try elem.?.asArray().cloneShallow(runtime.runtime_allocator);
+                        \\                const __cow_child_val = runtime.Value.initArray(__cow_child);
+                        \\                try arr.setByValue(runtime.runtime_allocator, reg_
+                    );
+                    try writer.print("{d}", .{op.key.id});
+                    try writer.writeAll(
+                        \\, __cow_child_val);
+                        \\                elem.?.release(runtime.runtime_allocator);
+                        \\                elem = __cow_child_val;
+                    );
+                    try writer.writeAll(
                         \\            }
                         \\            reg_
                     );
@@ -24912,8 +24963,14 @@ pub const NativeLinker = struct {
                         try writer.print("        try reg_{d}.*.asArray().{s}(runtime.runtime_allocator, reg_{d});\n", .{ op.array.id, push_method, op.value.id });
                     }
                 } else {
-                    // AOT-COW-001: 数组 push 前检查 COW（ref_count > 1 时克隆）
-                    try writer.print("        if (reg_{d}.isArray() and reg_{d}.asArray().ref_count > 1) {{\n", .{ op.array.id, op.array.id });
+                    // AOT-COW-001: 数组 push 前检查 COW。
+                    // ★F-195（R-284）：非 alloca 分支的数组值来自 `getGlobalVar`/属性读等**已 retain**
+                    //   的读取 ⇒ ref_count 里恒有 1 份是本次读取的临时引用。旧写 `> 1` 把它当成
+                    //   “被其它变量共享” ⇒ `$keep[] = ...` 每轮都整表 cloneShallow（O(N²) 垃圾克隆，
+                    //   并把子数组 rc 抬到 O(N)；GC 回收这些克隆时与活子数组的计数纠缠 ⇒ N≥255 SIGSEGV）。
+                    //   真实共享时 rc ≥ 3（持有者 + 读取临时 + 另 1 持有者）⇒ 阈值取 `> 2`。
+                    //   alloca 分支的 load 不 retain，语义不变，仍用 `> 1`。
+                    try writer.print("        if (reg_{d}.isArray() and reg_{d}.asArray().ref_count > 2) {{\n", .{ op.array.id, op.array.id });
                     try writer.print("            const __cow_arr = try reg_{d}.asArray().cloneShallow(runtime.runtime_allocator);\n", .{op.array.id});
                     try writer.print("            reg_{d}.release(runtime.runtime_allocator);\n", .{op.array.id});
                     try writer.print("            reg_{d} = runtime.Value.initArray(__cow_arr);\n", .{op.array.id});
