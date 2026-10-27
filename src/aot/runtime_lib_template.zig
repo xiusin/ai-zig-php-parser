@@ -13437,7 +13437,9 @@ pub fn php_string_offset_set(str_val: *Value, index_val: Value, char_val: Value,
     const val_str = try char_val.toString(allocator);
     defer val_str.release(allocator);
     if (val_str.length == 0) {
-        _ = try throwThrowable("Error", "Cannot assign an empty string to a string offset", allocator);
+        // ★F-204 同族：本函数是 void 返回，无错误通道 ⇒ 必须用 Discard 变体归还异常值，
+        //   直接 `_ = try throwThrowable(...)` 会把 setException 之外的这份引用丢掉（每次抛出漏一个异常图）。
+        try throwThrowableDiscard("Error", "Cannot assign an empty string to a string offset", allocator);
         return;
     }
     if (val_str.length > 1) {

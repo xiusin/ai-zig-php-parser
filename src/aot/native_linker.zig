@@ -1476,7 +1476,44 @@ pub const NativeLinker = struct {
     /// 关键：赋值后必须 retain result，确保 result 拥有独立的引用计数。
     /// 否则当 incoming 寄存器在 cleanup 中被 release 时，对象会被释放，
     /// 导致 result（如返回值）变成悬空指针（use-after-free）。
+    /// ★调用方若已自行 retain incoming（如 generatePhiAssignmentsParallel），
+    ///   必须改调 writePtrAwareAssignBare：否则同一份引用会被记两次，每个 PHI 拷贝净 +1（F-204）。
     fn writePtrAwareAssign(self: *Self, writer: anytype, indent: []const u8, result_id: usize, value_id: usize) !void {
+        const result_is_alloca = self.isAllocaReg(result_id);
+        const result_is_ref_ptr = if (self.current_ref_ptr_regs) |rpr| rpr.contains(result_id) else false;
+        const value_is_ref_ptr = if (self.current_ref_ptr_regs) |rpr| rpr.contains(value_id) else false;
+        const result_is_ref_param_alloca = self.isRefParamAlloca(result_id);
+
+        if (!result_is_alloca and !result_is_ref_ptr) {
+            // ★F-205（R-293）：普通 value 结果寄存器是**拥有者**，覆盖前必须归还旧值。
+            //   旧写法只「赋值 + retain 结果」⇒ 循环体里每轮丢一个旧值（字符串/容器驻留 O(n)~O(n²)）。
+            //   顺序与 generatePhiAssignmentsParallel 一致：先 retain 新（防 self-loop），再 release 旧，再赋值。
+            if (self.isPointerReg(value_id)) {
+                try writer.print("{s}_ = reg_{d}.*.retain();\n", .{ indent, value_id });
+            } else {
+                try writer.print("{s}_ = reg_{d}.retain();\n", .{ indent, value_id });
+            }
+            try writer.print("{s}reg_{d}.release(runtime.runtime_allocator);\n", .{ indent, result_id });
+            try self.writePtrAwareAssignBare(writer, indent, result_id, value_id);
+            return;
+        }
+
+        try self.writePtrAwareAssignBare(writer, indent, result_id, value_id);
+
+        if (result_is_ref_ptr) {
+            // ref_ptr 不拥有值，无需 retain
+        } else if (result_is_alloca and value_is_ref_ptr and !result_is_ref_param_alloca) {
+            // 普通 alloca ← ref_ptr：指针重定向（不拷贝值，无需 retain）
+        } else if (result_is_alloca) {
+            try writer.print("{s}_ = reg_{d}.*.retain();\n", .{ indent, result_id });
+        } else {
+            try writer.print("{s}_ = reg_{d}.retain();\n", .{ indent, result_id });
+        }
+    }
+
+    /// 仅做 PHI 解引用形态的赋值，**不**调整引用计数。
+    /// 供已经自行 retain incoming / release 旧 result 的调用方（并行 PHI 拷贝）复用。
+    fn writePtrAwareAssignBare(self: *Self, writer: anytype, indent: []const u8, result_id: usize, value_id: usize) !void {
         const result_is_alloca = self.isAllocaReg(result_id);
         const value_is_alloca = self.isAllocaReg(value_id);
         const result_is_ref_ptr = if (self.current_ref_ptr_regs) |rpr| rpr.contains(result_id) else false;
@@ -1486,49 +1523,55 @@ pub const NativeLinker = struct {
         if (result_is_alloca and value_is_alloca) {
             // alloca ← alloca: 拷贝值
             try writer.print("{s}reg_{d}.* = reg_{d}.*;\n", .{ indent, result_id, value_id });
-            try writer.print("{s}_ = reg_{d}.*.retain();\n", .{ indent, result_id });
         } else if (result_is_alloca and value_is_ref_ptr) {
             // alloca ← ref_ptr: 区分引用参数 alloca 与普通 alloca
             if (result_is_ref_param_alloca) {
-                // 引用参数 alloca: reg 为 **Value，storage 为 *Value，写入槽位
                 try writer.print("{s}reg_{d}.* = reg_{d};\n", .{ indent, result_id, value_id });
-                try writer.print("{s}_ = reg_{d}.*.retain();\n", .{ indent, result_id });
             } else {
-                // 普通 alloca: 指针重定向（不拷贝值，无需 retain）
                 try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, result_id, value_id });
             }
         } else if (result_is_alloca) {
             // alloca ← value: 写入内存
             try writer.print("{s}reg_{d}.* = reg_{d};\n", .{ indent, result_id, value_id });
-            try writer.print("{s}_ = reg_{d}.*.retain();\n", .{ indent, result_id });
         } else if (value_is_alloca) {
             // value ← alloca: 读出内存
             try writer.print("{s}reg_{d} = reg_{d}.*;\n", .{ indent, result_id, value_id });
-            try writer.print("{s}_ = reg_{d}.retain();\n", .{ indent, result_id });
         } else if (result_is_ref_ptr and value_is_ref_ptr) {
-            // ptr ← ptr: 指针拷贝（ref_ptr 不拥有值，无需 retain）
+            // ptr ← ptr: 指针拷贝
             try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, result_id, value_id });
         } else if (result_is_ref_ptr) {
-            // ref_ptr ← value: 解引用赋值（ref_ptr 是 *Value，需写入 .* ）
-            // ref_ptr 不拥有值，无需 retain
+            // ref_ptr ← value: 解引用赋值
             try writer.print("{s}reg_{d}.* = reg_{d};\n", .{ indent, result_id, value_id });
         } else if (value_is_ref_ptr) {
             // value ← ref_ptr: 读取指针指向的值
             try writer.print("{s}reg_{d} = reg_{d}.*;\n", .{ indent, result_id, value_id });
-            try writer.print("{s}_ = reg_{d}.retain();\n", .{ indent, result_id });
         } else {
             // value ← value: 普通赋值
             try writer.print("{s}reg_{d} = reg_{d};\n", .{ indent, result_id, value_id });
-            try writer.print("{s}_ = reg_{d}.retain();\n", .{ indent, result_id });
         }
     }
 
     /// PHI 赋值 + retain：处理指针类型（alloca/ref_ptr）的解引用
     /// 用于 generateLoopBodyFromBlock 中的 PHI 赋值路径
+    /// ★F-205（R-293）：旧写法「赋值 → 结果 retain」既不释放目标旧值、又把结果 retain 两次
+    ///   ⇒ 循环体里每轮丢一个旧值（字符串/容器 O(n)~O(n²) 驻留）。改成与 generatePhiAssignmentsParallel
+    ///   相同的账目：先 retain 新值（防 self-loop），再 release 目标旧值，最后裸赋值。
     fn writePhiAssignWithRetain(self: *Self, writer: anytype, phi_res_id: usize, incoming_value_id: usize) !void {
-        try self.writePtrAwareAssign(writer, "", phi_res_id, incoming_value_id);
-        const phi_deref = if (self.isPointerReg(phi_res_id)) ".*" else "";
-        try writer.print("_ = reg_{d}{s}.retain();\n", .{ phi_res_id, phi_deref });
+        const result_is_alloca = self.isAllocaReg(phi_res_id);
+        const result_is_ref_ptr = if (self.current_ref_ptr_regs) |rpr| rpr.contains(phi_res_id) else false;
+        if (!result_is_ref_ptr) {
+            if (self.isPointerReg(incoming_value_id)) {
+                try writer.print("_ = reg_{d}.*.retain();\n", .{incoming_value_id});
+            } else {
+                try writer.print("_ = reg_{d}.retain();\n", .{incoming_value_id});
+            }
+            if (result_is_alloca) {
+                try writer.print("reg_{d}.*.release(runtime.runtime_allocator);\n", .{phi_res_id});
+            } else {
+                try writer.print("reg_{d}.release(runtime.runtime_allocator);\n", .{phi_res_id});
+            }
+        }
+        try self.writePtrAwareAssignBare(writer, "", phi_res_id, incoming_value_id);
     }
 
     /// 写入转义后的 Zig 字符串字面量内容（处理反斜杠等特殊字符）
@@ -8183,20 +8226,37 @@ pub const NativeLinker = struct {
 
             // 检查是否是 for 循环
             if (std.mem.startsWith(u8, label, "for_cond_")) {
-                i = try self.generateForFromLabels(writer, func, i, end_idx, cleanup_regs, processed, loop_label_counter, indent);
+                const loop_head_idx_for = i;
+                const next_i_for = try self.generateForFromLabels(writer, func, i, end_idx, cleanup_regs, processed, loop_label_counter, indent);
+                // ★F-206-c（R-297）：for 生成器返回**出口块**索引。出口若落在本循环头之前
+                //   （内层 for 的出口就是外层 while 的 cond，index 更小），直接 `i = next`
+                //   会让行走器回退并重新 dispatch 外层 while ⇒ 生成 `__while_N` 复制体
+                //   （入口重置循环携带变量，a8 的 $c 丢失）。出口不前进 ⇒ 本臂行走到此结束，
+                //   循环之后的块由外层生成器收尾。
+                if (next_i_for <= loop_head_idx_for) {
+                    // 循环头由本臂负责登记（while/for 生成器只标 body/exit）
+                    try processed.put(loop_head_idx_for, {});
+                    break;
+                }
+                try processed.put(loop_head_idx_for, {});
+                i = next_i_for;
                 continue;
             }
 
             // 检查是否是 while 循环
             if (std.mem.startsWith(u8, label, "while_cond_")) {
+                const loop_head_idx_w = i;
                 i = try self.generateWhileFromLabels(writer, func, i, end_idx, cleanup_regs, processed, loop_label_counter, indent);
+                try processed.put(loop_head_idx_w, {});
                 continue;
             }
 
             // while_body_ 作为 while(true) 循环入口（无 while_cond_ 块）
             // IR 生成器在 while(true) 时可能省略 while_cond_，直接用 while_body_ 作为入口
             if (std.mem.startsWith(u8, label, "while_body_")) {
+                const loop_head_idx_wb = i;
                 i = try self.generateWhileFromLabels(writer, func, i, end_idx, cleanup_regs, processed, loop_label_counter, indent);
+                try processed.put(loop_head_idx_wb, {});
                 continue;
             }
 
@@ -13967,6 +14027,125 @@ pub const NativeLinker = struct {
         }
     }
 
+    /// F-206-d：then 臂内嵌套 if 的 then 边直达本循环回边（`if (c) continue;`），
+    /// else 边沿单后继 br 链折返 latch。通用回退把 nested_end 取成回边目标索引 + 1
+    /// （小于 nested_start）⇒ 行走范围为空，嵌套 if 与 else 链（如 `$c += 100`）
+    /// 整段被吞。此处按链式形态完整发射：
+    ///   if (c) { <回边 PHI>; continue :label; }
+    ///   <else 链指令 + 逐边 PHI> <latch PHI> <latch 增量> <cond PHI> continue
+    /// 先 dry-run 校验形态，返回 false 时不落任何发射，调用方回退通用处理。
+    fn generateNestedContinueChain(
+        self: *Self,
+        writer: anytype,
+        func: *const IR.Function,
+        then_blk: *const IR.BasicBlock,
+        cond_idx: usize,
+        loop_idx: usize,
+        else_start_idx: usize,
+        label_name: []const u8,
+        processed: *std.AutoHashMap(usize, void),
+        indent: []const u8,
+    ) !bool {
+        const nested_cb = switch (then_blk.terminator orelse return false) {
+            .cond_br => |cb| cb,
+            else => return false,
+        };
+        if (loop_idx == cond_idx) return false;
+        const cond_ptr = func.blocks.items[cond_idx];
+        const loop_ptr = func.blocks.items[loop_idx];
+
+        // dry-run：else 侧必须是纯 .br 单后继链，止于 latch。IR 块序与源码序
+        // 不必一致（if_merge_ 常排在分支体之前），因此不能只认前向边，
+        // 用链内去重防环（重复访问即放弃）。
+        var chain: [24]usize = undefined;
+        var n: usize = 0;
+        var cur = else_start_idx;
+        while (true) {
+            if (cur >= func.blocks.items.len or n >= chain.len) return false;
+            if (processed.contains(cur)) return false;
+            for (chain[0..n]) |seen| {
+                if (seen == cur) return false;
+            }
+            const blk = func.blocks.items[cur];
+            if (Self.loopHeadKind(blk.label) != .none) return false;
+            chain[n] = cur;
+            n += 1;
+            const tgt = switch (blk.terminator orelse return false) {
+                .br => |t| t,
+                else => return false,
+            };
+            if (tgt == loop_ptr) break;
+            if (tgt == cond_ptr) return false;
+            var tgt_idx: ?usize = null;
+            for (0..func.blocks.items.len) |bi_c| {
+                if (func.blocks.items[bi_c] == tgt) {
+                    tgt_idx = bi_c;
+                    break;
+                }
+            }
+            cur = tgt_idx orelse return false;
+        }
+
+        try writer.print("{s}if (", .{indent});
+        try self.writeConditionExpr(writer, nested_cb.cond.id, nested_cb.cond.type_);
+        try writer.print(") {{\n", .{});
+        const inner_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{indent});
+        defer self.allocator.free(inner_indent);
+        // then 边目标是 latch（增量在其内），必须走完整尾段而非裸 continue；
+        // PHI 来源块是持有 cond_br 的块（then_blk），不是目标 latch 本身。
+        try self.emitForLatchContinue(writer, func, cond_idx, loop_idx, then_blk, label_name, inner_indent);
+        try writer.print("{s}}}\n", .{indent});
+
+        for (chain[0..n], 0..) |ci, k| {
+            const blk = func.blocks.items[ci];
+            try processed.put(ci, {});
+            for (blk.instructions.items) |inst| {
+                if (inst.op == .phi) continue;
+                try writer.writeAll(indent);
+                try self.generateInstructionSimple(writer.list, inst);
+            }
+            if (k + 1 < n) {
+                try self.materializeEdgePhi(writer, func.blocks.items[chain[k + 1]], blk, indent);
+            }
+        }
+        try self.emitForLatchContinue(writer, func, cond_idx, loop_idx, func.blocks.items[chain[n - 1]], label_name, indent);
+        try processed.put(loop_idx, {});
+        self.break_generated = true;
+        return true;
+    }
+
+    /// 从 from_blk 经 latch 回边：latch PHI → 增量 → cond PHI → continue
+    fn emitForLatchContinue(
+        self: *Self,
+        writer: anytype,
+        func: *const IR.Function,
+        cond_idx: usize,
+        loop_idx: usize,
+        from_blk: *const IR.BasicBlock,
+        label_name: []const u8,
+        indent: []const u8,
+    ) !void {
+        const loop_blk = func.blocks.items[loop_idx];
+        try self.materializeEdgePhi(writer, loop_blk, from_blk, indent);
+        for (loop_blk.instructions.items) |inst| {
+            if (inst.op == .phi) continue;
+            try writer.writeAll(indent);
+            try self.generateInstructionSimple(writer.list, inst);
+        }
+        const cond_blk = func.blocks.items[cond_idx];
+        for (cond_blk.instructions.items) |phi_inst| {
+            if (phi_inst.op != .phi) continue;
+            const result = phi_inst.result orelse continue;
+            for (phi_inst.op.phi.incoming) |incoming| {
+                if (incoming.block == loop_blk or std.mem.eql(u8, incoming.block.label, loop_blk.label)) {
+                    try self.writePtrAwareAssign(writer, indent, result.id, incoming.value.id);
+                    break;
+                }
+            }
+        }
+        try writer.print("{s}continue :{s};\n", .{ indent, label_name });
+    }
+
     /// for 的 IR 块结构：
     ///   for_cond_N  - 条件检查
     ///   for_body_N+1 - 循环体
@@ -14597,7 +14776,22 @@ pub const NativeLinker = struct {
                                         // { <rhs 指令>; M←rhs 边 }，M 自身消费者交单块范围行走。
                                         const fe_is_or_sc = std.mem.startsWith(u8, nested_cb.then_block.label, "logical_merge_") and
                                             std.mem.startsWith(u8, nested_cb.else_block.label, "logical_rhs_");
-                                        if (fe_is_or_sc) {
+                                        // F-206-d：嵌套 if 的 then 边是回边 + else 边折返 latch。
+                                        // 旧通用回退把 nested_end 取成回边目标索引 + 1（< nested_start）
+                                        // ⇒ 行走范围为空，嵌套 if 与 else 链（如 `$c += 100`）整段被吞。
+                                        const nested_then_is_be = blk: {
+                                            if (nested_ti) |nti_be| {
+                                                break :blk isLoopBE(func.blocks.items[nti_be], cond_block_ptr, loop_block_ptr);
+                                            }
+                                            break :blk false;
+                                        };
+                                        const nested_chain_done = if (nested_then_is_be and nested_ei != null)
+                                            try self.generateNestedContinueChain(writer, func, then_blk, cond_idx, loop_idx, nested_ei.?, label_name, processed, then_indent)
+                                        else
+                                            false;
+                                        if (nested_chain_done) {
+                                            // 嵌套 if 与回边链已完整发射（含 latch 增量与 continue）
+                                        } else if (fe_is_or_sc) {
                                             try writer.print("{s}if (", .{then_indent});
                                             try self.writeConditionExpr(writer, nested_cb.cond.id, nested_cb.cond.type_);
                                             try writer.print(") {{\n", .{});
@@ -14893,6 +15087,35 @@ pub const NativeLinker = struct {
                                         }
                                     }
                                 }
+                            }
+                            // ★F-206（R-295）：回边块的**非 PHI 指令（增量）**与目标 cond 块的 PHI 必须在本臂内
+                            // 完整发射。旧实现只物化回边块 PHI：当 else 臂已把 latch 内联（如内层循环的
+                            // br → for_loop_3 被 generateBrToMergeCondBr 处理）时，then 路径落到 if 之后会
+                            // 跳过增量 ⇒ `$i` 不前进、死循环（b4 n=1 即挂）；值面表现为 `$s` 丢失。
+                            for (be_blk.instructions.items) |inst_be| {
+                                if (inst_be.op == .phi) continue;
+                                try writer.writeAll(then_indent);
+                                try self.generateInstructionSimple(writer.list, inst_be);
+                            }
+                            if (be_blk.terminator) |be_term| {
+                                if (be_term == .br) {
+                                    const cond_blk_be = be_term.br;
+                                    for (cond_blk_be.instructions.items) |phi_inst_ce| {
+                                        if (phi_inst_ce.op != .phi) continue;
+                                        const result_ce = phi_inst_ce.result orelse continue;
+                                        for (phi_inst_ce.op.phi.incoming) |inc_ce| {
+                                            if (inc_ce.block == be_blk or
+                                                std.mem.eql(u8, inc_ce.block.label, be_blk.label))
+                                            {
+                                                try self.writePtrAwareAssign(writer, then_indent, result_ce.id, inc_ce.value.id);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if (self.current_loop_label) |lbl_be| {
+                                try writer.print("{s}continue :{s};\n", .{ then_indent, lbl_be });
                             }
                         }
                         if (else_bi) |ei| {
@@ -15541,6 +15764,17 @@ pub const NativeLinker = struct {
                     }
                     if (!self.return_generated and !self.break_generated) {
                         try self.generateLabelDrivenBlockRange(writer, func, body_idx + 1, last_back_edge + 1, cleanup_regs, processed, loop_label_counter, body_indent);
+                        // F-206-d：尾段行走止于回边前驱（last_back_edge）时，该前驱
+                        // br→latch 的 PHI 边从未物化（latch 的 phi 只打占位注释）⇒
+                        // 跨迭代寄存器保持 null。按该前驱精确物化 latch PHIs。
+                        if (!self.return_generated and !self.break_generated and last_back_edge != loop_idx and last_back_edge < func.blocks.items.len) {
+                            const be_tail_fd = func.blocks.items[last_back_edge];
+                            if (be_tail_fd.terminator) |be_tt_fd| {
+                                if (be_tt_fd == .br and be_tt_fd.br == func.blocks.items[loop_idx]) {
+                                    try self.materializeEdgePhi(writer, func.blocks.items[loop_idx], be_tail_fd, body_indent);
+                                }
+                            }
+                        }
                     }
                 },
                 else => {},
@@ -16192,6 +16426,21 @@ pub const NativeLinker = struct {
                                 // then 块指向循环 cond（continue 语义）：直接生成 continue :label
                                 // 而非处理 cond 块的指令/终止符（会重复生成 PHI/cond_br）
                                 // 典型：dijkstra 的 if (isset($visited[$u])) continue;
+                                // ★F-206-c（R-296）：continue 前必须按 body_block 边物化 cond 块的
+                                // 循环携带 PHI（`$i++`/`$c++` 的增量结果），否则该路径读到上一轮值
+                                // ⇒ 条件永不前进、死循环（a8 的 `$i` 停在偶数）。
+                                for (cond_block_ptr.instructions.items) |phi_inst_be1| {
+                                    if (phi_inst_be1.op != .phi) continue;
+                                    const result_be1 = phi_inst_be1.result orelse continue;
+                                    for (phi_inst_be1.op.phi.incoming) |incoming_be1| {
+                                        if (incoming_be1.block == body_block or
+                                            std.mem.eql(u8, incoming_be1.block.label, body_block.label))
+                                        {
+                                            try self.writePtrAwareAssign(writer, then_indent, result_be1.id, incoming_be1.value.id);
+                                            break;
+                                        }
+                                    }
+                                }
                                 try writer.print("{s}    continue :{s};\n", .{ then_indent, label_name });
                         } else if (std.mem.startsWith(u8, func.blocks.items[ti].label, "logical_merge_")) {
                             // || 短路模式：then 块是 logical_merge_
@@ -16309,7 +16558,6 @@ pub const NativeLinker = struct {
                                             try writer.print("{s}    break :{s};\n", .{ then_indent, label_name });
                                             self.break_generated = true;
                                         } else if (br_target == cond_block_ptr) {
-                                            // br 到 cond 块：循环回边，生成 continue
                                             try writer.print("{s}    continue :{s};\n", .{ then_indent, label_name });
                                             self.break_generated = true;
                                         } else if (self.isLoopBreakTarget(func, br_target)) {
@@ -19292,7 +19540,8 @@ pub const NativeLinker = struct {
                         try writer.print("{s}reg_{d}.release(runtime.runtime_allocator);\n", .{ indent, assign.result.id });
                     }
                 }
-                try self.writePtrAwareAssign(writer, indent, assign.result.id, assign.value.id);
+                // 引用计数已在上面配平（retain incoming + release result）⇒ 这里只赋值，禁止再 retain（F-204）
+                try self.writePtrAwareAssignBare(writer, indent, assign.result.id, assign.value.id);
             }
         } else {
             // 有依赖，仅为需要的赋值使用临时变量
@@ -19340,7 +19589,8 @@ pub const NativeLinker = struct {
                         try writer.print("{s}reg_{d} = phi_temp_{d};\n", .{ indent, assign.result.id, i });
                     }
                 } else {
-                    try self.writePtrAwareAssign(writer, indent, assign.result.id, assign.value.id);
+                    // 引用计数已在上面配平 ⇒ 只赋值（F-204）
+                    try self.writePtrAwareAssignBare(writer, indent, assign.result.id, assign.value.id);
                 }
             }
         }
@@ -21002,7 +21252,15 @@ pub const NativeLinker = struct {
                         (m.get(op.value.id) orelse 0) == 1
                     else
                         false;
-                    if (single_store_value and !value_is_alloca and !value_is_ref_param and op.value.id != op.ptr.id and self.regMayHeap(op.value.id)) {
+                    // ★F-207（R-294）：`single_store_value` 只说明「被 store 一次」，不说明值已死——
+                    //   共享常量/临时可能在此 store 之后仍被别的块使用（IR 复用 const 寄存器：`$c=0` 的 0
+                    //   同时是循环初值与 intdiv 除数）。必须叠加块出口活跃性守卫，否则会把仍活的值置 null。
+                    const value_live_at_block_exit = blk: {
+                        const lv_exit = self.current_liveness orelse break :blk false;
+                        const bi_exit = self.current_gen_block_idx orelse break :blk false;
+                        break :blk lv_exit.isLiveAtBlockExit(bi_exit, op.value.id);
+                    };
+                    if (single_store_value and !value_live_at_block_exit and !value_is_alloca and !value_is_ref_param and op.value.id != op.ptr.id and self.regMayHeap(op.value.id)) {
                         try writer.print("    if (!reg_{d}.isNull()) {{ reg_{d}.release(runtime.runtime_allocator); reg_{d} = runtime.Value.initNull(); }}\n", .{ op.value.id, op.value.id, op.value.id });
                     }
                 } // end of optimized_alloca else

@@ -10796,14 +10796,211 @@ mem2reg 把 `$b = $a` 提升：`$b` 没有 alloca（home 槽），IR 里只剩�
 
 ### 200.4 读数
 
-<!-- R292_READINGS -->
+| 腿 | 读数 |
+|---|---|
+| C336（新门 18 臂＝a1–a16 语义 + s1/s2 泄漏） | **17/18 SAME**（92 s）：a1–a16 与 s1 全绿；a1/a2 局部与全局落盘、a3/a4 追加与补空格、a5/a6 负偏移、a7/a11/a12 空串 `Error`、a8/a9 标量首字节、a10 多字节告警、a14 数字串偏移、a15/a16 引用形参/实参写穿；s1 `LEAKFLAT lb=18300/18300 la=100/100`；s2 当时红＝F-204（**R-293 后转绿，C336 18/18**）；自证 `AOT_BIN=/bin/false` **18 CF** |
+| 邻居（同一最终二进制） | C328 **6/6**、C329 **4/8**（a1/a2/a3/a5＝F-191 既有红，零转移）、C330 **5/5**、C331 **7/7**、C332 **13/13**、C333 **7/7**、C334 **8/8**、C335 **14/14** |
+| `zig build test` | **21/21 steps、326/326**（`/tmp/r292_buildtest.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r292_regression.log`，`SELF_CHECK_OK rows=68 uniq=68 total=68`） |
+
+★归因留痕：C336 的 s2 与 `intdiv(1,0)` 最小复现在 **HEAD `b15d135`** 与 R-292 代次上读数**逐字节相同**（`16108→48110`、`1030712→3061680`），故 F-204 与本批无关；`$s[0]=$v` 普通分支的所有权转移在抛出路径上本来就成立（`A/B` 撤掉"异常归还"后读数完全相同）⇒ 该保险**未入库**，保持最小 diff。
 
 ### 200.5 代次锚
 
-`nlk 436db4fc07ccae00023cd631238f5bb5`；`tpl 407c44d5f7ce5869d89a9d4fea299068`；`opti 553a2e540da638f3766911b1f0941dd1`；`irg 0b7106338d5ffe1342caee961734b8d8`／`ir fb2bb442ca27b98cf1df7e109a240e1f` 未变（均未提交；HEAD `b15d135`）。
+`nlk 436db4fc07ccae00023cd631238f5bb5`；`tpl 407c44d5f7ce5869d89a9d4fea299068`；`opti 553a2e540da638f3766911b1f0941dd1`；`irg 0b7106338d5ffe1342caee961734b8d8`／`ir fb2bb442ca27b98cf1df7e109a240e1f` 未变。★三枚源已随提交 `01e8c61`（外部提交，内容与本轮验收代次逐字节一致）入库；§200.4 的读数即在该提交内容上取得；本文档与门资产未提交。
 
 ### 200.6 边界与残余
 
-- **F-204（P1，新立，既存）**：helper（`throwThrowable` 路径，如 `intdiv(1,0)`）抛出的异常在循环内被 `catch` 时，**每次抛出泄漏约 8 次分配／510 B**（`intdiv(1,0)` 基线 N=2000/6000：`live_allocs 16108→48110`、`live_bytes 1030712→3061680`；HEAD `b15d135` 与 R-292 代次读数**完全一致**）。同函数内 `throw new RuntimeException` 内联抛出**不泄漏**（4000 轮 +288 allocs ≈ 0.07/轮）⇒ 缺口在「helper 抛出 → 调用点路由 → catch」这条链，不在 catch 机器本身。C336 `s2` 作为常驻复现器**保留为已知红**（非本门判据）。
-- **残余（未覆盖，待立）**：`$r = &$s; $r[0]="x"`（源变量未绑定到引用单元，属于 F-199 族）、`$a["s"][0]="x"`（嵌套字符串写，`.array_ensure` 无字符串分支）、`$o->s[0]="x"`（属性载体未实测）、`$s[0] .= "x"`（复合赋值未实测）。
+- **F-204（P1，新立，既存）**：helper（`throwThrowable` 路径，如 `intdiv(1,0)`）抛出的异常在循环内被 `catch` 时，**每次抛出泄漏约 8 次分配／510 B**（`intdiv(1,0)` 基线 N=2000/6000：`live_allocs 16108→48110`、`live_bytes 1030712→3061680`；HEAD `b15d135` 与 R-292 代次读数**完全一致**）。同函数内 `throw new RuntimeException` 内联抛出**不泄漏**（4000 轮 +288 allocs ≈ 0.07/轮）⇒ 缺口在「helper 抛出 → 调用点路由 → catch」这条链，不在 catch 机器本身。C336 `s2` 曾作为常驻复现器保留为已知红（非本门判据）；**已由 R-293 关闭（见 §201），s2 现已转绿、C336 18/18**。
+- **残余（未覆盖，待立）**：`$r = &$s; $r[0]="x"` ⇒ AOT `s=ab r=xb`（PHP 两枚皆 `xb`）。★精确定性：**引用绑定本身没问题**——`$s="zz"` 后 `$r` 同步、`$r="zz"` 后 `$s` 同步（r10/r11 均 SAME）；缺口在**元素写**：`.array_set` 的接收者是「load 出的 Ref 临时」，普通分支把该临时整体替换成普通字符串并尾随 store 回 `$r` 的 alloca ⇒ Ref 被替换、`$s` 不再被写。修法：识别 load 来源为引用载体 alloca（复用 R-288 的 `isLoadedFromLocalAlloca` ＋ `isRefCarryingAlloca`），改写 `runtime.val_deref(&temp)` 写穿。
+- 其余未覆盖：`$a["s"][0]="x"`（嵌套字符串写，`.array_ensure` 无字符串分支）、`$o->s[0]="x"`（属性载体未实测）、`$s[0] .= "x"`（复合赋值未实测）。
 - **PHP 解释器对比口径**：a8/a9 的 Warning 行与 `bin2hex` 结果逐字节一致；`offset` 越界告警打印的是**原值**（含负号）。
+
+## 201. ★R-293 落地记录（F-204 helper 抛出泄漏＋F-205 循环体旧值泄漏，均已闭；新立 F-206／F-207）
+
+### 201.1 缺陷：三套 PHI 所有权账目互不一致
+
+| # | 站点 | 缺陷 |
+|---|---|---|
+| F-204 | `generatePhiAssignmentsParallel`（2 调用点：块状态机的终止边/循环体边） | 已按「retain 新 + release 旧」配平，**随后又调 `writePtrAwareAssign`（其内部再 retain 一次结果）** ⇒ 每个拷贝净 +1。循环内每次 catch 走 4 个拷贝 ⇒ 异常对象图 8 allocs／~510 B 每次抛出（`intdiv(1,0)` 基线 16108→48110 / 1020712→3031680） |
+| F-205 | `writePtrAwareAssign` 的**普通 value 结果**臂（循环体 phi 路径 90+ 调用点） | 只「赋值 + retain 结果」，**不释放目标旧值** ⇒ 循环体每轮丢掉一个旧字符串/容器。`$s=$s."b"` 的 concat 循环 O(n²) 驻留（n=2000/6000：2.1 MB→18.4 MB） |
+| 同族 | `writePhiAssignWithRetain` | 旧写法「赋值 → 结果 retain」再叠一次 retain，同样不释放旧值 ⇒ 一并改成同一账目 |
+| F-204（尾块） | `php_string_offset_set` 空串分支（tpl） | void 函数里 `_ = try throwThrowable(...)` **丢弃返回值、未 release**（`setException` 另持一份）⇒ 每次抛出漏一整个异常对象图。模板里同类丢弃式调用**仅此 1 处**（其余 100+ 抛出站点要么 `return throwThrowable` 交发射器清理、要么走 `throwThrowableDiscard`）；`intdiv` 未漏正是因为它用了 Discard 变体 |
+
+★GC 分类（决定性）：F-205 的字符串驻留**强推 GC 不回收**（s1g 与 s1 字节相同）⇒ 真引用计数泄漏；而异常残余（q1 1769→2025）与对象循环（o1 8105→24105）在强制 `gc_collect_cycles()` 后**完全平坦**（q1g 三档 2000/6000/12000 恒 `106/48620`）⇒ 属 F-191 缓冲平台，不是引用泄漏。
+
+### 201.2 修法（仅 nlk，三处）
+
+- 新增 `writePtrAwareAssignBare`：只做解引用形态赋值（alloca/ref_ptr/value 八种组合），**不动引用计数**。
+- `generatePhiAssignmentsParallel` 两处调用点 → `Bare`（引用计数已由调用方配平）。
+- `writePhiAssignWithRetain` → 显式 `retain 新 → release 旧 → Bare`（与并行拷贝同账目）。
+- `writePtrAwareAssign` 的普通 value 结果臂 → 同样改为 `retain 新 → release 旧 → Bare`；**alloca/ref_ptr 目标保持原语义**（所有权不明面不动）。
+- `php_string_offset_set` 空串分支 → `throwThrowableDiscard`（tpl；唯一丢弃式站点）。
+
+### 201.3 读数
+
+| 腿 | 读数 |
+|---|---|
+| C337（新门 16 臂＝13 语义 + 3 泄漏） | **16/16 SAME**（81 s）：a1 catch 循环、a2 嵌套 rethrow、a3 catch 内 continue、a5 finally+return、a6/a7/a8 三种字符串累加、a9 双串交换、a10 while、a11 do-while、a12 foreach 按值、a13 数组 phi、a14 try/finally 字符串 phi；s1 异常泄漏 FLAT（臂内先 `gc_collect_cycles()`）、s2 自拼接 FLAT、s3 新串赋值 FLAT；自证 `AOT_BIN=/bin/false` **16 CF** |
+| 定向 A/B（同机同参） | q1 live_allocs **16108→48110 变 1769→2025**（0.064/轮；残余经 q1g 三档恒 106 ⇒ F-191）；bytes 3031680→140780；s1 **2105→6107 变 101→101**；s2 **1104→3106 变 101→101**；s3/s4 bytes 4745603→18460；e1 恒 2014/2014；o1 与基线**逐字节相同**（4/轮，GC 可回收） |
+| C336（字符串偏移回归） | **18/18 SAME**（90 s；上批遗留的 s2 红随本轮转绿：s2 臂补 `gc_collect_cycles()` 把判据收敛到引用计数面；`s2g` 独立探针 3000/9000 恒 `110/48793`） |
+| 邻居（同一最终二进制） | C328 **6/6**、C329 **4/8**（a1/a2/a3/a5＝F-191 既有红，零转移）、C330 **5/5**、C331 **7/7**、C332 **13/13**、C333 **7/7**、C334 **8/8**、C335 **14/14**、C336 **18/18** |
+| `zig build test` | **21/21 steps、326/326**（`/tmp/r293_buildtest.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r293_regression.log`，`SELF_CHECK_OK rows=68 uniq=68 total=68`） |
+
+### 201.4 代次锚
+
+`nlk 4878e4d2d599701327b7ba72a07dbc4d`；**`tpl 3408c5bdce84957f0fbf54c3d7574df3`**（Discard 修复）；`opti 553a2e540da638f3766911b1f0941dd1`／`irg 0b7106338d5ffe1342caee961734b8d8`／`ir fb2bb442ca27b98cf1df7e109a240e1f` 均未变。未提交（HEAD `01e8c61`；R-292 三枚源已随该提交入库）。
+
+### 201.5 边界与新立
+
+- **只改普通 value 结果**：alloca 槽与 ref_ptr 指针的所有权约定未动（`isRefParamAlloca` 的 `**Value` 形态保持原样），避免动到未穷举的所有权面。
+- **F-206（P1，新立，既存）**：外层 `if (...) continue;` + 内层循环 ⇒ **死循环**（最小复现 b4：`for($i…){ if($i%3==0) continue; for($j=0;$j<2;$j++){ if($j==1) break; $s=$s."a"; } }`，n=1 即挂）。HEAD `01e8c61` 基线同样复现（此前一条「rc=0」读数是把 `echo "$(…)"` 的 `$?` 当成了 `timeout` 的返回码，已更正）。
+  ★根因（R-294 定位）：`br %13, for_loop_3, if_merge_6` 的 **then 臂直指循环 latch（增量块）**；发射器在 then 臂只物化了 latch 的 PHI（`reg_36/reg_33 ← …`），**增量指令、cond 块 PHI、`continue` 只发在 else 臂的尾部**（latch 被 else 困住）。then 臂落到 if 之后的第二份 latch 拷贝（只有增量、无 PHI/`continue`）⇒ 循环变量 `$i` 在该路径不前进 ⇒ 死循环。同一形的 echo 变体（b4d）能跑完但 **`$s` 丢失**（latched PHI `%33` 未写），是同一缺口的值面。
+  ★失败尝试（已完整回退，代次仍 `nlk 4878e4d2…`）：在 `writeBrInLoopContext` 里加「目标＝latch ⇒ 完整发射增量+PHI+continue」分支——**被 b1 证伪**：原本正确的「单层 continue」形状也挂（该 br 边不经过此函数，补丁在别的边上抢先发射，账目错位）。结论：收口点应在 if 臂发射器（then/else 各自的 latch 边）或改成「两臂都落到 if 后的唯一 latch」；改造时必须同时守 b1–b4 + 原 a15，并跑满邻门。
+  ★R-294 第二段取证（env `ZIGPHP_TRACE_PHI` 临时插桩，已全部移除、代次 md5 复原 `4878e4d2…`）：编译 b1 时四条「按边物化 PHI」入口只出现 `writeBrInLoopContext src=if_merge_6 tgt=for_loop_3`（其中转 `generateBrToMergeCondBr`）＋`generateExitPHIAssignments src=1 exit=4`＋`materializeBrTargetMergePhis src=entry tgt=for_cond_1`；**continue 边 `src=for_body_2 → for_loop_3` 四个入口一个都没见到**，native 循环体的 `merge_bi` 分支也未命中。⇒ then 臂里那句 `reg_22 = reg_23`（latch PHI）由**另一处**发射器产出（疑为臂范围行走器或 phi 状态机）。下一轮先把 `writePtrAwareAssign`/`generatePhiValueAssignment` 按「调用点 id」插桩（或在 Debug 构建里取返回地址）完成归因，再动刀；仍然以 b1–b4 为反证矩阵。
+- **F-207（P2，新立，既存）**：`catch (Throwable $e) { $c++; break; }` ⇒ 跳出后 AOT 再执行一次 `intdiv(1, null)`，多打一条 `Passing null to parameter #2 ($num2)` Deprecated（stdout+stderr 各一条）；PHP 只输出 `c=1`。HEAD 基线同样复现。
+- **C337 判据不含既有红**：a4（F-207）与 a15（F-206）已在门头注明剔除原因；两枚的复现脚本随本条记入工单。
+
+## 202. ★R-294 落地记录（F-207 共享寄存器被 store 回收置空，已闭）
+
+### 202.1 根因（发射器 / 回收判据）
+
+- 触发形：`for(...) { try { intdiv(1,0); } catch (Throwable $e) { $c++; break; } }` ⇒ AOT 在 `c=1` 前多打一条 `intdiv(): Passing null to parameter #2 ($num2)` Deprecated（PHP 只输出 `c=1`）。
+- IR：`%2 = const.i64 0` 被三处共享——`store %2 → $c`、`for_cond_1` 的 `$i` phi incoming、`try_body_5` 的 `intdiv(%9, %2)`。
+- 发射器：store 末尾的 F-139 泄漏回收只判 `single_store_value`（该寄存器「被 store 一次」）＋`regMayHeap` ⇒ release 并 `= initNull()`，把**仍被后续块使用**的共享常量清零。liveness 本身正确（CFG 与 live_out 已用 `ZIGPHP_TRACE_LIVE` 核对：`entry -> [1] -> [3] -> [1]`）。
+- 为什么其他形状没暴露：普通跨块复用的常量通过 alloca `load` 读回，不直接复用 const 寄存器（c1/c2/c3 全绿）；只有 try/循环组合让 IR 直接复用同一 const 寄存器。
+
+### 202.2 修法（仅 nlk，一行判据）
+
+store 尾部回收条件叠加块出口活跃性守卫：`!liveness.isLiveAtBlockExit(current_gen_block_idx, value)`。块出口仍活 ⇒ 不释放、不置空；F-139 的「死临时」形状（`$r = array(...)`）行为不变。
+
+### 202.3 读数
+
+| 腿 | 读数 |
+|---|---|
+| C338（新门 15 臂＝12 语义 + 3 泄漏） | **15/15 SAME**（69 s）：a1 catch+break、a2 catch+continue、a3 try 体内共享常量、a4 if 分支、a5 循环体、a6 字符串常量、a7 catch 体、a8 finally、a9 嵌套 try、a10 switch、a11 while、a12 do-while；s1 F-139 形状（置 null＋GC 前置）FLAT、s2 新串 FLAT、s3 异常循环 FLAT；自证 `AOT_BIN=/bin/false` **15 CF** |
+| 定向 | a4 由「Deprecated×2 + c=1」变**与 PHP 逐字节一致**（`c=1`、双流空）；c1/c2/c3/b1/b2/b3 不受影响 |
+| 邻居（同一最终二进制） | C328 **6/6**、C329 **4/8**（a1/a2/a3/a5＝F-191 既有红，零转移）、C330 **5/5**、C331 **7/7**、C332 **13/13**、C333 **7/7**、C334 **8/8**、C335 **14/14**、C336 **18/18**、C337 **16/16** |
+| `zig build test` | **21/21 steps、326/326**（`/tmp/r294_buildtest.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r294_regression.log`，`SELF_CHECK_OK rows=68 uniq=68 total=68`） |
+
+### 202.4 代次锚
+
+**`nlk 2ca2ea9503f4e347761bbbcc09794acc`**；`tpl 3408c5bdce84957f0fbf54c3d7574df3`／`opti 553a2e540da638f3766911b1f0941dd1`／`irg 0b7106338d5ffe1342caee961734b8d8`／`ir fb2bb442ca27b98cf1df7e109a240e1f` 未变。未提交（HEAD `01e8c61`）。
+
+### 202.5 边界
+
+- 只改「store 内联回收」这一处；`releaseDeadOperands` 的通用 liveness 判据未动。
+- `current_gen_block_idx` 在分支臂内发射时可能是陈旧值 ⇒ 方向性安全：最多少释放（生命周期延长到函数出口），不会误放。
+- F-139 的回归由 C338 s1 常驻守卫（含 GC barrier，只测引用计数面）。
+
+## 203. ★R-295 落地记录（F-206 for 族回边完整发射，已闭；F-206-b/c/d 新立）
+
+### 203.1 根因（发射器 / 回边臂）
+
+- 触发形：外层 `if (...) continue;` + 内层循环（b4）⇒ **n=1 即死循环**；此前已用两段取证排除四条「按边物化 PHI」入口与 `merge_bi` 分支（见 §201.5）。
+- 真站点：`generateForFromLabels` 的 `then_is_be` 分支——then 边是循环回边（`for_loop_3`）时，**只物化回边块的 PHI**（`%22 ← %23`），不发射增量指令、cond 块 PHI 与 `continue`。当 else 臂已把 latch 内联（内层循环的 `br → for_loop_3` 走 `generateBrToMergeCondBr`）时，then 路径落到 if 之后会跳过增量 ⇒ `$i` 不前进。
+- 归因法（可复用）：给 `generateForFromLabels` 区域内的 17 个 `writePtrAwareAssign` 调用点编号（临时 `trace_site` 字段），编译 b1，命中 `result=22` ⇒ **站点 7** 即该分支；插桩随后全部移除（md5 复原后再落修复）。
+
+### 203.2 修法（仅 nlk）
+
+`then_is_be` 分支内补全三步：①回边块的非 PHI 指令（增量）；②回边块 terminator 指向的 cond 块 PHI（只取来自回边块的 incoming）；③`continue :label`。与既有 f113「各边各自内联一份 latch」规则一致；未设置 `break_generated`，避免抑制其他形状 if/else 之后的兜底回边。
+
+### 203.3 读数
+
+| 腿 | 读数 |
+|---|---|
+| C339（新门 13 臂＝10 语义 + 3 泄漏） | **13/13 SAME**（61 s）：a1 b4 形状、a2 chr 累加（原 a15）、a3 嵌套累加、a4 仅外层 continue、a5 仅内层 break、a6 纯嵌套、a7 内层 continue、a9 do-while、a11 双层 break、a12 `i+=2`；s1/s2/s3 泄漏 FLAT；自证 `AOT_BIN=/bin/false` **13 CF** |
+| 定向 | b4 由「n=1 挂起」变**与 PHP 逐字节一致**（n=100 ⇒ 66）；b1/b2/b3/b4d 的控制流全部正常 |
+| 邻居（同一最终二进制） | C328 **6/6**、C329 **4/8**（a1/a2/a3/a5＝F-191 既有红，零转移）、C330 **5/5**、C331 **7/7**、C332 **13/13**、C333 **7/7**、C334 **8/8**、C335 **14/14**、C336 **18/18**、C337 **16/16**、C338 **15/15** |
+| `zig build test` | **21/21 steps、326/326**（`/tmp/r295_buildtest.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r295_regression.log`，`SELF_CHECK_OK rows=68 uniq=68 total=68`） |
+
+### 203.4 代次锚
+
+**`nlk 3c0f50e833f6a97b2edfad4b48137e18`**；`tpl 3408c5bdce84957f0fbf54c3d7574df3`／`opti 553a2e540da638f3766911b1f0941dd1`／`irg 0b7106338d5ffe1342caee961734b8d8`／`ir fb2bb442ca27b98cf1df7e109a240e1f` 未变。未提交（HEAD `01e8c61`）。
+
+### 203.5 新立与边界
+
+- **F-206-b（P1，值面）**：嵌套循环体内带 `echo` 的字符串累加（b4d）⇒ 控制流已正确、`$s` 丢失（LEN=0 vs 2）。同属循环体 merge phi 物化缺口（F-117/F-158 家族，需独立轮）。
+- **F-206-c（P1）**：`while` 外层 `continue` + 内层循环 ⇒ AOT **挂起**；生成码把外层 while 体复制成内层 `__while_2`（第二份 `php_increment` + `continue :__while_2`）。属 `generateWhileFromLabels` 的同族缺口。
+- **F-206-d（P1）**：`if/else` 分支内 `continue` + 内层循环 ⇒ AOT **输出为空**（rc=0）。
+- 本批只改 `generateForFromLabels`；while/if-else 两个发射器未动（a8/a10 已从 C339 剔除并在门头注明）。
+
+## 204. ★R-296 落地记录（F-206-c while 死循环面已闭；新立 F-206-c-b）
+
+### 204.1 根因（while 发射器 / continue 臂）
+
+- 触发形：a8「`while ($i < $n) { $i++; if ($i % 2 == 0) { continue; } for (...) {...} }`」⇒ AOT **挂起**。
+- 真站点：`generateWhileFromLabels` 的 `then_is_back_edge` 快速路（then 块直接是 `while_cond`）只发 `continue :label`，**不物化 cond 块的循环携带 PHI**。`$i++` 的增量结果（`%10`）在 body 块，continue 路径不回写 `%34` ⇒ `$i` 停在偶数、条件恒真 → 死循环。
+- 归因法：给 while 发射器内全部 7 个 `continue :{s}` 发点编号（`ZIGPHP_TRACE_WC`），编译 a8 命中 **WC_SITE=1**（then 快速路）与 5（循环尾）；插桩随后全部移除。
+
+### 204.2 修法（仅 nlk）
+
+站点 1 在 `continue` 前按 **body_block 边**物化 cond 块 PHI（与 R-295 for 族同账目）。只保留这一处；另两处未证的改动（self-cond continue 守卫、循环尾 br→cond 的 phi 块）经 A/B 证明非必需，已回退。
+
+### 204.3 读数
+
+| 腿 | 读数 |
+|---|---|
+| 定向 | a8 由 **rc=124 挂起** 变可终止（`i=12` 与 PHP 一致）；`c=0` vs PHP `6`（**值面残余**，见 §204.5）；b1–b4/a4 全部不受影响 |
+| C339（for 族 13 臂）/ C338（15）/ C337（16）/ C336（18） | **全绿**（62/71/76/83 s） |
+| 邻居 C328–C335 | C328 **6/6**、C329 **4/8**（F-191 既有红，零转移）、C330 **5/5**、C331 **7/7**、C332 **13/13**、C333 **7/7**、C334 **8/8**、C335 **14/14** |
+| `zig build test` | **21/21 steps、326/326**（`/tmp/r296_buildtest.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`/tmp/r296_regression.log`，`SELF_CHECK_OK rows=68 uniq=68 total=68`） |
+
+### 204.4 代次锚
+
+**`nlk 7849cee054f6d6af9abb628d3be6bb66`**；`tpl 3408c5bdce84957f0fbf54c3d7574df3`／`opti 553a2e540da638f3766911b1f0941dd1`／`irg 0b7106338d5ffe1342caee961734b8d8`／`ir fb2bb442ca27b98cf1df7e109a240e1f` 未变。未提交（HEAD `01e8c61`）。
+
+### 204.5 新立与边界
+
+- **F-206-c-b（P1，值面）**：a8 现在可终止但 `$c` 丢失（0 vs 6）。★R-297 追加取证（插桩已移除、代次复原）：
+  ① while 循环尾的 cond PHI 选取「范围内第一个 incoming」，在体内含内层循环时命中 body 块自拷贝（`reg_35=reg_35`、`reg_33=reg_33`）；② 出口 PHI 只拷贝了 `%35 = reg_36`，**没有 `%33 = %32`**；③ 外层 while 体仍被复制成内层 `__while_2`（第二份 `php_increment`，入口 `reg_33 = reg_2` 把 `$c` 重置为 0）。
+  ★失败实验（均已回退，代次 `nlk 7849cee0…` 不变）：
+  (a) 循环尾改「取块序最大的 incoming」⇒ `$c` 仅 0→1（复制体与出口 PHI 未解决）；
+  (b) 在 `writeBrInLoopContext` 加「目标在源块之前 ⇒ continue」守卫 ⇒ a8 不变（该边不经过此函数）；
+  (c) 收窄 if 臂 RC-4 救援（只 dispatch 前向循环头）⇒ a8 不变。
+  ★定位证据（`ZIGPHP_TRACE_WH` + 调用点 tag 包装 `genWhileTagged`，均已移除）：`generateWhileFromLabels(while_cond_0)` 被调用**两次**——第一次 `cur_label_null=true`（顶层），第二次 `cur_label_null=false`（在外层循环体内），**两次 tag 都是 1** ⇒ 都来自 `generateLabelDrivenBlockRange` 主派发（`genWhileTagged(...,1)`，原 8236/8243 两处）。
+  行走范围轨迹：`BWR[0,8)` →（外层 while 生成）→ `BWR[5,8)` → `BWR[7,8)` → **WHCALL(第二次)**；块序 `entry(0) while_cond_0(1) while_body_1(2) while_exit_2(3) if_merge_4(4) for_cond_5(5) for_body_6(6) if_merge_10(7)` ⇒ 第二次调用只能来自 `[7,8)` 行走中 `i` 被改写（Plan B 续走 `range_start = nei; i = nei`，原 9164）回退到 1。
+  ★实验 (d)（已回退）：把该续走改为「只前向（`nei > i`）」——a8 **完全不变**，说明二次 dispatch 不是该条续走、或 `i` 由别的改写点回退。下一轮需对 `generateLabelDrivenBlockRange` 的全部 `i =`／`range_start =` 改写点（含 defer 回跳）逐点插桩，定位真正把 `i` 置回 1 的语句。
+  修法方向：先锁定二次 dispatch 的真正回退语句并阻断（外层循环自身 cond 不应再 dispatch），再补出口 PHI；须以 b1–b4＋a8 反证。
+- **F-206-d 仍在**：`if/else` 分支内 continue + 内层循环 ⇒ 输出为空（本次未动）。
+- 本批只改 while 的 then 快速路；for 族与 if/else 发射器未动。
+
+## 205. ★R-297 落地记录（F-206-c 全闭、F-206-c-b 关闭）
+
+### 205.1 两个根因（walker 回退 + 头块登记）
+
+1. **walker 采用循环出口作续走起点**：`generateLabelDrivenBlockRange` 的 for 派发直接 `i = generateForFromLabels(...)`，而该生成器返回的是**循环出口块索引**。a8 中内层 for 的出口就是外层 `while_cond_0`（索引更小）⇒ walker 回退到 1 并**重新 dispatch 外层 while**，生成 `__while_N` 复制体（第二份增量；入口把携带变量重置为初值，`$c` 归零）。
+2. **外层 while 的 cond 块未登记 processed**：while 生成器只标 body/exit。此前复制体的第二次调用“顺带”标了它；阻断回退后立即暴露为 `[AST-DIRECT-FAIL] unprocessed blocks: 1:while_cond_0`（编译失败）。⇒ 两个缺陷互为掩护。
+
+### 205.2 修法（仅 nlk，walker 三处）
+
+- for 派发：`next_i = try generateForFromLabels(...)`；若 `next_i <= loop_head_idx`（出口不前进）⇒ `processed.put(loop_head)` 后 **break** 结束本臂行走（循环之后的块由外层生成器收尾）；否则登记后 `i = next_i` 继续。
+- `while_cond_` / `while_body_` 派发：调用后 `processed.put(loop_head)`。
+
+### 205.3 读数
+
+| 腿 | 读数 |
+|---|---|
+| a8 定向（while+continue+内层循环，n=12） | **与 PHP 逐字节一致**：`6 i=12`（修前 0 或挂起） |
+| 反证矩阵 | b1–b4、a4 全部不受影响 |
+| C339（14 臂＝a1–a9/a11/a12 + s1–s3；a8 已加回） | **14/14 SAME**（69 s）；自证 `AOT_BIN=/bin/false` **14 CF** |
+| C338 / C337 / C336 | C338 **15/15**（73 s）、C337 **16/16**（80 s）、C336 **18/18**（86 s） |
+| 邻居 C328–C335 | C328 **6/6**、C329 **4/8**（F-191 既有红，零转移）、C330 **5/5**、C331 **7/7**、C332 **13/13**、C333 **7/7**、C334 **8/8**、C335 **14/14** |
+| `zig build test` | **21/21 steps、326/326**（`/tmp/r297_buildtest.log`） |
+| 主回归 | **PASS=68 FAIL=0**（`SELF_CHECK_OK rows=68 uniq=68 total=68`；f004 仍 Skip） |
+
+★盘满插曲：本轮首次构建报 `failed to write: NoSpaceLeft`——`.zig-cache` 已涨到 **73G**、磁盘 100%（已知治理项 #112）。清 `.zig-cache` 后全量重建 79 s，所有证据均取自清理后的同一二进制。
+
+### 205.4 代次锚
+
+**`nlk ddff2cbd89c725b5ed9d42b27364c2c0`**；`tpl 3408c5bdce84957f0fbf54c3d7574df3`／`opti 553a2e540da638f3766911b1f0941dd1`／`irg 0b7106338d5ffe1342caee961734b8d8`／`ir fb2bb442ca27b98cf1df7e109a240e1f` 未变。未提交（HEAD `01e8c61`）。
+
+### 205.5 边界与残余
+
+- 只动 walker 的循环派发；两个循环生成器内部未动（R-295/R-296 的账目保持不变）。
+- **F-206-d 仍在**：`if/else` 分支内 continue + 内层循环 ⇒ AOT 输出为空（a10，未在门内）。
+- **F-206-b 仍在**：嵌套循环体内带 `echo` 的字符串累加值丢失（b4d，F-117/F-158 家族）。
