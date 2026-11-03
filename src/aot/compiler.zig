@@ -1328,7 +1328,8 @@ test "CompileOptions.getOutputPath" {
         };
         const path = try opts.getOutputPath(allocator);
         defer allocator.free(path);
-        try std.testing.expectEqualStrings("hello", path);
+        // 宪法 §7.4.6：AOT 编译产物以 aot_compile_{filename} 命名（防误删 PHP 源）
+        try std.testing.expectEqualStrings("aot_compile_hello", path);
     }
 
     // Test input without .php extension

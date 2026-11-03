@@ -159,7 +159,7 @@ pub const CompilationUnit = struct {
             .allocator = allocator,
             .file_path = file_path,
             .symbols = std.StringHashMap(SymbolDefinition).init(allocator),
-            .references = .{},
+            .references = .{ .items = &.{}, .capacity = 0 },
             .dependencies = std.StringHashMap(void).init(allocator),
             .ir_module = null,
         };

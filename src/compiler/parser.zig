@@ -450,7 +450,7 @@ pub const Parser = struct {
                 if (self.peek.tag == .double_colon or self.peek.tag == .k_function or self.peek.tag == .k_fn) return self.parseExpressionStatement();
                 return self.parseStatic();
             },
-            .k_const => self.parseConst(),
+            .k_const => self.parseConst(.{}),
             .k_go => self.parseGo(),
             .k_lock => self.parseLock(),
             .k_goto => self.parseGoto(),
@@ -742,7 +742,7 @@ pub const Parser = struct {
             if (self.curr.tag == .t_attribute_start) member_attributes = try self.parseAttributes();
 
             if (self.curr.tag == .k_const) {
-                try members.append(self.allocator, try self.parseConst());
+                try members.append(self.allocator, try self.parseConst(.{}));
             } else if (self.curr.tag == .k_use) {
                 try members.append(self.allocator, try self.parseTraitUse());
             } else {
@@ -946,7 +946,7 @@ pub const Parser = struct {
 
         // 处理 const 声明
         if (self.curr.tag == .k_const) {
-            return self.parseConst();
+            return self.parseConst(modifiers);
         }
 
         if (self.curr.tag == .k_function or self.curr.tag == .k_fn) {
@@ -1907,7 +1907,7 @@ pub const Parser = struct {
         return self.createNode(.{ .tag = .static_stmt, .main_token = token, .data = .{ .static_stmt = .{ .vars = try self.context.arena.allocator().dupe(ast.Node.Index, vars.items) } } });
     }
 
-    fn parseConst(self: *Parser) anyerror!ast.Node.Index {
+    fn parseConst(self: *Parser, modifiers: ast.Node.Modifier) anyerror!ast.Node.Index {
         const token = try self.eat(.k_const);
         // 支持类型化常量: const TYPE NAME = value; (PHP 8.3+)
         // 如果 curr 是类型 token 且 peek 不是 '=' 或 ',', 则为类型注解
@@ -1928,7 +1928,7 @@ pub const Parser = struct {
         _ = try self.eat(.equal);
         const val = try self.parseExpression(0);
         _ = try self.eat(.semicolon);
-        return self.createNode(.{ .tag = .const_decl, .main_token = token, .data = .{ .const_decl = .{ .name = name_id, .value = val } } });
+        return self.createNode(.{ .tag = .const_decl, .main_token = token, .data = .{ .const_decl = .{ .name = name_id, .value = val, .modifiers = modifiers } } });
     }
 
     fn parseGo(self: *Parser) anyerror!ast.Node.Index {
@@ -2629,6 +2629,18 @@ pub const Parser = struct {
                     } else {
                         // 动态类名：($expr)::$prop
                         left = try self.createNode(.{ .tag = .dynamic_static_property_access, .main_token = op, .data = .{ .dynamic_static_property_access = .{ .class_expr = left, .property_name = prop_id } } });
+                    }
+                } else if (self.curr.tag == .l_brace) {
+                    // ★F-164（PHP 8.3）：`C::{$expr}` 动态常量名访问。仅支持固定类名；
+                    // 双重动态（($expr)::{$name}）无对应节点，维持既有报错（本就解析失败）。
+                    self.nextToken(); // consume '{'
+                    const name_expr = try self.parseExpression(0);
+                    _ = try self.eat(.r_brace);
+                    if (class_name_id) |cid| {
+                        left = try self.createNode(.{ .tag = .dynamic_class_const_name_access, .main_token = op, .data = .{ .dynamic_class_const_name_access = .{ .class_name = cid, .name_expr = name_expr } } });
+                    } else {
+                        self.reportError("Dynamic class constant with dynamic class name is not supported");
+                        return error.InvalidStaticAccess;
                     }
                 } else {
                     // Allow keywords as valid member names after ::

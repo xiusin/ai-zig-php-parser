@@ -99,6 +99,7 @@ pub const Node = struct {
         dynamic_static_method_call, // ($expr)::method() 动态类名静态调用
         dynamic_static_property_access, // ($expr)::$prop 动态类名静态属性访问
         dynamic_class_constant_access, // ($expr)::CONSTANT 动态类名常量访问
+        dynamic_class_const_name_access, // ClassName::{$expr} 动态常量名访问（PHP 8.3，F-164）
         static_property_access, // 静态成员访问
         use_stmt,
         namespace_stmt,
@@ -167,7 +168,7 @@ pub const Node = struct {
             body: Index,
         },
         parameter: struct { attributes: []const Index, name: StringId, type: ?Index, default_value: ?Index, is_promoted: bool, modifiers: Modifier, is_variadic: bool, is_reference: bool },
-        const_decl: struct { name: StringId, value: Index },
+        const_decl: struct { name: StringId, value: Index, modifiers: Modifier = .{} },
         global_stmt: struct { vars: []const Index },
         static_stmt: struct { vars: []const Index },
         go_stmt: struct { call: Index },
@@ -203,6 +204,7 @@ pub const Node = struct {
         dynamic_static_method_call: struct { class_expr: Index, method_name: StringId, args: []const Index },
         dynamic_static_property_access: struct { class_expr: Index, property_name: StringId },
         dynamic_class_constant_access: struct { class_expr: Index, constant_name: StringId },
+        dynamic_class_const_name_access: struct { class_name: StringId, name_expr: Index },
         static_property_access: struct { class_name: StringId, property_name: StringId },
         class_constant_access: struct { class_name: StringId, constant_name: StringId },
         use_stmt: struct { namespace: StringId, alias: ?StringId, use_type: u8 }, // use_type: 0=class, 1=function, 2=const

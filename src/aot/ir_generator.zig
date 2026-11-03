@@ -1988,25 +1988,29 @@ pub const IRGenerator = struct {
                         try constants.append(self.allocator, .{
                             .name = const_name,
                             .value = cv,
-                            .visibility = .public,
+                            .visibility = self.getVisibility(const_data.modifiers),
                         });
 
                         // 即时写入 constant_cache，使后续常量表达式可引用已定义的常量
                         // （如 TOTAL_TIMEOUT = self::MAX_RETRIES * self::TIMEOUT_MS）
-                        var key_buf: [256]u8 = undefined;
-                        const key = std.fmt.bufPrint(&key_buf, "{s}::{s}", .{ class_name, const_name }) catch {
-                            try self.generateClassConstDecl(member, class_name);
-                            continue;
-                        };
-                        const key_owned = try self.allocator.dupe(u8, key);
-                        try self.constant_cache.put(self.allocator, key_owned, cv);
+                        // ★F-163（R-324）：仅 public 常量进编译期内联缓存——非 public 常量
+                        // 若在编译期内联，其直读会绕过运行期可见性门禁。
+                        if (self.getVisibility(const_data.modifiers) == .public) {
+                            var key_buf: [256]u8 = undefined;
+                            const key = std.fmt.bufPrint(&key_buf, "{s}::{s}", .{ class_name, const_name }) catch {
+                                try self.generateClassConstDecl(member, class_name);
+                                continue;
+                            };
+                            const key_owned = try self.allocator.dupe(u8, key);
+                            try self.constant_cache.put(self.allocator, key_owned, cv);
+                        }
                     } else {
                         // ★F-95-c-b：不可折叠初始化器（E_ALL 等运行期常量）⇒ 类注册期求值
                         const cfunc = try self.generatePropertyDefaultFunc(const_data.value, class_name);
                         try constants.append(self.allocator, .{
                             .name = const_name,
                             .value = .{ .null = {} },
-                            .visibility = .public,
+                            .visibility = self.getVisibility(const_data.modifiers),
                             .default_func = cfunc,
                         });
                     }
@@ -2078,6 +2082,8 @@ pub const IRGenerator = struct {
         for (type_def.constants) |const_info| {
             // ★F-95-c-b：运行期求值的常量不得进编译期缓存（占位值会把读取折叠成 null）
             if (const_info.default_func != null) continue;
+            // ★F-163（R-324）：仅 public 进编译期内联缓存（非 public 直读须走运行期门禁）
+            if (const_info.visibility != .public) continue;
             var key_buf: [256]u8 = undefined;
             const key = std.fmt.bufPrint(&key_buf, "{s}::{s}", .{ class_name, const_info.name }) catch continue;
             const key_owned = try self.allocator.dupe(u8, key);
@@ -2328,21 +2334,13 @@ pub const IRGenerator = struct {
                     const case_data = member.data.enum_case;
                     const case_name = self.getString(case_data.name);
                     // Extract case value if present
+                    // ★F-218（R-325）：改用 evalConstantExprToTypeDef（与枚举内常量同一套折叠器）——
+                    //   原白名单只接 literal_*，`-3`（unary_expr）等合法常量表达式静默丢值。
                     var case_value: ?TypeDef.ConstantValue = null;
                     if (case_data.value) |val_idx| {
                         const vn = self.getNode(val_idx);
                         if (vn) |value_node| {
-                            case_value = switch (value_node.tag) {
-                                .literal_int => .{ .int = value_node.data.literal_int.value },
-                                .literal_float => .{ .float = value_node.data.literal_float.value },
-                                .literal_string => .{ .string = try self.literalStringText(value_node) }, // ★F-89：枚举 case 值也是用户可见串
-                                .literal_bool => blk: {
-                                    const is_true = value_node.main_token.tag == .k_true;
-                                    break :blk .{ .bool = is_true };
-                                },
-                                .literal_null => .{ .null = {} },
-                                else => null,
-                            };
+                            case_value = self.evalConstantExprToTypeDef(value_node);
                         }
                     }
                     try enum_cases.append(self.allocator, .{
@@ -2363,7 +2361,7 @@ pub const IRGenerator = struct {
                         try constants.append(self.allocator, .{
                             .name = const_name,
                             .value = cv,
-                            .visibility = .public,
+                            .visibility = self.getVisibility(const_data.modifiers),
                         });
                     } else {
                         // ★F-95-c-b：枚举内常量的运行期初始化器
@@ -2371,7 +2369,7 @@ pub const IRGenerator = struct {
                         try constants.append(self.allocator, .{
                             .name = const_name,
                             .value = .{ .null = {} },
-                            .visibility = .public,
+                            .visibility = self.getVisibility(const_data.modifiers),
                             .default_func = cfunc,
                         });
                     }
@@ -2493,7 +2491,7 @@ pub const IRGenerator = struct {
                         try constants.append(self.allocator, .{
                             .name = const_name,
                             .value = cv,
-                            .visibility = .public,
+                            .visibility = self.getVisibility(const_data.modifiers),
                         });
                     } else {
                         // ★F-95-c-b：trait 常量的运行期初始化器（组合进类时由类注册点求值）
@@ -2501,7 +2499,7 @@ pub const IRGenerator = struct {
                         try constants.append(self.allocator, .{
                             .name = const_name,
                             .value = .{ .null = {} },
-                            .visibility = .public,
+                            .visibility = self.getVisibility(const_data.modifiers),
                             .default_func = cfunc,
                         });
                     }
@@ -5817,6 +5815,7 @@ pub const IRGenerator = struct {
             .dynamic_static_method_call => self.generateDynamicStaticMethodCall(node),
             .dynamic_static_property_access => self.generateDynamicStaticPropertyAccess(node),
             .dynamic_class_constant_access => self.generateDynamicClassConstantAccess(node),
+            .dynamic_class_const_name_access => self.generateDynamicClassConstNameAccess(node),
 
             // Array operations
             .array_init => self.generateArrayInit(node),
@@ -9503,6 +9502,24 @@ prop_name: ?[]const u8 = null,
         } }, .php_value);
     }
 
+    /// ★F-164（PHP 8.3）：`C::{$expr}` 固定类名 + 动态常量名访问。
+    /// 降到 php_class_constant_read（带可见性门禁 + PHP 口径未命中措辞）；
+    /// 类名按串传入（self/parent/static 由运行期作用域解析），常量名表达式求值。
+    fn generateDynamicClassConstNameAccess(self: *Self, node: *const Node) !Register {
+        const access_data = node.data.dynamic_class_const_name_access;
+        const class_name = self.getString(access_data.class_name);
+        const class_reg = try self.emitWithResult(.{ .const_string = try self.module.?.internString(class_name) }, .php_string);
+        const name_reg = try self.generateExpression(access_data.name_expr);
+        const dc_args = try self.allocator.alloc(Register, 2);
+        dc_args[0] = class_reg;
+        dc_args[1] = name_reg;
+        return self.emitWithResult(.{ .call = .{
+            .func_name = "php_class_constant_read",
+            .args = dc_args,
+            .return_type = .php_value,
+        } }, .php_value);
+    }
+
     /// Generate IR for static property access
     /// ★F-142：isset/empty 的静态属性静默调用（单实参）。动态类名先求值类名变量。
     fn emitStaticPropertyQuietCall(self: *Self, node: *const Node, func_name: []const u8) !Register {
@@ -9631,22 +9648,15 @@ prop_name: ?[]const u8 = null,
                 resolved_class_name = cls;
             }
         } else if (std.mem.eql(u8, class_name, "static")) {
-            // static::CONSTANT -> 运行时 LSB 解析
-            // 回退到运行时查找
-            return self.emitWithResult(.{ .static_property_get = .{
-                .class_name = class_name,
-                .property_name = const_name,
-            } }, .php_value);
+            // static::CONSTANT -> 运行时 LSB 解析（php_class_constant_read 内含 static 作用域）
+            return self.emitClassConstantReadRuntime(class_name, const_name);
         }
 
         // 优化：O(1) 哈希表查找 + 编译时内联
         var key_buf: [256]u8 = undefined;
         const key = std.fmt.bufPrint(&key_buf, "{s}::{s}", .{ resolved_class_name, const_name }) catch {
             // 回退：运行时查找
-            return self.emitWithResult(.{ .static_property_get = .{
-                .class_name = class_name,
-                .property_name = const_name,
-            } }, .php_value);
+            return self.emitClassConstantReadRuntime(class_name, const_name);
         };
 
         if (self.constant_cache.get(key)) |const_value| {
@@ -9661,19 +9671,32 @@ prop_name: ?[]const u8 = null,
                 .bool => |b| self.emitWithResult(.{ .const_bool = b }, .bool),
                 .null => self.emitWithResult(.{ .const_null = {} }, .php_value),
                 .array => {
-                    // 数组常量不能内联，回退到运行时查找
-                    return self.emitWithResult(.{ .static_property_get = .{
-                        .class_name = class_name,
-                        .property_name = const_name,
-                    } }, .php_value);
+                    // 数组常量不能内联，回退到运行时类常量读取（★F-217：值在 class_constants，不在静态属性表）
+                    return self.emitClassConstantReadRuntime(class_name, const_name);
                 },
             };
         }
 
         // 回退：运行时查找（用于动态类或未找到的常量）
-        return self.emitWithResult(.{ .static_property_get = .{
-            .class_name = class_name,
-            .property_name = const_name,
+        // F-95-d（残余面）：改接 php_class_constant_read——类存在但常量子虚时按
+        // PHP 口径抛可捕获 Error `Undefined constant C::K`，不再走静态属性路径的
+        // 「Access to undeclared static property」措辞；命中语义不变
+        //（★F-217：findClassConstant 读 class_constants 独立表，含父/接口链）。
+        return self.emitClassConstantReadRuntime(class_name, const_name);
+    }
+
+    /// ★F-217（R-325）：类常量直读的统一运行时回退——php_class_constant_read
+    ///（含 self/parent/static 作用域解析、可见性门禁、PHP 口径措辞）。
+    fn emitClassConstantReadRuntime(self: *Self, class_name: []const u8, const_name: []const u8) !Register {
+        const cls_reg = try self.emitWithResult(.{ .const_string = try self.module.?.internString(class_name) }, .php_string);
+        const kn_reg = try self.emitWithResult(.{ .const_string = try self.module.?.internString(const_name) }, .php_string);
+        const rd_args = try self.allocator.alloc(Register, 2);
+        rd_args[0] = cls_reg;
+        rd_args[1] = kn_reg;
+        return self.emitWithResult(.{ .call = .{
+            .func_name = "php_class_constant_read",
+            .args = rd_args,
+            .return_type = .php_value,
         } }, .php_value);
     }
 

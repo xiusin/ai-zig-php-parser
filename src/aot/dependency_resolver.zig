@@ -689,8 +689,11 @@ test "DependencyResolver initialization" {
     var diagnostics = DiagnosticEngine.init(allocator);
     defer diagnostics.deinit();
 
-    const resolver = try DependencyResolver.init(allocator, &diagnostics);
-    defer resolver.deinit();
+    const resolver = try DependencyResolver.init(allocator, std.Io.Threaded.global_single_threaded.io(), std.Io.Dir.cwd(), &diagnostics);
+    defer {
+        resolver.deinit();
+        std.testing.allocator.destroy(resolver);
+    }
 
     try std.testing.expectEqual(@as(usize, 0), resolver.getFileCount());
     try std.testing.expect(!resolver.hasCircularDependencies());
@@ -703,8 +706,11 @@ test "DependencyResolver.matchKeyword" {
     var diagnostics = DiagnosticEngine.init(allocator);
     defer diagnostics.deinit();
 
-    const resolver = try DependencyResolver.init(allocator, &diagnostics);
-    defer resolver.deinit();
+    const resolver = try DependencyResolver.init(allocator, std.Io.Threaded.global_single_threaded.io(), std.Io.Dir.cwd(), &diagnostics);
+    defer {
+        resolver.deinit();
+        std.testing.allocator.destroy(resolver);
+    }
 
     try std.testing.expect(resolver.matchKeyword("include 'file.php'", "include"));
     try std.testing.expect(resolver.matchKeyword("include('file.php')", "include"));
@@ -720,8 +726,11 @@ test "DependencyResolver.isDynamicPath" {
     var diagnostics = DiagnosticEngine.init(allocator);
     defer diagnostics.deinit();
 
-    const resolver = try DependencyResolver.init(allocator, &diagnostics);
-    defer resolver.deinit();
+    const resolver = try DependencyResolver.init(allocator, std.Io.Threaded.global_single_threaded.io(), std.Io.Dir.cwd(), &diagnostics);
+    defer {
+        resolver.deinit();
+        std.testing.allocator.destroy(resolver);
+    }
 
     try std.testing.expect(!resolver.isDynamicPath("config.php"));
     try std.testing.expect(!resolver.isDynamicPath("lib/utils.php"));
@@ -735,8 +744,11 @@ test "DependencyResolver.extractIncludes basic" {
     var diagnostics = DiagnosticEngine.init(allocator);
     defer diagnostics.deinit();
 
-    const resolver = try DependencyResolver.init(allocator, &diagnostics);
-    defer resolver.deinit();
+    const resolver = try DependencyResolver.init(allocator, std.Io.Threaded.global_single_threaded.io(), std.Io.Dir.cwd(), &diagnostics);
+    defer {
+        resolver.deinit();
+        std.testing.allocator.destroy(resolver);
+    }
 
     const source =
         \\<?php
@@ -786,8 +798,11 @@ test "DependencyResolver add include path" {
     var diagnostics = DiagnosticEngine.init(allocator);
     defer diagnostics.deinit();
 
-    const resolver = try DependencyResolver.init(allocator, &diagnostics);
-    defer resolver.deinit();
+    const resolver = try DependencyResolver.init(allocator, std.Io.Threaded.global_single_threaded.io(), std.Io.Dir.cwd(), &diagnostics);
+    defer {
+        resolver.deinit();
+        std.testing.allocator.destroy(resolver);
+    }
 
     try resolver.addIncludePath("/usr/share/php");
     try resolver.addIncludePath("/var/www/lib");

@@ -12194,3 +12194,148 @@ if (reg_19.toBool()) {            // elseif(i%2==0)
 
 - **for/while 的 else 臂同源副本**（≈15301/15549 for 侧、≈17040/17253 while 侧的 elseif 链 then 行走）：与 F-213-d6 同形的缺口**理论上存在**但无复现件（本轮 f6 的 for/while 变体未测红——未普查）；按 §六 先问再扩。修法与 d6 相同（前置内联分支可逐字复用）。
 - F-162/F-163（共享层，等批准）、F-88、F-95-d 维持 §224/§226 原状。
+
+## 229. R-323：共享层放行批（F-162/F-163/F-169/F-170 类常量包 + F-164 + F-170 尾五族 hash + P2 措辞差）＋ 快速节奏批销项
+
+- 日期：2026-11-03（老铁批准共享层放行：可动 `src/compiler/ast.zig`、`src/compiler/parser.zig`）
+- 复现件：`/tmp/inv/{f162m,v1..v4,f164,f95d,f95d_valid,f140b,f106b,f117,f004}.php`、`/tmp/f220/{wp,tiger,gost,haval,snefru,ro}/*.php`
+- 验证口径（老铁给定）：共享层改动后 `timeout 600 zig build` + `timeout 600 zig build test-aot`（**139/139**）+ 探针矩阵对照 + 既有 AOT 探针零转移（f158/d7_for/d7_while/d8/f95d/f95d_valid/f5 抽查全 SAME；侧门 C343 12 臂 same=12 diff=0）；不跑主回归、不跑全量单测、不做 md5 复核、不跑全臂门
+
+### 229.1 快速节奏批销项（共享层放行前已完成，本节补登记）
+
+| 项 | 定性 | 读数 |
+|---|---|---|
+| **F-158**（嵌套三元 echo 实参丢值） | 修：`generateIfFromLabels` Step 5 尾部后新增 then 边 merge 物化块（`merge_idx==null` 且 then 块 br→带本边 PHI 的 merge 目标时按边物化一次） | f158 SAME；探针零转移 |
+| **F-213-d7**（for/while else 臂变体） | 修：d6 前置内联分支移植——for 双副本 + while 第一副本加 `isLoopBreakTarget(then) ∧ !isLoopBreakTarget(else)` 内联「块内指令+守卫 break+else 延续」；while 第二副本（结构不同）单独在 `!chain_done_n` 后补 d7-while 分支 | d7_for/d7_while SAME；C343 12 臂绿 |
+| **F-213-d9**（for then 臂 ret 倒置空区间） | 修：新增分支 `nested_ti != null and then_terminates and !isLoopBreakTarget(then_block) and <else 链式达 latch(collectChainToCond)>` ⇒ 守卫内联 then(ret)+else 延续块单块行走；**d9/d4 precedence 守卫**：首版误吞 d4 致 g_for 回归 2032，补 `!isLoopBreakTarget(then_block)`（d4=break 形/d9=return 形互斥）后双绿 | g_for 1026 SAME |
+| **F-213-d8**（`for_loop_` 名单缺口） | **登记为死代码，不动**：探针红的根因实为 d9 的倒置空区间，非名单缺口 | 死代码登记 |
+| **F-88**（throwThrowable 未初始化分配器） | 修：`runtime_initialized` 旗标 + initRuntime 置位 + throwThrowable 顶部短路 | f004 族探针不崩 |
+| **F-95-d**（类常量缺失措辞） | 修：新增 `php_class_constant_read`（`Undefined constant` 措辞），ir_generator 静态名回退路改接；nlk 注册表登记 + `writeValueArgsArray` 两处切片打包名单加入（漏登记曾致生成码 `expected 2 argument(s), found 3`） | f95d/f95d_valid SAME |
+| **F-106-b**（catch 栈帧深度差） | **按宪法 T2（栈帧深度容差）关闭** | — |
+| **F-140-b**（error_handler 恢复泄漏） | 修：`php_restore_error_handler` 补旧 handler `release` | f140b SAME |
+| **F-38**（test{} 块编译错误） | 修：`dependency_resolver.zig` 5 处测试块 `DependencyResolver.init` 补 io/cwd 实参 + defer 补 destroy；`linker.zig` 结构体字面量补 `.references`；`compiler.zig` 测试期望 `hello`→`aot_compile_hello`（宪法 §7.4.6 口径） | test-aot **139/139** |
+| **F-117**（`defined('PCRE_VERSION')`） | **自然转绿**：`#D_PCRE_VERSION#y##D_NOPE#n#` 与 PHP 逐字节一致（defined 全局常量路径既有能力覆盖） | f117 SAME |
+| **f004** | **维持 SKIP**，措辞差登记 | — |
+| **md2**（F-170 尾批1） | 修：RFC 1319 附录 A 逐字取 PI_SUBST 表 + Transform + 校验和；`hmacOneShot`/`pbkdf2FillCustom` 加 comptime 块长参数 `Blen`（md2=16，其余=64）；四入口接通 | 五枚官方向量核验全对 |
+
+### 229.2 F-162/F-163/F-169/F-170 类常量包（§224.3 已备补丁落地）
+
+| 层 | 站点 | 变更 |
+|---|---|---|
+| 共享 ast | `ast.zig:170` | `const_decl` 增 `modifiers: Modifier = .{}` |
+| 共享 parser | `parser.zig:1910` `parseConst` | 接收 `modifiers` 形参并存入 const_decl；3 调用点透传（453/745 传 `.{}`、949 传 `modifiers`） |
+| IR | `ir_generator.zig` 3 构造点（类/枚举/trait） | `.visibility = self.getVisibility(const_data.modifiers)`；`constant_cache` 两处门控**仅 public 内联** |
+| 运行时 | `runtime_lib_template.zig` | 新增 `ConstVisibility` 枚举 + ClassMeta 增 `const_visibility` 字段（init/deinit/5 处字面量构造点补齐）+ `setConstVisibility` + `findClassConstant`（名单+父/接口链跳 private）+ `constAccessAllowed`（public 恒可/private 同声明类/protected classMetaSameFamily）+ `fatalConstAccess`（private 打**声明类**名、protected 打检索名）+ `php_defined` 增 `::` 分支 + `php_constant_get` 换可见性查找 + `php_class_constant_read` 加 self/parent/static 作用域解析与门禁（首版 v1 探针空输出：self/parent 被 `findClass("self")` 判负，补作用域解析后 `6 2`=PHP） |
+| 发射器 | `native_linker.zig` | 3 发射点（类常量/trait 常量/枚举 case）各加 `php_set_const_visibility(...)` |
+
+**枚举 case 进常量名单**（F-169）：枚举 case 与类常量同表登记。
+**读数**：§224.2 探针矩阵逐格对照全绿（f162m 六探针：存在性/关键字/可见性矩阵/defined/constant/直读）；v1..v4 SAME。
+
+### 229.3 F-164（PHP 8.3 动态类常量名 `C::{$name}`）
+
+| 层 | 站点 | 变更 |
+|---|---|---|
+| 共享 ast | `ast.zig:102/207` | 新增 `dynamic_class_const_name_access` tag + data（`class_name: StringId, name_expr: Index`） |
+| 共享 parser | `parser.zig:2633` | `::` 后 `.l_brace` 分支解析 `C::{$expr}` |
+| IR | `ir_generator.zig:5826` | 分发新增 `.dynamic_class_const_name_access => self.generateDynamicClassConstNameAccess(node)`（≈9513，降到 `php_class_constant_read`） |
+
+**读数**：f164 探针 SAME（`C::{$name}` 直读/动态名/defined 三态）。
+
+### 229.4 F-170 尾剩余批（五族 hash，一批一族、一手规范取表、逐族单独验证）
+
+统一接线 4 点：`hashBytes` / `php_hash_hmac`（块长参数化）/ `hash_pbkdf2`（枚举+fromName+hlen+fill）。五族均已在 `HASH_ALGOS`/`HASH_CRYPTO_ALGOS` 名单（此前返回 false）。
+
+| 族 | 一手来源 | 形 | 块长 | 验证 |
+|---|---|---|---|---|
+| **whirlpool** | php-src `php_hash_whirlpool_tables.h`（Barreto & Rijmen 官方参考实现逐字表 WP_RC 11 枚 + WP_C0..C7 八表 533 行）+ `hash_whirlpool.c` WhirlpoolTransform 结构 | 1 | 64 | 6 格全对（空串 `19fa61d7…`/abc `4e2448a4…`/fox/hmac/pbkdf2/raw） |
+| **tiger** | php-src `php_hash_tiger_tables.h`（table[4*256] 拆 TIGER_T1..T4）+ `hash_tiger.c`（pass/key_schedule/feedforward 结构） | 6（128/160/192 × ,3/,4） | 64 | 11 格全对；tiger192,3 空串 `3293ac63…` = 官方向量 |
+| **gost** | php-src `php_hash_gost_tables.h`（tables_test/tables_crypto 各 [4][256]u32）+ `hash_gost.c`（derived from Saarinen gost_compress） | 2（gost/gost-crypto） | 32 | 8 格全对；gost 空串 `ce85b99c…` = GOST R 34.11-94 官方向量 |
+| **haval** | php-src `hash_haval.c` 内嵌常量（K2..K5/I2..I5/M0..M7/D0 逐字） | 15（128..256 × 3/4/5 轮） | 128 | 20 格全对；haval128,3 空串 `c68f3991…` = 官方向量 |
+| **snefru** | php-src `php_hash_snefru_tables.h`（tables[16][256] 逐字 546 行）+ `hash_snefru.c`（8 轮 × 4 子轮） | 2（snefru/snefru256 同实现） | 32 | 8 格全对；snefru 空串 `8617f366…` = Merkle 官方向量 |
+
+**gost 调试插曲**：SHIFT61 宏 h[3] 两处移位方向抄错（`v[1]>>16`→`<<16`、`v[4]>>16`→`<<16`）+ h[7] 漏两项（`(v[6]>>16)`、`(v[7]<<16)`）⇒ 首轮全错。定位法 = 编译 php-src C 参考实现打印 s/u/v/h 中间态逐点对比（s/u/v 一致锁定 SHIFT61）+ 手工展开 h[3] 证 Zig 侧式子错；修后以 **token 级 diff 脚本**复核 SHIFT12/SHIFT16/SHIFT61 全 24 式 C↔Zig 对齐（BAD=0）。
+
+**模板接线纪律两条**（本批两次踩坑）：① 分支链插入时锚点末位 `}` 必须保留交接（whirlpool 批被吃 1 枚致生成码 `else` 悬孤；tiger 批多 1 枚致 `expected type expression`）——模板是文本资源，`zig build` 绿不代表生成码合法，必须 AOT 编译探针验证（F-38 教训复现）；② AOT 编译须在**项目根目录**执行（`copyRuntimeLib` 依赖 cwd 下 `src/aot/runtime_lib_template.zig` 相对路径，否则 `executable generation failed: FileNotFound`）。
+
+### 229.5 P2 措辞差（readonly 打声明类名）
+
+- 现象：`class BaseEntity { public readonly string $uuid }`，`User extends BaseEntity`，写 `$u->uuid` ⇒ PHP 打 `Cannot modify readonly property BaseEntity::$uuid`（**声明类**），AOT 打 `User::$uuid`（运行时类）
+- 修：`runtime_lib_template.zig` 两处 readonly 措辞（`php_object_set_dynamic`:24659 与 `php_object_set`:24797）`meta.name` → `decl.class.name`（`findPropertyDeclaringClass` 已返回声明类元数据）；`src/runtime/exceptions.zig:563` 为解释器侧，按宪法§五不动
+- **读数**：ro 探针 SAME；test-aot 139/139；C343 12 臂；既有探针零转移
+
+### 229.6 汇总读数
+
+| 验证 | 结果 |
+|---|---|
+| `zig build` | 绿（每族后） |
+| `zig build test-aot` | **139/139**（每族后复跑） |
+| 侧门 C343（12 臂：f3/f4/f6/g_for/g_while 等） | same=12 diff=0（每族后复跑） |
+| 既有探针抽查（f158/d7_for/d7_while/d8/f95d/f95d_valid/f5） | 7/7 SAME 零转移（每族后复跑） |
+| F-170 尾五族探针（whirlpool 6 + tiger 11 + gost 8 + haval 20 + snefru 8 格） | 全对 |
+| 类常量包 + F-164 + readonly 措辞探针 | 全对 |
+
+## 230. R-325 收尾批：F-216/F-215/F-217/F-218 闭环 + 反向扫新立四族（只读登记）
+
+- 日期：2026-11-03
+- 复现件：`/tmp/f224m/p1..p6.php`（41 格矩阵）、`/tmp/f218/j.php`/`j2.php`、`/tmp/scan/w_*.php`（27 枚反向扫变体）
+
+### 230.1 F-216（类常量越权/缺失可捕获化）
+
+`fatalConstAccess`（noreturn print+exit）→ `fatalConstAccessMsg` 构造消息；`php_constant_get` 四处 `::` 分支（Class not found / no scope / Undefined kw / Undefined 兜底）+ `php_class_constant_read` 越权点全换 `throwThrowable("Error", …)`。措辞逐字不变。→ c_prot/c_priv/c_nope/c_noclass/sub_in/out_prot/out_priv/out_sub_prot/out_sub_pub 转 SAME。
+
+### 230.2 F-215（内部类常量纳入名单）
+
+DateTimeInterface 10 枚常量经 `setClassConst` 登记（public）；DateTime/DateTimeImmutable 挂 `interfaces={"DateTimeInterface"}`（容器级常量 `DATETIME_INTERFACE_LINK`，防栈逃逸）。PHP 内部类常量恒 public，无误判面。→ d_dt_atom/c_dt/p6 六格转 SAME。
+
+### 230.3 F-217（常量与静态属性同表混淆 ⇒ 物理分表）
+
+根因：`A4::$prop`（静态属性）与 `A4::prop`（常量）同键存 `static_properties`，后写覆盖。方案丙（独立表）：
+- 模板：ClassMeta 加 `class_constants` 字段（init/deinit/4 处字面量构造点）+ `setClassConst`（值+可见性一次写）+ `php_set_class_constant`
+- 写入迁移：发射器类常量/trait 常量（nlk 两行并一行）、枚举 case（setClassConst）、F-215 注册点
+- 读取迁移：findClassConstant/findClassConstantValue/反射 getConstant/hasConstant/getConstants/ReflectionClassConstant::getValue/enumFrom/enumTryFrom/cases()/unserialize('E:') 共 10 处
+- ir_generator：三处 `static_property_get` 回退（`static::`、key 溢出、数组常量不内联）统一改接新 helper `emitClassConstantReadRuntime`——**数组常量回退即 f95d_valid 转移根因**，已收口复绿
+- `A4::$prop`=STATIC ✓；PHP 枚举禁属性故 case 无撞名面（仍随迁隔离）
+
+### 230.4 F-218（json_encode 枚举序列化）
+
+PHP 8.5.8 实测口径：纯 enum ⇒ **返回 false**（不抛错，last_error=11）；backed enum ⇒ backing value；纯 enum 嵌任意深度 ⇒ 整体 false。修法：jsonEncodeValue/jsonEncodeValuePretty 对象分支加枚举特判（`is_enum` + 有 value ⇒ 递归 backing；否则 `error.JsonPureEnum` 顶层收 false + 置 `json_error_non_backed_enum=11`）。顺带修掉连带缺陷：**负值枚举 case 的 value 丢失**（`case Y = -3` 是 unary_expr，白名单只接 literal_* ⇒ 换 `evalConstantExprToTypeDef`）。→ j.php 9 格 + j2 + c_enum 全 SAME。
+
+### 230.5 反向扫（27 枚变体：3 循环 × then/elseif/else 臂 × break/continue/return，只读登记）
+
+| 编号 | 形状 | 证据（php→aot） |
+|---|---|---|
+| **F-219** | foreach **else 臂**内嵌 if-break/continue/return 丢失（函数内值形） | w_foreach_else_*：404→4/202/4 |
+| **F-220** | foreach **then 臂**内嵌 if-continue/return 丢失；elseif 臂内嵌 break 函数内形（f6 顶层 kv 形绿，函数内值形红 ⇒ d6 覆盖面不足） | w_foreach_then_continue/ret：404→103/400；w_foreach_elseif_break：102→2 |
+| **F-221** | while **elseif 臂**内嵌 if-break/return 丢失 | w_while_elseif_break/ret：102→2/4 |
+| **F-222** | while 三枚 **AstDirectGenerationFailed**（else_continue / then_break / then_ret） | COMPILE_FAIL |
+
+对照面（零转移）：for 族 9/9 全绿；while then_continue/elseif_continue/else_break/else_ret 绿；foreach then_break 绿。
+
+### 230.6 R-326 修复轮读数（F-219/F-220/F-221/F-222）
+
+| 编号 | 探针 | 结果 | 修法 |
+|---|---|---|---|
+| F-222 | w_while_then_break / then_ret | **SAME(404)** | while then 臂 d5 分支后：ctrl 判定（break/ret）+ ret 守卫内联 + 行走区间改从 else 延续块起算 + walkContinuationChain |
+| F-222-c | w_while_else_continue | **SAME(404)** | walker F-208 链式发射的 shared 块误报：新增 `emitted_shared_blocks` 登记表，unprocessed 检查豁免 |
+| F-220 | w_foreach_then_continue | **SAME(404)** | foreach then 臂 12460 case 加 continue/ret 双形分支（分支2后） |
+| F-220-b | w_foreach_elseif_break | **SAME(102)** | d6 两副本延续块换 walkContinuationChain（跨级 if_merge_ 链物化，回边/出口守卫防 unreachable） |
+| F-221 | w_while_elseif_break | **SAME(102)** | d7-while 第四副本（18330 `!chain_done_n` 后）延续块换链行走 |
+| F-221-ret | w_while_elseif_ret | 仍红（102→2） | ret 形分支已加（blk221r2）但 +100 仍丢——延续链物化路径未覆盖，待下轮 |
+| F-220-ret | w_foreach_then_ret | 仍红（404→100） | then 臂 ret 分支命中但延续物化断链，待下轮 |
+| F-219 | w_foreach_else_{break,continue,ret} | 仍红（404→4/202/4） | walker 收窄分支（9392）未命中——else 臂的 then 边控制目标 processed 预标记判定不成立，落点待重新取证 |
+
+**对照面零转移**：C343 12 臂 same=12 diff=0；f158/d7_for/d7_while/d8/f95d/f95d_valid/f5 全 SAME。
+**过程教训（新增纪律）**：① walker 统一分支的宽判定会静默吃掉生成器臂内已修复形状——新分支必须带「相邻形状排除」限定；② 模板/Zig fmt 的 `}` 转义（`}}`）是本轮最高频自伤（5 处），插入脚本生成 print 调用后必须 grep 自查；③ 调试打印法是定位分支命中的最快路径，用完即删。
+
+### 230.7 R-327 修复轮读数（F-219 全家 + F-220-ret + F-221-ret 闭环）
+
+| 编号 | 探针 | 结果 | 站点与修法 |
+|---|---|---|---|
+| F-219-break | w_{foreach,for,while}_else_break | **SAME(404)** | 双站点组合修复：① walker 9392 F-219 分支（命中点，仅 3 枚 else_break 命中）——删冗余指令重发（walker 9379 已统一发射，重发致双条件计算）+ 收尾 `continue`→`break`（**终止本层区间行走，防止漂入共享 merge 块**：漂移会把 M1→M2 物化吞进 else 臂内，另一臂永远拿不到拷贝）；② d6 双副本（13267/13617）`nested_merge_after_else` 计算——`findCommonBrTarget` 要求双边 `.br`，else 块以 cond_br 结尾（臂内嵌套 if）时退化 nested_end ⇒ merge 层收口被跳过；补「then 臂 br 目标 + else 块沿 cond_br else 边/br 链可达性验证」探测共享 merge |
+| F-219-cont/ret | w_foreach_else_continue / else_ret | **SAME(404)** | 不经过 walker 9392 分支（continue 目标未预标记 processed、ret 非循环控制目标），纯由 d6 `nested_merge_after_else` 修复收掉——同族同根因 |
+| F-220-ret | w_foreach_then_ret | **SAME(404)** | foreach then 臂 12460 case 的 F-220 ret 分支（12719）：ret 块行走置 `return_generated`，else 延续行走前**未清旗标** ⇒ walker 头部 8213 检查直接 `markReachableRestBlocks` 吞掉延续块（+1 指令丢失、只剩 PHI 拷贝读 null ⇒ 404→100）。修：ret 侧行走后清 `return_generated`/`break_generated` |
+| F-221-ret | w_while_elseif_ret | **SAME(102)** | 与 F-220-ret **同因**（老铁预判命中）：blk221r（18062 区）与 blk221r2（18512 区）两处 ret 行走后同样未清旗标 ⇒ walkContinuationChain 头部吞块（+100 丢失）。同法修 |
+
+**取证方法（本轮关键路径）**：生成码指纹反推——broken 探针 dump 显示 `reg_47=reg_48`（M1→M2 拷贝）缩进 16 落在 else 臂内、对照组 n_plain（无嵌套 if 同骨架）显示正确落点在缩进 12（merge 层）⇒ 缺口定性为「merge 块被区间行走漂移到臂内消费」而非「物化缺失」；`std.debug` 插印 + `dumpCurrentStackTrace` 锁定调用方为 foreach 生成器 13745（d6 else 侧行走），非 GIFL。
+**验收**：`timeout 600 zig build` 绿；反向扫 **27/27 SAME**（修前 9 DIFF + 3 CF 全部收口）；对照面零转移——C343 12 臂 `same=12 diff=0`、f158/d7_for/d7_while/d8/f95d/f95d_valid/f5 全 SAME。
+**过程教训（追加）**：④ 「某臂绿」可能是「拷贝恰好在活臂」的巧合——w_foreach_elseif_break 的 merge 物化同样在臂内错位，只是缺失路径是死代码 ⇒ 对照组必须含「两臂皆活」的探针才能证真；⑤ 调试插印期间编译探针必须从项目根目录跑（runtime_lib 模板按 CWD 相对路径解析，`/tmp` 下报 FileNotFound 假 CF）；⑥ 「ret/continue 行走置旗标 ⇒ 后续行走头部吞块」是一族隐患，凡「守卫内联 + 延续行走」两段的站点都要检查中间是否清旗标。
