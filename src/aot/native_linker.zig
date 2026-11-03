@@ -15639,6 +15639,86 @@ pub const NativeLinker = struct {
                                                     }
                                                     break :blk nested_end;
                                                 };
+                                                // F-213-d7：elseif 的 then 块以「嵌套 if：then 边=循环出口
+                                                //（break）」结尾时，下方范围行走把它委托给通用 walker，
+                                                // 而出口块已被循环收尾预标记 ⇒ 嵌套 if 整段丢失
+                                                //（d7_for：PHP 22 / AOT 34；d7_while：if_merge_10 未处理
+                                                // ⇒ 编译失败）。与 foreach 侧 F-213-d6 同根同法——前置
+                                                // 内联发射：块内指令（PHI 按 else_blk 边物化）+
+                                                // if (n2cond) { 出口PHI; break } + else 延续块（边 PHI +
+                                                // 单块行走）；命中即标 processed，原行走自动跳过。
+                                                // 条件性 break 不置 break_generated；回边交各生成器
+                                                // 既有口径（for 尾部 / while 臂内自含）。
+                                                if (nested_then_idx) |nti_d7| {
+                                                    if (!processed.contains(nti_d7)) {
+                                                        const nt_blk_d7 = func.blocks.items[nti_d7];
+                                                        const n2_d7 = blk: {
+                                                            const nt_term_d7 = nt_blk_d7.terminator orelse break :blk null;
+                                                            if (nt_term_d7 != .cond_br) break :blk null;
+                                                            const cb_d7 = nt_term_d7.cond_br;
+                                                            if (!self.isLoopBreakTarget(func, cb_d7.then_block)) break :blk null;
+                                                            // 双边皆出口的退化形（if(c)break;else break;）走原路径
+                                                            if (self.isLoopBreakTarget(func, cb_d7.else_block)) break :blk null;
+                                                            break :blk cb_d7;
+                                                        };
+                                                        if (n2_d7) |cb_d7| {
+                                                            const saved_rg_d7 = self.return_generated;
+                                                            const saved_brk_d7 = self.break_generated;
+                                                            self.return_generated = false;
+                                                            self.break_generated = false;
+                                                            try processed.put(nti_d7, {});
+                                                            for (nt_blk_d7.instructions.items) |inst_d7| {
+                                                                if (inst_d7.op == .phi) {
+                                                                    if (inst_d7.result) |result_d7| {
+                                                                        for (inst_d7.op.phi.incoming) |incoming_d7| {
+                                                                            if (incoming_d7.block == else_blk or
+                                                                                std.mem.eql(u8, incoming_d7.block.label, else_blk.label))
+                                                                            {
+                                                                                try self.writePtrAwareAssign(writer, nested_indent, result_d7.id, incoming_d7.value.id);
+                                                                                break;
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    continue;
+                                                                }
+                                                                try writer.writeAll(nested_indent);
+                                                                try self.generateInstructionSimple(writer.list, inst_d7);
+                                                            }
+                                                            try writer.print("{s}if (", .{nested_indent});
+                                                            try self.writeConditionExpr(writer, cb_d7.cond.id, cb_d7.cond.type_);
+                                                            try writer.print(") {{\n", .{});
+                                                            const n2_indent_d7 = try std.fmt.allocPrint(self.allocator, "{s}    ", .{nested_indent});
+                                                            defer self.allocator.free(n2_indent_d7);
+                                                            var n2_exit_bi_d7: ?usize = null;
+                                                            for (0..func.blocks.items.len) |bi_d7| {
+                                                                if (func.blocks.items[bi_d7] == cb_d7.then_block) {
+                                                                    n2_exit_bi_d7 = bi_d7;
+                                                                    break;
+                                                                }
+                                                            }
+                                                            if (n2_exit_bi_d7) |nx_d7| {
+                                                                try self.generateExitPHIAssignments(writer, func, nti_d7, nx_d7, n2_indent_d7, false);
+                                                            }
+                                                            try writer.print("{s}break :{s};\n", .{ n2_indent_d7, label_name });
+                                                            try writer.print("{s}}}\n", .{nested_indent});
+                                                            var n2_else_bi_d7: ?usize = null;
+                                                            for (0..func.blocks.items.len) |bi_d7e| {
+                                                                if (func.blocks.items[bi_d7e] == cb_d7.else_block) {
+                                                                    n2_else_bi_d7 = bi_d7e;
+                                                                    break;
+                                                                }
+                                                            }
+                                                            if (n2_else_bi_d7) |ne_d7| {
+                                                                if (!processed.contains(ne_d7)) {
+                                                                    try self.materializeEdgePhi(writer, func.blocks.items[ne_d7], nt_blk_d7, nested_indent);
+                                                                    try self.generateLabelDrivenBlockRange(writer, func, ne_d7, ne_d7 + 1, cleanup_regs, processed, loop_label_counter, nested_indent);
+                                                                }
+                                                            }
+                                                            if (!self.return_generated) self.return_generated = saved_rg_d7;
+                                                            if (!self.break_generated) self.break_generated = saved_brk_d7;
+                                                        }
+                                                    }
+                                                }
                                                 if (nested_then_idx) |nti| {
                                                     if (!processed.contains(nti)) {
                                                         const saved_rg = self.return_generated;
@@ -15919,6 +15999,86 @@ pub const NativeLinker = struct {
                                                     }
                                                     break :blk nested_end;
                                                 };
+                                                // F-213-d7：elseif 的 then 块以「嵌套 if：then 边=循环出口
+                                                //（break）」结尾时，下方范围行走把它委托给通用 walker，
+                                                // 而出口块已被循环收尾预标记 ⇒ 嵌套 if 整段丢失
+                                                //（d7_for：PHP 22 / AOT 34；d7_while：if_merge_10 未处理
+                                                // ⇒ 编译失败）。与 foreach 侧 F-213-d6 同根同法——前置
+                                                // 内联发射：块内指令（PHI 按 else_blk 边物化）+
+                                                // if (n2cond) { 出口PHI; break } + else 延续块（边 PHI +
+                                                // 单块行走）；命中即标 processed，原行走自动跳过。
+                                                // 条件性 break 不置 break_generated；回边交各生成器
+                                                // 既有口径（for 尾部 / while 臂内自含）。
+                                                if (nested_then_idx) |nti_d7| {
+                                                    if (!processed.contains(nti_d7)) {
+                                                        const nt_blk_d7 = func.blocks.items[nti_d7];
+                                                        const n2_d7 = blk: {
+                                                            const nt_term_d7 = nt_blk_d7.terminator orelse break :blk null;
+                                                            if (nt_term_d7 != .cond_br) break :blk null;
+                                                            const cb_d7 = nt_term_d7.cond_br;
+                                                            if (!self.isLoopBreakTarget(func, cb_d7.then_block)) break :blk null;
+                                                            // 双边皆出口的退化形（if(c)break;else break;）走原路径
+                                                            if (self.isLoopBreakTarget(func, cb_d7.else_block)) break :blk null;
+                                                            break :blk cb_d7;
+                                                        };
+                                                        if (n2_d7) |cb_d7| {
+                                                            const saved_rg_d7 = self.return_generated;
+                                                            const saved_brk_d7 = self.break_generated;
+                                                            self.return_generated = false;
+                                                            self.break_generated = false;
+                                                            try processed.put(nti_d7, {});
+                                                            for (nt_blk_d7.instructions.items) |inst_d7| {
+                                                                if (inst_d7.op == .phi) {
+                                                                    if (inst_d7.result) |result_d7| {
+                                                                        for (inst_d7.op.phi.incoming) |incoming_d7| {
+                                                                            if (incoming_d7.block == else_blk or
+                                                                                std.mem.eql(u8, incoming_d7.block.label, else_blk.label))
+                                                                            {
+                                                                                try self.writePtrAwareAssign(writer, nested_indent, result_d7.id, incoming_d7.value.id);
+                                                                                break;
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    continue;
+                                                                }
+                                                                try writer.writeAll(nested_indent);
+                                                                try self.generateInstructionSimple(writer.list, inst_d7);
+                                                            }
+                                                            try writer.print("{s}if (", .{nested_indent});
+                                                            try self.writeConditionExpr(writer, cb_d7.cond.id, cb_d7.cond.type_);
+                                                            try writer.print(") {{\n", .{});
+                                                            const n2_indent_d7 = try std.fmt.allocPrint(self.allocator, "{s}    ", .{nested_indent});
+                                                            defer self.allocator.free(n2_indent_d7);
+                                                            var n2_exit_bi_d7: ?usize = null;
+                                                            for (0..func.blocks.items.len) |bi_d7| {
+                                                                if (func.blocks.items[bi_d7] == cb_d7.then_block) {
+                                                                    n2_exit_bi_d7 = bi_d7;
+                                                                    break;
+                                                                }
+                                                            }
+                                                            if (n2_exit_bi_d7) |nx_d7| {
+                                                                try self.generateExitPHIAssignments(writer, func, nti_d7, nx_d7, n2_indent_d7, false);
+                                                            }
+                                                            try writer.print("{s}break :{s};\n", .{ n2_indent_d7, label_name });
+                                                            try writer.print("{s}}}\n", .{nested_indent});
+                                                            var n2_else_bi_d7: ?usize = null;
+                                                            for (0..func.blocks.items.len) |bi_d7e| {
+                                                                if (func.blocks.items[bi_d7e] == cb_d7.else_block) {
+                                                                    n2_else_bi_d7 = bi_d7e;
+                                                                    break;
+                                                                }
+                                                            }
+                                                            if (n2_else_bi_d7) |ne_d7| {
+                                                                if (!processed.contains(ne_d7)) {
+                                                                    try self.materializeEdgePhi(writer, func.blocks.items[ne_d7], nt_blk_d7, nested_indent);
+                                                                    try self.generateLabelDrivenBlockRange(writer, func, ne_d7, ne_d7 + 1, cleanup_regs, processed, loop_label_counter, nested_indent);
+                                                                }
+                                                            }
+                                                            if (!self.return_generated) self.return_generated = saved_rg_d7;
+                                                            if (!self.break_generated) self.break_generated = saved_brk_d7;
+                                                        }
+                                                    }
+                                                }
                                                 if (nested_then_idx) |nti| {
                                                     if (!processed.contains(nti)) {
                                                         const saved_rg = self.return_generated;
@@ -17389,6 +17549,86 @@ pub const NativeLinker = struct {
                                                     }
                                                     break :blk nested_end;
                                                 };
+                                                // F-213-d7：elseif 的 then 块以「嵌套 if：then 边=循环出口
+                                                //（break）」结尾时，下方范围行走把它委托给通用 walker，
+                                                // 而出口块已被循环收尾预标记 ⇒ 嵌套 if 整段丢失
+                                                //（d7_for：PHP 22 / AOT 34；d7_while：if_merge_10 未处理
+                                                // ⇒ 编译失败）。与 foreach 侧 F-213-d6 同根同法——前置
+                                                // 内联发射：块内指令（PHI 按 else_blk 边物化）+
+                                                // if (n2cond) { 出口PHI; break } + else 延续块（边 PHI +
+                                                // 单块行走）；命中即标 processed，原行走自动跳过。
+                                                // 条件性 break 不置 break_generated；回边交各生成器
+                                                // 既有口径（for 尾部 / while 臂内自含）。
+                                                if (nested_then_idx) |nti_d7| {
+                                                    if (!processed.contains(nti_d7)) {
+                                                        const nt_blk_d7 = func.blocks.items[nti_d7];
+                                                        const n2_d7 = blk: {
+                                                            const nt_term_d7 = nt_blk_d7.terminator orelse break :blk null;
+                                                            if (nt_term_d7 != .cond_br) break :blk null;
+                                                            const cb_d7 = nt_term_d7.cond_br;
+                                                            if (!self.isLoopBreakTarget(func, cb_d7.then_block)) break :blk null;
+                                                            // 双边皆出口的退化形（if(c)break;else break;）走原路径
+                                                            if (self.isLoopBreakTarget(func, cb_d7.else_block)) break :blk null;
+                                                            break :blk cb_d7;
+                                                        };
+                                                        if (n2_d7) |cb_d7| {
+                                                            const saved_rg_d7 = self.return_generated;
+                                                            const saved_brk_d7 = self.break_generated;
+                                                            self.return_generated = false;
+                                                            self.break_generated = false;
+                                                            try processed.put(nti_d7, {});
+                                                            for (nt_blk_d7.instructions.items) |inst_d7| {
+                                                                if (inst_d7.op == .phi) {
+                                                                    if (inst_d7.result) |result_d7| {
+                                                                        for (inst_d7.op.phi.incoming) |incoming_d7| {
+                                                                            if (incoming_d7.block == else_blk or
+                                                                                std.mem.eql(u8, incoming_d7.block.label, else_blk.label))
+                                                                            {
+                                                                                try self.writePtrAwareAssign(writer, nested_indent, result_d7.id, incoming_d7.value.id);
+                                                                                break;
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    continue;
+                                                                }
+                                                                try writer.writeAll(nested_indent);
+                                                                try self.generateInstructionSimple(writer.list, inst_d7);
+                                                            }
+                                                            try writer.print("{s}if (", .{nested_indent});
+                                                            try self.writeConditionExpr(writer, cb_d7.cond.id, cb_d7.cond.type_);
+                                                            try writer.print(") {{\n", .{});
+                                                            const n2_indent_d7 = try std.fmt.allocPrint(self.allocator, "{s}    ", .{nested_indent});
+                                                            defer self.allocator.free(n2_indent_d7);
+                                                            var n2_exit_bi_d7: ?usize = null;
+                                                            for (0..func.blocks.items.len) |bi_d7| {
+                                                                if (func.blocks.items[bi_d7] == cb_d7.then_block) {
+                                                                    n2_exit_bi_d7 = bi_d7;
+                                                                    break;
+                                                                }
+                                                            }
+                                                            if (n2_exit_bi_d7) |nx_d7| {
+                                                                try self.generateExitPHIAssignments(writer, func, nti_d7, nx_d7, n2_indent_d7, false);
+                                                            }
+                                                            try writer.print("{s}break :{s};\n", .{ n2_indent_d7, label_name });
+                                                            try writer.print("{s}}}\n", .{nested_indent});
+                                                            var n2_else_bi_d7: ?usize = null;
+                                                            for (0..func.blocks.items.len) |bi_d7e| {
+                                                                if (func.blocks.items[bi_d7e] == cb_d7.else_block) {
+                                                                    n2_else_bi_d7 = bi_d7e;
+                                                                    break;
+                                                                }
+                                                            }
+                                                            if (n2_else_bi_d7) |ne_d7| {
+                                                                if (!processed.contains(ne_d7)) {
+                                                                    try self.materializeEdgePhi(writer, func.blocks.items[ne_d7], nt_blk_d7, nested_indent);
+                                                                    try self.generateLabelDrivenBlockRange(writer, func, ne_d7, ne_d7 + 1, cleanup_regs, processed, loop_label_counter, nested_indent);
+                                                                }
+                                                            }
+                                                            if (!self.return_generated) self.return_generated = saved_rg_d7;
+                                                            if (!self.break_generated) self.break_generated = saved_brk_d7;
+                                                        }
+                                                    }
+                                                }
                                                 if (nested_then_idx) |nti| {
                                                     if (!processed.contains(nti)) {
                                                         const saved_rg = self.return_generated;
@@ -17703,6 +17943,47 @@ pub const NativeLinker = struct {
                                                                         }
                                                                     }
                                                                     if (!chain_done_n) {
+                                                                        // F-213-d7（while 侧 elseif 臂副本）：嵌套 if 的 then 边即循环
+                                                                        // 出口（break）时，spill 拒绝 + 范围行走 [nti+1, then_end)
+                                                                        // 为空 ⇒ break 与 else 延续块俱丢（d7_while：if_merge_10
+                                                                        // 未处理 ⇒ 编译失败）。嵌套 then 块指令已在上方内联，
+                                                                        // 此处只补：守卫 break + else 延续块（边 PHI + 单块行走，
+                                                                        // 其 br→cond 由 walker 发 continue）。条件性 break 不置
+                                                                        // break_generated。
+                                                                        if (self.isLoopBreakTarget(func, inner_cb.then_block) and
+                                                                            !self.isLoopBreakTarget(func, inner_cb.else_block))
+                                                                        {
+                                                                            try writer.print("{s}if (", .{nested_indent});
+                                                                            try self.writeConditionExpr(writer, inner_cb.cond.id, inner_cb.cond.type_);
+                                                                            try writer.print(") {{\n", .{});
+                                                                            const n2_indent_d7w = try std.fmt.allocPrint(self.allocator, "{s}    ", .{nested_indent});
+                                                                            defer self.allocator.free(n2_indent_d7w);
+                                                                            var d7w_exit_bi: ?usize = null;
+                                                                            for (0..func.blocks.items.len) |bi_d7w| {
+                                                                                if (func.blocks.items[bi_d7w] == inner_cb.then_block) {
+                                                                                    d7w_exit_bi = bi_d7w;
+                                                                                    break;
+                                                                                }
+                                                                            }
+                                                                            if (d7w_exit_bi) |nx_d7w| {
+                                                                                try self.generateExitPHIAssignments(writer, func, nti, nx_d7w, n2_indent_d7w, false);
+                                                                            }
+                                                                            try writer.print("{s}break :{s};\n", .{ n2_indent_d7w, label_name });
+                                                                            try writer.print("{s}}}\n", .{nested_indent});
+                                                                            var d7w_else_bi: ?usize = null;
+                                                                            for (0..func.blocks.items.len) |bi_d7we| {
+                                                                                if (func.blocks.items[bi_d7we] == inner_cb.else_block) {
+                                                                                    d7w_else_bi = bi_d7we;
+                                                                                    break;
+                                                                                }
+                                                                            }
+                                                                            if (d7w_else_bi) |ne_d7w| {
+                                                                                if (!processed.contains(ne_d7w)) {
+                                                                                    try self.materializeEdgePhi(writer, func.blocks.items[ne_d7w], nested_then_blk, nested_indent);
+                                                                                    try self.generateLabelDrivenBlockRange(writer, func, ne_d7w, ne_d7w + 1, cleanup_regs, processed, loop_label_counter, nested_indent);
+                                                                                }
+                                                                            }
+                                                                        } else {
                                                                         // 缺陷B修复（f161 c3/xp）：外层 else 块索引先于 then 块（乱序布局）
                                                                         // 时 then_end 退化为 nti+1，旧范围发射为空操作，嵌套
                                                                         // if-without-else（br 臂 + merge 副作用块 + 外层 merge 推进）被
@@ -17710,6 +17991,7 @@ pub const NativeLinker = struct {
                                                                         const spill_handled = try self.emitSpilledNestedIfMerge(writer, func, nested_then_blk, inner_cb, nti, then_end, cond_block_ptr, (if (exit_idx < func.blocks.items.len) exit_ptr else null), end_idx, cleanup_regs, processed, loop_label_counter, label_name, nested_indent);
                                                                         if (!spill_handled) {
                                                                             try self.generateLabelDrivenBlockRange(writer, func, nti + 1, then_end, cleanup_regs, processed, loop_label_counter, nested_indent);
+                                                                        }
                                                                         }
                                                                     }
                                                                 },
@@ -18751,6 +19033,39 @@ pub const NativeLinker = struct {
                             if (is_from_then or is_from_nested_merge) {
                                 try self.writePtrAwareAssign(writer, then_indent, result.id, incoming.value.id);
                                 break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // F-158：else 臂以 cond_br 结尾（嵌套三元/嵌套 if）时，cfb 的 merge 检测要求
+        // else 以 .br 汇合 ⇒ 落空、merge_idx=null ⇒ 上方 Step 5 尾部的 then 侧 PHI 物化
+        // 整体跳过 ⇒ then 路径的 merge 寄存器永不写回（f158：嵌套三元在 echo 实参位
+        // 丢值，`M3|stdClass` → `M3|`）。此处不设 merge_idx（else 行走边界依赖
+        // merge_idx==null 的 else_defer_to_walk 口径，18780，不可动），只补 then 边
+        // 物化：then 块以 .br 直落的目标块若含「来自 then 块」的 PHI incoming，即为
+        // 本边 merge，按边物化一次；循环回边/出口目标排除（那是 continue/break 边）。
+        if (!self.return_generated and !self.break_generated and merge_idx == null) {
+            if (then_block.terminator) |term_f158| {
+                if (term_f158 == .br) {
+                    const tgt_f158 = term_f158.br;
+                    const tgt_is_loop_edge_f158 = (if (self.current_loop_cond_block) |ci_f158| tgt_f158 == func.blocks.items[ci_f158] else false) or
+                        (if (self.current_loop_exit_block) |xi_f158| (xi_f158 < func.blocks.items.len and tgt_f158 == func.blocks.items[xi_f158]) else false);
+                    if (!tgt_is_loop_edge_f158) {
+                        for (tgt_f158.instructions.items) |phi_f158| {
+                            if (phi_f158.op == .phi) {
+                                if (phi_f158.result) |result_f158| {
+                                    for (phi_f158.op.phi.incoming) |incoming_f158| {
+                                        if (incoming_f158.block == then_block or
+                                            std.mem.eql(u8, incoming_f158.block.label, then_block.label))
+                                        {
+                                            try self.writePtrAwareAssign(writer, then_indent, result_f158.id, incoming_f158.value.id);
+                                            break;
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

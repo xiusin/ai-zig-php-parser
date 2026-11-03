@@ -90,6 +90,11 @@ fn getRandomIntRange(comptime T: type, at_least: T, at_most: T) T {
 /// 注意：这是一个全局变量，在AOT编译的代码中可以直接访问
 pub var runtime_allocator: Allocator = undefined;
 
+/// 运行时初始化完成标志（F-88）：initRuntime 完成分配器装配后置位。
+/// 测试直达路径（不经 initRuntime）调用可抛内置时，throwThrowable 依此短路
+/// 为 error.RuntimeNotInitialized，而非拿未初始化分配器建对象（SIGSEGV）。
+var runtime_initialized: bool = false;
+
 /// 空字符串常量（用于错误恢复）
 var EMPTY_STRING: PHPString = .{
     .data = &[_]u8{},
@@ -511,6 +516,7 @@ pub fn initRuntime(allocator: Allocator) !void {
     last_opened_dir = null;
     stats_allocator = StatsAllocator.init(allocator);
     runtime_allocator = stats_allocator.allocator();
+    runtime_initialized = true;
 
     // 先初始化全局表，再注册类（类注册可能需要写入 constants）
     initClassRegistry(runtime_allocator);
@@ -26382,6 +26388,10 @@ pub fn throwThrowableDiscardCatch(class_name: []const u8, message: []const u8, a
 }
 
 pub fn throwThrowable(class_name: []const u8, message: []const u8, allocator: Allocator) !Value {
+    // F-88：运行时未初始化（测试直达路径不经 initRuntime）时，
+    // runtime_allocator 为 undefined，findClass/PHPObject.init 读取即 UB/SIGSEGV；
+    // 短路为可读错误，交由调用方按既有错误路径上报。
+    if (!runtime_initialized) return error.RuntimeNotInitialized;
     const obj = if (findClass(class_name)) |meta|
         try PHPObject.initWithMeta(allocator, meta)
     else
