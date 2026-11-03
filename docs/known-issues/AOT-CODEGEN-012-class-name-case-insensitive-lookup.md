@@ -12007,3 +12007,190 @@ C 语义打底：精度 P＝**有效数字位数**（默认 6；`%.0g` 视作 1�
 | 丙 | 只落 F-162 的「public 存在性」面、可见性面留待 | 会让 private/protected 的 `defined()` 由 false 变 true（**可见面回归**） | 小但不可取 |
 
 > 已按宪法默认「不动共享层」停在乙：本轮改动零残留（五枚 md5 复核对齐）。**交接时点实测 `/tmp/f218` 已被系统清理** ⇒ 探针需按 §224.2 的表格重建；重建脚本已内嵌在交接文档 `docs/changes/2026-10-26/AOT-CODEGEN-012_R306-R317_handoff_2026-10-26_a9f7a94f.md` 的附录 C。
+
+## 225. F-167 / F-168 + 顺带缺陷：sprintf 空格标志与 NAN 字符串化告警（R-319 闭环）
+
+- 日期：2026-10-26
+- 代次锚：**`tpl 2dfc5d01b745148ddddd3652e7267daf`**（本轮唯一改动）；`nlk a9f7a94f…`／`irg ea35bbde…`／`opti 553a2e54…`／`ir fb2bb442…` 未变
+- 复现/真值探针：重建脚本见交接文档附录 C2（`/tmp` 已被清理）
+
+### 225.1 契约（PHP 8.5.8 实测）
+
+**F-167 空格标志**：PHP **忽略**之，只保留宽度效果。`sprintf("[% f][% d][% 5d][%05d][% 05d][% .3f][%+ d]", 1.25,3,3,3,3,1.25,3)` ⇒ `[1.250000][3][    3][00003][00003][1.250][+3]`；`"[% s][% 10s][%-10s]"` 于 `"ab"` ⇒ `[ab][        ab][ab        ]`；`[% -5d][% 8.2f]` 于 (7,3.14159) ⇒ `[7    ][    3.14]`。
+**F-168 NAN 字符串化**：`Warning: unexpected NAN value was coerced to string`（小写开头），然后输出 `NAN`。触发面（全部实测）：`echo`／`print`／`(string)`／`strval`／字符串插值／`.` 拼接／`sprintf("%s")`／`printf("%s")`／`print_r`／`implode`（**每元素各一条**）。**不发**：`INF`、`var_export`、`json_encode`(⇒false)、`var_dump`(⇒`float(NAN)`)；`@` 与 `error_reporting(E_ALL & ~E_WARNING)` 可抑制，恢复后重启告警。
+**既存正确的面（勿动）**：`(int)INF/NAN/-INF` 的 `The float X is not representable as an int, cast occurred` 在 AOT 已与 PHP 一致。
+
+### 225.2 修法（模板 4 处 + 顺带 1 处）
+
+| # | 站点 | 变更 |
+|---|---|---|
+| 1 | `php_sprintf` 标志解析（≈31822） | `' '` 只消费不生效；删 `flag_space` 变量与其 **3 处**使用（`%d/%i` 与 `%f/%F` 的前导空格、`%e/%E` 的 `sign_str`） |
+| 2 | `Value.toString` float 分支（≈3380） | `std.math.isNan` ⇒ `emitWarning("unexpected NAN value was coerced to string")`（覆盖 `(string)/strval/插值/拼接/sprintf("%s")`） |
+| 3 | `php_echo` float 分支（≈10178） | 同上（覆盖 `echo/print`） |
+| 4 | `printValue` float 分支（≈10388） | 同上（覆盖 `print_r`；`var_dump` 走独立分支，不受影响） |
+| 5 | **`php_implode`（≈15295，顺带缺陷）** | 旧实现**两遍各 `toString` 一次**（长度遍＋写入遍）⇒ NAN 每元素发**两条**告警（PHP 只发一条）。改为首遍转换并保留 `*PHPString`（`ArrayListUnmanaged` + 统一 release），第二遍直接用 |
+
+### 225.3 读数
+
+| 项 | 修前 | 修后 |
+|---|---|---|
+| F-167 七格式 + 字符串/左对齐/`% 8.2f` | `[ 1.250000][ 3][    3][00003][ 0003][ 1.250][+3]` | **SAME**（`[1.250000][3][    3][00003][00003][1.250][+3]`） |
+| NAN 路径（echo/print/cast/strval/插值/拼接/sprintf/print_r/implode） | 多数无告警；implode 修前 0 条 | **每条 1 条，与 PHP 逐字节 SAME** |
+| 反证（INF/var_export/json_encode/(int) 转换） | — | **SAME**（无新增告警，既有 `(int)` 告警不变） |
+| `@` / error_reporting 掩码 | — | **SAME**（抑制与恢复都对） |
+| C342 门（新建 6 臂） | — | **6 same / 0 diff / 0 CF / 0 timeout**；`AOT_BIN=/bin/false` 自证 **6 COMPILE_FAIL** |
+| 邻门 | — | C341 **5/5**、C340 **4/4**、ERRH **18 same + 1 既有 CF**、C339 **30/30** |
+| 主回归 / 单测 | — | **`PASS=68 FAIL=0`**（`SELF_CHECK_OK rows=68 uniq=68 total=68`）／**`21/21 steps; 326/326 tests`** |
+
+### 225.4 过程教训（新增纪律）
+
+- **回退后必须重建二进制**：本轮先用「回退前构建的二进制」跑门，C340 四臂立即 `COMPILE_FAIL`（`no field named 'setConstVisibility'`）——模板是从磁盘读的、发射器是编进二进制的，**回退 nlk 后不 `zig build` 就会用旧发射器配新模板**。⇒ 任何 nlk/irg 改动或回退后，第一件事是 `timeout 600 zig build`，再跑门。
+- `php_implode` 的双重转换是**既存**缺陷（修前静默），本轮因告警可见化才暴露；同类「两遍转换」若出现在别的拼接函数需同样处理（本轮普查仅 implode 命中）。
+
+## 226. R-320：while 的 elseif 段嵌套 cond_br 改「链式发射」（F-213-c 闭环；F-213-d 重定范围）
+
+- 日期：2026-10-26
+- 代次锚：**`nlk` 本轮改动**（md5 见交付记录）／`tpl 2dfc5d01…`（R-319）／`irg ea35bbde…` 未变
+- 复现件：`/tmp/f220/m/{w1,w2,w3,w4,d1,f1,f2,f3,f4}.php`（形状普查，9 臂）
+
+### 226.1 旧口径失效（重要更正）
+
+工单 §215 与交接文档附录 C3 里的简化形状（`if(奇){+1} elseif(偶){ if(%4==0) {echo/continue} +100 }`）在当前代次**已通过**——它们不是真实复现。用**形状普查**重新筛出 4 个仍红形状：
+
+| 臂 | 形状 | PHP | AOT 修前 | 定性 |
+|---|---|---|---|---|
+| **w1** | `while`：`elseif { if(%4==0) { continue; } $z+=100; }` | `306 12` | **`606 12`** | F-213-c（嵌套 if 丢弃 + else 链变无条件） |
+| **w3** | `while`：`elseif { if(%4==0) {+2} else {+3} }`（外层另有 else） | `42 12` | **编译失败** `[AST-DIRECT-FAIL] unprocessed blocks: 8:if_then_9 9:if_else_10` | 同族（链式路径未覆盖） |
+| **f3** | `foreach`：首臂 `if(%3==0){continue}` + elseif 内嵌 `if(%4==0){echo}` | `c4 c4 303` | **挂死 rc=124**（修前空输出 rc=0） | **F-213-d2**（新立，foreach 侧） |
+| **f4** | `foreach` kv：`if(奇){ if($k>4){break;} $z+=$k; } elseif…` | `1026` | **`2048`** | **F-213-d3**（新立，break 丢失） |
+
+对照臂全绿：w2（continue 在语句后）、w4（首臂嵌套 continue）、d1（do-while 同形）、f1（foreach elseif+else）、f2（foreach 嵌套 continue）。
+
+### 226.2 根因（IR + 生成码双证，w1）
+
+IR（`--compile --emit-ir`）：
+```
+if_else_4:  … eq(i%2,0) … br %19, if_then_6, while_cond_0
+if_then_6:  … eq(i%4,0) … br %24, while_cond_0, if_merge_9      ← 嵌套 if 的 then 边直指循环头
+if_merge_9: $z += 100 ; br while_cond_0
+```
+修前生成码（已滤掉异常清理块）：
+```
+if (reg_19.toBool()) {            // elseif(i%2==0)
+    … 只算了 reg_24 = (i%4==0) …
+} else {                          // ← 空
+}
+… $z += 100 … continue;           // ← 嵌套 if 本体完全没发，else 链成了无条件延续
+```
+机制：while 生成器 elseif 段的 `.cond_br` 分支里，`emitSpilledNestedIfMerge` 对该形拒绝，回退 `generateLabelDrivenBlockRange(nti+1, then_end)` —— 从**嵌套 if 之后**起走，嵌套 if 本体被跳过，`if_merge_9` 被当普通延续无条件发射。
+
+### 226.3 修法（`native_linker.zig` 两处）
+
+1. while 生成器 elseif 段（≈17432 `.cond_br` 分支）：先调 **`generateNestedContinueChain`**（该 helper 本为「then/else 两臂都沿单后继 `.br` 链折返循环头」而写，内部先做纯 CFG dry-run，不成立则零发射）：
+   - then 起点 = `inner_cb.then_block` 的索引（= 循环头 ⇒ R-307 的空链，只发 cond PHI + `continue`）；
+   - else 起点 = `inner_cb.else_block` 的索引（= `if_merge_9` ⇒ 发 `$z += 100` + cond PHI + `continue`）；
+   - 成功即收口；失败保持原 spill → 范围行走路径（零行为变化）。
+2. `generateNestedContinueChain`（≈14118）：`chain_cond_phi_src` 回填加 `en > 0` 守卫（两链皆空时旧写法 `echain[en-1]` 会下溢）。
+
+### 226.4 读数
+
+| 项 | 修前 | 修后 |
+|---|---|---|
+| w1 | `606 12` | **`306 12` SAME** |
+| w3 | 编译失败 | **`42 12` SAME** |
+| w2 / w4 / d1 / f1 / f2 | SAME | SAME |
+| C343（新建 7 臂，含 TIMEOUT 判定列） | — | **7 same / 0 diff / 0 CF / 0 timeout**；自证 **7 COMPILE_FAIL** |
+| 邻门 | — | C339 **30/30**、C340 **4/4**、C341 **5/5**、C342 **6/6**、ERRH **18 same + 1 既有 CF**（`repo_build_residue=0`） |
+| 主回归 / 单测 | — | **`PASS=68 FAIL=0`**（`SELF_CHECK_OK rows=68 uniq=68 total=68`）／**`21/21 steps; 326/326 tests`** |
+
+### 226.5 仍开（foreach 侧，新立）
+
+- **F-213-d2**：`foreach` 首臂 `continue` + elseif 内嵌 if ⇒ **挂死**（f3，rc=124）。修前为静默空输出——两代都错，现以「挂死」为基线。
+- **F-213-d3**：`foreach kv` 的 `if(奇){ if($k>4){break;} … }` ⇒ break 丢失（f4：PHP 1026 / AOT 2048）。
+- 下一轮建议：照 R-320 的路子，在 **foreach 生成器**对应 elseif 段接 `generateNestedContinueChain`；f3 先查「首臂 continue 后被预标记的块」与 foreach 收尾的交互（与 R-306 的 `then_skipped_marked` 同族）。
+
+## 227. R-321：foreach 的 then_is_be 尾部抑制解除 + 嵌套 break 显式守卫（F-213-d2 / F-213-d3 闭环）
+
+- 日期：2026-11-03
+- 代次锚：**`nlk d9b463fc13ff0cfc6535fe1d9ab7f4e7`**（本轮唯一改动）；`tpl 2dfc5d01…`／`irg ea35bbde…`／`opti 553a2e54…`／`ir fb2bb442…` 未变
+- 复现件：`/tmp/f220/m/{f3,f4}.php`（§226.1 普查件，仍幸存）；新增探针 `f5/f6/g_for/g_while.php`
+- ★**锚值笔误订正**（本轮顺手，仅改锚值字符）：两版交接文档与 §225 的 opti 锚原作 `5532e540da638f3766911b1f0941dd1`（**31 字符**，不可能是真实 md5 输出）系转写吞掉第 4 位 `a`；实测值 `553a2e540da638f3766911b1f0941dd1` 与 R-300/R-301/R-305/R-306 四份变更文档及本工单 §222 前读数（line 10810）交叉一致 ⇒ 基线未漂移。已订正：本节上方 §225 锚行、两版交接文档（R306-R317 §0 表、R319-R320 §0 表与附录 A0/A3 共 3 处）。残留：R-319/R-320 变更文档首行的短形式 `opti 5532e540…` 未在「两版交接文档」字面范围内，本轮未动（下轮可顺手）。
+
+### 227.1 根因（IR + 生成码双证）
+
+**F-213-d2（f3 挂死）**：f3 的 body cond_br 为 `br (i%3==0), foreach_increment_2, if_else_6` —— then 边直指 increment（continue）。该路径命中 `then_is_be`（12409，只置旗标、**臂体恒不发射**），else 臂（elseif 链）在 12911 段处理时，内层 `if (i%4==0)` 被 walker 的 F-208 链式派发（9346 `chainsReachCond` → `generateNestedContinueChain`）收口、于 14119 置位 `break_generated=true`；该标志经 12911 段的 save/restore **漏出**，再被 foreach 收尾的 `else_is_coalesce or then_is_be` 守卫（原 13491）**保留** ⇒ 尾部（13551–13615：increment 指令 + 回边 PHI + continue）整段被抑制。于是空 then 臂（i%3==0）与外层 else 臂（`$z+=1`，`br→increment` 按 is_to_increment 口径不发 continue）都没有回边 ⇒ `while(true)` 空转 ⇒ rc=124 挂死。
+**关键事实**：then_is_be 路径的 then 臂恒为空（无 noreturn），尾部对 then 路径**永远必需**——「保持 break_generated」的注释语义对该形状恒错。
+
+**F-213-d3（f4 值错 2048）**：f4 的 then 臂（`if_then_5`）尾部嵌套 cond_br `br (k>4), foreach_cleanup_3, if_merge_9`。then-arm 嵌套 cond_br 处理（12456 段）的两个特化分支均不命中（分支②要求 else 为循环延续块，而 `if_merge_9` 是普通 merge），落入 final-else 范围行走：`nested_start` 指针回扫命中 **cleanup（索引 4，低于臂块）**、`nested_end` 由 else 块的 br→increment（索引 3）推出 **4** ⇒ **空区间 [4,4)** ⇒ 嵌套 if（`if (k>4) break`）整段丢失；`if_merge_9`（`$z+=$k`）未被标记 processed，外溢到本层尾部行走被**无条件**重发 ⇒ 2048 = 每轮都多吃一份 `$z+=$k` 且 break 丢失。
+
+### 227.2 修法（`native_linker.zig` 两处，+41/−3）
+
+| # | 站点 | 变更 |
+|---|---|---|
+| 1 | foreach 收尾的 break_generated 合并（≈13491） | 守卫由 `else_is_coalesce or then_is_be` 收窄为 `else_is_coalesce`：then_is_be 时 then 臂的 break 状态恒为 false ⇒ `break_generated = false and … = false` ⇒ **尾部增量+PHI+continue 恢复发射**。链式臂内 continue 的路径不会落到尾部（continue 跳走），fall-through 路径（空 then 臂、is_to_increment 的 else 臂）由尾部补回边——与「链上共享块不标记 processed、留待后续行走」的设计意图（14200 注释）一致 |
+| 2 | foreach then 臂嵌套 cond_br 处理（≈12551，新分支） | 嵌套 then 目标即循环出口（`cleanup_idx`/`exit_idx`，指针比较镜像 12591）时：显式发射 `if (cond) { 出口PHI(generateExitPHIAssignments(ti→nested_ti)); break :label; }`，else 延续块先 `materializeEdgePhi(nei←then_blk)` 再单块范围行走 `[nei, nei+1)`（其 `br→increment` 由 walker is_to_increment 口径不发 continue，交尾部）。不置 `break_generated`（break 在 if 内，臂仍 fall-through） |
+
+### 227.3 读数
+
+| 项 | 修前 | 修后 |
+|---|---|---|
+| f3（F-213-d2） | **rc=124 挂死** | **`c4 c4 303` SAME**（=PHP 逐字节） |
+| f4（F-213-d3） | **2048** | **`1026` SAME** |
+| w1–w4 / d1 / f1 / f2（对照臂） | SAME | SAME（零转移） |
+| C343（扩臂 7→9，含 f3/f4） | 7/7 | **9 same / 0 diff / 0 CF / 0 timeout**；`AOT_BIN=/bin/false` 自证 **9 COMPILE_FAIL** |
+| 邻门 | — | C339 **30/30**、C340 **4/4**、C341 **5/5**、C342 **6/6**、ERRH **18 same + 1 既有 CF（h9）**（`repo_build_residue=0`） |
+| 主回归 / 单测 | — | **`PASS=68 FAIL=0`**（`SELF_CHECK_OK rows=68 uniq=68 total=68`；`regression_failures.tsv` 与基线**逐字节一致**：67 PASS + 1 既有 SKIP(f004)，无新增）／**`21/21 steps; 326/326 tests`** |
+
+### 227.4 同族新发现（待老铁裁决，**本轮未修**）
+
+形状普查顺带实测（PHP 真值 / 修后 AOT 读数）：
+
+| 探针 | 形状 | PHP | AOT（本代次） | 定性 |
+|---|---|---|---|---|
+| `g_for` | for 版 f4（then 臂内嵌 `if(k>4) break`） | 1026 | **2048** | **F-213-d4**（新立）：for 生成器 then 臂嵌套 cond_br 的 final-else 范围行走同一空区间缺陷（14929 段，与 foreach 同构）；该副本还**已有 F-206-d 链式钩子**（14884）但对 break 形不适用 |
+| `g_while` | while 版 f4 | 1026 | **2032** | **F-213-d5**（新立）：while 侧 break 丢失但 merge 未外溢（症状较轻，发射路径不同） |
+| `f5` | f4 的 else 延续块多语句形 | 1212 | **1212 SAME** | f4 修复对多语句延续块稳健（鲁棒性验证通过） |
+| `f6` | **elseif 臂**内嵌 `if(k>3) break`（break 在 k=4,i=5 真实触发） | 22 | **34** | **F-213-d6**（新立）：else 臂嵌套 cond_br 副本（≈12911 then_is_be 路径 / ≈13188 final-else 路径）缺同一「嵌套 then=循环出口」分支 ⇒ 嵌套 if 整段（break + `$z+=$k`）丢失；读数 34 = 22 之后 elseif 臂恒空、只走首臂/else |
+
+> 纪律说明：按宪法§五默认只修 AOT 且本轮范围圈定 foreach（f3/f4）；F-213-d6 在 **foreach 同函数**的 else 臂副本上（修复模式与本轮 #2 相同，约 +30 行），d4/d5 涉及 `generateForFromLabels`/`generateWhileFromLabels` 同源副本，虽已确证为 AOT 缺陷，仍请老铁裁决是否下轮一并修。
+
+## 228. R-322：F-213-d4/d5/d6 同族闭环（foreach else 臂 + for/while 生成器）
+
+- 日期：2026-11-03（老铁裁决：d6 与 d4/d5 同轮，批准扩到 for/while 生成器，仍限 AOT）
+- 代次锚：**`nlk 9d74f79d4911e4202b715788a6486f33`**（本轮唯一改动）；`tpl 2dfc5d01…`／`irg ea35bbde…`／`opti 553a2e54…`／`ir fb2bb442…` 未变
+- 复现件：`/tmp/f220/m/{f6,g_for,g_while}.php`（PHP 真值：22 / 1026 / 1026）
+
+### 228.1 各生成器「回边由谁发射」口径（改前先答，老铁硬性要求）
+
+| 生成器 | 回边归属 | 关键证据 |
+|---|---|---|
+| foreach | **尾部**统一发射 increment+PHI+continue（`generateForeachFromLabels` 13551+）；臂内 `br→increment` 走 walker `is_to_increment` 不发 continue | increment/cleanup/exit 三枚进入臂处理前已预标记（12386-12388） |
+| for | **尾部**统一发射 latch+PHI+continue（≈15940 latch 指令不被 `break_generated` 门控，≈15952 PHI 与 ≈15999 continue 受其门控） | exit/latch 预标记（14566-14570）；latch 标签为 `for_loop_`（注意：`else_is_loop_continuation` 的标签名单**不含** `for_loop_`） |
+| while | **臂内自含**（无 increment 块，臂 br 直指 cond ⇒ walker 发 continue + 置 break_generated） | g_while 修前 merge 未外溢（2032=仅丢 break）即为证据 |
+
+### 228.2 根因与修法（三处，共 +175 行）
+
+| 缺陷 | 站点 | 根因 | 修法 |
+|---|---|---|---|
+| **F-213-d6**（f6：34 vs 22） | foreach else 臂两副本（then_is_be 路径 + final-else 路径，§227 的 12911/13188 段） | elseif 的 then 块以「嵌套 if：then 边=循环出口」结尾时，范围行走把它委托给通用 walker；出口块已被循环收尾预标记 ⇒ walker 对 then=cleanup 跳过 ⇒ 嵌套 if 的 break 丢失、else 延续（`$z+=$k`）算了 add 却丢 `global.set`（值不落盘） | 两副本各补**前置内联分支**：then 块终止符为 cond_br 且 `isLoopBreakTarget(then_block)` ∧ `!isLoopBreakTarget(else_block)` ⇒ 内联发射「块内指令（PHI 按 else_blk 边物化）+ `if (n2cond) { generateExitPHIAssignments; break }` + else 延续块（materializeEdgePhi + 单块行走）」，命中即标 processed，原行走自动跳过；自带 return/break save/restore |
+| **F-213-d4**（g_for：2048 vs 1026） | for 生成器 then 臂嵌套 cond_br 处理（branch2 与 final-else 之间） | 与 f4 同根：nested_start=exit(4)、nested_end=latch(3)+1=4 ⇒ 空区间；嵌套 if 丢失 + if_merge_9 外溢尾部被无条件重发 | 镜像 R-321 ②：新增 `isLoopBreakTarget(nested_cb.then_block) and !isLoopBreakTarget(nested_cb.else_block)` 分支，显式守卫 break + else 延续块臂内单块行走；条件性 break 不置 `break_generated`（for 尾部 PHI/continue 受其门控） |
+| **F-213-d5**（g_while：2032 vs 1026） | while 生成器 then 臂 `.cond_br` case（F-206-d-b 链式失败后的范围行走前） | 同一空区间：nested_start=exit(3)、nested_end=cond(1)+1=2 ⇒ [3,2) 空；但 while 的 else 延续由既有 merge 流程正确留在臂内（故症状仅丢 break） | **只补守卫 break**：`isLoopBreakTarget(nested_cb.then_block) and !isLoopBreakTarget(else_block)` ⇒ `if (cond) { 出口PHI; break }`，不动 merge 流程；不置 `break_generated`（同 16568 条件性 break 口径） |
+
+> 三处统一改用 `isLoopBreakTarget`（读 `current_loop_exit_block`/`current_loop_cleanup_block`，三生成器执行期均已设置：foreach 12239-12241、for 14434/14450、while 16351/16361），替代 R-321 ② 的 cleanup/exit 指针比较——语义等价且对 for（无 cleanup_idx）/while 通用。R-321 的 f4 分支保持原样（已验过门）。
+
+### 228.3 读数
+
+| 项 | 修前 | 修后 |
+|---|---|---|
+| f6（F-213-d6，elseif 臂内嵌 break） | **34** | **`22` SAME** |
+| g_for（F-213-d4） | **2048** | **`1026` SAME** |
+| g_while（F-213-d5） | **2032** | **`1026` SAME** |
+| f3 / f4 / f5（R-321 闭环件） | SAME | SAME（零转移） |
+| C343（扩臂 9→12：+f6/g_for/g_while） | 9/9 | **12 same / 0 diff / 0 CF / 0 timeout**；`AOT_BIN=/bin/false` 自证 **12 COMPILE_FAIL** |
+| 邻门 | — | 见本节收尾回填 |
+| 主回归 / 单测 | — | 见本节收尾回填 |
+
+### 228.4 仍开 / 待裁
+
+- **for/while 的 else 臂同源副本**（≈15301/15549 for 侧、≈17040/17253 while 侧的 elseif 链 then 行走）：与 F-213-d6 同形的缺口**理论上存在**但无复现件（本轮 f6 的 for/while 变体未测红——未普查）；按 §六 先问再扩。修法与 d6 相同（前置内联分支可逐字复用）。
+- F-162/F-163（共享层，等批准）、F-88、F-95-d 维持 §224/§226 原状。

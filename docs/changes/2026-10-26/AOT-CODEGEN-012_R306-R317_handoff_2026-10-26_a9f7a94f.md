@@ -10,17 +10,30 @@
 | `src/aot/runtime_lib_template.zig`（tpl） | `a54a0df983fdaf650e0a6db5c8008381` |
 | `src/aot/native_linker.zig`（nlk） | `a9f7a94f0e0140b7b4d96e480ef41c91` |
 | `src/aot/ir_generator.zig`（irg） | `ea35bbdefcfe9789de942bca13888130` |
-| `src/aot/optimizer.zig`（opti） | `5532e540da638f3766911b1f0941dd1` |
+| `src/aot/optimizer.zig`（opti） | `553a2e540da638f3766911b1f0941dd1` |
 | `src/aot/ir.zig`（ir） | `fb2bb442ca27b98cf1df7e109a240e1f` |
 
 > 复核命令：`md5 -q src/aot/runtime_lib_template.zig src/aot/native_linker.zig src/aot/ir_generator.zig src/aot/optimizer.zig src/aot/ir.zig`
+
+> ★**本文件已被第二版取代**：当前生效的交接是 `docs/changes/2026-10-26/AOT-CODEGEN-012_handoff_R319-R320_2026-10-26_99283791.md`（含最新代次锚、待办与可粘贴提示词 A0–A3）。本文件仅作历史参考。
+>
+> ★**交接后更新（R-319 + R-320 已落地，2026-10-26）**
+>
+> | 轮次 | 内容 | 读数 |
+> |---|---|---|
+> | **R-319** | F-167 sprintf 空格标志（PHP 忽略）+ F-168 NAN 字符串化告警（echo/print/print_r 三处入口，顺带修 `php_implode` 每元素双转换） | C342 6/6（自证 6 CF）、邻门全绿、回归 68/68、单测 326/326 |
+> | **R-320** | **F-213-c 闭环**：while 的 elseif 段嵌套 `cond_br` 先交 `generateNestedContinueChain`（两臂都沿 `.br` 链折返循环头时链式发射），失败再走原 spill/范围行走；顺带修 `chain_cond_phi_src` 下溢 | w1 `606→306`、w3 编译失败→`42 12`；C343 7/7（自证 7 CF）、C339 30/30、C340 4/4、C341 5/5、C342 6/6、ERRH 18+1CF、回归 68/68、单测 326/326 |
+>
+> **最新代次锚**：`tpl 2dfc5d01b745148ddddd3652e7267daf`、**`nlk 9928379148ad58c6ac6d46db0dbdd041`**（irg/opti/ir 三枚不变）。接手第一步请用这两枚。
+> 附录 A2（F-167/F-168）**已完成**，附录 A1（原 F-213-c/d 结构性改造）**已过时**——F-213-c 已闭环，剩余 foreach 侧两项见工单 §226.5（F-213-d2 挂死 / F-213-d3 break 丢失）。
+> 新增纪律：**nlk/irg 改动或回退后必须先 `timeout 600 zig build` 再跑门**（模板自磁盘读、发射器编进二进制；曾因旧二进制误发 `setConstVisibility` 使 C340 假红）；**改代码前先跑形状普查**（旧复现件可能已失效，§226.1 即一例）。
 
 ## 1. 高层摘要（TL;DR）
 
 1. 本轮主线（R-306…R-317）**全部已闭环并验收**：主回归 `PASS=68 FAIL=0`（`SELF_CHECK_OK rows=68 uniq=68 total=68`）、单测 `Build Summary: 21/21 steps succeeded; 326/326 tests passed`、邻门（ERRH 19 / C339 30 / C340 4 / C341 5）全绿。
 2. 本会话最后一轮 **R-318（F-162/F-163 类常量 `defined()` 与可见性）只完成取证，代码已逐字节回退**：根因是**共享层 AST 缺字段**（`const_decl` 不存修饰符），按宪法默认「不动共享层」停在待裁点；全部 PHP 真值矩阵与「可直接重落的补丁清单」已写入工单 §224。
 3. 当前工作树 = 已验证代次，**无残留半成品**（工作树与 index 一致，五枚锚对齐）。
-4. 建议下一轮优先级：**P0 = F-213-d（foreach + elseif 值面，需结构性重写）**；**P1 = F-167+F-168 小批（纯模板、已备真值）**；**P2 = F-162/F-163（等老铁批准跨模式 AST 字段后即可落地）**。
+4. 建议下一轮优先级：**P0 = F-213-d（foreach + elseif 值面，需结构性重写）**；~~P1 = F-167+F-168 小批~~（R-319 已闭环）；**P2 = F-162/F-163（等老铁批准跨模式 AST 字段后即可落地）**。
 
 ## 2. 影响范围
 
@@ -154,8 +167,8 @@ rm -rf .zigphp_aot_build_* ; rm -f ./*.o
 
 | 编号 | 事项 | 现状与证据 | 建议 |
 |---|---|---|---|
-| **F-167** | 空格标志 `% f`/`% d`/`% 05d` PHP **忽略**、AOT 补空格 | 工单 §222.4；真值：`[% f]`⇒`1.250000`、`[% 5d]`⇒`    3`、`[% 05d]`⇒`00003`、`[% .3f]`⇒`1.250`；AOT 现为 `[ 1.250000]`/`[ 0003]` | 模板 1 处：`runtime_lib_template.zig:31832` 的 `' ' => flag_space = true` 改为只消费不生效，并删 `flag_space` 变量与 **3 处**使用（≈31905、≈31915、≈31990）。**注意：`flag_space` 变量删掉后 3 处使用必须同步删，否则编译失败**（本轮曾只改一半，已回退） |
-| **F-168** | `echo NAN` 缺 PHP 告警 | 真值（PHP 8.5.8）：`echo/print/(string)/strval/插值/拼接/sprintf("%s")/implode` 对 NAN **全部**发 `Warning: unexpected NAN value was coerced to string`；`INF` **不发**；`(int)INF/NAN/-INF` 的 `The float X is not representable as an int, cast occurred` **AOT 已正确**（本轮实测） | 模板 1 处：`Value.toString` 的 float 分支（`:3380`）加 `if (std.math.isNan(fv)) emitWarning("unexpected NAN value was coerced to string");`（数组分支已有同样先例）。**风险**：`var_export`/`json_encode` 不告警——确认它们不走 `toString` |
+| ~~F-167~~ **已闭环 R-319** | 空格标志 `% f`/`% d`/`% 05d` PHP **忽略**、AOT 补空格 | 工单 §222.4；真值：`[% f]`⇒`1.250000`、`[% 5d]`⇒`    3`、`[% 05d]`⇒`00003`、`[% .3f]`⇒`1.250`；AOT 现为 `[ 1.250000]`/`[ 0003]` | 模板 1 处：`runtime_lib_template.zig:31832` 的 `' ' => flag_space = true` 改为只消费不生效，并删 `flag_space` 变量与 **3 处**使用（≈31905、≈31915、≈31990）。**注意：`flag_space` 变量删掉后 3 处使用必须同步删，否则编译失败**（本轮曾只改一半，已回退） |
+| ~~F-168~~ **已闭环 R-319** | `echo NAN` 缺 PHP 告警 | 真值（PHP 8.5.8）：`echo/print/(string)/strval/插值/拼接/sprintf("%s")/implode` 对 NAN **全部**发 `Warning: unexpected NAN value was coerced to string`；`INF` **不发**；`(int)INF/NAN/-INF` 的 `The float X is not representable as an int, cast occurred` **AOT 已正确**（本轮实测） | 模板 1 处：`Value.toString` 的 float 分支（`:3380`）加 `if (std.math.isNan(fv)) emitWarning("unexpected NAN value was coerced to string");`（数组分支已有同样先例）。**风险**：`var_export`/`json_encode` 不告警——确认它们不走 `toString` |
 | **F-162/F-163** | `defined('C::K')` 恒 false；类常量可见性未建模 | 工单 §224 全量真值矩阵 + 已写好并**完整回退**的补丁清单（tpl+nlk+irg 三段）+ **唯一硬前置：AST `const_decl` 增 `modifiers`** | **等老铁裁决**；批准后按 §224.3 清单原样重落，本轮不用重新取证 |
 
 ### P2（已登记，未开工）

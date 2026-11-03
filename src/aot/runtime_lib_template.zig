@@ -3379,7 +3379,12 @@ pub const Value = struct {
         }
         if (self.isFloat()) {
             var buf: [64]u8 = undefined;
-            const str = phpFormatFloat(&buf, self.asFloat());
+            const fv = self.asFloat();
+            // ★F-168（R-319）：PHP 8.5.8 实测 NAN 的任何字符串化都发一条 Warning（INF 不发）：
+            //   echo/print/(string)/strval/插值/拼接/sprintf("%s")/implode 全部同一条。
+            //   var_export 与 json_encode 不走本函数（各自有序列化器），故不会误报。
+            if (std.math.isNan(fv)) emitWarning("unexpected NAN value was coerced to string");
+            const str = phpFormatFloat(&buf, fv);
             return PHPString.init(allocator, str);
         }
         if (self.isString()) {
@@ -10172,7 +10177,10 @@ pub fn php_echo(value: Value) !void {
         try php_output_write(str);
     } else if (value.isFloat()) {
         var buf: [64]u8 = undefined;
-        const str = phpFormatFloat(&buf, value.asFloat());
+        const fv = value.asFloat();
+        // ★F-168（R-319）：NAN 字符串化告警（与 Value.toString 同口径；INF 不发）
+        if (std.math.isNan(fv)) emitWarning("unexpected NAN value was coerced to string");
+        const str = phpFormatFloat(&buf, fv);
         try php_output_write(str);
     } else if (value.isString()) {
         const str = value.asString();
@@ -10379,7 +10387,10 @@ fn printValue(writer: anytype, value: Value, indent: usize, is_nested: bool) !vo
     }
     if (value.isFloat()) {
         var buf: [64]u8 = undefined;
-        try writer.writeAll(phpFormatFloat(&buf, value.asFloat()));
+        const fv = value.asFloat();
+        // ★F-168（R-319）：print_r 走本函数，NAN 同样发一条告警（PHP 实测发；var_dump 不走这里）
+        if (std.math.isNan(fv)) emitWarning("unexpected NAN value was coerced to string");
+        try writer.writeAll(phpFormatFloat(&buf, fv));
         return;
     }
     if (value.isString()) {
@@ -15306,15 +15317,20 @@ pub fn php_implode(glue: Value, pieces: Value, allocator: Allocator) !Value {
 
     if (arr.count() == 0) return Value.initString(try PHPString.init(allocator, ""));
 
-    // 计算总长度
+    // 计算总长度（★F-168/R-319：每元素只 toString 一次并保留结果——旧实现两遍各转换一次，
+    // 使 NAN 的字符串化告警每元素发两条，而 PHP 实测每条元素只发一条）
+    var strs: std.ArrayListUnmanaged(*PHPString) = .{ .items = &.{}, .capacity = 0 };
+    defer {
+        for (strs.items) |s| s.release(allocator);
+        strs.deinit(allocator);
+    }
     var total_len: usize = 0;
     var it = arr.elements.iterator();
     var first = true;
     while (it.next()) |entry| {
         if (!first) total_len += glue_str.length;
-        const val = entry.value_ptr.*;
-        const str = try val.toString(allocator);
-        defer str.release(allocator);
+        const str = try entry.value_ptr.*.toString(allocator);
+        try strs.append(allocator, str);
         total_len += str.length;
         first = false;
     }
@@ -15324,16 +15340,14 @@ pub fn php_implode(glue: Value, pieces: Value, allocator: Allocator) !Value {
     errdefer allocator.free(buffer);
 
     var write_pos: usize = 0;
-    it = arr.elements.iterator();
+    var si: usize = 0;
     first = true;
-    while (it.next()) |entry| {
+    while (si < strs.items.len) : (si += 1) {
         if (!first) {
             @memcpy(buffer[write_pos .. write_pos + glue_str.length], glue_str.data);
             write_pos += glue_str.length;
         }
-        const val = entry.value_ptr.*;
-        const str = try val.toString(allocator);
-        defer str.release(allocator);
+        const str = strs.items[si];
         @memcpy(buffer[write_pos .. write_pos + str.length], str.data);
         write_pos += str.length;
         first = false;
@@ -31822,14 +31836,15 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
             // 解析标志
             var flag_minus = false;
             var flag_plus = false;
-            var flag_space = false;
             var flag_zero = false;
             var pad_char: u8 = ' ';
             while (i < fmt.len) {
                 switch (fmt[i]) {
                     '-' => flag_minus = true,
                     '+' => flag_plus = true,
-                    ' ' => flag_space = true,
+                    // ★F-167（R-319）：PHP 8.5.8 实测**忽略**空格标志（`% f`⇒`1.250000`、
+                    //   `% 5d`⇒`    3`、`% 05d`⇒`00003`、`% 10s`⇒8 空格+值），只消费不生效。
+                    ' ' => {},
                     '0' => flag_zero = true,
                     '#' => return throwThrowable("ValueError", "Unknown format specifier \"#\"", allocator),
                     '\'' => {
@@ -31902,7 +31917,7 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
                 },
                 'd', 'i' => {
                     const val = castIntArgWithWarn(arg); // ★F-69：sprintf／printf 的 int 族站点（实测 %d %u %x %X %o %b %c 各转换一次 ⇒ 各发一条 Warn）
-                    if (flag_plus and val >= 0) try tmp_buf.append(allocator, '+') else if (flag_space and val >= 0) try tmp_buf.append(allocator, ' ');
+                    if (flag_plus and val >= 0) try tmp_buf.append(allocator, '+');
                     const str = try std.fmt.allocPrint(allocator, "{d}", .{val});
                     defer allocator.free(str);
                     try tmp_buf.appendSlice(allocator, str);
@@ -31912,7 +31927,7 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
                     if (phpFmtSpecialFloat(val)) |sp| {
                         try tmp_buf.appendSlice(allocator, sp);
                     } else {
-                        if (flag_plus and val >= 0) try tmp_buf.append(allocator, '+') else if (flag_space and val >= 0) try tmp_buf.append(allocator, ' ');
+                        if (flag_plus and val >= 0) try tmp_buf.append(allocator, '+');
                         const prec = precision orelse 6;
                         var fbuf: [128]u8 = undefined;
                         const fstr = formatFloatPrecision(&fbuf, val, prec);
@@ -31987,7 +32002,7 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
                     // 格式化尾数
                     var fbuf: [64]u8 = undefined;
                     const fstr = formatFloatPrecision(&fbuf, mantissa, prec);
-                    const sign_str = if (val < 0) "-" else if (flag_plus) "+" else if (flag_space) " " else "";
+                    const sign_str = if (val < 0) "-" else if (flag_plus) "+" else "";
                     const exp_sign = if (exp >= 0) "+" else "-";
                     const exp_abs: u32 = @intCast(if (exp >= 0) exp else -exp);
                     const e_char: u8 = if (specifier == 'E') 'E' else 'e';

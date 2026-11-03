@@ -1,0 +1,6 @@
+f1	SAME	rc=0	[[1.250000][3][    3][00003][00003][1.250][+3] [ab][        ab][ab        ] [7    ][    3.14] ]
+n1	SAME	rc=0	[echo=[ Warning: unexpected NAN value was coerced to string in @FILE@ on line @N@ NAN] print=[ Warning: unexpected NAN va]
+n2	SAME	rc=0	[cast=[ Warning: unexpected NAN value was coerced to string in @FILE@ on line @N@ NAN] strval=[ Warning: unexpected NAN v]
+n3	SAME	rc=0	[sprintf=[ Warning: unexpected NAN value was coerced to string in @FILE@ on line @N@ NAN] implode1=[ Warning: unexpected ]
+n4	SAME	rc=0	[inf=[INF] ve=[NAN] bool(false)  Warning: The float INF is not representable as an int, cast occurred in @FILE@ on line @]
+n5	SAME	rc=0	[at=[NAN] er=[NAN] back=[ Warning: unexpected NAN value was coerced to string in @FILE@ on line @N@ NAN] ]
