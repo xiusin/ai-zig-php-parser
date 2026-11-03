@@ -191,6 +191,9 @@ pub const IRGenerator = struct {
     pub const FinallyContext = struct {
         /// Finally clause node index (for code duplication)
         finally_clause: Node.Index,
+        /// F-211：push 时的循环栈深度。break/continue 只有跳出「包含该 finally 的循环」
+        /// （目标循环下标 < loop_depth）时才需要先执行 finally 体。
+        loop_depth: usize = 0,
     };
 
     /// Initialize a new IR generator
@@ -3639,6 +3642,7 @@ pub const IRGenerator = struct {
         if (try_data.finally_clause) |finally_idx| {
             try self.finally_stack.append(self.allocator, .{
                 .finally_clause = finally_idx,
+                .loop_depth = self.loop_stack.items.len,
             });
         }
 
@@ -4033,34 +4037,60 @@ pub const IRGenerator = struct {
     /// Returns true if finally body was generated (caller should set terminator
     /// only if the block is not already terminated by the finally body itself).
     fn redirectThroughFinally(self: *Self, is_throw: bool) !bool {
-        // Only redirect when finally is active
+        return try self.redirectChainThroughFinally(is_throw, null);
+    }
+
+    /// F-211：break/continue 跳出「包含该 finally 的循环」时，先执行 finally 体。
+    /// 判据：push finally 时的循环深度 > 目标循环栈下标 ⇒ try 在目标循环体内侧。
+    /// （`try { while(){ break; } } finally{}` 深度相等 ⇒ 不重定向，正确。）
+    fn redirectLoopJumpThroughFinally(self: *Self, target_loop_idx: usize) !bool {
+        return try self.redirectChainThroughFinally(false, target_loop_idx);
+    }
+
+    /// F-211/F-211-b/F-211-c：把当前跳转（return/throw/break/continue）经过的 finally 层
+    /// **一次性**收集后逐层复制（内层先执行）。`loop_target == null` 表示跳出全部作用域
+    /// （return/throw）；否则只收集 `loop_depth > target` 的层（try 在目标循环内侧）。
+    fn redirectChainThroughFinally(self: *Self, is_throw: bool, loop_target: ?usize) !bool {
         if (self.finally_stack.items.len == 0) return false;
         // For throw: skip if inside try body (throw goes to catch via runtime,
         // catch dispatcher enters finally if exception is uncaught).
         // For return: always redirect (return must execute finally before leaving).
         if (is_throw and self.try_stack.items.len > 0) return false;
-
-        const finally_ctx = self.finally_stack.items[self.finally_stack.items.len - 1];
-
-        // Pop temporarily to prevent infinite recursion in finally body
-        _ = self.finally_stack.pop();
-        defer self.finally_stack.append(self.allocator, finally_ctx) catch {};
-
-        // Create a new block for the duplicated finally body
-        var buf: [64]u8 = undefined;
-        const blk_name = std.fmt.bufPrint(&buf, "finally_dup_{d}", .{self.block_counter}) catch "finally_dup";
-        const dup_block = try self.createBlock(blk_name);
-
-        // Current block jumps to the duplicated finally block
-        self.setTerminator(.{ .br = dup_block });
-
-        // Generate finally body in the new block
-        self.setCurrentBlock(dup_block);
-        const finally_node = self.getNode(finally_ctx.finally_clause);
-        if (finally_node != null and finally_node.?.tag == .finally_clause) {
-            try self.generateStatement(finally_node.?.data.finally_clause.body);
+        var n: usize = 0;
+        while (n < self.finally_stack.items.len) {
+            const ctx = self.finally_stack.items[self.finally_stack.items.len - 1 - n];
+            if (loop_target) |lt| {
+                if (ctx.loop_depth <= lt) break;
+            }
+            n += 1;
         }
-
+        if (n == 0) return false;
+        var saved: [8]FinallyContext = undefined;
+        if (n > saved.len) n = saved.len;
+        for (0..n) |k| saved[k] = self.finally_stack.items[self.finally_stack.items.len - 1 - k];
+        var popped: usize = 0;
+        while (popped < n) : (popped += 1) _ = self.finally_stack.pop();
+        defer {
+            var r: usize = n;
+            while (r > 0) : (r -= 1) {
+                self.finally_stack.append(self.allocator, saved[r - 1]) catch {};
+            }
+        }
+        // 逐层复制 finally 体（内层先执行，与 PHP 一致）
+        for (0..n) |idx| {
+            const ctx = saved[idx];
+            var buf: [64]u8 = undefined;
+            const blk_name = std.fmt.bufPrint(&buf, "finally_dup_{d}", .{self.block_counter}) catch "finally_dup";
+            const dup_block = try self.createBlock(blk_name);
+            self.setTerminator(.{ .br = dup_block });
+            self.setCurrentBlock(dup_block);
+            const finally_node = self.getNode(ctx.finally_clause);
+            if (finally_node != null and finally_node.?.tag == .finally_clause) {
+                try self.generateStatement(finally_node.?.data.finally_clause.body);
+            }
+            // finally 体自身终止（return/throw/break）⇒ 后续外层不再执行
+            if (self.isBlockTerminated()) return true;
+        }
         return true;
     }
 
@@ -4238,7 +4268,8 @@ pub const IRGenerator = struct {
         if (self.loop_stack.items.len >= level) {
             const target_idx = self.loop_stack.items.len - level;
             const ctx = self.loop_stack.items[target_idx];
-            self.setTerminator(.{ .br = ctx.break_block });
+            _ = try self.redirectLoopJumpThroughFinally(target_idx);
+            if (!self.isBlockTerminated()) self.setTerminator(.{ .br = ctx.break_block });
         }
     }
 
@@ -4267,7 +4298,8 @@ pub const IRGenerator = struct {
         if (self.loop_stack.items.len >= level) {
             const target_idx = self.loop_stack.items.len - level;
             const ctx = self.loop_stack.items[target_idx];
-            self.setTerminator(.{ .br = ctx.continue_block });
+            _ = try self.redirectLoopJumpThroughFinally(target_idx);
+            if (!self.isBlockTerminated()) self.setTerminator(.{ .br = ctx.continue_block });
         }
     }
 

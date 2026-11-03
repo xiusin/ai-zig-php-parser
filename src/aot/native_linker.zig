@@ -362,6 +362,10 @@ pub const NativeLinker = struct {
     /// AST-Direct 路径：generateBrToMergeCondBr 处理的 merge 块引用。
     /// 调用者在 if/else 后检查此字段，在正确的缩进级别生成非 PHI 指令。
     pending_merge_non_phi: ?*const IR.BasicBlock = null,
+    /// F-206-d-b：本层 while 体的嵌套 if 已按链式发射时，记下 else 链尾块索引。
+    /// 循环尾段的 cond PHI 必须取该块（两条路径的真实汇合前驱），否则会取到
+    /// 已被臂内消费的 then 边 incoming（w1：`reg_48=reg_48`/`reg_45=reg_20`）。
+    chain_cond_phi_src: ?usize = null,
     current_optimized_alloca_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_function_for_resolve: ?*const IR.Function = null,
     /// 当前函数返回类型（用于返回值弱类型转换）
@@ -9326,6 +9330,35 @@ pub const NativeLinker = struct {
                         }
                     },
                     .cond_br => {
+                        // F-208：两条分支都沿 .br 链直达本循环 cond（典型形态：循环体之后
+                        // 的 `if (..) { ..; continue; } else { ..; continue; }`）。通用
+                        // if/else 行走在 then 臂 continue 后置 break_generated ⇒ else 臂
+                        // 整段被跳过，其块保持未处理（`[AST-DIRECT-FAIL] unprocessed blocks`）。
+                        // 此处交链式发射一次收口：两条链各自以 continue 收尾。
+                        if (self.current_loop_label) |lbl_c8| {
+                            if (self.current_loop_cond_block) |cc8| {
+                                var t8: ?usize = null;
+                                var e8: ?usize = null;
+                                for (0..func.blocks.items.len) |b8| {
+                                    if (func.blocks.items[b8] == term.cond_br.then_block) t8 = b8;
+                                    if (func.blocks.items[b8] == term.cond_br.else_block) e8 = b8;
+                                }
+                                if (t8 != null and e8 != null and self.chainsReachCond(func, t8.?, e8.?, cc8)) {
+                                    // 条件计算属本块指令，必须先于 if 头部发射
+                                    for (block.instructions.items) |inst8| {
+                                        if (inst8.op == .phi) continue;
+                                        try writer.writeAll(indent);
+                                        try self.generateInstructionSimple(writer.list, inst8);
+                                    }
+                                    const done8 = try self.generateNestedContinueChain(writer, func, block, t8.?, e8.?, cc8, lbl_c8, processed, indent, false);
+                                    if (done8) {
+                                        try processed.put(i, {});
+                                        i += 1;
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
                         const cond_br_data = term.cond_br;
 
                         // 生成块内指令（包括条件计算）
@@ -12369,6 +12402,7 @@ pub const NativeLinker = struct {
 
                     // 处理 then 块
                     var then_is_be = false;
+                    var then_skipped_marked = false;
                     var logical_merge_to_process: ?usize = null;
                     var merge_bi: ?usize = null;
                     if (then_bi) |ti| {
@@ -12718,6 +12752,8 @@ pub const NativeLinker = struct {
                                     else => {},
                                 }
                             }
+                        } else {
+                            then_skipped_marked = true;
                         }
                     }
 
@@ -13086,6 +13122,20 @@ pub const NativeLinker = struct {
                             try writer.print("{s}}}\n", .{if_indent});
                         }
                     } else {
+                        // F-212：then 臂即 break 目标（cleanup/exit）且已被预标记为已处理
+                        // （increment/cleanup/exit 在 then/else 处理前统一预标记），then 体
+                        // 整段未发射 ⇒ 裸 break 丢失；若增量被 else 臂内联，then 路径还会
+                        // 跳过 iter_next ⇒ 死循环。此处按「cond_br 源块 → then 块」边物化
+                        // 出口 PHI 并补发 break。
+                        if (then_skipped_marked and then_bi != null and !self.return_generated and !self.break_generated) {
+                            const ti_s7 = then_bi.?;
+                            const s7_is_break = ti_s7 == cleanup_idx or
+                                (if (exit_idx) |ei_s7| ti_s7 == ei_s7 else false);
+                            if (s7_is_break) {
+                                try self.generateExitPHIAssignments(writer, func, body_idx, ti_s7, then_indent, false);
+                                try writer.print("{s}    break :{s};\n", .{ then_indent, label_name });
+                            }
+                        }
                         if (else_bi) |ei| {
                             if (!processed.contains(ei)) {
                                 try writer.print("{s}}} else {{\n", .{if_indent});
@@ -14027,42 +14077,73 @@ pub const NativeLinker = struct {
         }
     }
 
-    /// F-206-d：then 臂内嵌套 if 的 then 边直达本循环回边（`if (c) continue;`），
-    /// else 边沿单后继 br 链折返 latch。通用回退把 nested_end 取成回边目标索引 + 1
-    /// （小于 nested_start）⇒ 行走范围为空，嵌套 if 与 else 链（如 `$c += 100`）
-    /// 整段被吞。此处按链式形态完整发射：
-    ///   if (c) { <回边 PHI>; continue :label; }
-    ///   <else 链指令 + 逐边 PHI> <latch PHI> <latch 增量> <cond PHI> continue
-    /// 先 dry-run 校验形态，返回 false 时不落任何发射，调用方回退通用处理。
+    /// F-206-d/-d-b：循环体 if/else 的一臂内嵌套 if，其 then 边与 else 边都沿
+    /// 「单后继 .br 链」折返本循环 cond（`if (c) continue;`，或 `$c += 100` 后再回边）。
+    /// 通用回退把 nested_end 取成回边目标索引 + 1（循环头恒在之前）⇒ 行走范围
+    /// 为空，嵌套 if 与后续赋值整段被吞。此处按链式形态完整发射：
+    ///   if (c) { <then 链> } <else 链>      两条链各自以 continue :label 收尾
+    /// 先对两条链做纯 CFG dry-run，任一不成立即返回 false 且不落任何发射。
     fn generateNestedContinueChain(
         self: *Self,
         writer: anytype,
         func: *const IR.Function,
         then_blk: *const IR.BasicBlock,
-        cond_idx: usize,
-        loop_idx: usize,
+        then_start_idx: usize,
         else_start_idx: usize,
+        cond_idx: usize,
         label_name: []const u8,
         processed: *std.AutoHashMap(usize, void),
         indent: []const u8,
+        record_cond_src: bool,
     ) !bool {
         const nested_cb = switch (then_blk.terminator orelse return false) {
             .cond_br => |cb| cb,
             else => return false,
         };
-        if (loop_idx == cond_idx) return false;
-        const cond_ptr = func.blocks.items[cond_idx];
-        const loop_ptr = func.blocks.items[loop_idx];
+        var tchain: [24]usize = undefined;
+        var tn: usize = 0;
+        var echain: [24]usize = undefined;
+        var en: usize = 0;
+        if (!self.collectChainToCond(func, then_start_idx, cond_idx, &tchain, &tn)) return false;
+        if (!self.collectChainToCond(func, else_start_idx, cond_idx, &echain, &en)) return false;
 
-        // dry-run：else 侧必须是纯 .br 单后继链，止于 latch。IR 块序与源码序
-        // 不必一致（if_merge_ 常排在分支体之前），因此不能只认前向边，
-        // 用链内去重防环（重复访问即放弃）。
-        var chain: [24]usize = undefined;
+        try writer.print("{s}if (", .{indent});
+        try self.writeConditionExpr(writer, nested_cb.cond.id, nested_cb.cond.type_);
+        try writer.print(") {{\n", .{});
+        const inner_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{indent});
+        defer self.allocator.free(inner_indent);
+        try self.emitChainToCond(writer, func, tchain[0..tn], then_blk, cond_idx, label_name, processed, inner_indent);
+        try writer.print("{s}}}\n", .{indent});
+        try self.emitChainToCond(writer, func, echain[0..en], then_blk, cond_idx, label_name, processed, indent);
+        if (record_cond_src) self.chain_cond_phi_src = echain[en - 1];
+        self.break_generated = true;
+        return true;
+    }
+
+    /// 收集 [start_idx → cond) 的单后继块链（含起点）。纯 CFG 校验：仅 .br、
+    /// 链内去重防环（IR 块序可回跳）、不越过其它循环头。不含 processed 判定——
+    /// then/else 两条链可共享 latch 块（各自路径都要执行一次增量）。
+    fn collectChainToCond(
+        self: *Self,
+        func: *const IR.Function,
+        start_idx: usize,
+        cond_idx: usize,
+        chain: *[24]usize,
+        chain_n: *usize,
+    ) bool {
+        _ = self;
+        const cond_ptr = func.blocks.items[cond_idx];
+        // 分支自身即回边（start == cond）：空链。交给 emitChainToCond 只物化 cond
+        // PHI 并发 continue。旧口径按「越过循环头」拒绝，令 generateNestedContinueChain
+        // 整体放弃、回退范围行走从 cond 起算 ⇒ 中间块永不发射（F-213 g4）。
+        if (start_idx == cond_idx) {
+            chain_n.* = 0;
+            return true;
+        }
         var n: usize = 0;
-        var cur = else_start_idx;
+        var cur = start_idx;
         while (true) {
             if (cur >= func.blocks.items.len or n >= chain.len) return false;
-            if (processed.contains(cur)) return false;
             for (chain[0..n]) |seen| {
                 if (seen == cur) return false;
             }
@@ -14074,8 +14155,10 @@ pub const NativeLinker = struct {
                 .br => |t| t,
                 else => return false,
             };
-            if (tgt == loop_ptr) break;
-            if (tgt == cond_ptr) return false;
+            if (tgt == cond_ptr) {
+                chain_n.* = n;
+                return true;
+            }
             var tgt_idx: ?usize = null;
             for (0..func.blocks.items.len) |bi_c| {
                 if (func.blocks.items[bi_c] == tgt) {
@@ -14085,65 +14168,80 @@ pub const NativeLinker = struct {
             }
             cur = tgt_idx orelse return false;
         }
+    }
 
-        try writer.print("{s}if (", .{indent});
-        try self.writeConditionExpr(writer, nested_cb.cond.id, nested_cb.cond.type_);
-        try writer.print(") {{\n", .{});
-        const inner_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{indent});
-        defer self.allocator.free(inner_indent);
-        // then 边目标是 latch（增量在其内），必须走完整尾段而非裸 continue；
-        // PHI 来源块是持有 cond_br 的块（then_blk），不是目标 latch 本身。
-        try self.emitForLatchContinue(writer, func, cond_idx, loop_idx, then_blk, label_name, inner_indent);
-        try writer.print("{s}}}\n", .{indent});
+    /// 纯 CFG 预检：两条分支是否都能沿 .br 单后继链走到 cond（不落任何发射）。
+    fn chainsReachCond(self: *Self, func: *const IR.Function, a_idx: usize, b_idx: usize, cond_idx: usize) bool {
+        var ca: [24]usize = undefined;
+        var na: usize = 0;
+        var cb: [24]usize = undefined;
+        var nb: usize = 0;
+        return self.collectChainToCond(func, a_idx, cond_idx, &ca, &na) and
+            self.collectChainToCond(func, b_idx, cond_idx, &cb, &nb);
+    }
 
-        for (chain[0..n], 0..) |ci, k| {
+    /// 沿链逐块发射「进入该块的 PHI ← 来源块」与块内非 PHI 指令，最后物化
+    /// cond 块的 PHI 并发 continue。
+    fn emitChainToCond(
+        self: *Self,
+        writer: anytype,
+        func: *const IR.Function,
+        chain: []const usize,
+        src_blk: *const IR.BasicBlock,
+        cond_idx: usize,
+        label_name: []const u8,
+        processed: *std.AutoHashMap(usize, void),
+        indent: []const u8,
+    ) !void {
+        var src = src_blk;
+        var prev_idx: ?usize = null;
+        for (chain) |ci| {
             const blk = func.blocks.items[ci];
-            try processed.put(ci, {});
+            // 链上块可能与本层另一条臂共享（如 if_merge_ 由 then 链与内层循环出口共用）。
+            // 共享块必须照发（本路径要执行其副作用），但**不得登记 processed**——
+            // 否则另一条臂的回退行走会因 processed 跳过它，副作用整段丢失（w1 死循环）。
+            const shared = self.chainBlockHasOutsidePred(func, ci, src_blk, prev_idx);
+            if (!shared) try processed.put(ci, {});
+            try self.materializeEdgePhi(writer, blk, src, indent);
             for (blk.instructions.items) |inst| {
                 if (inst.op == .phi) continue;
                 try writer.writeAll(indent);
                 try self.generateInstructionSimple(writer.list, inst);
             }
-            if (k + 1 < n) {
-                try self.materializeEdgePhi(writer, func.blocks.items[chain[k + 1]], blk, indent);
-            }
+            src = blk;
+            prev_idx = ci;
         }
-        try self.emitForLatchContinue(writer, func, cond_idx, loop_idx, func.blocks.items[chain[n - 1]], label_name, indent);
-        try processed.put(loop_idx, {});
-        self.break_generated = true;
-        return true;
+        try self.materializeEdgePhi(writer, func.blocks.items[cond_idx], src, indent);
+        try writer.print("{s}continue :{s};\n", .{ indent, label_name });
     }
 
-    /// 从 from_blk 经 latch 回边：latch PHI → 增量 → cond PHI → continue
-    fn emitForLatchContinue(
+    /// 链上块是否被「链外」前驱指向（共享汇合块）。唯一允许的前驱是链首的
+    /// 来源块 src_blk 与链内紧邻前一块。
+    fn chainBlockHasOutsidePred(
         self: *Self,
-        writer: anytype,
         func: *const IR.Function,
-        cond_idx: usize,
-        loop_idx: usize,
-        from_blk: *const IR.BasicBlock,
-        label_name: []const u8,
-        indent: []const u8,
-    ) !void {
-        const loop_blk = func.blocks.items[loop_idx];
-        try self.materializeEdgePhi(writer, loop_blk, from_blk, indent);
-        for (loop_blk.instructions.items) |inst| {
-            if (inst.op == .phi) continue;
-            try writer.writeAll(indent);
-            try self.generateInstructionSimple(writer.list, inst);
-        }
-        const cond_blk = func.blocks.items[cond_idx];
-        for (cond_blk.instructions.items) |phi_inst| {
-            if (phi_inst.op != .phi) continue;
-            const result = phi_inst.result orelse continue;
-            for (phi_inst.op.phi.incoming) |incoming| {
-                if (incoming.block == loop_blk or std.mem.eql(u8, incoming.block.label, loop_blk.label)) {
-                    try self.writePtrAwareAssign(writer, indent, result.id, incoming.value.id);
-                    break;
-                }
+        idx: usize,
+        src_blk: *const IR.BasicBlock,
+        prev_idx: ?usize,
+    ) bool {
+        _ = self;
+        const target = func.blocks.items[idx];
+        for (func.blocks.items, 0..) |blk, bi_s| {
+            if (bi_s == idx) continue;
+            const t = blk.terminator orelse continue;
+            const hits = switch (t) {
+                .br => |tg| tg == target,
+                .cond_br => |cb| cb.then_block == target or cb.else_block == target,
+                else => false,
+            };
+            if (!hits) continue;
+            if (blk == src_blk) continue;
+            if (prev_idx) |pi| {
+                if (bi_s == pi) continue;
             }
+            return true;
         }
-        try writer.print("{s}continue :{s};\n", .{ indent, label_name });
+        return false;
     }
 
     /// for 的 IR 块结构：
@@ -14776,17 +14874,11 @@ pub const NativeLinker = struct {
                                         // { <rhs 指令>; M←rhs 边 }，M 自身消费者交单块范围行走。
                                         const fe_is_or_sc = std.mem.startsWith(u8, nested_cb.then_block.label, "logical_merge_") and
                                             std.mem.startsWith(u8, nested_cb.else_block.label, "logical_rhs_");
-                                        // F-206-d：嵌套 if 的 then 边是回边 + else 边折返 latch。
+                                        // F-206-d：嵌套 if 的两条边都沿 .br 链折返本循环 cond。
                                         // 旧通用回退把 nested_end 取成回边目标索引 + 1（< nested_start）
                                         // ⇒ 行走范围为空，嵌套 if 与 else 链（如 `$c += 100`）整段被吞。
-                                        const nested_then_is_be = blk: {
-                                            if (nested_ti) |nti_be| {
-                                                break :blk isLoopBE(func.blocks.items[nti_be], cond_block_ptr, loop_block_ptr);
-                                            }
-                                            break :blk false;
-                                        };
-                                        const nested_chain_done = if (nested_then_is_be and nested_ei != null)
-                                            try self.generateNestedContinueChain(writer, func, then_blk, cond_idx, loop_idx, nested_ei.?, label_name, processed, then_indent)
+                                        const nested_chain_done = if (nested_ti != null and nested_ei != null)
+                                            try self.generateNestedContinueChain(writer, func, then_blk, nested_ti.?, nested_ei.?, cond_idx, label_name, processed, then_indent, false)
                                         else
                                             false;
                                         if (nested_chain_done) {
@@ -15630,6 +15722,25 @@ pub const NativeLinker = struct {
                                                     }
                                                 }
                                                 try writer.print("{s}}}\n", .{then_indent});
+                                                // F-214-a（R-309）：嵌套 then/else 汇聚到 M 后仍沿 .br 到 N（外层 merge）。
+                                                // then 臂只物化进入 M 的一层边 PHI，而 else 臂的范围行走会把「M→N」边 PHI
+                                                // 发进 else 臂内 ⇒ then 路径缺写（c_for：$z += 10 丢失）。此处按 M→N 再物化一次。
+                                                if (nested_then_idx) |nti_mf| {
+                                                    if (nested_else_idx) |nei_mf| {
+                                                        if (findCommonBrTarget(self, func, nti_mf, nei_mf)) |m_idx_f| {
+                                                            if (m_idx_f < func.blocks.items.len) {
+                                                                const m_blk_f = func.blocks.items[m_idx_f];
+                                                                if (m_blk_f.terminator) |mt_f| {
+                                                                    if (mt_f == .br and mt_f.br != func.blocks.items[cond_idx] and
+                                                                        !(exit_idx < func.blocks.items.len and mt_f.br == func.blocks.items[exit_idx]))
+                                                                    {
+                                                                        try self.materializeEdgePhi(writer, mt_f.br, m_blk_f, then_indent);
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
                                                 // 方案 C：L2 if/else 闭合后，两条路径均经 then 边
                                                 // br 目标指向的容器 merge 块（M2）到达外层 merge
                                                 // （merge_bi，M1）。物化 M1 中来自 M2 的 PHI incoming，
@@ -15972,6 +16083,28 @@ pub const NativeLinker = struct {
     ///   while_cond_N  - 条件检查
     ///   while_body_N+1 - 循环体
     ///   while_exit_N+K - 循环出口
+    /// F-210：在 `continue :label` 之前，按来源块物化本层 cond 的循环携带 PHI。
+    /// 嵌套守卫（`if (c1) continue; if (c2) continue;`）的第二条 continue 原先裸发，
+    /// `$i++` 的结果不回填 ⇒ 条件永不前进（q2 死循环）。
+    fn emitCondPhisFromBlk(
+        self: *Self,
+        writer: anytype,
+        cond_blk: *const IR.BasicBlock,
+        src_blk: *const IR.BasicBlock,
+        indent: []const u8,
+    ) !void {
+        for (cond_blk.instructions.items) |phi_inst| {
+            if (phi_inst.op != .phi) continue;
+            const result = phi_inst.result orelse continue;
+            for (phi_inst.op.phi.incoming) |incoming| {
+                if (incoming.block == src_blk or std.mem.eql(u8, incoming.block.label, src_blk.label)) {
+                    try self.writePtrAwareAssign(writer, indent, result.id, incoming.value.id);
+                    break;
+                }
+            }
+        }
+    }
+
     fn generateWhileFromLabels(
         self: *Self,
         writer: anytype,
@@ -15983,6 +16116,8 @@ pub const NativeLinker = struct {
         loop_label_counter: *u32,
         indent: []const u8,
     ) anyerror!usize {
+        // F-206-d-b：进入新循环时清掉上一循环遗留的 cond-PHI 强制源，避免错配
+        self.chain_cond_phi_src = null;
         const cond_block = func.blocks.items[cond_idx];
 
         var body_idx: usize = undefined;
@@ -16501,6 +16636,23 @@ pub const NativeLinker = struct {
                                         }
                                     },
                                     .cond_br => {
+                                        // F-206-d-b：then/else 两臂都沿 .br 链折返 while_cond 时按链发射
+                                        const chain_cb_w = tt.cond_br;
+                                        var chain_then_w: ?usize = null;
+                                        var chain_else_w: ?usize = null;
+                                        for (0..func.blocks.items.len) |bi_wc| {
+                                            if (func.blocks.items[bi_wc] == chain_cb_w.then_block) chain_then_w = bi_wc;
+                                            if (func.blocks.items[bi_wc] == chain_cb_w.else_block) chain_else_w = bi_wc;
+                                        }
+                                        const chain_done_w = if (chain_then_w != null and chain_else_w != null)
+                                            try self.generateNestedContinueChain(writer, func, then_blk, chain_then_w.?, chain_else_w.?, cond_idx, label_name, processed, then_indent, true)
+                                        else
+                                            false;
+                                        if (chain_done_w) {
+                                            // 两条链已完整发射（各自以 continue 收尾）
+                                        } else {
+
+
                                         // then 块内有嵌套 if，递归处理后续块
                                         // 修复：当 then 块有嵌套 cond_br（如 ?? 运算符），
                                         // 限制递归范围仅覆盖嵌套控制流块，
@@ -16539,6 +16691,7 @@ pub const NativeLinker = struct {
                                         try self.generateLabelDrivenBlockRange(writer, func, nested_start, nested_end, cleanup_regs, processed, loop_label_counter, then_indent);
                                         if (!self.return_generated) self.return_generated = saved_rg;
                                         if (!self.break_generated) self.break_generated = saved_brk;
+                                        }
                                     },
                                     .br => |br_target| {
                                         if (exit_idx < func.blocks.items.len and br_target == exit_ptr) {
@@ -16558,6 +16711,21 @@ pub const NativeLinker = struct {
                                             try writer.print("{s}    break :{s};\n", .{ then_indent, label_name });
                                             self.break_generated = true;
                                         } else if (br_target == cond_block_ptr) {
+                                            // F-209-b：then 臂内联后 br→cond（`if (..) { $x++; continue; }`
+                                            // 的展开形）同样必须在 continue 前物化循环携带 PHI，否则臂内
+                                            // 写入不进入下一轮、出口值还可能为 null（s2 的 `$x` 打印为空）。
+                                            for (cond_block_ptr.instructions.items) |phi_inst_tb| {
+                                                if (phi_inst_tb.op != .phi) continue;
+                                                const result_tb = phi_inst_tb.result orelse continue;
+                                                for (phi_inst_tb.op.phi.incoming) |incoming_tb| {
+                                                    if (incoming_tb.block == then_blk or
+                                                        std.mem.eql(u8, incoming_tb.block.label, then_blk.label))
+                                                    {
+                                                        try self.writePtrAwareAssign(writer, then_indent, result_tb.id, incoming_tb.value.id);
+                                                        break;
+                                                    }
+                                                }
+                                            }
                                             try writer.print("{s}    continue :{s};\n", .{ then_indent, label_name });
                                             self.break_generated = true;
                                         } else if (self.isLoopBreakTarget(func, br_target)) {
@@ -17182,6 +17350,8 @@ pub const NativeLinker = struct {
                                                 };
                                                 if (nested_then_idx) |nti| {
                                                     if (nti == cond_idx) {
+                                                        // F-210：来源块＝持有该嵌套 cond_br 的 else_blk
+                                                        try self.emitCondPhisFromBlk(writer, cond_block_ptr, else_blk, nested_indent);
                                                         try writer.print("{s}    continue :{s};\n", .{ nested_indent, label_name });
                                                     } else if (nti == exit_idx and exit_idx < func.blocks.items.len) {
                                                         // 条件性 break 直达 exit 块（如 strlen 守卫分发器）：
@@ -17213,6 +17383,8 @@ pub const NativeLinker = struct {
                                                             switch (nt) {
                                                                 .br => |br_t| {
                                                                     if (br_t == cond_block_ptr) {
+                                                                        // F-210：来源块＝nested_then_blk
+                                                                        try self.emitCondPhisFromBlk(writer, cond_block_ptr, nested_then_blk, nested_indent);
                                                                         try writer.print("{s}    continue :{s};\n", .{ nested_indent, label_name });
                                                                         self.break_generated = true;
                                                                     } else if (exit_idx < func.blocks.items.len and br_t == exit_ptr) {
@@ -17294,6 +17466,26 @@ pub const NativeLinker = struct {
                                                     }
                                                 }
                                                 try writer.print("{s}}}\n", .{then_indent});
+                                                // F-213-b：嵌套 then/else 汇聚到 M 后仍沿 .br 到 N（外层 merge）。then 臂
+                                                // 只物化进入 M 的一层边 PHI（materializeBrTargetMergePhis），而 else 臂的范围
+                                                // 行走会一路走到 N 并物化「M→N」边 PHI ⇒ then 路径缺写（g4：$z += 10 丢失）。
+                                                // 此处按 M→N 再物化一次：两臂写同名 PHI 寄存器，后置赋值在各自路径取各自的值。
+                                                if (nested_then_idx) |nti_m| {
+                                                    if (nested_else_idx) |nei_m| {
+                                                        if (findCommonBrTarget(self, func, nti_m, nei_m)) |m_idx| {
+                                                            if (m_idx < func.blocks.items.len) {
+                                                                const m_blk = func.blocks.items[m_idx];
+                                                                if (m_blk.terminator) |mt_m| {
+                                                                    if (mt_m == .br and mt_m.br != cond_block_ptr and
+                                                                        !(exit_idx < func.blocks.items.len and mt_m.br == exit_ptr))
+                                                                    {
+                                                                        try self.materializeEdgePhi(writer, mt_m.br, m_blk, then_indent);
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
                                             }
                                         },
                                         .br => |br_target| {
@@ -17414,11 +17606,37 @@ pub const NativeLinker = struct {
 
         // PHI 消解：在循环回边处添加 PHI 赋值（来自循环内部的 incoming 值）
         // 回边可能来自 body 块或其他循环内部块（如 if_merge_）
+        // F-206-d-b：臂内已按链式发射时，真实汇合前驱是 else 链尾块，必须优先取它；
+        // 否则会取到已被该臂消费的 then 边 incoming（w1 的 `reg_45=reg_20` 错源）。
+        const forced_cond_src: ?*const IR.BasicBlock = blk_fs: {
+            if (self.chain_cond_phi_src) |fs| break :blk_fs func.blocks.items[fs];
+            // F-209：落空前驱＝[body_idx+1, extended_end) 内**最后一个 br→本层 cond 的块**。
+            // 默认「第一个回边 incoming」会命中循环体自身的 continue 边，累加变量恒回初值
+            // （`while { $i++; if (..) continue; $x++; }` ⇒ $x 永远 0）。
+            var be_fs: ?usize = null;
+            if (body_idx + 1 < extended_end) {
+                for (body_idx + 1..extended_end) |bi_fs| {
+                    if (bi_fs >= func.blocks.items.len) break;
+                    if (func.blocks.items[bi_fs].terminator) |t_fs| {
+                        if (t_fs == .br and t_fs.br == cond_block) be_fs = bi_fs;
+                    }
+                }
+            }
+            if (be_fs) |bi_fs2| break :blk_fs func.blocks.items[bi_fs2];
+            break :blk_fs null;
+        };
+        self.chain_cond_phi_src = null;
         if (!self.break_generated and !self.lastLineIsReturn(writer)) {
             for (cond_block.instructions.items) |phi_inst| {
                 if (phi_inst.op == .phi) {
                     if (phi_inst.result) |result| {
                         for (phi_inst.op.phi.incoming) |incoming| {
+                            if (forced_cond_src) |fs_blk| {
+                                if (incoming.block != fs_blk and
+                                    !std.mem.eql(u8, incoming.block.label, fs_blk.label)) continue;
+                                try self.writePtrAwareAssign(writer, body_indent, result.id, incoming.value.id);
+                                break;
+                            }
                             // 找到来自循环内部的 incoming（非初始值）
                             // 初始值的 incoming 来自循环前的块（如 entry），
                             // 回边值的 incoming 来自循环内的块（如 while_body_1 或 if_merge_4）

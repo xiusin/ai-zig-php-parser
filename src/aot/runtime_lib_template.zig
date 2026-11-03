@@ -11039,6 +11039,23 @@ pub fn php_note_constant_access(name: []const u8) void {
     }
 }
 
+/// ★F-160（R-314）：类常量沿「父类链 + `implements` 接口链」查找。
+/// 接口常量存放在**接口自身** ClassMeta 的 `static_properties` 里（实测：`I::IC` 可解析、
+/// 但 `D::IC`（D implements I）在旧实现下报 Undefined）⇒ 必须递归接口链。深度上限防注册表环。
+fn findClassConstantValue(meta_in: *const ClassMeta, name: []const u8, depth: u32) ?Value {
+    if (depth > 32) return null;
+    if (meta_in.static_properties.get(name)) |val| return val;
+    if (meta_in.parent) |p| {
+        if (findClassConstantValue(p, name, depth + 1)) |v| return v;
+    }
+    for (meta_in.interfaces) |iface_name| {
+        if (findClass(iface_name)) |im| {
+            if (findClassConstantValue(im, name, depth + 1)) |v| return v;
+        }
+    }
+    return null;
+}
+
 pub fn php_constant_get(name_val: Value, allocator: Allocator) !Value {
     _ = allocator;
     if (!name_val.isString()) return Value.initNull();
@@ -11048,6 +11065,56 @@ pub fn php_constant_get(name_val: Value, allocator: Allocator) !Value {
         php_note_constant_access(name);
         _ = val.retain();
         return val;
+    }
+
+    // ★F-160（R-314）：`constant('C::X')` 解析**类常量**（直接读 `C::X` 由发射器另路处理）。
+    //   PHP 8.5.8 实测三态：命中 ⇒ 值；类存在但常量子虚 ⇒ `Undefined constant C::NOPE`（**无引号**）；
+    //   类不存在 ⇒ `Class "NoSuch" not found`；`C::class` 经 constant() **不可解析**（同常量子虚）。
+    if (std.mem.indexOf(u8, name, "::")) |sep| {
+        const cls_name = name[0..sep];
+        const const_name = name[sep + 2 ..];
+        if (!std.mem.eql(u8, const_name, "class")) {
+            // ★F-161（R-315）：`self::`/`static::`/`parent::` 按当前类作用域解析。
+            //   PHP 实测：关键字**大小写不敏感**（`SELF::K` 合法）；消息里关键字被规范化为小写
+            //   （`constant('SELF::NOPE')` ⇒ `Undefined constant self::NOPE`）；无作用域/无父类时
+            //   抛 `Cannot access "self|parent" when no class scope is active`。
+            var resolved: ?*const ClassMeta = null;
+            var kw: ?[]const u8 = null;
+            if (std.ascii.eqlIgnoreCase(cls_name, "self") or std.ascii.eqlIgnoreCase(cls_name, "static")) {
+                kw = "self";
+                resolved = getCurrentScopeClass();
+            } else if (std.ascii.eqlIgnoreCase(cls_name, "parent")) {
+                kw = "parent";
+                if (getCurrentScopeClass()) |sc| resolved = sc.parent;
+            } else {
+                resolved = findClass(cls_name);
+                if (resolved == null) {
+                    std.debug.print("Fatal error: Uncaught Error: Class \"{s}\" not found\n", .{cls_name});
+                    std.process.exit(255);
+                }
+            }
+            if (resolved == null) {
+                // PHP 实测两条措辞：完全无作用域 ⇒ "no class scope is active"；
+                // 有作用域但无父类（parent::）⇒ "current class scope has no parent"。
+                if (std.mem.eql(u8, kw.?, "parent") and getCurrentScopeClass() != null) {
+                    std.debug.print("Fatal error: Uncaught Error: Cannot access \"parent\" when current class scope has no parent\n", .{});
+                } else {
+                    std.debug.print("Fatal error: Uncaught Error: Cannot access \"{s}\" when no class scope is active\n", .{kw.?});
+                }
+                std.process.exit(255);
+            }
+            if (findClassConstantValue(resolved.?, const_name, 0)) |val| {
+                php_note_constant_access(name);
+                _ = val.retain();
+                return val;
+            }
+            if (kw) |k| {
+                std.debug.print("Fatal error: Uncaught Error: Undefined constant {s}::{s}\n", .{ k, const_name });
+                std.process.exit(255);
+            }
+        }
+        std.debug.print("Fatal error: Uncaught Error: Undefined constant {s}\n", .{name});
+        std.process.exit(255);
     }
 
     // R-2b（AOT-CODEGEN-010 §3.3）：仅 true/false/null 三枚关键字常量名忽略大小写 ——
@@ -22931,11 +22998,29 @@ fn weakref_cleanup() void {
 /// 使用嵌套计数器支持 @@expr 等场景
 threadlocal var error_suppress_depth: u32 = 0;
 
+/// ★F-217（R-311）：PHP 8 的 `@expr` 会把 error_reporting **临时**改成
+/// `E_ERROR|E_PARSE|E_CORE_ERROR|E_COMPILE_ERROR|E_USER_ERROR|E_RECOVERABLE_ERROR`（实测 4437），
+/// 表达式结束后恢复**进入前**的级别（连处理器内部对 error_reporting 的修改也会被覆盖，PHP 实测）。
+/// 旧实现只记抑制深度、不动 error_reporting ⇒ 处理器里 `error_reporting()` 读到全量掩码（30719）。
+const E_SUPPRESSED: i64 = E_ERROR | E_PARSE | E_CORE_ERROR | E_COMPILE_ERROR | E_USER_ERROR | E_RECOVERABLE_ERROR;
+
+threadlocal var error_suppress_saved: [128]i64 = undefined;
+threadlocal var error_suppress_saved_n: u32 = 0;
+
 pub fn php_error_suppress_push() void {
+    if (error_suppress_saved_n < error_suppress_saved.len) {
+        error_suppress_saved[error_suppress_saved_n] = global_error_types;
+        error_suppress_saved_n += 1;
+    }
     error_suppress_depth += 1;
+    global_error_types = E_SUPPRESSED;
 }
 
 pub fn php_error_suppress_pop() void {
+    if (error_suppress_saved_n > 0) {
+        error_suppress_saved_n -= 1;
+        global_error_types = error_suppress_saved[error_suppress_saved_n];
+    }
     if (error_suppress_depth > 0) error_suppress_depth -= 1;
 }
 
@@ -22943,6 +23028,11 @@ pub fn php_error_suppress_pop() void {
 /// PHP 的抑制范围止于该表达式，**异常路径也不例外**；只发 push/pop 的话，
 /// 右值抛异常时 pop 被跳过 ⇒ 抑制位残留并静默吞掉之后所有本该打印的诊断（门 SUPB 的 `L1`/探针 P1 实测）。
 pub fn php_error_suppress_reset() void {
+    // 异常展开：恢复到**最外层** `@` 进入前的级别（PHP 语义同上），并清空整栈
+    if (error_suppress_saved_n > 0) {
+        global_error_types = error_suppress_saved[0];
+        error_suppress_saved_n = 0;
+    }
     error_suppress_depth = 0;
 }
 
@@ -25500,14 +25590,12 @@ pub fn php_get_class_constant_dynamic(args: []const Value, allocator: Allocator)
         return Value.initString(str);
     }
 
-    // 类常量存储在 static_properties 中，需遍历继承链查找
-    var current_meta: ?*const ClassMeta = findClass(class_name);
-    while (current_meta) |meta| {
-        if (meta.static_properties.get(const_name)) |val| {
+    // 类常量存储在 static_properties 中，需遍历「父类链 + 接口链」查找（★F-160：接口常量）
+    if (findClass(class_name)) |meta| {
+        if (findClassConstantValue(meta, const_name, 0)) |val| {
             _ = val.retain();
             return val;
         }
-        current_meta = meta.parent;
     }
 
     return Value.initNull();
@@ -31625,6 +31713,74 @@ fn formatFloatPrecision(buf: []u8, val: f64, precision: usize) []const u8 {
     return std.fmt.bufPrint(buf, "{d:.6}", .{val}) catch "0";
 }
 
+/// ★F-165（R-316）：sprintf 浮点 `%f/%F/%e/%E` 的非有限值拼写。
+/// PHP 8.5.8 实测：INF ⇒ `INF`／`-INF` ⇒ `-INF`／NAN ⇒ `NaN`（与 echo 的 `NAN` 大小写不同）。
+/// 旧实现：`%f` 走 C `snprintf` ⇒ 输出小写 `inf`/`nan`；`%e` 的规格化循环对 INF **永不收敛**
+///（`INF/10 == INF`）⇒ 死循环（探针 rc=124）。
+fn phpFmtSpecialFloat(val: f64) ?[]const u8 {
+    if (std.math.isNan(val)) return "NaN";
+    if (std.math.isInf(val)) return if (val < 0) "-INF" else "INF";
+    return null;
+}
+
+/// ★F-166（R-317）：`snprintf("%.*e")` 归一化取尾数与十进制指数（%g 的判定基础）。
+fn formatFloatExpNorm(buf: []u8, val: f64, prec: usize) []const u8 {
+    var fmt_buf: [16]u8 = undefined;
+    const fmt_str = std.fmt.bufPrintSentinel(&fmt_buf, "%.{d}e", .{prec}, 0) catch "%.6e";
+    const len = snprintf(buf.ptr, buf.len, fmt_str.ptr, val);
+    if (len > 0 and @as(usize, @intCast(len)) < buf.len) return buf[0..@intCast(len)];
+    return "0e+0";
+}
+
+/// ★F-166（R-317）：PHP 的 `%g`（C 语义 + PHP 两处特化，均由 8.5.8 实测钉死）：
+///   · 精度 P＝有效数字位数（默认 6；`%.0g` 视作 1）→ 先按 `%.{P-1}e` 取**舍入后**的尾数与指数
+///     （进位会改指数：999999.5 ⇒ 1.0e+6）；
+///   · `exp < -4 或 exp >= P` ⇒ 指数形，尾数**去尾零但至少保留一位小数**（1.0e-5、1.0e+6）；
+///   · 否则定点形，小数位＝`P-1-exp`，去尾零并去孤点（0.0001、123456、1.5、0）。
+fn formatG(buf: []u8, val: f64, prec_req: usize, upper: bool) []const u8 {
+    const p: usize = if (prec_req == 0) 1 else prec_req;
+    var ebuf: [96]u8 = undefined;
+    const estr = formatFloatExpNorm(&ebuf, val, p - 1);
+    const epos = std.mem.indexOfScalar(u8, estr, 'e') orelse return estr;
+    var mant = estr[0..epos];
+    const exp_val = std.fmt.parseInt(i32, estr[epos + 1 ..], 10) catch 0;
+    // 尾数去尾零（保留至少一位小数）
+    if (std.mem.indexOfScalar(u8, mant, '.')) |dot| {
+        var end = mant.len;
+        while (end > dot + 2 and mant[end - 1] == '0') end -= 1;
+        mant = mant[0..end];
+    }
+    if (exp_val < -4 or exp_val >= @as(i32, @intCast(p))) {
+        // PHP 特化：指数形的尾数**至少保留一位小数**（`%.1g` ⇒ `1.0e+6`，而 C 给 `1e+06`）
+        var mbuf2: [80]u8 = undefined;
+        var mant_out: []const u8 = mant;
+        if (std.mem.indexOfScalar(u8, mant, '.') == null) {
+            mant_out = std.fmt.bufPrint(&mbuf2, "{s}.0", .{mant}) catch mant;
+        }
+        const sign_str: []const u8 = if (exp_val < 0) "-" else "+";
+        const exp_abs: u32 = @intCast(if (exp_val < 0) -exp_val else exp_val);
+        return std.fmt.bufPrint(buf, "{s}{c}{s}{d}", .{
+            mant_out,
+            if (upper) @as(u8, 'E') else @as(u8, 'e'),
+            sign_str,
+            exp_abs,
+        }) catch mant_out;
+    }
+    const decimals_i: i32 = @as(i32, @intCast(p - 1)) - exp_val;
+    const decimals: usize = if (decimals_i < 0) 0 else @intCast(decimals_i);
+    var fbuf: [128]u8 = undefined;
+    const fstr = formatFloatPrecision(&fbuf, val, decimals);
+    var fend = fstr.len;
+    while (fend > 1 and fstr[fend - 1] == '0' and std.mem.indexOfScalar(u8, fstr[0..fend], '.') != null) fend -= 1;
+    if (fend > 1 and fstr[fend - 1] == '.') fend -= 1;
+    const out = fstr[0..fend];
+    if (out.len <= buf.len) {
+        @memcpy(buf[0..out.len], out);
+        return buf[0..out.len];
+    }
+    return out;
+}
+
 /// sprintf - 格式化字符串
 pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Value {
     if (!format.isString()) return error.InvalidArgument;
@@ -31751,13 +31907,17 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
                     defer allocator.free(str);
                     try tmp_buf.appendSlice(allocator, str);
                 },
-                'f' => {
+                'f', 'F' => {
                     const val = arg.toFloat();
-                    if (flag_plus and val >= 0) try tmp_buf.append(allocator, '+') else if (flag_space and val >= 0) try tmp_buf.append(allocator, ' ');
-                    const prec = precision orelse 6;
-                    var fbuf: [128]u8 = undefined;
-                    const fstr = formatFloatPrecision(&fbuf, val, prec);
-                    try tmp_buf.appendSlice(allocator, fstr);
+                    if (phpFmtSpecialFloat(val)) |sp| {
+                        try tmp_buf.appendSlice(allocator, sp);
+                    } else {
+                        if (flag_plus and val >= 0) try tmp_buf.append(allocator, '+') else if (flag_space and val >= 0) try tmp_buf.append(allocator, ' ');
+                        const prec = precision orelse 6;
+                        var fbuf: [128]u8 = undefined;
+                        const fstr = formatFloatPrecision(&fbuf, val, prec);
+                        try tmp_buf.appendSlice(allocator, fstr);
+                    }
                 },
                 'x' => {
                     const val = castIntArgWithWarn(arg); // ★F-69：sprintf／printf 的 int 族站点（实测 %d %u %x %X %o %b %c 各转换一次 ⇒ 各发一条 Warn）
@@ -31799,8 +31959,20 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
                     defer allocator.free(str);
                     try tmp_buf.appendSlice(allocator, str);
                 },
+                'g', 'G' => {
+                    const val = arg.toFloat();
+                    if (phpFmtSpecialFloat(val)) |sp| {
+                        try tmp_buf.appendSlice(allocator, sp);
+                    } else {
+                        var gbuf: [160]u8 = undefined;
+                        try tmp_buf.appendSlice(allocator, formatG(&gbuf, val, precision orelse 6, specifier == 'G'));
+                    }
+                },
                 'e', 'E' => {
                     const val = arg.toFloat();
+                    if (phpFmtSpecialFloat(val)) |sp| {
+                        try tmp_buf.appendSlice(allocator, sp);
+                    } else {
                     const prec = precision orelse 6;
                     // PHP %e 格式：[-]d.dddddde[+-]dd
                     var ebuf: [128]u8 = undefined;
@@ -31821,6 +31993,7 @@ pub fn php_sprintf(format: Value, args: []const Value, allocator: Allocator) !Va
                     const e_char: u8 = if (specifier == 'E') 'E' else 'e';
                     const formatted = std.fmt.bufPrint(&ebuf, "{s}{s}{c}{s}{d}", .{ sign_str, fstr, e_char, exp_sign, exp_abs }) catch "0";
                     try tmp_buf.appendSlice(allocator, formatted);
+                    }
                 },
                 else => {
                     try result.append(allocator, '%');

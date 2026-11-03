@@ -1,6 +1,6 @@
 # fuzzy_scripts_720/pass/ 回归测试报告
 
-测试时间: 2026-10-23 23:44:25
+测试时间: 2026-10-27 19:26:58
 AOT 编译器: /Users/wangjianjun/products/parser/zig-out/bin/php-interpreter
 
 ## 统计
