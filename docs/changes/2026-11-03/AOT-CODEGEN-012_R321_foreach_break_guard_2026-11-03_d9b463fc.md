@@ -3,7 +3,7 @@
 - 日期：2026-11-03
 - 代次锚：**`nlk d9b463fc13ff0cfc6535fe1d9ab7f4e7`**（本轮唯一改动）；`tpl 2dfc5d01…`／`irg ea35bbde…`／`opti 553a2e54…`／`ir fb2bb442…` 未变
 - 工单：`docs/known-issues/AOT-CODEGEN-012-class-name-case-insensitive-lookup.md` §227
-- 提交：未提交（HEAD `234c81d`）
+- 提交：已随 `8b33878` 入库（2026-11-03，老铁提交；本文档的读数回填在其后完成，见 git 暂存区）
 - 附带：opti 锚值笔误订正（`5532e540…`→`553a2e54…`，31 字符不可能值，转写吞字符；仅改工单 §225 锚行 + 两版交接文档共 5 处锚值字符）
 
 ## 1. 高层摘要（TL;DR）

@@ -12187,8 +12187,8 @@ if (reg_19.toBool()) {            // elseif(i%2==0)
 | g_while（F-213-d5） | **2032** | **`1026` SAME** |
 | f3 / f4 / f5（R-321 闭环件） | SAME | SAME（零转移） |
 | C343（扩臂 9→12：+f6/g_for/g_while） | 9/9 | **12 same / 0 diff / 0 CF / 0 timeout**；`AOT_BIN=/bin/false` 自证 **12 COMPILE_FAIL** |
-| 邻门 | — | 见本节收尾回填 |
-| 主回归 / 单测 | — | 见本节收尾回填 |
+| 邻门 | — | C339 **30/30**、C340 **4/4**、C341 **5/5**、C342 **6/6**、ERRH **18 same + 1 既有 CF（h9）**（`repo_build_residue=0`） |
+| 主回归 / 单测 | — | **`PASS=68 FAIL=0`**（`SELF_CHECK_OK rows=68 uniq=68 total=68`；`regression_failures.tsv` 与基线**逐字节一致**：67 PASS + 1 既有 SKIP(f004)，无新增）／**`21/21 steps; 326/326 tests`** |
 
 ### 228.4 仍开 / 待裁
 

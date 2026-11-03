@@ -3,7 +3,7 @@
 - 日期：2026-11-03
 - 代次锚：**`nlk 9d74f79d4911e4202b715788a6486f33`**（本轮唯一改动）；`tpl 2dfc5d01…`／`irg ea35bbde…`／`opti 553a2e54…`／`ir fb2bb442…` 未变
 - 工单：`docs/known-issues/AOT-CODEGEN-012-class-name-case-insensitive-lookup.md` §228
-- 提交：未提交（HEAD `234c81d`）
+- 提交：已随 `8b33878` 入库（2026-11-03，老铁提交；本文 §6 验证行与工单 §228.3 的回填在其后完成，当前在暂存区）
 - 范围裁决：老铁批准 d6 与 d4/d5 同轮，扩到 for/while 生成器（仍限 AOT 编译/运行问题）
 
 ## 1. 高层摘要（TL;DR）
@@ -118,7 +118,7 @@ if (self.isLoopBreakTarget(func, nested_cb.then_block) and
 - **破坏式变更**：无。三个新分支都只在「嵌套 then=循环出口 ∧ else 非出口」时命中——该形状旧路径恒为空区间/跳过（必坏），不存在被抢占的正常形状；双边皆出口的退化形显式排除（走原路径）。
 - **save/restore 成对核对**（老铁硬性要求）：d6 分支自带 `saved_rg_d6/saved_brk_d6` 包裹全部内联发射；d4 分支包裹 else 延续行走；d5 分支零旗标改动（纯写流）。三处条件性 break 均**不置** `break_generated`（对齐 while 16568 既有口径），尾部回边门控不受影响。
 - **性能**：编译期每处多一次终止符判定 + 指针扫描；运行期对修复形状消除死循环/外溢，其余形状生成码零差异。
-- **验证**：C343 **12/12**（自证 **12 全 CF**）；邻门 C339 **30/30**、C340 **4/4**、C341 **5/5**、C342 **6/6**、ERRH **18 same+1 既有 CF**（`repo_build_residue=0`）；主回归与单测读数收尾回填于本节末行。
+- **验证**：C343 **12/12**（自证 **12 全 CF**）；邻门 C339 **30/30**、C340 **4/4**、C341 **5/5**、C342 **6/6**、ERRH **18 same+1 既有 CF**（`repo_build_residue=0`）；主回归 **PASS=68 FAIL=0**（`SELF_CHECK_OK rows=68 uniq=68 total=68`，failures TSV 与基线逐字节一致、无新增）；单测 **`21/21 steps; 326/326 tests`**。
 - **复测路径**：`bash fuzzy_scripts_720/tmp/c343_loop_elseif_gate_tmp.sh`（12 臂全 SAME 即通过）。
 
 ## 7. 遗留问题 / 潜在问题
