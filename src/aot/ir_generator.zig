@@ -7202,17 +7202,41 @@ pub const IRGenerator = struct {
             const access = name_node.data.safe_property_access;
             const object_reg = try self.generateExpression(access.target);
             const method_name_reg = try self.emitPropertyNameValue(self.getString(access.property_name));
+
+            // ★F-134b（R-328）：`?->` 短路守卫——空接收者 ⇒ 解包空转、调用短路 NULL；
+            // 对象接收者 ⇒ 先做方法解析检查（未定义方法 Error 先于解包 TypeError，PHP 顺序）。
+            var has_spread_safe: bool = false;
+            for (call_data.args) |arg_idx| {
+                const arg_node = self.getNode(arg_idx) orelse continue;
+                if (arg_node.tag == .unpacking_expr) {
+                    has_spread_safe = true;
+                    break;
+                }
+            }
+            if (has_spread_safe) {
+                const precheck_args = try self.allocator.alloc(Register, 3);
+                precheck_args[0] = object_reg;
+                precheck_args[1] = method_name_reg;
+                precheck_args[2] = try self.emitWithResult(.{ .const_bool = true }, .bool);
+                _ = try self.emit(.{ .call = .{
+                    .func_name = "php_method_call_precheck",
+                    .args = precheck_args,
+                    .return_type = .php_value,
+                } }, null);
+            }
+
             const args_arr = try self.emitWithResult(.{ .array_new = .{ .capacity = @intCast(call_data.args.len) } }, .php_array);
 
             for (call_data.args) |arg_idx| {
                 const arg_node = self.getNode(arg_idx) orelse continue;
                 if (arg_node.tag == .unpacking_expr) {
                     const spread_reg = try self.generateExpression(arg_node.data.unpacking_expr.expr);
-                    const spread_args = try self.allocator.alloc(Register, 2);
+                    const spread_args = try self.allocator.alloc(Register, 3);
                     spread_args[0] = args_arr;
                     spread_args[1] = spread_reg;
+                    spread_args[2] = object_reg;
                     _ = try self.emit(.{ .call = .{
-                        .func_name = "php_args_append_spread",
+                        .func_name = "php_args_append_spread_safe",
                         .args = spread_args,
                         .return_type = .php_value,
                     } }, null);
@@ -7240,6 +7264,28 @@ pub const IRGenerator = struct {
             const vp_access = name_node.data.variable_property_access;
             const object_reg = try self.generateExpression(vp_access.target);
             const method_name_reg = try self.generateExpression(vp_access.prop_variable);
+
+            // ★F-134b（R-328）：含解包实参时先发解析守卫（PHP 顺序：解析先于解包）。
+            var has_spread_dyn: bool = false;
+            for (call_data.args) |arg_idx| {
+                const arg_node = self.getNode(arg_idx) orelse continue;
+                if (arg_node.tag == .unpacking_expr) {
+                    has_spread_dyn = true;
+                    break;
+                }
+            }
+            if (has_spread_dyn) {
+                const precheck_args = try self.allocator.alloc(Register, 3);
+                precheck_args[0] = object_reg;
+                precheck_args[1] = method_name_reg;
+                precheck_args[2] = try self.emitWithResult(.{ .const_bool = false }, .bool);
+                _ = try self.emit(.{ .call = .{
+                    .func_name = "php_method_call_precheck",
+                    .args = precheck_args,
+                    .return_type = .php_value,
+                } }, null);
+            }
+
             const args_arr = try self.emitWithResult(.{ .array_new = .{ .capacity = @intCast(call_data.args.len) } }, .php_array);
 
             for (call_data.args) |arg_idx| {
@@ -8081,9 +8127,11 @@ prop_name: ?[]const u8 = null,
                             };
                             try self.entry_allocas.append(self.allocator, alloca_inst);
 
-                            // 初始化为null（不读取未定义的变量）
-                            const null_val = try self.emitWithResult(.{ .const_null = {} }, .php_value);
-                            _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = null_val } }, null);
+                            // ★F-53（R-331）：copy-in 装载调用方当前值（no_warn＝按引用传参对未定义变量
+                            // 不告警，缺省得 null 即 PHP 的 auto-vivify）。旧口径置 null ⇒ 编译前失败路径
+                            // 「不写即保留」退化成「不写即 null」，预置值全丢。
+                            const cur_val = try self.emitWithResult(.{ .global_get = .{ .name = var_name, .no_warn = true } }, .php_value);
+                            _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = cur_val } }, null);
 
                             // 直接使用alloca指针
                             args[2] = temp_reg;
@@ -8134,9 +8182,11 @@ prop_name: ?[]const u8 = null,
                             };
                             try self.entry_allocas.append(self.allocator, alloca_inst);
 
-                            // 初始化为null（不读取未定义的变量）
-                            const null_val = try self.emitWithResult(.{ .const_null = {} }, .php_value);
-                            _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = null_val } }, null);
+                            // ★F-53（R-331）：copy-in 装载调用方当前值（no_warn＝按引用传参对未定义变量
+                            // 不告警，缺省得 null 即 PHP 的 auto-vivify）。旧口径置 null ⇒ 编译前失败路径
+                            // 「不写即保留」退化成「不写即 null」，预置值全丢。
+                            const cur_val = try self.emitWithResult(.{ .global_get = .{ .name = var_name, .no_warn = true } }, .php_value);
+                            _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = cur_val } }, null);
 
                             // 直接使用alloca指针
                             args[2] = temp_reg;
@@ -8552,6 +8602,21 @@ prop_name: ?[]const u8 = null,
         if (has_unpacking) {
             // 使用数组展开方式
             const method_name_reg = try self.emitPropertyNameValue(method_name);
+
+            // ★F-134b（R-328）：PHP 顺序「方法解析先于实参解包」——未定义方法 Error
+            // 必须先于解包 TypeError 抛出（门 c254 r12）。
+            {
+                const precheck_args = try self.allocator.alloc(Register, 3);
+                precheck_args[0] = obj_reg;
+                precheck_args[1] = method_name_reg;
+                precheck_args[2] = try self.emitWithResult(.{ .const_bool = false }, .bool);
+                _ = try self.emit(.{ .call = .{
+                    .func_name = "php_method_call_precheck",
+                    .args = precheck_args,
+                    .return_type = .php_value,
+                } }, null);
+            }
+
             const args_arr = try self.emitWithResult(.{ .array_new = .{ .capacity = @intCast(call_data.args.len) } }, .php_array);
 
             for (call_data.args) |arg_idx| {

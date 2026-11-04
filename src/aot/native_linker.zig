@@ -2011,6 +2011,11 @@ pub const NativeLinker = struct {
         );
         // 遍历builtin_map生成函数名列表
         for (builtin_map.keys()) |key| {
+            // ★F-43（R-331）：内部 helper 键（`php_bool_or`/`php_concat` 等 IR 发射目标）
+            //   不进 `function_exists` 可见集（PHP 实测 `function_exists("php_bool_or")`=false）。
+            //   可见性隔离只作用于此表；分发键与实现体全保留（F-4 同族）。例外＝PHP 真实
+            //   函数 `php_sapi_name`（`phpversion` 键名无前缀，天然不受影响）。
+            if (std.mem.startsWith(u8, key, "php_") and !std.mem.eql(u8, key, "php_sapi_name")) continue;
             try writer.print("    .{{ \"{s}\", {{}} }},\n", .{key});
         }
         try writer.writeAll(
@@ -4760,7 +4765,8 @@ pub const NativeLinker = struct {
         .{ "base_convert", .{ .runtime_name = "php_base_convert", .needs_allocator = true } },
         .{ "log", .{ .runtime_name = "php_log", .needs_allocator = false } },
         .{ "log10", .{ .runtime_name = "php_log10", .needs_allocator = false } },
-        .{ "log2", .{ .runtime_name = "php_log2", .needs_allocator = false } },
+        // ★F-62e（R-330）：`log2()` 在 PHP 8.5.8 不存在（`Call to undefined function`）——
+        //   从可调用名表摘除（模板内 `php_log2` 函数体保留但不可达，删除与否待老铁定）。
         .{ "exp", .{ .runtime_name = "php_exp", .needs_allocator = false } },
         .{ "fmod", .{ .runtime_name = "php_fmod", .needs_allocator = false } },
         .{ "intdiv", .{ .runtime_name = "php_intdiv", .needs_allocator = false } },
@@ -5017,6 +5023,8 @@ pub const NativeLinker = struct {
         .{ "php_empty_var", bi(.{ .runtime_name = "php_empty_var", .needs_allocator = false, .may_raise = false }) },
         .{ "php_array_empty", bi(.{ .runtime_name = "php_array_empty", .needs_allocator = true, .may_raise = true }) },
         .{ "php_args_append_spread", bi(.{ .runtime_name = "php_args_append_spread", .needs_allocator = true }) },
+        .{ "php_args_append_spread_safe", bi(.{ .runtime_name = "php_args_append_spread_safe", .needs_allocator = true }) },
+        .{ "php_method_call_precheck", bi(.{ .runtime_name = "php_method_call_precheck", .needs_allocator = true }) },
         .{ "php_invoke_callable_args_array", bi(.{ .runtime_name = "php_invoke_callable_args_array", .needs_allocator = true }) },
         .{ "php_object_call_safe_args_array", bi(.{ .runtime_name = "php_object_call_safe_args_array", .needs_allocator = true }) },
         .{ "php_object_call_args_array", bi(.{ .runtime_name = "php_object_call_args_array", .needs_allocator = true }) },
@@ -9400,43 +9408,28 @@ pub const NativeLinker = struct {
                             const f219_brk = self.isLoopBreakTarget(func, cond_br_data.then_block) and
                                 !self.isLoopBreakTarget(func, cond_br_data.else_block) and
                                 !self.isLoopContinueTarget(func, cond_br_data.else_block);
-                            const f219_cont = !f219_brk and
-                                self.isLoopContinueTarget(func, cond_br_data.then_block) and
-                                !self.isLoopBreakTarget(func, cond_br_data.then_block) and
-                                !self.isLoopContinueTarget(func, cond_br_data.else_block) and
-                                !self.isLoopBreakTarget(func, cond_br_data.else_block);
-                            if (!f219_brk and !f219_cont) break :blk_f219;
+                            // f135 Miller-Rabin：continue 目标为 for 增量块（for_loop_）时，
+                            // 此处物化增量 PHI 后不发 continue ⇒ 控制流落进 else 臂（内层 for），
+                            // continue 语义丢失。continue 形态交回通用 if/else 行走（基线路径，
+                            // 内层 for 留在 else 臂内、continue 由循环尾部增量+回边统一发射）。
+                            // F-219 仅收口 break 形态。
+                            if (!f219_brk) break :blk_f219;
                             // 块内指令（含条件计算）已由上方 9379-9382 统一发射，此处不重发。
                             try writer.print("{s}if (", .{indent});
                             try self.writeConditionExpr(writer, cond_br_data.cond.id, cond_br_data.cond.type_);
                             try writer.print(") {{\n", .{});
                             const f_ind = try std.fmt.allocPrint(self.allocator, "{s}    ", .{indent});
                             defer self.allocator.free(f_ind);
-                            if (f219_brk) {
-                                try self.generateExitPHIAssignments(writer, func, i, then_bi.?, f_ind, false);
-                                try writer.print("{s}break :{s};\n", .{ f_ind, self.current_loop_label.? });
-                            } else {
-                                if (self.current_loop_cond_block) |cc_f| {
-                                    if (then_bi.? == cc_f) {
-                                        try self.materializeEdgePhi(writer, func.blocks.items[cc_f], block, f_ind);
-                                        try writer.print("{s}continue :{s};\n", .{ f_ind, self.current_loop_label.? });
-                                    } else {
-                                        try self.materializeEdgePhi(writer, cond_br_data.then_block, block, f_ind);
-                                    }
-                                }
-                            }
+                            try self.generateExitPHIAssignments(writer, func, i, then_bi.?, f_ind, false);
+                            try writer.print("{s}break :{s};\n", .{ f_ind, self.current_loop_label.? });
                             try writer.print("{s}}} else {{\n", .{indent});
                             try self.materializeEdgePhi(writer, func.blocks.items[else_bi.?], block, indent);
                             try self.generateLabelDrivenBlockRange(writer, func, else_bi.?, else_bi.? + 1, cleanup_regs, processed, loop_label_counter, indent);
                             try self.materializeMergeChainPhis(writer, func, func.blocks.items[else_bi.?], indent);
                             try writer.print("{s}}}\n", .{indent});
                             try processed.put(i, {});
-                            // ★收口：break 终止本层区间行走——else 延续链的共享 merge
-                            // （如 if_merge_10）必须保持未处理，留给外层 merge 层级发射；
-                            // 若 continue 让本层行走漂入该 merge，其 br→外层 merge 的
-                            // 物化（reg_47=reg_48）会被吞进 else 臂内，另一臂（elseif）
-                            // 永远拿不到拷贝（w_foreach_else_break PHP 404 / AOT 4）。
-                            break;
+                            i += 1;
+                            continue;
                         }
                         // 如果两个目标都已处理，这是循环回边，跳过
                         if ((then_bi == null or processed.contains(then_bi.?)) and
@@ -18537,14 +18530,15 @@ pub const NativeLinker = struct {
                                                                                     try self.walkContinuationChain(writer, func, ne_d7w2, nested_then_blk, end_idx, cleanup_regs, processed, loop_label_counter, nested_indent);
                                                                                 }
                                                                             }
-                                                                        // 缺陷B修复（f161 c3/xp）：外层 else 块索引先于 then 块（乱序布局）
-                                                                        // 时 then_end 退化为 nti+1，旧范围发射为空操作，嵌套
-                                                                        // if-without-else（br 臂 + merge 副作用块 + 外层 merge 推进）被
-                                                                        // 静默丢弃。交公共 spill 发射器按边内联，不命中则保持旧路径。
-                                                                        const spill_handled = try self.emitSpilledNestedIfMerge(writer, func, nested_then_blk, inner_cb, nti, then_end, cond_block_ptr, (if (exit_idx < func.blocks.items.len) exit_ptr else null), end_idx, cleanup_regs, processed, loop_label_counter, label_name, nested_indent);
-                                                                        if (!spill_handled) {
-                                                                            try self.generateLabelDrivenBlockRange(writer, func, nti + 1, then_end, cleanup_regs, processed, loop_label_counter, nested_indent);
-                                                                        }
+                                                                        } else {
+                                                                            // 缺陷B修复（f161 c3/xp）：外层 else 块索引先于 then 块（乱序布局）
+                                                                            // 时 then_end 退化为 nti+1，旧范围发射为空操作，嵌套
+                                                                            // if-without-else（br 臂 + merge 副作用块 + 外层 merge 推进）被
+                                                                            // 静默丢弃。交公共 spill 发射器按边内联，不命中则保持旧路径。
+                                                                            const spill_handled = try self.emitSpilledNestedIfMerge(writer, func, nested_then_blk, inner_cb, nti, then_end, cond_block_ptr, (if (exit_idx < func.blocks.items.len) exit_ptr else null), end_idx, cleanup_regs, processed, loop_label_counter, label_name, nested_indent);
+                                                                            if (!spill_handled) {
+                                                                                try self.generateLabelDrivenBlockRange(writer, func, nti + 1, then_end, cleanup_regs, processed, loop_label_counter, nested_indent);
+                                                                            }
                                                                         }
                                                                     }
                                                                 },

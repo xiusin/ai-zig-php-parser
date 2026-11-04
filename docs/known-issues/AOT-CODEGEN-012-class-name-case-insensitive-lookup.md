@@ -12339,3 +12339,45 @@ PHP 8.5.8 实测口径：纯 enum ⇒ **返回 false**（不抛错，last_error=
 **取证方法（本轮关键路径）**：生成码指纹反推——broken 探针 dump 显示 `reg_47=reg_48`（M1→M2 拷贝）缩进 16 落在 else 臂内、对照组 n_plain（无嵌套 if 同骨架）显示正确落点在缩进 12（merge 层）⇒ 缺口定性为「merge 块被区间行走漂移到臂内消费」而非「物化缺失」；`std.debug` 插印 + `dumpCurrentStackTrace` 锁定调用方为 foreach 生成器 13745（d6 else 侧行走），非 GIFL。
 **验收**：`timeout 600 zig build` 绿；反向扫 **27/27 SAME**（修前 9 DIFF + 3 CF 全部收口）；对照面零转移——C343 12 臂 `same=12 diff=0`、f158/d7_for/d7_while/d8/f95d/f95d_valid/f5 全 SAME。
 **过程教训（追加）**：④ 「某臂绿」可能是「拷贝恰好在活臂」的巧合——w_foreach_elseif_break 的 merge 物化同样在臂内错位，只是缺失路径是死代码 ⇒ 对照组必须含「两臂皆活」的探针才能证真；⑤ 调试插印期间编译探针必须从项目根目录跑（runtime_lib 模板按 CWD 相对路径解析，`/tmp` 下报 FileNotFound 假 CF）；⑥ 「ret/continue 行走置旗标 ⇒ 后续行走头部吞块」是一族隐患，凡「守卫内联 + 延续行走」两段的站点都要检查中间是否清旗标。
+
+---
+
+## 231. R-328…R-330 批次收口登记（2026-11-04）
+
+### 231.1 复用号消歧（老铁要求标注）
+
+| 复用号 | 已闭环的旧义 | 本批核销的新义 |
+|---|---|---|
+| **F-167** | preg 替换串 `$$` 语法（R-260 闭环，§167） | sprintf 空格标志 `% f`/`% d`（R-319 闭环，§225）⇒ 后续引用一律写 **F-167′（sprintf 空格标志）** |
+| **F-168** | password argon2i/argon2id（R-263 闭环，§170） | `echo NAN`/`(int)INF` 转换告警 ⇒ 后续引用一律写 **F-168′（NAN/INF 告警）** |
+
+### 231.2 过期红核销（实测已绿、非本轮修复，禁记为修复成果）
+
+| 编号 | 核销探针读数 | 实际闭环批次 |
+|---|---|---|
+| F-206-b（b4d 嵌套循环串累加） | 8 组 n 值 × PHP↔AOT 全 SAME | R-297…R-300 联动转绿（§208.4 已记） |
+| F-206-c-b（a8 while+continue+内层循环） | 同上全 SAME | R-297（§205） |
+| F-206-d（a10 if/else+continue+内层循环） | 同上全 SAME | R-298（§206） |
+| F-160（`constant('K::A')`） | C340 4/4 + K 类精确复现 + 边界矩阵全 SAME | R-314（§220），F-217 迁移无遗漏 |
+| F-69（float→int 越界告警与回绕） | F2I 51/51 + 11 形复核矩阵逐格一致（含告警文案/@ 抑制） | R-175 起各批 |
+| F-70（number_format 舍入） | NFM 56/56 + 约束三角/精确展开/HALF_UP/大数/负零/字符串全对 | R-19x 起各批 |
+| F-144（chr 越界 Deprecated） | PHP↔AOT 逐字 SAME | R-240（§147） |
+| F-167′（sprintf 空格标志） | 七格式全 SAME（PHP 忽略空格符） | R-319（§225） |
+| F-168′（NAN/INF 告警） | `echo NAN` Warning + `(int)INF/-INF/NAN` 三 Warning 全 SAME | 同 F-69 族批次 |
+| F-101 主体（PHP_VERSION/PHP_OS） | PHP_VERSION=8.5.8、PHP_OS=Darwin 已 SAME | R-265（§172）；`PHP_BINDIR`/`PHP_BINARY` 工单 §172.4 登记**产品口径待裁**，维持现状 |
+| F-62e 部分面（`log($n,$base)`） | `log(8,2)=3` 已 SAME | 已在 R-172 族闭环 |
+
+### 231.3 本轮实修（R-328 F-134b ＋ F-159 ／ R-329 F-65 ／ R-330 F-62e）
+
+| 编号 | 站点 | 修法 |
+|---|---|---|
+| F-159（trait 常量直读） | tpl `php_class_constant_read`/`php_constant_get`/`php_defined` 三处 | 命中 `findClassConstant` 后查 `meta.is_trait` ⇒ Error「Cannot access trait constant T::A directly」（置于命中后：`T::NOPE` 仍报 Undefined）；`defined('T::A')`⇒false |
+| F-134b（解析 vs 解包顺序 + `?->` 短路） | tpl 新增 `php_method_call_precheck`＋`php_args_append_spread_safe`；irg 三站点（`?->`／`$o->$m()`／`$o->foo()`）在实参数组构建前发 precheck | PHP 顺序「方法名检查→接收者检查→方法解析(含 __call)→实参解包」；`?->` 空接收者解包空转+调用短路 NULL |
+| F-65 残余（极端 dec 不透明报错） | tpl `php_number_format` 前置尺寸守卫＋文件级 `PHPSTRING_MAX_BYTES`（PHPString.init 共用） | 投影=`dec+309+309/3+8` 超 100MB ⇒ 与 PHPString 守卫同路同消息；分隔符只作用于整数段（防 75M–100M 档误杀）；PHP `Allowed memory size` 措辞不对齐（环境差异已登记） |
+| F-62e 真红面 | nlk 4763 log2 摘除；tpl 18982 `ArgumentCountError` 入 Error 树（parent=TypeError）；tpl `php_max`/`php_min` 零参 ⇒ ArgumentCountError | `log2()` ⇒ `Call to undefined function`（PHP 8.5.8 实测不存在）；`max()/min()` 零参措辞 `expects at least 1 argument, 0 given` |
+
+### 231.4 验收读数
+
+- `timeout 600 zig build` rc=0；主回归 **67 PASS + 1 SKIP（f004 既有）+ 零新增红**（f135/f161 在 TSV 均 PASS）
+- 门：C343 12/12；NFM 58/58（含新增 nf_over1/nf_over2 环境等价 fatal 臂）；F2I 51/51；C340 4/4；c254 30 臂 fixed=2 零意外；C341 5/5；C342 6/6；C280 7/8（t8=登记红 null/0 折衷）、C281 7/8（a8=F-145-b）、FLT c052 67/68（e6=幂运算诊断族登记红）——**三枚 DIFF 全部为工单已登记的既有红，零转移**
+- 遗留：F-122（P|100 pow ulp，待裁）；F-145-b（C281 a8，srand 种子面）；模板 `php_log2` 函数体保留未删（不可达；删除待老铁定）

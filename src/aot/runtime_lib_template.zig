@@ -1907,6 +1907,12 @@ fn gcDestroyClosure(c: *PHPClosure) void {
 // 字符串类型
 // ============================================================================
 
+/// ★F-65（R-329）：字符串字节数上限（100MB），PHPString.init 与
+/// `php_number_format` 的前置尺寸守卫共用（DRY，禁第二份字面量）。
+/// 环境差异登记：PHP 侧上限是 INI `memory_limit`（默认 128MB）的 fatal，
+/// AOT 无 INI 概念，以本上限为同区 fatal；不对齐措辞（§四.3）。
+pub const PHPSTRING_MAX_BYTES: usize = 1024 * 1024 * 100; // 100MB
+
 /// PHP字符串类型
 /// 使用引用计数管理内存，支持写时复制（COW）
 pub const PHPString = struct {
@@ -1918,7 +1924,7 @@ pub const PHPString = struct {
     /// 创建新字符串
     pub fn init(allocator: Allocator, str: []const u8) !*PHPString {
         // 检查字符串长度是否异常
-        if (str.len > 1024 * 1024 * 100) { // 100MB
+        if (str.len > PHPSTRING_MAX_BYTES) {
             std.debug.print("ERROR: String too large: {d} bytes ({d} MB)\n", .{ str.len, str.len / (1024 * 1024) });
             return error.StringTooLarge;
         }
@@ -3752,6 +3758,10 @@ fn lookupBuiltinFunction(name: []const u8) ?BuiltinFn {
 }
 
 pub fn php_create_closure(name: Value, captures: Value, is_static_val: Value, allocator: Allocator) !Value {
+    // ★F-136d（R-331）：错误路径兜底释放捕获数组——发射器只在成功路径后置 release（F-136b），
+    //   Zig 错误外逸（UnknownFunction/OOM）时生成码的 hasException 清理块不覆盖该临时量 ⇒
+    //   漏一枚数组。errdefer 只在错误返回时触发，成功路径仍由调用方释放（单释放不变）。
+    errdefer captures.release(allocator);
     if (!name.isString()) return error.InvalidClosureName;
     if (!captures.isArray()) return error.InvalidCaptureList;
 
@@ -7231,6 +7241,46 @@ pub fn php_args_append_spread(dest: Value, src: Value, allocator: Allocator) !Va
     return dest;
 }
 
+/// ★F-134b（R-328）：`?->` 空接收者短路版解包。PHP 实测 `$x=null; $x?->foo(...5)` ⇒ NULL
+/// 且实参完全不求值；发射器在 safe 调用路径上把本函数替换 php_args_append_spread，
+/// 接收者非对象时静默空转（不产生 TypeError），调用本体随后短路为 NULL。
+pub fn php_args_append_spread_safe(dest: Value, src: Value, obj_val: Value, allocator: Allocator) !Value {
+    if (!Value_isObject(obj_val)) return dest;
+    return php_args_append_spread(dest, src, allocator);
+}
+
+/// ★F-134b（R-328）：方法调用「解析 vs 实参解包」顺序守卫。
+/// PHP 8.5.8 实测顺序：① 方法名字符串检查 → ② 接收者检查 → ③ 方法解析（含 __call）
+/// → ④ 实参求值（解包 TypeError）。发射器在构建实参数组（php_args_append_spread
+/// 可能抛 TypeError）之前调用本函数，使「未定义方法 Error」先于解包错误抛出。
+/// nullsafe=true（`?->`）时：接收者非对象 ⇒ 静默返回（短路，不查方法）；
+/// 接收者是对象时仍按 ③ 做解析检查（`$o?->nope(...)` ⇒ Error，PHP 实测）。
+pub fn php_method_call_precheck(obj_val: Value, method_name_val: Value, nullsafe_val: Value, allocator: Allocator) !Value {
+    const nullsafe = nullsafe_val.toBool();
+    if (!method_name_val.isString()) {
+        return throwThrowable("Error", "Method name must be a string", allocator);
+    }
+    const method_name = method_name_val.asString().data;
+    if (!Value_isObject(obj_val)) {
+        if (nullsafe) return Value.initNull();
+        var nbuf: [256]u8 = undefined;
+        const nmsg = std.fmt.bufPrint(&nbuf, "Call to a member function {s}() on {s}", .{
+            method_name, phpArgTypeWord(obj_val),
+        }) catch "Call to a member function on a non-object";
+        return throwThrowable("Error", nmsg, allocator);
+    }
+    const obj = Value_asObject(obj_val);
+    const meta = obj.class_meta orelse return Value.initNull(); // 内部对象无 meta：交调用本体
+    if (meta.findMethodLookup(method_name) != null) return Value.initNull();
+    if (meta.findMethodLookup("__call") != null) return Value.initNull();
+    // Closure 的方法表在 Closure meta（__invoke/Closure::call 等由 php_object_call 特例分发）
+    if (std.mem.eql(u8, meta.name, "Closure")) return Value.initNull();
+    var buf: [512]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "Call to undefined method {s}::{s}()", .{ meta.name, method_name }) catch
+        "Call to undefined method";
+    return throwThrowable("Error", msg, allocator);
+}
+
 pub fn php_invoke_callable_args_array(callback: Value, args_array: Value, allocator: Allocator) !Value {
     if (!args_array.isArray()) {
         // 常规入口由 php_call_user_func_array 先审查（带函数专有措辞）；此处兜内部调用方。
@@ -7718,7 +7768,10 @@ pub fn php_increment(val: Value) !Value {
         return Value.initInt(1);
     }
     if (val.isBool()) {
-        return Value.initInt(@as(i64, if (val.asBool()) 2 else 1));
+        // ★F-61（R-331）：bool 增量 PHP 8.5.8 实测＝Warning「Increment on type bool has no
+        //   effect…」＋**值不变**（旧误返 int 2/1）。
+        emitWarning("Increment on type bool has no effect, this will change in the next major version of PHP");
+        return val;
     }
     if (val.isString()) {
         const str = val.asString();
@@ -7736,6 +7789,9 @@ pub fn php_increment(val: Value) !Value {
     }
     // ★F-59（R-169）：对象走自己的措辞，**不能**落到 `php_add`（那边现在也拒对象，但措辞是 `Foo + int`，不是 PHP 的 `Cannot increment Foo`）
     if (Value_isObject(val)) return throwCannotIncDecError(val, "increment");
+    // ★F-61（R-331）：数组增量措辞＝「Cannot increment array」（operandTypeName(array)="array"，
+    //   与对象支同一 helper；旧落到 php_add ⇒ 错措辞「Unsupported operand types: array + int」）。
+    if (val.isArray()) return throwCannotIncDecError(val, "increment");
     return try php_add(val, Value.initInt(1));
 }
 
@@ -7755,6 +7811,8 @@ pub fn php_decrement(val: Value) !Value {
         return val;
     }
     if (val.isBool()) {
+        // ★F-61（R-331）：bool 递减同族（「Decrement on type bool…」Warning + 值不变）。
+        emitWarning("Decrement on type bool has no effect, this will change in the next major version of PHP");
         return val;
     }
     if (val.isString()) {
@@ -7774,6 +7832,8 @@ pub fn php_decrement(val: Value) !Value {
     }
     // ★F-59（R-169）：同 `php_increment`——对象必须走 `Cannot decrement <类名>`，不能落到 `php_sub` 的算术措辞上
     if (Value_isObject(val)) return throwCannotIncDecError(val, "decrement");
+    // ★F-61（R-331）：数组递减同族（「Cannot decrement array」）。
+    if (val.isArray()) return throwCannotIncDecError(val, "decrement");
     return try php_sub(val, Value.initInt(1));
 }
 
@@ -11077,6 +11137,8 @@ pub fn php_defined(name_val: Value) !Value {
             resolved = findClass(cls_name);
         }
         const meta = resolved orelse return Value.initBool(false);
+        // ★F-159（R-328）：`defined('T::A')` 于 trait 名 ⇒ false（PHP 实测）。
+        if (meta.is_trait) return Value.initBool(false);
         if (findClassConstant(meta, const_name, 0)) |found| {
             // 存在但不可见 ⇒ false（不抛）
             return Value.initBool(constAccessAllowed(found, getCurrentScopeClass()));
@@ -11213,6 +11275,12 @@ pub fn php_constant_get(name_val: Value, allocator: Allocator) !Value {
             }
             // ★F-163（R-324）：换可见性感知查找——命中先过门禁再返回值。
             if (findClassConstant(resolved.?, const_name, 0)) |found| {
+                // ★F-159（R-328）：`constant('T::A')` 同直读——trait 名命中 ⇒ Error。
+                if (resolved.?.is_trait) {
+                    var buf_t: [256]u8 = undefined;
+                    const msg_t = std.fmt.bufPrint(&buf_t, "Cannot access trait constant {s}::{s} directly", .{ resolved.?.name, const_name }) catch "Cannot access trait constant directly";
+                    return throwThrowable("Error", msg_t, runtime_allocator);
+                }
                 if (!constAccessAllowed(found, getCurrentScopeClass())) {
                     // ★F-216（R-325）：越权 Error 可捕获（措辞不变）
                     var buf_acc: [256]u8 = undefined;
@@ -14240,8 +14308,9 @@ fn parsePHPRegexPattern(pattern: []const u8) ParsedPattern {
 pub fn preg_match(pattern_val: Value, subject_val: Value, matches_ref: *Value, flags: Value, offset: Value, allocator: Allocator) !Value {
     _ = flags; // TODO: 实现flags支持
     _ = offset; // TODO: 实现offset支持
-    // ★F-50 起 `matches_ref` 在告警早退支上被真实写入 ⇒ 此处不再有"未使用参数"可丢弃；
-    //   成功支仍不填 matches（那属 `preg_match_with_matches`/`php_preg_match` 的分工，不在本批范围）
+    // ★F-53（R-331）起编译前失败支也不再写出参槽（保留预置值）⇒ 本孪生支全路径不触 matches_ref，
+    //   显式丢弃防 unused；成功支的 matches 填充属 `preg_match_with_matches`/`php_preg_match` 的分工。
+    _ = matches_ref;
 
     if (!pattern_val.isString() or !subject_val.isString()) {
         return Value.initInt(0);
@@ -14252,18 +14321,16 @@ pub fn preg_match(pattern_val: Value, subject_val: Value, matches_ref: *Value, f
 
     const parsed = parsePHPRegexPattern(pattern_str.data);
     // ★F-50（R-163）：非法分隔符/修饰符 ⇒ 按 PHP 口径发 Warning 后返回 false，不进 PCRE。
-    //   出参槽按本文件既有早退支装成空数组；★实测 PHP 在告警路径上**保留调用者预置值**，本仓因按引用实参未初始化而做不到 ⇒ 另立 F-53。
+    // ★F-53（R-331）：编译前失败路径保留调用者预置值（不写即保留；与 php_preg_match 支同语义）。
     if (parsed.issue != .none) {
         emitRegexPatternWarning("preg_match", parsed);
-        matches_ref.* = Value.initArray(try PHPArray.init(allocator));
         return Value.initBool(false);
     }
 
     // 使用缓存获取编译后的正则（不需要release，缓存管理生命周期）
     // ★F-79d：编译失败不再吞成"匹配不上"⇒ 发 PHP 那条 `Compilation failed` Warning 并按契约返回 `false`
-    //   （出参清空＝与上方 F-50 非法模式早退支同形）
+    // ★F-53（R-331）：编译失败同属编译前路径 ⇒ 保留预置值（不写即保留）。
     const re = compileRegexOrWarn("preg_match", parsed, allocator) orelse {
-        matches_ref.* = Value.initArray(try PHPArray.init(allocator));
         return Value.initBool(false);
     };
 
@@ -14291,17 +14358,17 @@ pub fn preg_match_with_matches(pattern_val: Value, subject_val: Value, matches_r
     const subject_str = subject_val.asString();
     const parsed = parsePHPRegexPattern(pattern_str.data);
     // ★F-50（R-163）：非法分隔符/修饰符 ⇒ 按 PHP 口径发 Warning 后返回 false，不进 PCRE。
-    //   出参槽按本文件既有早退支装成空数组；★实测 PHP 在告警路径上**保留调用者预置值**，本仓因按引用实参未初始化而做不到 ⇒ 另立 F-53。
+    // ★F-53（R-331）：PHP 实测**编译前**失败路径保留调用者预置值（`$m=['pre']` 告警后仍 `['pre']`）；
+    //   IR 的 by-ref 槽持有调用方实值 ⇒ 不写即保留（旧注释「做不到」已过时）。
     if (parsed.issue != .none) {
         emitRegexPatternWarning("preg_match", parsed); // ★F-84：本 handler 只由 `preg_match` 的三参形重写而来 ⇒ 告警须用 PHP 可见名
-        matches_ref.* = Value.initArray(try PHPArray.init(allocator));
         return Value.initBool(false);
     }
 
     // 使用缓存获取编译后的正则
     // ★F-79d＋F-84：失败路径同样用 `preg_match` 这个名字，返回 `false`（旧给 `initInt(0)`＝静默错值）
+    // ★F-53（R-331）：编译失败同属编译前路径 ⇒ 保留预置值（PHP 实测 `preg_match("/(a/",…)` MC=1）。
     const re = compileRegexOrWarn("preg_match", parsed, allocator) orelse {
-        matches_ref.* = Value.initArray(try PHPArray.init(allocator));
         return Value.initBool(false);
     };
 
@@ -14403,17 +14470,16 @@ pub fn preg_match_all(pattern_val: Value, subject_val: Value, matches_ref: *Valu
     const subject_str = subject_val.asString();
     const parsed = parsePHPRegexPattern(pattern_str.data);
     // ★F-50（R-163）：非法分隔符/修饰符 ⇒ 按 PHP 口径发 Warning 后返回 false，不进 PCRE。
-    //   出参槽按本文件既有早退支装成空数组；★实测 PHP 在告警路径上**保留调用者预置值**，本仓因按引用实参未初始化而做不到 ⇒ 另立 F-53。
     if (parsed.issue != .none) {
+        // ★F-53（R-331）：编译前失败路径保留预置值（同 preg_match 支）。
         emitRegexPatternWarning("preg_match_all", parsed);
-        matches_ref.* = Value.initArray(try PHPArray.init(allocator));
         return Value.initBool(false);
     }
 
     // 使用缓存获取编译后的正则
     // ★F-79d：实测 PHP `preg_match_all` 编译失败 ⇒ `false` ＋ Warning（旧给 `initInt(0)`）
+    // ★F-53（R-331）：编译失败同属编译前路径 ⇒ 保留预置值。
     const re = compileRegexOrWarn("preg_match_all", parsed, allocator) orelse {
-        matches_ref.* = Value.initArray(try PHPArray.init(allocator));
         return Value.initBool(false);
     };
 
@@ -15243,6 +15309,12 @@ pub fn php_str_ends_with(haystack: Value, needle: Value) !Value {
 
 /// spl_object_id - 返回对象的唯一整数ID (PHP 7.2+)
 pub fn php_spl_object_id(obj: Value) !Value {
+    // ★F-34（R-331）：闭包在 PHP 侧是 Closure 实例、有对象 id；指针源取 PHPClosure 地址，
+    //   与对象支同一掩码口径（AOT id 本就是地址掩码而非 PHP 递增序号，判据只看 >0 与自等）。
+    if (obj.isFunction()) {
+        const fptr = @intFromPtr(obj.asFunction());
+        return Value.initInt(@intCast(fptr & 0x7FFFFFFF));
+    }
     if (!Value_isObject(obj)) return Value.initInt(0);
     const ptr = @intFromPtr(Value_asObject(obj));
     return Value.initInt(@intCast(ptr & 0x7FFFFFFF));
@@ -15250,6 +15322,13 @@ pub fn php_spl_object_id(obj: Value) !Value {
 
 /// spl_object_hash - 返回对象唯一十六进制哈希字符串
 pub fn php_spl_object_hash(obj: Value, allocator: Allocator) !Value {
+    // ★F-34（R-331）：闭包支同上（指针源 = PHPClosure 地址）。
+    if (obj.isFunction()) {
+        const fptr = @intFromPtr(obj.asFunction());
+        var fbuf: [16]u8 = undefined;
+        const fhex = std.fmt.bufPrint(&fbuf, "{x:0>16}", .{fptr}) catch return Value.initNull();
+        return Value.initString(try PHPString.init(allocator, fhex));
+    }
     if (!Value_isObject(obj)) return Value.initString(try PHPString.init(allocator, "0000000000000000"));
     const ptr = @intFromPtr(Value_asObject(obj));
     var buf: [16]u8 = undefined;
@@ -16478,7 +16557,10 @@ pub fn php_ceil(val: Value) !Value {
 /// min - 最小值
 /// max - 最大值
 pub fn php_max(args: []const Value) !Value {
-    if (args.len == 0) return Value.initInt(0);
+    // ★F-62e（R-330）：零参 ⇒ ArgumentCountError（PHP 8.5.8 实测措辞；可捕获，extends TypeError）
+    if (args.len == 0) {
+        return throwThrowable("ArgumentCountError", "max() expects at least 1 argument, 0 given", runtime_allocator);
+    }
     if (args.len == 1) {
         // ★F-62（R-172）：单参数形 PHP 要求 array（实测 `max($o)` ⇒ `max(): Argument #1 ($value) must be of type array, Foo given`、
         //   `max(5)` ⇒ 同句式 `int given`），旧写法把标量／对象原样返回 ⇒ 静默放行。
@@ -16511,7 +16593,10 @@ pub fn php_max(args: []const Value) !Value {
 
 /// min - 最小值
 pub fn php_min(args: []const Value) !Value {
-    if (args.len == 0) return Value.initInt(0);
+    // ★F-62e（R-330）：零参 ⇒ ArgumentCountError（同 max 口径，PHP 8.5.8 实测）
+    if (args.len == 0) {
+        return throwThrowable("ArgumentCountError", "min() expects at least 1 argument, 0 given", runtime_allocator);
+    }
     if (args.len == 1) {
         // ★F-62（R-172）：同 `max`，实测 `min(5)` ⇒ `min(): Argument #1 ($value) must be of type array, int given`。
         _ = requireArrayParam("min", 1, "value", args[0]) orelse return Value.initNull();
@@ -18923,6 +19008,9 @@ pub const ClassMeta = struct {
             // Error 树：PHP 里 Error 与 Exception **平级**（各自 implements Throwable）
             .{ .name = "Error", .parent = "" },
             .{ .name = "TypeError", .parent = "Error" },
+            // ★F-62e（R-330）：ArgumentCountError extends TypeError（PHP 8.5.8 实测
+            //   `max()` 零参抛出；`catch (ArgumentCountError)` 与 `catch (TypeError)` 均须命中）
+            .{ .name = "ArgumentCountError", .parent = "TypeError" },
             .{ .name = "ValueError", .parent = "Error" },
             .{ .name = "UnhandledMatchError", .parent = "Error" },
             .{ .name = "ArithmeticError", .parent = "Error" },
@@ -23929,8 +24017,17 @@ pub const PHPObject = struct {
                 }
             }
         }
-        // 默认返回类名
-        return PHPString.init(allocator, self.class_name);
+        // ★F-32（R-331）：无 __toString ⇒ 可捕获 Error「Object of class X could not be
+        //   converted to string」（PHP 8.5.8 实测），不再 fail-open 返类名。
+        //   与 Value.toString 的 Closure 支同构：setException 后返回空串占位，调用点
+        //   hasException 轮询接管分派；echo 路径（php_echo 的对象支）有 has_to_string
+        //   前置守卫、永不抵达这里 ⇒ 不受影响。
+        {
+            var ebuf: [256]u8 = undefined;
+            const emsg = std.fmt.bufPrint(&ebuf, "Object of class {s} could not be converted to string", .{self.class_name}) catch "Object of class could not be converted to string";
+            throwThrowableDiscardCatch("Error", emsg, allocator);
+        }
+        return PHPString.init(allocator, "");
     }
 };
 
@@ -25815,6 +25912,14 @@ pub fn php_class_constant_read(args: []const Value, allocator: Allocator) !Value
     };
     // ★F-163（R-324）：可见性感知查找 + 门禁（直读=解析后类名消息）
     if (findClassConstant(meta, const_name, 0)) |found| {
+        // ★F-159（R-328）：trait 常量经 trait 名直读 ⇒ Error（PHP 8.5.8 实测：
+        // 命中才报「Cannot access trait constant T::A directly」，常量不存在仍报
+        // Undefined constant——故检查置于命中之后；类名按声明拼写 meta.name）。
+        if (meta.is_trait) {
+            var buf_t: [256]u8 = undefined;
+            const msg_t = std.fmt.bufPrint(&buf_t, "Cannot access trait constant {s}::{s} directly", .{ meta.name, const_name }) catch "Cannot access trait constant directly";
+            return throwThrowable("Error", msg_t, allocator);
+        }
         if (!constAccessAllowed(found, getCurrentScopeClass())) {
             // ★F-216（R-325）：越权 Error 可捕获（措辞不变）
             var buf_acc: [256]u8 = undefined;
@@ -29424,6 +29529,20 @@ pub fn php_number_format(number: Value, decimals: Value, dec_point: Value, thous
         @intCast(d64);
     const dec: usize = if (dec_in > 0) @intCast(dec_in) else 0; // ④打印位数＝max(dec,0)
 
+    // ★F-65（R-329）：前置尺寸守卫——投影输出字节数超 PHPString 上限时，直接与
+    //   `PHPString.init` 同路同消息（`ERROR: String too large …` + `error.StringTooLarge`）；
+    //   修前 `dec=i32max` 会在下方 2GB 缓冲分配/snprintf 路径吐不透明 `error.InvalidArgument`。
+    //   投影＝dec + 整数段上界 309（DBL_MAX 位数）+ 千分位分隔符（**只**作用于整数段，
+    //   `每 3 位 1 枚`）+ 符号/小数点余量 ⇒ 禁把 dec 算进分隔符（75M–100M 档会被误杀）。
+    //   阈值与 PHP 的 `memory_limit` fatal（默认 128MB）同区不同值——环境差异已登记，措辞不对齐（§四.3）。
+    {
+        const projected = dec +| 309 +| (309 / 3) +| 8;
+        if (projected > PHPSTRING_MAX_BYTES) {
+            std.debug.print("ERROR: String too large: {d} bytes ({d} MB)\n", .{ projected, projected / (1024 * 1024) });
+            return error.StringTooLarge;
+        }
+    }
+
     const rounded = blk: { const r = phpMathRoundValue(mag, dec_in, ROUND_MODE_HALF_UP); break :blk if (r == 0.0) 0.0 else r; }; // ②③
     if (rounded == 0.0) is_negative = false; // ③
 
@@ -32419,18 +32538,17 @@ pub fn php_preg_match(pattern: Value, subject: Value, matches: *Value, flags: Va
     const subject_str = subject.asString();
     const parsed = parsePHPRegexPattern(pattern_str.data);
     // ★F-50（R-163）：非法分隔符/修饰符 ⇒ 按 PHP 口径发 Warning 后返回 false，不进 PCRE。
-    //   出参槽按本文件既有早退支装成空数组；★实测 PHP 在告警路径上**保留调用者预置值**，本仓因按引用实参未初始化而做不到 ⇒ 另立 F-53。
+    // ★F-53（R-331）：编译前失败路径保留调用者预置值（不写即保留；同 preg_match_with_matches 支）。
     if (parsed.issue != .none) {
         emitRegexPatternWarning("preg_match", parsed);
-        matches.* = Value.initArray(try PHPArray.init(allocator));
         return Value.initBool(false);
     }
 
     // 使用缓存获取编译后的正则
     // ★F-79d：本文件内另有 `preg_match` 的孪生实现（builtin_map 重复键，工单 §66.2-2/§70.2）⇒
     //   **两侧必须同语义**，否则"哪一行活着"会决定这里是否报警。
+    // ★F-53（R-331）：编译失败同属编译前路径 ⇒ 保留预置值。
     const re = compileRegexOrWarn("preg_match", parsed, allocator) orelse {
-        matches.* = Value.initArray(try PHPArray.init(allocator));
         return Value.initBool(false);
     };
 
@@ -32572,17 +32690,16 @@ pub fn php_preg_match_all(pattern: Value, subject: Value, matches: *Value, flags
     const subject_str = subject.asString();
     const parsed = parsePHPRegexPattern(pattern_str.data);
     // ★F-50（R-163）：非法分隔符/修饰符 ⇒ 按 PHP 口径发 Warning 后返回 false，不进 PCRE。
-    //   出参槽按本文件既有早退支装成空数组；★实测 PHP 在告警路径上**保留调用者预置值**，本仓因按引用实参未初始化而做不到 ⇒ 另立 F-53。
+    // ★F-53（R-331）：编译前失败路径保留调用者预置值（不写即保留；同 php_preg_match 支）。
     if (parsed.issue != .none) {
         emitRegexPatternWarning("preg_match_all", parsed);
-        matches.* = Value.initArray(try PHPArray.init(allocator));
         return Value.initBool(false);
     }
 
     // 使用缓存获取编译后的正则
     // ★F-79d：同 `preg_match` 孪生支 ⇒ 两侧同语义（§66.2-2 的重复键未决项不因本批改变）
+    // ★F-53（R-331）：编译失败同属编译前路径 ⇒ 保留预置值（不写即保留）。
     const re = compileRegexOrWarn("preg_match_all", parsed, allocator) orelse {
-        matches.* = Value.initArray(try PHPArray.init(allocator));
         return Value.initBool(false);
     };
 
