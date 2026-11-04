@@ -12381,3 +12381,84 @@ PHP 8.5.8 实测口径：纯 enum ⇒ **返回 false**（不抛错，last_error=
 - `timeout 600 zig build` rc=0；主回归 **67 PASS + 1 SKIP（f004 既有）+ 零新增红**（f135/f161 在 TSV 均 PASS）
 - 门：C343 12/12；NFM 58/58（含新增 nf_over1/nf_over2 环境等价 fatal 臂）；F2I 51/51；C340 4/4；c254 30 臂 fixed=2 零意外；C341 5/5；C342 6/6；C280 7/8（t8=登记红 null/0 折衷）、C281 7/8（a8=F-145-b）、FLT c052 67/68（e6=幂运算诊断族登记红）——**三枚 DIFF 全部为工单已登记的既有红，零转移**
 - 遗留：F-122（P|100 pow ulp，待裁）；F-145-b（C281 a8，srand 种子面）；模板 `php_log2` 函数体保留未删（不可达；删除待老铁定）
+
+---
+
+## 232. R-331 批次五收口登记（2026-11-04）
+
+### 232.1 过期红核销（实测已绿、非本轮修复，禁记为修复成果）
+
+| 编号 | 核销探针读数 | 实际闭环批次 |
+|---|---|---|
+| F-62d（round `$mode` 非法值 ValueError） | f62d 探针 PHP↔AOT 逐字 SAME（`RoundingMode::*` 措辞 + HALF_EVEN 数值） | R-172 族已闭环 |
+
+### 232.2 本轮实修
+
+| 编号 | 站点 | 修法 |
+|---|---|---|
+| F-136d（create_closure 抛错路径漏一枚捕获数组） | tpl `php_create_closure:3764` | `errdefer captures.release(allocator)`——错误外逸（OOM/UnknownFunction）兜底释放；成功路径仍由发射器后置 release 单释放（F-136b 不变） |
+| F-34（`spl_object_id()` 对闭包返 0） | tpl `php_spl_object_id:15312`／`php_spl_object_hash:15325` | 各加 `.function` 支，指针源取 `Value.asFunction(): *PHPClosure` 地址；判据按 §28.8 口径只看 >0／自等／互异，**禁比绝对值**（地址掩码） |
+| F-32（`PHPObject.toString` fail-open 返类名） | tpl `:24020` | 去 fail-open：无 `__toString` ⇒ 可捕获 Error「Object of class X could not be converted to string」（PHP 8.5 口径） |
+| F-61（bool 增量缺 Warning + 数组增量措辞） | tpl `:7771/:7792`（inc）、`:7814/:7835`（dec） | bool `++`/`--` ⇒ Warning「In/Decrement on type bool has no effect…」+ 值不变；数组 ⇒ TypeError「Cannot in/decrement array」（可捕获） |
+| F-53（preg 预置值残差） | **irg 两站点**（`preg_match`/`preg_match_all` 第三参非局部变量支）：by-ref 槽 `store const.null` ⇒ 改 `global_get no_warn` copy-in 调用方当前值；**tpl 四函数八站点**（`preg_match_with_matches`／`preg_match_all`／`php_preg_match`／`php_preg_match_all` 各 2 处 + `preg_match` 孪生支 2 处）：编译前失败路径（分隔符告警／编译失败）不再写出参槽 | PHP 实测规则：编译前失败 ⇒ **保留预置值**；编译后路径（NOMATCH/offset 越界/flags VE）⇒ **清空**。旧 IR 置 null 使「不写即保留」退化成「不写即 null」（pd18 count(null) fatal 的卡点根因）；copy-in 后「不写」语义成立。孪生支 `preg_match:14308` 全路径不再触 matches_ref ⇒ 显式 `_ = matches_ref;` |
+| F-43（`function_exists("php_bool_or")` 泄漏） | nlk `:2014` 发射 `aot_registered_functions` 处 | 过滤 `php_*` 内部 helper 键（IR 发射目标，非 PHP 可见函数），放行 `php_sapi_name`；模板 `php_function_exists` 第一版改动已回退（AOT 走 aot_function_exists 读表键，改模板被绕过） |
+
+### 232.3 新发现登记（取证结论，未修，待裁）
+
+| 发现 | 取证 | 性质 |
+|---|---|---|
+| `Closure::fromCallable("no_such_fn")` AOT **不抛** TypeError（原样返回字符串）；PHP 抛「Failed to create closure from callable: function … not found」 | f136d_sanity2 探针：AOT `string(14) "no_such_fn_xyz"` NO_THROW | irg `:7185/:8855` 两处把单参 fromCallable **IR 级短路直通**（字面串⇒const_string，其余⇒原样）——一等 callable 的字符串表达设计使然，错误推迟到调用期。「创建期校验」是否补做涉一等 callable 全局设计 ⇒ 待裁 |
+| preg flags ValueError 路径 `$matches` 残差 | f53b 探针：PHP `MC=0`（throw 前已清空，by-ref 别名语义）vs AOT `MC=1`（`try` 外逸 ⇒ copy-out 写回被跳过） | **by-ref copy-in/copy-out 的 throw 路径通用缺口**，非 preg 专属（一切抛出型 by-ref 内置同构）；修法涉发射器写回包裹（try/catch+回写+重抛）影响面大 ⇒ 待裁 |
+
+### 232.4 验收读数
+
+- `timeout 600 zig build` rc=0（F-53 双段修复后最终态）
+- 探针：f53（pd18/pd19/pd20）／f53b（nomatch、offset_capture）／f53c（offset_oob、compilefail）／f43／f34（+f34b hash 支）／f32／f61／f61b／f62d 全 SAME；F-136d 泄漏探针 20000 次失败循环 delta=5B（0.0/iter，与 PHP 平）
+- 门：PD c036 **20/20**（pd18/pd20 摘登记红）；C249 14 臂 flat=12、leak=0、known_leak=1（a11=F-136c 既有登记）、sense_ok=1、route_gap=0；OBJ c044 **35/35**（F-61 注册红 i8/i11 摘）；C343 **12/12**；BLT c047 **208/209**（唯一 DIFF＝b5 bcadd 对象参数 TypeError，R171/R195/R206 历史快照同判 ⇒ 既有登记红，零转移）；f135/f161 防护面 MATCH
+- 运维注记：c249/c047 门脚本含 `→` 字面量，macOS 系统 bash 3.2 在 UTF-8 locale 下 `$var→` 展开误并变量名（`lb1: unbound variable`）⇒ 门一律 `LC_ALL=C bash` 跑
+- 遗留（维持挂着不动）：PHP_BINDIR/PHP_BINARY 口径（§172.4 待裁）；模板 `php_log2` 死代码体（删除待裁）；F-122；F-145-b
+
+---
+
+## 233. R-332 批次六收口登记（2026-11-04）
+
+### 233.1 过期红核销（实测已绿、非本轮修复，禁记为修复成果）
+
+| 编号 | 核销探针读数 | 实际闭环批次 |
+|---|---|---|
+| F-91（preg_last_error 族） | f91 探针 PHP↔AOT 逐字全同：`preg_last_error_msg` 存在、`PREG_BAD_UTF8_ERROR=4`/`PREG_BACKTRACK_LIMIT_ERROR=2` 可 defined、匹配后 0/"No error"、编译失败后 1/"Internal error"、NOMATCH 归零 | R-182（记点单点映射）＋R-185（动态调用 shim）＋R-186（PCRE 自述常量族）；存储＝既有 `threadlocal last_pcre_error_code`（本批未动） |
+| F-66（NAN→字符串四路径告警） | f66 探针逐字全同：echo/`(string)`/插值/print_r 四路径全打「unexpected NAN value was coerced to string」；var_dump 不打；json_encode(NAN)⇒false 且不打 | F-168′ 族批次 |
+| F-188 尾（get_class_methods/vars TypeError 接帧） | f188 探针逐字全同：三条 TypeError 措辞（string/int/未知类各一枚）＋正路径 `ok\|m1`；C327 门 5/5 | R-281 异常层级族批次 |
+
+### 233.2 本轮实修（R-332 F-71b ＋ F-71c）
+
+| 编号 | 站点 | 修法 |
+|---|---|---|
+| F-71c（http_build_query 键编码/嵌套形制） | tpl `php_http_build_query:29236` 重写＋新增递归体 `httpBuildQueryInto` | 键段先按原文拼（`prefix[key]`）再整体 RFC1738 编码（空格⇒`+`、`[]`⇒`%5B%5D`）；嵌套数组递归；null 值与空数组值**整对省略**；bool false⇒`0`（旧支只写真）；`first` 跨递归共享保 & 全局序 |
+| F-71b（debug_zval_dump 数组体/refcount） | tpl `php_debug_zval_dump:30164` 数组支重写＋新增 `debugZvalDumpArray`/`debugZvalDumpValue` | 元素枚举＋键形制（`[0]`/`["k"]`）＋packed 判定（HASH_PACKED 语义：迭代序第 i 键恰为 i）＋嵌套递归＋空数组 `array(0) interned {` 形制；refcount 口径：顶层恒 3（变量实参主流形）/嵌套恒 1；嵌套数组头缩进由值行调用方承担（修双缩进）；深度 >16 印 PHP 同款 `*RECURSION*` 防栈 |
+
+**过程事故（自伤已摁死）**：F-71b 首版局部变量误用 Zig 关键字 `packed` ⇒ 模板语法错误 ⇒ 并行主回归后段 21 枚 FAIL_COMPILE（f135/f161 亦在其中）；改 `is_packed` 后重跑主回归 **67 PASS + 1 SKIP（f004 既有）零新增红** 闭环。教训：模板任何标识符先过 Zig 关键字表；并行回归期间模板落码须即时单编一哨兵脚本（本次 f161 充当）。
+
+### 233.3 F-193 取证结论（有界残留，发射器活性层，待裁未修）
+
+- **现象复核**：b1 臂 AOT `g1=1|1 g4=1|1` vs PHP `0|0`；10 万次循环 delta 仍 11B（与 2 万次同值）⇒ **有界常量**，非逐轮泄漏；C329 门判据（|增量|≤64）容忍 ⇒ b1 SAME；a1/a2/a3/a5 臂 DIFF 系门注释自认「当前应为红」的 F-193 登记位。
+- **根因**（f193m dump zig 取证）：赋值表达式值寄存器（owned call 结果，如 `reg_6 = php_fopen(...)`）在 `setGlobalVar` 消费后**不立即释放**，靠「下一轮寄存器复用前 release」兜底；循环脱出后最后一轮值滞留至函数尾统一清理 ⇒ fd/资源类可见「每循环结构残留 1 枚」。
+- **方案候选**：
+  - 甲（消费点释放）：`global_set`/`store` 消费 owned call 结果且在 F-139 `store_count` 归零处补 release；**风险**＝链式赋值同寄存器多消费点（实测 `$g=($f=fopen())` 同一 reg 两次 `setGlobalVar`）＋非 store 消费（表达式值被读）不在计数内 ⇒ 需完备活性分析背书。
+  - 乙（循环脱出边补释放）：只清循环结构；治标——if 块等其它结构同构残留仍在。
+- **建议**：按宪法 §六（有风险必问）挂起待裁；若裁甲，须先补「寄存器全消费点计数」设施（store＋读两侧）。
+
+### 233.4 新发现登记（取证结论，未修，待裁）
+
+| 发现 | 取证 | 性质 |
+|---|---|---|
+| `debug_zval_dump` 字符串元素 `interned` vs `refcount(1)` 尾标 | f71b3 钉板：同长同内容两形互歧（"dynamic" interned vs "in_func" refcount(1)） | PHP interned-string 池＋opcache 状态实现细节，**语义不可复刻** ⇒ AOT 恒 `refcount(1)`，尾标差豁免待裁（类 §七 microtime 族先例） |
+| PERR e4 臂 `defined("PCRE_*")` 返 false 但值可读 | c093 本次与 R186/R232 快照同判 DIFF | 既有登记红（常量注册表与 defined 判定表不同源），非本批转移 |
+
+### 233.5 验收读数
+
+- `timeout 600 zig build` rc=0；主回归重跑 **67 PASS + 1 SKIP（f004 既有）零新增红**
+- 门：PERR c093 31/32（e4＝上述既有红）；C327 5/5；FLT c052 67/68（e6＝幂运算诊断族既有红）；C329 8 臂 same=4 diff=4（a1/a2/a3/a5＝F-193 登记位，门自认应红）；f135/f161 防护面 MATCH
+- 探针：f91/f66/f188 逐字 SAME；f71c2 六行全同；f71b2 仅余 interned 尾标三处（§233.4 豁免待裁）
+- 运维注记：`.zigphp_aot_build_*` 残留两枚（PERR/FLT 门臂编译失败遗孤）已清；门脚本一律 `LC_ALL=C bash`
+- 遗留（维持挂着不动）：PHP_BINDIR/PHP_BINARY（§172.4）；`php_log2` 死代码体；F-122；F-145-b；§232.3 两枚（fromCallable 创建期校验／by-ref throw 写回缺口）

@@ -29240,38 +29240,64 @@ pub fn php_http_build_query(data: Value, allocator: Allocator) !Value {
     var aw = std.Io.Writer.Allocating.initCapacity(allocator, 64) catch return Value.initNull();
     defer aw.deinit();
 
+    // ★F-71c（R-332）：键编码/嵌套形制对齐 PHP（RFC1738：空格⇒`+`、`[]`⇒`%5B%5D`、
+    //   键段先按原文拼接再整体编码）；null 值与空数组值**整对省略**；bool false⇒`0`。
     var first = true;
+    try httpBuildQueryInto(&aw.writer, arr, "", &first, allocator);
+
+    return Value.initString(try PHPString.init(allocator, aw.written()));
+}
+
+/// http_build_query 递归体：prefix＝上层键段原文（未编码），根层为空串。
+/// first 跨递归共享（& 分隔符的全局序），与 PHP 的 flats 收口同序。
+fn httpBuildQueryInto(writer: anytype, arr: *PHPArray, prefix: []const u8, first: *bool, allocator: Allocator) !void {
     var iter = arr.elements.iterator();
     while (iter.next()) |entry| {
-        if (!first) try aw.writer.writeAll("&");
-        first = false;
+        // 键段原文：根层＝键本身；嵌套＝prefix[key]
+        const key_raw: []const u8 = switch (entry.key_ptr.*) {
+            .integer => |i| try std.fmt.allocPrint(allocator, "{d}", .{i}),
+            .string => |s| s.data,
+        };
+        defer if (entry.key_ptr.* == .integer) allocator.free(key_raw);
 
-        // 写入键
-        switch (entry.key_ptr.*) {
-            .integer => |i| try aw.writer.print("{d}", .{i}),
-            .string => |s| try aw.writer.writeAll(s.data),
-        }
-        try aw.writer.writeAll("=");
+        const seg: []const u8 = if (prefix.len == 0)
+            key_raw
+        else
+            try std.fmt.allocPrint(allocator, "{s}[{s}]", .{ prefix, key_raw });
+        defer if (prefix.len != 0) allocator.free(seg);
 
-        // 写入值
         const val = entry.value_ptr.*;
+        // null／空数组 ⇒ 整对省略（PHP 实测）
+        if (val.isNull()) continue;
+        if (val.isArray()) {
+            const sub = val.asArray();
+            if (sub.count() == 0) continue;
+            try httpBuildQueryInto(writer, sub, seg, first, allocator);
+            continue;
+        }
+
+        if (!first.*) try writer.writeAll("&");
+        first.* = false;
+
+        try urlEncodeQueryComponent(writer, seg);
+        try writer.writeAll("=");
+
         if (val.isString()) {
-            try urlEncodeQueryComponent(&aw.writer, val.asString().data);
+            try urlEncodeQueryComponent(writer, val.asString().data);
         } else if (val.isInt()) {
-            try aw.writer.print("{d}", .{val.asInt()});
+            try writer.print("{d}", .{val.asInt()});
         } else if (val.isFloat()) {
             // ★F-71（R-173b 加封）：m1 实测两处因，缺一不可 ——
             //   ① 旧写 `{d}` 是「最短位数直出」，而 PHP 的标量值走 `(string)` ＝**显示**口径（`a=1.0E+19`、`a=0.3`、`a=1.0E-5`）；
             //   ② 旧写**不做 URL 编码**，而 PHP 对值一律编码 ⇒ `+` 必须成 `%2B`（实测 `a=1.0E%2B19`）。
             //   ⇒ 先按显示口径格式化，再走与字符串同一支编码器（`E`/`.`/`-` 都属不编码集，只有 `+` 会被转义）。
             var fbuf: [64]u8 = undefined;
-            try urlEncodeQueryComponent(&aw.writer, phpFormatFloat(&fbuf, val.asFloat()));
+            try urlEncodeQueryComponent(writer, phpFormatFloat(&fbuf, val.asFloat()));
         } else if (val.isBool()) {
-            if (val.asBool()) try aw.writer.writeAll("1");
+            // ★F-71c（R-332）：false⇒`0`（旧支只在 true 写 `1`，false 落成空值 ⇒ `f=` 与 PHP `f=0` 分歧）
+            try writer.writeAll(if (val.asBool()) "1" else "0");
         }
     }
-
-    return Value.initString(try PHPString.init(allocator, aw.written()));
 }
 
 /// parse_str - 将查询字符串解析到变量中
@@ -30136,14 +30162,121 @@ pub fn php_debug_zval_dump(value: Value) !Value {
     } else if (value.isNull()) {
         fileWriteAll(1, "NULL\n");
     } else if (value.isArray()) {
-        const arr = value.asArray();
-        var buf: [64]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "array({d}) refcount(1){{\n}}\n", .{arr.count()}) catch "array(?)\n";
-        fileWriteAll(1, msg);
+        debugZvalDumpArray(value.asArray(), 0);
     } else {
         fileWriteAll(1, "unknown type\n");
     }
     return Value.initNull();
+}
+
+/// ★F-71b（R-332）：`debug_zval_dump` 的数组体——元素枚举／键形制／packed 标注／嵌套递归全对齐 PHP 8.5.8 实测。
+///   refcount 口径：顶层（indent=0，只能由本函数入口到达）恒 3＝变量实参主流形；嵌套恒 1。
+///   字符串元素尾标恒 `refcount(1)`：PHP 的 `interned` 尾标是 interned-string 池实现细节
+///   （实测同长内容两形互歧："dynamic" interned vs "in_func" refcount(1)），语义不可复刻 ⇒ 登记豁免。
+///   自引用／深嵌套防御：深度 >16 印 PHP 同款 `*RECURSION*` 字眼收口（防栈溢出）。
+fn debugZvalDumpArray(arr: *PHPArray, indent: usize) void {
+    var nbuf: [96]u8 = undefined;
+    // 缩进串（每级 2 空格）
+    var ibuf: [40]u8 = undefined;
+    const pad_len = @min(indent * 2, ibuf.len);
+    @memset(ibuf[0..pad_len], ' ');
+    const pad = ibuf[0..pad_len];
+
+    const count = arr.count();
+    // packed 判定（PHP HASH_PACKED 语义）：迭代序第 i 枚键恰为整数 i
+    var is_packed = true;
+    {
+        var i: usize = 0;
+        var pit = arr.elements.iterator();
+        while (pit.next()) |e| : (i += 1) {
+            switch (e.key_ptr.*) {
+                .integer => |k| {
+                    if (k != @as(i64, @intCast(i))) {
+                        is_packed = false;
+                        break;
+                    }
+                },
+                .string => {
+                    is_packed = false;
+                    break;
+                },
+            }
+        }
+    }
+
+    if (count == 0) {
+        // PHP 实测空数组：`array(0) interned {`（无 packed、`{` 前有空格）；
+        // 头部缩进由值行调用方已印（顶层 pad="" 无差）。
+        fileWriteAll(1, "array(0) interned {\n");
+        fileWriteAll(1, pad);
+        fileWriteAll(1, "}\n");
+        return;
+    }
+
+    const head = std.fmt.bufPrint(&nbuf, "array({d}) {s}refcount({d}){{\n", .{
+        count,
+        if (is_packed) "packed " else "",
+        if (indent == 0) @as(i64, 3) else @as(i64, 1),
+    }) catch "array(?)\n";
+    // 头部不再自印 pad：值行缩进由调用方（debugZvalDumpValue 的 {pad}+"  "）承担，
+    // 本函数自印的只有键行／闭括号行（PHP 实测嵌套数组头与父值行同缩进）。
+    fileWriteAll(1, head);
+
+    var it = arr.elements.iterator();
+    while (it.next()) |entry| {
+        // 键行：{pad}  [键]=>
+        fileWriteAll(1, pad);
+        fileWriteAll(1, "  ");
+        switch (entry.key_ptr.*) {
+            .integer => |k| {
+                const ks = std.fmt.bufPrint(&nbuf, "[{d}]=>\n", .{k}) catch "[?]=>\n";
+                fileWriteAll(1, ks);
+            },
+            .string => |s| {
+                fileWriteAll(1, "[\"");
+                fileWriteAll(1, s.data);
+                fileWriteAll(1, "\"]=>\n");
+            },
+        }
+        // 值行：{pad}  {渲染}
+        fileWriteAll(1, pad);
+        fileWriteAll(1, "  ");
+        debugZvalDumpValue(entry.value_ptr.*, indent + 1);
+    }
+    fileWriteAll(1, pad);
+    fileWriteAll(1, "}\n");
+}
+
+/// F-71b：数组元素的值渲染（顶层非标量支由 php_debug_zval_dump 既有支承担，本 helper 只服务数组体内）。
+fn debugZvalDumpValue(val: Value, indent: usize) void {
+    var nbuf: [96]u8 = undefined;
+    if (val.isInt()) {
+        const s = std.fmt.bufPrint(&nbuf, "int({d})\n", .{val.asInt()}) catch "int(?)\n";
+        fileWriteAll(1, s);
+    } else if (val.isFloat()) {
+        var num: [64]u8 = undefined;
+        const fs = phpFormatFloatSerialize(&num, val.asFloat(), false, true);
+        const s = std.fmt.bufPrint(&nbuf, "float({s})\n", .{fs}) catch "float(?)\n";
+        fileWriteAll(1, s);
+    } else if (val.isBool()) {
+        fileWriteAll(1, if (val.asBool()) "bool(true)\n" else "bool(false)\n");
+    } else if (val.isNull()) {
+        fileWriteAll(1, "NULL\n");
+    } else if (val.isString()) {
+        const s = val.asString();
+        const line = std.fmt.bufPrint(&nbuf, "string({d}) \"", .{s.length}) catch "string(?)\n";
+        fileWriteAll(1, line);
+        fileWriteAll(1, s.data);
+        fileWriteAll(1, "\" refcount(1)\n");
+    } else if (val.isArray()) {
+        if (indent > 16) {
+            fileWriteAll(1, "*RECURSION*\n");
+            return;
+        }
+        debugZvalDumpArray(val.asArray(), indent);
+    } else {
+        fileWriteAll(1, "unknown type\n");
+    }
 }
 
 /// headers_list - 返回已发送的 HTTP 头列表

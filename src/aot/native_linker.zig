@@ -5396,6 +5396,15 @@ pub const NativeLinker = struct {
         var unset_registers = std.AutoHashMap(usize, void).init(self.allocator);
         defer unset_registers.deinit();
 
+        // ★F-136c（R-333）：捕获绑定槽＝「store 的 value 是 capture_get 结果」的 ptr。
+        //   val_assign 对共享数组 **COW 克隆**（tpl:3530-3548）⇒ 槽内是新建克隆体、与 capture_get
+        //   结果寄存器已无共享 ⇒ optimized_alloca 守卫（shouldReleaseReg:892 假定槽值由他处清理）
+        //   对此类槽不成立，必须在函数尾/异常路径放行释放。
+        var capture_get_results = std.AutoHashMap(usize, void).init(self.allocator);
+        defer capture_get_results.deinit();
+        var capture_bound_slots = std.AutoHashMap(usize, void).init(self.allocator);
+        defer capture_bound_slots.deinit();
+
         // 收集需要释放的寄存器（字符串、数组等）
         // 使用HashSet避免重复
         var cleanup_registers_set = std.AutoHashMap(usize, void).init(self.allocator);
@@ -5524,6 +5533,28 @@ pub const NativeLinker = struct {
                         // alloca 指令（局部变量）也需要在函数结束时释放
                         try cleanup_registers_set.put(reg.id, {});
                     }
+                }
+
+                // ★F-136c（R-333）：非 alloca 的**变量槽 store 目标**也纳入 cleanup。
+                //   箭头函数捕获绑定（irg `getOrCreateVarRegister`＋`store capture→槽`）的槽
+                //   没有任何指令以它为 result、也不发 alloca ⇒ 此前永远进不了清单 ⇒
+                //   槽内那枚 val_assign 引用在函数尾无人归还（array_map(fn) 每调漏 1 枚 ≈320 B）。
+                //   安全：set 去重幂等；清理支 `if(!isNull) release` 对未定义槽 no-op；
+                //   val_assign 语义＝槽恰持一份当前值引用；alloca/ref_ptr/this 槽被清理支既有守卫跳过。
+                if (inst.op == .store) {
+                    const st = inst.op.store;
+                    const is_var_slot = var_name_map.contains(st.ptr.id);
+                    const is_alloca_slot = alloca_registers.contains(st.ptr.id);
+                    if (is_var_slot and !is_alloca_slot) {
+                        try cleanup_registers_set.put(st.ptr.id, {});
+                    }
+                    // F-136c：value 是 capture_get 结果 ⇒ ptr 记入捕获绑定槽（守卫放行用）
+                    if (capture_get_results.contains(st.value.id)) {
+                        try capture_bound_slots.put(st.ptr.id, {});
+                    }
+                }
+                if (inst.op == .capture_get) {
+                    if (inst.result) |cg_reg| try capture_get_results.put(cg_reg.id, {});
                 }
 
                 // 收集操作数寄存器（所有 BinaryOp 和 UnaryOp）
@@ -6814,6 +6845,8 @@ pub const NativeLinker = struct {
                         if (cleanup_registers.items.len > 0) {
                             try code.appendSlice(self.allocator, "\n    // Cleanup: release allocated values (except return value)\n");
                             for (cleanup_registers.items) |reg_id| {
+                                // DEBUG-F136C（临时，验收后删）
+                                std.debug.print("DBG-CLEANUP reg={d} stored_to_alloca={} shouldRel={} refparam={} refptr={} this={} unset={}\n", .{ reg_id, stored_to_alloca.contains(reg_id), self.shouldReleaseReg(reg_id), ref_param_alloca_map.get(reg_id) != null, ref_ptr_regs.contains(reg_id), this_regs.contains(reg_id), unset_registers.contains(reg_id) });
                                 // 跳过已经被store到alloca的寄存器
                                 if (stored_to_alloca.contains(reg_id)) continue;
 
@@ -6941,6 +6974,8 @@ pub const NativeLinker = struct {
                         if (cleanup_registers.items.len > 0) {
                             try code.appendSlice(self.allocator, "\n    // Cleanup: release allocated values (except return value)\n");
                             for (cleanup_registers.items) |reg_id| {
+                                // DEBUG-F136C（临时，验收后删）
+                                std.debug.print("DBG-CLEANUP reg={d} stored_to_alloca={} shouldRel={} refparam={} refptr={} this={} unset={}\n", .{ reg_id, stored_to_alloca.contains(reg_id), self.shouldReleaseReg(reg_id), ref_param_alloca_map.get(reg_id) != null, ref_ptr_regs.contains(reg_id), this_regs.contains(reg_id), unset_registers.contains(reg_id) });
                                 // 跳过已经被store到alloca的寄存器
                                 if (stored_to_alloca.contains(reg_id)) continue;
 
