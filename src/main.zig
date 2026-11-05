@@ -805,6 +805,9 @@ fn runAOTCompilation(allocator: std.mem.Allocator, io: std.Io, cwd_dir: std.Io.D
     // 设置预解析的 AST
     try aot_compiler.setAST(context.nodes.items, string_table, root_index);
 
+    // ★F-35（R-334）：strict_types 位透传（单文件编译支；多文件支在 multi_file_compiler）
+    aot_compiler.setStrictTypes(p.strict_types);
+
     // 执行完整的编译流程（IR生成、优化、代码生成、链接）
     const result = aot_compiler.compile() catch |err| {
         std.debug.print("Error: Compilation failed: {s}\n", .{@errorName(err)});

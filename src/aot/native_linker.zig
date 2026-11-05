@@ -320,6 +320,13 @@ pub const NativeLinker = struct {
     current_alloca_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_this_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_var_name_map: ?*const std.AutoHashMap(usize, []const u8) = null,
+    /// ★F-136c（R-333）：捕获绑定槽集合（store.value ∈ capture_get 结果 ⇒ store.ptr）。
+    ///   此类槽内是 val_assign COW 克隆体，optimized_alloca 守卫须对其放行。
+    current_capture_bound_slots: ?*const std.AutoHashMap(usize, void) = null,
+    /// ★F-35（R-334）：当前编译单元源文件的 `declare(strict_types=1)` 位（Module.strict_types 挂载）。
+    current_strict_types: bool = false,
+    /// ★F-35（R-334）：当前模块（ret 收口点解析 `parent` 返回类型需查类表）。
+    current_ir_module: ?*const IR.Module = null,
     in_while_loop: bool = false,
     /// i64 快速路径优化标志：当为 true 时，call 生成处对 php_increment/php_lt/php_add 等生成运行时类型检查 + i64 操作
     i64_loop_optimize_active: bool = false,
@@ -2522,7 +2529,15 @@ pub const NativeLinker = struct {
             \\    };
             \\
             \\    // 注册所有类
-            \\    registerAllClasses(allocator) catch {};
+            \\    // ★F-24d（R-337）：登记点抛出的 Error（父类/接口缺失）走未捕获通道——
+            \\    //   启动期无用户 handler ⇒ 必按未捕获处理（PHP 风格 fatal + rc=255）；
+            \\    //   无挂起异常的旧式错误（OOM 等）维持原静默口径。
+            \\    registerAllClasses(allocator) catch {
+            \\        if (runtime.hasException()) {
+            \\            runtime.php_handle_uncaught_exception();
+            \\            return;
+            \\        }
+            \\    };
             \\    // 注册所有函数
             \\    registerAllFunctions() catch {};
             \\
@@ -3761,24 +3776,53 @@ pub const NativeLinker = struct {
             return;
         }
 
-        try writer.writeAll(
-            \\
-            \\fn registerAllClasses(allocator: std.mem.Allocator) !void {
-            \\    try runtime.ClassMeta.registerExceptionClass(allocator);
-            \\
-        );
-
         var emitted_class_names = std.StringHashMap(void).init(self.allocator);
         defer emitted_class_names.deinit();
+        // ★F-24d 第二段：{short}_meta 全局按短名去重（条件重复声明 ⇒ 两 typedef 同一短名，
+        //   各自的 __classDecl_N 共享这枚槽位；运行期 CI 查重决定谁能真正登记）
+        var emitted_meta_globals = std.StringHashMap(void).init(self.allocator);
+        defer emitted_meta_globals.deinit();
 
+        // ★F-24d 第二段：登记面拆分 —— 每类一枚 fn；早绑定类拆 __classMeta_N（建表+注册）与
+        //   __classLink_N（常量/父链/魔术/抽象检查）两段，registerAllClasses 先全 meta 后全 link
+        //   （与原多趟语义逐字等价）；延迟类（条件/函数内/implements/use-trait/enum/父编译期
+        //   不可解析）为单枚 __classDecl_N（前置依赖检查 ⇒ 链接失败类不登记，对齐 PHP 实测），
+        //   由 IR .class_decl 指令在声明语句位置调用。
+        //   {short}_meta 提升为文件级 var：meta/link 两 fn 共享同一 meta 指针（各 pass 体逐字不变）。
         for (0..class_count) |ci| {
             const full_cname = class_names[ci]; // 完整类名
             const short_cname = class_short_names[ci]; // 短名（用于变量名）
+            const cur_tdi: usize = type_def_idx[ci] orelse 0;
+            const cur_is_early = if (type_def_idx[ci]) |tdi0| ir_module.types.items[tdi0].early_bind else true;
+            const cur_is_dup = emitted_class_names.contains(full_cname);
+            if (!emitted_meta_globals.contains(short_cname)) {
+                try emitted_meta_globals.put(short_cname, {});
+                try writer.print("var {s}_meta: *runtime.ClassMeta = undefined;\n", .{short_cname});
+            }
+            if (cur_is_early) {
+                try writer.print("fn __classMeta_{d}(allocator: std.mem.Allocator) !void {{\n", .{cur_tdi});
+            } else {
+                try writer.print("fn __classDecl_{d}(allocator: std.mem.Allocator) !void {{\n", .{cur_tdi});
+                if (type_def_idx[ci]) |tdi0| {
+                    const td0 = ir_module.types.items[tdi0];
+                    try self.emitClassDeclPrecheck(writer, td0);
+                    // ★缺 trait（传递闭包）⇒ 编译期组合不可能（resolveClassTraitMembers 会抛
+                    //   TraitNotFound 炸掉整个编译）；PHP 语义＝声明点抛可捕获 Trait not found，
+                    //   已由 precheck 覆盖 ⇒ fn 体到此为止（运行期永远到不了 meta 构建）。
+                    if (self.hasMissingTraitInClosure(ir_module, td0)) {
+                        // 无 meta 构建 ⇒ 形参未用（Zig 0.16 编译错误）⇒ 仅此路径显式丢弃
+                        try writer.writeAll("    _ = allocator;\n}\n");
+                        continue;
+                    }
+                }
+            }
 
             // AOT-CODEGEN-012：完全同名重复声明 ⇒ 跳过 meta 构建（Zig 符号会重定义），
             // 仅发 registerClassRedeclare（运行期按 PHP 语义 Fatal，prev 取首声明）。
             // 跨大小写重复（Foo/foo，符号不同）⇒ 正常双 meta，由 registerClassWithLocation 的 CI 查重 Fatal。
-            if (emitted_class_names.contains(full_cname)) {
+            // ★F-24d 第二段：仅早绑定类适用编译期跳过；延迟类全量落体 —— 运行期 CI 查重即
+            //   PHP 的声明点 redeclare Fatal，且先声明未执行时后声明正常登记。
+            if (cur_is_early and cur_is_dup) {
                 var dup_file: []const u8 = "";
                 var dup_line: u32 = 0;
                 if (type_def_idx[ci]) |tdi_dup| {
@@ -3790,15 +3834,18 @@ pub const NativeLinker = struct {
                 defer self.allocator.free(escaped_dup);
                 const escaped_df = try self.escapeString(dup_file);
                 defer self.allocator.free(escaped_df);
+                // Redeclare-only 体不触碰 allocator ⇒ 显式丢弃（Zig 0.16 未用形参即错）
+                try writer.writeAll("    _ = allocator;\n");
                 try writer.print("    try runtime.registerClassRedeclare(\"{s}\", \"{s}\", {d});\n", .{ escaped_dup, escaped_df, dup_line });
+                try writer.writeAll("}\n");
                 continue;
             }
-            try emitted_class_names.put(full_cname, {});
+            if (!cur_is_dup) try emitted_class_names.put(full_cname, {});
             // ✅ 转义完整类名中的反斜杠
             const escaped_full_cname = try escapeBackslashes(self.allocator, full_cname);
             defer self.allocator.free(escaped_full_cname);
-            // ✅ 使用短名作为变量名，但注册时使用完整类名
-            try writer.print("    const {s}_meta = try runtime.ClassMeta.init(allocator, \"{s}\");\n", .{ short_cname, escaped_full_cname });
+            // ✅ 使用短名作为变量名（文件级 var，见上），但注册时使用完整类名
+            try writer.print("    {s}_meta = try runtime.ClassMeta.init(allocator, \"{s}\");\n", .{ short_cname, escaped_full_cname });
 
             if (type_def_idx[ci]) |tdi| {
                 const td_ptr = ir_module.types.items[tdi];
@@ -4052,6 +4099,26 @@ pub const NativeLinker = struct {
                     try writer.writeAll("    }\n");
                 }
             }
+            if (cur_is_early) {
+                try writer.writeAll("}\n");
+                // link 面全部站点走 runtime.runtime_allocator ⇒ 形参 allocator 对 Zig 0.16 属未用，显式丢弃
+                try writer.print("fn __classLink_{d}(allocator: std.mem.Allocator) !void {{\n    _ = allocator;\n", .{cur_tdi});
+            }
+            try self.emitClassLinkBody(writer, ir_module, ci, &class_names, &class_short_names, &type_def_idx);
+            try writer.writeAll("}\n");
+        }
+
+        // ★F-24d 第二段：registerAllClasses 外壳 —— 启动期仅登记早绑定集（先全 meta；trait 静态属性块；后全 link）
+        try writer.writeAll(
+            \\
+            \\fn registerAllClasses(allocator: std.mem.Allocator) !void {
+            \\    try runtime.ClassMeta.registerExceptionClass(allocator);
+            \\
+        );
+        for (0..class_count) |ci| {
+            const tdi = type_def_idx[ci] orelse continue;
+            if (!ir_module.types.items[tdi].early_bind) continue;
+            try writer.print("    try __classMeta_{d}(allocator);\n", .{tdi});
         }
 
         // 注册含静态属性的 trait（使 self::$prop 在 trait 方法中可用）
@@ -4061,6 +4128,8 @@ pub const NativeLinker = struct {
         for (ir_module.types.items) |td_ptr| {
             const td = td_ptr.*;
             if (td.kind != .trait) continue;
+            // ★F-24d 第二段：延迟 trait 的静态属性随其 __classDecl_N 在声明点登记（启动期跳过）
+            if (!td.early_bind) continue;
 
             var has_static = false;
             for (td.properties) |prop| {
@@ -4135,9 +4204,86 @@ pub const NativeLinker = struct {
             try writer.print("    if (runtime.findClass(\"{s}\") == null) try runtime.registerClassWithLocation(trait_{s}_meta, \"{s}\", {d});\n", .{ tname, tname, escaped_tf, td.location.line });
         }
 
-        // 初始化类常量
+        // 后段：早绑定类的 link 调用（dup 类的 meta fn 仅含 Redeclare，Fatal 不返回 ⇒ 无 link 面）
         for (0..class_count) |ci| {
-            if (type_def_idx[ci]) |tdi| {
+            const tdi = type_def_idx[ci] orelse continue;
+            if (!ir_module.types.items[tdi].early_bind) continue;
+            var is_dup_shell = false;
+            for (0..ci) |pj| {
+                if (std.mem.eql(u8, class_names[pj], class_names[ci])) {
+                    is_dup_shell = true;
+                    break;
+                }
+            }
+            if (is_dup_shell) continue;
+            try writer.print("    try __classLink_{d}(allocator);\n", .{tdi});
+        }
+        try writer.writeAll("}\n");
+    }
+
+    /// ★F-24d 第二段：传递闭包查「use 链上是否有缺失 trait」（class 的 traits → trait 的 traits → …）。
+    ///   任一缺失 ⇒ 编译期组合不可能，该类的登记 fn 只保留 precheck 抛出面。
+    fn hasMissingTraitInClosure(self: *Self, ir_module: *const IR.Module, td: *const IR.TypeDef) bool {
+        var visited = std.StringHashMap(void).init(self.allocator);
+        defer visited.deinit();
+        var worklist = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
+        defer worklist.deinit(self.allocator);
+        worklist.appendSlice(self.allocator, td.traits) catch return false;
+        while (worklist.pop()) |tn| {
+            if (visited.contains(tn)) continue;
+            visited.put(tn, {}) catch return false;
+            const ttd = self.findTypeDef(ir_module, tn, .trait) orelse return true;
+            worklist.appendSlice(self.allocator, ttd.traits) catch return false;
+        }
+        return false;
+    }
+
+    /// ★F-24d 第二段：延迟登记 fn 的前置依赖检查 —— PHP 语义：链接失败的类不登记
+    ///   （catch 后 class_exists 恒 false），故缺父/缺接口/缺 trait 必须在 meta 注册之前
+    ///   抛可捕获 Error（措辞与 F-24d 第一段的登记点抛出逐字一致）。
+    fn emitClassDeclPrecheck(self: *Self, writer: anytype, td: *const IR.TypeDef) !void {
+        const escaped_file = try self.escapeString(td.location.file);
+        defer self.allocator.free(escaped_file);
+        if (td.parent) |parent_name| {
+            const escaped_parent = try self.escapeString(parent_name);
+            defer self.allocator.free(escaped_parent);
+            try writer.print(
+                "    if (runtime.findClass(\"{s}\") == null) return runtime.throwClassLinkError(\"Class\", \"{s}\", \"{s}\", {d});\n",
+                .{ escaped_parent, escaped_parent, escaped_file, td.location.line },
+            );
+        }
+        for (td.interfaces) |iface| {
+            const escaped_iface = try self.escapeString(iface);
+            defer self.allocator.free(escaped_iface);
+            try writer.print(
+                "    if (runtime.findClass(\"{s}\") == null and !runtime.isBuiltinPseudoInterface(\"{s}\")) return runtime.throwClassLinkError(\"Interface\", \"{s}\", \"{s}\", {d});\n",
+                .{ escaped_iface, escaped_iface, escaped_iface, escaped_file, td.location.line },
+            );
+        }
+        for (td.traits) |trait_name| {
+            const escaped_trait = try self.escapeString(trait_name);
+            defer self.allocator.free(escaped_trait);
+            try writer.print(
+                "    if (runtime.findClass(\"{s}\") == null) return runtime.throwClassLinkError(\"Trait\", \"{s}\", \"{s}\", {d});\n",
+                .{ escaped_trait, escaped_trait, escaped_file, td.location.line },
+            );
+        }
+    }
+
+    /// ★F-24d 第二段：单类 link 面（原「常量/父链+接口/魔术指针/抽象检查」四趟循环的逐类切片，
+    ///   体逐字保留）—— 早绑定类由 __classLink_N 承载（registerAllClasses 后段统一调用）；
+    ///   延迟类在 __classDecl_N 内联。{short}_meta 已提升为文件级 var（meta fn 赋值），两侧共享。
+    fn emitClassLinkBody(
+        self: *Self,
+        writer: anytype,
+        ir_module: *const IR.Module,
+        ci: usize,
+        class_names: *const [64][]const u8,
+        class_short_names: *const [64][]const u8,
+        type_def_idx: *const [64]?usize,
+    ) !void {
+        // 初始化类常量
+        if (type_def_idx[ci]) |tdi| {
                 const td_ptr = ir_module.types.items[tdi];
                 const td = td_ptr.*;
                 const full_cname = class_names[ci];
@@ -4196,24 +4342,26 @@ pub const NativeLinker = struct {
                     try writer.writeAll("    }\n");
                 }
             }
-        }
 
-        for (0..class_count) |ci| {
-            if (type_def_idx[ci]) |tdi| {
+        // ===== 父链 + 接口检查（原 LOOP C 逐类切片）=====
+        if (type_def_idx[ci]) |tdi| {
                 const td = ir_module.types.items[tdi].*;
                 const short_cname = class_short_names[ci];
                 if (td.parent) |parent_name| {
                     const escaped_parent = try self.escapeString(parent_name);
                     defer self.allocator.free(escaped_parent);
-                    try writer.print(
-                        "    {s}_meta.parent = if (runtime.findClass(\"{s}\")) |p| p else null;\n",
-                        .{ short_cname, escaped_parent },
-                    );
-                    // final class 继承检查
                     const escaped_full = try escapeBackslashes(self.allocator, class_names[ci]);
                     defer self.allocator.free(escaped_full);
                     const escaped_file = try self.escapeString(td.location.file);
                     defer self.allocator.free(escaped_file);
+                    // ★F-24d 第一段（R-337）：父类缺失不再静默置 null（旧形态＝类照登、方法全缺、
+                    //   首个方法调用才炸「undefined method」，t9/t11 红的真身）；
+                    //   PHP 语义＝登记（链接）点抛可捕获 Error: Class "X" not found。
+                    try writer.print(
+                        "    {s}_meta.parent = if (runtime.findClass(\"{s}\")) |p| p else return runtime.throwClassLinkError(\"Class\", \"{s}\", \"{s}\", {d});\n",
+                        .{ short_cname, escaped_parent, escaped_parent, escaped_file, td.location.line },
+                    );
+                    // final class 继承检查
                     try writer.print(
                         "    if ({s}_meta.parent) |p| runtime.php_check_final_inheritance(\"{s}\", p, \"{s}\", {d});\n",
                         .{ short_cname, escaped_full, escaped_file, td.location.line },
@@ -4228,6 +4376,19 @@ pub const NativeLinker = struct {
 
                 // 设置接口列表
                 if (td.interfaces.len > 0) {
+                    // ★F-24d 第一段（R-337）：接口缺失即抛可捕获 Error: Interface "X" not found
+                    //   （PHP 对 `implements X` / `interface X extends Y` 同此规则）；内建伪接口
+                    //   （Countable/Traversable/…不注册 ClassMeta）由白名单放行。
+                    const escaped_decl_file = try self.escapeString(td.location.file);
+                    defer self.allocator.free(escaped_decl_file);
+                    for (td.interfaces) |iface_chk| {
+                        const escaped_chk = try self.escapeString(iface_chk);
+                        defer self.allocator.free(escaped_chk);
+                        try writer.print(
+                            "    if (runtime.findClass(\"{s}\") == null and !runtime.isBuiltinPseudoInterface(\"{s}\")) return runtime.throwClassLinkError(\"Interface\", \"{s}\", \"{s}\", {d});\n",
+                            .{ escaped_chk, escaped_chk, escaped_chk, escaped_decl_file, td.location.line },
+                        );
+                    }
                     try writer.print("    {s}_meta.interfaces = &[_][]const u8{{", .{short_cname});
                     for (td.interfaces, 0..) |iface, idx| {
                         if (idx > 0) try writer.writeAll(", ");
@@ -4238,9 +4399,9 @@ pub const NativeLinker = struct {
                     try writer.writeAll("};\n");
                 }
             }
-        }
 
-        for (0..class_count) |ci| {
+        // ===== 魔术方法指针（原 LOOP D 逐类切片）=====
+        {
             const full_cname = class_names[ci];
             const short_cname = class_short_names[ci];
             try writer.print("    if ({s}_meta.findMethod(\"__construct\")) |m| {{ {s}_meta.magic_construct = m.func; }}\n", .{ short_cname, short_cname });
@@ -4257,9 +4418,8 @@ pub const NativeLinker = struct {
             _ = full_cname; // 避免未使用警告
         }
 
-        // 抽象方法实现检查：非抽象类必须实现所有继承的抽象方法
-        for (0..class_count) |ci| {
-            if (type_def_idx[ci]) |tdi| {
+        // ===== 抽象方法实现检查（原 LOOP E 逐类切片）：非抽象类必须实现所有继承的抽象方法 =====
+        if (type_def_idx[ci]) |tdi| {
                 const td = ir_module.types.items[tdi].*;
                 if (td.kind == .class and !td.is_abstract) {
                     const escaped_full = try escapeBackslashes(self.allocator, class_names[ci]);
@@ -4272,9 +4432,6 @@ pub const NativeLinker = struct {
                     );
                 }
             }
-        }
-
-        try writer.writeAll("}\n");
     }
 
     /// IR类型转Zig类型字符串
@@ -5105,10 +5262,13 @@ pub const NativeLinker = struct {
     }
 
     /// 生成函数
-    fn generateFunction(self: *Self, code: *std.ArrayList(u8), _: *const IR.Module, func: *const IR.Function) !void {
+    fn generateFunction(self: *Self, code: *std.ArrayList(u8), ir_module: *const IR.Module, func: *const IR.Function) !void {
         const has_this = func.params.items.len > 0 and std.mem.eql(u8, func.params.items[0].name, "this");
         self.current_function_has_this = has_this;
         self.current_function_for_resolve = func;
+        // ★F-35（R-334）：strict_types 位挂载（ret 收口点 strict/coerce 分流）
+        self.current_strict_types = ir_module.strict_types;
+        self.current_ir_module = ir_module;
         defer self.current_function_for_resolve = null;
         // 重置 return_generated 标志（每个函数开始时清除）
         self.return_generated = false;
@@ -6776,6 +6936,9 @@ pub const NativeLinker = struct {
         self.current_cleanup_regs = cleanup_registers.items;
         defer self.current_cleanup_regs = null;
 
+        self.current_capture_bound_slots = &capture_bound_slots;
+        defer self.current_capture_bound_slots = null;
+
         // 找出被store到alloca的寄存器，它们不应该被cleanup
         // 因为alloca会负责cleanup
         var stored_to_alloca = std.AutoHashMap(usize, void).init(self.allocator);
@@ -6845,13 +7008,14 @@ pub const NativeLinker = struct {
                         if (cleanup_registers.items.len > 0) {
                             try code.appendSlice(self.allocator, "\n    // Cleanup: release allocated values (except return value)\n");
                             for (cleanup_registers.items) |reg_id| {
-                                // DEBUG-F136C（临时，验收后删）
-                                std.debug.print("DBG-CLEANUP reg={d} stored_to_alloca={} shouldRel={} refparam={} refptr={} this={} unset={}\n", .{ reg_id, stored_to_alloca.contains(reg_id), self.shouldReleaseReg(reg_id), ref_param_alloca_map.get(reg_id) != null, ref_ptr_regs.contains(reg_id), this_regs.contains(reg_id), unset_registers.contains(reg_id) });
                                 // 跳过已经被store到alloca的寄存器
                                 if (stored_to_alloca.contains(reg_id)) continue;
 
                                 const is_return_reg = if (ret_val) |reg| reg.id == reg_id else false;
-                                if (!is_return_reg and self.shouldReleaseReg(reg_id)) {
+                                // ★F-136c（R-333）：捕获绑定槽内是 val_assign COW 克隆体，
+                                // optimized_alloca 守卫假定不成立 ⇒ 放行（槽恰持一份引用）。
+                                const is_capture_bound = if (self.current_capture_bound_slots) |cbs| cbs.contains(reg_id) else false;
+                                if (!is_return_reg and (self.shouldReleaseReg(reg_id) or is_capture_bound)) {
                                     // 跳过引用参数的alloca（它们是undefined）
                                     if (ref_param_alloca_map.get(reg_id)) |_| continue;
 
@@ -20987,6 +21151,41 @@ pub const NativeLinker = struct {
 
     /// 生成完整的赋值语句（包括分号和换行）
     /// format_str 不应包含 "reg_{d} = " 前缀
+    /// ★F-35（R-334）：ret 收口点的 `self`/`parent` 关键字**编译期**解析（PHP 语义）：
+    ///   self⇒当前方法声明类（函数名 `Class::method` 前缀）；parent⇒类表查父类；static 保留
+    ///   （模板 `checkReturnTypeStrict` 的 static 支走 LSB 运行期语义）。非方法上下文原样返回。
+    fn resolveReturnTypeKeyword(self: *Self, rt: []const u8) []const u8 {
+        const is_self = std.mem.eql(u8, rt, "self");
+        const is_parent = std.mem.eql(u8, rt, "parent");
+        if (!is_self and !is_parent) return rt;
+        const func = self.current_function_for_resolve orelse return rt;
+        const sep = std.mem.indexOf(u8, func.name, "::") orelse return rt;
+        const cls = func.name[0..sep];
+        if (is_self) return cls;
+        const mod = self.current_ir_module orelse return rt;
+        const td = self.findTypeDef(mod, cls, .class) orelse return rt;
+        return td.parent orelse rt;
+    }
+
+    /// ★F-35（R-334）：静态快速路径——返回寄存器的**编译期类型**与声明类型精确相当时，
+    ///   ret 收口点不生成任何判定调用（零运行期开销）。
+    ///   对应表：int↔.i64、float↔.f64、bool↔.bool、string↔.php_string、array↔.php_array、
+    ///   object↔.php_object（任意对象）、类名↔.php_object 同名（CI；继承/接口等运行期面交动态判定）。
+    ///   无类型登记（orelse false）、php_value 动态值、nullable 的 null 位、union ⇒ 一律走动态判定。
+    fn staticallyMatchesReturnType(self: *Self, reg_id: usize, rt: []const u8) bool {
+        const types = self.current_reg_types orelse return false;
+        const t = types.get(reg_id) orelse return false;
+        return switch (t) {
+            .i64 => std.mem.eql(u8, rt, "int"),
+            .f64 => std.mem.eql(u8, rt, "float"),
+            .bool => std.mem.eql(u8, rt, "bool"),
+            .php_string => std.mem.eql(u8, rt, "string"),
+            .php_array => std.mem.eql(u8, rt, "array"),
+            .php_object => |cls| std.mem.eql(u8, rt, "object") or std.ascii.eqlIgnoreCase(rt, cls),
+            else => false,
+        };
+    }
+
     /// 生成带弱类型转换的 return 语句
     /// 当函数有返回类型声明时，对标量返回值做 php_coerce_value 转换
     fn writeReturnStmt(self: *Self, writer: anytype, reg_id: usize, is_alloca: bool, indent: []const u8) !void {
@@ -21001,11 +21200,22 @@ pub const NativeLinker = struct {
             try std.fmt.allocPrint(self.allocator, "reg_{d}", .{reg_id});
         defer self.allocator.free(val_expr);
 
-        if (self.current_return_type) |rt| {
+        if (self.current_return_type) |rt_raw| {
+            const rt = self.resolveReturnTypeKeyword(rt_raw);
             // 组合类型不做值转换
             if (rt.len > 0 and std.mem.indexOfScalar(u8, rt, '|') == null and std.mem.indexOfScalar(u8, rt, '&') == null) {
                 const nullable_str = if (self.current_return_nullable) "true" else "false";
-                try writer.print("{s}return if ({s} and {s}.isNull()) {s} else runtime.php_coerce_value({s}, \"{s}\", runtime.runtime_allocator);\n", .{ indent, nullable_str, val_expr, val_expr, val_expr, try self.escapeString(rt) });
+                // ★F-35（R-334）静态快速路径：编译期类型与声明精确相当 ⇒ 零判定直返
+                if (self.staticallyMatchesReturnType(reg_id, rt)) {
+                    try writer.print("{s}return {s};\n", .{ indent, val_expr });
+                    self.return_generated = true;
+                    if (self.current_loop_label != null and !self.in_cond_br_branch) self.loop_body_return_generated = true;
+                    return;
+                }
+                // 动态判定点：模板内完成 nullable/精确匹配/strict/coerce/TE 全链
+                const fn_name = if (self.current_function_for_resolve) |f| f.name else "?";
+                const strict_str = if (self.current_strict_types) "true" else "false";
+                try writer.print("{s}return try runtime.php_check_return_type(\"{s}\", {s}, \"{s}\", {s}, {s});\n", .{ indent, try self.escapeString(fn_name), val_expr, try self.escapeString(rt), nullable_str, strict_str });
                 self.return_generated = true;
                 if (self.current_loop_label != null and !self.in_cond_br_branch) self.loop_body_return_generated = true;
                 return;
@@ -21029,10 +21239,18 @@ pub const NativeLinker = struct {
             try std.fmt.allocPrint(self.allocator, "reg_{d}", .{reg_id});
         defer self.allocator.free(val_expr);
 
-        if (self.current_return_type) |rt| {
+        if (self.current_return_type) |rt_raw| {
+            const rt = self.resolveReturnTypeKeyword(rt_raw);
             if (rt.len > 0 and std.mem.indexOfScalar(u8, rt, '|') == null and std.mem.indexOfScalar(u8, rt, '&') == null) {
                 const nullable_str = if (self.current_return_nullable) "true" else "false";
-                return std.fmt.allocPrint(self.allocator, "{s}return if ({s} and {s}.isNull()) {s} else runtime.php_coerce_value({s}, \"{s}\", runtime.runtime_allocator);\n", .{ indent, nullable_str, val_expr, val_expr, val_expr, try self.escapeString(rt) });
+                // ★F-35（R-334）静态快速路径：编译期类型与声明精确相当 ⇒ 零判定直返
+                if (self.staticallyMatchesReturnType(reg_id, rt)) {
+                    return std.fmt.allocPrint(self.allocator, "{s}return {s};\n", .{ indent, val_expr });
+                }
+                // 动态判定点：模板内完成 nullable/精确匹配/strict/coerce/TE 全链
+                const fn_name = if (self.current_function_for_resolve) |f| f.name else "?";
+                const strict_str = if (self.current_strict_types) "true" else "false";
+                return std.fmt.allocPrint(self.allocator, "{s}return try runtime.php_check_return_type(\"{s}\", {s}, \"{s}\", {s}, {s});\n", .{ indent, try self.escapeString(fn_name), val_expr, try self.escapeString(rt), nullable_str, strict_str });
             }
         }
         return std.fmt.allocPrint(self.allocator, "{s}return {s};\n", .{ indent, val_expr });
@@ -22125,7 +22343,9 @@ pub const NativeLinker = struct {
                 // 此点之后仍活跃（含块出口）⇒ 不得释放
                 if (liveness.isLiveAfter(bidx, iidx, reg_id)) continue;
                 if (liveness.isLiveAtBlockExit(bidx, reg_id)) continue;
-                if (!self.shouldReleaseReg(reg_id)) continue;
+                // ★F-136c（R-333）：捕获绑定槽放行（槽内 COW 克隆体须归还）
+                const cb_rel = if (self.current_capture_bound_slots) |cbs| cbs.contains(reg_id) else false;
+                if (!self.shouldReleaseReg(reg_id) and !cb_rel) continue;
                 try writer.print("    if (!reg_{d}.isNull()) {{ reg_{d}.release(runtime.runtime_allocator); reg_{d} = runtime.Value.initNull(); }}\n", .{ reg_id, reg_id, reg_id });
             }
         }
@@ -22175,7 +22395,9 @@ pub const NativeLinker = struct {
                         if (map.get(reg_id)) |_| continue;
                     }
 
-                    if (self.regMayHeap(reg_id)) {
+                    // ★F-136c（R-333）：捕获绑定槽放行（槽内 COW 克隆体须归还）
+                    const cb_rel2 = if (self.current_capture_bound_slots) |cbs| cbs.contains(reg_id) else false;
+                    if (self.regMayHeap(reg_id) or cb_rel2) {
                         try writer.print("        reg_{d}.release(runtime.runtime_allocator);\n", .{reg_id});
                         // 重新初始化为null，避免悬垂指针
                         try writer.print("        reg_{d} = runtime.Value.initNull();\n", .{reg_id});
@@ -24830,35 +25052,8 @@ pub const NativeLinker = struct {
                                     try writer.writeAll("runtime.Value.initNull()");
                                 }
                                 try writer.writeAll(", runtime.runtime_allocator);\n");
-                                // COW store-back: 排序函数返回排序后的数组，需写回第一个参数寄存器
-                                if (op.args.len > 0) {
-                                    const arg0_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.args[0].id) else false;
-                                    if (arg0_alloca) {
-                                        try writer.print("    reg_{d}.* = reg_{d};\n", .{ op.args[0].id, reg.id });
-                                    } else {
-                                        try writer.print("    reg_{d} = reg_{d};\n", .{ op.args[0].id, reg.id });
-                                    }
-                                    // retain: store-back 后两个寄存器共享同一数组，需增加引用计数
-                                    try writer.print("    _ = reg_{d}.retain();\n", .{reg.id});
-                                    // alloca 写回：如果第一个参数来自 load（非 mem2reg'd 变量），
-                                    // 排序结果需写回变量的 alloca 存储
-                                    if (self.current_load_to_alloca) |lta| {
-                                        if (lta.get(op.args[0].id)) |alloca_id| {
-                                            const alloca_is_rpa = if (self.ref_param_alloca_map) |rpm| rpm.contains(alloca_id) else false;
-                                            const alloca_deref = if (alloca_is_rpa) ".*" else "";
-                                            const alloca_val_deref = alloca_deref;
-                                            try writer.print("    reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ alloca_id, alloca_deref });
-                                            try writer.print("    runtime.val_assign(reg_{d}{s}, reg_{d});\n", .{ alloca_id, alloca_val_deref, reg.id });
-                                        }
-                                    }
-                                    if (self.current_global_get_names) |ggn| {
-                                        if (ggn.get(op.args[0].id)) |var_name| {
-                                            const escaped_var = try self.escapeString(var_name);
-                                            defer self.allocator.free(escaped_var);
-                                            try writer.print("    try setGlobalVar(\"{s}\", reg_{d});\n", .{ escaped_var, reg.id });
-                                        }
-                                    }
-                                }
+                                // ★R-334：排序族真原地+返 bool（PHP 契约）⇒ 旧「返回值 store-back 写回参数」删除
+                                //   （返 bool 后写回会把 true 灌进参数槽——f042/f164 回归红）。
                             } else if (std.mem.eql(u8, runtime_name, "php_range")) {
                                 // range(start, end, step=1)
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
@@ -25464,7 +25659,12 @@ pub const NativeLinker = struct {
                                         try self.writeBuiltinArgs(writer, op.args, op.func_name);
                                         try writer.writeAll(", runtime.runtime_allocator);\n");
                                     }
-                                    // COW store-back: 原地排序函数返回排序后的数组，需写回第一个参数寄存器
+                                    // ★R-334-b（f164 回归红修复）：排序族 by-ref 契约＝原地排序。AOT-COW-002 的
+                                    //   克隆把参数从共享数组分离（保 PHP 值语义：usort($a) 不得动 $b=$a 的共享体），
+                                    //   但克隆体必须写回来源存储（alloca/全局/对象属性），否则排序结果丢失。
+                                    //   与旧版的差异：旧版写回「返回值」（返 bool 后会把 true 写穿——f042），
+                                    //   本版写回「参数寄存器本身」（克隆体经原地排序后持有结果）。
+                                    //   arg0 直接是 alloca 时 COW 块已把克隆写回 alloca，无需再写。
                                     if (op.args.len > 0 and (std.mem.eql(u8, runtime_name, "php_usort") or
                                         std.mem.eql(u8, runtime_name, "php_uasort") or
                                         std.mem.eql(u8, runtime_name, "php_uksort") or
@@ -25476,42 +25676,47 @@ pub const NativeLinker = struct {
                                         std.mem.eql(u8, runtime_name, "php_ksort") or
                                         std.mem.eql(u8, runtime_name, "php_krsort")))
                                     {
-                                        const arg0_alloca = if (self.current_alloca_regs) |regs| regs.contains(op.args[0].id) else false;
-                                        if (arg0_alloca) {
-                                            try writer.print("    reg_{d}.* = reg_{d};\n", .{ op.args[0].id, reg.id });
-                                        } else {
-                                            try writer.print("    reg_{d} = reg_{d};\n", .{ op.args[0].id, reg.id });
-                                        }
-                                        // retain: store-back 后两个寄存器共享同一数组，需增加引用计数
-                                        try writer.print("    _ = reg_{d}.retain();\n", .{reg.id});
-                                        // alloca 写回：如果第一个参数来自 load（非 mem2reg'd 变量），
-                                        // 排序结果需写回变量的 alloca 存储
-                                        if (self.current_load_to_alloca) |lta| {
-                                            if (lta.get(op.args[0].id)) |alloca_id| {
-                                                const alloca_is_rpa = if (self.ref_param_alloca_map) |map| map.contains(alloca_id) else false;
-                                                const alloca_deref = if (alloca_is_rpa) ".*" else "";
-                                                try writer.print("    reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ alloca_id, alloca_deref });
-                                                try writer.print("    runtime.val_assign(reg_{d}{s}, reg_{d});\n", .{ alloca_id, alloca_deref, reg.id });
+                                        const sb_arg = op.args[0];
+                                        // arg0 是 alloca 时其值在 reg_N.* 槽内（COW 块写的就是槽），源表达式需解引用。
+                                        const sb_arg_alloca = if (self.current_alloca_regs) |regs| regs.contains(sb_arg.id) else false;
+                                        const sb_src_deref: []const u8 = if (sb_arg_alloca) ".*" else "";
+                                        // 注意：不设 alloca 守卫——load_to_alloca 的映射可能把 arg0 的 alloca
+                                        // 指到 ref 变量寄存器（by-ref 绑定的变量，f085 的 $all），
+                                        // 该写回必须穿透 Ref 写进 cell，否则排序结果滞留 alloca。
+                                        {
+                                            // alloca/来源寄存器写回：arg0 来自 load（含 ref-var 的 deref 装载）
+                                            if (self.current_load_to_alloca) |lta| {
+                                                if (lta.get(sb_arg.id)) |alloca_id| {
+                                                    // alloca 直参时 COW 块已把克隆写进 alloca 本体；
+                                                    // 若来源是另一寄存器（ref-var），仍需穿透写回。
+                                                    if (alloca_id != sb_arg.id) {
+                                                        const alloca_is_rpa = if (self.ref_param_alloca_map) |map| map.contains(alloca_id) else false;
+                                                        const alloca_deref = if (alloca_is_rpa) ".*" else "";
+                                                        try writer.print("    _ = reg_{d}{s}.retain();\n", .{ sb_arg.id, sb_src_deref });
+                                                        try writer.print("    reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ alloca_id, alloca_deref });
+                                                        try writer.print("    runtime.val_assign(reg_{d}{s}, reg_{d}{s});\n", .{ alloca_id, alloca_deref, sb_arg.id, sb_src_deref });
+                                                    }
+                                                }
                                             }
-                                        }
-                                        if (self.current_global_get_names) |ggn| {
-                                            if (ggn.get(op.args[0].id)) |var_name| {
-                                                const escaped_var = try self.escapeString(var_name);
-                                                defer self.allocator.free(escaped_var);
-                                                try writer.print("    try setGlobalVar(\"{s}\", reg_{d});\n", .{ escaped_var, reg.id });
+                                            // 全局写回：arg0 来自 global_get（顶层变量/gloabl 声明）
+                                            if (self.current_global_get_names) |ggn| {
+                                                if (ggn.get(sb_arg.id)) |var_name| {
+                                                    const escaped_var = try self.escapeString(var_name);
+                                                    defer self.allocator.free(escaped_var);
+                                                    try writer.print("    try setGlobalVar(\"{s}\", reg_{d}{s});\n", .{ escaped_var, sb_arg.id, sb_src_deref });
+                                                }
                                             }
-                                        }
-                                        // 属性写回：如果第一个参数来自 property_get（如 $this->data），
-                                        // COW 克隆后排序结果需写回对象属性
-                                        if (self.current_property_get_origins) |origins| {
-                                            if (origins.get(op.args[0].id)) |origin| {
-                                                const escaped_prop = try self.escapeString(origin.property_name);
-                                                defer self.allocator.free(escaped_prop);
-                                                const obj_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(origin.object_reg_id) else false;
-                                                if (obj_is_alloca) {
-                                                    try writer.print("    _ = try runtime.php_object_set(reg_{d}.*, \"{s}\", reg_{d});\n", .{ origin.object_reg_id, escaped_prop, reg.id });
-                                                } else {
-                                                    try writer.print("    _ = try runtime.php_object_set(reg_{d}, \"{s}\", reg_{d});\n", .{ origin.object_reg_id, escaped_prop, reg.id });
+                                            // 属性写回：arg0 来自 property_get（$this->items）
+                                            if (self.current_property_get_origins) |origins| {
+                                                if (origins.get(sb_arg.id)) |origin| {
+                                                    const escaped_prop = try self.escapeString(origin.property_name);
+                                                    defer self.allocator.free(escaped_prop);
+                                                    const obj_is_alloca = if (self.current_alloca_regs) |regs| regs.contains(origin.object_reg_id) else false;
+                                                    if (obj_is_alloca) {
+                                                        try writer.print("    _ = try runtime.php_object_set(reg_{d}.*, \"{s}\", reg_{d}{s});\n", .{ origin.object_reg_id, escaped_prop, sb_arg.id, sb_src_deref });
+                                                    } else {
+                                                        try writer.print("    _ = try runtime.php_object_set(reg_{d}, \"{s}\", reg_{d}{s});\n", .{ origin.object_reg_id, escaped_prop, sb_arg.id, sb_src_deref });
+                                                    }
                                                 }
                                             }
                                         }
@@ -27443,6 +27648,14 @@ pub const NativeLinker = struct {
             },
             .clear_exception => {
                 try writer.writeAll("    runtime.clearException();\n");
+            },
+            .class_decl => |tdi| {
+                // ★F-24d 第二段：声明点延迟登记 —— 调用 per-class 登记 fn；
+                // 缺父/缺接口/缺 trait ⇒ PHP Error 已 setException + error.ClassLinkFailed 返回，
+                // 按抛出站点路由（有 handler 跳 catch 块，无则上抛为 RuntimeError）
+                try writer.print("    __classDecl_{d}(runtime.runtime_allocator) catch {{\n", .{tdi});
+                try self.emitThrowSiteRouting(writer);
+                try writer.writeAll("        return error.RuntimeError;\n    };\n");
             },
             .global_get => |op| {
                 // 从全局表读取变量

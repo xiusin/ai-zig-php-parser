@@ -37,6 +37,11 @@ pub const Parser = struct {
     /// 旗标关闭时（解释器/字节码构造点）行为与历史逐字节等价。
     strict_switch_case_list: bool = false,
 
+    /// ★F-35（R-334）：`declare(strict_types=1)` 记录位——AOT 返回值类型校验的 strict/coerce 分流
+    ///   以此为据（PHP 语义：strict_types 只允许文件首句，故文件级单 bit 即完备）。
+    ///   parseDeclare 处记录；经 multi_file_compiler→AOTCompiler→IR Module 透传至 native_linker。
+    strict_types: bool = false,
+
     /// 公共预取逻辑：取 curr/peek 并装配 Parser（各构造函数共享，DRY）
     fn initFromLexer(allocator: std.mem.Allocator, context: *PHPContext, lexer: Lexer, mode: SyntaxMode, hooks: ?*const SyntaxHooks) anyerror!Parser {
         var lex = lexer;
@@ -1289,11 +1294,18 @@ pub const Parser = struct {
 
             const name = self.lexer.buffer[name_tok.loc.start..name_tok.loc.end];
             _ = try self.eat(.equal);
-            _ = try self.parseExpression(1);
+            const decl_value_node = try self.parseExpression(1);
 
             if (std.mem.eql(u8, name, "strict_types") and self.block_depth == 0 and self.top_level_stmt_count != 0) {
                 self.reportError("strict_types declaration must be the very first statement in the script");
                 return error.ParseError;
+            }
+            // ★F-35（R-334）：记录 strict_types=1（值节点须为字面整数；其它写法按 PHP 语义fatal，此处保守只认 1）
+            if (std.mem.eql(u8, name, "strict_types")) {
+                const decl_node = self.context.nodes.items[decl_value_node];
+                if (decl_node.tag == .literal_int and decl_node.data.literal_int.value == 1) {
+                    self.strict_types = true;
+                }
             }
 
             if (self.curr.tag != .comma) break;

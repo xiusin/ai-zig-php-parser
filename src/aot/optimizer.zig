@@ -3332,6 +3332,8 @@ pub const IROptimizer = struct {
                 }
             },
             .nop => {},
+            // ★F-24d 第二段：延迟类登记指令无寄存器操作数（载荷为 module.types 下标）
+            .class_decl => {},
             .yield_val => |op| {
                 if (op.key) |k| try self.used_registers.put(k.id, {});
                 if (op.value) |v| try self.used_registers.put(v.id, {});
@@ -3437,6 +3439,8 @@ pub const IROptimizer = struct {
             .go_spawn, .channel_new, .channel_send, .channel_recv, .channel_close, .select_, .await_ => true,
             .debug_print => true,
             .yield_val, .yield_from => true,
+            // ★F-24d 第二段：类登记写全局类表且可能抛可捕获 Error ⇒ 有副作用，禁 DCE/LICM/CSE
+            .class_decl => true,
             .nop => false,
         };
     }

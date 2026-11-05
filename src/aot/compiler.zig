@@ -482,6 +482,9 @@ pub const AOTCompiler = struct {
     root_index: u32,
     string_table: ?[]const []const u8,
     ir_module: ?*IR.Module,
+    /// ★F-35（R-334）：`declare(strict_types=1)` 位（multi_file_compiler 由 Parser 读入透传，
+    ///   generateIR 成功后写入 IR Module；nlk 在 ret 收口点读取分流 strict/coerce）。
+    strict_types: bool = false,
     const Self = @This();
 
     /// Initialize a new AOT compiler
@@ -982,6 +985,10 @@ pub const AOTCompiler = struct {
                 std.debug.print("  IR generation completed: {d} functions\n", .{module.functions.items.len});
             }
         }
+        // ★F-35（R-334）：strict_types 位写入 Module（nlk ret 收口点分流依据）
+        if (self.ir_module) |module| {
+            module.strict_types = self.strict_types;
+        }
     }
 
     /// Optimize IR using configured optimization passes
@@ -1285,6 +1292,11 @@ pub const AOTCompiler = struct {
     /// Get syntax mode
     pub fn getSyntaxMode(self: *const Self) SyntaxMode {
         return self.options.syntax_mode;
+    }
+
+    /// ★F-35（R-334）：由 Parser 侧透传 `declare(strict_types=1)` 位
+    pub fn setStrictTypes(self: *Self, v: bool) void {
+        self.strict_types = v;
     }
 
     /// Check if compilation had errors

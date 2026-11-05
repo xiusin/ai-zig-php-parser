@@ -37,6 +37,9 @@ pub const Module = struct {
     inferred_types: std.StringHashMap(std.AutoHashMap(usize, Type)),
     /// 匿名类计数器
     next_anon_class_id: u32 = 0,
+    /// ★F-35（R-334）：源文件 `declare(strict_types=1)` 位——返回值类型校验 strict/coerce 分流依据
+    ///   （PHP 语义：strict_types 只允许文件首句 ⇒ 模块级单 bit 完备；parser 记录、irg 写入、nlk 读取）。
+    strict_types: bool = false,
 
     const Self = @This();
 
@@ -188,6 +191,10 @@ pub const TypeDef = struct {
     is_final: bool = false,
     /// PHP attributes (#[...]) on this type
     attributes: []const Attribute = &.{},
+    /// ★F-24d 第二段：true ⇒ 启动期（registerAllClasses）登记（对齐 PHP 早绑定）；
+    ///   false ⇒ 延迟到声明语句位置登记（irg 发射 .class_decl 指令）。
+    ///   默认 true（匿名类等非语句来源恒早绑定）；仅语句声明的 typedef 会被 irg 降级。
+    early_bind: bool = true,
     /// Source location
     location: SourceLocation,
 
@@ -928,6 +935,10 @@ pub const Instruction = struct {
         implements_interface: ImplementsInterfaceOp,
         /// Get parent class
         parent_call: ParentCallOp,
+        /// ★F-24d 第二段：延迟类登记 —— 在声明语句位置调用 per-class 登记函数
+        ///   （条件/函数内声明、implements/use-trait/enum、父编译期不可解析 ⇒ 不在启动期登记）。
+        ///   载荷 = module.types 下标；登记函数内部含缺父/缺接口的可捕获 Error 抛出。
+        class_decl: u32,
 
         // ============ PHP Value Operations ============
         /// Create PHP value from primitive
@@ -1561,6 +1572,7 @@ pub const IRPrinter = struct {
             .const_string => |id| try self.print("const.string ${d}", .{id}),
             .const_null => try self.write("const.null"),
             .const_missing => try self.write("const.missing"),
+            .class_decl => |tdi| try self.print("class_decl types[{d}]", .{tdi}),
             .const_array => |elements| {
                 try self.print("const.array [{} elements]", .{elements.len});
             },

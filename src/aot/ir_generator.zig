@@ -90,6 +90,37 @@ fn phpFloatToInt(f: f64) i64 {
     return @bitCast(wrapped);
 }
 
+/// ★F-24d 第二段：启动期内建类名单（早绑定判定的编译期权威表）——
+///   对应 runtime_lib_template.zig initRuntime（:545-556）与
+///   ClassMeta.registerExceptionClass（:20065-20346，含其级联的 Closure/WeakReference/WeakMap/Generator/Reflection/Fiber）。
+///   判错代价双向安全：漏列 ⇒ 父解析降级为声明点登记（findClass 仍命中内建，行为正确，
+///   仅 class_exists 时序与 PHP 差一行）；多列 ⇒ 父必在登记点存在。新增内建类须同步本表。
+const STARTUP_BUILTIN_CLASSES = [_][]const u8{
+    "stdClass",
+    "ArrayIterator", "ArrayObject", "InternalIterator", "IteratorIterator", "CachingIterator",
+    "SplFixedArray", "SplStack", "SplQueue",
+    "DateTimeInterface", "DateTime", "DateTimeImmutable", "DateTimeZone", "DateInterval", "DatePeriod",
+    "Exception", "ReflectionException", "ErrorException", "JsonException",
+    "RuntimeException", "LogicException", "BadFunctionCallException", "BadMethodCallException",
+    "DomainException", "InvalidArgumentException", "LengthException", "OutOfRangeException",
+    "OutOfBoundsException", "OverflowException", "RangeException", "UnderflowException",
+    "UnexpectedValueException",
+    "Error", "TypeError", "ArgumentCountError", "ValueError", "UnhandledMatchError",
+    "ArithmeticError", "DivisionByZeroError",
+    "Closure", "WeakReference", "WeakMap", "WeakMapIterator", "Generator", "Fiber",
+    "ReflectionAttribute", "ReflectionClass", "ReflectionEnum", "ReflectionClassConstant",
+    "ReflectionNamedType", "ReflectionUnionType", "ReflectionIntersectionType",
+    "ReflectionMethod", "ReflectionParameter", "ReflectionProperty", "ReflectionFunction",
+};
+
+/// 父类可用性判定之一：启动期内建类（PHP 编译期可用 ⇒ 早绑定不被打断，t11/t18 实测）
+fn isStartupBuiltinClass(name: []const u8) bool {
+    for (STARTUP_BUILTIN_CLASSES) |n| {
+        if (std.ascii.eqlIgnoreCase(n, name)) return true;
+    }
+    return false;
+}
+
 pub const IRGenerator = struct {
     allocator: Allocator,
     /// Current IR module being generated
@@ -163,6 +194,10 @@ pub const IRGenerator = struct {
     goto_labels: std.StringHashMapUnmanaged(*BasicBlock),
     /// 待处理的 goto 跳转：{当前块, 目标标签名}（用于前向引用）
     pending_gotos: std.ArrayListUnmanaged(PendingGoto),
+    /// ★F-24d 第二段：声明节点 → 其 TypeDef（pass 1 记录，pass 2/指令发射查用）
+    decl_typedef_map: std.AutoHashMapUnmanaged(Node.Index, *TypeDef),
+    /// ★F-24d 第二段：当前 generate*Decl 刚产出的 typedef（generateTypeDeclStatement 交接用）
+    last_decl_typedef: ?*TypeDef = null,
 
     const PendingGoto = struct {
         from_block: *BasicBlock,
@@ -236,6 +271,8 @@ pub const IRGenerator = struct {
             .trait_methods = .{},
             .goto_labels = .{},
             .pending_gotos = .{ .items = &.{}, .capacity = 0 },
+            .decl_typedef_map = .{},
+            .last_decl_typedef = null,
         };
     }
 
@@ -324,6 +361,7 @@ pub const IRGenerator = struct {
         self.constant_cache.deinit(self.allocator);
 
         self.global_vars.deinit(self.allocator);
+        self.decl_typedef_map.deinit(self.allocator);
     }
 
     fn flushEntryAllocas(self: *Self, entry_block: *BasicBlock) !void {
@@ -417,12 +455,15 @@ pub const IRGenerator = struct {
                             const block_data = body_node.data.block;
                             for (block_data.stmts) |inner_idx| {
                                 const inner_node = self.getNode(inner_idx) orelse continue;
-                                if (inner_node.tag == .function_decl or inner_node.tag == .class_decl or
-                                    inner_node.tag == .interface_decl or inner_node.tag == .trait_decl or
-                                    inner_node.tag == .enum_decl or
-                                    inner_node.tag == .use_stmt)
-                                {
+                                if (inner_node.tag == .function_decl or inner_node.tag == .use_stmt) {
                                     try self.generateStatement(inner_idx);
+                                } else if (inner_node.tag == .class_decl or inner_node.tag == .interface_decl or
+                                    inner_node.tag == .trait_decl or inner_node.tag == .enum_decl)
+                                {
+                                    // ★F-24d 第二段：pass 1 编译期建表；节点同时保留进 __main__ 语句流，
+                                    // pass 2 按 early_bind 判定结果在语句位补发射登记指令（时序对齐 PHP）
+                                    try self.generateStatement(inner_idx);
+                                    try top_level_stmts.append(self.allocator, inner_idx);
                                 } else {
                                     try top_level_stmts.append(self.allocator, inner_idx);
                                 }
@@ -436,18 +477,23 @@ pub const IRGenerator = struct {
                         // 原先设完立即恢复 ⇒ __NAMESPACE__ 恒为空串（d5a 红）。
                         try top_level_stmts.append(self.allocator, stmt_idx);
                     }
-                } else if (stmt_node.tag == .function_decl or stmt_node.tag == .class_decl or
-                    stmt_node.tag == .interface_decl or stmt_node.tag == .trait_decl or
-                    stmt_node.tag == .enum_decl or
-                    stmt_node.tag == .use_stmt)
-                {
+                } else if (stmt_node.tag == .function_decl or stmt_node.tag == .use_stmt) {
                     // Process declarations and use statements directly
                     try self.generateStatement(stmt_idx);
+                } else if (stmt_node.tag == .class_decl or stmt_node.tag == .interface_decl or
+                    stmt_node.tag == .trait_decl or stmt_node.tag == .enum_decl)
+                {
+                    // ★F-24d 第二段：pass 1 编译期建表；节点同时保留进 __main__ 语句流（同上）
+                    try self.generateStatement(stmt_idx);
+                    try top_level_stmts.append(self.allocator, stmt_idx);
                 } else {
                     // Collect top-level statements for __main__
                     try top_level_stmts.append(self.allocator, stmt_idx);
                 }
             }
+
+            // ★F-24d 第二段：全部 typedef 就绪后一次性判定早绑定集合（ Zend 编译期绑定规则）
+            self.computeEarlyBindFlags();
 
             // Create __main__ function for top-level statements if any
             if (top_level_stmts.items.len > 0) {
@@ -744,10 +790,8 @@ pub const IRGenerator = struct {
 
         switch (node.tag) {
             .function_decl => try self.generateFunctionDecl(node),
-            .class_decl => try self.generateClassDecl(node),
-            .interface_decl => try self.generateInterfaceDecl(node),
-            .trait_decl => try self.generateTraitDecl(node),
-            .enum_decl => try self.generateEnumDecl(node),
+            // ★F-24d 第二段：类族声明统一走两趟分流（pass1 建表 / pass2 语句位补发射登记指令）
+            .class_decl, .interface_decl, .trait_decl, .enum_decl => try self.generateTypeDeclStatement(index, node),
             .if_stmt => try self.generateIfStmt(node),
             .while_stmt => try self.generateWhileStmt(node),
             .do_while_stmt => try self.generateDoWhileStmt(node),
@@ -1698,6 +1742,87 @@ pub const IRGenerator = struct {
         self.current_block = prev_block;
     }
 
+    /// ★F-24d 第二段：类族声明语句的两趟分流。
+    ///   pass 1（声明处理点）：编译期构建 TypeDef（原有 generate*Decl 路径，方法体照常编译）；
+    ///     若处于可执行上下文（函数体/条件块，current_function != null）⇒ PHP 从不早绑定
+    ///     ⇒ early_bind=false 并立即在声明点发射 .class_decl 运行时登记指令。
+    ///   pass 2（__main__ 语句位重放）：顶层声明节点已在 pass 1 建表 ⇒ 不再重建，
+    ///     仅当早绑定不动点判定延迟（early_bind=false）时在语句位补发射登记指令。
+    fn generateTypeDeclStatement(self: *Self, index: Node.Index, node: *const Node) !void {
+        if (self.decl_typedef_map.get(index)) |td| {
+            if (!td.early_bind) try self.emitClassDeclInstr(td);
+            return;
+        }
+        self.last_decl_typedef = null;
+        switch (node.tag) {
+            .class_decl => try self.generateClassDecl(node),
+            .interface_decl => try self.generateInterfaceDecl(node),
+            .trait_decl => try self.generateTraitDecl(node),
+            .enum_decl => try self.generateEnumDecl(node),
+            else => unreachable,
+        }
+        // 内建接口重声明等跳过路径不产生 typedef（last_decl_typedef 为 null）
+        const td = self.last_decl_typedef orelse return;
+        try self.decl_typedef_map.put(self.allocator, index, td);
+        if (self.current_function != null) {
+            // 条件/函数内声明：一律延迟到声明点登记（t2/t6 实测：执行前 class_exists 为 false）
+            td.early_bind = false;
+            try self.emitClassDeclInstr(td);
+        }
+    }
+
+    /// 发射 .class_decl 运行时登记指令（载荷＝module.types 下标；nlk 生成 __classDecl_N 调用）
+    fn emitClassDeclInstr(self: *Self, td: *TypeDef) !void {
+        const module = self.module orelse return;
+        for (module.types.items, 0..) |item, i| {
+            if (item == td) {
+                _ = try self.emit(.{ .class_decl = @intCast(i) }, null);
+                return;
+            }
+        }
+        return error.TypeDefNotInModule;
+    }
+
+    /// ★F-24d 第二段：早绑定不动点 —— 对齐 Zend 编译期绑定规则（PHP 8.5.8 t11-t18 实测）：
+    ///   早绑定 ⇔ 顶层无条件声明（嵌套/条件声明在 build 时已标 false）
+    ///     ∧ kind ≠ enum（enum 隐式 implements UnitEnum ⇒ 恒延迟，t17）
+    ///     ∧ interfaces 为空（implements / interface extends 恒延迟，t12/t14）
+    ///     ∧ traits 为空（use-trait 恒延迟，t15/t17）
+    ///     ∧ (无父 ∨ 父为启动期内建类 ∨ 父为源序更早的早绑定 typedef)（t4/t11/t13）
+    ///   顺序敏感：单趟源序扫描即不动点（父在后 ⇒ 子延迟，与 Zend 一致）。
+    fn computeEarlyBindFlags(self: *Self) void {
+        const module = self.module orelse return;
+        // 仅语句声明的 typedef 参与降级（匿名类等非语句来源恒保持早绑定）
+        var stmt_decls = std.AutoHashMapUnmanaged(*TypeDef, void){};
+        defer stmt_decls.deinit(self.allocator);
+        var vit = self.decl_typedef_map.valueIterator();
+        while (vit.next()) |td_ptr| {
+            stmt_decls.put(self.allocator, td_ptr.*, {}) catch return;
+        }
+        for (module.types.items) |td| {
+            if (!td.early_bind) continue;
+            if (!stmt_decls.contains(td)) continue;
+            if (td.kind == .@"enum" or td.interfaces.len > 0 or td.traits.len > 0) {
+                td.early_bind = false;
+                continue;
+            }
+            if (td.parent) |p| {
+                if (!isStartupBuiltinClass(p) and !hasEarlierEarlyTypedef(module, td, p)) {
+                    td.early_bind = false;
+                }
+            }
+        }
+    }
+
+    /// 父类可用性：源序更早且早绑定的同名（CI）typedef
+    fn hasEarlierEarlyTypedef(module: *const Module, td: *TypeDef, name: []const u8) bool {
+        for (module.types.items) |cand| {
+            if (cand == td) return false; // 只查更早的
+            if (cand.early_bind and std.ascii.eqlIgnoreCase(cand.name, name)) return true;
+        }
+        return false;
+    }
+
     /// Generate IR for class declaration
     fn generateClassDecl(self: *Self, node: *const Node) !void {
         // 安全检查：class_decl应该使用container_decl数据
@@ -2090,6 +2215,9 @@ pub const IRGenerator = struct {
             try self.constant_cache.put(self.allocator, key_owned, const_info.value);
         }
 
+        // ★F-24d 第二段：声明交接（须为嵌套声明处理完之后，外层 typedef 才落笔）
+        self.last_decl_typedef = type_def;
+
         // Leave class scope
         self.symbol_table.leaveScope();
     }
@@ -2225,6 +2353,8 @@ pub const IRGenerator = struct {
         if (self.module) |module| {
             try module.addTypeDef(type_def);
         }
+        // ★F-24d 第二段：声明交接
+        self.last_decl_typedef = type_def;
     }
 
     /// 递归收集逗号分隔的名称（处理 binary comma 表达式树）
@@ -2394,6 +2524,8 @@ pub const IRGenerator = struct {
             TypeDef.Constant,
             constants.items,
         );
+        // ★F-24d 第二段：声明交接
+        self.last_decl_typedef = type_def;
     }
 
     /// Generate IR for trait declaration
@@ -2552,6 +2684,8 @@ pub const IRGenerator = struct {
         type_def.trait_adaptations = try trait_adaptations.toOwnedSlice(
             self.allocator,
         );
+        // ★F-24d 第二段：声明交接
+        self.last_decl_typedef = type_def;
     }
 
     /// 将 AST 类型节点转换为 PHP 类型字符串表示（用于 Reflection API 元数据）
@@ -4139,6 +4273,14 @@ pub const IRGenerator = struct {
         try self.syncStaticVars();
 
         if (return_data.expr) |expr_idx| {
+            // ★F-35（R-334）：void 函数带值 return ⇒ PHP 编译期 Fatal 对齐
+            //   （「A void function must not return a value」——整个脚本拒跑 ⇒ AOT 对应编译失败）。
+            if (self.current_php_return_type) |rt| {
+                if (std.mem.eql(u8, rt, "void")) {
+                    self.diagnostics.reportError(self.current_location, "A void function must not return a value", .{});
+                    return error.InvalidReturnValue;
+                }
+            }
             // 检查当前函数是否返回引用（&getRef）
             const returns_ref = if (self.current_function) |func| func.returns_reference else false;
 
@@ -8422,9 +8564,10 @@ prop_name: ?[]const u8 = null,
             .return_type = .php_value,
         } }, .php_value);
 
-        // 排序函数写回：usort/sort 等原地修改第一个参数（by-ref），
-        // native_linker 的 COW store-back 覆盖简单变量/全局/直接属性，
-        // 但不覆盖嵌套表达式（如 $this->prop[$key]）。此处补充嵌套写回。
+        // ★R-334-b（f164 回归红修复）：排序族 by-ref 契约＝原地排序。nlk 的 AOT-COW-002 克隆
+        //   把参数从共享数组分离后，克隆体必须写回来源——简单变量/全局/直接属性由 nlk 写回
+        //   （本批恢复，写 arg0 而非 result）；嵌套表达式（$this->prop[$key] / $arr[$key]）
+        //   在 IR 层补 array_set/property_set 写回 arg0（运行时该寄存器持的是克隆且已排序的数组）。
         const is_inplace_sort = std.mem.eql(u8, func_name, "usort") or
             std.mem.eql(u8, func_name, "uasort") or
             std.mem.eql(u8, func_name, "uksort") or
@@ -8434,7 +8577,9 @@ prop_name: ?[]const u8 = null,
             std.mem.eql(u8, func_name, "asort") or
             std.mem.eql(u8, func_name, "arsort") or
             std.mem.eql(u8, func_name, "ksort") or
-            std.mem.eql(u8, func_name, "krsort");
+            std.mem.eql(u8, func_name, "krsort") or
+            std.mem.eql(u8, func_name, "natsort") or
+            std.mem.eql(u8, func_name, "natcasesort");
         if (is_inplace_sort and positional_args.items.len > 0) {
             const arg0_node = self.getNode(positional_args.items[0]);
             if (arg0_node != null and arg0_node.?.tag == .array_access) {
@@ -8442,7 +8587,7 @@ prop_name: ?[]const u8 = null,
                 if (aa.index != null) {
                     const aa_target = self.getNode(aa.target);
                     if (aa_target != null and aa_target.?.tag == .property_access) {
-                        // $obj->prop[$key] = sorted result
+                        // $obj->prop[$key] = arg0（排序后克隆体）
                         const pa = aa_target.?.data.property_access;
                         const prop_name_wb = self.getString(pa.property_name);
                         const obj_reg_wb = try self.generateExpression(pa.target);
@@ -8454,7 +8599,7 @@ prop_name: ?[]const u8 = null,
                         _ = try self.emit(.{ .array_set = .{
                             .array = prop_arr,
                             .key = key_reg_wb,
-                            .value = result,
+                            .value = args[0],
                         } }, null);
                         _ = try self.emit(.{ .property_set = .{
                             .object = obj_reg_wb,
@@ -8464,7 +8609,7 @@ prop_name: ?[]const u8 = null,
                         _ = try self.emit(.{ .release = .{ .operand = obj_reg_wb } }, null);
                         _ = try self.emit(.{ .release = .{ .operand = prop_arr } }, null);
                     } else if (aa_target != null and aa_target.?.tag == .variable) {
-                        // $arr[$key] = sorted result
+                        // $arr[$key] = arg0（排序后克隆体）
                         const var_name_wb = self.getString(aa_target.?.data.variable.name);
                         const is_global_wb = self.global_vars.contains(var_name_wb);
                         const is_main_wb = if (self.current_function) |func| std.mem.eql(u8, func.name, "__main__") else false;
@@ -8478,7 +8623,7 @@ prop_name: ?[]const u8 = null,
                         _ = try self.emit(.{ .array_set = .{
                             .array = base_arr,
                             .key = key_reg_wb,
-                            .value = result,
+                            .value = args[0],
                         } }, null);
                         if (is_global_wb or is_main_wb) {
                             _ = try self.emit(.{ .global_set = .{ .name = var_name_wb, .value = base_arr } }, null);
@@ -8489,17 +8634,13 @@ prop_name: ?[]const u8 = null,
                         _ = try self.emit(.{ .release = .{ .operand = base_arr } }, null);
                     }
                 }
-            }
-        }
-        // 排序函数写回：by-reference 参数（如 trait Sortable::sort(array &$items)）
-        // usort 的 COW 克隆了数组但排序结果未通过 Ref 写回调用者
-        if (is_inplace_sort and positional_args.items.len > 0) {
-            const arg0_node = self.getNode(positional_args.items[0]);
-            if (arg0_node != null and arg0_node.?.tag == .variable) {
+            } else if (arg0_node != null and arg0_node.?.tag == .variable) {
+                // ★R-334-b：global 别名变量（函数内 `global $g`）——其 alloca 是全局表的种子副本，
+                //   nlk 的 COW 克隆写回 alloca 后全局表仍持原数组 ⇒ 补 global_set 写回 arg0。
+                //   （__main__ 顶层变量走 nlk 的 global_get 写回，不在此列。）
                 const var_name_wb = self.getString(arg0_node.?.data.variable.name);
-                if (self.reference_params.contains(var_name_wb)) {
-                    const var_reg_wb = try self.getOrCreateVarRegister(var_name_wb, .php_value);
-                    _ = try self.emit(.{ .store = .{ .ptr = var_reg_wb, .value = result, .through_ref = true } }, null);
+                if (self.global_vars.contains(var_name_wb)) {
+                    _ = try self.emit(.{ .global_set = .{ .name = var_name_wb, .value = args[0] } }, null);
                 }
             }
         }
@@ -9893,6 +10034,20 @@ prop_name: ?[]const u8 = null,
         const prev_has_this = self.current_has_this_param;
         const prev_try_stack = self.try_stack;
         const prev_finally_stack = self.finally_stack;
+        // ★F-35（R-334）：闭包是独立函数作用域——返回类型声明也必须重置，
+        //   否则外层 `: void` 方法的声明会污染闭包体（f164 回归红：`function($h) use($m){ return $m; }`
+        //   在 `: void` 方法内被 void 拦截误伤）。闭包自己的 `function(): T` 声明正常生效。
+        const prev_php_return_type = self.current_php_return_type;
+        self.current_php_return_type = null;
+        if (closure_data.return_type) |rt_idx| {
+            const rt_info = self.resolveTypeNodeToString(rt_idx);
+            const rt_norm = self.normalizeClassTypeName(rt_info.name) catch rt_info.name;
+            if (rt_norm.len > 0) {
+                func.php_return_type = rt_norm;
+                func.php_return_nullable = rt_info.nullable;
+                self.current_php_return_type = rt_norm;
+            }
+        }
 
         self.current_function = func;
         self.var_registers = .{ .items = &.{}, .capacity = 0 };
@@ -9941,6 +10096,7 @@ prop_name: ?[]const u8 = null,
         self.current_function = prev_function;
         self.current_block = prev_block;
         self.current_has_this_param = prev_has_this;
+        self.current_php_return_type = prev_php_return_type;
 
         // Return callable reference
         // Create array for captures
@@ -10013,6 +10169,19 @@ prop_name: ?[]const u8 = null,
         const prev_has_this = self.current_has_this_param;
         const prev_try_stack = self.try_stack;
         const prev_finally_stack = self.finally_stack;
+        // ★F-35（R-334）：箭头函数同属独立函数作用域（同 generateClosure 口径）——
+        //   外层 `: void`/声明型函数的返回类型不得污染本函数体；`fn(): T =>` 自声明正常生效。
+        const prev_php_return_type = self.current_php_return_type;
+        self.current_php_return_type = null;
+        if (arrow_data.return_type) |rt_idx| {
+            const rt_info = self.resolveTypeNodeToString(rt_idx);
+            const rt_norm = self.normalizeClassTypeName(rt_info.name) catch rt_info.name;
+            if (rt_norm.len > 0) {
+                func.php_return_type = rt_norm;
+                func.php_return_nullable = rt_info.nullable;
+                self.current_php_return_type = rt_norm;
+            }
+        }
 
         self.current_function = func;
         self.var_registers = .{ .items = &.{}, .capacity = 0 };
@@ -10052,6 +10221,7 @@ prop_name: ?[]const u8 = null,
         self.current_function = prev_function;
         self.current_block = prev_block;
         self.current_has_this_param = prev_has_this;
+        self.current_php_return_type = prev_php_return_type;
 
         // Create array for captures
         const caps_arr_reg = try self.emitWithResult(.{ .array_new = .{ .capacity = @intCast(captures.items.len) } }, .php_array);

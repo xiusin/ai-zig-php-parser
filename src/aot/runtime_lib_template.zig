@@ -545,6 +545,11 @@ pub fn initRuntime(allocator: Allocator) !void {
     ClassMeta.registerStdClass(runtime_allocator) catch {};
     registerArrayIterator(runtime_allocator) catch {};
     registerArrayObject(runtime_allocator) catch {};
+    // ★批次十（i1）：InternalIterator 须先于 SplFixedArray（其 getIterator 返回此类实例）；
+    //   IteratorIterator 须先于 CachingIterator（F-24d 父类存在性检查）。
+    registerInternalIterator(runtime_allocator) catch {};
+    registerIteratorIterator(runtime_allocator) catch {};
+    registerCachingIterator(runtime_allocator) catch {};
     registerSplFixedArray(runtime_allocator) catch {};
     registerSplStack(runtime_allocator) catch {};
     registerSplQueue(runtime_allocator) catch {};
@@ -1865,6 +1870,8 @@ fn gcDestroyArray(a: *PHPArray) void {
             entry.key_ptr.string.release(runtime_allocator);
         }
     }
+    // ★F-139d（R-334 方案乙）：GC 收集路径同样归还 foreach by-ref 裸 cell（与 deinit 同责）。
+    a.releaseRefCells(runtime_allocator);
     a.elements.deinit();
     destroyPHPArray(a, runtime_allocator);
 }
@@ -1890,6 +1897,11 @@ fn gcDestroyObject(o: *PHPObject) void {
         o.allocator.free(entry.key_ptr.*);
     }
     o.properties.deinit();
+    // ★批次十（i1/i2）：GC 路径同样要收内部状态面（与 PHPObject.deinit 同规则）
+    if (o.internal_data) |p| {
+        if (o.internal_dtor) |dtor| dtor(p, o.allocator);
+        o.internal_data = null;
+    }
     o.allocator.free(o.class_name);
     o.allocator.destroy(o);
 }
@@ -2281,6 +2293,12 @@ pub const PHPArray = struct {
     gc_info: GCInfo,
     has_active_refs: bool = false, // 是否有活跃的引用
     ref_lock_count: u32 = 0, // 引用锁计数
+    /// ★F-139d（R-334 方案乙）：foreach by-ref 经 `php_array_iter_value_ref`→`make_ref` 建的
+    ///   裸 Ref cell（*Value）登记处。cell 无 RC（retain/release 对 Ref 双 no-op）⇒ 生命周期
+    ///   挂宿主数组：数组 rc=0 析构时统一拆 cell（此时无 COW 共享者；逃逸面已由 return/
+    ///   global_set/属性写 的 deref 固化覆盖——f139d_escape 探针四形 SAME 取证）。
+    ///   只登记 foreach 路径所建（显式 `&$b` 引用不经此通道，不受影响）。
+    ref_cells: std.ArrayListUnmanaged(*Value) = .{ .items = &.{}, .capacity = 0 },
 
     pub const ArrayContext = struct {
         pub fn hash(_: ArrayContext, key: ArrayKey) u32 {
@@ -2456,6 +2474,9 @@ pub const PHPArray = struct {
         array.gc_info = .{};
         array.has_active_refs = false;
         array.ref_lock_count = 0;
+        // ★F-139d：逐字段初始化不走结构体默认值 ⇒ 池化复用槽位的 ref_cells 必须显式重置，
+        // 否则沿用上一住户的表头（野指针/野长度），deinit 时 releaseRefCells 踩脏内存。
+        array.ref_cells = .{ .items = &.{}, .capacity = 0 };
         alloc_counters.php_array_objects += 1;
         alloc_counters.php_array_live_objects += 1;
         alloc_counters.php_array_peak_live_objects = @max(
@@ -2601,6 +2622,7 @@ pub const PHPArray = struct {
             if (array_internal_pointers) |*m| {
             _ = m.remove(self);
         }
+        // 释放元素值与字符串键
         var iter = self.elements.iterator();
         while (iter.next()) |entry| {
             entry.value_ptr.*.release(allocator);
@@ -2609,10 +2631,24 @@ pub const PHPArray = struct {
             }
         }
         self.elements.deinit();
+        self.releaseRefCells(allocator);
         if (alloc_counters.php_array_live_objects > 0) {
             alloc_counters.php_array_live_objects -= 1;
         }
         destroyPHPArray(self, allocator);
+    }
+
+    /// ★F-139d（R-334 方案乙）：回收 foreach by-ref 登记的裸 Ref cell——
+    ///   元素槽的 Ref 值 release 是 no-op（tpl 值语义对称设计），cell 内**当前值**在此归还，
+    ///   cell 本体 destroy。此刻数组 rc=0 ⇒ 无 COW 共享者；帧内 $v 槽的 Ref release 亦 no-op。
+    ///   deinit 与 gcDestroyArray 双路同调（GC 收集路径绕过 deinit，F-133③ 同族）。
+    fn releaseRefCells(self: *PHPArray, allocator: Allocator) void {
+        for (self.ref_cells.items) |cell| {
+            cell.release(allocator);
+            allocator.destroy(cell);
+        }
+        self.ref_cells.deinit(allocator);
+        self.ref_cells = .{ .items = &.{}, .capacity = 0 };
     }
 
     /// 获取元素
@@ -9152,6 +9188,169 @@ pub fn php_coerce_value(val: Value, expected_type: []const u8, allocator: Alloca
     return val;
 }
 
+/// ★F-35（R-334）：返回值类型校验＋coerce（PHP 8.5.8 真值矩阵＝工单 §234.3）。
+///   与 `php_coerce_value`（静默强转旧面，参数弱化等既有调用点不动）分工：
+///   本函数是 ret 收口点的 PHP 语义完备版——先精确匹配（`checkTypeMatch` 含类名 CI/继承链/union 各支），
+///   失败按 strict/coerce 分流：strict 仅放行 int→float 拓宽；coerce 覆盖四标量强转＋
+///   float→int 精度损失 Deprecated；仍不符 ⇒ TypeError「{fn}(): Return value must be of type {decl}, {got} returned」。
+///   strict 位＝编译期常量（nlk 从 Module.strict_types 挂载直写字面量）；静态快速路径在发射侧
+///   （编译期类型已精确匹配的返回点不生成对本函数的调用——零运行期开销）。
+pub fn php_check_return_type(fn_name: []const u8, val: Value, type_decl: []const u8, nullable: bool, strict: bool) !Value {
+    if (type_decl.len == 0) return val;
+    if (containsTypeComponent(type_decl, "mixed")) return val;
+
+    // null：nullable／union 含 null ⇒ 放行；否则 TE「…, null returned」
+    if (val.isNull()) {
+        if (nullable or containsTypeComponent(type_decl, "null")) return val;
+        return throwReturnTypeError(fn_name, type_decl, nullable, "null");
+    }
+
+    const got = phpGetValueTypeName(val);
+    // 精确匹配（严格版：标量互通宽松支是参数面「可弱转」语义，返回面须先精确再决定转/抛）
+    if (checkReturnTypeStrict(type_decl, got, val)) return val;
+
+    // strict：仅 int→float 拓宽豁免（f35b 实测 float(5) 放行）
+    if (strict) {
+        if (std.mem.eql(u8, type_decl, "float") and val.isInt()) {
+            return Value.initFloat(@floatFromInt(val.asInt()));
+        }
+        return throwReturnTypeError(fn_name, type_decl, nullable, got);
+    }
+
+    // coerce：四标量强转（单类型声明；union 非精确支按 PHP 弱转优先级面超出本批钉板范围 ⇒ TE 兜底）
+    if (std.mem.eql(u8, type_decl, "int")) {
+        if (val.isFloat()) {
+            const f = val.asFloat();
+            if (std.math.isFinite(f) and f != @trunc(f)) emitDeprecatedFloatToInt(f);
+            return Value.initInt(val.toInt());
+        }
+        if (val.isString()) {
+            const data = val.asString().data;
+            // 严格整串（"5"）直转；浮点数字串（"5.5"）Deprecated+截断；非数字 ⇒ TE
+            if (tryAsInt(val)) |i| return Value.initInt(i);
+            if (isNumericString(data)) {
+                emitDeprecatedFloatStrToInt(data);
+                const f = std.fmt.parseFloat(f64, data) catch
+                    return throwReturnTypeError(fn_name, type_decl, nullable, got);
+                return Value.initInt(@intFromFloat(@trunc(f)));
+            }
+            return throwReturnTypeError(fn_name, type_decl, nullable, got);
+        }
+        if (val.isBool()) return Value.initInt(if (val.asBool()) 1 else 0);
+        return throwReturnTypeError(fn_name, type_decl, nullable, got);
+    }
+    if (std.mem.eql(u8, type_decl, "float")) {
+        if (val.isInt()) return Value.initFloat(@floatFromInt(val.asInt()));
+        if (val.isString() and isNumericString(val.asString().data)) return Value.initFloat(val.toFloat());
+        if (val.isBool()) return Value.initFloat(if (val.asBool()) 1.0 else 0.0);
+        return throwReturnTypeError(fn_name, type_decl, nullable, got);
+    }
+    if (std.mem.eql(u8, type_decl, "string")) {
+        if (val.isInt() or val.isFloat() or val.isBool()) {
+            const s = val.toString(runtime_allocator) catch
+                return throwReturnTypeError(fn_name, type_decl, nullable, got);
+            return Value.initString(s);
+        }
+        return throwReturnTypeError(fn_name, type_decl, nullable, got);
+    }
+    if (std.mem.eql(u8, type_decl, "bool")) {
+        if (val.isInt() or val.isFloat() or val.isString()) return Value.initBool(val.toBool());
+        return throwReturnTypeError(fn_name, type_decl, nullable, got);
+    }
+    // object/array/类名/iterable/callable/resource 等：不可强转 ⇒ TE
+    return throwReturnTypeError(fn_name, type_decl, nullable, got);
+}
+
+/// F-35：返回值 TypeError 单点构造（措辞实测：「{fn}(): Return value must be of type {decl}, {got} returned」；
+/// nullable 声明在 PHP 措辞里带 `?` 前缀）。
+fn throwReturnTypeError(fn_name: []const u8, type_decl: []const u8, nullable: bool, got: []const u8) !Value {
+    var buf: [768]u8 = undefined;
+    const msg = if (nullable)
+        std.fmt.bufPrint(&buf, "{s}(): Return value must be of type ?{s}, {s} returned", .{ fn_name, type_decl, got }) catch "Return value must be of declared type"
+    else
+        std.fmt.bufPrint(&buf, "{s}(): Return value must be of type {s}, {s} returned", .{ fn_name, type_decl, got }) catch "Return value must be of declared type";
+    try throwThrowableDiscard("TypeError", msg, runtime_allocator);
+    return Value.initNull();
+}
+
+/// ★F-35（R-334）：返回值面的**严格精确**匹配。
+///   与 `checkSingleType` 的差异：后者 9360-9390 六支标量互通是**参数面**「可弱转」语义
+///   （调用点随后做值转换）；返回面必须先精确判定、再自行决定强转或 TypeError ⇒
+///   互通支在此不存在。类名继承/接口/union/intersection/伪类型各支照 checkSingleType 精确口径。
+fn checkReturnTypeStrict(type_decl: []const u8, got: []const u8, val: Value) bool {
+    var exp = std.mem.trim(u8, type_decl, " ");
+    while (exp.len > 0 and exp[0] == '\\') exp = exp[1..];
+    if (exp.len == 0) return true;
+
+    // union 逐支（含 intersection 成员）
+    if (std.mem.indexOfScalar(u8, exp, '|') != null) {
+        var it = std.mem.splitScalar(u8, exp, '|');
+        while (it.next()) |part| {
+            if (checkReturnTypeStrict(part, got, val)) return true;
+        }
+        return false;
+    }
+    // intersection：仅对象面（逐支类名/接口）
+    if (std.mem.indexOfScalar(u8, exp, '&') != null) {
+        if (!Value_isObject(val)) return false;
+        var it = std.mem.splitScalar(u8, exp, '&');
+        while (it.next()) |part| {
+            if (!checkReturnTypeStrict(part, got, val)) return false;
+        }
+        return true;
+    }
+
+    // 单类型
+    if (std.mem.eql(u8, exp, got)) return true;
+    if (std.mem.eql(u8, exp, "mixed")) return true;
+    if (std.mem.eql(u8, exp, "null")) return val.isNull();
+    if (std.mem.eql(u8, exp, "object")) return Value_isObject(val) or val.isFunction();
+    if (std.mem.eql(u8, exp, "iterable")) {
+        if (val.isArray()) return true;
+        if (Value_isObject(val)) {
+            const obj = Value_asObject(val);
+            if (obj.class_meta) |meta| {
+                if (meta.implementsInterface("Traversable")) return true;
+            }
+        }
+        return false;
+    }
+    if (std.mem.eql(u8, exp, "callable")) {
+        if (val.isFunction()) return true;
+        const result = php_is_callable(val) catch return false;
+        return result.isBool() and result.asBool();
+    }
+    if (std.mem.eql(u8, exp, "Closure")) {
+        if (val.isFunction()) return true;
+        if (Value_isObject(val)) {
+            const obj = Value_asObject(val);
+            if (obj.class_meta) |meta| {
+                if (std.mem.eql(u8, meta.name, "Closure")) return true;
+            }
+        }
+        return false;
+    }
+    if (std.mem.eql(u8, exp, "static")) {
+        if (!Value_isObject(val)) return false;
+        const obj = Value_asObject(val);
+        if (obj.class_meta) |meta| {
+            if (getCurrentCalledClass()) |called_class| {
+                if (meta.isSubclassOf(called_class.name)) return true;
+            }
+        }
+        return false;
+    }
+    // 类名：继承链 + 接口
+    if (Value_isObject(val)) {
+        const obj = Value_asObject(val);
+        if (obj.class_meta) |meta| {
+            if (meta.isSubclassOf(exp)) return true;
+            if (meta.implementsInterface(exp)) return true;
+        }
+    }
+    return false;
+}
+
 /// 获取 Value 的 PHP 类型名称
 fn phpGetValueTypeName(val: Value) []const u8 {
     if (val.isNull()) return "null";
@@ -11590,7 +11789,15 @@ pub fn php_array_iter_value_ref(iter_val: Value) !Value {
                 // 直接返回 Value.initRef(容器槽地址) 会在数组扩容搬迁桶数组后悬垂——
                 // 写入落在已释放内存（UAF）且写不回容器；make_ref 建稳定堆单元并把
                 // 元素槽自身重定向为 Ref，扩容只搬迁该 Ref 值，单元地址恒不变。
-                return try make_ref(value_ptr, runtime_allocator);
+                // ★F-139d（R-334 方案乙）：复用已有 Ref 不新建不登记；新建 cell 登记宿主数组，
+                //   随数组 rc=0 析构统一回收（在此之前 cell 经元素槽/$v 槽共享存活）。
+                if (value_ptr.isRef()) {
+                    return try make_ref(value_ptr, runtime_allocator);
+                }
+                const ref_val = try make_ref(value_ptr, runtime_allocator);
+                // make_ref 已把 value_ptr.* 重定向为 Ref(cell) ⇒ cell 指针取之即得
+                iter.array.ref_cells.append(runtime_allocator, value_ptr.asRef()) catch {};
+                return ref_val;
             }
         }
 
@@ -11793,20 +12000,51 @@ pub fn php_array_iter_free(iter_val: Value, allocator: Allocator) !Value {
 // ArrayIterator类（SPL）
 // ============================================================================
 
+/// ★批次十一：ArrayIterator 状态面——元素面挂**私有声明属性 `storage`**（与 PHP 对齐：
+///   var_dump 显示 `["storage":"ArrayIterator":private]`、get_object_vars 全局作用域为空）；
+///   迭代游标属纯内部状态 ⇒ internal_data（PHP 属性面无此物）。
+const ArrayIteratorData = struct {
+    pos: i64 = 0,
+    flags: i64 = 0,
+
+    fn dtor(p: ?*anyopaque, allocator: Allocator) void {
+        const data: *ArrayIteratorData = @ptrCast(@alignCast(p orelse return));
+        allocator.destroy(data);
+    }
+};
+
+fn arrayIteratorDataOf(obj: *PHPObject) ?*ArrayIteratorData {
+    const p = obj.internal_data orelse return null;
+    return @ptrCast(@alignCast(p));
+}
+
+/// 装配/取游标面（construct 与 ArrayObject::getIterator 的跨类装配共用）。
+fn arrayIteratorAttach(obj: *PHPObject, allocator: Allocator) !*ArrayIteratorData {
+    if (arrayIteratorDataOf(obj)) |existing| return existing;
+    const data = try allocator.create(ArrayIteratorData);
+    errdefer allocator.destroy(data);
+    data.* = .{};
+    obj.internal_data = data;
+    obj.internal_dtor = ArrayIteratorData.dtor;
+    return data;
+}
+
+fn arrayIteratorStorage(obj: *PHPObject) ?*PHPArray {
+    const storage = obj.properties.get("storage") orelse return null;
+    if (!storage.isArray()) return null;
+    return storage.asArray();
+}
+
 /// ArrayIterator构造函数
 fn arrayIterator_construct(ctx: Value, args: []const Value, allocator: Allocator) !Value {
-    _ = allocator;
     if (args.len < 1) return Value.initNull();
 
     const obj = Value_asObject(ctx);
-    const array_val = args[0];
+    _ = try arrayIteratorAttach(obj, allocator);
 
-    // 存储数组到_array属性
-    _ = array_val.retain();
-    try obj.putProperty("_array", array_val);
-
-    // 初始化位置为0
-    try obj.putProperty("_position", Value.initInt(0));
+    // 存储数组到 storage 私有声明属性（retain：属性面自持一份）
+    _ = args[0].retain();
+    try obj.putProperty("storage", args[0]);
 
     return Value.initNull();
 }
@@ -11816,7 +12054,8 @@ fn arrayIterator_rewind(ctx: Value, args: []const Value, allocator: Allocator) !
     _ = args;
     _ = allocator;
     const obj = Value_asObject(ctx);
-    try obj.putProperty("_position", Value.initInt(0));
+    const data = arrayIteratorDataOf(obj) orelse return Value.initNull();
+    data.pos = 0;
     return Value.initNull();
 }
 
@@ -11826,14 +12065,9 @@ fn arrayIterator_valid(ctx: Value, args: []const Value, allocator: Allocator) !V
     _ = allocator;
     const obj = Value_asObject(ctx);
 
-    const array_val = obj.properties.get("_array") orelse return Value.initBool(false);
-    if (!array_val.isArray()) return Value.initBool(false);
-
-    const position = obj.properties.get("_position") orelse return Value.initBool(false);
-    const pos = position.asInt();
-
-    const array = array_val.asArray();
-    return Value.initBool(pos >= 0 and pos < @as(i64, @intCast(array.elements.count())));
+    const data = arrayIteratorDataOf(obj) orelse return Value.initBool(false);
+    const array = arrayIteratorStorage(obj) orelse return Value.initBool(false);
+    return Value.initBool(data.pos >= 0 and data.pos < @as(i64, @intCast(array.elements.count())));
 }
 
 /// ArrayIterator::current
@@ -11842,17 +12076,13 @@ fn arrayIterator_current(ctx: Value, args: []const Value, allocator: Allocator) 
     _ = allocator;
     const obj = Value_asObject(ctx);
 
-    const array_val = obj.properties.get("_array") orelse return Value.initNull();
-    if (!array_val.isArray()) return Value.initNull();
+    const data = arrayIteratorDataOf(obj) orelse return Value.initNull();
+    const array = arrayIteratorStorage(obj) orelse return Value.initNull();
 
-    const position = obj.properties.get("_position") orelse return Value.initNull();
-    const pos = position.asInt();
-
-    const array = array_val.asArray();
     var iter = array.elements.iterator();
     var i: i64 = 0;
     while (iter.next()) |entry| {
-        if (i == pos) {
+        if (i == data.pos) {
             _ = entry.value_ptr.retain();
             return entry.value_ptr.*;
         }
@@ -11866,17 +12096,13 @@ fn arrayIterator_key(ctx: Value, args: []const Value, _: Allocator) !Value {
     _ = args;
     const obj = Value_asObject(ctx);
 
-    const array_val = obj.properties.get("_array") orelse return Value.initNull();
-    if (!array_val.isArray()) return Value.initNull();
+    const data = arrayIteratorDataOf(obj) orelse return Value.initNull();
+    const array = arrayIteratorStorage(obj) orelse return Value.initNull();
 
-    const position = obj.properties.get("_position") orelse return Value.initNull();
-    const pos = position.asInt();
-
-    const array = array_val.asArray();
     var iter = array.elements.iterator();
     var i: i64 = 0;
     while (iter.next()) |entry| {
-        if (i == pos) {
+        if (i == data.pos) {
             switch (entry.key_ptr.*) {
                 .integer => |int_key| return Value.initInt(int_key),
                 .string => |str_key| {
@@ -11896,12 +12122,149 @@ fn arrayIterator_next(ctx: Value, args: []const Value, allocator: Allocator) !Va
     _ = allocator;
     const obj = Value_asObject(ctx);
 
-    const position = obj.properties.get("_position") orelse return Value.initNull();
-    const pos = position.asInt();
-    try obj.putProperty("_position", Value.initInt(pos + 1));
+    const data = arrayIteratorDataOf(obj) orelse return Value.initNull();
+    data.pos += 1;
 
     return Value.initNull();
 }
+
+/// ArrayIterator::getArrayCopy
+fn arrayIterator_getArrayCopy(ctx: Value, _: []const Value, allocator: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    if (arrayIteratorStorage(obj)) |src| {
+        const new_arr = try PHPArray.init(allocator);
+        var iter = src.elements.iterator();
+        while (iter.next()) |entry| {
+            _ = entry.value_ptr.retain();
+            try new_arr.elements.put(entry.key_ptr.*, entry.value_ptr.*);
+        }
+        return Value.initArray(new_arr);
+    }
+    return Value.initArray(try PHPArray.init(allocator));
+}
+
+/// ArrayIterator::count
+fn arrayIterator_count(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    if (arrayIteratorStorage(obj)) |arr| return Value.initInt(@intCast(arr.count()));
+    return Value.initInt(0);
+}
+
+/// ArrayIterator::append
+fn arrayIterator_append(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    if (arrayIteratorStorage(obj)) |arr| {
+        const val = if (args.len > 0) args[0] else Value.initNull();
+        _ = val.retain();
+        try arr.push(allocator, val);
+    }
+    return Value.initNull();
+}
+
+/// ArrayIterator::offsetExists/Get/Set/Unset（元素面直挂 storage）
+fn arrayIterator_offsetExists(ctx: Value, args: []const Value, _: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    if (args.len == 0) return Value.initBool(false);
+    if (arrayIteratorStorage(obj)) |arr| {
+        const key = try valueToArrayKey(args[0], runtime_allocator);
+        return Value.initBool(arr.elements.get(key) != null);
+    }
+    return Value.initBool(false);
+}
+
+fn arrayIterator_offsetGet(ctx: Value, args: []const Value, _: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    if (args.len == 0) return Value.initNull();
+    if (arrayIteratorStorage(obj)) |arr| {
+        const key = try valueToArrayKey(args[0], runtime_allocator);
+        if (arr.elements.get(key)) |val| {
+            _ = val.retain();
+            return val;
+        }
+    }
+    return Value.initNull();
+}
+
+fn arrayIterator_offsetSet(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    if (args.len < 2) return Value.initNull();
+    if (arrayIteratorStorage(obj)) |arr| {
+        const key = try valueToArrayKey(args[0], allocator);
+        _ = args[1].retain();
+        try arr.elements.put(key, args[1]);
+    }
+    return Value.initNull();
+}
+
+fn arrayIterator_offsetUnset(ctx: Value, args: []const Value, _: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    if (args.len == 0) return Value.initNull();
+    if (arrayIteratorStorage(obj)) |arr| {
+        const key = try valueToArrayKey(args[0], runtime_allocator);
+        if (arr.elements.get(key)) |old| old.release(runtime_allocator);
+        _ = arr.elements.remove(key);
+    }
+    return Value.initNull();
+}
+
+/// ArrayIterator::__serialize —— 同 ArrayObject 契约：`[flags, storage, [], null]`
+/// （PHP 真值 `O:13:"ArrayIterator":4:{i:0;i:0;i:1;a:…;i:2;a:0:{};i:3;N;}`）。
+fn arrayIterator___serialize(ctx: Value, _: []const Value, allocator: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    const arr = try PHPArray.init(allocator);
+    errdefer arr.release(allocator);
+
+    try arr.elements.put(.{ .integer = 0 }, Value.initInt(if (arrayIteratorDataOf(obj)) |d| d.flags else 0));
+    if (obj.properties.get("storage")) |storage| {
+        _ = storage.retain();
+        try arr.elements.put(.{ .integer = 1 }, storage);
+    } else {
+        try arr.elements.put(.{ .integer = 1 }, Value.initNull());
+    }
+    const empty_props = try PHPArray.init(allocator);
+    defer empty_props.release(allocator);
+    try arr.elements.put(.{ .integer = 2 }, Value.initArray(empty_props));
+    _ = empty_props.retain();
+    try arr.elements.put(.{ .integer = 3 }, Value.initNull());
+
+    return Value.initArray(arr);
+}
+
+/// ArrayIterator::__unserialize（unserialize 路径不经 __construct ⇒ 无游标面时现装配）
+fn arrayIterator___unserialize(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    const data = try arrayIteratorAttach(obj, allocator);
+    if (args.len > 0 and args[0].isArray()) {
+        const arr = args[0].asArray();
+        if (arr.elements.get(.{ .integer = 0 })) |flags| data.flags = flags.toInt();
+        if (arr.elements.get(.{ .integer = 1 })) |storage| {
+            _ = storage.retain();
+            try obj.putProperty("storage", storage);
+        }
+    }
+    return Value.initNull();
+}
+
+// ============================================================================
+// ★F-3（R-336）：内建类↔内建接口静态真值表
+//   来源：PHP 8.5.8 `class_implements()` 实测（完整传递闭包，含接口继承逐级展平：
+//   如 ArrayIterator 的 SeekableIterator→Iterator→Traversable 全列；元素顺序＝PHP 原生注册序）。
+//   §四.3 合规说明：类↔接口关系是 Zend 引擎编译进内核的**规范常量**（PHP 源码在
+//   `spl_ce_*`/异常族/反射族注册时写死的 C 结构体成员，非运行期可配置项），
+//   AOT 以同形态静态表复刻＝规格落地，不属于"把本应动态计算的值硬编码"的违禁形态。
+//   三入口共读 ClassMeta.interfaces：class_implements / is_a / instanceof。
+//   异常族 23 类走 EXCEPTION_ROOT_INTERFACES+父链递归（已齐）；DateTime 族走
+//   DATETIME_INTERFACE_LINK（F-215 已齐）；本表补齐 SPL 容器/Generator/DatePeriod/反射族。
+// ============================================================================
+const ARRAY_OBJECT_INTERFACES = [_][]const u8{ "IteratorAggregate", "Traversable", "ArrayAccess", "Serializable", "Countable" };
+const ARRAY_ITERATOR_INTERFACES = [_][]const u8{ "SeekableIterator", "Traversable", "Iterator", "ArrayAccess", "Serializable", "Countable" };
+const SPL_FIXED_ARRAY_INTERFACES = [_][]const u8{ "IteratorAggregate", "Traversable", "ArrayAccess", "Countable", "JsonSerializable" };
+const SPL_STACK_QUEUE_INTERFACES = [_][]const u8{ "Serializable", "ArrayAccess", "Countable", "Traversable", "Iterator" };
+const GENERATOR_INTERFACES = [_][]const u8{ "Iterator", "Traversable" };
+const DATE_PERIOD_INTERFACES = [_][]const u8{ "IteratorAggregate", "Traversable" };
+const REFLECTION_STD_INTERFACES = [_][]const u8{ "Stringable", "Reflector" };
+const REFLECTION_ENUM_INTERFACES = [_][]const u8{ "Reflector", "Stringable" };
+const STRINGABLE_ONLY_INTERFACES = [_][]const u8{"Stringable"};
 
 /// 注册ArrayIterator类
 pub fn registerArrayIterator(allocator: Allocator) !void {
@@ -11916,10 +12279,14 @@ pub fn registerArrayIterator(allocator: Allocator) !void {
         .static_properties = std.StringHashMap(Value).init(allocator),
         .const_visibility = std.StringHashMap(ConstVisibility).init(allocator),
         .class_constants = std.StringHashMap(Value).init(allocator),
-        .interfaces = &.{},
+        .interfaces = &ARRAY_ITERATOR_INTERFACES, // ★F-3（R-336）：PHP 8.5.8 实测传递闭包
         .is_abstract = false,
         .allocator = allocator,
     };
+
+    // ★批次十一：PHP 真值面——唯一私有声明属性 `storage`（var_dump 可见、get_object_vars 不可见）；
+    //   游标在 internal_data（不入属性表）。默认值 null ⇒ 序列化空迭代器仍有 storage 键位。
+    try meta.addProperty(.{ .name = "storage", .default_value = Value.initNull(), .is_public = false });
 
     // 注册方法
     try meta.putMethodOrdered(.{
@@ -11958,7 +12325,22 @@ pub fn registerArrayIterator(allocator: Allocator) !void {
         .is_public = true,
     });
 
+    // 元素面/计数/序列化（★批次十一：迁移后对齐 PHP 方法面核心集；
+    //   sort 族/seek/setFlags 等仍缺——登记为覆盖度遗留，不在本批范围）
+    try meta.putMethodOrdered(.{ .name = "getArrayCopy", .func = arrayIterator_getArrayCopy, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "count", .func = arrayIterator_count, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "append", .func = arrayIterator_append, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "offsetExists", .func = arrayIterator_offsetExists, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "offsetGet", .func = arrayIterator_offsetGet, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "offsetSet", .func = arrayIterator_offsetSet, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "offsetUnset", .func = arrayIterator_offsetUnset, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "__serialize", .func = arrayIterator___serialize, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "__unserialize", .func = arrayIterator___unserialize, .is_public = true });
+
     meta.magic_construct = arrayIterator_construct;
+    // putMethodOrdered 刻意不触发 magic_* 派发 ⇒ 序列化钩子显式挂
+    meta.magic_serialize = arrayIterator___serialize;
+    meta.magic_unserialize = arrayIterator___unserialize;
 
     try registerClass(meta);
 }
@@ -11967,25 +12349,748 @@ pub fn registerArrayIterator(allocator: Allocator) !void {
 // SplFixedArray类（SPL）
 // ============================================================================
 
-/// SplFixedArray构造函数
-fn splFixedArray_construct(ctx: Value, args: []const Value, allocator: Allocator) !Value {
-    _ = allocator;
-    const size = if (args.len > 0) args[0].asInt() else 0;
+/// ★批次十（i1/i2）：SplFixedArray 内部状态面——经 PHPObject.internal_data 持有，
+/// 不挂对象属性表（PHP 真值：`get_object_vars(new SplFixedArray(2)) == []`、
+/// `get_class_methods` 15 枚且头部 `__construct|__wakeup|__serialize|__unserialize`）。
+const SplFixedArrayData = struct {
+    elements: *PHPArray,
+    size: i64,
 
-    const obj = Value_asObject(ctx);
+    fn dtor(p: ?*anyopaque, allocator: Allocator) void {
+        const data: *SplFixedArrayData = @ptrCast(@alignCast(p orelse return));
+        data.elements.release(allocator);
+        allocator.destroy(data);
+    }
+};
 
-    // 创建固定大小的数组
-    const array = try PHPArray.init(runtime_allocator);
-    for (0..@intCast(size)) |i| {
+fn splFixedArrayDataOf(obj: *PHPObject) ?*SplFixedArrayData {
+    const p = obj.internal_data orelse return null;
+    return @ptrCast(@alignCast(p));
+}
+
+/// 重建元素数组为定长 null 填充（construct / __unserialize / fromArray 共用，DRY）。
+fn splFixedArrayFill(allocator: Allocator, size: i64) !*PHPArray {
+    const array = try PHPArray.init(allocator);
+    errdefer array.release(allocator);
+    const n: usize = if (size > 0) @intCast(size) else 0;
+    for (0..n) |i| {
         try array.elements.put(.{ .integer = @intCast(i) }, Value.initNull());
     }
+    return array;
+}
 
-    const array_val = Value.initArray(array);
-    try obj.putProperty("_array", array_val);
-    try obj.putProperty("_size", Value.initInt(size));
-    try obj.putProperty("_position", Value.initInt(0));
+/// 为对象装配/重置内部状态（重入 __construct 时先清旧面，防双份泄漏）。
+fn splFixedArrayAttach(obj: *PHPObject, data: *SplFixedArrayData, allocator: Allocator) void {
+    if (obj.internal_data) |p| {
+        if (obj.internal_dtor) |d| d(p, allocator);
+        obj.internal_data = null;
+    }
+    obj.internal_data = data;
+    obj.internal_dtor = SplFixedArrayData.dtor;
+}
 
+// ============================================================================
+// InternalIterator（PHP 内部类）：IteratorAggregate 内建类 getIterator 的返回面。
+//   PHP 真值：`(new SplFixedArray(2))->getIterator()` 的类名即 InternalIterator，
+//   方法 = current|key|next|valid|rewind，**绑定宿主**（迭代期间改宿主元素可见，
+//   真值 `0:1 1:99 2:3`）。故 internal_data 持宿主强引用 + 游标，经宿主公开
+//   ArrayAccess/Countable 面分派——天然绑定语义，且对任何同形宿主泛化成立。
+// ============================================================================
+
+/// ★批次十一：DatePeriod 迭代游标面（原 `_key` 伪属性下线）。
+const DatePeriodData = struct {
+    iter_key: i64 = 0,
+
+    fn dtor(p: ?*anyopaque, allocator: Allocator) void {
+        const data: *DatePeriodData = @ptrCast(@alignCast(p orelse return));
+        allocator.destroy(data);
+    }
+};
+
+fn datePeriodDataOf(obj: *PHPObject) ?*DatePeriodData {
+    const p = obj.internal_data orelse return null;
+    return @ptrCast(@alignCast(p));
+}
+
+fn datePeriodAttach(obj: *PHPObject, allocator: Allocator) !*DatePeriodData {
+    if (datePeriodDataOf(obj)) |existing| return existing;
+    const data = try allocator.create(DatePeriodData);
+    errdefer allocator.destroy(data);
+    data.* = .{};
+    obj.internal_data = data;
+    obj.internal_dtor = DatePeriodData.dtor;
+    return data;
+}
+
+const InternalIteratorData = struct {
+    host: Value, // retained 宿主对象
+    pos: i64,
+
+    fn dtor(p: ?*anyopaque, allocator: Allocator) void {
+        const data: *InternalIteratorData = @ptrCast(@alignCast(p orelse return));
+        data.host.release(allocator);
+        allocator.destroy(data);
+    }
+};
+
+fn internalIteratorDataOf(obj: *PHPObject) ?*InternalIteratorData {
+    const p = obj.internal_data orelse return null;
+    return @ptrCast(@alignCast(p));
+}
+
+fn internalIterator_rewind(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    const data = internalIteratorDataOf(obj) orelse return Value.initNull();
+    // ★批次十一：宿主自带 Iterator 五法（DatePeriod 等）⇒ 直挂分派（绑定宿主游标，
+    //   与 PHP 的 InternalIterator 同语义）；否则走 count/offsetGet 泛化面（SplFixedArray）。
+    if (internalIteratorHostIsIterator(data.host)) {
+        return php_object_call(data.host, "rewind", &[_]Value{});
+    }
+    data.pos = 0;
     return Value.initNull();
+}
+
+fn internalIterator_valid(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    const data = internalIteratorDataOf(obj) orelse return Value.initBool(false);
+    if (internalIteratorHostIsIterator(data.host)) {
+        return php_object_call(data.host, "valid", &[_]Value{});
+    }
+    const cnt = php_object_call(data.host, "count", &[_]Value{}) catch return Value.initBool(false);
+    defer cnt.release(runtime_allocator);
+    return Value.initBool(data.pos >= 0 and data.pos < cnt.asInt());
+}
+
+fn internalIterator_current(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    const data = internalIteratorDataOf(obj) orelse return Value.initNull();
+    if (internalIteratorHostIsIterator(data.host)) {
+        return php_object_call(data.host, "current", &[_]Value{});
+    }
+    const args = [_]Value{Value.initInt(data.pos)};
+    return php_object_call(data.host, "offsetGet", &args);
+}
+
+fn internalIterator_key(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    const data = internalIteratorDataOf(obj) orelse return Value.initNull();
+    if (internalIteratorHostIsIterator(data.host)) {
+        return php_object_call(data.host, "key", &[_]Value{});
+    }
+    return Value.initInt(data.pos);
+}
+
+fn internalIterator_next(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    const data = internalIteratorDataOf(obj) orelse return Value.initNull();
+    if (internalIteratorHostIsIterator(data.host)) {
+        return php_object_call(data.host, "next", &[_]Value{});
+    }
+    data.pos += 1;
+    return Value.initNull();
+}
+
+/// 宿主是否自带 Iterator 五法（⇒ 直挂分派模式）。
+fn internalIteratorHostIsIterator(host: Value) bool {
+    if (!Value_isObject(host)) return false;
+    const obj = Value_asObject(host);
+    const meta = obj.class_meta orelse return false;
+    return meta.findMethod("rewind") != null and meta.findMethod("valid") != null and
+        meta.findMethod("current") != null and meta.findMethod("key") != null and
+        meta.findMethod("next") != null;
+}
+
+/// SplFixedArray::getIterator / 其余 IteratorAggregate 内建类共用装配面。
+fn internalIteratorNewBound(host: Value, allocator: Allocator) !Value {
+    const it_val = try php_object_new("InternalIterator", allocator);
+    errdefer it_val.release(allocator);
+    const it_obj = Value_asObject(it_val);
+    const data = try allocator.create(InternalIteratorData);
+    data.* = .{ .host = host.retain(), .pos = 0 };
+    it_obj.internal_data = data;
+    it_obj.internal_dtor = InternalIteratorData.dtor;
+    return it_val;
+}
+
+pub fn registerInternalIterator(allocator: Allocator) !void {
+    const meta = try ClassMeta.init(allocator, "InternalIterator");
+    meta.interfaces = &GENERATOR_INTERFACES; // {Iterator, Traversable}，与 PHP 一致
+    try meta.addMethod(.{ .name = "rewind", .func = internalIterator_rewind, .is_static = false });
+    try meta.addMethod(.{ .name = "valid", .func = internalIterator_valid, .is_static = false });
+    try meta.addMethod(.{ .name = "current", .func = internalIterator_current, .is_static = false });
+    try meta.addMethod(.{ .name = "key", .func = internalIterator_key, .is_static = false });
+    try meta.addMethod(.{ .name = "next", .func = internalIterator_next, .is_static = false });
+    try registerClass(meta);
+}
+
+// ============================================================================
+// IteratorIterator / CachingIterator（SPL 迭代器族，★批次十 i1）
+// ============================================================================
+
+/// IteratorIterator 内部状态：持有的 inner 迭代器对象（retained）。
+const IteratorIteratorData = struct {
+    inner: Value,
+
+    fn dtor(p: ?*anyopaque, allocator: Allocator) void {
+        const data: *IteratorIteratorData = @ptrCast(@alignCast(p orelse return));
+        data.inner.release(allocator);
+        allocator.destroy(data);
+    }
+};
+
+fn iteratorIteratorDataOf(obj: *PHPObject) ?*IteratorIteratorData {
+    const p = obj.internal_data orelse return null;
+    return @ptrCast(@alignCast(p));
+}
+
+/// CachingIterator 内部状态：inner 迭代器 + 已读面缓存（平行双 list：键/值）。
+const CachingIteratorData = struct {
+    inner: Value,
+    cache_keys: *PHPArray,
+    cache_vals: *PHPArray,
+    flags: i64,
+    pos: i64,
+    inner_started: bool,
+
+    fn dtor(p: ?*anyopaque, allocator: Allocator) void {
+        const data: *CachingIteratorData = @ptrCast(@alignCast(p orelse return));
+        data.inner.release(allocator);
+        data.cache_keys.release(allocator);
+        data.cache_vals.release(allocator);
+        allocator.destroy(data);
+    }
+};
+
+fn cachingIteratorDataOf(obj: *PHPObject) ?*CachingIteratorData {
+    const p = obj.internal_data orelse return null;
+    return @ptrCast(@alignCast(p));
+}
+
+/// 构造参数解包（IteratorIterator 语义：Traversable——IteratorAggregate 经 getIterator 解包）。
+fn iteratorIteratorResolveInner(arg: Value, allocator: Allocator) !Value {
+    if (!Value_isObject(arg)) {
+        return throwThrowable("TypeError", "IteratorIterator::__construct(): Argument #1 ($iterator) must be of type Traversable", allocator);
+    }
+    const obj = Value_asObject(arg);
+    if (obj.class_meta) |meta| {
+        const is_iter = meta.findMethod("rewind") != null and meta.findMethod("valid") != null and
+            meta.findMethod("current") != null and meta.findMethod("key") != null and meta.findMethod("next") != null;
+        if (!is_iter and meta.findMethod("getIterator") != null) {
+            return php_object_call(arg, "getIterator", &[_]Value{});
+        }
+    }
+    return arg.retain();
+}
+
+fn iteratorIterator_construct(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
+    if (args.len < 1) {
+        return throwThrowable("TypeError", "IteratorIterator::__construct() expects exactly 1 argument, 0 given", allocator);
+    }
+    const obj = Value_asObject(ctx);
+    const inner = try iteratorIteratorResolveInner(args[0], allocator);
+    errdefer inner.release(allocator);
+    const data = try allocator.create(IteratorIteratorData);
+    data.* = .{ .inner = inner };
+    if (obj.internal_data) |p| {
+        if (obj.internal_dtor) |d| d(p, allocator);
+        obj.internal_data = null;
+    }
+    obj.internal_data = data;
+    obj.internal_dtor = IteratorIteratorData.dtor;
+    return Value.initNull();
+}
+
+fn iteratorIterator_getInnerIterator(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    const data = iteratorIteratorDataOf(obj) orelse return Value.initNull();
+    return data.inner.retain();
+}
+
+fn iteratorIterator_rewind(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    const data = iteratorIteratorDataOf(obj) orelse return Value.initNull();
+    return php_object_call(data.inner, "rewind", &[_]Value{});
+}
+
+fn iteratorIterator_valid(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    const data = iteratorIteratorDataOf(obj) orelse return Value.initBool(false);
+    return php_object_call(data.inner, "valid", &[_]Value{});
+}
+
+fn iteratorIterator_current(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    const data = iteratorIteratorDataOf(obj) orelse return Value.initNull();
+    return php_object_call(data.inner, "current", &[_]Value{});
+}
+
+fn iteratorIterator_key(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    const data = iteratorIteratorDataOf(obj) orelse return Value.initNull();
+    return php_object_call(data.inner, "key", &[_]Value{});
+}
+
+fn iteratorIterator_next(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    const data = iteratorIteratorDataOf(obj) orelse return Value.initNull();
+    return php_object_call(data.inner, "next", &[_]Value{});
+}
+
+pub fn registerIteratorIterator(allocator: Allocator) !void {
+    const meta = try ClassMeta.init(allocator, "IteratorIterator");
+    meta.interfaces = &[_][]const u8{ "OuterIterator", "Traversable", "Iterator" };
+    try meta.addMethod(.{ .name = "__construct", .func = iteratorIterator_construct, .is_static = false });
+    try meta.addMethod(.{ .name = "getInnerIterator", .func = iteratorIterator_getInnerIterator, .is_static = false });
+    try meta.addMethod(.{ .name = "rewind", .func = iteratorIterator_rewind, .is_static = false });
+    try meta.addMethod(.{ .name = "valid", .func = iteratorIterator_valid, .is_static = false });
+    try meta.addMethod(.{ .name = "current", .func = iteratorIterator_current, .is_static = false });
+    try meta.addMethod(.{ .name = "key", .func = iteratorIterator_key, .is_static = false });
+    try meta.addMethod(.{ .name = "next", .func = iteratorIterator_next, .is_static = false });
+    try registerClass(meta);
+}
+
+/// CachingIterator：从 inner 预读一枚入缓存（缓存行 = 平行双 list 的尾部）。
+fn cachingIteratorPullOne(data: *CachingIteratorData, allocator: Allocator) !bool {
+    if (!data.inner_started) {
+        _ = php_object_call(data.inner, "rewind", &[_]Value{}) catch return false;
+        data.inner_started = true;
+    } else {
+        _ = php_object_call(data.inner, "next", &[_]Value{}) catch return false;
+    }
+    const valid = php_object_call(data.inner, "valid", &[_]Value{}) catch return false;
+    defer valid.release(allocator);
+    if (!valid.toBool()) return false;
+    const k = php_object_call(data.inner, "key", &[_]Value{}) catch return false;
+    const v = php_object_call(data.inner, "current", &[_]Value{}) catch {
+        k.release(allocator);
+        return false;
+    };
+    try data.cache_keys.push(allocator, k);
+    k.release(allocator);
+    try data.cache_vals.push(allocator, v);
+    v.release(allocator);
+    return true;
+}
+
+fn cachingIterator_construct(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
+    if (args.len < 1) {
+        return throwThrowable("TypeError", "CachingIterator::__construct() expects at least 1 argument, 0 given", allocator);
+    }
+    const obj = Value_asObject(ctx);
+    const inner = try iteratorIteratorResolveInner(args[0], allocator);
+    errdefer inner.release(allocator);
+    const flags: i64 = if (args.len > 1) args[1].toInt() else 1; // CALL_TOSTRING
+    const data = try allocator.create(CachingIteratorData);
+    data.* = .{
+        .inner = inner,
+        .cache_keys = try PHPArray.init(allocator),
+        .cache_vals = try PHPArray.init(allocator),
+        .flags = flags,
+        .pos = 0,
+        .inner_started = false,
+    };
+    if (obj.internal_data) |p| {
+        if (obj.internal_dtor) |d| d(p, allocator);
+        obj.internal_data = null;
+    }
+    obj.internal_data = data;
+    obj.internal_dtor = CachingIteratorData.dtor;
+    return Value.initNull();
+}
+
+fn cachingIterator_rewind(ctx: Value, _: []const Value, allocator: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    const data = cachingIteratorDataOf(obj) orelse return Value.initNull();
+    data.pos = 0;
+    // 首读惰性拉一枚（PHP 语义：rewind 后 current 立即可用）
+    if (data.cache_vals.elements.count() == 0) {
+        _ = try cachingIteratorPullOne(data, allocator);
+    }
+    return Value.initNull();
+}
+
+fn cachingIterator_valid(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    const data = cachingIteratorDataOf(obj) orelse return Value.initBool(false);
+    return Value.initBool(data.pos >= 0 and data.pos < @as(i64, @intCast(data.cache_vals.elements.count())));
+}
+
+fn cachingIterator_current(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    const data = cachingIteratorDataOf(obj) orelse return Value.initNull();
+    const val = data.cache_vals.elements.get(.{ .integer = data.pos }) orelse return Value.initNull();
+    _ = val.retain();
+    return val;
+}
+
+fn cachingIterator_key(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    const data = cachingIteratorDataOf(obj) orelse return Value.initNull();
+    const val = data.cache_keys.elements.get(.{ .integer = data.pos }) orelse return Value.initNull();
+    _ = val.retain();
+    return val;
+}
+
+fn cachingIterator_next(ctx: Value, _: []const Value, allocator: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    const data = cachingIteratorDataOf(obj) orelse return Value.initNull();
+    data.pos += 1;
+    // 游标越过缓存尾 ⇒ 尝试从 inner 拉下一枚
+    if (data.pos >= @as(i64, @intCast(data.cache_vals.elements.count()))) {
+        _ = try cachingIteratorPullOne(data, allocator);
+    }
+    return Value.initNull();
+}
+
+fn cachingIterator_hasNext(ctx: Value, _: []const Value, allocator: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    const data = cachingIteratorDataOf(obj) orelse return Value.initBool(false);
+    if (data.pos + 1 < @as(i64, @intCast(data.cache_vals.elements.count()))) return Value.initBool(true);
+    // 预读一枚判定（PHP 的 hasNext 即此语义）；拉到则缓存留待后续 current
+    return Value.initBool(try cachingIteratorPullOne(data, allocator));
+}
+
+fn cachingIterator_getCache(ctx: Value, _: []const Value, allocator: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    const data = cachingIteratorDataOf(obj) orelse return Value.initArray(try PHPArray.init(allocator));
+    // PHP 真值：未带 FULL_CACHE 时抛 BadMethodCallException（措辞逐字）
+    if ((data.flags & 256) == 0) {
+        return throwThrowable("BadMethodCallException", "CachingIterator does not use a full cache (see CachingIterator::__construct)", allocator);
+    }
+    const arr = try PHPArray.init(allocator);
+    errdefer arr.release(allocator);
+    var i: i64 = 0;
+    const n: i64 = @intCast(data.cache_vals.elements.count());
+    while (i < n) : (i += 1) {
+        const k = data.cache_keys.elements.get(.{ .integer = i }) orelse continue;
+        const v = data.cache_vals.elements.get(.{ .integer = i }) orelse Value.initNull();
+        _ = v.retain();
+        const key: ArrayKey = if (k.isString()) .{ .string = k.asString() } else .{ .integer = k.toInt() };
+        if (k.isString()) _ = k.asString().retain();
+        try arr.set(allocator, key, v);
+        if (k.isString()) k.asString().release(allocator);
+    }
+    return Value.initArray(arr);
+}
+
+fn cachingIterator_count(ctx: Value, _: []const Value, allocator: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    const data = cachingIteratorDataOf(obj) orelse return Value.initInt(0);
+    // PHP 真值：未带 FULL_CACHE 时抛 BadMethodCallException（与 getCache 同规则）
+    if ((data.flags & 256) == 0) {
+        return throwThrowable("BadMethodCallException", "CachingIterator does not use a full cache (see CachingIterator::__construct)", allocator);
+    }
+    return Value.initInt(@intCast(data.cache_vals.elements.count()));
+}
+
+fn cachingIterator_getFlags(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    const data = cachingIteratorDataOf(obj) orelse return Value.initInt(0);
+    return Value.initInt(data.flags);
+}
+
+fn cachingIterator_setFlags(ctx: Value, args: []const Value, _: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    const data = cachingIteratorDataOf(obj) orelse return Value.initNull();
+    if (args.len > 0) data.flags = args[0].toInt();
+    return Value.initNull();
+}
+
+fn cachingIterator_getInnerIterator(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    const data = cachingIteratorDataOf(obj) orelse return Value.initNull();
+    return data.inner.retain();
+}
+
+fn cachingIterator_offsetGet(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
+    _ = allocator;
+    const obj = Value_asObject(ctx);
+    const data = cachingIteratorDataOf(obj) orelse return Value.initNull();
+    if (args.len < 1) return Value.initNull();
+    var i: i64 = 0;
+    const n: i64 = @intCast(data.cache_keys.elements.count());
+    while (i < n) : (i += 1) {
+        const k = data.cache_keys.elements.get(.{ .integer = i }) orelse continue;
+        const matches = if (args[0].isString() and k.isString())
+            std.mem.eql(u8, args[0].asString().data, k.asString().data)
+        else
+            k.toInt() == args[0].toInt();
+        if (matches) {
+            const v = data.cache_vals.elements.get(.{ .integer = i }) orelse return Value.initNull();
+            _ = v.retain();
+            return v;
+        }
+    }
+    return Value.initNull();
+}
+
+fn cachingIterator_offsetSet(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    const data = cachingIteratorDataOf(obj) orelse return Value.initNull();
+    if (args.len < 2) return Value.initNull();
+    var i: i64 = 0;
+    const n: i64 = @intCast(data.cache_keys.elements.count());
+    while (i < n) : (i += 1) {
+        const k = data.cache_keys.elements.get(.{ .integer = i }) orelse continue;
+        const matches = if (args[0].isString() and k.isString())
+            std.mem.eql(u8, args[0].asString().data, k.asString().data)
+        else
+            k.toInt() == args[0].toInt();
+        if (matches) {
+            const v = args[1];
+            _ = v.retain();
+            try data.cache_vals.elements.put(.{ .integer = i }, v);
+            return Value.initNull();
+        }
+    }
+    // 未命中 ⇒ 追加
+    const k = args[0];
+    _ = k.retain();
+    try data.cache_keys.push(allocator, k);
+    k.release(allocator);
+    const v2 = args[1];
+    _ = v2.retain();
+    try data.cache_vals.push(allocator, v2);
+    v2.release(allocator);
+    return Value.initNull();
+}
+
+fn cachingIterator_offsetExists(ctx: Value, args: []const Value, _: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    const data = cachingIteratorDataOf(obj) orelse return Value.initBool(false);
+    if (args.len < 1) return Value.initBool(false);
+    var i: i64 = 0;
+    const n: i64 = @intCast(data.cache_keys.elements.count());
+    while (i < n) : (i += 1) {
+        const k = data.cache_keys.elements.get(.{ .integer = i }) orelse continue;
+        const matches = if (args[0].isString() and k.isString())
+            std.mem.eql(u8, args[0].asString().data, k.asString().data)
+        else
+            k.toInt() == args[0].toInt();
+        if (matches) return Value.initBool(true);
+    }
+    return Value.initBool(false);
+}
+
+fn cachingIterator_offsetUnset(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
+    _ = allocator;
+    const obj = Value_asObject(ctx);
+    const data = cachingIteratorDataOf(obj) orelse return Value.initNull();
+    if (args.len < 1) return Value.initNull();
+    var i: i64 = 0;
+    const n: i64 = @intCast(data.cache_keys.elements.count());
+    while (i < n) : (i += 1) {
+        const k = data.cache_keys.elements.get(.{ .integer = i }) orelse continue;
+        const matches = if (args[0].isString() and k.isString())
+            std.mem.eql(u8, args[0].asString().data, k.asString().data)
+        else
+            k.toInt() == args[0].toInt();
+        if (matches) {
+            if (data.cache_keys.elements.get(.{ .integer = i })) |old_k| old_k.release(runtime_allocator);
+            if (data.cache_vals.elements.get(.{ .integer = i })) |old_v| old_v.release(runtime_allocator);
+            _ = data.cache_keys.elements.remove(.{ .integer = i });
+            _ = data.cache_vals.elements.remove(.{ .integer = i });
+            return Value.initNull();
+        }
+    }
+    return Value.initNull();
+}
+
+fn cachingIterator___toString(ctx: Value, _: []const Value, allocator: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    const data = cachingIteratorDataOf(obj) orelse return Value.initString(try PHPString.init(allocator, ""));
+    // flags 语义（PHP 真值）：TOSTRING_USE_KEY=2 ⇒ (string)key；TOSTRING_USE_CURRENT=4 / CALL_TOSTRING=1 ⇒
+    //   (string)current；TOSTRING_USE_INNER=8 ⇒ (string)inner。**四个 tostring 位全无时抛**
+    //   BadMethodCallException "CachingIterator does not fetch string value (see CachingIterator::__construct)"。
+    if ((data.flags & 15) == 0) {
+        return throwThrowable("BadMethodCallException", "CachingIterator does not fetch string value (see CachingIterator::__construct)", allocator);
+    }
+    if ((data.flags & 2) != 0) {
+        const k = data.cache_keys.elements.get(.{ .integer = data.pos }) orelse return Value.initString(try PHPString.init(allocator, ""));
+        const s = try k.toString(allocator);
+        return Value.initString(s);
+    }
+    if ((data.flags & 8) != 0) {
+        const s = php_object_call(data.inner, "__toString", &[_]Value{}) catch return Value.initString(try PHPString.init(allocator, ""));
+        return s;
+    }
+    // CALL_TOSTRING / TOSTRING_USE_CURRENT
+    const v = data.cache_vals.elements.get(.{ .integer = data.pos }) orelse return Value.initString(try PHPString.init(allocator, ""));
+    const s = try v.toString(allocator);
+    return Value.initString(s);
+}
+
+pub fn registerCachingIterator(allocator: Allocator) !void {
+    const meta = try ClassMeta.init(allocator, "CachingIterator");
+    if (findClass("IteratorIterator")) |parent| meta.parent = parent;
+    meta.interfaces = &[_][]const u8{ "OuterIterator", "Traversable", "Iterator", "ArrayAccess", "Countable", "Stringable" };
+    // 常量面（PHP 8.5.8 真值）
+    try meta.setClassConst("CALL_TOSTRING", Value.initInt(1), .public);
+    try meta.setClassConst("TOSTRING_USE_KEY", Value.initInt(2), .public);
+    try meta.setClassConst("TOSTRING_USE_CURRENT", Value.initInt(4), .public);
+    try meta.setClassConst("TOSTRING_USE_INNER", Value.initInt(8), .public);
+    try meta.setClassConst("CATCH_GET_CHILD", Value.initInt(16), .public);
+    try meta.setClassConst("FULL_CACHE", Value.initInt(256), .public);
+
+    // 方法序按 PHP 8.5.8 真值
+    try meta.addMethod(.{ .name = "__construct", .func = cachingIterator_construct, .is_static = false });
+    try meta.addMethod(.{ .name = "rewind", .func = cachingIterator_rewind, .is_static = false });
+    try meta.addMethod(.{ .name = "valid", .func = cachingIterator_valid, .is_static = false });
+    try meta.addMethod(.{ .name = "next", .func = cachingIterator_next, .is_static = false });
+    try meta.addMethod(.{ .name = "hasNext", .func = cachingIterator_hasNext, .is_static = false });
+    try meta.addMethod(.{ .name = "__toString", .func = cachingIterator___toString, .is_static = false });
+    try meta.addMethod(.{ .name = "getFlags", .func = cachingIterator_getFlags, .is_static = false });
+    try meta.addMethod(.{ .name = "setFlags", .func = cachingIterator_setFlags, .is_static = false });
+    try meta.addMethod(.{ .name = "offsetGet", .func = cachingIterator_offsetGet, .is_static = false });
+    try meta.addMethod(.{ .name = "offsetSet", .func = cachingIterator_offsetSet, .is_static = false });
+    try meta.addMethod(.{ .name = "offsetUnset", .func = cachingIterator_offsetUnset, .is_static = false });
+    try meta.addMethod(.{ .name = "offsetExists", .func = cachingIterator_offsetExists, .is_static = false });
+    try meta.addMethod(.{ .name = "getCache", .func = cachingIterator_getCache, .is_static = false });
+    try meta.addMethod(.{ .name = "count", .func = cachingIterator_count, .is_static = false });
+    try meta.addMethod(.{ .name = "getInnerIterator", .func = cachingIterator_getInnerIterator, .is_static = false });
+    try meta.addMethod(.{ .name = "key", .func = cachingIterator_key, .is_static = false });
+    try meta.addMethod(.{ .name = "current", .func = cachingIterator_current, .is_static = false });
+    try registerClass(meta);
+}
+
+/// SplFixedArray构造函数
+fn splFixedArray_construct(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    const size: i64 = if (args.len > 0) args[0].asInt() else 0;
+    const obj = Value_asObject(ctx);
+
+    const data = try allocator.create(SplFixedArrayData);
+    errdefer allocator.destroy(data);
+    data.* = .{ .elements = try splFixedArrayFill(allocator, size), .size = @max(size, 0) };
+    splFixedArrayAttach(obj, data, allocator);
+    return Value.initNull();
+}
+
+/// SplFixedArray::__wakeup —— PHP 8.4+ 已废弃（序列化钩子由 __serialize/__unserialize 接管），
+/// 直调发 Deprecated 并返回 null（PHP 8.5.8 实测措辞逐字）。
+fn splFixedArray___wakeup(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
+    _ = ctx;
+    emitDeprecated("Method SplFixedArray::__wakeup() is deprecated since 8.4, this method is obsolete, as serialization hooks are provided by __unserialize() and __serialize()");
+    return Value.initNull();
+}
+
+/// SplFixedArray::__serialize —— 返回元素列表 [0=>v0, …]（serializeValue 的 O: 面逐字对齐
+/// PHP 真值 `O:13:"SplFixedArray":3:{i:0;i:1;…}`）。
+fn splFixedArray___serialize(ctx: Value, _: []const Value, allocator: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    const arr = try PHPArray.init(allocator);
+    errdefer arr.release(allocator);
+    if (splFixedArrayDataOf(obj)) |data| {
+        var i: i64 = 0;
+        while (i < data.size) : (i += 1) {
+            const val = data.elements.elements.get(.{ .integer = i }) orelse Value.initNull();
+            _ = val.retain();
+            try arr.elements.put(.{ .integer = i }, val);
+        }
+    }
+    return Value.initArray(arr);
+}
+
+/// SplFixedArray::__unserialize —— PHP 真值：size = 数据元素数，values **按下标序**填入
+/// （原键被忽略：`O:…:2:{i:0;i:1;i:5;s:1:"x";}` ⇒ toArray=[1,"x"]）。
+/// unserialize 路径不经 __construct ⇒ 对象可能尚无内部状态面，须现装配。
+fn splFixedArray___unserialize(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    if (splFixedArrayDataOf(obj) == null) {
+        const fresh_data = try allocator.create(SplFixedArrayData);
+        fresh_data.* = .{ .elements = try PHPArray.init(allocator), .size = 0 };
+        splFixedArrayAttach(obj, fresh_data, allocator);
+    }
+    const data = splFixedArrayDataOf(obj).?;
+    if (args.len < 1 or !args[0].isArray()) return Value.initNull();
+    const src = args[0].asArray();
+
+    const fresh = try splFixedArrayFill(allocator, @intCast(src.elements.count()));
+    data.elements.release(allocator);
+    data.elements = fresh;
+    data.size = @intCast(src.elements.count());
+
+    var it = src.elements.iterator();
+    var i: i64 = 0;
+    while (it.next()) |entry| : (i += 1) {
+        const val = entry.value_ptr.*;
+        _ = val.retain();
+        try data.elements.elements.put(.{ .integer = i }, val);
+    }
+    return Value.initNull();
+}
+
+/// SplFixedArray::fromArray —— static。preserveKeys=true：键必须全为非负整数
+/// （否则 InvalidArgumentException，措辞同 PHP），size=max_key+1 缺位补 null；
+/// false：values 按下标序重排。
+fn splFixedArray_fromArray(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
+    _ = ctx;
+    if (args.len < 1 or !args[0].isArray()) {
+        const word = if (args.len < 1) "array" else phpArgTypeWord(args[0]);
+        var buf: [160]u8 = undefined;
+        const msg = std.fmt.bufPrint(
+            &buf,
+            "SplFixedArray::fromArray(): Argument #1 ($array) must be of type array, {s} given",
+            .{word},
+        ) catch "SplFixedArray::fromArray(): Argument #1 ($array) must be of type array";
+        return throwThrowable("TypeError", msg, allocator);
+    }
+    const src = args[0].asArray();
+    const preserve = if (args.len > 1) args[1].toBool() else true;
+
+    var size: i64 = 0;
+    if (preserve) {
+        var max_key: i64 = -1;
+        var it = src.elements.iterator();
+        while (it.next()) |entry| {
+            switch (entry.key_ptr.*) {
+                .integer => |k| {
+                    if (k < 0) {
+                        return throwThrowable("InvalidArgumentException", "array must contain only positive integer keys", allocator);
+                    }
+                    if (k > max_key) max_key = k;
+                },
+                .string => {
+                    return throwThrowable("InvalidArgumentException", "array must contain only positive integer keys", allocator);
+                },
+            }
+        }
+        size = max_key + 1;
+    } else {
+        size = @intCast(src.elements.count());
+    }
+
+    const obj_val = try php_object_new("SplFixedArray", allocator);
+    errdefer obj_val.release(allocator);
+    const obj = Value_asObject(obj_val);
+    const data = try allocator.create(SplFixedArrayData);
+    errdefer allocator.destroy(data);
+    data.* = .{ .elements = try splFixedArrayFill(allocator, size), .size = size };
+    splFixedArrayAttach(obj, data, allocator);
+
+    var it2 = src.elements.iterator();
+    var idx: i64 = 0;
+    while (it2.next()) |entry| {
+        const val = entry.value_ptr.*;
+        _ = val.retain();
+        if (preserve) {
+            try data.elements.elements.put(.{ .integer = entry.key_ptr.integer }, val);
+        } else {
+            try data.elements.elements.put(.{ .integer = idx }, val);
+        }
+        idx += 1;
+    }
+    return obj_val;
+}
+
+/// SplFixedArray::getIterator —— 返回 InternalIterator 绑定宿主（绑定语义：
+/// 迭代期间改宿主元素对迭代可见，PHP 8.5.8 真值 `0:1 1:99 2:3`）。
+fn splFixedArray_getIterator(ctx: Value, _: []const Value, allocator: Allocator) anyerror!Value {
+    return internalIteratorNewBound(ctx, allocator);
+}
+
+/// SplFixedArray::jsonSerialize —— 等价 toArray（json_encode 对象面经 JsonSerializable 钩子调）。
+fn splFixedArray_jsonSerialize(ctx: Value, _: []const Value, allocator: Allocator) anyerror!Value {
+    return splFixedArray___serialize(ctx, &.{}, allocator);
 }
 
 /// SplFixedArray::getSize
@@ -11993,7 +13098,8 @@ fn splFixedArray_getSize(ctx: Value, args: []const Value, allocator: Allocator) 
     _ = args;
     _ = allocator;
     const obj = Value_asObject(ctx);
-    return obj.properties.get("_size") orelse Value.initInt(0);
+    const data = splFixedArrayDataOf(obj) orelse return Value.initInt(0);
+    return Value.initInt(data.size);
 }
 
 /// SplFixedArray::setSize
@@ -12002,11 +13108,10 @@ fn splFixedArray_setSize(ctx: Value, args: []const Value, allocator: Allocator) 
     if (args.len < 1) return Value.initNull();
 
     const obj = Value_asObject(ctx);
+    const data = splFixedArrayDataOf(obj) orelse return Value.initNull();
     const new_size = args[0].asInt();
-    const old_size = (obj.properties.get("_size") orelse Value.initInt(0)).asInt();
-
-    const array_val = obj.properties.get("_array") orelse return Value.initNull();
-    const array = array_val.asArray();
+    const old_size = data.size;
+    const array = data.elements;
 
     if (new_size > old_size) {
         // 扩展：添加null元素
@@ -12015,7 +13120,8 @@ fn splFixedArray_setSize(ctx: Value, args: []const Value, allocator: Allocator) 
         }
     } else if (new_size < old_size) {
         // 缩小：删除多余元素
-        for (@intCast(new_size)..@intCast(old_size)) |i| {
+        const lo: usize = if (new_size > 0) @intCast(new_size) else 0;
+        for (lo..@intCast(old_size)) |i| {
             if (array.elements.get(.{ .integer = @intCast(i) })) |val| {
                 val.release(runtime_allocator);
             }
@@ -12023,7 +13129,7 @@ fn splFixedArray_setSize(ctx: Value, args: []const Value, allocator: Allocator) 
         }
     }
 
-    try obj.putProperty("_size", Value.initInt(new_size));
+    data.size = @max(new_size, 0);
     return Value.initNull();
 }
 
@@ -12031,17 +13137,16 @@ fn splFixedArray_setSize(ctx: Value, args: []const Value, allocator: Allocator) 
 fn splFixedArray_toArray(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     _ = args;
     const obj = Value_asObject(ctx);
-
-    const size = (obj.properties.get("_size") orelse Value.initInt(0)).asInt();
-    const array_val = obj.properties.get("_array") orelse return Value.initNull();
-    const src_array = array_val.asArray();
+    const data = splFixedArrayDataOf(obj) orelse return Value.initArray(try PHPArray.init(allocator));
 
     // 创建新数组，只包含有效范围内的元素
     const new_array = try PHPArray.init(allocator);
-    for (0..@intCast(size)) |i| {
-        if (src_array.elements.get(.{ .integer = @intCast(i) })) |val| {
+    errdefer new_array.release(allocator);
+    var i: i64 = 0;
+    while (i < data.size) : (i += 1) {
+        if (data.elements.elements.get(.{ .integer = i })) |val| {
             _ = val.retain();
-            try new_array.elements.put(.{ .integer = @intCast(i) }, val);
+            try new_array.elements.put(.{ .integer = i }, val);
         }
     }
 
@@ -12055,9 +13160,9 @@ fn splFixedArray_offsetExists(ctx: Value, args: []const Value, allocator: Alloca
 
     const obj = Value_asObject(ctx);
     const index = args[0].asInt();
-    const size = (obj.properties.get("_size") orelse Value.initInt(0)).asInt();
+    const data = splFixedArrayDataOf(obj) orelse return Value.initBool(false);
 
-    return Value.initBool(index >= 0 and index < size);
+    return Value.initBool(index >= 0 and index < data.size);
 }
 
 /// SplFixedArray::offsetGet
@@ -12068,10 +13173,8 @@ fn splFixedArray_offsetGet(ctx: Value, args: []const Value, allocator: Allocator
     const obj = Value_asObject(ctx);
     const index = args[0].asInt();
 
-    const array_val = obj.properties.get("_array") orelse return Value.initNull();
-    const array = array_val.asArray();
-
-    const val = array.elements.get(.{ .integer = index }) orelse return Value.initNull();
+    const data = splFixedArrayDataOf(obj) orelse return Value.initNull();
+    const val = data.elements.elements.get(.{ .integer = index }) orelse return Value.initNull();
     _ = val.retain();
     return val;
 }
@@ -12085,11 +13188,13 @@ fn splFixedArray_offsetSet(ctx: Value, args: []const Value, allocator: Allocator
     const index = args[0].asInt();
     const value = args[1];
 
-    const array_val = obj.properties.get("_array") orelse return Value.initNull();
-    const array = array_val.asArray();
-
+    const data = splFixedArrayDataOf(obj) orelse return Value.initNull();
+    // 覆写前归还旧值引用（Elements.put 的 packed 覆写路径不释放旧值）
+    if (data.elements.elements.get(.{ .integer = index })) |old| {
+        old.release(runtime_allocator);
+    }
     _ = value.retain();
-    try array.elements.put(.{ .integer = index }, value);
+    try data.elements.elements.put(.{ .integer = index }, value);
 
     return Value.initNull();
 }
@@ -12102,10 +13207,12 @@ fn splFixedArray_offsetUnset(ctx: Value, args: []const Value, allocator: Allocat
     const obj = Value_asObject(ctx);
     const index = args[0].asInt();
 
-    const array_val = obj.properties.get("_array") orelse return Value.initNull();
-    const array = array_val.asArray();
-
-    try array.elements.put(.{ .integer = index }, Value.initNull());
+    const data = splFixedArrayDataOf(obj) orelse return Value.initNull();
+    // PHP 语义：offsetUnset 把该位重置为 null（不缩小定长面）
+    if (data.elements.elements.get(.{ .integer = index })) |old| {
+        old.release(runtime_allocator);
+    }
+    try data.elements.elements.put(.{ .integer = index }, Value.initNull());
 
     return Value.initNull();
 }
@@ -12115,104 +13222,35 @@ fn splFixedArray_count(ctx: Value, args: []const Value, allocator: Allocator) !V
     _ = args;
     _ = allocator;
     const obj = Value_asObject(ctx);
-    return obj.properties.get("_size") orelse Value.initInt(0);
-}
-
-/// SplFixedArray::rewind
-fn splFixedArray_rewind(ctx: Value, args: []const Value, allocator: Allocator) !Value {
-    _ = args;
-    _ = allocator;
-    const obj = Value_asObject(ctx);
-    try obj.putProperty("_position", Value.initInt(0));
-    return Value.initNull();
-}
-
-/// SplFixedArray::valid
-fn splFixedArray_valid(ctx: Value, args: []const Value, allocator: Allocator) !Value {
-    _ = args;
-    _ = allocator;
-    const obj = Value_asObject(ctx);
-
-    const position = (obj.properties.get("_position") orelse Value.initInt(0)).asInt();
-    const size = (obj.properties.get("_size") orelse Value.initInt(0)).asInt();
-
-    return Value.initBool(position >= 0 and position < size);
-}
-
-/// SplFixedArray::current
-fn splFixedArray_current(ctx: Value, args: []const Value, allocator: Allocator) !Value {
-    _ = args;
-    _ = allocator;
-    const obj = Value_asObject(ctx);
-
-    const position = (obj.properties.get("_position") orelse Value.initInt(0)).asInt();
-    const array_val = obj.properties.get("_array") orelse return Value.initNull();
-    const array = array_val.asArray();
-
-    const val = array.elements.get(.{ .integer = position }) orelse return Value.initNull();
-    _ = val.retain();
-    return val;
-}
-
-/// SplFixedArray::key
-fn splFixedArray_key(ctx: Value, args: []const Value, allocator: Allocator) !Value {
-    _ = args;
-    _ = allocator;
-    const obj = Value_asObject(ctx);
-    return obj.properties.get("_position") orelse Value.initInt(0);
-}
-
-/// SplFixedArray::next
-fn splFixedArray_next(ctx: Value, args: []const Value, allocator: Allocator) !Value {
-    _ = args;
-    _ = allocator;
-    const obj = Value_asObject(ctx);
-
-    const position = (obj.properties.get("_position") orelse Value.initInt(0)).asInt();
-    try obj.putProperty("_position", Value.initInt(position + 1));
-
-    return Value.initNull();
+    const data = splFixedArrayDataOf(obj) orelse return Value.initInt(0);
+    return Value.initInt(data.size);
 }
 
 /// 注册SplFixedArray类
+/// ★批次十（i1/i2）：方法面按 PHP 8.5.8 真值 15 枚逐字对齐（含注册序）：
+///   __construct|__wakeup|__serialize|__unserialize|count|toArray|fromArray|getSize|setSize|
+///   offsetExists|offsetGet|offsetSet|offsetUnset|getIterator|jsonSerialize
+///   旧表的 rewind/valid/current/key/next 五枚在 PHP 8.5 的 SplFixedArray 上**不存在**
+///   （它是 IteratorAggregate 不是 Iterator），迭代统一由 getIterator ⇒ InternalIterator 承担。
 pub fn registerSplFixedArray(allocator: Allocator) !void {
-    const meta = try allocator.create(ClassMeta);
-    const name = try allocator.dupe(u8, "SplFixedArray");
-    meta.* = .{
-        .name = name,
-        .parent = null,
-        .methods = std.StringHashMap(ClassMethod).init(allocator),
-        .properties = std.StringHashMap(ClassProperty).init(allocator),
-        .property_order = try std.ArrayList([]const u8).initCapacity(allocator, 0),
-        .static_properties = std.StringHashMap(Value).init(allocator),
-        .const_visibility = std.StringHashMap(ConstVisibility).init(allocator),
-        .class_constants = std.StringHashMap(Value).init(allocator),
-        .interfaces = &.{},
-        .is_abstract = false,
-        .allocator = allocator,
-    };
+    const meta = try ClassMeta.init(allocator, "SplFixedArray");
+    meta.interfaces = &SPL_FIXED_ARRAY_INTERFACES; // ★F-3（R-336）：PHP 8.5.8 实测传递闭包
 
-    // 注册方法
-    try meta.putMethodOrdered(.{ .name = "__construct", .func = splFixedArray_construct, .is_public = true });
-    try meta.putMethodOrdered(.{ .name = "getSize", .func = splFixedArray_getSize, .is_public = true });
-    try meta.putMethodOrdered(.{ .name = "setSize", .func = splFixedArray_setSize, .is_public = true });
-    try meta.putMethodOrdered(.{ .name = "toArray", .func = splFixedArray_toArray, .is_public = true });
-    try meta.putMethodOrdered(.{ .name = "count", .func = splFixedArray_count, .is_public = true });
-
-    // ArrayAccess接口
-    try meta.putMethodOrdered(.{ .name = "offsetExists", .func = splFixedArray_offsetExists, .is_public = true });
-    try meta.putMethodOrdered(.{ .name = "offsetGet", .func = splFixedArray_offsetGet, .is_public = true });
-    try meta.putMethodOrdered(.{ .name = "offsetSet", .func = splFixedArray_offsetSet, .is_public = true });
-    try meta.putMethodOrdered(.{ .name = "offsetUnset", .func = splFixedArray_offsetUnset, .is_public = true });
-
-    // Iterator接口
-    try meta.putMethodOrdered(.{ .name = "rewind", .func = splFixedArray_rewind, .is_public = true });
-    try meta.putMethodOrdered(.{ .name = "valid", .func = splFixedArray_valid, .is_public = true });
-    try meta.putMethodOrdered(.{ .name = "current", .func = splFixedArray_current, .is_public = true });
-    try meta.putMethodOrdered(.{ .name = "key", .func = splFixedArray_key, .is_public = true });
-    try meta.putMethodOrdered(.{ .name = "next", .func = splFixedArray_next, .is_public = true });
-
-    meta.magic_construct = splFixedArray_construct;
+    try meta.addMethod(.{ .name = "__construct", .func = splFixedArray_construct, .is_static = false });
+    try meta.addMethod(.{ .name = "__wakeup", .func = splFixedArray___wakeup, .is_static = false });
+    try meta.addMethod(.{ .name = "__serialize", .func = splFixedArray___serialize, .is_static = false });
+    try meta.addMethod(.{ .name = "__unserialize", .func = splFixedArray___unserialize, .is_static = false });
+    try meta.addMethod(.{ .name = "count", .func = splFixedArray_count, .is_static = false });
+    try meta.addMethod(.{ .name = "toArray", .func = splFixedArray_toArray, .is_static = false });
+    try meta.addMethod(.{ .name = "fromArray", .func = splFixedArray_fromArray, .is_static = true });
+    try meta.addMethod(.{ .name = "getSize", .func = splFixedArray_getSize, .is_static = false });
+    try meta.addMethod(.{ .name = "setSize", .func = splFixedArray_setSize, .is_static = false });
+    try meta.addMethod(.{ .name = "offsetExists", .func = splFixedArray_offsetExists, .is_static = false });
+    try meta.addMethod(.{ .name = "offsetGet", .func = splFixedArray_offsetGet, .is_static = false });
+    try meta.addMethod(.{ .name = "offsetSet", .func = splFixedArray_offsetSet, .is_static = false });
+    try meta.addMethod(.{ .name = "offsetUnset", .func = splFixedArray_offsetUnset, .is_static = false });
+    try meta.addMethod(.{ .name = "getIterator", .func = splFixedArray_getIterator, .is_static = false });
+    try meta.addMethod(.{ .name = "jsonSerialize", .func = splFixedArray_jsonSerialize, .is_static = false });
 
     try registerClass(meta);
 }
@@ -12225,13 +13263,50 @@ pub fn registerSplFixedArray(allocator: Allocator) !void {
 const ARRAY_AS_PROPS: i64 = 1;
 const STD_PROP_LIST: i64 = 2;
 
+/// ★批次十一：ArrayObject 状态面——元素面挂**私有声明属性 `storage`**（PHP 真值：
+///   var_dump `["storage":"ArrayObject":private]`、get_object_vars 全局为空、(array) 转换给元素面）；
+///   flags/iteratorClass 属内部配置 ⇒ internal_data。flags 默认 **0**（PHP 实测，
+///   旧版默认 STD_PROP_LIST=2 与真值相悖）。
+const ArrayObjectData = struct {
+    flags: i64 = 0,
+    iterator_class: []const u8 = "ArrayIterator",
+
+    fn dtor(p: ?*anyopaque, allocator: Allocator) void {
+        const data: *ArrayObjectData = @ptrCast(@alignCast(p orelse return));
+        allocator.free(data.iterator_class);
+        allocator.destroy(data);
+    }
+};
+
+fn arrayObjectDataOf(obj: *PHPObject) ?*ArrayObjectData {
+    const p = obj.internal_data orelse return null;
+    return @ptrCast(@alignCast(p));
+}
+
+fn arrayObjectAttach(obj: *PHPObject, allocator: Allocator) !*ArrayObjectData {
+    if (arrayObjectDataOf(obj)) |existing| return existing;
+    const data = try allocator.create(ArrayObjectData);
+    errdefer allocator.destroy(data);
+    data.* = .{ .iterator_class = try allocator.dupe(u8, "ArrayIterator") };
+    obj.internal_data = data;
+    obj.internal_dtor = ArrayObjectData.dtor;
+    return data;
+}
+
+fn arrayObjectStorage(obj: *PHPObject) ?*PHPArray {
+    const storage = obj.properties.get("storage") orelse return null;
+    if (!storage.isArray()) return null;
+    return storage.asArray();
+}
+
 /// ArrayObject::__construct
 fn arrayObject_construct(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     const obj = Value_asObject(ctx);
+    const data = try arrayObjectAttach(obj, allocator);
 
     // 初始化存储数组
     const array = try PHPArray.init(allocator);
-    var flags: i64 = STD_PROP_LIST;
+    errdefer array.release(allocator);
 
     if (args.len > 0) {
         if (args[0].isArray()) {
@@ -12249,13 +13324,10 @@ fn arrayObject_construct(ctx: Value, args: []const Value, allocator: Allocator) 
     }
 
     if (args.len > 1) {
-        flags = args[1].toInt();
+        data.flags = args[1].toInt();
     }
 
-    try obj.setProperty("_storage", Value.initArray(array));
-    try obj.setProperty("_flags", Value.initInt(flags));
-    try obj.setProperty("_iteratorClass", Value.initString(try PHPString.init(allocator, "ArrayIterator")));
-    try obj.setProperty("_position", Value.initInt(0));
+    try obj.putProperty("storage", Value.initArray(array));
 
     return Value.initNull();
 }
@@ -12263,13 +13335,10 @@ fn arrayObject_construct(ctx: Value, args: []const Value, allocator: Allocator) 
 /// ArrayObject::append
 fn arrayObject_append(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     const obj = Value_asObject(ctx);
-    if (obj.getProperty("_storage")) |storage| {
-        if (storage.isArray()) {
-            const arr = storage.asArray();
-            const val = if (args.len > 0) args[0] else Value.initNull();
-            _ = val.retain();
-            try arr.push(allocator, val);
-        }
+    if (arrayObjectStorage(obj)) |arr| {
+        const val = if (args.len > 0) args[0] else Value.initNull();
+        _ = val.retain();
+        try arr.push(allocator, val);
     }
     return Value.initNull();
 }
@@ -12277,46 +13346,43 @@ fn arrayObject_append(ctx: Value, args: []const Value, allocator: Allocator) !Va
 /// ArrayObject::asort
 fn arrayObject_asort(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     const obj = Value_asObject(ctx);
-    if (obj.getProperty("_storage")) |storage| {
-        if (storage.isArray()) {
-            const arr = storage.asArray();
-            const flags = if (args.len > 0) args[0].toInt() else 0;
-            _ = flags;
+    if (arrayObjectStorage(obj)) |arr| {
+        const flags = if (args.len > 0) args[0].toInt() else 0;
+        _ = flags;
 
-            // 收集所有键
-            var keys = std.ArrayListUnmanaged(ArrayKey){ .items = &.{}, .capacity = 0 };
-            defer keys.deinit(allocator);
-            var iter = arr.elements.iterator();
-            while (iter.next()) |entry| try keys.append(allocator, entry.key_ptr.*);
+        // 收集所有键
+        var keys = std.ArrayListUnmanaged(ArrayKey){ .items = &.{}, .capacity = 0 };
+        defer keys.deinit(allocator);
+        var iter = arr.elements.iterator();
+        while (iter.next()) |entry| try keys.append(allocator, entry.key_ptr.*);
 
-            // 按值排序
-            const SortCtx = struct {
-                elems: *const PHPArray.Elements,
-                fn lessThan(self_ctx: @This(), a: ArrayKey, b: ArrayKey) bool {
-                    const va = self_ctx.elems.get(a) orelse return false;
-                    const vb = self_ctx.elems.get(b) orelse return true;
-                    // 使用浮点比较作为通用比较
-                    return va.toFloat() < vb.toFloat();
-                }
-            };
-            std.sort.insertion(ArrayKey, keys.items, SortCtx{ .elems = &arr.elements }, SortCtx.lessThan);
-
-            // 重建有序数组
-            const new_arr = try PHPArray.init(allocator);
-            for (keys.items) |key| {
-                if (arr.elements.get(key)) |val| {
-                    _ = val.retain();
-                    try new_arr.elements.put(key, val);
-                }
+        // 按值排序
+        const SortCtx = struct {
+            elems: *const PHPArray.Elements,
+            fn lessThan(self_ctx: @This(), a: ArrayKey, b: ArrayKey) bool {
+                const va = self_ctx.elems.get(a) orelse return false;
+                const vb = self_ctx.elems.get(b) orelse return true;
+                // 使用浮点比较作为通用比较
+                return va.toFloat() < vb.toFloat();
             }
-            // 用新数组的元素替换旧数组
-            arr.elements.deinit();
-            arr.elements = PHPArray.Elements.init(allocator);
-            arr.elements.parent = arr;
-            var new_iter = new_arr.elements.iterator();
-            while (new_iter.next()) |entry| {
-                try arr.elements.put(entry.key_ptr.*, entry.value_ptr.*);
+        };
+        std.sort.insertion(ArrayKey, keys.items, SortCtx{ .elems = &arr.elements }, SortCtx.lessThan);
+
+        // 重建有序数组
+        const new_arr = try PHPArray.init(allocator);
+        for (keys.items) |key| {
+            if (arr.elements.get(key)) |val| {
+                _ = val.retain();
+                try new_arr.elements.put(key, val);
             }
+        }
+        // 用新数组的元素替换旧数组
+        arr.elements.deinit();
+        arr.elements = PHPArray.Elements.init(allocator);
+        arr.elements.parent = arr;
+        var new_iter = new_arr.elements.iterator();
+        while (new_iter.next()) |entry| {
+            try arr.elements.put(entry.key_ptr.*, entry.value_ptr.*);
         }
     }
     return Value.initNull();
@@ -12325,8 +13391,8 @@ fn arrayObject_asort(ctx: Value, args: []const Value, allocator: Allocator) !Val
 /// ArrayObject::count
 fn arrayObject_count(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
     const obj = Value_asObject(ctx);
-    if (obj.getProperty("_storage")) |storage| {
-        if (storage.isArray()) return Value.initInt(@intCast(storage.asArray().count()));
+    if (arrayObjectStorage(obj)) |arr| {
+        return Value.initInt(@intCast(arr.count()));
     }
     return Value.initInt(0);
 }
@@ -12334,7 +13400,7 @@ fn arrayObject_count(ctx: Value, _: []const Value, _: Allocator) anyerror!Value 
 /// ArrayObject::exchangeArray
 fn arrayObject_exchangeArray(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     const obj = Value_asObject(ctx);
-    const old_storage = obj.getProperty("_storage");
+    const old_storage = obj.properties.get("storage");
 
     if (args.len > 0 and args[0].isArray()) {
         const new_arr = try PHPArray.init(allocator);
@@ -12344,7 +13410,7 @@ fn arrayObject_exchangeArray(ctx: Value, args: []const Value, allocator: Allocat
             _ = entry.value_ptr.retain();
             try new_arr.elements.put(entry.key_ptr.*, entry.value_ptr.*);
         }
-        try obj.setProperty("_storage", Value.initArray(new_arr));
+        try obj.putProperty("storage", Value.initArray(new_arr));
     }
 
     if (old_storage) |old| {
@@ -12357,17 +13423,14 @@ fn arrayObject_exchangeArray(ctx: Value, args: []const Value, allocator: Allocat
 /// ArrayObject::getArrayCopy
 fn arrayObject_getArrayCopy(ctx: Value, _: []const Value, allocator: Allocator) anyerror!Value {
     const obj = Value_asObject(ctx);
-    if (obj.getProperty("_storage")) |storage| {
-        if (storage.isArray()) {
-            const src = storage.asArray();
-            const new_arr = try PHPArray.init(allocator);
-            var iter = src.elements.iterator();
-            while (iter.next()) |entry| {
-                _ = entry.value_ptr.retain();
-                try new_arr.elements.put(entry.key_ptr.*, entry.value_ptr.*);
-            }
-            return Value.initArray(new_arr);
+    if (arrayObjectStorage(obj)) |src| {
+        const new_arr = try PHPArray.init(allocator);
+        var iter = src.elements.iterator();
+        while (iter.next()) |entry| {
+            _ = entry.value_ptr.retain();
+            try new_arr.elements.put(entry.key_ptr.*, entry.value_ptr.*);
         }
+        return Value.initArray(new_arr);
     }
     return Value.initArray(try PHPArray.init(allocator));
 }
@@ -12375,32 +13438,35 @@ fn arrayObject_getArrayCopy(ctx: Value, _: []const Value, allocator: Allocator) 
 /// ArrayObject::getFlags
 fn arrayObject_getFlags(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
     const obj = Value_asObject(ctx);
-    if (obj.getProperty("_flags")) |flags| return flags;
-    return Value.initInt(STD_PROP_LIST);
+    if (arrayObjectDataOf(obj)) |data| return Value.initInt(data.flags);
+    return Value.initInt(0);
 }
 
 /// ArrayObject::setFlags
-fn arrayObject_setFlags(ctx: Value, args: []const Value, _: Allocator) anyerror!Value {
+fn arrayObject_setFlags(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
     const obj = Value_asObject(ctx);
     if (args.len > 0) {
-        try obj.setProperty("_flags", args[0]);
+        const data = try arrayObjectAttach(obj, allocator);
+        data.flags = args[0].toInt();
     }
     return Value.initNull();
 }
 
-/// ArrayObject::getIterator
+/// ArrayObject::getIterator —— 返回 iteratorClass（默认 ArrayIterator）实例，
+/// storage **共享引用**（PHP 真值：迭代期间 `$a[1]=99` 对迭代可见 ⇒ 绑定语义）。
 fn arrayObject_getIterator(ctx: Value, _: []const Value, allocator: Allocator) anyerror!Value {
     const obj = Value_asObject(ctx);
+    const data = arrayObjectDataOf(obj) orelse return Value.initNull();
 
-    // 创建 ArrayIterator
-    const iter_meta = findClass("ArrayIterator") orelse return Value.initNull();
+    const iter_meta = findClass(data.iterator_class) orelse return Value.initNull();
     const iter_obj = try PHPObject.initWithMeta(allocator, iter_meta);
 
-    // 复制数组引用
-    if (obj.getProperty("_storage")) |storage| {
-        try iter_obj.setProperty("_array", storage);
+    // storage 共享（retain 移交迭代器属性面）+ 游标面装配
+    if (obj.properties.get("storage")) |storage| {
+        _ = storage.retain();
+        try iter_obj.putProperty("storage", storage);
     }
-    try iter_obj.setProperty("_position", Value.initInt(0));
+    _ = try arrayIteratorAttach(iter_obj, allocator);
 
     return Value_initObject(iter_obj);
 }
@@ -12408,44 +13474,41 @@ fn arrayObject_getIterator(ctx: Value, _: []const Value, allocator: Allocator) a
 /// ArrayObject::ksort
 fn arrayObject_ksort(ctx: Value, _: []const Value, allocator: Allocator) !Value {
     const obj = Value_asObject(ctx);
-    if (obj.getProperty("_storage")) |storage| {
-        if (storage.isArray()) {
-            const arr = storage.asArray();
-            var keys = std.ArrayListUnmanaged(ArrayKey){ .items = &.{}, .capacity = 0 };
-            defer keys.deinit(allocator);
-            var iter = arr.elements.iterator();
-            while (iter.next()) |entry| try keys.append(allocator, entry.key_ptr.*);
+    if (arrayObjectStorage(obj)) |arr| {
+        var keys = std.ArrayListUnmanaged(ArrayKey){ .items = &.{}, .capacity = 0 };
+        defer keys.deinit(allocator);
+        var iter = arr.elements.iterator();
+        while (iter.next()) |entry| try keys.append(allocator, entry.key_ptr.*);
 
-            std.sort.insertion(ArrayKey, keys.items, {}, struct {
-                fn lessThan(_: void, a: ArrayKey, b: ArrayKey) bool {
-                    switch (a) {
-                        .integer => |ai| switch (b) {
-                            .integer => |bi| return ai < bi,
-                            .string => return true, // int < string
-                        },
-                        .string => |as| switch (b) {
-                            .integer => return false, // string > int
-                            .string => |bs| return std.mem.order(u8, as.data, bs.data) == .lt,
-                        },
-                    }
-                }
-            }.lessThan);
-
-            const new_arr = try PHPArray.init(allocator);
-            for (keys.items) |key| {
-                if (arr.elements.get(key)) |val| {
-                    _ = val.retain();
-                    try new_arr.elements.put(key, val);
+        std.sort.insertion(ArrayKey, keys.items, {}, struct {
+            fn lessThan(_: void, a: ArrayKey, b: ArrayKey) bool {
+                switch (a) {
+                    .integer => |ai| switch (b) {
+                        .integer => |bi| return ai < bi,
+                        .string => return true, // int < string
+                    },
+                    .string => |as| switch (b) {
+                        .integer => return false, // string > int
+                        .string => |bs| return std.mem.order(u8, as.data, bs.data) == .lt,
+                    },
                 }
             }
-            // 用新数组的元素替换旧数组
-            arr.elements.deinit();
-            arr.elements = PHPArray.Elements.init(allocator);
-            arr.elements.parent = arr;
-            var new_iter = new_arr.elements.iterator();
-            while (new_iter.next()) |entry| {
-                try arr.elements.put(entry.key_ptr.*, entry.value_ptr.*);
+        }.lessThan);
+
+        const new_arr = try PHPArray.init(allocator);
+        for (keys.items) |key| {
+            if (arr.elements.get(key)) |val| {
+                _ = val.retain();
+                try new_arr.elements.put(key, val);
             }
+        }
+        // 用新数组的元素替换旧数组
+        arr.elements.deinit();
+        arr.elements = PHPArray.Elements.init(allocator);
+        arr.elements.parent = arr;
+        var new_iter = new_arr.elements.iterator();
+        while (new_iter.next()) |entry| {
+            try arr.elements.put(entry.key_ptr.*, entry.value_ptr.*);
         }
     }
     return Value.initNull();
@@ -12472,12 +13535,9 @@ fn arrayObject_offsetExists(ctx: Value, args: []const Value, _: Allocator) anyer
     const obj = Value_asObject(ctx);
     if (args.len == 0) return Value.initBool(false);
 
-    if (obj.getProperty("_storage")) |storage| {
-        if (storage.isArray()) {
-            const arr = storage.asArray();
-            const key = try valueToArrayKey(args[0], runtime_allocator);
-            return Value.initBool(arr.elements.get(key) != null);
-        }
+    if (arrayObjectStorage(obj)) |arr| {
+        const key = try valueToArrayKey(args[0], runtime_allocator);
+        return Value.initBool(arr.elements.get(key) != null);
     }
     return Value.initBool(false);
 }
@@ -12487,14 +13547,11 @@ fn arrayObject_offsetGet(ctx: Value, args: []const Value, _: Allocator) anyerror
     const obj = Value_asObject(ctx);
     if (args.len == 0) return Value.initNull();
 
-    if (obj.getProperty("_storage")) |storage| {
-        if (storage.isArray()) {
-            const arr = storage.asArray();
-            const key = try valueToArrayKey(args[0], runtime_allocator);
-            if (arr.elements.get(key)) |val| {
-                _ = val.retain();
-                return val;
-            }
+    if (arrayObjectStorage(obj)) |arr| {
+        const key = try valueToArrayKey(args[0], runtime_allocator);
+        if (arr.elements.get(key)) |val| {
+            _ = val.retain();
+            return val;
         }
     }
     return Value.initNull();
@@ -12505,13 +13562,12 @@ fn arrayObject_offsetSet(ctx: Value, args: []const Value, allocator: Allocator) 
     const obj = Value_asObject(ctx);
     if (args.len < 2) return Value.initNull();
 
-    if (obj.getProperty("_storage")) |storage| {
-        if (storage.isArray()) {
-            const arr = storage.asArray();
-            const key = try valueToArrayKey(args[0], allocator);
-            _ = args[1].retain();
-            try arr.elements.put(key, args[1]);
-        }
+    if (arrayObjectStorage(obj)) |arr| {
+        const key = try valueToArrayKey(args[0], allocator);
+        _ = args[1].retain();
+        try arr.elements.put(key, args[1]);
+        // PHP 语义：整数键写入维护 next_index（append ⇒ max_int_key+1）
+        if (key == .integer and key.integer >= arr.next_index) arr.next_index = key.integer + 1;
     }
     return Value.initNull();
 }
@@ -12521,51 +13577,36 @@ fn arrayObject_offsetUnset(ctx: Value, args: []const Value, _: Allocator) anyerr
     const obj = Value_asObject(ctx);
     if (args.len == 0) return Value.initNull();
 
-    if (obj.getProperty("_storage")) |storage| {
-        if (storage.isArray()) {
-            const arr = storage.asArray();
-            const key = try valueToArrayKey(args[0], runtime_allocator);
-            if (arr.elements.get(key)) |old| old.release(runtime_allocator);
-            _ = arr.elements.remove(key);
-        }
+    if (arrayObjectStorage(obj)) |arr| {
+        const key = try valueToArrayKey(args[0], runtime_allocator);
+        if (arr.elements.get(key)) |old| old.release(runtime_allocator);
+        _ = arr.elements.remove(key);
     }
     return Value.initNull();
 }
 
-/// ArrayObject::serialize
+/// ArrayObject::serialize —— 方法面自定义包装（PHP 8.5.8 真值逐字）：
+///   `x:` ser(flags) ser(storage) `m:` ser(动态属性面)；`x:`/`m:` 为 Zend 分隔标记。
 fn arrayObject_serialize(ctx: Value, _: []const Value, allocator: Allocator) anyerror!Value {
     const obj = Value_asObject(ctx);
-    var result = try std.ArrayList(u8).initCapacity(allocator, 64);
-    var aw = std.Io.Writer.Allocating.fromArrayList(allocator, &result);
-    defer aw.deinit();
+    var result = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+    defer result.deinit(allocator);
 
-    try aw.writer.writeAll("O:11:\"ArrayObject\":1:{");
-
-    if (obj.getProperty("_storage")) |storage| {
-        if (storage.isArray()) {
-            const arr = storage.asArray();
-            const count = arr.count();
-            try aw.writer.print("i:0;a:{d}:{{", .{count});
-            var iter = arr.elements.iterator();
-            while (iter.next()) |entry| {
-                switch (entry.key_ptr.*) {
-                    .integer => |i| {
-                        try aw.writer.print("i:{d};", .{i});
-                    },
-                    .string => |s| {
-                        try aw.writer.print("s:{d}:\"{s}\";", .{ s.length, s.data });
-                    },
-                }
-                // 简化值序列化
-                try aw.writer.writeAll("N;");
-            }
-            try aw.writer.writeAll("}}");
-        }
+    try result.appendSlice(allocator, "x:");
+    const flags_val = Value.initInt(if (arrayObjectDataOf(obj)) |d| d.flags else 0);
+    try serializeValue(&result, flags_val, allocator);
+    if (obj.properties.get("storage")) |storage| {
+        try serializeValue(&result, storage, allocator);
+    } else {
+        try serializeValue(&result, Value.initNull(), allocator);
     }
+    try result.appendSlice(allocator, ";m:");
+    // 动态属性面（STD_PROP_LIST 之外的公开属性；现状恒空——ARRAY_AS_PROPS 拦截面未实现）
+    const empty_props = try PHPArray.init(allocator);
+    defer empty_props.release(allocator);
+    try serializeValue(&result, Value.initArray(empty_props), allocator);
 
-    try aw.writer.writeAll("}");
-
-    return Value.initString(try PHPString.init(allocator, aw.written()));
+    return Value.initString(try PHPString.init(allocator, result.items));
 }
 
 /// ArrayObject::uasort
@@ -12586,12 +13627,35 @@ fn arrayObject_uksort(ctx: Value, args: []const Value, allocator: Allocator) !Va
     return Value.initBool(true);
 }
 
-/// ArrayObject::unserialize
+/// ArrayObject::unserialize —— 方法面吃自定义包装 `x:ser(flags)ser(storage);m:ser(props)`
+/// （PHP 对非包装输入抛 UnexpectedValueException「Error at offset N of M bytes」）。
 fn arrayObject_unserialize(ctx: Value, args: []const Value, allocator: Allocator) !Value {
-    _ = ctx;
-    _ = args;
-    _ = allocator;
-    // 反序列化 - 简化实现
+    const obj = Value_asObject(ctx);
+    if (args.len < 1 or !args[0].isString()) return Value.initNull();
+    const raw = args[0].asString().data;
+    if (raw.len < 2 or raw[0] != 'x' or raw[1] != ':') {
+        var buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Error at offset 0 of {d} bytes", .{raw.len}) catch "Error at offset 0";
+        return throwThrowable("UnexpectedValueException", msg, allocator);
+    }
+    var pos: usize = 2;
+    const flags_val = try unserializeValue(raw, &pos, allocator);
+    defer flags_val.release(allocator);
+    const storage_val = try unserializeValue(raw, &pos, allocator);
+    defer storage_val.release(allocator);
+    // 'm:' 段为动态属性面（现状恒空 ⇒ 解析但丢弃）
+    if (pos + 2 <= raw.len and raw[pos] == 'm' and raw[pos + 1] == ':') {
+        pos += 2;
+        const props_val = try unserializeValue(raw, &pos, allocator);
+        defer props_val.release(allocator);
+    }
+
+    const data = try arrayObjectAttach(obj, allocator);
+    data.flags = flags_val.toInt();
+    if (storage_val.isArray()) {
+        _ = storage_val.retain();
+        try obj.putProperty("storage", storage_val);
+    }
     return Value.initNull();
 }
 
@@ -12604,33 +13668,40 @@ fn arrayObject_usort(ctx: Value, args: []const Value, allocator: Allocator) !Val
     return Value.initBool(true);
 }
 
-/// ArrayObject::__serialize
+/// ArrayObject::__serialize —— 函数面（serialize()）契约，PHP 8.5.8 真值：
+///   `[0=>flags, 1=>storage, 2=>动态属性面, 3=>null]` ⇒ `O:11:"ArrayObject":4:{i:0;i:0;i:1;a:…;i:2;a:0:{};i:3;N;}`
 fn arrayObject___serialize(ctx: Value, _: []const Value, allocator: Allocator) anyerror!Value {
     const obj = Value_asObject(ctx);
     const arr = try PHPArray.init(allocator);
+    errdefer arr.release(allocator);
 
-    if (obj.getProperty("_storage")) |storage| {
-        try arr.set(allocator, .{ .string = try PHPString.init(allocator, "storage") }, storage);
+    try arr.elements.put(.{ .integer = 0 }, Value.initInt(if (arrayObjectDataOf(obj)) |d| d.flags else 0));
+    if (obj.properties.get("storage")) |storage| {
+        _ = storage.retain();
+        try arr.elements.put(.{ .integer = 1 }, storage);
+    } else {
+        try arr.elements.put(.{ .integer = 1 }, Value.initNull());
     }
-    if (obj.getProperty("_flags")) |flags| {
-        try arr.set(allocator, .{ .string = try PHPString.init(allocator, "flags") }, flags);
-    }
+    const empty_props = try PHPArray.init(allocator);
+    defer empty_props.release(allocator);
+    try arr.elements.put(.{ .integer = 2 }, Value.initArray(empty_props));
+    _ = empty_props.retain();
+    try arr.elements.put(.{ .integer = 3 }, Value.initNull());
 
     return Value.initArray(arr);
 }
 
-/// ArrayObject::__unserialize
-fn arrayObject___unserialize(ctx: Value, args: []const Value, _: Allocator) anyerror!Value {
+/// ArrayObject::__unserialize —— 函数面（unserialize()）契约：data[0]=flags, data[1]=storage。
+/// unserialize 路径不经 __construct ⇒ 无 internal_data 时现装配。
+fn arrayObject___unserialize(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
     const obj = Value_asObject(ctx);
+    const data = try arrayObjectAttach(obj, allocator);
     if (args.len > 0 and args[0].isArray()) {
-        const data = args[0].asArray();
-        const storage_key = ArrayKey{ .string = try PHPString.init(runtime_allocator, "storage") };
-        if (data.get(storage_key)) |storage| {
-            try obj.setProperty("_storage", storage);
-        }
-        const flags_key = ArrayKey{ .string = try PHPString.init(runtime_allocator, "flags") };
-        if (data.get(flags_key)) |flags| {
-            try obj.setProperty("_flags", flags);
+        const arr = args[0].asArray();
+        if (arr.elements.get(.{ .integer = 0 })) |flags| data.flags = flags.toInt();
+        if (arr.elements.get(.{ .integer = 1 })) |storage| {
+            _ = storage.retain();
+            try obj.putProperty("storage", storage);
         }
     }
     return Value.initNull();
@@ -12640,8 +13711,10 @@ fn arrayObject___unserialize(ctx: Value, args: []const Value, _: Allocator) anye
 fn arrayObject___debugInfo(ctx: Value, _: []const Value, allocator: Allocator) anyerror!Value {
     const obj = Value_asObject(ctx);
     const arr = try PHPArray.init(allocator);
+    errdefer arr.release(allocator);
 
-    if (obj.getProperty("_storage")) |storage| {
+    if (obj.properties.get("storage")) |storage| {
+        _ = storage.retain();
         try arr.set(allocator, .{ .string = try PHPString.init(allocator, "storage") }, storage);
     }
 
@@ -12651,11 +13724,11 @@ fn arrayObject___debugInfo(ctx: Value, _: []const Value, allocator: Allocator) a
 /// 注册ArrayObject类
 pub fn registerArrayObject(allocator: Allocator) !void {
     const meta = try ClassMeta.init(allocator, "ArrayObject");
+    meta.interfaces = &ARRAY_OBJECT_INTERFACES; // ★F-3（R-336）：PHP 8.5.8 实测传递闭包
 
-    try meta.addProperty(.{ .name = "_storage", .default_value = Value.initNull(), .is_public = false });
-    try meta.addProperty(.{ .name = "_flags", .default_value = Value.initInt(STD_PROP_LIST), .is_public = false });
-    try meta.addProperty(.{ .name = "_iteratorClass", .default_value = Value.initNull(), .is_public = false });
-    try meta.addProperty(.{ .name = "_position", .default_value = Value.initInt(0), .is_public = false });
+    // ★批次十一：PHP 真值面——唯一私有声明属性 `storage`（var_dump/serialize 属性面可见，
+    //   get_object_vars 全局作用域不可见）；flags/iteratorClass 挪 internal_data（不入属性表）。
+    try meta.addProperty(.{ .name = "storage", .default_value = Value.initNull(), .is_public = false });
 
     // 构造和基本方法
     try meta.addMethod(.{ .name = "__construct", .func = arrayObject_construct, .is_static = false });
@@ -12704,17 +13777,41 @@ pub fn registerArrayObject(allocator: Allocator) !void {
 // SplStack类（SPL）
 // ============================================================================
 
+/// ★批次十一：SplStack/SplQueue 内部状态面（internal_data，伪属性 `_data` 下线——
+///   PHP 真值 `get_object_vars(new SplStack()) == []`）。iter_pos 为迭代游标：
+///   Stack 走 LIFO（rewind 起自栈顶 ⇒ PHP 真值 `2:3 1:2 0:1`），Queue 走 FIFO。
+const SplDoublyLinkedListData = struct {
+    elements: *PHPArray,
+    iter_pos: i64 = 0,
+
+    fn dtor(p: ?*anyopaque, allocator: Allocator) void {
+        const data: *SplDoublyLinkedListData = @ptrCast(@alignCast(p orelse return));
+        data.elements.release(allocator);
+        allocator.destroy(data);
+    }
+};
+
+fn splDllDataOf(obj: *PHPObject) ?*SplDoublyLinkedListData {
+    const p = obj.internal_data orelse return null;
+    return @ptrCast(@alignCast(p));
+}
+
+/// 装配/重建内部状态（construct / __unserialize 不经构造时兜底共用）。
+fn splDllAttach(obj: *PHPObject, allocator: Allocator) !*SplDoublyLinkedListData {
+    if (splDllDataOf(obj)) |existing| return existing;
+    const data = try allocator.create(SplDoublyLinkedListData);
+    errdefer allocator.destroy(data);
+    data.* = .{ .elements = try PHPArray.init(allocator) };
+    obj.internal_data = data;
+    obj.internal_dtor = SplDoublyLinkedListData.dtor;
+    return data;
+}
+
 /// SplStack构造函数
 fn splStack_construct(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     _ = args;
-    _ = allocator;
     const obj = Value_asObject(ctx);
-
-    // 创建内部数组
-    const array = try PHPArray.init(runtime_allocator);
-    const array_val = Value.initArray(array);
-    try obj.putProperty("_data", array_val);
-
+    _ = try splDllAttach(obj, allocator);
     return Value.initNull();
 }
 
@@ -12724,15 +13821,13 @@ fn splStack_push(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     if (args.len < 1) return Value.initNull();
 
     const obj = Value_asObject(ctx);
-    const value = args[0];
-
-    const array_val = obj.properties.get("_data") orelse return Value.initNull();
-    const array = array_val.asArray();
+    const data = splDllDataOf(obj) orelse return Value.initNull();
+    const array = data.elements;
 
     // 添加到数组末尾
     const count = array.elements.count();
-    _ = value.retain();
-    try array.elements.put(.{ .integer = @intCast(count) }, value);
+    _ = args[0].retain();
+    try array.elements.put(.{ .integer = @intCast(count) }, args[0]);
 
     return Value.initNull();
 }
@@ -12743,8 +13838,8 @@ fn splStack_pop(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     _ = allocator;
     const obj = Value_asObject(ctx);
 
-    const array_val = obj.properties.get("_data") orelse return Value.initNull();
-    const array = array_val.asArray();
+    const data = splDllDataOf(obj) orelse return Value.initNull();
+    const array = data.elements;
 
     const count = array.elements.count();
     if (count == 0) return Value.initNull();
@@ -12764,10 +13859,77 @@ fn splStack_isEmpty(ctx: Value, args: []const Value, allocator: Allocator) !Valu
     _ = allocator;
     const obj = Value_asObject(ctx);
 
-    const array_val = obj.properties.get("_data") orelse return Value.initBool(true);
-    const array = array_val.asArray();
+    const data = splDllDataOf(obj) orelse return Value.initBool(true);
+    return Value.initBool(data.elements.elements.count() == 0);
+}
 
-    return Value.initBool(array.elements.count() == 0);
+/// SplStack::count（Countable 接口面——批次九 php_count 改接口判定后须有真方法）
+fn splStack_count(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    _ = allocator;
+    const obj = Value_asObject(ctx);
+    const data = splDllDataOf(obj) orelse return Value.initInt(0);
+    return Value.initInt(@intCast(data.elements.elements.count()));
+}
+
+/// SplStack::top
+fn splStack_top(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    _ = allocator;
+    const obj = Value_asObject(ctx);
+    const data = splDllDataOf(obj) orelse return Value.initNull();
+    const count = data.elements.elements.count();
+    if (count == 0) return Value.initNull();
+    const val = data.elements.elements.get(.{ .integer = @intCast(count - 1) }) orelse return Value.initNull();
+    _ = val.retain();
+    return val;
+}
+
+// --- Iterator 协议（LIFO：栈顶→栈底，key 保持原下标；PHP 真值 `2:3 1:2 0:1`）---
+
+fn splStack_rewind(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    _ = allocator;
+    const obj = Value_asObject(ctx);
+    const data = splDllDataOf(obj) orelse return Value.initNull();
+    data.iter_pos = @as(i64, @intCast(data.elements.elements.count())) - 1;
+    return Value.initNull();
+}
+
+fn splStack_valid(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    _ = allocator;
+    const obj = Value_asObject(ctx);
+    const data = splDllDataOf(obj) orelse return Value.initBool(false);
+    const count: i64 = @intCast(data.elements.elements.count());
+    return Value.initBool(data.iter_pos >= 0 and data.iter_pos < count);
+}
+
+fn splStack_current(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    _ = allocator;
+    const obj = Value_asObject(ctx);
+    const data = splDllDataOf(obj) orelse return Value.initNull();
+    const val = data.elements.elements.get(.{ .integer = data.iter_pos }) orelse return Value.initNull();
+    _ = val.retain();
+    return val;
+}
+
+fn splStack_key(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    _ = allocator;
+    const obj = Value_asObject(ctx);
+    const data = splDllDataOf(obj) orelse return Value.initInt(0);
+    return Value.initInt(data.iter_pos);
+}
+
+fn splStack_next(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    _ = allocator;
+    const obj = Value_asObject(ctx);
+    const data = splDllDataOf(obj) orelse return Value.initNull();
+    data.iter_pos -= 1;
+    return Value.initNull();
 }
 
 /// 注册SplStack类
@@ -12783,7 +13945,7 @@ pub fn registerSplStack(allocator: Allocator) !void {
         .static_properties = std.StringHashMap(Value).init(allocator),
         .const_visibility = std.StringHashMap(ConstVisibility).init(allocator),
         .class_constants = std.StringHashMap(Value).init(allocator),
-        .interfaces = &.{},
+        .interfaces = &SPL_STACK_QUEUE_INTERFACES, // ★F-3（R-336）：PHP 8.5.8 实测传递闭包
         .is_abstract = false,
         .allocator = allocator,
     };
@@ -12792,6 +13954,14 @@ pub fn registerSplStack(allocator: Allocator) !void {
     try meta.putMethodOrdered(.{ .name = "push", .func = splStack_push, .is_public = true });
     try meta.putMethodOrdered(.{ .name = "pop", .func = splStack_pop, .is_public = true });
     try meta.putMethodOrdered(.{ .name = "isEmpty", .func = splStack_isEmpty, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "count", .func = splStack_count, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "top", .func = splStack_top, .is_public = true });
+    // Iterator 协议（LIFO）——伪属性迁移后 foreach 的真值通道（PHP：SplStack 是 Iterator 直挂）
+    try meta.putMethodOrdered(.{ .name = "rewind", .func = splStack_rewind, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "valid", .func = splStack_valid, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "current", .func = splStack_current, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "key", .func = splStack_key, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "next", .func = splStack_next, .is_public = true });
 
     meta.magic_construct = splStack_construct;
 
@@ -12805,14 +13975,8 @@ pub fn registerSplStack(allocator: Allocator) !void {
 /// SplQueue构造函数
 fn splQueue_construct(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     _ = args;
-    _ = allocator;
     const obj = Value_asObject(ctx);
-
-    // 创建内部数组
-    const array = try PHPArray.init(runtime_allocator);
-    const array_val = Value.initArray(array);
-    try obj.putProperty("_data", array_val);
-
+    _ = try splDllAttach(obj, allocator);
     return Value.initNull();
 }
 
@@ -12822,15 +13986,13 @@ fn splQueue_enqueue(ctx: Value, args: []const Value, allocator: Allocator) !Valu
     if (args.len < 1) return Value.initNull();
 
     const obj = Value_asObject(ctx);
-    const value = args[0];
-
-    const array_val = obj.properties.get("_data") orelse return Value.initNull();
-    const array = array_val.asArray();
+    const data = splDllDataOf(obj) orelse return Value.initNull();
+    const array = data.elements;
 
     // 添加到数组末尾
     const count = array.elements.count();
-    _ = value.retain();
-    try array.elements.put(.{ .integer = @intCast(count) }, value);
+    _ = args[0].retain();
+    try array.elements.put(.{ .integer = @intCast(count) }, args[0]);
 
     return Value.initNull();
 }
@@ -12841,8 +14003,8 @@ fn splQueue_dequeue(ctx: Value, args: []const Value, allocator: Allocator) !Valu
     _ = allocator;
     const obj = Value_asObject(ctx);
 
-    const array_val = obj.properties.get("_data") orelse return Value.initNull();
-    const array = array_val.asArray();
+    const data = splDllDataOf(obj) orelse return Value.initNull();
+    const array = data.elements;
 
     const count = array.elements.count();
     if (count == 0) return Value.initNull();
@@ -12871,10 +14033,64 @@ fn splQueue_isEmpty(ctx: Value, args: []const Value, allocator: Allocator) !Valu
     _ = allocator;
     const obj = Value_asObject(ctx);
 
-    const array_val = obj.properties.get("_data") orelse return Value.initBool(true);
-    const array = array_val.asArray();
+    const data = splDllDataOf(obj) orelse return Value.initBool(true);
+    return Value.initBool(data.elements.elements.count() == 0);
+}
 
-    return Value.initBool(array.elements.count() == 0);
+/// SplQueue::count
+fn splQueue_count(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    _ = allocator;
+    const obj = Value_asObject(ctx);
+    const data = splDllDataOf(obj) orelse return Value.initInt(0);
+    return Value.initInt(@intCast(data.elements.elements.count()));
+}
+
+// --- Iterator 协议（FIFO：队首→队尾；PHP 真值 `0=a 1=b`）---
+
+fn splQueue_rewind(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    _ = allocator;
+    const obj = Value_asObject(ctx);
+    const data = splDllDataOf(obj) orelse return Value.initNull();
+    data.iter_pos = 0;
+    return Value.initNull();
+}
+
+fn splQueue_valid(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    _ = allocator;
+    const obj = Value_asObject(ctx);
+    const data = splDllDataOf(obj) orelse return Value.initBool(false);
+    const count: i64 = @intCast(data.elements.elements.count());
+    return Value.initBool(data.iter_pos >= 0 and data.iter_pos < count);
+}
+
+fn splQueue_current(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    _ = allocator;
+    const obj = Value_asObject(ctx);
+    const data = splDllDataOf(obj) orelse return Value.initNull();
+    const val = data.elements.elements.get(.{ .integer = data.iter_pos }) orelse return Value.initNull();
+    _ = val.retain();
+    return val;
+}
+
+fn splQueue_key(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    _ = allocator;
+    const obj = Value_asObject(ctx);
+    const data = splDllDataOf(obj) orelse return Value.initInt(0);
+    return Value.initInt(data.iter_pos);
+}
+
+fn splQueue_next(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    _ = allocator;
+    const obj = Value_asObject(ctx);
+    const data = splDllDataOf(obj) orelse return Value.initNull();
+    data.iter_pos += 1;
+    return Value.initNull();
 }
 
 /// 注册SplQueue类
@@ -12890,7 +14106,7 @@ pub fn registerSplQueue(allocator: Allocator) !void {
         .static_properties = std.StringHashMap(Value).init(allocator),
         .const_visibility = std.StringHashMap(ConstVisibility).init(allocator),
         .class_constants = std.StringHashMap(Value).init(allocator),
-        .interfaces = &.{},
+        .interfaces = &SPL_STACK_QUEUE_INTERFACES, // ★F-3（R-336）：PHP 8.5.8 实测传递闭包
         .is_abstract = false,
         .allocator = allocator,
     };
@@ -12899,6 +14115,13 @@ pub fn registerSplQueue(allocator: Allocator) !void {
     try meta.putMethodOrdered(.{ .name = "enqueue", .func = splQueue_enqueue, .is_public = true });
     try meta.putMethodOrdered(.{ .name = "dequeue", .func = splQueue_dequeue, .is_public = true });
     try meta.putMethodOrdered(.{ .name = "isEmpty", .func = splQueue_isEmpty, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "count", .func = splQueue_count, .is_public = true });
+    // Iterator 协议（FIFO）
+    try meta.putMethodOrdered(.{ .name = "rewind", .func = splQueue_rewind, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "valid", .func = splQueue_valid, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "current", .func = splQueue_current, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "key", .func = splQueue_key, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "next", .func = splQueue_next, .is_public = true });
 
     meta.magic_construct = splQueue_construct;
 
@@ -15800,15 +17023,20 @@ pub fn php_count(arr: Value, mode: Value) !Value {
     if (Value_isObject(arr)) {
         const obj = Value_asObject(arr);
         if (obj.class_meta) |meta| {
-            if (meta.findMethod("count")) |_| {
+            // ★F-33 第二批（R-336，与 F-3 内建接口表同批）：判定由「有没有 count() 方法」换成
+            //   「是否实现 Countable」——有 count() 但未实现 Countable 的类在 PHP 侧是 TypeError。
+            if (meta.implementsInterface("Countable")) {
                 return try php_object_call(arr, "count", &[_]Value{});
             }
         }
+        // 非 Countable 对象 ⇒ TypeError（措辞实测：`... Countable|array, Foo given`，类名）
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "count(): Argument #1 ($value) must be of type Countable|array, {s} given", .{obj.class_name}) catch
+            "count(): Argument #1 ($value) must be of type Countable|array, unknown given";
+        return throwThrowable("TypeError", msg, runtime_allocator);
     }
 
     // AOT-CODEGEN-012 F-33 第一批：非数组且无 count() 可调 ⇒ PHP 抛 TypeError（旧写法静默返 0 是 fail-open）
-    // 「有 count() 但未实现 Countable」这一格仍走上面的方法分支 ⇒ 与真值不符，留作门 X 的注册红 x4，
-    // 待 F-3 的内建接口表补齐后再切 implementsInterface("Countable") 判定。
     if (!arr.isArray()) {
         var buf: [256]u8 = undefined;
         const msg = std.fmt.bufPrint(&buf, "count(): Argument #1 ($value) must be of type Countable|array, {s} given", .{countArgTypeName(arr)}) catch
@@ -18191,31 +19419,36 @@ pub const ClassMeta = struct {
 
     fn registerDatePeriodClass(allocator: Allocator) !void {
         const meta = try ClassMeta.init(allocator, "DatePeriod");
-        try meta.addProperty(.{ .name = "start", .default_value = Value.initNull(), .is_public = false });
-        try meta.addProperty(.{ .name = "interval", .default_value = Value.initNull(), .is_public = false });
-        try meta.addProperty(.{ .name = "end", .default_value = Value.initNull(), .is_public = false });
-        try meta.addProperty(.{ .name = "recurrences", .default_value = Value.initInt(0), .is_public = false });
-        try meta.addProperty(.{ .name = "_current", .default_value = Value.initNull(), .is_public = false });
-        try meta.addProperty(.{ .name = "_key", .default_value = Value.initInt(0), .is_public = false });
+        meta.interfaces = &DATE_PERIOD_INTERFACES; // ★F-3（R-336）：PHP 8.5.8 实测传递闭包
+        // ★批次十一：PHP 真值——get_object_vars(DatePeriod) 全局可见 **7 枚 public 属性**
+        //   （start/current/end/interval/recurrences/include_start_date/include_end_date）；
+        //   迭代游标（原 _key 伪属性）挪 internal_data。
+        try meta.addProperty(.{ .name = "start", .default_value = Value.initNull(), .has_default = true, .is_public = true });
+        try meta.addProperty(.{ .name = "current", .default_value = Value.initNull(), .has_default = true, .is_public = true });
+        try meta.addProperty(.{ .name = "end", .default_value = Value.initNull(), .has_default = true, .is_public = true });
+        try meta.addProperty(.{ .name = "interval", .default_value = Value.initNull(), .has_default = true, .is_public = true });
+        try meta.addProperty(.{ .name = "recurrences", .default_value = Value.initInt(0), .has_default = true, .is_public = true });
+        try meta.addProperty(.{ .name = "include_start_date", .default_value = Value.initBool(true), .has_default = true, .is_public = true });
+        try meta.addProperty(.{ .name = "include_end_date", .default_value = Value.initBool(false), .has_default = true, .is_public = true });
 
         try meta.addMethod(.{ .name = "__construct", .func = struct {
-            fn call(ctx: Value, args: []const Value, _: Allocator) anyerror!Value {
+            fn call(ctx: Value, args: []const Value, alloc: Allocator) anyerror!Value {
                 const this = Value_asObject(ctx);
                 if (args.len < 3) return Value.initNull();
                 try this.setProperty("start", args[0]);
                 try this.setProperty("interval", args[1]);
                 if (args[2].isInt()) try this.setProperty("recurrences", args[2]) else try this.setProperty("end", args[2]);
-                try this.setProperty("_current", args[0]);
-                try this.setProperty("_key", Value.initInt(0));
+                try this.setProperty("current", args[0]);
+                _ = try datePeriodAttach(this, alloc);
                 return Value.initNull();
             }
         }.call, .is_static = false });
 
-        // Iterator interface
+        // Iterator interface（current 读 public 属性面；游标经 internal_data）
         try meta.addMethod(.{ .name = "current", .func = struct {
             fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
                 const this = Value_asObject(ctx);
-                if (this.getProperty("_current")) |current| {
+                if (this.getProperty("current")) |current| {
                     _ = current.retain();
                     return current;
                 }
@@ -18226,7 +19459,7 @@ pub const ClassMeta = struct {
         try meta.addMethod(.{ .name = "key", .func = struct {
             fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
                 const this = Value_asObject(ctx);
-                if (this.getProperty("_key")) |key| return key;
+                if (datePeriodDataOf(this)) |data| return Value.initInt(data.iter_key);
                 return Value.initInt(0);
             }
         }.call, .is_static = false });
@@ -18237,7 +19470,7 @@ pub const ClassMeta = struct {
                 fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
                     const this = Value_asObject(ctx);
                     var current_ts: i64 = 0;
-                    if (this.getProperty("_current")) |current| {
+                    if (this.getProperty("current")) |current| {
                         if (Value_isObject(current)) {
                             if (Value_asObject(current).getProperty("timestamp")) |ts| current_ts = ts.toInt();
                         }
@@ -18300,9 +19533,9 @@ pub const ClassMeta = struct {
                         const new_dt = try PHPObject.initWithMeta(alloc, dt_meta);
                         try new_dt.setProperty("timestamp", Value.initInt(current_ts));
                         try new_dt.setProperty("microseconds", Value.initInt(0));
-                        try this.setProperty("_current", Value_initObject(new_dt));
+                        try this.setProperty("current", Value_initObject(new_dt));
                     }
-                    if (this.getProperty("_key")) |key| try this.setProperty("_key", Value.initInt(key.toInt() + 1));
+                    if (datePeriodDataOf(this)) |data| data.iter_key += 1;
                     return Value.initNull();
                 }
             }.call,
@@ -18312,8 +19545,8 @@ pub const ClassMeta = struct {
         try meta.addMethod(.{ .name = "rewind", .func = struct {
             fn call(ctx: Value, _: []const Value, _: Allocator) anyerror!Value {
                 const this = Value_asObject(ctx);
-                if (this.getProperty("start")) |start| try this.setProperty("_current", start);
-                try this.setProperty("_key", Value.initInt(0));
+                if (this.getProperty("start")) |start| try this.setProperty("current", start);
+                if (datePeriodDataOf(this)) |data| data.iter_key = 0;
                 return Value.initNull();
             }
         }.call, .is_static = false });
@@ -18325,7 +19558,7 @@ pub const ClassMeta = struct {
                     if (!end.isNull()) {
                         var current_ts: i64 = 0;
                         var end_ts: i64 = 0;
-                        if (this.getProperty("_current")) |current| {
+                        if (this.getProperty("current")) |current| {
                             if (Value_isObject(current)) {
                                 if (Value_asObject(current).getProperty("timestamp")) |ts| current_ts = ts.toInt();
                             }
@@ -18337,9 +19570,16 @@ pub const ClassMeta = struct {
                     }
                 }
                 if (this.getProperty("recurrences")) |recurrences| {
-                    if (this.getProperty("_key")) |key| return Value.initBool(key.toInt() < recurrences.toInt());
+                    if (datePeriodDataOf(this)) |data| return Value.initBool(data.iter_key <= recurrences.toInt());
                 }
                 return Value.initBool(false);
+            }
+        }.call, .is_static = false });
+
+        // ★批次十一：getIterator ⇒ InternalIterator 直挂分派（宿主自带五法 ⇒ 绑定游标语义）
+        try meta.addMethod(.{ .name = "getIterator", .func = struct {
+            fn call(ctx: Value, _: []const Value, alloc: Allocator) anyerror!Value {
+                return internalIteratorNewBound(ctx, alloc);
             }
         }.call, .is_static = false });
 
@@ -18808,6 +20048,14 @@ pub const ClassMeta = struct {
     /// ★R-281：Throwable/Stringable 是伪接口（未注册 ClassMeta）⇒ 以静态字面量挂在两个根类上。
     const EXCEPTION_ROOT_INTERFACES = [_][]const u8{ "Stringable", "Throwable" };
 
+    /// ★F-3（R-336）：异常族 class_implements 的元素序是 Zend C 层注册的**逐类规格常量**
+    ///   （PHP 8.5.8 实测：10 枚为 Throwable 在前，12 枚＋两根为 Stringable 在前，
+    ///   与父子继承序无关 ⇒ 不能靠父链递归继承，必须逐类直挂）。
+    ///   本表＝"Throwable 在前"那一组（ErrorException/ValueError/TypeError/ArithmeticError/
+    ///   UnhandledMatchError/BadMethodCallException/JsonException/LogicException/
+    ///   ReflectionException/RuntimeException，共 10 枚）。
+    const EXCEPTION_INTERFACES_TF = [_][]const u8{ "Throwable", "Stringable" };
+
     /// ★F-215（R-325）：DateTime/DateTimeImmutable 挂 DateTimeInterface 的静态链接（容器级常量，防栈逃逸）。
     const DATETIME_INTERFACE_LINK = [_][]const u8{"DateTimeInterface"};
 
@@ -18853,6 +20101,20 @@ pub const ClassMeta = struct {
                         }
                         this.setProperty("line", Value.initInt(@intCast(src_line))) catch {};
                     }
+                    return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
+
+        // __wakeup()（★F-24d 补全：PHP 8.5.8 Exception 方法表第 2 枚；反序列化魔术方法，无操作返 null）
+        try meta.addMethod(.{
+            .name = "__wakeup",
+            .func = struct {
+                fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                    _ = ctx;
+                    _ = args;
+                    _ = runtime_alloc;
                     return Value.initNull();
                 }
             }.call,
@@ -18926,6 +20188,20 @@ pub const ClassMeta = struct {
             .is_static = false,
         });
 
+        // getTrace()（★F-24d 补全：AOT 无真实栈帧 ⇒ 恒空数组，与「未抛出/顶层抛出」的 PHP 真值一致；
+        //   深层调用栈差异属宪法 §七.5 栈追踪豁免面）
+        try meta.addMethod(.{
+            .name = "getTrace",
+            .func = struct {
+                fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                    _ = ctx;
+                    _ = args;
+                    return Value.initArray(try PHPArray.init(runtime_alloc));
+                }
+            }.call,
+            .is_static = false,
+        });
+
         try meta.addMethod(.{
             .name = "getPrevious",
             .func = struct {
@@ -18938,6 +20214,19 @@ pub const ClassMeta = struct {
                         return val;
                     }
                     return Value.initNull();
+                }
+            }.call,
+            .is_static = false,
+        });
+
+        // getTraceAsString()（★F-24d 补全：PHP 实测恒 "#0 {main}"）
+        try meta.addMethod(.{
+            .name = "getTraceAsString",
+            .func = struct {
+                fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
+                    _ = ctx;
+                    _ = args;
+                    return Value.initString(try PHPString.init(runtime_alloc, "#0 {main}"));
                 }
             }.call,
             .is_static = false,
@@ -18987,15 +20276,17 @@ pub const ClassMeta = struct {
         //   逐枚核对）。此前 `Error extends Exception`、其余全部平铺在 Exception 下 ⇒
         //   ① `f(Throwable)` 全拒（无 Throwable 接口登记）；② `f(Exception)` 错收 Error 族；
         //   ③ `catch (LogicException)`／`catch (RuntimeException)` 抓不到子类。
-        const ExceptionSpec = struct { name: []const u8, parent: []const u8 };
+        // ★F-3（R-336）：tf=true ⇒ class_implements 序为 "Throwable,Stringable"（10 枚实测）；
+        //   其余子类与两根同为 "Stringable,Throwable"。序为 Zend 逐类规格常量，非继承可得。
+        const ExceptionSpec = struct { name: []const u8, parent: []const u8, tf: bool = false };
         const exception_specs = [_]ExceptionSpec{
-            .{ .name = "ReflectionException", .parent = "Exception" },
-            .{ .name = "ErrorException", .parent = "Exception" },
-            .{ .name = "JsonException", .parent = "Exception" },
-            .{ .name = "RuntimeException", .parent = "Exception" },
-            .{ .name = "LogicException", .parent = "Exception" },
+            .{ .name = "ReflectionException", .parent = "Exception", .tf = true },
+            .{ .name = "ErrorException", .parent = "Exception", .tf = true },
+            .{ .name = "JsonException", .parent = "Exception", .tf = true },
+            .{ .name = "RuntimeException", .parent = "Exception", .tf = true },
+            .{ .name = "LogicException", .parent = "Exception", .tf = true },
             .{ .name = "BadFunctionCallException", .parent = "LogicException" },
-            .{ .name = "BadMethodCallException", .parent = "BadFunctionCallException" },
+            .{ .name = "BadMethodCallException", .parent = "BadFunctionCallException", .tf = true },
             .{ .name = "DomainException", .parent = "LogicException" },
             .{ .name = "InvalidArgumentException", .parent = "LogicException" },
             .{ .name = "LengthException", .parent = "LogicException" },
@@ -19007,13 +20298,13 @@ pub const ClassMeta = struct {
             .{ .name = "UnexpectedValueException", .parent = "RuntimeException" },
             // Error 树：PHP 里 Error 与 Exception **平级**（各自 implements Throwable）
             .{ .name = "Error", .parent = "" },
-            .{ .name = "TypeError", .parent = "Error" },
+            .{ .name = "TypeError", .parent = "Error", .tf = true },
             // ★F-62e（R-330）：ArgumentCountError extends TypeError（PHP 8.5.8 实测
             //   `max()` 零参抛出；`catch (ArgumentCountError)` 与 `catch (TypeError)` 均须命中）
             .{ .name = "ArgumentCountError", .parent = "TypeError" },
-            .{ .name = "ValueError", .parent = "Error" },
-            .{ .name = "UnhandledMatchError", .parent = "Error" },
-            .{ .name = "ArithmeticError", .parent = "Error" },
+            .{ .name = "ValueError", .parent = "Error", .tf = true },
+            .{ .name = "UnhandledMatchError", .parent = "Error", .tf = true },
+            .{ .name = "ArithmeticError", .parent = "Error", .tf = true },
             .{ .name = "DivisionByZeroError", .parent = "ArithmeticError" },
         };
         for (exception_specs) |spec| {
@@ -19033,6 +20324,9 @@ pub const ClassMeta = struct {
             } else {
                 const registry = class_registry orelse return error.ClassRegistryNotInitialized;
                 child.parent = registry.get(spec.parent) orelse return error.ParentExceptionClassMissing;
+                // ★F-3（R-336）：逐类直挂实测序的接口表——T-first 组用 EXCEPTION_INTERFACES_TF，
+                //   其余（含 S-first 子类）用根序表；父链递归仅兜底用户自定义异常子类。
+                child.interfaces = if (spec.tf) &EXCEPTION_INTERFACES_TF else &EXCEPTION_ROOT_INTERFACES;
             }
             // 内建异常都继承 Exception 的 __construct/__toString（ReflectionException 曾漏拷 ⇒ Stringable 失配）
             child.magic_construct = meta.magic_construct;
@@ -19356,10 +20650,10 @@ pub const ClassMeta = struct {
     fn registerWeakMapClass(allocator: Allocator) !void {
         const meta = try ClassMeta.init(allocator, "WeakMap");
 
-        // 实现接口标记
+        // 实现接口标记（★F-3 R-336 校序：与 PHP 8.5.8 class_implements 原生序一致）
         const ifaces = try allocator.alloc([]const u8, 4);
-        ifaces[0] = "Countable";
-        ifaces[1] = "ArrayAccess";
+        ifaces[0] = "ArrayAccess";
+        ifaces[1] = "Countable";
         ifaces[2] = "IteratorAggregate";
         ifaces[3] = "Traversable";
         meta.interfaces = ifaces;
@@ -19928,6 +21222,7 @@ pub const ClassMeta = struct {
     fn registerReflectionClasses(allocator: Allocator) !void {
         // ReflectionAttribute
         const attr_meta = try ClassMeta.init(allocator, "ReflectionAttribute");
+        attr_meta.interfaces = &REFLECTION_STD_INTERFACES; // ★F-3（R-336）：PHP 8.5.8 实测
         try attr_meta.addMethod(.{
             .name = "getName",
             .func = struct {
@@ -20036,6 +21331,7 @@ pub const ClassMeta = struct {
 
         // ReflectionClass
         const rc_meta = try ClassMeta.init(allocator, "ReflectionClass");
+        rc_meta.interfaces = &REFLECTION_STD_INTERFACES; // ★F-3（R-336）：PHP 8.5.8 实测
         try rc_meta.addMethod(.{
             .name = "__construct",
             .func = struct {
@@ -20711,6 +22007,7 @@ pub const ClassMeta = struct {
 
         // ReflectionEnum (extends ReflectionClass behavior)
         const re_meta = try ClassMeta.init(allocator, "ReflectionEnum");
+        re_meta.interfaces = &REFLECTION_ENUM_INTERFACES; // ★F-3（R-336）：PHP 8.5.8 实测
         try re_meta.addMethod(.{
             .name = "__construct",
             .func = struct {
@@ -20744,6 +22041,7 @@ pub const ClassMeta = struct {
 
         // ReflectionClassConstant
         const rcc_meta = try ClassMeta.init(allocator, "ReflectionClassConstant");
+        rcc_meta.interfaces = &REFLECTION_STD_INTERFACES; // ★F-3（R-336）：PHP 8.5.8 实测
         try rcc_meta.addMethod(.{
             .name = "__construct",
             .func = struct {
@@ -20810,6 +22108,7 @@ pub const ClassMeta = struct {
 
         // ReflectionNamedType - PHP ReflectionNamedType 类
         const rnt_meta = try ClassMeta.init(allocator, "ReflectionNamedType");
+        rnt_meta.interfaces = &STRINGABLE_ONLY_INTERFACES; // ★F-3（R-336）：PHP 8.5.8 实测
         // getName() - 返回类型名称字符串
         try rnt_meta.addMethod(.{
             .name = "getName",
@@ -20872,6 +22171,7 @@ pub const ClassMeta = struct {
 
         // ReflectionUnionType - PHP ReflectionUnionType 类
         const rut_meta = try ClassMeta.init(allocator, "ReflectionUnionType");
+        rut_meta.interfaces = &STRINGABLE_ONLY_INTERFACES; // ★F-3（R-336）：PHP 8.5.8 实测
         // getTypes() - 返回 ReflectionNamedType 对象数组
         try rut_meta.addMethod(.{
             .name = "getTypes",
@@ -20942,6 +22242,7 @@ pub const ClassMeta = struct {
 
         // ReflectionIntersectionType - PHP ReflectionIntersectionType 类
         const rit_meta = try ClassMeta.init(allocator, "ReflectionIntersectionType");
+        rit_meta.interfaces = &STRINGABLE_ONLY_INTERFACES; // ★F-3（R-336）：PHP 8.5.8 实测
         // getTypes()
         try rit_meta.addMethod(.{
             .name = "getTypes",
@@ -21009,6 +22310,7 @@ pub const ClassMeta = struct {
 
         // ReflectionMethod
         const rm_meta = try ClassMeta.init(allocator, "ReflectionMethod");
+        rm_meta.interfaces = &REFLECTION_STD_INTERFACES; // ★F-3（R-336）：PHP 8.5.8 实测
         try rm_meta.addMethod(.{
             .name = "__construct",
             .func = struct {
@@ -21546,6 +22848,7 @@ pub const ClassMeta = struct {
 
         // ReflectionParameter
         const rp_meta = try ClassMeta.init(allocator, "ReflectionParameter");
+        rp_meta.interfaces = &REFLECTION_STD_INTERFACES; // ★F-3（R-336）：PHP 8.5.8 实测
         try rp_meta.addMethod(.{
             .name = "__construct",
             .func = struct {
@@ -21899,6 +23202,7 @@ pub const ClassMeta = struct {
 
         // ReflectionProperty - PHP ReflectionProperty 类
         const rprop_meta = try ClassMeta.init(allocator, "ReflectionProperty");
+        rprop_meta.interfaces = &REFLECTION_STD_INTERFACES; // ★F-3（R-336）：PHP 8.5.8 实测
         try rprop_meta.addMethod(.{
             .name = "__construct",
             .func = struct {
@@ -22258,6 +23562,7 @@ pub const ClassMeta = struct {
 
         // ReflectionFunction
         const rf_meta = try ClassMeta.init(allocator, "ReflectionFunction");
+        rf_meta.interfaces = &REFLECTION_STD_INTERFACES; // ★F-3（R-336）：PHP 8.5.8 实测
         try rf_meta.addMethod(.{
             .name = "__construct",
             .func = struct {
@@ -23061,7 +24366,8 @@ pub const ClassMeta = struct {
     /// 检查是否实现了接口
     pub fn implementsInterface(self: *const ClassMeta, interface_name: []const u8) bool {
         for (self.interfaces) |iface| {
-            if (std.mem.eql(u8, iface, interface_name)) return true;
+            // ★F-3（R-336）：接口名 CI（PHP 类/接口名均大小写不敏感；表内存的是规范拼写）
+            if (std.ascii.eqlIgnoreCase(iface, interface_name)) return true;
             // 递归检查接口的父接口（interface C extends A, B）
             if (class_registry) |reg| {
                 if (reg.get(iface)) |iface_meta| {
@@ -23648,6 +24954,13 @@ pub const PHPObject = struct {
     gc_info: GCInfo,
     allocator: Allocator,
 
+    /// ★批次十（i1/i2）：内建类的内部状态面（对应 Zend 的 internal object handlers）。
+    /// 内部状态**不挂 properties** ⇒ get_object_vars / foreach 属性快照 / 默认 serialize
+    /// 路径均不可见，与 PHP 内建对象语义对齐（真值：`get_object_vars(new SplFixedArray(2)) == []`）。
+    /// 释放挂点：deinit（正常引用归零）与 gcDestroyObject（GC 收集）两处统一调 internal_dtor。
+    internal_data: ?*anyopaque = null,
+    internal_dtor: ?*const fn (?*anyopaque, Allocator) void = null,
+
     /// 创建新对象
     pub fn init(allocator: Allocator, class_name: []const u8) !*PHPObject {
         const obj = try allocator.create(PHPObject);
@@ -23661,6 +24974,8 @@ pub const PHPObject = struct {
         obj.gc_info = .{};
         obj.allocator = allocator;
         obj.class_meta = findClass(class_name);
+        obj.internal_data = null;
+        obj.internal_dtor = null;
 
         alloc_counters.php_object_objects += 1;
         alloc_counters.php_object_live_objects += 1;
@@ -23684,6 +24999,8 @@ pub const PHPObject = struct {
         obj.gc_info = .{};
         obj.allocator = allocator;
         obj.class_meta = meta;
+        obj.internal_data = null;
+        obj.internal_dtor = null;
 
         alloc_counters.php_object_objects += 1;
         alloc_counters.php_object_live_objects += 1;
@@ -23805,6 +25122,12 @@ pub const PHPObject = struct {
             self.allocator.free(entry.key_ptr.*);
         }
         self.properties.deinit();
+
+        // ★批次十（i1/i2）：内建类内部状态面回收（SplFixedArray 元素数组、迭代器宿主引用等）
+        if (self.internal_data) |p| {
+            if (self.internal_dtor) |dtor| dtor(p, self.allocator);
+            self.internal_data = null;
+        }
 
         // 释放类名
         self.allocator.free(self.class_name);
@@ -24015,6 +25338,15 @@ pub const PHPObject = struct {
                 if (result.isString()) {
                     return result.asString();
                 }
+                // ★批次十（t13 族）：__toString 内部抛可捕获异常时（throwThrowable 契约 =
+                //   setException + 返回异常对象**值**，非 Zig error），pending 异常不得被
+                //   下面的通用 "could not be converted" Error 覆盖。归还本函数这份引用，
+                //   全局那份留给 hasException 轮询分派。
+                if (hasException()) {
+                    result.release(allocator);
+                    return PHPString.init(allocator, "");
+                }
+                result.release(allocator);
             }
         }
         // ★F-32（R-331）：无 __toString ⇒ 可捕获 Error「Object of class X could not be
@@ -24864,6 +26196,40 @@ pub fn php_cast_array(val: Value) !Value {
     // 对象转数组：将属性名作为键，属性值作为数组元素
     if (Value_isObject(actual_val)) {
         const obj = Value_asObject(actual_val);
+        // ★批次十一：ArrayObject/ArrayIterator 的 (array) cast 定制（对应 Zend 的 cast_object
+        //   handler——该族返回**元素面**而非属性面，PHP 真值 `(array)new ArrayObject([1,x=>2])` = `[1,x=>2]`）。
+        //   沿继承链判定（用户子类同语义），其余类维持属性面旧路径。
+        {
+            var m: ?*const ClassMeta = obj.class_meta;
+            var is_spl_storage_class = false;
+            while (m) |mm| : (m = mm.parent) {
+                if (std.ascii.eqlIgnoreCase(mm.name, "ArrayObject") or std.ascii.eqlIgnoreCase(mm.name, "ArrayIterator")) {
+                    is_spl_storage_class = true;
+                    break;
+                }
+            }
+            if (is_spl_storage_class) {
+                if (obj.properties.get("storage")) |storage| {
+                    if (storage.isArray()) {
+                        const src = storage.asArray();
+                        var it = src.elements.iterator();
+                        while (it.next()) |entry| {
+                            const key_val: Value = switch (entry.key_ptr.*) {
+                                .integer => |i| Value.initInt(i),
+                                .string => |sp| blk: {
+                                    sp.retain();
+                                    break :blk Value.initString(sp);
+                                },
+                            };
+                            defer key_val.release(runtime_allocator);
+                            _ = entry.value_ptr.retain();
+                            try arr.setByValue(runtime_allocator, key_val, entry.value_ptr.*);
+                        }
+                        return Value.initArray(arr);
+                    }
+                }
+            }
+        }
         var it = obj.properties.iterator();
         while (it.next()) |entry| {
             const key_phpstr = try PHPString.init(runtime_allocator, entry.key_ptr.*);
@@ -25433,8 +26799,9 @@ pub fn php_enum_exists(name_val: Value, autoload: Value, allocator: Allocator) !
 /// 类名 CI（经 findClass 规范化）。
 pub fn php_is_a(value: Value, class_name: Value, allow_string: Value) !Value {
     if (!class_name.isString()) return Value.initBool(false);
-    const target_meta = findClass(class_name.asString().data) orelse return Value.initBool(false);
-    const target = target_meta.name;
+    // ★F-3（R-336）：接口名（ArrayAccess/Iterator/…）不注册为 ClassMeta ⇒ 不可 findClass 失败即 false；
+    //   与 instanceof 同口径：注册名取规范拼写，未注册名（伪接口）原样比较。
+    const target = if (findClass(class_name.asString().data)) |m| m.name else class_name.asString().data;
 
     if (Value_isObject(value)) {
         const obj = Value_asObject(value);
@@ -25680,7 +27047,11 @@ fn collectInterfaces(meta: *const ClassMeta, arr: *PHPArray, visited: *std.Strin
         if (visited.contains(iface)) continue;
         try visited.put(iface, {});
         const val_str = try PHPString.init(allocator, iface);
-        try arr.push(allocator, Value.initString(val_str));
+        // ★F-3（R-336）：PHP 契约＝class_implements 返回 [接口名 => 接口名]（名键名值），
+        //   旧实现 push 成 int 键 ⇒ array_keys 出 0,1,2… 与 PHP 相悖。
+        try arr.set(allocator, ArrayKey{ .string = val_str }, Value.initString(val_str));
+        // set 已对键/值各 retain 一次，归还调用侧自持的一份
+        val_str.release(allocator);
     }
     // 递归检查接口的父接口
     for (meta.interfaces) |iface| {
@@ -26543,8 +27914,10 @@ fn unserializeValue(data: []const u8, pos: *usize, allocator: Allocator) !Value 
                 const val = try unserializeValue(data, pos, allocator);
 
                 if (!key_val.isString()) {
+                    // ★批次十（i1/i2）：整数键同样入 data_arr——__unserialize 语义需要
+                    // （PHP 真值：SplFixedArray 的 O: 载荷键是整数；旧路径写属性时仍会过滤非字符串键）。
+                    try data_arr.set(allocator, .{ .integer = key_val.toInt() }, val);
                     key_val.release(allocator);
-                    val.release(allocator);
                     continue;
                 }
                 const raw_key = key_val.asString().data;
@@ -26712,6 +28085,42 @@ pub fn throwThrowableDiscard(class_name: []const u8, message: []const u8, alloca
 pub fn throwThrowableDiscardCatch(class_name: []const u8, message: []const u8, allocator: Allocator) void {
     const ex = throwThrowable(class_name, message, allocator) catch return;
     ex.release(allocator);
+}
+
+/// ★F-24d 第一段（R-337）：类链接失败——登记时父类/接口缺失 ⇒ 抛**可捕获** Error。
+///   PHP 8.5.8 实测措辞：`Class "X" not found` / `Interface "X" not found`（Error 类，可 catch；
+///   未捕获 ⇒ 未捕获通道 fatal+rc=255）。file/line 覆盖为类声明点（setException 的惰性注入
+///   会写成启动期位置，须在抛后覆盖回声明点）。
+pub fn throwClassLinkError(kind: []const u8, name: []const u8, file: []const u8, line: i64) error{ClassLinkFailed} {
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s} \"{s}\" not found", .{ kind, name }) catch "Class not found";
+    const ex = throwThrowable("Error", msg, runtime_allocator) catch return error.ClassLinkFailed;
+    if (Value_isObject(ex)) {
+        const obj = Value_asObject(ex);
+        if (PHPString.init(runtime_allocator, file) catch null) |s| {
+            const fv = Value.initString(s);
+            obj.setProperty("file", fv) catch {};
+            fv.release(runtime_allocator);
+        }
+        obj.setProperty("line", Value.initInt(line)) catch {};
+    }
+    ex.release(runtime_allocator);
+    return error.ClassLinkFailed;
+}
+
+/// ★F-3/F-24d：内建伪接口白名单——PHP 内建接口在 AOT 不注册 ClassMeta（F-3 静态表只挂名字），
+///   「接口缺失即抛」必须放行这些名字，否则 `implements Countable` 之类误炸。
+///   名单＝F-3 真值表出现过的全部内建接口 + enum 隐式接口（UnitEnum/BackedEnum）。
+pub fn isBuiltinPseudoInterface(name: []const u8) bool {
+    const list = [_][]const u8{
+        "Traversable", "Iterator", "IteratorAggregate", "ArrayAccess", "Countable",
+        "Serializable", "SeekableIterator", "JsonSerializable", "Stringable", "Throwable",
+        "DateTimeInterface", "Reflector", "UnitEnum", "BackedEnum",
+    };
+    for (list) |n| {
+        if (std.ascii.eqlIgnoreCase(n, name)) return true;
+    }
+    return false;
 }
 
 pub fn throwThrowable(class_name: []const u8, message: []const u8, allocator: Allocator) !Value {
@@ -28363,7 +29772,7 @@ pub fn php_sort(arr: Value, allocator: Allocator) !Value {
     sort_arr.elements.deinit();
     sort_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
     sort_arr.next_index = @intCast(values.len);
-    return Value.initArray(sort_arr);
+    return Value.initBool(true); // ★R-334（f042 回归红显形）：PHP 排序族契约＝原地排序+返 true；旧返数组本体系非 PHP 语义
 }
 
 pub fn php_rsort(arr: Value, allocator: Allocator) !Value {
@@ -28391,7 +29800,7 @@ pub fn php_rsort(arr: Value, allocator: Allocator) !Value {
     sort_arr.elements.deinit();
     sort_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
     sort_arr.next_index = @intCast(values.len);
-    return Value.initArray(sort_arr);
+    return Value.initBool(true); // ★R-334（f042 回归红显形）：PHP 排序族契约＝原地排序+返 true；旧返数组本体系非 PHP 语义
 }
 
 pub fn php_asort(arr: Value, allocator: Allocator) !Value {
@@ -28411,7 +29820,7 @@ pub fn php_asort(arr: Value, allocator: Allocator) !Value {
     }
     sort_arr.elements.deinit();
     sort_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
-    return Value.initArray(sort_arr);
+    return Value.initBool(true); // ★R-334（f042 回归红显形）：PHP 排序族契约＝原地排序+返 true；旧返数组本体系非 PHP 语义
 }
 
 pub fn php_arsort(arr: Value, allocator: Allocator) !Value {
@@ -28431,7 +29840,7 @@ pub fn php_arsort(arr: Value, allocator: Allocator) !Value {
     }
     sort_arr.elements.deinit();
     sort_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
-    return Value.initArray(sort_arr);
+    return Value.initBool(true); // ★R-334（f042 回归红显形）：PHP 排序族契约＝原地排序+返 true；旧返数组本体系非 PHP 语义
 }
 
 pub fn php_ksort(arr: Value, allocator: Allocator) !Value {
@@ -28451,7 +29860,7 @@ pub fn php_ksort(arr: Value, allocator: Allocator) !Value {
     }
     sort_arr.elements.deinit();
     sort_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
-    return Value.initArray(sort_arr);
+    return Value.initBool(true); // ★R-334（f042 回归红显形）：PHP 排序族契约＝原地排序+返 true；旧返数组本体系非 PHP 语义
 }
 
 pub fn php_krsort(arr: Value, allocator: Allocator) !Value {
@@ -28471,7 +29880,7 @@ pub fn php_krsort(arr: Value, allocator: Allocator) !Value {
     }
     sort_arr.elements.deinit();
     sort_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
-    return Value.initArray(sort_arr);
+    return Value.initBool(true); // ★R-334（f042 回归红显形）：PHP 排序族契约＝原地排序+返 true；旧返数组本体系非 PHP 语义
 }
 
 fn invokeUserCompare(callback: Value, a: Value, b: Value, allocator: Allocator) !i64 {
@@ -28616,7 +30025,7 @@ pub fn php_usort(arr: Value, callback: Value, allocator: Allocator) !Value {
     sort_arr.elements.deinit();
     sort_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
     sort_arr.next_index = @intCast(values.len);
-    return Value.initArray(sort_arr);
+    return Value.initBool(true); // ★R-334（f042 回归红显形）：PHP 排序族契约＝原地排序+返 true；旧返数组本体系非 PHP 语义
 }
 
 pub fn php_uasort(arr: Value, callback: Value, allocator: Allocator) !Value {
@@ -28637,7 +30046,7 @@ pub fn php_uasort(arr: Value, callback: Value, allocator: Allocator) !Value {
     }
     sort_arr.elements.deinit();
     sort_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
-    return Value.initArray(sort_arr);
+    return Value.initBool(true); // ★R-334（f042 回归红显形）：PHP 排序族契约＝原地排序+返 true；旧返数组本体系非 PHP 语义
 }
 
 pub fn php_uksort(arr: Value, callback: Value, allocator: Allocator) !Value {
@@ -28658,7 +30067,7 @@ pub fn php_uksort(arr: Value, callback: Value, allocator: Allocator) !Value {
     }
     sort_arr.elements.deinit();
     sort_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
-    return Value.initArray(sort_arr);
+    return Value.initBool(true); // ★R-334（f042 回归红显形）：PHP 排序族契约＝原地排序+返 true；旧返数组本体系非 PHP 语义
 }
 
 fn quickSortIndicesByValues(indices: []usize, values: []Value, allocator: Allocator, descending: bool) !void {
@@ -30720,6 +32129,18 @@ fn jsonEncodeValue(value: Value, buffer: *std.ArrayListUnmanaged(u8), allocator:
                 }
                 return error.JsonPureEnum;
             }
+            // ★批次十（t13）：JsonSerializable 契约——json_encode 命中该接口的对象时
+            //   编码其 jsonSerialize() 返回值，而非公开属性面（PHP 8.5.8 真值：
+            //   `class P implements \JsonSerializable {…return [1,2];}` ⇒ `JSON=[1,2]`）。
+            if (meta.implementsInterface("JsonSerializable")) {
+                if (meta.findMethodLookup("jsonSerialize")) |lookup| {
+                    const guard = ClassContext.init(meta, lookup.owner);
+                    defer guard.deinit();
+                    const ret = try lookup.method.func(value, &.{}, allocator);
+                    defer ret.release(allocator);
+                    return jsonEncodeValue(ret, buffer, allocator, flags);
+                }
+            }
         }
         try buffer.append(allocator, '{');
         var first = true;
@@ -30853,6 +32274,16 @@ fn jsonEncodeValuePretty(value: Value, buffer: *std.ArrayListUnmanaged(u8), allo
                     return jsonEncodeValuePretty(backing, buffer, allocator, flags, indent);
                 }
                 return error.JsonPureEnum;
+            }
+            // ★批次十（t13）：JsonSerializable 契约同 jsonEncodeValue（pretty 面递归带缩进）。
+            if (meta.implementsInterface("JsonSerializable")) {
+                if (meta.findMethodLookup("jsonSerialize")) |lookup| {
+                    const guard = ClassContext.init(meta, lookup.owner);
+                    defer guard.deinit();
+                    const ret = try lookup.method.func(value, &.{}, allocator);
+                    defer ret.release(allocator);
+                    return jsonEncodeValuePretty(ret, buffer, allocator, flags, indent);
+                }
             }
         }
         var count: usize = 0;
@@ -39565,7 +40996,7 @@ pub fn php_shuffle(arr: Value, allocator: Allocator) !Value {
         _ = idx;
     }
 
-    return Value.initArray(sort_arr);
+    return Value.initBool(true); // ★R-334（f042 回归红显形）：PHP 排序族契约＝原地排序+返 true；旧返数组本体系非 PHP 语义
 }
 
 /// compact() - 创建包含变量及其值的数组
@@ -39677,7 +41108,7 @@ pub fn php_natsort(arr: Value, allocator: Allocator) !Value {
             try m.put(allocator, entry.key, entry.val);
         }
     }
-    return Value.initArray(sort_arr);
+    return Value.initBool(true); // ★R-334（f042 回归红显形）：PHP 排序族契约＝原地排序+返 true；旧返数组本体系非 PHP 语义
 }
 
 /// 大小写不敏感的自然排序
@@ -39732,7 +41163,7 @@ pub fn php_natcasesort(arr: Value, allocator: Allocator) !Value {
             try m.put(allocator, entry.key, entry.val);
         }
     }
-    return Value.initArray(sort_arr);
+    return Value.initBool(true); // ★R-334（f042 回归红显形）：PHP 排序族契约＝原地排序+返 true；旧返数组本体系非 PHP 语义
 }
 
 /// 带键值比较的数组差集
@@ -40031,6 +41462,7 @@ pub fn php_generator_yield_from(
 
 fn registerGeneratorClass(allocator: Allocator) !void {
     const meta = try ClassMeta.init(allocator, "Generator");
+    meta.interfaces = &GENERATOR_INTERFACES; // ★F-3（R-336）：PHP 8.5.8 实测传递闭包
 
     try meta.addMethod(.{
         .name = "rewind",
@@ -40167,6 +41599,27 @@ fn registerGeneratorClass(allocator: Allocator) !void {
                     return gc.return_value;
                 }
                 return Value.initNull();
+            }
+        }.call,
+        .is_static = false,
+    });
+
+    // ★批次十（i1）：Generator 方法面第 9 枚 __debugInfo。
+    //   PHP 真值：返回 ['function' => '{closure:file:line}']（调试信息面）；
+    //   AOT 无源行号面，键形与 PHP 对齐、值为闭包占位词（与 var_dump 的调试口径同级）。
+    try meta.addMethod(.{
+        .name = "__debugInfo",
+        .func = struct {
+            fn call(_: Value, _: []const Value, alloc: Allocator) anyerror!Value {
+                const arr = try PHPArray.init(alloc);
+                errdefer arr.release(alloc);
+                const key = try PHPString.init(alloc, "function");
+                const fn_str = try PHPString.init(alloc, "{closure}");
+                const fn_val = Value.initString(fn_str);
+                try arr.set(alloc, .{ .string = key }, fn_val);
+                key.release(alloc);
+                fn_val.release(alloc);
+                return Value.initArray(arr);
             }
         }.call,
         .is_static = false,

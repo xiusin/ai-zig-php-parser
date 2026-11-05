@@ -230,6 +230,8 @@ pub const MultiFileCompiler = struct {
 
         try aot_compiler.setSource(source_z);
         try aot_compiler.setAST(context.nodes.items, string_table.items, root_index);
+        // ★F-35（R-334）：strict_types 位由 Parser 透传至 IR Module
+        aot_compiler.setStrictTypes(p.strict_types);
 
         // 只编译到 IR，不生成可执行文件
         const module_opt = aot_compiler.compileToIR() catch |err| {
