@@ -34595,13 +34595,21 @@ fn pcreSearchOffset(offset: Value, subject_len: usize) struct { start: usize, ou
     return .{ .start = as_len, .out_of_range = false };
 }
 
+/// ★批次十二：by-ref matches 槽覆盖写——先释放槽内旧值再赋新值。
+///   temp_reg 槽经 val_assign copy-in 独立持有一份 retain（nlk 调用方已 release+retain
+///   抵消）⇒ `matches.* = X` 裸覆盖会净漏旧值一份引用；对 null/int 旧值 release 为 no-op。
+inline fn pregMatchesAssign(matches: *Value, new_val: Value, allocator: Allocator) void {
+    matches.*.release(allocator);
+    matches.* = new_val;
+}
+
 pub fn php_preg_match(pattern: Value, subject: Value, matches: *Value, flags: Value, offset: Value, allocator: Allocator) !Value {
     // ★F-62f 余量（R-232）：#4 flags／#5 offset 必为 int（Foo ⇒ TypeError，先于 PREG_* 域检查）
     const flags_ok = requireOptionalNumParam("preg_match", 4, "flags", .int_param, flags) orelse return Value.initBool(false);
     const offset_ok = requireOptionalNumParam("preg_match", 5, "offset", .int_param, offset) orelse return Value.initBool(false);
     const flags_val: i64 = if (flags_ok.isNull()) 0 else flags_ok.toInt();
     if (pregMatchFlagsInvalid(flags_val)) {
-        matches.* = Value.initArray(try PHPArray.init(allocator));
+        pregMatchesAssign(matches, Value.initArray(try PHPArray.init(allocator)), allocator);
         throwThrowableDiscardCatch("ValueError", "preg_match(): Argument #4 ($flags) must be a PREG_* constant", allocator);
         return Value.initBool(false);
     }
@@ -34609,7 +34617,7 @@ pub fn php_preg_match(pattern: Value, subject: Value, matches: *Value, flags: Va
     const unmatched_as_null = (flags_val & PREG_UNMATCHED_AS_NULL_BIT) != 0;
 
     if (!pattern.isString() or !subject.isString()) {
-        matches.* = Value.initArray(try PHPArray.init(allocator));
+        pregMatchesAssign(matches, Value.initArray(try PHPArray.init(allocator)), allocator);
         return Value.initInt(0);
     }
 
@@ -34633,12 +34641,12 @@ pub fn php_preg_match(pattern: Value, subject: Value, matches: *Value, flags: Va
 
     const off = pcreSearchOffset(offset_ok, subject_str.length);
     if (off.out_of_range) {
-        matches.* = Value.initArray(try PHPArray.init(allocator));
+        pregMatchesAssign(matches, Value.initArray(try PHPArray.init(allocator)), allocator);
         return Value.initBool(false);
     }
 
     const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse {
-        matches.* = Value.initArray(try PHPArray.init(allocator));
+        pregMatchesAssign(matches, Value.initArray(try PHPArray.init(allocator)), allocator);
         return Value.initInt(0);
     };
     defer pcre2_match_data_free_8(match_data);
@@ -34655,12 +34663,12 @@ pub fn php_preg_match(pattern: Value, subject: Value, matches: *Value, flags: Va
     recordPcreMatchResult(rc);
 
     if (rc == PCRE2_ERROR_NOMATCH) {
-        matches.* = Value.initArray(try PHPArray.init(allocator));
+        pregMatchesAssign(matches, Value.initArray(try PHPArray.init(allocator)), allocator);
         return Value.initInt(0);
     }
     // ★F-90（R-184）：孪生支同语义 ⇒ 真错误 false，出参槽装空数组。
     if (rc < 0) {
-        matches.* = Value.initArray(try PHPArray.init(allocator));
+        pregMatchesAssign(matches, Value.initArray(try PHPArray.init(allocator)), allocator);
         return Value.initBool(false);
     }
 
@@ -34691,7 +34699,7 @@ pub fn php_preg_match(pattern: Value, subject: Value, matches: *Value, flags: Va
         try matches_arr.push(allocator, entry);
     }
 
-    matches.* = Value.initArray(matches_arr);
+    pregMatchesAssign(matches, Value.initArray(matches_arr), allocator);
     return Value.initInt(1);
 }
 
@@ -34752,7 +34760,7 @@ pub fn php_preg_match_all(pattern: Value, subject: Value, matches: *Value, flags
     const offset_ok = requireOptionalNumParam("preg_match_all", 5, "offset", .int_param, offset) orelse return Value.initBool(false);
     const flags_val: i64 = if (flags_ok.isNull()) 0 else flags_ok.toInt();
     if (pregMatchAllFlagsInvalid(flags_val)) {
-        matches.* = Value.initArray(try PHPArray.init(allocator));
+        pregMatchesAssign(matches, Value.initArray(try PHPArray.init(allocator)), allocator);
         throwThrowableDiscardCatch("ValueError", "preg_match_all(): Argument #4 ($flags) must be a PREG_* constant", allocator);
         return Value.initBool(false);
     }
@@ -34761,7 +34769,7 @@ pub fn php_preg_match_all(pattern: Value, subject: Value, matches: *Value, flags
     const is_set_order = (flags_val & PREG_SET_ORDER_BIT) != 0;
 
     if (!pattern.isString() or !subject.isString()) {
-        matches.* = Value.initArray(try PHPArray.init(allocator));
+        pregMatchesAssign(matches, Value.initArray(try PHPArray.init(allocator)), allocator);
         return Value.initInt(0);
     }
 
@@ -34784,12 +34792,12 @@ pub fn php_preg_match_all(pattern: Value, subject: Value, matches: *Value, flags
 
     const off = pcreSearchOffset(offset_ok, subject_str.length);
     if (off.out_of_range) {
-        matches.* = Value.initArray(try PHPArray.init(allocator));
+        pregMatchesAssign(matches, Value.initArray(try PHPArray.init(allocator)), allocator);
         return Value.initBool(false);
     }
 
     const match_data = pcre2_match_data_create_from_pattern_8(re, null) orelse {
-        matches.* = Value.initArray(try PHPArray.init(allocator));
+        pregMatchesAssign(matches, Value.initArray(try PHPArray.init(allocator)), allocator);
         return Value.initInt(0);
     };
     defer pcre2_match_data_free_8(match_data);
@@ -34897,7 +34905,7 @@ pub fn php_preg_match_all(pattern: Value, subject: Value, matches: *Value, flags
         }
     }
 
-    matches.* = Value.initArray(matches_arr);
+    pregMatchesAssign(matches, Value.initArray(matches_arr), allocator);
     return Value.initInt(match_count);
 }
 

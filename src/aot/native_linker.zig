@@ -167,6 +167,13 @@ const PropertyGetOrigin = struct {
     property_name: []const u8,
 };
 
+/// ★批次十二（F-13b）：php_array_get_coalesce 调用的 {base, key} 寄存器对
+/// （preg by-ref 数组下标形异常写回链的回溯结构；匿名 struct 两处求值会成两类型，故命名）
+const PregCoalesceCall = struct {
+    base: usize,
+    key: usize,
+};
+
 /// ★F-86：把 `??`/isset/empty 语境下的读链（`$a->b->c ?? d`、`isset($a->b['k'])`）整条标记为静默。
 /// PHP 对 `??` 左操作数与 isset/empty 的实参按 BP_VAR_IS 求值 ⇒ 链上每级属性读/元素读都不告警；
 /// 只沿“被读值的基”（对象操作数 / 数组基）回溯，绝不触及 RHS 默认值里的独立读
@@ -345,6 +352,9 @@ pub const NativeLinker = struct {
     current_make_ref_ptr: ?*const std.AutoHashMap(usize, usize) = null,
     /// ★批次十二（§232.3-2）：store 指令 ptr → value 寄存器（preg by-ref 异常写回链第 2 环）
     current_store_ptr_value: ?*const std.AutoHashMap(usize, usize) = null,
+    /// ★批次十二（F-13b）：php_array_get_coalesce 的 call 结果 → {base 寄存器, key 寄存器}
+    /// （preg by-ref **数组下标形**异常写回链——元素写回要重现 base/key）
+    current_preg_coalesce_calls: ?*const std.AutoHashMap(usize, PregCoalesceCall) = null,
     current_concat_operand_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_coalesce_nowarn_regs: ?*const std.AutoHashMap(usize, void) = null,
     /// ★F-151-b：isset/empty 实参链上的**属性读**寄存器——发射期改用 `php_object_get_isset_chain`
@@ -4814,6 +4824,9 @@ pub const NativeLinker = struct {
         .{ "array_unshift", bi(.{ .runtime_name = "php_array_unshift", .needs_allocator = true }) },
         .{ "php_array_get_ref", bi(.{ .runtime_name = "php_array_get_ref", .needs_allocator = true }) },
         .{ "php_object_get_ref", bi(.{ .runtime_name = "php_object_get_ref", .needs_allocator = true }) },
+        // ★批次十二（F-13b）：preg by-ref 数组下标的 copy-in 静默读（coalesce 语义，
+        //   不存在 ⇒ null 不告警——PHP by-ref auto-vivify 不对未定义元素告警）。
+        .{ "php_array_get_coalesce", bi(.{ .runtime_name = "php_array_get_coalesce", .needs_allocator = true }) },
         .{ "array_slice", bi(.{ .runtime_name = "php_array_slice", .needs_allocator = true }) },
         .{ "array_splice", bi(.{ .runtime_name = "php_array_splice", .needs_allocator = true, .ref_params = &[_]u8{0} }) },
         .{ "array_merge", bi(.{ .runtime_name = "php_array_merge", .needs_allocator = true }) },
@@ -6815,6 +6828,9 @@ pub const NativeLinker = struct {
         defer make_ref_ptr_map.deinit();
         var store_ptr_value_map = std.AutoHashMap(usize, usize).init(self.allocator);
         defer store_ptr_value_map.deinit();
+        // ★批次十二（F-13b）：preg coalesce copy-in 的 call 结果 → {base, key}（数组下标形写回链）
+        var preg_coalesce_calls = std.AutoHashMap(usize, PregCoalesceCall).init(self.allocator);
+        defer preg_coalesce_calls.deinit();
         for (func.blocks.items) |blk_scan| {
             for (blk_scan.instructions.items) |inst_scan| {
                 if (inst_scan.op == .global_get) {
@@ -6835,6 +6851,13 @@ pub const NativeLinker = struct {
                     }
                 } else if (inst_scan.op == .store) {
                     try store_ptr_value_map.put(inst_scan.op.store.ptr.id, inst_scan.op.store.value.id);
+                } else if (inst_scan.op == .call) {
+                    // F-13b：preg by-ref 数组下标的 copy-in 静默读 call（{base, key} 回溯）
+                    if (inst_scan.result) |reg| {
+                        if (std.mem.eql(u8, inst_scan.op.call.func_name, "php_array_get_coalesce") and inst_scan.op.call.args.len >= 2) {
+                            try preg_coalesce_calls.put(reg.id, .{ .base = inst_scan.op.call.args[0].id, .key = inst_scan.op.call.args[1].id });
+                        }
+                    }
                 }
             }
         }
@@ -6962,6 +6985,8 @@ pub const NativeLinker = struct {
         defer self.current_make_ref_ptr = null;
         self.current_store_ptr_value = &store_ptr_value_map;
         defer self.current_store_ptr_value = null;
+        self.current_preg_coalesce_calls = &preg_coalesce_calls;
+        defer self.current_preg_coalesce_calls = null;
         self.current_concat_operand_regs = &concat_operand_regs;
         defer self.current_concat_operand_regs = null;
         self.current_coalesce_nowarn_regs = &coalesce_nowarn_regs;
@@ -22540,13 +22565,34 @@ pub const NativeLinker = struct {
         const store_map = self.current_store_ptr_value orelse return;
         const src_id = store_map.get(temp_id) orelse return;
         const ggn = self.current_global_get_names orelse return;
-        const name = ggn.get(src_id) orelse return;
-        const escaped = try self.escapeString(name);
-        defer self.allocator.free(escaped);
-        try writer.print(
-            "    if (runtime.hasException()) {{\n        @branchHint(.unlikely);\n        try setGlobalVar(\"{s}\", reg_{d}.*);\n    }}\n",
-            .{ escaped, temp_id },
-        );
+
+        // 链甲：src 直接是 global_get（**全局变量形** `$m`）⇒ 整体写回全局槽
+        if (ggn.get(src_id)) |name| {
+            const escaped = try self.escapeString(name);
+            defer self.allocator.free(escaped);
+            try writer.print(
+                "    if (runtime.hasException()) {{\n        @branchHint(.unlikely);\n        try setGlobalVar(\"{s}\", reg_{d}.*);\n    }}\n",
+                .{ escaped, temp_id },
+            );
+            return;
+        }
+
+        // 链乙：src 是 php_array_get_coalesce 结果（**数组下标形** `$m[k]`，F-13b）⇒
+        //   元素写回：读基座（未定义/非数组 ⇒ 物化空数组）→ COW 守卫 → setByValue →
+        //   写回基座（同 :26796 的 COW 形状；PHP 真值 f13b2：ValueError 时 $m[k] 清空为 []）。
+        if (self.current_preg_coalesce_calls) |cc_map| {
+            if (cc_map.get(src_id)) |cc| {
+                const name = ggn.get(cc.base) orelse return;
+                const escaped = try self.escapeString(name);
+                defer self.allocator.free(escaped);
+                try writer.print(
+                    "    if (runtime.hasException()) {{\n        @branchHint(.unlikely);\n        var __preg_wb_base = getGlobalVarNoWarn(\"{s}\");\n        if (!__preg_wb_base.isArray()) {{\n            __preg_wb_base = runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator));\n        }} else if (__preg_wb_base.asArray().ref_count > 1) {{\n            const __preg_wb_cow = try __preg_wb_base.asArray().cloneShallow(runtime.runtime_allocator);\n            __preg_wb_base.release(runtime.runtime_allocator);\n            __preg_wb_base = runtime.Value.initArray(__preg_wb_cow);\n        }}\n        try __preg_wb_base.asArray().setByValue(runtime.runtime_allocator, ",
+                    .{escaped},
+                );
+                try self.writeRegRef(writer, cc.key);
+                try writer.print(", reg_{d}.*);\n        try setGlobalVar(\"{s}\", __preg_wb_base);\n    }}\n", .{ temp_id, escaped });
+            }
+        }
     }
 
     /// 生成指令（简化版）

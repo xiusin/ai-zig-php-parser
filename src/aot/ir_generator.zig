@@ -8246,7 +8246,51 @@ prop_name: ?[]const u8 = null,
                     const matches_arg_idx = positional_args.items[2];
                     const matches_node = self.getNode(matches_arg_idx);
 
-                    if (matches_node != null and matches_node.?.tag == .variable) {
+                    // ★F-13b（批次十二）：数组下标 by-ref（同 preg_match_all 支，口径互锁）
+                    if (matches_node != null and matches_node.?.tag == .array_access) {
+                        const aa = matches_node.?.data.array_access;
+                        if (aa.index != null) {
+                            const base_node = self.getNode(aa.target);
+                            if (base_node != null and base_node.?.tag == .variable) {
+                                const base_var = self.getString(base_node.?.data.variable.name);
+                                const func = self.current_function orelse return error.NoCurrentFunction;
+                                const alloca_type = Type{ .php_value = {} };
+                                const type_ptr = try self.allocator.create(Type);
+                                type_ptr.* = alloca_type;
+                                const ptr_type = Type{ .ptr = type_ptr };
+                                const temp_reg = func.newRegister(ptr_type);
+                                const alloca_inst = try self.allocator.create(Instruction);
+                                alloca_inst.* = .{
+                                    .result = temp_reg,
+                                    .op = .{ .alloca = .{ .type_ = alloca_type, .count = 1, .no_optimize = true } },
+                                    .location = self.current_location,
+                                };
+                                try self.entry_allocas.append(self.allocator, alloca_inst);
+                                // copy-in：静默读（同 preg_match_all 支，口径互锁）
+                                const is_global_wb = self.global_vars.contains(base_var) or
+                                    (if (self.current_function) |f2| std.mem.eql(u8, f2.name, "__main__") else false);
+                                const base_reg = if (is_global_wb)
+                                    try self.emitWithResult(.{ .global_get = .{ .name = base_var, .no_warn = true } }, .php_value)
+                                else blk: {
+                                    const var_reg = try self.getOrCreateVarRegister(base_var, .php_value);
+                                    break :blk try self.emitWithResult(.{ .load = .{ .ptr = var_reg, .type_ = .php_value } }, .php_value);
+                                };
+                                const key_reg = try self.generateExpression(aa.index.?);
+                                const coalesce_args = try self.allocator.alloc(Register, 2);
+                                coalesce_args[0] = base_reg;
+                                coalesce_args[1] = key_reg;
+                                const cur_val = try self.emitWithResult(.{ .call = .{ .func_name = "php_array_get_coalesce", .args = coalesce_args, .return_type = .php_value } }, .php_value);
+                                _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = cur_val } }, null);
+                                args[2] = temp_reg;
+                                try ref_writebacks.append(self.allocator, .{
+                                    .var_name = base_var,
+                                    .temp_reg = temp_reg,
+                                    .array_base = base_var,
+                                    .array_key = key_reg,
+                                });
+                            }
+                        }
+                    } else if (matches_node != null and matches_node.?.tag == .variable) {
                         const var_name = self.getString(matches_node.?.data.variable.name);
 
                         // 检查是否是局部变量（在var_registers中）
@@ -8301,7 +8345,56 @@ prop_name: ?[]const u8 = null,
                     const matches_arg_idx = positional_args.items[2];
                     const matches_node = self.getNode(matches_arg_idx);
 
-                    if (matches_node != null and matches_node.?.tag == .variable) {
+                    // ★F-13b（批次十二）：数组下标 by-ref（$m[0]/$m2['k']）——temp_reg +
+                    //   copy-in（读当前元素，不存在 ⇒ null 的 auto-vivify 语义）+
+                    //   ref_writebacks（array_base/array_key ⇒ array_set + global_set 写回）。
+                    //   旧支只认 .variable ⇒ 数组下标停在 :8196 的 const_null 占位 ⇒ 引用丢失。
+                    if (matches_node != null and matches_node.?.tag == .array_access) {
+                        const aa = matches_node.?.data.array_access;
+                        if (aa.index != null) {
+                            const base_node = self.getNode(aa.target);
+                            if (base_node != null and base_node.?.tag == .variable) {
+                                const base_var = self.getString(base_node.?.data.variable.name);
+                                const func = self.current_function orelse return error.NoCurrentFunction;
+                                const alloca_type = Type{ .php_value = {} };
+                                const type_ptr = try self.allocator.create(Type);
+                                type_ptr.* = alloca_type;
+                                const ptr_type = Type{ .ptr = type_ptr };
+                                const temp_reg = func.newRegister(ptr_type);
+                                const alloca_inst = try self.allocator.create(Instruction);
+                                alloca_inst.* = .{
+                                    .result = temp_reg,
+                                    .op = .{ .alloca = .{ .type_ = alloca_type, .count = 1, .no_optimize = true } },
+                                    .location = self.current_location,
+                                };
+                                try self.entry_allocas.append(self.allocator, alloca_inst);
+                                // copy-in：静默读（php_array_get_coalesce——不存在 ⇒ null
+                                // 不告警，PHP by-ref auto-vivify 对未定义元素不告警）；
+                                // 基座与 :8704 写回同口径（global/__main__ ⇒ global_get；局部 ⇒ load var_reg）。
+                                const is_global_wb = self.global_vars.contains(base_var) or
+                                    (if (self.current_function) |f2| std.mem.eql(u8, f2.name, "__main__") else false);
+                                const base_reg = if (is_global_wb)
+                                    try self.emitWithResult(.{ .global_get = .{ .name = base_var, .no_warn = true } }, .php_value)
+                                else blk: {
+                                    const var_reg = try self.getOrCreateVarRegister(base_var, .php_value);
+                                    break :blk try self.emitWithResult(.{ .load = .{ .ptr = var_reg, .type_ = .php_value } }, .php_value);
+                                };
+                                const key_reg = try self.generateExpression(aa.index.?);
+                                const coalesce_args = try self.allocator.alloc(Register, 2);
+                                coalesce_args[0] = base_reg;
+                                coalesce_args[1] = key_reg;
+                                const cur_val = try self.emitWithResult(.{ .call = .{ .func_name = "php_array_get_coalesce", .args = coalesce_args, .return_type = .php_value } }, .php_value);
+                                _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = cur_val } }, null);
+                                args[2] = temp_reg;
+                                try ref_writebacks.append(self.allocator, .{
+                                    .var_name = base_var,
+                                    .temp_reg = temp_reg,
+                                    .array_base = base_var,
+                                    .array_key = key_reg,
+                                });
+                            }
+                        }
+                    } else if (matches_node != null and matches_node.?.tag == .variable) {
                         const var_name = self.getString(matches_node.?.data.variable.name);
 
                         // 与 preg_match 相同的逻辑：检查变量是否在局部寄存器中

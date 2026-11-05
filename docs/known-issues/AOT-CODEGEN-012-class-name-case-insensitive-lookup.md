@@ -12835,3 +12835,62 @@ PHP 8.5.8 实测口径：纯 enum ⇒ **返回 false**（不抛错，last_error=
 - `src/aot/runtime_lib_template.zig`：帧栈（CallFrame/call_frames/debugFramePush/debugFramePop/debugFramesDeinit）+ `php_debug_backtrace`/`php_debug_print_backtrace` + 两枚内建常量注册。
 - `src/aot/native_linker.zig`：`@import("build_options")` + generateFunction 插桩臂 + builtin 表两枚注册。
 - `build.zig`：`-Ddebug_frames` 选项（默认关）+ build_options 双挂（exe/aot_test）。
+
+---
+
+## 241. 批次十二（2026-11-05）：SPL 基类统型 + 伪属性三类收官 + §232.3-2 by-ref 异常写回 + F-13b 销票（F-14/F-15 过期核销）
+
+### 241.1 伪属性三类（ArrayObject / SplStack / SplQueue）
+
+| 面 | 修法 | 读数 |
+|---|---|---|
+| SplDoublyLinkedList 基类统型 | 新注册 `SplDoublyLinkedList`（PHP 真值父类），SplStack/SplQueue 改 `parent` 继承（`findMethodLookup` parent 链既有通道，零新造）；`get_parent_class`/`instanceof`/var_dump 归属三面同源 | t1 探针全 SAME |
+| 方法面补齐 | 三类共享 `splDll*` 统一实现（**mode 位驱动**：LIFO=2/DELETE=1/高位 4 实测保留；默认 DLL=0/Queue=4/Stack=6）——push/pop/shift/unshift/top/bottom/add/count/isEmpty/offset 族/迭代五件套/serialize 族/setIteratorMode（**LIFO/FIFO 位冻结文案** `Iterators' LIFO/FIFO modes ... are frozen`） | m1/m2/m6 全 SAME（m6 残差=栈追踪 §七.5 豁免） |
+| offset LIFO 翻转 | PHP 真值 m2 钉死：LIFO 模式 offset 自**栈顶**起数（`$st[0]`=栈顶）；`splDllPhysIndex` 映射，add/迭代/serialize 保物理序 | m2 SAME |
+| DELETE 迭代消耗 | mode&1 ⇒ current/key 读消费端、next 弹消费端（LIFO=pop/FIFO=shift），KEEP 游标不消耗 | m2 SAME（`1:2 0:1`→count=0） |
+| serialize 三段制 | `__serialize`⇒`[mode,dllist,props]`、`__unserialize` 恢复；`putMethodOrdered` 不挂 magic 钩子且 `serializeValue` 不沿 parent 链 ⇒ 三类显式挂 `magic_serialize/magic_unserialize` | m2/probe2 SAME（往返保 mode/元素/动态属性） |
+| var_dump 私有标记 | `php_var_dump` 对象分支重写：声明属性沿链根→叶带可见性标记（`["n":"Decl":private]`/`["n":protected]`），动态属性随后；**DLL 家族特判**补 flags/dllist 两枚 live 值（`splDllFamilyOf` 类链校验防 internal_data 撞型） | probe1/probe2/m3/m4 SAME（残差=对象 id `#0` 既有现状 + 嵌套缩进 §七.4 豁免） |
+| 常量值修正 | **`ARRAY_AS_PROPS=2`、`STD_PROP_LIST=1`（旧版写反）**；ArrayObject 常量走 `setClassConst` 权威通道（旧版只写全局 `constants` 死通道 ⇒ 直读炸 `Undefined constant`）；SplDoublyLinkedList 注册 IT_MODE_* 四枚 | m4/m5 SAME |
+| ARRAY_AS_PROPS 行为 | `arrayObjectAsPropsStorage` 重定向（flags&2，类链含 ArrayObject）：`php_object_get/set`/`objectIssetByName`/`php_object_unset_impl` 四挂点——命中读写 storage、未命中 `Warning: Undefined array key`+null、不发动态属性 Deprecated | m4/m5 SAME |
+| 可见性字段修正 | ArrayObject/ArrayIterator 的 `storage` 注册补 `.is_private=true`（三可见性字段独立，旧版只写 `is_public=false` ⇒ 标记判定落空） | probe1/m4 SAME |
+
+**迭代顺序纪律**：Stack LIFO（`2:3 1:2 0:1`）/Queue FIFO（`0:x 1:y 2:z`）由 mode 位驱动，非两套代码；`SplStack/SplQueue::getIterator` **PHP 里也不存在**（Iterator 直挂）⇒ AOT 对齐报错不硬造。空栈文案：`Can't pop/shift/peek from an empty datastructure`；越界 `Out of range`（OutOfRangeException）；异型键 `must be of type ?int, string given`（TypeError）。
+
+### 241.2 §232.3 第二条（preg flags ValueError throw 前 `$matches` 未清空）——销票
+
+- **真身**：非「`try` 外逸」（`throwThrowableDiscardCatch` 不返 Zig error），是 **`if (hasException()) continue` 路由跳过 IR 后续 copy-out**（`global_set`）。模板层 `php_preg_match_all:34755` 本就先清空 matches 槽 ⇒ 缺口纯在发射器写回层。
+- **修法（发射器，未在模板打补丁）**：nlk 新增 `emitPregByrefWriteback`——preg_match/preg_match_all 两臂在 call 后生成 `if (hasException()) { 写回 }` 前置块；写回目标经**预扫描链**解析：`args[2] →（make_ref）→ temp_reg →（store）→ src_reg →（global_get_names）→ 变量名`；仅 `is_alloca` 非引用参数 alloca 的转发形命中（mem2reg/ref_ptr/引用透传直写原槽自然过滤）。
+- **附带真修**：模板两函数 12 处 `matches.* = X` 裸覆盖改 `pregMatchesAssign`（先 release 旧值再赋值——temp_reg 槽经 val_assign 独立持有 retain，裸覆盖净漏一份；F-38 教训现形：分号错位一次，`zig build` 验不住模板文本，经 AOT 产物编译逮回）。
+- **读数**：preg2（flag=16/-1/0x8003 三抛点）MC=0 全 SAME；preg4（preg_match 同机制）SAME；preg1 非法正则 Warning+false+保留 SAME。
+
+### 241.3 F-13b / F-14 / F-15
+
+| 编号 | 定性 | 结果 |
+|---|---|---|
+| F-14（非法正则告警+返回形制） | **过期核销**：preg_split `',/'` / `[unclosed` ⇒ Warning+false 两态逐字同（F-53/R-331 批次已修） | f14 探针 SAME，零落码 |
+| F-15（未定义常量文案族） | **过期核销**：`Undefined constant "NO_SUCH_CONSTANT_XYZ"` + rc=255 + B 行中止 两态逐字同 | f15 探针 SAME，零落码 |
+| F-13b（数组下标 by-ref 占位丢失） | **销票（真修）** | 见下 |
+
+**F-13b 修法**：ir_generator 的 preg 专属支（F-13 历史通道，`is_ref_param` 对内建 preg 不命中故有此支）补 `.array_access` 处理——temp_reg + copy-in（`php_array_get_coalesce` **静默读**，builtin_map 新增条目；不存在 ⇒ null 的 auto-vivify 语义，不打 `Undefined array key`）+ `ref_writebacks`（array_base/array_key ⇒ array_set + global_set 写回，复用 :8704 既有机制）。**异常路径**：`emitPregByrefWriteback` 扩链乙（`preg_coalesce_calls` 回溯 {base,key}）⇒ 物化空数组/COW 守卫/`setByValue`/`setGlobalVar` 前置写回（PHP 真值 f13b2：ValueError 时 `$m[0]`/`$m2['k']` 清空为 `[]`）。未走 get_ref 直写路线（元素引用）：未定义基座 auto-vivify 写不回，方案 B（copy-out）覆盖全形态。
+
+### 241.4 门面读数
+
+| 门 | 读数 | 与基线 |
+|---|---|---|
+| 门 P（c012） | `same=85 diff=3`（红集 f12/f34/d6 逐枚同，i1/i2 保持绿） | 持平，零转移 |
+| 门 T（c019） | 22/22 | 全绿持平 |
+| PD c036 | 20/20 | 全绿持平 |
+| preg 族 | c072 15/15；c093 31/32（e4 既有红持平）；c281 7/8（a8=mt_rand 序列差，mt 族既有，与本批无关）；c304 9/9；c330 5/5 | 持平 |
+| C343 | 12/12 | 持平 |
+| f135/f161 | 双 MATCH | 持平 |
+| 主回归 | 见 §241.5 | — |
+
+### 241.5 主回归（串行单跑）
+
+（待补）
+
+### 241.6 变更文件
+
+- `src/aot/runtime_lib_template.zig`：SplDoublyLinkedList 基类统型（splDll* 全集 + 三注册函数 + initRuntime 注册序）+ var_dump 对象分支重写 + AS_PROPS 四挂点 + 常量值/通道修正 + `pregMatchesAssign`（12 处覆盖点）+ storage 可见性字段补正。
+- `src/aot/native_linker.zig`：`emitPregByrefWriteback`（含链甲/链乙）+ 预扫描三映射（make_ref_ptr/store_ptr_value/preg_coalesce_calls）+ preg 两臂调用点 + `php_array_get_coalesce` 进 builtin_map。
+- `src/aot/ir_generator.zig`：preg_match/preg_match_all 专属支补 `.array_access`（temp_reg + coalesce copy-in + ref_writebacks）。

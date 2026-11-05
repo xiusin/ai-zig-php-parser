@@ -53,10 +53,3 @@ PASS|f124_container_orchestrator_pod_service_autoscale.php
 PASS|f134_event_sourcing_snapshot_cqrs_projection.php
 PASS|f135_math_number_theory_crt_miller_rabin.php
 PASS|f151_type_system_generics_variance.php
-PASS|f152_closure_arrow_higher_order.php
-PASS|f160_virtual_fs_path_traversal.php
-PASS|f161_json_xml_csv_parsing.php
-PASS|f163_event_driven_dispatch_bus.php
-PASS|f164_plugin_hook_system.php
-PASS|f171_state_machine_dfa.php
-PASS|f173_concurrency_primitives_sim.php
