@@ -94,7 +94,10 @@ cat > "$T/s1.php" <<'PHP'
 $N = (int)($argv[1] ?? "1000");
 $keep = [];
 for ($i = 0; $i < $N; $i++) {
-  $keep[] = "sens";
+  // ★R-283：旧写是 `$keep[] = "sens";`（同一 interned 字面量）⇒ 每轮只 retain 不分配，
+  //   Δlive_allocs 靠 GC 根表扩容才勉强 >0；F-191 让根表稳定后该臂 GAUGE_BLIND（假红）。
+  //   改成每轮拼接出**新串**，保证真分配（判据仍是 Δla>0 ∧ Δlb>0，不放宽）。
+  $keep[] = "sens" . $i;
 }
 echo "S1|", count($keep), "\n";
 PHP

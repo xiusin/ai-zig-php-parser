@@ -9,8 +9,11 @@
 #   判据：stdout+stderr+rc 与 PHP 8.5.8 逐字节一致（norm 折叠路径/行号并丢弃栈帧）。
 #   臂：w1 continue+后续语句 / w2 语句后 continue / w3 嵌套 if-else / w4 首臂嵌套 continue /
 #       d1 do-while 同形（对照）/ f1 foreach elseif+else（对照）/ f2 foreach 嵌套 continue（对照）
-#   ★不在门内（仍开，见工单 §226）：f3（foreach 首臂 continue + elseif 嵌套 ⇒ 死循环）、
-#     f4（foreach kv 嵌套 if 内 break 丢失）；修好后应作为 f3/f4 臂并入本门。
+#       f3 foreach 首臂 continue + elseif 嵌套 if（R-321 闭环：then_is_be 尾部抑制解除）/
+#       f4 foreach kv 嵌套 if 内 break（R-321 闭环：嵌套 then=循环出口显式守卫 break）
+#       f6 foreach elseif 臂内嵌 break（R-322 闭环：else 臂两副本补「嵌套 then=出口」前置分支）/
+#       g_for for 版 f4（R-322 闭环：for 生成器同构分支）/
+#       g_while while 版 f4（R-322 闭环：while 侧仅补守卫 break，merge 本在臂内）
 #   纪律：门臂一律 heredoc；AOT_BIN=/bin/false 自证必须全 COMPILE_FAIL；TSV 走 TSV_OUT；产物落临时目录并清理。
 set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 90
@@ -94,7 +97,62 @@ foreach ([1,2,3,4,5,6,7,8] as $i) {
 echo $z,"\n";
 PHP
 
-ALL_ARMS="w1 w2 w3 w4 d1 f1 f2"
+cat > "$T/f3.php" <<'PHP'
+<?php
+$z=0;
+foreach ([1,2,3,4,5,6,7,8] as $i) {
+  if ($i%3==0) { continue; }
+  elseif ($i%2==0) { if ($i%4==0) { echo "c4\n"; } $z+=100; }
+  else { $z+=1; }
+}
+echo $z,"\n";
+PHP
+
+cat > "$T/f4.php" <<'PHP'
+<?php
+$z=0;
+foreach ([1,2,3,4,5,6,7,8] as $k => $i) {
+  if ($i%2==1) { if ($k>4) { break; } $z+=$k; }
+  elseif ($i%4==0) { $z+=1000; }
+  else { $z+=10; }
+}
+echo $z,"\n";
+PHP
+
+cat > "$T/f6.php" <<'PHP'
+<?php
+$z=0;
+foreach ([1,2,3,4,5,6,7,8] as $k => $i) {
+  if ($i%2==0) { $z+=1; }
+  elseif ($i%5==0) { if ($k>3) { break; } $z+=$k; }
+  else { $z+=10; }
+}
+echo $z,"\n";
+PHP
+
+cat > "$T/g_for.php" <<'PHP'
+<?php
+$z=0;
+for ($k=0; $k<8; $k++) { $i=$k+1;
+  if ($i%2==1) { if ($k>4) { break; } $z+=$k; }
+  elseif ($i%4==0) { $z+=1000; }
+  else { $z+=10; }
+}
+echo $z,"\n";
+PHP
+
+cat > "$T/g_while.php" <<'PHP'
+<?php
+$i=0;$z=0;
+while ($i<8) { $i++; $k=$i-1;
+  if ($i%2==1) { if ($k>4) { break; } $z+=$k; }
+  elseif ($i%4==0) { $z+=1000; }
+  else { $z+=10; }
+}
+echo $z,"\n";
+PHP
+
+ALL_ARMS="w1 w2 w3 w4 d1 f1 f2 f3 f4 f6 g_for g_while"
 : > "$OUT"
 START=$(date +%s); narms=0; same=0; diff=0; cfail=0; tfail=0
 for a in $ALL_ARMS; do

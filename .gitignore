@@ -22,3 +22,4 @@ aot_debug.zig
 .kiro/steering
 aot_compile_*
 .zigphp_aot_build*
+fuzzy_scripts_720/tmp/

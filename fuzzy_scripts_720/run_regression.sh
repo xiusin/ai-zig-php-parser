@@ -120,6 +120,19 @@ for script in "$PASS_DIR"/f*.php; do
     fi
 done
 
+# ★表自检（工单 §93.5）：每个脚本必须**恰好写一行**判定。历史上出过两类静默污染——
+#   ① 被杀链的 `timeout bash run_regression.sh` 子进程存活成孤儿，在下一轮清表后继续追加 ⇒ 同一脚本两行；
+#   ② 目录/glob 意外重复 ⇒ 同一脚本被执行两遍。
+#   两种都不会让 `rc` 变红，只会让汇总表出现 `Pass > Total` 这种自相矛盾数（本仓刚就这样读过一次）。
+rows_written=$(grep -c '' "$FAILURES_TSV" 2>/dev/null || echo 0)
+uniq_names=$(cut -d'|' -f2 "$FAILURES_TSV" 2>/dev/null | sort -u | grep -c '' || echo 0)
+if [ "$rows_written" != "$TOTAL" ] || [ "$uniq_names" != "$TOTAL" ]; then
+    echo "SELF_CHECK_FAIL rows=$rows_written uniq=$uniq_names total=$TOTAL ⇒ 回归表被重复写入或有脚本未产出判定，**本次读数作废**"
+    echo "  重复名：$(cut -d'|' -f2 "$FAILURES_TSV" | sort | uniq -d | tr '\n' ' ')"
+    exit 99
+fi
+echo "SELF_CHECK_OK rows=$rows_written uniq=$uniq_names total=$TOTAL"
+
 echo ""
 echo "=========================================="
 echo "PASS=$PASS_CNT FAIL=$FAIL_CNT"

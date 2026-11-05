@@ -1,5 +1,5 @@
-# c007 inline-only attribution arm 2026-10-06 10:55:26
-bin_md5=1f15e4ce9b5c9cdaaef7cabf5efb9c76
-native_linker=fbe6382a2e0904b6740d771b88c409c7/32797
-optimizer=252234ef48cb47a42e6f39d1bc3e845b
+# c007 inline-only attribution arm 2026-10-21 13:26:16
+bin_md5=86c4fb8844b5c041a1edad32f18b7d51
+native_linker=c08427256b8069120bd54c6e1764229f/33801
+optimizer=745e4bd4bbb77258fbd5de58629d8684
 flags=--compile --no-debug-info --aot-enable-pass=inline --aot-inline-threshold=50

@@ -1,10 +1,5 @@
-# c007 f152 inline-threshold bisect（两批合成）2026-10-06
-#   round1 2026-10-06 17:23:42 thresholds=15 20 25 30 35 40 45 50  ELAPSED=114s（含 base 共 9 臂）
-#   round2 2026-10-06 17:29:31 thresholds=31 32 33 34             ELAPSED=63s （含 base 共 5 臂）
-#   ⇒ 本 TSV = 两批逐阈值行按 T 升序合成（base 行两批各跑一次、逐字节相同，只保一份）⇒ 13 个阈值 / 14 次编译臂
-bin_md5=1f15e4ce9b5c9cdaaef7cabf5efb9c76
+# c007 f152 inline-threshold bisect 2026-10-21 13:42:43
+bin_md5=86c4fb8844b5c041a1edad32f18b7d51
 arm=--compile --no-debug-info --aot-enable-pass=inline --aot-inline-threshold=<T>
-thresholds=0 15 20 25 30 31 32 33 34 35 40 45 50
+thresholds=15 20 25 30 34 35 45 50
 header_cols=shape|T|gen_vs_base|verdict|lines|md5|Oflag|detail
-reading=min_detonation_T=35（T<=34 全部 BASE_SAME+PASS 且 md5 == 冻结基线 f4c41d87a3bfbb78c7ff42fff27c3d66）
-gate_anchor=optimizer.zig:4590-4592 can_inline（estimated_cost <= inline_threshold，直接比较）+ :4664 very_small（est*4 <= T）

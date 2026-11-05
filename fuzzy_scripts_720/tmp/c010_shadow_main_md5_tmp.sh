@@ -42,12 +42,15 @@ awk -F'\t' '
   $2=="old" { old[$1]=$3 }
   $2=="new" { new[$1]=$3 }
   END {
-    same=0; diff=0; miss=0
+    same=0; diff=0; miss=0; invalid=0
     for (b in old) {
       if (!(b in new)) { miss++; continue }
+      # 假等值防护：任一侧为「无产物/无临时目录」哨兵值时不得计入 same
+      # （磁盘满等环境故障会让两侧同时写不出产物 ⇒ NOT_EXECUTABLE==NOT_EXECUTABLE 曾被误记为 same）
+      if (old[b]=="NOT_EXECUTABLE" || old[b]=="NO_MAINDIR" || new[b]=="NOT_EXECUTABLE" || new[b]=="NO_MAINDIR") { invalid++; continue }
       if (old[b]==new[b]) same++; else diff++
     }
     # 注意：ELAPSED 由外层 sed 回填（awk 内不可引用 END 关键字作变量）
-    printf "C010_SHADOW_DONE total=%d same=%d diff=%d miss=%d ELAPSED=NA\n", (same+diff+miss), same, diff, miss
+    printf "C010_SHADOW_DONE total=%d same=%d diff=%d miss=%d invalid=%d ELAPSED=NA\n", (same+diff+miss+invalid), same, diff, miss, invalid
   }' "$OUT" | sed "s/ELAPSED=NA/ELAPSED=$((END-START))s/" >>"$OUT"
 tail -1 "$OUT"
