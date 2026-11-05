@@ -12783,3 +12783,55 @@ PHP 8.5.8 实测口径：纯 enum ⇒ **返回 false**（不抛错，last_error=
 
 - **主回归**（`run_regression.sh`，串行单独跑，未与其他门并发）：**PASS=67 FAIL=1**，SELF_CHECK_OK rows=68 uniq=68；唯一红 = `f095_compiler_opt_constfold_dce_cse.php`（FAIL_DIFF）＝F-236 latent 登记位（嵌套 foreach×闭包存量缺陷，非本批引入，未动）。**与批次十基线逐枚一致，零回归**。
 - **批次十一总评**：F-25 销票（§238.6 已记）＋ 五类伪属性迁移 + F-24d 第二段（类声明时序对齐）全部验收通过；门 T/门 P/C343/C249/f135/f161 全绿持平；主回归零回归。
+
+## 240. F-6 销票（2026-11-05）：`debug_backtrace` / `debug_print_backtrace` 帧栈实现（编译期开关 `-Ddebug_frames`，默认关）
+
+### 240.1 帧栈设计
+
+- **载体**：`runtime_lib_template.zig` 新增 `threadlocal var call_frames: std.ArrayListUnmanaged(CallFrame)`（与既有 `static_vars` 等 threadlocal/全局槽同约定，AOT 单协程执行模型下天然绑定当前执行上下文）。
+- **帧字段对齐 PHP**：`function`（短名）/ `class`（可空）/ `call_type`（`"->"`/`"::"`，静态性查 `TypeDef.methods` 编译期定）/ `args`（**借用**调用者 args 切片——帧只在函数执行期间存活，该期间调用者 args 有效 ⇒ push/pop 零拷贝）。`file`/`line` 按 §七.5 豁免**不伪造**（AOT 无源码映射）。
+- **生命周期收口**：`deinitRuntime` 新增 `debugFramesDeinit()` 逐帧弹出清零。
+
+### 240.2 插桩点清单
+
+| 位置 | 内容 |
+|---|---|
+| `native_linker.zig` `generateFunction`（profiler 插桩旁，~5431-5480） | 编译期 `if (build_options.debug_frames)` 门内生成 `runtime.debugFramePush(fn, class, type, args); defer runtime.debugFramePop();` |
+| pop 覆盖 | `defer` 收口 ⇒ 正常 return 路径 + 异常 error 展开路径**双路全覆盖**（不新造平行机制，挂在函数头 defer 上） |
+| `native_linker.zig` builtin 表（~5154） | 注册 `debug_backtrace`/`debug_print_backtrace`（handler_params=2，两枚 optional 默认 null） |
+| `build.zig` | `b.option(bool, "debug_frames") orelse false`（**默认关**）+ `b.addOptions()` 经 `root_module.addOptions("build_options", …)` 传给编译器代码（exe 与 aot_test 双挂） |
+
+### 240.3 六形读数（开态编译器 `-Ddebug_frames=true`，six.php 与 PHP 对参）
+
+| 形 | 内容 | 结果 |
+|---|---|---|
+| 1 | 基本嵌套调用 `debug_backtrace()` | SAME |
+| 2 | 类实例方法（`class`/`type="->"`） | SAME |
+| 3 | 类静态方法 + `limit`（`type="::"`） | SAME |
+| 4 | 异常中调用（catch 内取栈） | SAME |
+| 5 | 顶层空调用 | SAME |
+| 6 | `debug_print_backtrace` | SAME（`#N [Class::\|Class->]function()`；`file`/`line` 前缀差按 §七.5 豁免） |
+
+- **异常路径验证**：异常展开后 `after ⇒ int(0)`（栈已正确弹出，不漏 pop）。
+- `IGNORE_ARGS`（=2，已注册内建常量 `DEBUG_BACKTRACE_PROVIDE_OBJECT=1`/`DEBUG_BACKTRACE_IGNORE_ARGS=2`）与 `limit` 行为与 PHP 一致。
+
+### 240.4 开/关性能两态（fib(22) 调用密集，同脚本两态编译产物）
+
+| 态 | 耗时 | 开销 |
+|---|---|---|
+| 关态（默认） | 0.0769s | — |
+| 开态·args 拷贝初版 | 0.0837s | **8.8%（超标，触发 5% 停线）** |
+| 开态·args 借用终版 | 0.0779s | **1.3%（达标 <5%）** |
+
+- **优化路径**：初版 args 逐元素 alloc+retain/release 是主热源；改借用后 push/pop 退化为 `append`+`len-1`，零拷贝零引计。借用正确性复验：六形仍全 SAME、异常路径仍 int(0)。
+
+### 240.5 门面（关态，零转移）
+
+- **C343**（loop_elseif 12 臂）：12/12 绿保持；**f135/f161** 双 MATCH；**f095 关态 SAME**（F-236 修复保持）；关态生成码 grep 零 `debugFramePush` 残留（关态零开销实证）。
+- **主回归**（`run_regression.sh` 串行单跑 + f174-f179 六枚补跑——首轮被我 20min timeout 截断，非编译器问题；f175 初判 FAIL_DIFF 系补跑精简 normalize 漏 TIMESTAMP 替换的假红，完整 normalize 复判 PASS）：**67 PASS + 1 SKIP（f004 既有跳项 PHP_error_exit=255）+ 0 FAIL**，f095 在 PASS 列（F-236 修复稳固）。**与 F-236 修复后基线逐枚一致，F-6 关态零转移**。
+
+### 240.6 变更文件
+
+- `src/aot/runtime_lib_template.zig`：帧栈（CallFrame/call_frames/debugFramePush/debugFramePop/debugFramesDeinit）+ `php_debug_backtrace`/`php_debug_print_backtrace` + 两枚内建常量注册。
+- `src/aot/native_linker.zig`：`@import("build_options")` + generateFunction 插桩臂 + builtin 表两枚注册。
+- `build.zig`：`-Ddebug_frames` 选项（默认关）+ build_options 双挂（exe/aot_test）。

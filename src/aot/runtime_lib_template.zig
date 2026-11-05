@@ -428,6 +428,112 @@ pub fn restoreCurrentCallArgs(prev: ?[]const Value) void {
     current_call_args = prev;
 }
 
+// ========== F-6：debug_backtrace 帧栈 ==========
+// 仅 -Ddebug_frames 开态由编译器在函数头插桩 push + defer pop；关态不生成任何调用 ⇒ 零开销。
+// 帧栈 threadlocal（Fiber 属 AOT 排除项，无需协程绑定）。
+// function/class/call_type 是编译期字面量（静态，不引计）；args 借用调用者切片（见 CallFrame.args 注释）。
+threadlocal var call_frames: std.ArrayListUnmanaged(CallFrame) = .empty;
+
+pub const CallFrame = struct {
+    function: []const u8,
+    class: ?[]const u8 = null,
+    call_type: ?[]const u8 = null, // "->" / "::"
+    /// ★借用调用者的 args 切片（帧只在函数执行期间存活，该期间 args 有效）⇒ push/pop 零拷贝。
+    ///   debug_backtrace 返回数组时才逐元素 retain（拷贝出帧生命周期）。
+    args: []const Value = &.{},
+};
+
+pub fn debugFramePush(function: []const u8, class: ?[]const u8, call_type: ?[]const u8, args: []const Value) void {
+    call_frames.append(runtime_allocator, .{
+        .function = function,
+        .class = class,
+        .call_type = call_type,
+        .args = args,
+    }) catch {};
+}
+
+pub fn debugFramePop() void {
+    const n = call_frames.items.len;
+    if (n == 0) return;
+    call_frames.items.len = n - 1; // 借用 args 无需 release（调用者持有）
+}
+
+/// deinitRuntime 收口：清空帧栈（开态路径的兜底，防测试 leak 检测误报）
+fn debugFramesDeinit() void {
+    while (call_frames.items.len > 0) debugFramePop();
+    call_frames.deinit(runtime_allocator);
+    call_frames = .empty;
+}
+
+/// debug_backtrace([int $options = DEBUG_BACKTRACE_PROVIDE_OBJECT[, int $limit = 0]]): array
+/// DEBUG_BACKTRACE_PROVIDE_OBJECT=1（object 帧字段 AOT 省略）；DEBUG_BACKTRACE_IGNORE_ARGS=2。
+/// 帧序对齐 PHP：栈顶（最内层调用）为 [0]；顶层脚本帧（__main__）不入栈。
+/// file/line：AOT 无源码映射 ⇒ §七.5 豁免口径，省略字段（不伪造行号）。
+pub fn php_debug_backtrace(options_v: Value, limit_v: Value, allocator: Allocator) !Value {
+    const opts: i64 = if (options_v.isNull()) 1 else options_v.toInt();
+    const ignore_args = (opts & 2) != 0;
+    const limit: i64 = if (limit_v.isNull()) 0 else limit_v.toInt();
+
+    const result = try PHPArray.init(allocator);
+    errdefer result.release(allocator);
+
+    var idx = call_frames.items.len;
+    var emitted: i64 = 0;
+    while (idx > 0) {
+        idx -= 1;
+        const f = call_frames.items[idx];
+        if (std.mem.eql(u8, f.function, "__main__")) continue; // 顶层脚本帧不进 backtrace
+        if (limit > 0 and emitted >= limit) break;
+
+        const frame = try PHPArray.init(allocator);
+        errdefer frame.release(allocator);
+        try frame.set(allocator, .{ .string = PHPString.initStatic("function") }, Value.initString(PHPString.initStatic(f.function)));
+        if (f.class) |c| try frame.set(allocator, .{ .string = PHPString.initStatic("class") }, Value.initString(PHPString.initStatic(c)));
+        if (f.call_type) |t| try frame.set(allocator, .{ .string = PHPString.initStatic("type") }, Value.initString(PHPString.initStatic(t)));
+        if (!ignore_args) {
+            const args_arr = try PHPArray.init(allocator);
+            errdefer args_arr.release(allocator);
+            for (f.args) |a| try args_arr.push(allocator, a);
+            try frame.set(allocator, .{ .string = PHPString.initStatic("args") }, Value.initArray(args_arr));
+            args_arr.release(allocator); // set 已 retain；归还 init 的初始份额
+        }
+        try result.push(allocator, Value.initArray(frame));
+        frame.release(allocator); // push 已 retain；归还 init 的初始份额
+        emitted += 1;
+    }
+    return Value.initArray(result);
+}
+
+/// debug_print_backtrace([int $options = 0[, int $limit = 0]]): void
+/// 打印格式对齐 PHP `#N [Class::|Class->]function()`；file/line 因无源映射省略（§七.5，不伪造）。
+pub fn php_debug_print_backtrace(options_v: Value, limit_v: Value, allocator: Allocator) !Value {
+    _ = allocator;
+    _ = options_v; // IGNORE_ARGS 对 print 输出无影响（args 打印从简）
+    const limit: i64 = if (limit_v.isNull()) 0 else limit_v.toInt();
+
+    var idx = call_frames.items.len;
+    var emitted: i64 = 0;
+    var out_idx: usize = 0;
+    while (idx > 0) {
+        idx -= 1;
+        const f = call_frames.items[idx];
+        if (std.mem.eql(u8, f.function, "__main__")) continue;
+        if (limit > 0 and emitted >= limit) break;
+        var nb: [16]u8 = undefined;
+        const nstr = std.fmt.bufPrint(&nb, "#{d} ", .{out_idx}) catch break;
+        fileWriteAll(1, nstr);
+        if (f.class) |c| {
+            fileWriteAll(1, c);
+            if (f.call_type) |t| fileWriteAll(1, t);
+        }
+        fileWriteAll(1, f.function);
+        fileWriteAll(1, "()\n");
+        out_idx += 1;
+        emitted += 1;
+    }
+    return Value.initNull();
+}
+
 fn allocPHPString(allocator: Allocator) !*PHPString {
     if (php_string_pool) |*p| return p.create(allocator);
     return try allocator.create(PHPString);
@@ -551,6 +657,8 @@ pub fn initRuntime(allocator: Allocator) !void {
     registerIteratorIterator(runtime_allocator) catch {};
     registerCachingIterator(runtime_allocator) catch {};
     registerSplFixedArray(runtime_allocator) catch {};
+    // ★批次十二：SplDoublyLinkedList 基类须先于 SplStack/SplQueue（parent 链解析）
+    registerSplDoublyLinkedList(runtime_allocator) catch {};
     registerSplStack(runtime_allocator) catch {};
     registerSplQueue(runtime_allocator) catch {};
     ClassMeta.registerDateTimeClasses(runtime_allocator) catch {};
@@ -1003,6 +1111,7 @@ pub fn deinitRuntime() void {
     }
     concurrency.shutdownScheduler();
     cleanupAllClasses();
+    debugFramesDeinit(); // ★F-6：清空 debug_backtrace 帧栈（开态兜底；关态本就是空）
     if (user_function_registry) |*registry| {
         registry.deinit();
         user_function_registry = null;
@@ -3871,6 +3980,17 @@ fn objectIssetByName(obj_val: Value, prop_name: []const u8) !bool {
 
     const obj = Value_asObject(resolved);
 
+    // ★批次十二：ArrayObject ARRAY_AS_PROPS isset 重定向（storage 键存在性 + null 判定）
+    if (arrayObjectAsPropsStorage(obj)) |storage| {
+        const key = ArrayKey{ .string = PHPString.initStatic(prop_name) };
+        if (storage.elements.get(key)) |v| {
+            var actual = v;
+            while (actual.isRef()) actual = actual.asRef().*;
+            return !actual.isNull();
+        }
+        return false;
+    }
+
     // 属性可见性检查 + __isset 魔术方法回退
     if (obj.class_meta) |meta| {
         if (findPropertyDeclaringClass(meta, prop_name)) |decl| {
@@ -3988,6 +4108,14 @@ pub fn php_object_unset(obj_val: Value, property_name_val: Value, allocator: All
 }
 
 fn php_object_unset_impl(obj_val: Value, obj: *PHPObject, name: []const u8) !Value {
+    // ★批次十二：ArrayObject ARRAY_AS_PROPS unset 重定向（storage 删键，PHP 真值 m5）
+    if (arrayObjectAsPropsStorage(obj)) |storage| {
+        const key = ArrayKey{ .string = PHPString.initStatic(name) };
+        if (storage.elements.get(key)) |old| old.release(runtime_allocator);
+        _ = storage.elements.remove(key);
+        return Value.initNull();
+    }
+
     // 属性可见性检查 + __unset 魔术方法回退
     if (obj.class_meta) |meta| {
         if (findPropertyDeclaringClass(meta, name)) |decl| {
@@ -10565,10 +10693,79 @@ pub fn php_var_dump(value: Value) !Value {
     } else if (Value_isObject(value)) {
         const obj = Value_asObject(value);
         var buf: [256]u8 = undefined;
+
+        // ★批次十二：SplDoublyLinkedList 家族特判——flags/dllist 是 internal_data 的
+        //   live 内部状态（不挂实例属性表），PHP 真值 var_dump 补出两枚私有声明属性
+        //   `["flags":"SplDoublyLinkedList":private]`/`["dllist":...]`，且动态属性序在前。
+        if (splDllFamilyOf(obj)) {
+            if (splDllDataOf(obj)) |data| {
+                const header = try std.fmt.bufPrint(&buf, "object({s})#0 ({d}) {{\n", .{ obj.class_name, obj.properties.count() + 2 });
+                fileWriteAll(1, header);
+                var it = obj.properties.iterator();
+                while (it.next()) |entry| {
+                    fileWriteAll(1, "  [\"");
+                    fileWriteAll(1, entry.key_ptr.*);
+                    fileWriteAll(1, "\"]=>\n  ");
+                    _ = php_var_dump(entry.value_ptr.*) catch {};
+                }
+                fileWriteAll(1, "  [\"flags\":\"SplDoublyLinkedList\":private]=>\n  ");
+                _ = php_var_dump(Value.initInt(data.mode)) catch {};
+                fileWriteAll(1, "  [\"dllist\":\"SplDoublyLinkedList\":private]=>\n  ");
+                _ = php_var_dump(Value.initArray(data.elements)) catch {};
+                fileWriteAll(1, "}\n");
+                return Value.initNull();
+            }
+        }
+
+        // 通用分支（★批次十二：对齐 PHP 真值——声明属性沿链**根→叶**按声明序输出并带
+        // 可见性标记：`["name":"DeclClass":private]`/`["name":protected]`/`["name"]`；
+        // 动态属性随后无标记。var_dump 不做可见性过滤——私有属性照出，仅标记归属）。
         const header = try std.fmt.bufPrint(&buf, "object({s})#0 ({d}) {{\n", .{ obj.class_name, obj.properties.count() });
         fileWriteAll(1, header);
+        var printed = std.StringHashMap(void).init(runtime_allocator);
+        defer printed.deinit();
+        if (obj.class_meta) |obj_meta| {
+            var chain: std.ArrayList(*const ClassMeta) = .empty;
+            defer chain.deinit(runtime_allocator);
+            var cur: ?*const ClassMeta = obj_meta;
+            while (cur) |m| {
+                try chain.append(runtime_allocator, m);
+                cur = m.parent;
+            }
+            var idx = chain.items.len;
+            while (idx > 0) {
+                idx -= 1;
+                const m = chain.items[idx];
+                for (m.property_order.items) |pname| {
+                    if (printed.contains(pname)) continue;
+                    const decl = findPropertyDeclaringClass(obj_meta, pname) orelse continue;
+                    if (decl.prop.is_static) continue;
+                    const val = obj.properties.get(pname) orelse continue;
+                    try printed.put(pname, {});
+                    if (decl.prop.is_private) {
+                        fileWriteAll(1, "  [\"");
+                        fileWriteAll(1, pname);
+                        fileWriteAll(1, "\":\"");
+                        fileWriteAll(1, decl.class.name);
+                        fileWriteAll(1, "\":private]=>\n  ");
+                    } else if (decl.prop.is_protected) {
+                        fileWriteAll(1, "  [\"");
+                        fileWriteAll(1, pname);
+                        fileWriteAll(1, "\":protected]=>\n  ");
+                    } else {
+                        fileWriteAll(1, "  [\"");
+                        fileWriteAll(1, pname);
+                        fileWriteAll(1, "\"]=>\n  ");
+                    }
+                    _ = php_var_dump(val) catch {};
+                }
+            }
+        }
+        // 动态属性（恒 public 无标记；StringHashMap 序——单枚等值，多枚序属已知残留，
+        //   与 get_object_vars 7161 登记的同一限制）。
         var it = obj.properties.iterator();
         while (it.next()) |entry| {
+            if (printed.contains(entry.key_ptr.*)) continue;
             fileWriteAll(1, "  [\"");
             fileWriteAll(1, entry.key_ptr.*);
             fileWriteAll(1, "\"]=>\n  ");
@@ -11055,6 +11252,9 @@ pub fn registerPHPPredefinedConstants(allocator: Allocator) !void {
         .{ .name = "E_DEPRECATED", .value = 8192 },
         .{ .name = "E_USER_DEPRECATED", .value = 16384 },
         .{ .name = "E_ALL", .value = 30719 },
+        // ★F-6：debug_backtrace 选项常量（PHP 8.5.8 实测值）
+        .{ .name = "DEBUG_BACKTRACE_PROVIDE_OBJECT", .value = 1 },
+        .{ .name = "DEBUG_BACKTRACE_IGNORE_ARGS", .value = 2 },
         // 正则
         .{ .name = "PREG_OFFSET_CAPTURE", .value = 256 },
         .{ .name = "PREG_UNMATCHED_AS_NULL", .value = 512 },
@@ -12286,7 +12486,7 @@ pub fn registerArrayIterator(allocator: Allocator) !void {
 
     // ★批次十一：PHP 真值面——唯一私有声明属性 `storage`（var_dump 可见、get_object_vars 不可见）；
     //   游标在 internal_data（不入属性表）。默认值 null ⇒ 序列化空迭代器仍有 storage 键位。
-    try meta.addProperty(.{ .name = "storage", .default_value = Value.initNull(), .is_public = false });
+    try meta.addProperty(.{ .name = "storage", .default_value = Value.initNull(), .is_public = false, .is_private = true });
 
     // 注册方法
     try meta.putMethodOrdered(.{
@@ -13260,8 +13460,10 @@ pub fn registerSplFixedArray(allocator: Allocator) !void {
 // ============================================================================
 
 /// ArrayObject 标志常量
-const ARRAY_AS_PROPS: i64 = 1;
-const STD_PROP_LIST: i64 = 2;
+/// ★批次十二：PHP 8.5.8 真值 STD_PROP_LIST=1 / ARRAY_AS_PROPS=2（旧版两值写反，
+///   由 asprops-ser 探针 `i:0;i:2` 钉死）。
+const STD_PROP_LIST: i64 = 1;
+const ARRAY_AS_PROPS: i64 = 2;
 
 /// ★批次十一：ArrayObject 状态面——元素面挂**私有声明属性 `storage`**（PHP 真值：
 ///   var_dump `["storage":"ArrayObject":private]`、get_object_vars 全局为空、(array) 转换给元素面）；
@@ -13297,6 +13499,29 @@ fn arrayObjectStorage(obj: *PHPObject) ?*PHPArray {
     const storage = obj.properties.get("storage") orelse return null;
     if (!storage.isArray()) return null;
     return storage.asArray();
+}
+
+/// ★批次十二：ArrayObject ARRAY_AS_PROPS（flags 位 2）重定向面——置位时属性读写/
+///   isset/unset **全名**重定向到 storage（PHP 真值：含 "storage" 名本身——`$ao->storage`
+///   读的是 storage 数组里键 "storage"，未命中 `Warning: Undefined array key "storage"` + null；
+///   不产生动态属性、不发 Creation of dynamic property Deprecated）。
+///   快路径：class_name 非 ArrayObject 且 parent 链无 ArrayObject ⇒ null（零成本）。
+fn arrayObjectAsPropsStorage(obj: *PHPObject) ?*PHPArray {
+    var is_family = std.mem.eql(u8, obj.class_name, "ArrayObject");
+    if (!is_family) {
+        var cur = obj.class_meta;
+        while (cur) |m| {
+            if (std.mem.eql(u8, m.name, "ArrayObject")) {
+                is_family = true;
+                break;
+            }
+            cur = m.parent;
+        }
+    }
+    if (!is_family) return null;
+    const data = arrayObjectDataOf(obj) orelse return null;
+    if ((data.flags & ARRAY_AS_PROPS) == 0) return null;
+    return arrayObjectStorage(obj);
 }
 
 /// ArrayObject::__construct
@@ -13728,7 +13953,9 @@ pub fn registerArrayObject(allocator: Allocator) !void {
 
     // ★批次十一：PHP 真值面——唯一私有声明属性 `storage`（var_dump/serialize 属性面可见，
     //   get_object_vars 全局作用域不可见）；flags/iteratorClass 挪 internal_data（不入属性表）。
-    try meta.addProperty(.{ .name = "storage", .default_value = Value.initNull(), .is_public = false });
+    // ★批次十二：补 .is_private=true——三可见性字段独立（nlk 约定 private ⇒ is_private），
+    //   旧版只写 is_public=false ⇒ var_dump 可见性标记判定落空。
+    try meta.addProperty(.{ .name = "storage", .default_value = Value.initNull(), .is_public = false, .is_private = true });
 
     // 构造和基本方法
     try meta.addMethod(.{ .name = "__construct", .func = arrayObject_construct, .is_static = false });
@@ -13765,6 +13992,11 @@ pub fn registerArrayObject(allocator: Allocator) !void {
     meta.magic_construct = arrayObject_construct;
 
     // 注册常量
+    // ★批次十二：权威通道 = meta.class_constants + const_visibility（findClassConstant
+    //   走此通道，旧版只写全局 constants 表 ⇒ `ArrayObject::ARRAY_AS_PROPS` 直读
+    //   Undefined constant）。全局表保留——`constant('ArrayObject::X')` 直读路径兼容。
+    try meta.setClassConst("STD_PROP_LIST", Value.initInt(STD_PROP_LIST), .public);
+    try meta.setClassConst("ARRAY_AS_PROPS", Value.initInt(ARRAY_AS_PROPS), .public);
     const key1 = try allocator.dupe(u8, "ArrayObject::STD_PROP_LIST");
     try constants.put(key1, Value.initInt(STD_PROP_LIST));
     const key2 = try allocator.dupe(u8, "ArrayObject::ARRAY_AS_PROPS");
@@ -13774,20 +14006,46 @@ pub fn registerArrayObject(allocator: Allocator) !void {
 }
 
 // ============================================================================
-// SplStack类（SPL）
+// SplDoublyLinkedList 类族（SPL）：SplDoublyLinkedList / SplStack / SplQueue
 // ============================================================================
 
-/// ★批次十一：SplStack/SplQueue 内部状态面（internal_data，伪属性 `_data` 下线——
-///   PHP 真值 `get_object_vars(new SplStack()) == []`）。iter_pos 为迭代游标：
-///   Stack 走 LIFO（rewind 起自栈顶 ⇒ PHP 真值 `2:3 1:2 0:1`），Queue 走 FIFO。
+/// ★批次十二：基类统型重写。PHP 真值架构：`SplStack`/`SplQueue` extends
+///   `SplDoublyLinkedList`（`get_parent_class`/`instanceof`/var_dump 私有属性归属
+///   `"SplDoublyLinkedList":private` 三面同源）；迭代语义差异**全由实例 mode 位驱动**——
+///   LIFO 位=2、DELETE 位=1、高位 4 为 PHP 8.5.8 实测保留位（默认 DLL=0、Queue=4、
+///   Stack=6；setIteratorMode 时高位保留 `new=(old & ~3) | (new & 3)`）。
+///   SplStack/SplQueue 的 LIFO/FIFO 位**冻结**（改动 ⇒ RuntimeException
+///   `Iterators' LIFO/FIFO modes for SplStack/SplQueue objects are frozen`）。
+///   三类方法实现共享同一套（按 mode 分支）——对齐 Zend spl_dllist 单实现结构，
+///   行为差异在数据位而非代码路径（LIFO 栈顶⇄FIFO 队首两序互不套写）。
+///
+///   内部状态（elements/iter_pos/mode）在 internal_data（批次十一伪属性迁移面）；
+///   flags/dllist 刻意**不挂** meta 属性声明（避免 gov/foreach/serialize 各面连锁），
+///   var_dump 由对象分支的家族特判补出（php_var_dump 内 splDllFamilyOf 检查）。
+
+const SPL_DLL_IT_LIFO: i64 = 2;
+const SPL_DLL_IT_DELETE: i64 = 1;
+
 const SplDoublyLinkedListData = struct {
     elements: *PHPArray,
     iter_pos: i64 = 0,
+    /// 迭代模式位（默认按类：SplDoublyLinkedList=0、SplQueue=4、SplStack=6）。
+    mode: i64 = 0,
 
     fn dtor(p: ?*anyopaque, allocator: Allocator) void {
         const data: *SplDoublyLinkedListData = @ptrCast(@alignCast(p orelse return));
         data.elements.release(allocator);
         allocator.destroy(data);
+    }
+
+    fn isLifo(self: *const SplDoublyLinkedListData) bool {
+        return (self.mode & SPL_DLL_IT_LIFO) != 0;
+    }
+    fn isDelete(self: *const SplDoublyLinkedListData) bool {
+        return (self.mode & SPL_DLL_IT_DELETE) != 0;
+    }
+    fn cnt(self: *const SplDoublyLinkedListData) i64 {
+        return @intCast(self.elements.elements.count());
     }
 };
 
@@ -13807,138 +14065,471 @@ fn splDllAttach(obj: *PHPObject, allocator: Allocator) !*SplDoublyLinkedListData
     return data;
 }
 
-/// SplStack构造函数
+/// var_dump 家族判定：沿 parent 链是否挂 SplDoublyLinkedList（internal_data 撞型防护——
+/// ArrayIterator 等其它 internal_data 类不得被误判进 DLL 家族）。
+fn splDllFamilyOf(obj: *PHPObject) bool {
+    var cur = obj.class_meta;
+    while (cur) |m| {
+        if (std.mem.eql(u8, m.name, "SplDoublyLinkedList")) return true;
+        cur = m.parent;
+    }
+    return false;
+}
+
+/// 键重排：按键序收集值，重建 0..n-1 紧凑整数键。
+/// ★搬运语义：Elements.deinit 只释放**容器**不释放元素值（PHPArray.deinit 才遍历
+///   释放）⇒ collect **不 retain**（值份额随切片移交新表），多 retain 一次即净泄漏。
+fn splDllReindex(data: *SplDoublyLinkedListData, allocator: Allocator) !void {
+    const arr = data.elements;
+    var vals: std.ArrayListUnmanaged(Value) = .empty;
+    defer vals.deinit(allocator);
+    var it = arr.elements.iterator();
+    while (it.next()) |entry| try vals.append(allocator, entry.value_ptr.*);
+    arr.elements.deinit();
+    arr.elements = PHPArray.Elements.init(allocator);
+    arr.elements.parent = arr;
+    for (vals.items, 0..) |v, i| {
+        try arr.elements.put(.{ .integer = @intCast(i) }, v);
+    }
+    arr.next_index = @intCast(vals.items.len);
+}
+
+/// 尾加（push/enqueue/null 键 offsetSet 共用）。
+fn splDllPushValue(data: *SplDoublyLinkedListData, v: Value) !void {
+    const count = data.cnt();
+    _ = v.retain();
+    try data.elements.elements.put(.{ .integer = count }, v);
+    data.elements.next_index = count + 1;
+}
+
+/// 头取（shift/dequeue/DELETE 模式 FIFO 消耗共用）：删头 + 键重排。
+/// 份额随返回值移交（remove 只摘槽位不释放 ⇒ 借用拷贝即携带表份额，无需 retain）。
+fn splDllShiftValue(data: *SplDoublyLinkedListData, allocator: Allocator) !?Value {
+    if (data.cnt() == 0) return null;
+    const first = data.elements.elements.get(.{ .integer = 0 }) orelse return null;
+    _ = data.elements.elements.remove(.{ .integer = 0 });
+    try splDllReindex(data, allocator);
+    return first;
+}
+
+// --- 构造（三类默认 mode 真值：DLL=0 / Queue=4 / Stack=6；4=PHP 8.5.8 实测保留高位）---
+
+const SPL_DLL_STACK_DEFAULT_MODE: i64 = 4 | SPL_DLL_IT_LIFO;
+const SPL_DLL_QUEUE_DEFAULT_MODE: i64 = 4;
+
+fn splDllConstructMode(ctx: Value, default_mode: i64, allocator: Allocator) !Value {
+    const obj = Value_asObject(ctx);
+    const data = try splDllAttach(obj, allocator);
+    data.mode = default_mode;
+    return Value.initNull();
+}
+
+fn splDll_construct(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    return splDllConstructMode(ctx, 0, allocator);
+}
+
 fn splStack_construct(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     _ = args;
-    const obj = Value_asObject(ctx);
-    _ = try splDllAttach(obj, allocator);
-    return Value.initNull();
+    return splDllConstructMode(ctx, SPL_DLL_STACK_DEFAULT_MODE, allocator);
 }
 
-/// SplStack::push
-fn splStack_push(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+fn splQueue_construct(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    return splDllConstructMode(ctx, SPL_DLL_QUEUE_DEFAULT_MODE, allocator);
+}
+
+// --- 元素操作（LIFO/FIFO 差异全由 mode 位驱动，方法体三类共享）---
+
+fn splDll_push(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     _ = allocator;
     if (args.len < 1) return Value.initNull();
-
     const obj = Value_asObject(ctx);
     const data = splDllDataOf(obj) orelse return Value.initNull();
-    const array = data.elements;
-
-    // 添加到数组末尾
-    const count = array.elements.count();
-    _ = args[0].retain();
-    try array.elements.put(.{ .integer = @intCast(count) }, args[0]);
-
+    try splDllPushValue(data, args[0]);
     return Value.initNull();
 }
 
-/// SplStack::pop
-fn splStack_pop(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+fn splDll_pop(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     _ = args;
-    _ = allocator;
     const obj = Value_asObject(ctx);
-
     const data = splDllDataOf(obj) orelse return Value.initNull();
-    const array = data.elements;
-
-    const count = array.elements.count();
-    if (count == 0) return Value.initNull();
-
-    // 从末尾取出
-    const last_key = ArrayKey{ .integer = @intCast(count - 1) };
-    const val = array.elements.get(last_key) orelse return Value.initNull();
-    _ = val.retain();
-    _ = array.elements.remove(last_key);
-
+    const count = data.cnt();
+    if (count == 0) return throwThrowable("RuntimeException", "Can't pop from an empty datastructure", allocator);
+    const last_key = ArrayKey{ .integer = count - 1 };
+    const val = data.elements.elements.get(last_key) orelse return Value.initNull();
+    // 份额随返回值移交（remove 只摘槽位不释放，同 splDllShiftValue 契约）
+    _ = data.elements.elements.remove(last_key);
     return val;
 }
 
-/// SplStack::isEmpty
-fn splStack_isEmpty(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+/// shift/dequeue 共体（PHP 真值同文案 `Can't shift from an empty datastructure`）。
+fn splDll_shift(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    const obj = Value_asObject(ctx);
+    const data = splDllDataOf(obj) orelse return Value.initNull();
+    if (try splDllShiftValue(data, allocator)) |v| return v;
+    return throwThrowable("RuntimeException", "Can't shift from an empty datastructure", allocator);
+}
+
+/// 头加（unshift）：重建表，新值置 0、原值键序 +1（搬运语义同 splDllReindex）。
+fn splDll_unshift(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    if (args.len < 1) return Value.initNull();
+    const obj = Value_asObject(ctx);
+    const data = splDllDataOf(obj) orelse return Value.initNull();
+    const arr = data.elements;
+    var vals: std.ArrayListUnmanaged(Value) = .empty;
+    defer vals.deinit(allocator);
+    var it = arr.elements.iterator();
+    while (it.next()) |entry| try vals.append(allocator, entry.value_ptr.*);
+    arr.elements.deinit();
+    arr.elements = PHPArray.Elements.init(allocator);
+    arr.elements.parent = arr;
+    _ = args[0].retain();
+    try arr.elements.put(.{ .integer = 0 }, args[0]);
+    for (vals.items, 0..) |v, i| {
+        try arr.elements.put(.{ .integer = @as(i64, @intCast(i)) + 1 }, v);
+    }
+    arr.next_index = @intCast(vals.items.len + 1);
+    return Value.initNull();
+}
+
+fn splDllPeek(ctx: Value, front: bool, allocator: Allocator) !Value {
+    const obj = Value_asObject(ctx);
+    const data = splDllDataOf(obj) orelse return Value.initNull();
+    const count = data.cnt();
+    if (count == 0) return throwThrowable("RuntimeException", "Can't peek at an empty datastructure", allocator);
+    const key = ArrayKey{ .integer = if (front) 0 else count - 1 };
+    const val = data.elements.elements.get(key) orelse return Value.initNull();
+    _ = val.retain();
+    return val;
+}
+
+fn splDll_top(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    return splDllPeek(ctx, false, allocator);
+}
+
+fn splDll_bottom(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    return splDllPeek(ctx, true, allocator);
+}
+
+fn splDll_isEmpty(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     _ = args;
     _ = allocator;
     const obj = Value_asObject(ctx);
-
     const data = splDllDataOf(obj) orelse return Value.initBool(true);
-    return Value.initBool(data.elements.elements.count() == 0);
+    return Value.initBool(data.cnt() == 0);
 }
 
-/// SplStack::count（Countable 接口面——批次九 php_count 改接口判定后须有真方法）
-fn splStack_count(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+fn splDll_count(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     _ = args;
     _ = allocator;
     const obj = Value_asObject(ctx);
     const data = splDllDataOf(obj) orelse return Value.initInt(0);
-    return Value.initInt(@intCast(data.elements.elements.count()));
+    return Value.initInt(data.cnt());
 }
 
-/// SplStack::top
-fn splStack_top(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+/// 位插（add）：`0 <= index <= count`（==count 即尾加）；越界 OutOfRangeException。
+/// 插入位及之后键序 +1（重建一次，搬运语义同 splDllReindex）。
+fn splDll_add(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    if (args.len < 2) return Value.initNull();
+    const obj = Value_asObject(ctx);
+    const data = splDllDataOf(obj) orelse return Value.initNull();
+    const index = args[0].toInt();
+    const count = data.cnt();
+    if (index < 0 or index > count) {
+        return throwThrowable("OutOfRangeException", "SplDoublyLinkedList::add(): Argument #1 ($index) is out of range", allocator);
+    }
+    const arr = data.elements;
+    var vals: std.ArrayListUnmanaged(Value) = .empty;
+    defer vals.deinit(allocator);
+    var it = arr.elements.iterator();
+    while (it.next()) |entry| try vals.append(allocator, entry.value_ptr.*);
+    arr.elements.deinit();
+    arr.elements = PHPArray.Elements.init(allocator);
+    arr.elements.parent = arr;
+    _ = args[1].retain();
+    for (vals.items, 0..) |v, i| {
+        const idx: i64 = @intCast(i);
+        try arr.elements.put(.{ .integer = if (idx < index) idx else idx + 1 }, v);
+    }
+    try arr.elements.put(.{ .integer = index }, args[1]);
+    arr.next_index = count + 1;
+    return Value.initNull();
+}
+
+// --- 迭代模式 ---
+
+fn splDll_getIteratorMode(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     _ = args;
     _ = allocator;
     const obj = Value_asObject(ctx);
+    const data = splDllDataOf(obj) orelse return Value.initInt(0);
+    return Value.initInt(data.mode);
+}
+
+fn splDllSetIteratorModeImpl(ctx: Value, args: []const Value, allocator: Allocator, frozen: bool) !Value {
+    if (args.len < 1) return Value.initNull();
+    const obj = Value_asObject(ctx);
     const data = splDllDataOf(obj) orelse return Value.initNull();
-    const count = data.elements.elements.count();
-    if (count == 0) return Value.initNull();
-    const val = data.elements.elements.get(.{ .integer = @intCast(count - 1) }) orelse return Value.initNull();
+    const new_bits = args[0].toInt();
+    // SplStack/SplQueue 的 LIFO/FIFO 位冻结（PHP 真值 RuntimeException 文案）
+    if (frozen and (new_bits & SPL_DLL_IT_LIFO) != (data.mode & SPL_DLL_IT_LIFO)) {
+        return throwThrowable("RuntimeException", "Iterators' LIFO/FIFO modes for SplStack/SplQueue objects are frozen", allocator);
+    }
+    // 高位（4）保留，只写低两位
+    data.mode = (data.mode & ~@as(i64, 3)) | (new_bits & 3);
+    return Value.initNull();
+}
+
+fn splDll_setIteratorMode(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    return splDllSetIteratorModeImpl(ctx, args, allocator, false);
+}
+
+fn splDll_setIteratorModeFrozen(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    return splDllSetIteratorModeImpl(ctx, args, allocator, true);
+}
+
+// --- ArrayAccess（offset 族：键恒 ?int——null 即尾加；越界 OutOfRange；异型 TypeError）---
+
+/// offset 逻辑下标 → 物理下标（PHP 真值 m2 钉死：LIFO 模式 offset 自**栈顶**起数——
+/// `$st[0]` 读栈顶、`$st[1]=99` 写物理头；SplQueue FIFO 正向恒等映射。
+/// add/迭代/serialize/unset 重排一律用**物理序**，不经此映射）。
+fn splDllPhysIndex(data: *const SplDoublyLinkedListData, logical: i64) i64 {
+    return if (data.isLifo()) data.cnt() - 1 - logical else logical;
+}
+
+/// offset 键解析：int ⇒ 下标；null ⇒ null（push 语义位）；异型 ⇒ TypeError（已置
+/// hasException，调用方必须立即 hasException() 短路——此 null 返回无意义，仅为类型收口；
+/// 不可返回 error：Zig error 路径会绕过 nlk 方法调用臂的 catch 路由）。
+/// method 名用于文案（`SplDoublyLinkedList::{method}(): Argument #1 ($index) must be of type ?int, {type} given`）。
+fn splDllOffsetIndex(arg: Value, comptime method: []const u8, allocator: Allocator) !?i64 {
+    if (arg.isNull()) return null;
+    if (arg.isInt()) return arg.asInt();
+    var buf: [160]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "SplDoublyLinkedList::" ++ method ++ "(): Argument #1 ($index) must be of type ?int, {s} given", .{valueTypeName(arg)}) catch "SplDoublyLinkedList: offset index must be of type ?int";
+    _ = try throwThrowable("TypeError", msg, allocator);
+    return null;
+}
+
+fn splDll_offsetExists(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = allocator;
+    if (args.len < 1) return Value.initBool(false);
+    const obj = Value_asObject(ctx);
+    const data = splDllDataOf(obj) orelse return Value.initBool(false);
+    // isset 语义：异型键不抛，恒 false
+    if (!args[0].isInt()) return Value.initBool(false);
+    const idx = args[0].asInt();
+    if (idx < 0 or idx >= data.cnt()) return Value.initBool(false);
+    return Value.initBool(data.elements.elements.get(.{ .integer = splDllPhysIndex(data, idx) }) != null);
+}
+
+fn splDll_offsetGet(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    if (args.len < 1) return Value.initNull();
+    const obj = Value_asObject(ctx);
+    const data = splDllDataOf(obj) orelse return Value.initNull();
+    const idx_opt = try splDllOffsetIndex(args[0], "offsetGet", allocator);
+    if (hasException()) return Value.initNull(); // 异型键 TypeError 已置位（splDllOffsetIndex 契约）
+    const idx = idx_opt orelse return Value.initNull();
+    if (idx < 0 or idx >= data.cnt()) {
+        return throwThrowable("OutOfRangeException", "SplDoublyLinkedList::offsetGet(): Argument #1 ($index) is out of range", allocator);
+    }
+    const val = data.elements.elements.get(.{ .integer = splDllPhysIndex(data, idx) }) orelse return Value.initNull();
     _ = val.retain();
     return val;
 }
 
-// --- Iterator 协议（LIFO：栈顶→栈底，key 保持原下标；PHP 真值 `2:3 1:2 0:1`）---
+fn splDll_offsetSet(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    if (args.len < 2) return Value.initNull();
+    const obj = Value_asObject(ctx);
+    const data = splDllDataOf(obj) orelse return Value.initNull();
+    const idx_opt = try splDllOffsetIndex(args[0], "offsetSet", allocator);
+    if (hasException()) return Value.initNull(); // 异型键 TypeError 已置位（splDllOffsetIndex 契约）
+    // null 键 ⇒ 尾加（PHP 真值 `$st[] = v` 等价 push）
+    const idx = idx_opt orelse {
+        try splDllPushValue(data, args[1]);
+        return Value.initNull();
+    };
+    const count = data.cnt();
+    if (idx < 0 or idx > count) {
+        return throwThrowable("OutOfRangeException", "SplDoublyLinkedList::offsetSet(): Argument #1 ($index) is out of range", allocator);
+    }
+    if (idx == count) {
+        // ==count ⇒ 尾加（PHP：offsetSet 允许 append 位）
+        try splDllPushValue(data, args[1]);
+        return Value.initNull();
+    }
+    _ = args[1].retain();
+    try data.elements.elements.put(.{ .integer = splDllPhysIndex(data, idx) }, args[1]);
+    return Value.initNull();
+}
 
-fn splStack_rewind(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+fn splDll_offsetUnset(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    if (args.len < 1) return Value.initNull();
+    const obj = Value_asObject(ctx);
+    const data = splDllDataOf(obj) orelse return Value.initNull();
+    if (!args[0].isInt()) return Value.initNull();
+    const idx = args[0].asInt();
+    if (idx < 0 or idx >= data.cnt()) return Value.initNull();
+    const phys = splDllPhysIndex(data, idx);
+    if (data.elements.elements.get(.{ .integer = phys })) |old| old.release(allocator);
+    _ = data.elements.elements.remove(.{ .integer = phys });
+    // PHP 真值：unset($st[0]) 后键重排紧凑
+    try splDllReindex(data, allocator);
+    return Value.initNull();
+}
+
+// --- Iterator 协议（LIFO/FIFO 与 KEEP/DELETE 全由 mode 位驱动，三类共享）---
+//
+// KEEP（默认）：rewind 起 LIFO 栈顶(count-1)/FIFO 队首(0)，游标向对端步进，
+//   key 恒为元素真实下标；不消耗（PHP 真值 probe1：Stack `2:3 1:2 0:1`、Queue `0:x 1:y 2:z`）。
+// DELETE：迭代即消耗——current/key 恒读消费端（LIFO 栈顶/FIFO 队首），next 弹消费端
+//   （LIFO=pop/FIFO=shift）；valid 恒 count>0（PHP 真值 m2：mode 7 迭代后 count=0）。
+
+fn splDll_rewind(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     _ = args;
     _ = allocator;
     const obj = Value_asObject(ctx);
     const data = splDllDataOf(obj) orelse return Value.initNull();
-    data.iter_pos = @as(i64, @intCast(data.elements.elements.count())) - 1;
+    data.iter_pos = if (data.isDelete()) 0 else if (data.isLifo()) data.cnt() - 1 else 0;
     return Value.initNull();
 }
 
-fn splStack_valid(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+fn splDll_valid(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     _ = args;
     _ = allocator;
     const obj = Value_asObject(ctx);
     const data = splDllDataOf(obj) orelse return Value.initBool(false);
-    const count: i64 = @intCast(data.elements.elements.count());
+    if (data.isDelete()) return Value.initBool(data.cnt() > 0);
+    const count = data.cnt();
     return Value.initBool(data.iter_pos >= 0 and data.iter_pos < count);
 }
 
-fn splStack_current(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+fn splDll_current(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     _ = args;
     _ = allocator;
     const obj = Value_asObject(ctx);
     const data = splDllDataOf(obj) orelse return Value.initNull();
-    const val = data.elements.elements.get(.{ .integer = data.iter_pos }) orelse return Value.initNull();
+    const idx: i64 = if (data.isDelete())
+        (if (data.isLifo()) data.cnt() - 1 else 0)
+    else
+        data.iter_pos;
+    const val = data.elements.elements.get(.{ .integer = idx }) orelse return Value.initNull();
     _ = val.retain();
     return val;
 }
 
-fn splStack_key(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+fn splDll_key(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     _ = args;
     _ = allocator;
     const obj = Value_asObject(ctx);
     const data = splDllDataOf(obj) orelse return Value.initInt(0);
+    if (data.isDelete()) return Value.initInt(if (data.isLifo()) data.cnt() - 1 else 0);
     return Value.initInt(data.iter_pos);
 }
 
-fn splStack_next(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+fn splDll_next(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     _ = args;
-    _ = allocator;
     const obj = Value_asObject(ctx);
     const data = splDllDataOf(obj) orelse return Value.initNull();
-    data.iter_pos -= 1;
+    if (data.isDelete()) {
+        // 消耗语义：LIFO 弹栈顶 / FIFO 弹队首（get 借用 release + remove 摘槽 ⇒ 平衡）
+        if (data.isLifo()) {
+            const count = data.cnt();
+            if (count > 0) {
+                const key = ArrayKey{ .integer = count - 1 };
+                if (data.elements.elements.get(key)) |old| old.release(allocator);
+                _ = data.elements.elements.remove(key);
+            }
+        } else {
+            if (try splDllShiftValue(data, allocator)) |v| v.release(allocator);
+        }
+        return Value.initNull();
+    }
+    data.iter_pos += if (data.isLifo()) -1 else 1;
     return Value.initNull();
 }
 
-/// 注册SplStack类
-pub fn registerSplStack(allocator: Allocator) !void {
+// --- 序列化（PHP 三段制：`O:<len>:"<类名>":3:{i:0;<mode>;i:1;<dllist>;i:2;<动态属性面>}`）---
+
+fn splDll___serialize(ctx: Value, _: []const Value, allocator: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    const data = splDllDataOf(obj) orelse return Value.initNull();
+    const arr = try PHPArray.init(allocator);
+    errdefer arr.release(allocator);
+    try arr.elements.put(.{ .integer = 0 }, Value.initInt(data.mode));
+    // dllist 拷贝（值借用 ⇒ set 自 retain）
+    const list = try PHPArray.init(allocator);
+    var it = data.elements.elements.iterator();
+    while (it.next()) |entry| {
+        try list.set(allocator, entry.key_ptr.*, entry.value_ptr.*);
+    }
+    try arr.elements.put(.{ .integer = 1 }, Value.initArray(list));
+    // props = 动态属性面（flags/dllist 不入实例表 ⇒ properties 全量即动态面）
+    const props = try PHPArray.init(allocator);
+    var pit = obj.properties.iterator();
+    while (pit.next()) |entry| {
+        const kstr = try PHPString.init(allocator, entry.key_ptr.*);
+        try props.set(allocator, .{ .string = kstr }, entry.value_ptr.*);
+        kstr.release(allocator);
+    }
+    try arr.elements.put(.{ .integer = 2 }, Value.initArray(props));
+    return Value.initArray(arr);
+}
+
+fn splDll___unserialize(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
+    const obj = Value_asObject(ctx);
+    const data = try splDllAttach(obj, allocator);
+    if (args.len > 0 and args[0].isArray()) {
+        const arr = args[0].asArray();
+        if (arr.elements.get(.{ .integer = 0 })) |mode_v| data.mode = mode_v.toInt();
+        if (arr.elements.get(.{ .integer = 1 })) |list_v| {
+            if (list_v.isArray()) {
+                const src = list_v.asArray();
+                // 清空旧表（遍历释放值与字符串键 + 释放容器——同 PHPArray.deinit 的
+                // 键值两段；不能调 PHPArray.deinit：它会整体销毁壳含 alloc_counters）。
+                var oit = data.elements.elements.iterator();
+                while (oit.next()) |entry| {
+                    entry.value_ptr.*.release(allocator);
+                    if (entry.key_ptr.* == .string) entry.key_ptr.*.string.release(allocator);
+                }
+                data.elements.elements.deinit();
+                data.elements.elements = PHPArray.Elements.init(allocator);
+                data.elements.elements.parent = data.elements;
+                data.elements.next_index = 0;
+                var it = src.elements.iterator();
+                while (it.next()) |entry| {
+                    try data.elements.set(allocator, entry.key_ptr.*, entry.value_ptr.*);
+                }
+            }
+        }
+        if (arr.elements.get(.{ .integer = 2 })) |props_v| {
+            if (props_v.isArray()) {
+                var pit = props_v.asArray().elements.iterator();
+                while (pit.next()) |entry| {
+                    const key_str: []const u8 = switch (entry.key_ptr.*) {
+                        .string => |s| s.data,
+                        .integer => continue, // 动态属性面恒字符串键，异型跳过
+                    };
+                    _ = entry.value_ptr.retain();
+                    try obj.putProperty(key_str, entry.value_ptr.*);
+                }
+            }
+        }
+    }
+    return Value.initNull();
+}
+
+// --- 注册（基类全量 + 子类差异点；方法继承走 ClassMeta.parent 链）---
+
+fn newSplDllClassMeta(allocator: Allocator, name_str: []const u8, parent: ?*const ClassMeta) !*ClassMeta {
     const meta = try allocator.create(ClassMeta);
-    const name = try allocator.dupe(u8, "SplStack");
+    const name = try allocator.dupe(u8, name_str);
     meta.* = .{
         .name = name,
-        .parent = null,
+        .parent = parent,
         .methods = std.StringHashMap(ClassMethod).init(allocator),
         .properties = std.StringHashMap(ClassProperty).init(allocator),
         .property_order = try std.ArrayList([]const u8).initCapacity(allocator, 0),
@@ -13949,182 +14540,85 @@ pub fn registerSplStack(allocator: Allocator) !void {
         .is_abstract = false,
         .allocator = allocator,
     };
+    return meta;
+}
 
-    try meta.putMethodOrdered(.{ .name = "__construct", .func = splStack_construct, .is_public = true });
-    try meta.putMethodOrdered(.{ .name = "push", .func = splStack_push, .is_public = true });
-    try meta.putMethodOrdered(.{ .name = "pop", .func = splStack_pop, .is_public = true });
-    try meta.putMethodOrdered(.{ .name = "isEmpty", .func = splStack_isEmpty, .is_public = true });
-    try meta.putMethodOrdered(.{ .name = "count", .func = splStack_count, .is_public = true });
-    try meta.putMethodOrdered(.{ .name = "top", .func = splStack_top, .is_public = true });
-    // Iterator 协议（LIFO）——伪属性迁移后 foreach 的真值通道（PHP：SplStack 是 Iterator 直挂）
-    try meta.putMethodOrdered(.{ .name = "rewind", .func = splStack_rewind, .is_public = true });
-    try meta.putMethodOrdered(.{ .name = "valid", .func = splStack_valid, .is_public = true });
-    try meta.putMethodOrdered(.{ .name = "current", .func = splStack_current, .is_public = true });
-    try meta.putMethodOrdered(.{ .name = "key", .func = splStack_key, .is_public = true });
-    try meta.putMethodOrdered(.{ .name = "next", .func = splStack_next, .is_public = true });
+/// 注册 SplDoublyLinkedList 基类（★批次十二新增——SplStack/SplQueue 的 PHP 真值父类）。
+pub fn registerSplDoublyLinkedList(allocator: Allocator) !void {
+    const meta = try newSplDllClassMeta(allocator, "SplDoublyLinkedList", null);
 
-    meta.magic_construct = splStack_construct;
+    try meta.putMethodOrdered(.{ .name = "__construct", .func = splDll_construct, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "push", .func = splDll_push, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "pop", .func = splDll_pop, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "shift", .func = splDll_shift, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "unshift", .func = splDll_unshift, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "top", .func = splDll_top, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "bottom", .func = splDll_bottom, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "add", .func = splDll_add, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "isEmpty", .func = splDll_isEmpty, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "count", .func = splDll_count, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "setIteratorMode", .func = splDll_setIteratorMode, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "getIteratorMode", .func = splDll_getIteratorMode, .is_public = true });
+    // ArrayAccess 接口
+    try meta.putMethodOrdered(.{ .name = "offsetExists", .func = splDll_offsetExists, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "offsetGet", .func = splDll_offsetGet, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "offsetSet", .func = splDll_offsetSet, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "offsetUnset", .func = splDll_offsetUnset, .is_public = true });
+    // Iterator 协议
+    try meta.putMethodOrdered(.{ .name = "rewind", .func = splDll_rewind, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "valid", .func = splDll_valid, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "current", .func = splDll_current, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "key", .func = splDll_key, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "next", .func = splDll_next, .is_public = true });
+    // 序列化
+    try meta.putMethodOrdered(.{ .name = "__serialize", .func = splDll___serialize, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "__unserialize", .func = splDll___unserialize, .is_public = true });
+
+    meta.magic_construct = splDll_construct;
+    // ★putMethodOrdered 不挂 magic 钩子（addMethod 才挂），serializeValue 只看对象自身
+    //   meta（不沿 parent 链）⇒ 三类各自显式挂。
+    meta.magic_serialize = splDll___serialize;
+    meta.magic_unserialize = splDll___unserialize;
+
+    // 类常量（PHP 8.5.8 实测值；setClassConst 权威通道 + 全局表兼容 constant() 直读）
+    const consts = [_]struct { name: []const u8, val: i64 }{
+        .{ .name = "IT_MODE_LIFO", .val = 2 },
+        .{ .name = "IT_MODE_FIFO", .val = 0 },
+        .{ .name = "IT_MODE_DELETE", .val = 1 },
+        .{ .name = "IT_MODE_KEEP", .val = 0 },
+    };
+    for (consts) |c| {
+        try meta.setClassConst(c.name, Value.initInt(c.val), .public);
+        const key = try std.fmt.allocPrint(allocator, "SplDoublyLinkedList::{s}", .{c.name});
+        try constants.put(key, Value.initInt(c.val));
+    }
 
     try registerClass(meta);
 }
 
-// ============================================================================
-// SplQueue类（SPL）
-// ============================================================================
-
-/// SplQueue构造函数
-fn splQueue_construct(ctx: Value, args: []const Value, allocator: Allocator) !Value {
-    _ = args;
-    const obj = Value_asObject(ctx);
-    _ = try splDllAttach(obj, allocator);
-    return Value.initNull();
+/// 注册 SplStack 类（继承 SplDoublyLinkedList；默认 mode=6，LIFO 位冻结）。
+pub fn registerSplStack(allocator: Allocator) !void {
+    const meta = try newSplDllClassMeta(allocator, "SplStack", findClass("SplDoublyLinkedList"));
+    // 差异点：构造默认 mode=6；LIFO/FIFO 位冻结覆盖
+    try meta.putMethodOrdered(.{ .name = "__construct", .func = splStack_construct, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "setIteratorMode", .func = splDll_setIteratorModeFrozen, .is_public = true });
+    meta.magic_construct = splStack_construct;
+    meta.magic_serialize = splDll___serialize;
+    meta.magic_unserialize = splDll___unserialize;
+    try registerClass(meta);
 }
 
-/// SplQueue::enqueue
-fn splQueue_enqueue(ctx: Value, args: []const Value, allocator: Allocator) !Value {
-    _ = allocator;
-    if (args.len < 1) return Value.initNull();
-
-    const obj = Value_asObject(ctx);
-    const data = splDllDataOf(obj) orelse return Value.initNull();
-    const array = data.elements;
-
-    // 添加到数组末尾
-    const count = array.elements.count();
-    _ = args[0].retain();
-    try array.elements.put(.{ .integer = @intCast(count) }, args[0]);
-
-    return Value.initNull();
-}
-
-/// SplQueue::dequeue
-fn splQueue_dequeue(ctx: Value, args: []const Value, allocator: Allocator) !Value {
-    _ = args;
-    _ = allocator;
-    const obj = Value_asObject(ctx);
-
-    const data = splDllDataOf(obj) orelse return Value.initNull();
-    const array = data.elements;
-
-    const count = array.elements.count();
-    if (count == 0) return Value.initNull();
-
-    // 从开头取出
-    const first_val = array.elements.get(.{ .integer = 0 }) orelse return Value.initNull();
-    _ = first_val.retain();
-
-    // 重新索引：将所有元素向前移动
-    var i: usize = 1;
-    while (i < count) : (i += 1) {
-        if (array.elements.get(.{ .integer = @intCast(i) })) |val| {
-            try array.elements.put(.{ .integer = @intCast(i - 1) }, val);
-        }
-    }
-
-    // 删除最后一个位置
-    _ = array.elements.remove(.{ .integer = @intCast(count - 1) });
-
-    return first_val;
-}
-
-/// SplQueue::isEmpty
-fn splQueue_isEmpty(ctx: Value, args: []const Value, allocator: Allocator) !Value {
-    _ = args;
-    _ = allocator;
-    const obj = Value_asObject(ctx);
-
-    const data = splDllDataOf(obj) orelse return Value.initBool(true);
-    return Value.initBool(data.elements.elements.count() == 0);
-}
-
-/// SplQueue::count
-fn splQueue_count(ctx: Value, args: []const Value, allocator: Allocator) !Value {
-    _ = args;
-    _ = allocator;
-    const obj = Value_asObject(ctx);
-    const data = splDllDataOf(obj) orelse return Value.initInt(0);
-    return Value.initInt(@intCast(data.elements.elements.count()));
-}
-
-// --- Iterator 协议（FIFO：队首→队尾；PHP 真值 `0=a 1=b`）---
-
-fn splQueue_rewind(ctx: Value, args: []const Value, allocator: Allocator) !Value {
-    _ = args;
-    _ = allocator;
-    const obj = Value_asObject(ctx);
-    const data = splDllDataOf(obj) orelse return Value.initNull();
-    data.iter_pos = 0;
-    return Value.initNull();
-}
-
-fn splQueue_valid(ctx: Value, args: []const Value, allocator: Allocator) !Value {
-    _ = args;
-    _ = allocator;
-    const obj = Value_asObject(ctx);
-    const data = splDllDataOf(obj) orelse return Value.initBool(false);
-    const count: i64 = @intCast(data.elements.elements.count());
-    return Value.initBool(data.iter_pos >= 0 and data.iter_pos < count);
-}
-
-fn splQueue_current(ctx: Value, args: []const Value, allocator: Allocator) !Value {
-    _ = args;
-    _ = allocator;
-    const obj = Value_asObject(ctx);
-    const data = splDllDataOf(obj) orelse return Value.initNull();
-    const val = data.elements.elements.get(.{ .integer = data.iter_pos }) orelse return Value.initNull();
-    _ = val.retain();
-    return val;
-}
-
-fn splQueue_key(ctx: Value, args: []const Value, allocator: Allocator) !Value {
-    _ = args;
-    _ = allocator;
-    const obj = Value_asObject(ctx);
-    const data = splDllDataOf(obj) orelse return Value.initInt(0);
-    return Value.initInt(data.iter_pos);
-}
-
-fn splQueue_next(ctx: Value, args: []const Value, allocator: Allocator) !Value {
-    _ = args;
-    _ = allocator;
-    const obj = Value_asObject(ctx);
-    const data = splDllDataOf(obj) orelse return Value.initNull();
-    data.iter_pos += 1;
-    return Value.initNull();
-}
-
-/// 注册SplQueue类
+/// 注册 SplQueue 类（继承 SplDoublyLinkedList；默认 mode=4，FIFO 位冻结 + enqueue/dequeue）。
 pub fn registerSplQueue(allocator: Allocator) !void {
-    const meta = try allocator.create(ClassMeta);
-    const name = try allocator.dupe(u8, "SplQueue");
-    meta.* = .{
-        .name = name,
-        .parent = null,
-        .methods = std.StringHashMap(ClassMethod).init(allocator),
-        .properties = std.StringHashMap(ClassProperty).init(allocator),
-        .property_order = try std.ArrayList([]const u8).initCapacity(allocator, 0),
-        .static_properties = std.StringHashMap(Value).init(allocator),
-        .const_visibility = std.StringHashMap(ConstVisibility).init(allocator),
-        .class_constants = std.StringHashMap(Value).init(allocator),
-        .interfaces = &SPL_STACK_QUEUE_INTERFACES, // ★F-3（R-336）：PHP 8.5.8 实测传递闭包
-        .is_abstract = false,
-        .allocator = allocator,
-    };
-
+    const meta = try newSplDllClassMeta(allocator, "SplQueue", findClass("SplDoublyLinkedList"));
     try meta.putMethodOrdered(.{ .name = "__construct", .func = splQueue_construct, .is_public = true });
-    try meta.putMethodOrdered(.{ .name = "enqueue", .func = splQueue_enqueue, .is_public = true });
-    try meta.putMethodOrdered(.{ .name = "dequeue", .func = splQueue_dequeue, .is_public = true });
-    try meta.putMethodOrdered(.{ .name = "isEmpty", .func = splQueue_isEmpty, .is_public = true });
-    try meta.putMethodOrdered(.{ .name = "count", .func = splQueue_count, .is_public = true });
-    // Iterator 协议（FIFO）
-    try meta.putMethodOrdered(.{ .name = "rewind", .func = splQueue_rewind, .is_public = true });
-    try meta.putMethodOrdered(.{ .name = "valid", .func = splQueue_valid, .is_public = true });
-    try meta.putMethodOrdered(.{ .name = "current", .func = splQueue_current, .is_public = true });
-    try meta.putMethodOrdered(.{ .name = "key", .func = splQueue_key, .is_public = true });
-    try meta.putMethodOrdered(.{ .name = "next", .func = splQueue_next, .is_public = true });
-
+    try meta.putMethodOrdered(.{ .name = "setIteratorMode", .func = splDll_setIteratorModeFrozen, .is_public = true });
+    // enqueue/dequeue = push/shift 的别名（PHP 真值同文案，DRY 直挂共享实现）
+    try meta.putMethodOrdered(.{ .name = "enqueue", .func = splDll_push, .is_public = true });
+    try meta.putMethodOrdered(.{ .name = "dequeue", .func = splDll_shift, .is_public = true });
     meta.magic_construct = splQueue_construct;
-
+    meta.magic_serialize = splDll___serialize;
+    meta.magic_unserialize = splDll___unserialize;
     try registerClass(meta);
 }
 
@@ -25891,6 +26385,17 @@ pub fn php_object_get(obj_val: Value, property_name: []const u8) !Value {
 
     const obj = Value_asObject(obj_val);
 
+    // ★批次十二：ArrayObject ARRAY_AS_PROPS 读重定向（先于可见性检查——属性名全量
+    //   重定向 storage；未命中 Warning `Undefined array key` + null，PHP 真值 m5 钉死）。
+    if (arrayObjectAsPropsStorage(obj)) |storage| {
+        const key = ArrayKey{ .string = PHPString.initStatic(property_name) };
+        if (storage.elements.get(key)) |v| return v; // 借用返回（同 getProperty 契约）
+        var wbuf: [256]u8 = undefined;
+        const wmsg = std.fmt.bufPrint(&wbuf, "Undefined array key \"{s}\"", .{property_name}) catch "Undefined array key";
+        emitWarning(wmsg);
+        return Value.initNull();
+    }
+
     // 属性可见性检查
     if (obj.class_meta) |meta| {
         if (findPropertyDeclaringClass(meta, property_name)) |decl| {
@@ -26291,6 +26796,15 @@ pub fn php_object_set(obj_val: Value, property_name: []const u8, value: Value) !
     }
 
     const obj = Value_asObject(obj_val);
+
+    // ★批次十二：ArrayObject ARRAY_AS_PROPS 写重定向——写 storage（不产生动态属性、
+    //   不发 Creation of dynamic property Deprecated，PHP 真值 m3/m4 钉死）。
+    if (arrayObjectAsPropsStorage(obj)) |storage| {
+        const kstr = try PHPString.init(runtime_allocator, property_name);
+        try storage.set(runtime_allocator, .{ .string = kstr }, value);
+        kstr.release(runtime_allocator);
+        return Value.initNull();
+    }
 
     // 属性可见性检查
     if (obj.class_meta) |meta| {

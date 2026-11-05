@@ -60,9 +60,3 @@ PASS|f163_event_driven_dispatch_bus.php
 PASS|f164_plugin_hook_system.php
 PASS|f171_state_machine_dfa.php
 PASS|f173_concurrency_primitives_sim.php
-PASS|f174_command_undo_redo_macro.php
-PASS|f175_decorator_strategy_template.php
-PASS|f176_specification_chain_rules.php
-PASS|f177_graph_traversal_dfs_bfs.php
-PASS|f178_numeric_precision_matrix.php
-PASS|f179_visitor_composite_ast.php

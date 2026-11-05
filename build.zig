@@ -9,6 +9,17 @@ pub fn build(b: *std.Build) void {
     // The bug causes "Instruction does not dominate all uses" LLVM error in Debug mode
     const exe_optimize: std.builtin.OptimizeMode = if (optimize == .debug) .safe else optimize;
 
+    // ========== F-6：debug_backtrace 帧栈插桩开关（编译期） ==========
+    // 开态：AOT 产物每个 PHP 函数头 push 帧 + defer pop；关态：不生成任何 push/pop ⇒ 零开销。
+    // 默认关（release 产物零开销、门面零转移）；调试需要时显式 -Ddebug_frames=true 开启。
+    const debug_frames = b.option(
+        bool,
+        "debug_frames",
+        "Enable debug_backtrace frame tracking in AOT-compiled PHP products (default: off)",
+    ) orelse false;
+    const build_options = b.addOptions();
+    build_options.addOption(bool, "debug_frames", debug_frames);
+
     // ========== 定义共享模块 ==========
     // 这些模块用于解决 Zig 0.15.2 不推荐使用 `../` 跨目录导入的问题
 
@@ -86,6 +97,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("jit", jit_mod);
     exe.root_module.addImport("extension", extension_mod);
     exe.root_module.addImport("shared", shared_mod);
+    exe.root_module.addOptions("build_options", build_options);
     exe.root_module.link_libc = true;
     exe.root_module.linkSystemLibrary("pcre2-8", .{});
     exe.root_module.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/lib" });
@@ -108,6 +120,7 @@ pub fn build(b: *std.Build) void {
     aot_test.root_module.addImport("jit", jit_mod);
     aot_test.root_module.addImport("extension", extension_mod);
     aot_test.root_module.addImport("shared", shared_mod);
+    aot_test.root_module.addOptions("build_options", build_options);
     const run_aot_test = b.addRunArtifact(aot_test);
     aot_test_step.dependOn(&run_aot_test.step);
 

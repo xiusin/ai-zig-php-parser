@@ -26,6 +26,8 @@ const Diagnostics = @import("diagnostics.zig");
 const DiagnosticEngine = Diagnostics.DiagnosticEngine;
 const compiler = @import("compiler");
 const ast = compiler.ast;
+// ★F-6：debug_backtrace 帧栈插桩开关（编译期；-Ddebug_frames，debug/safe 默认开）
+const build_options = @import("build_options");
 
 fn getIo() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
@@ -339,6 +341,10 @@ pub const NativeLinker = struct {
     current_byref_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_switch_value_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_global_get_names: ?*const std.AutoHashMap(usize, []const u8) = null,
+    /// ★批次十二（§232.3-2）：make_ref 结果寄存器 → ptr 寄存器（preg by-ref 异常写回链第 1 环）
+    current_make_ref_ptr: ?*const std.AutoHashMap(usize, usize) = null,
+    /// ★批次十二（§232.3-2）：store 指令 ptr → value 寄存器（preg by-ref 异常写回链第 2 环）
+    current_store_ptr_value: ?*const std.AutoHashMap(usize, usize) = null,
     current_concat_operand_regs: ?*const std.AutoHashMap(usize, void) = null,
     current_coalesce_nowarn_regs: ?*const std.AutoHashMap(usize, void) = null,
     /// ★F-151-b：isset/empty 实参链上的**属性读**寄存器——发射期改用 `php_object_get_isset_chain`
@@ -5151,6 +5157,9 @@ pub const NativeLinker = struct {
         // 临时文件/调试
         .{ "tempnam", bi(.{ .runtime_name = "php_tempnam", .needs_allocator = true }) },
         .{ "debug_zval_dump", bi(.{ .runtime_name = "php_debug_zval_dump", .needs_allocator = false }) },
+        // ★F-6：debug_backtrace 族（帧栈由 -Ddebug_frames 插桩维护；关态下两函数返回空数组/无输出）
+        .{ "debug_backtrace", bi(.{ .runtime_name = "php_debug_backtrace", .needs_allocator = true, .handler_params = 2, .optional_defaults = &.{ "runtime.Value.initNull()", "runtime.Value.initNull()" } }) },
+        .{ "debug_print_backtrace", bi(.{ .runtime_name = "php_debug_print_backtrace", .needs_allocator = true, .handler_params = 2, .optional_defaults = &.{ "runtime.Value.initNull()", "runtime.Value.initNull()" } }) },
 
         // HTTP 头（CLI 模式）
         .{ "headers_list", bi(.{ .runtime_name = "php_headers_list", .needs_allocator = true }) },
@@ -5422,6 +5431,57 @@ pub const NativeLinker = struct {
         try code.appendSlice(self.allocator, "    defer runtime.profiler.exitGlobal(\"");
         try code.appendSlice(self.allocator, escaped_prof_name);
         try code.appendSlice(self.allocator, "\");\n");
+
+        // ★F-6：debug_backtrace 帧栈插桩（仅 -Ddebug_frames 开态生成；关态不生成任何调用 ⇒ 零开销）。
+        //   defer 覆盖正常 return 与异常 error 返回两条路径 ⇒ 异常展开不漏 pop（帧栈不错位）。
+        if (build_options.debug_frames) {
+            var fn_short = func.name; // 方法帧 function 字段用短名（对齐 PHP）
+            var class_name_opt: ?[]const u8 = null;
+            var call_type: ?[]const u8 = null;
+            if (std.mem.indexOf(u8, func.name, "::")) |sep| {
+                class_name_opt = func.name[0..sep];
+                fn_short = func.name[sep + 2 ..];
+                var is_static_m = false;
+                if (self.ir_module) |ir_mod| {
+                    for (ir_mod.types.items) |td_ptr| {
+                        const td = td_ptr.*;
+                        if (std.mem.eql(u8, td.name, class_name_opt.?)) {
+                            for (td.methods) |m| {
+                                if (std.mem.eql(u8, m.name, fn_short)) {
+                                    is_static_m = m.is_static;
+                                    break;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+                call_type = if (is_static_m) "::" else "->";
+            }
+            const escaped_fn_short = try self.escapeString(fn_short);
+            defer self.allocator.free(escaped_fn_short);
+            try code.appendSlice(self.allocator, "    runtime.debugFramePush(\"");
+            try code.appendSlice(self.allocator, escaped_fn_short);
+            try code.appendSlice(self.allocator, "\", ");
+            if (class_name_opt) |cn| {
+                const escaped_cn = try self.escapeString(cn);
+                defer self.allocator.free(escaped_cn);
+                try code.appendSlice(self.allocator, "\"");
+                try code.appendSlice(self.allocator, escaped_cn);
+                try code.appendSlice(self.allocator, "\", ");
+            } else {
+                try code.appendSlice(self.allocator, "null, ");
+            }
+            if (call_type) |ct| {
+                try code.appendSlice(self.allocator, "\"");
+                try code.appendSlice(self.allocator, ct);
+                try code.appendSlice(self.allocator, "\"");
+            } else {
+                try code.appendSlice(self.allocator, "null");
+            }
+            try code.appendSlice(self.allocator, ", args);\n");
+            try code.appendSlice(self.allocator, "    defer runtime.debugFramePop();\n");
+        }
 
         // 参数类型检查：查找 TypeDef 中方法的参数类型声明
         // 当方法有 typed parameters 时，生成运行时类型检查代码
@@ -6750,6 +6810,11 @@ pub const NativeLinker = struct {
         defer global_get_reg_set.deinit();
         var null_const_regs = std.AutoHashMap(usize, void).init(self.allocator);
         defer null_const_regs.deinit();
+        // ★批次十二（§232.3-2）：preg by-ref 异常写回链——make_ref 结果→ptr、store ptr→value
+        var make_ref_ptr_map = std.AutoHashMap(usize, usize).init(self.allocator);
+        defer make_ref_ptr_map.deinit();
+        var store_ptr_value_map = std.AutoHashMap(usize, usize).init(self.allocator);
+        defer store_ptr_value_map.deinit();
         for (func.blocks.items) |blk_scan| {
             for (blk_scan.instructions.items) |inst_scan| {
                 if (inst_scan.op == .global_get) {
@@ -6764,6 +6829,12 @@ pub const NativeLinker = struct {
                     if (inst_scan.result) |reg| {
                         try null_const_regs.put(reg.id, {});
                     }
+                } else if (inst_scan.op == .make_ref) {
+                    if (inst_scan.result) |reg| {
+                        try make_ref_ptr_map.put(reg.id, inst_scan.op.make_ref.ptr.id);
+                    }
+                } else if (inst_scan.op == .store) {
+                    try store_ptr_value_map.put(inst_scan.op.store.ptr.id, inst_scan.op.store.value.id);
                 }
             }
         }
@@ -6887,6 +6958,10 @@ pub const NativeLinker = struct {
         }
         self.current_global_get_names = &global_get_names;
         defer self.current_global_get_names = null;
+        self.current_make_ref_ptr = &make_ref_ptr_map;
+        defer self.current_make_ref_ptr = null;
+        self.current_store_ptr_value = &store_ptr_value_map;
+        defer self.current_store_ptr_value = null;
         self.current_concat_operand_regs = &concat_operand_regs;
         defer self.current_concat_operand_regs = null;
         self.current_coalesce_nowarn_regs = &coalesce_nowarn_regs;
@@ -22448,6 +22523,32 @@ pub const NativeLinker = struct {
         try writer.writeAll("    }\n");
     }
 
+    /// ★批次十二（§232.3-2）：preg by-ref 异常写回——ValueError 等异常路由
+    /// （`if (runtime.hasException()) continue`）会跳过 IR 后续的 copy-out（global_set），
+    /// 在 call 生成后**前置**写回全局变量形（PHP 别名语义：throw 前已清空 $matches，
+    /// 模板层 php_preg_match_all 已先清空 matches 槽，本层负责把槽值写回全局）。
+    /// 链：args[2] →（make_ref）→ temp_reg →（store）→ src_reg →（global_get）→ 变量名。
+    /// 仅 is_alloca 且非引用参数 alloca 的转发形有缺口——mem2reg（&reg_N）/ref_ptr/
+    /// 引用参数透传均直写原槽，无需写回（自然过滤：链解析不命中即不生成）。
+    fn emitPregByrefWriteback(self: *Self, writer: anytype, matches_id: usize) !void {
+        const is_alloca = if (self.current_alloca_regs) |regs| regs.contains(matches_id) else false;
+        if (!is_alloca or self.isRefParamAlloca(matches_id)) return;
+        var temp_id = matches_id;
+        if (self.current_make_ref_ptr) |m| {
+            if (m.get(matches_id)) |pid| temp_id = pid;
+        }
+        const store_map = self.current_store_ptr_value orelse return;
+        const src_id = store_map.get(temp_id) orelse return;
+        const ggn = self.current_global_get_names orelse return;
+        const name = ggn.get(src_id) orelse return;
+        const escaped = try self.escapeString(name);
+        defer self.allocator.free(escaped);
+        try writer.print(
+            "    if (runtime.hasException()) {{\n        @branchHint(.unlikely);\n        try setGlobalVar(\"{s}\", reg_{d}.*);\n    }}\n",
+            .{ escaped, temp_id },
+        );
+    }
+
     /// 生成指令（简化版）
     fn generateInstructionSimple(self: *Self, code: *std.ArrayList(u8), inst: *const IR.Instruction) !void {
         @setEvalBranchQuota(10000); // 增加编译时求值限制
@@ -24946,6 +25047,8 @@ pub const NativeLinker = struct {
                                     }
 
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    // ★批次十二（§232.3-2）：by-ref 异常写回（hasException 路由前）
+                                    if (op.args.len >= 3) try self.emitPregByrefWriteback(writer, op.args[2].id);
                                 } else {
                                     // 参数不足，fallback
                                     try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull(), blk: { var tmp = runtime.Value.initNull(); break :blk &tmp; }, runtime.Value.initInt(0), runtime.Value.initInt(0), runtime.runtime_allocator);\n");
@@ -25000,6 +25103,8 @@ pub const NativeLinker = struct {
                                     }
 
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    // ★批次十二（§232.3-2）：by-ref 异常写回（hasException 路由前）
+                                    if (op.args.len >= 3) try self.emitPregByrefWriteback(writer, op.args[2].id);
                                 } else {
                                     try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull(), blk: { var tmp = runtime.Value.initNull(); break :blk &tmp; }, runtime.Value.initInt(0), runtime.Value.initInt(0), runtime.runtime_allocator);\n");
                                 }
