@@ -2017,8 +2017,13 @@ pub const PHPString = struct {
     /// 增加引用计数
     pub fn retain(self: *PHPString) void {
         if (!self.is_static) {
+            // [LEDGER-TMP F-236] 用完必须清零
+            if (self.length == 2 and self.data.len >= 2 and self.data[0] == '2' and self.data[1] == '1') {
+                var b: [96]u8 = undefined;
+                const m = std.fmt.bufPrint(&b, "[L+] \"21\" rc={d}->{d} ptr={*}\n", .{ self.ref_count, self.ref_count + 1, self }) catch "";
+                fileWriteAll(2, m);
+            }
             self.ref_count += 1;
-            // std.debug.print("PHPString.retain: data={s} ref_count={d}\n", .{self.data, self.ref_count});
         }
     }
 
@@ -2027,8 +2032,12 @@ pub const PHPString = struct {
         if (self.is_static) {
             return;
         }
-
-        // std.debug.print("PHPString.release: data={s} ref_count={d}\n", .{self.data, self.ref_count});
+        // [LEDGER-TMP F-236] 用完必须清零
+        if (self.length == 2 and self.data.len >= 2 and self.data[0] == '2' and self.data[1] == '1') {
+            var b: [96]u8 = undefined;
+            const m = std.fmt.bufPrint(&b, "[L-] \"21\" rc={d}->{d} ptr={*}\n", .{ self.ref_count, self.ref_count - 1, self }) catch "";
+            fileWriteAll(2, m);
+        }
 
         if (self.ref_count == 0) {
             // Already freed (is_static should be true, but safety check)
@@ -2044,7 +2053,12 @@ pub const PHPString = struct {
     /// 释放字符串
     fn deinit(self: *PHPString, allocator: Allocator) void {
         if (!self.is_static) {
-            // std.debug.print("PHPString.deinit called\n", .{});
+            // [LEDGER-TMP F-236] 用完必须清零
+            if (self.length == 2 and self.data.len >= 2 and self.data[0] == '2' and self.data[1] == '1') {
+                var b: [96]u8 = undefined;
+                const m = std.fmt.bufPrint(&b, "[L!] FREE \"21\" ptr={*}\n", .{self}) catch "";
+                fileWriteAll(2, m);
+            }
             if (alloc_counters.php_string_live_objects > 0) {
                 alloc_counters.php_string_live_objects -= 1;
             }
