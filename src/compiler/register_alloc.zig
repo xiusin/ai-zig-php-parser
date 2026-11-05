@@ -58,7 +58,7 @@ pub const RegisterAllocator = struct {
     pub fn init() RegisterAllocator {
         return .{
             .reg_map = [_]?VarId{null} ** MAX_REGS,
-            .last_use = [_]u32{0} ** MAX_REGS,
+            .last_use = @as([MAX_REGS]u32, @splat(0)),
             .timestamp = 1,
             .free_bitmap = 0xFF, // 所有寄存器初始为空闲
             .stats = .{},

@@ -978,7 +978,7 @@ pub fn stripTagsFn(vm: *VM, args: []const Value) !Value {
 
 pub fn htmlspecialcharsFn(vm: *VM, args: []const Value) !Value {
     const str = if (args[0].getTag() == .string) args[0].getAsString().data.data else "";
-    var result = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+    var result = std.ArrayListUnmanaged(u8).empty;
     defer result.deinit(vm.allocator);
     for (str) |c| {
         switch (c) {
@@ -1626,7 +1626,7 @@ pub fn strShuffleFn(vm: *VM, args: []const Value) !Value {
 pub fn htmlEntityDecodeFn(vm: *VM, args: []const Value) !Value {
     const str = if (args[0].getTag() == .string) args[0].getAsString().data.data else "";
 
-    var result = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+    var result = std.ArrayListUnmanaged(u8).empty;
     defer result.deinit(vm.allocator);
 
     var i: usize = 0;
@@ -1750,7 +1750,7 @@ pub fn urlencodeFn(vm: *VM, args: []const Value) !Value {
     // application/x-www-form-urlencoded encoding
     // Encodes everything except: A-Z a-z 0-9 - _ .
     // Space becomes +
-    var result = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+    var result = std.ArrayListUnmanaged(u8).empty;
     defer result.deinit(vm.allocator);
 
     for (str) |c| {
@@ -1812,7 +1812,7 @@ pub fn rawurlencodeFn(vm: *VM, args: []const Value) !Value {
     const str = if (args[0].getTag() == .string) args[0].getAsString().data.data else "";
 
     // RFC 3986 encoding: encodes everything except A-Z a-z 0-9 - _ . ~
-    var result = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+    var result = std.ArrayListUnmanaged(u8).empty;
     defer result.deinit(vm.allocator);
 
     for (str) |c| {
@@ -1872,7 +1872,7 @@ pub fn strWordCountFn(vm: *VM, args: []const Value) !Value {
     var word_start: usize = 0;
 
     // Collect word positions for format 1 and 2
-    var word_list = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
+    var word_list = std.ArrayListUnmanaged([]const u8).empty;
     defer word_list.deinit(vm.allocator);
 
     for (str, 0..) |c, idx| {

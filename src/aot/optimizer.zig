@@ -883,7 +883,7 @@ pub const IROptimizer = struct {
         // 1. It is side-effect free
         // 2. All operands are loop-invariant (constants or defined outside the loop)
 
-        var invariant_instrs = std.ArrayListUnmanaged(*Instruction){ .items = &.{}, .capacity = 0 };
+        var invariant_instrs = std.ArrayListUnmanaged(*Instruction).empty;
         defer invariant_instrs.deinit(self.allocator);
 
         // 两遍扫描：第一遍找出所有可能的不变量，第二遍按依赖顺序提升
@@ -1111,7 +1111,7 @@ pub const IROptimizer = struct {
         // and 'header' has only 'pre-header' as non-loop predecessor.
 
         // Count non-loop predecessors
-        var non_loop_preds = std.ArrayListUnmanaged(*BasicBlock){ .items = &.{}, .capacity = 0 };
+        var non_loop_preds = std.ArrayListUnmanaged(*BasicBlock).empty;
         defer non_loop_preds.deinit(self.allocator);
 
         for (header.predecessors.items) |pred| {
@@ -1649,7 +1649,7 @@ pub const IROptimizer = struct {
 
         // ---- 第 2 阶段：传播 param 派生值（工作列表算法）----
         // 跟踪 select/move/cast 链和 store->load 链
-        var worklist = std.ArrayListUnmanaged(u32){ .items = &.{}, .capacity = 0 };
+        var worklist = std.ArrayListUnmanaged(u32).empty;
         defer worklist.deinit(self.allocator);
         {
             var it = param_value_regs.iterator();
@@ -1823,7 +1823,7 @@ pub const IROptimizer = struct {
         try self.markHandlerReachableBlocks(func, &handler_reachable);
 
         // 2. Find promotable allocas
-        var promotable_allocas = std.ArrayListUnmanaged(*Instruction){ .items = &.{}, .capacity = 0 };
+        var promotable_allocas = std.ArrayListUnmanaged(*Instruction).empty;
         defer promotable_allocas.deinit(self.allocator);
 
         // Map alloca -> list of definition blocks
@@ -1932,7 +1932,7 @@ pub const IROptimizer = struct {
                 if (inst.*.op == .alloca) {
                     if (self.isPromotable(inst, func, &property_get_result_regs, &handler_reachable, &load_result_regs, &const_string_result_regs, &mut_receiver_regs)) {
                         try promotable_allocas.append(self.allocator, inst);
-                        try def_blocks.put(inst, .{ .items = &.{}, .capacity = 0 });
+                        try def_blocks.put(inst, .empty);
                         if (inst.result) |res| {
                             try reg_to_alloca.put(res.id, inst);
                         }
@@ -2297,9 +2297,9 @@ pub const IROptimizer = struct {
 
     /// Compute Iterated Dominance Frontier
     fn computeIDF(self: *Self, defs: []const *BasicBlock, dt: *const Analysis.DominatorTree) !std.ArrayListUnmanaged(*BasicBlock) {
-        var idf = std.ArrayListUnmanaged(*BasicBlock){ .items = &.{}, .capacity = 0 };
+        var idf = std.ArrayListUnmanaged(*BasicBlock).empty;
 
-        var worklist = std.ArrayListUnmanaged(*BasicBlock){ .items = &.{}, .capacity = 0 };
+        var worklist = std.ArrayListUnmanaged(*BasicBlock).empty;
         defer worklist.deinit(self.allocator);
 
         var visited = std.AutoHashMap(*BasicBlock, void).init(self.allocator);
@@ -2333,7 +2333,7 @@ pub const IROptimizer = struct {
     /// 异常边可在 try 块中途离开，结构支配树把 try 块整块当作 handler 的前驱，表达不了中途抛出；
     /// handler 及其后继（finally 合并块、catch 之后的续接块）中的 load 都会继承这个错误的当前值。
     fn markHandlerReachableBlocks(self: *Self, func: *Function, out: *std.DynamicBitSet) !void {
-        var stack = std.ArrayListUnmanaged(*BasicBlock){ .items = &.{}, .capacity = 0 };
+        var stack = std.ArrayListUnmanaged(*BasicBlock).empty;
         defer stack.deinit(self.allocator);
 
         var seen = std.AutoHashMap(*BasicBlock, void).init(self.allocator);
@@ -2509,7 +2509,7 @@ pub const IROptimizer = struct {
                 // Push phi result to stack
                 var stack = current_values.getPtr(alloca);
                 if (stack == null) {
-                    try current_values.put(alloca, .{ .items = &.{}, .capacity = 0 });
+                    try current_values.put(alloca, .empty);
                     stack = current_values.getPtr(alloca);
                 }
 
@@ -2553,7 +2553,7 @@ pub const IROptimizer = struct {
                         // Push value to stack
                         var stack = current_values.getPtr(alloca);
                         if (stack == null) {
-                            try current_values.put(alloca, .{ .items = &.{}, .capacity = 0 });
+                            try current_values.put(alloca, .empty);
                             stack = current_values.getPtr(alloca);
                         }
 
@@ -2609,7 +2609,7 @@ pub const IROptimizer = struct {
                         // Push it onto the stack so it persists for children
                         var stack = current_values.getPtr(alloca);
                         if (stack == null) {
-                            try current_values.put(alloca, .{ .items = &.{}, .capacity = 0 });
+                            try current_values.put(alloca, .empty);
                             stack = current_values.getPtr(alloca);
                         }
                         try stack.?.append(self.allocator, undef_reg);
@@ -4923,7 +4923,7 @@ pub const IROptimizer = struct {
         var next_reg_id = caller.getNextRegisterId();
 
         // Collect instructions to inline (excluding terminators)
-        var inlined_instructions: std.ArrayListUnmanaged(*Instruction) = .{ .items = &.{}, .capacity = 0 };
+        var inlined_instructions: std.ArrayListUnmanaged(*Instruction) = .empty;
         defer inlined_instructions.deinit(self.allocator);
 
         // Process callee's entry block instructions
@@ -5025,12 +5025,13 @@ pub const IROptimizer = struct {
         reg_map: *std.AutoHashMap(u32, u32),
     ) !Instruction.Op {
         var result: Instruction.Op = undefined;
-        inline for (@typeInfo(Instruction.Op).@"union".fields) |f| {
-            if (std.meta.activeTag(op) == @field(std.meta.Tag(Instruction.Op), f.name)) {
+        const op_union = @typeInfo(Instruction.Op).@"union";
+        inline for (op_union.field_names, op_union.field_types) |f_name, f_type| {
+            if (std.meta.activeTag(op) == @field(std.meta.Tag(Instruction.Op), f_name)) {
                 result = @unionInit(
                     Instruction.Op,
-                    f.name,
-                    try remapPayloadValue(f.type, @field(op, f.name), reg_map, self.allocator),
+                    f_name,
+                    try remapPayloadValue(f_type, @field(op, f_name), reg_map, self.allocator),
                 );
             }
         }
@@ -5042,8 +5043,10 @@ pub const IROptimizer = struct {
         if (T == Register) return true;
         return switch (@typeInfo(T)) {
             .@"struct" => blk: {
-                inline for (@typeInfo(T).@"struct".fields) |f| {
-                    if (payloadContainsRegister(f.type)) break :blk true;
+                const st = @typeInfo(T).@"struct";
+                inline for (st.field_names, st.field_types) |f_name, f_type| {
+                    _ = f_name;
+                    if (payloadContainsRegister(f_type)) break :blk true;
                 }
                 break :blk false;
             },
@@ -5065,8 +5068,9 @@ pub const IROptimizer = struct {
         return switch (@typeInfo(T)) {
             .@"struct" => blk: {
                 var out = value;
-                inline for (@typeInfo(T).@"struct".fields) |f| {
-                    @field(out, f.name) = try remapPayloadValue(f.type, @field(out, f.name), reg_map, allocator);
+                const st = @typeInfo(T).@"struct";
+                inline for (st.field_names, st.field_types) |f_name, f_type| {
+                    @field(out, f_name) = try remapPayloadValue(f_type, @field(out, f_name), reg_map, allocator);
                 }
                 break :blk out;
             },
@@ -6292,7 +6296,7 @@ pub const LLVMPassManager = struct {
 
     /// Get the list of enabled passes (for debugging)
     pub fn getEnabledPasses(self: *const Self, allocator: Allocator) ![]const []const u8 {
-        var passes = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
+        var passes = std.ArrayListUnmanaged([]const u8).empty;
 
         if (self.config.basic_aa) try passes.append(allocator, "basic-aa");
         if (self.config.tbaa) try passes.append(allocator, "tbaa");

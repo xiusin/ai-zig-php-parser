@@ -74,7 +74,7 @@ pub fn main() !void {
     var walker = try dir.walk(allocator);
     defer walker.deinit();
 
-    var test_paths = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
+    var test_paths = std.ArrayListUnmanaged([]const u8).empty;
     defer {
         for (test_paths.items) |p| allocator.free(p);
         test_paths.deinit(allocator);

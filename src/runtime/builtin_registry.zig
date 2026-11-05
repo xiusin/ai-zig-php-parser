@@ -152,8 +152,8 @@ pub const BuiltinRegistry = struct {
         var categories = std.EnumMap(Category, std.ArrayList(*const BuiltinFunction)){};
 
         // Initialize category lists
-        inline for (@typeInfo(Category).@"enum".fields) |field| {
-            const category = @field(Category, field.name);
+        inline for (@typeInfo(Category).@"enum".field_names) |field_name| {
+            const category = @field(Category, field_name);
             categories.put(category, std.ArrayList(*const BuiltinFunction).empty);
         }
 

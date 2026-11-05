@@ -40,7 +40,7 @@ pub fn SlabAllocator(comptime T: type) type {
             return .{
                 .alloc = allocator,
                 .free_head = null,
-                .chunks = .{ .items = &.{}, .capacity = 0 },
+                .chunks = .empty,
                 .stats = .{},
             };
         }
@@ -197,7 +197,7 @@ pub const MultiPool = struct {
         return .{
             .backing = backing,
             .lists = @splat(null),
-            .chunks = .{ .items = &.{}, .capacity = 0 },
+            .chunks = .empty,
         };
     }
 

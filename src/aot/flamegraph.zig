@@ -139,12 +139,12 @@ pub const FlameGraphGenerator = struct {
         while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
         defer self.mutex.unlock();
 
-        var buffer: std.ArrayListUnmanaged(u8) = .{ .items = &.{}, .capacity = 0 };
+        var buffer: std.ArrayListUnmanaged(u8) = .empty;
         errdefer buffer.deinit(allocator);
 
         var aw = std.Io.Writer.Allocating.fromArrayList(allocator, &buffer);
 
-        var stack: std.ArrayListUnmanaged([]const u8) = .{ .items = &.{}, .capacity = 0 };
+        var stack: std.ArrayListUnmanaged([]const u8) = .empty;
         defer stack.deinit(allocator);
 
         try self.writeFoldedNode(&aw.writer, allocator, self.root, &stack);

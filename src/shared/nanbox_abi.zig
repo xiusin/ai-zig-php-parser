@@ -33,7 +33,7 @@ pub inline fn decodeInt(v: u64) i64 {
 }
 
 pub inline fn encodePtr(addr: usize, type_tag: u64) u64 {
-    if (builtin.mode == .Debug) {
+    if (builtin.mode == .debug) {
         std.debug.assert((type_tag & ~TYPE_MASK) == 0);
         std.debug.assert((@as(u64, addr) & ~ADDR_MASK) == 0);
     }

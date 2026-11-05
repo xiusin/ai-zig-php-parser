@@ -7,7 +7,7 @@ pub fn build(b: *std.Build) void {
 
     // Use ReleaseSafe for main exe to work around Zig 0.15.2 LLVM Debug mode bug
     // The bug causes "Instruction does not dominate all uses" LLVM error in Debug mode
-    const exe_optimize: std.builtin.OptimizeMode = if (optimize == .Debug) .ReleaseSafe else optimize;
+    const exe_optimize: std.builtin.OptimizeMode = if (optimize == .debug) .safe else optimize;
 
     // ========== 定义共享模块 ==========
     // 这些模块用于解决 Zig 0.15.2 不推荐使用 `../` 跨目录导入的问题
@@ -256,7 +256,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
         }),
     });
     bench_exe.root_module.link_libc = true;
@@ -278,7 +278,7 @@ pub fn build(b: *std.Build) void {
     const benchmark_module = b.createModule(.{
         .root_source_file = b.path("src/benchmark/string_benchmark.zig"),
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = .fast,
     });
 
     const string_bench_exe = b.addExecutable(.{
@@ -286,7 +286,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/benchmarks/run_string_benchmark.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
         }),
     });
     string_bench_exe.root_module.addImport("string_benchmark", benchmark_module);
@@ -308,7 +308,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
-            .optimize = .Debug,
+            .optimize = .debug,
         }),
     });
     leak_check_exe.root_module.link_libc = true;
@@ -329,7 +329,7 @@ pub fn build(b: *std.Build) void {
     const array_benchmark_module = b.createModule(.{
         .root_source_file = b.path("src/benchmark/array_benchmark.zig"),
         .target = target,
-        .optimize = .ReleaseFast,
+        .optimize = .fast,
     });
 
     const array_bench_exe = b.addExecutable(.{
@@ -337,7 +337,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/benchmarks/run_array_benchmark.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
         }),
     });
     array_bench_exe.root_module.addImport("array_benchmark", array_benchmark_module);
@@ -360,7 +360,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/benchmark/jit_benchmark.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
         }),
     });
     jit_bench_exe.root_module.link_libc = true;
@@ -382,7 +382,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/benchmark/aot_benchmark.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
         }),
     });
     aot_bench_exe.root_module.link_libc = true;
@@ -444,7 +444,7 @@ pub fn build(b: *std.Build) void {
     //     .name = "perf-cli",
     //     .root_source_file = b.path("src/benchmark/perf_cli.zig"),
     //     .target = target,
-    //     .optimize = .ReleaseFast,
+    //     .optimize = .fast,
     // });
     // b.installArtifact(perf_cli_exe);
 
@@ -453,7 +453,7 @@ pub fn build(b: *std.Build) void {
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/tools/profile_cli.zig"),
             .target = target,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
         }),
     });
     profile_cli_exe.root_module.link_libc = true;

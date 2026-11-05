@@ -137,7 +137,7 @@ pub const PHPString = struct {
 
         // Pre-allocate result buffer (estimate: original + (replacement - search) * count)
         const size_estimate = self.length + (replacement.length -| search.length) * count;
-        var result = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+        var result = std.ArrayListUnmanaged(u8).empty;
         try result.ensureTotalCapacity(allocator, @max(size_estimate, 16));
 
         // Perform replacement
@@ -1649,7 +1649,7 @@ pub const InlineCache = struct {
 
     /// 使缓存失效
     pub fn invalidate(self: *InlineCache, shape_id: u32) void {
-        var to_remove = std.ArrayListUnmanaged(u64){ .items = &.{}, .capacity = 0 };
+        var to_remove = std.ArrayListUnmanaged(u64).empty;
         defer to_remove.deinit(self.allocator);
 
         var iter = self.entries.iterator();

@@ -170,7 +170,7 @@ fn generateReport(
     aot_builtins: std.StringHashMap(void),
 ) !void {
     // Buffer the output
-    var buffer = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+    var buffer = std.ArrayListUnmanaged(u8).empty;
     defer buffer.deinit(allocator);
     const writer = buffer.writer(allocator);
 
@@ -182,7 +182,7 @@ fn generateReport(
     try writer.print("| IR Op | Supported | Status |\n", .{});
     try writer.print("|---|---|---|\n", .{});
 
-    var ir_keys = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
+    var ir_keys = std.ArrayListUnmanaged([]const u8).empty;
     defer ir_keys.deinit(allocator);
     var ir_iter = ir_ops.keyIterator();
     while (ir_iter.next()) |key| {
@@ -213,7 +213,7 @@ fn generateReport(
     try writer.print("| Builtin Function | Supported | Status |\n", .{});
     try writer.print("|---|---|---|\n", .{});
 
-    var builtin_keys = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
+    var builtin_keys = std.ArrayListUnmanaged([]const u8).empty;
     defer builtin_keys.deinit(allocator);
     var b_iter = interpreter_builtins.keyIterator();
     while (b_iter.next()) |key| {

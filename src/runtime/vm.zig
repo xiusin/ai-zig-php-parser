@@ -97,8 +97,8 @@ pub const GeneratorState = struct {
     pub fn init(allocator: std.mem.Allocator) GeneratorState {
         return GeneratorState{
             .allocator = allocator,
-            .values = .{ .items = &.{}, .capacity = 0 },
-            .keys = .{ .items = &.{}, .capacity = 0 },
+            .values = .empty,
+            .keys = .empty,
             .current_index = 0,
             .function_body = null,
             .captured_vars = null,
@@ -2232,8 +2232,8 @@ pub const VM = struct {
             .stdlib = try StandardLibrary.init(allocator),
             .reflection_system = undefined, // Will be initialized after VM creation
             .memory_manager = try types.gc.MemoryManager.init(allocator),
-            .call_stack = .{ .items = &.{}, .capacity = 0 },
-            .call_frame_pool = .{ .items = &.{}, .capacity = 0 },
+            .call_stack = .empty,
+            .call_frame_pool = .empty,
             .fast_call_frame_pool = fast_pool.CallFramePool.init(allocator),
             .current_frame = null,
             .execution_stats = ExecutionStats{},
@@ -3958,7 +3958,7 @@ pub const VM = struct {
     }
 
     fn cleanupStringInternPool(self: *VM) !void {
-        var to_remove = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
+        var to_remove = std.ArrayListUnmanaged([]const u8).empty;
         defer to_remove.deinit(self.allocator);
 
         var iterator = self.string_intern_pool.iterator();
@@ -8344,7 +8344,7 @@ pub const VM = struct {
             std.mem.eql(u8, name, "Channel"))
         {
             // Call the builtin constructor directly based on the class name
-            var args = std.ArrayListUnmanaged(Value){ .items = &.{}, .capacity = 0 };
+            var args = std.ArrayListUnmanaged(Value).empty;
             defer {
                 for (args.items) |arg| {
                     self.releaseValue(arg);
@@ -10489,7 +10489,7 @@ pub const VM = struct {
             }
 
             // Evaluate arguments
-            var args_list = std.ArrayListUnmanaged(Value){ .items = &.{}, .capacity = 0 };
+            var args_list = std.ArrayListUnmanaged(Value).empty;
             defer args_list.deinit(self.allocator);
             for (func_call.args) |arg_idx| {
                 const arg_value = try self.eval(arg_idx);
@@ -10505,7 +10505,7 @@ pub const VM = struct {
             const method_name = self.context.string_pool.keys()[method_call.method_name];
 
             // Create a closure that calls the method
-            var args_list = std.ArrayListUnmanaged(Value){ .items = &.{}, .capacity = 0 };
+            var args_list = std.ArrayListUnmanaged(Value).empty;
             for (method_call.args) |arg_idx| {
                 const arg_value = try self.eval(arg_idx);
                 try args_list.append(self.allocator, arg_value);
@@ -11323,7 +11323,7 @@ pub const VM = struct {
 
         try self.applyTraitAdaptations(methods, trait_use_data.adaptations);
 
-        var resolved_methods = std.ArrayListUnmanaged(ComposedTraitMethod){ .items = &.{}, .capacity = 0 };
+        var resolved_methods = std.ArrayListUnmanaged(ComposedTraitMethod).empty;
         defer resolved_methods.deinit(self.allocator);
         for (methods.items) |method| {
             try self.appendComposedTraitMethod(&resolved_methods, method);
@@ -11340,11 +11340,11 @@ pub const VM = struct {
         php_trait: *types.PHPTrait,
         trait_use_data: anytype,
     ) !void {
-        var methods = std.ArrayListUnmanaged(ComposedTraitMethod){ .items = &.{}, .capacity = 0 };
+        var methods = std.ArrayListUnmanaged(ComposedTraitMethod).empty;
         defer methods.deinit(self.allocator);
-        var properties = std.ArrayListUnmanaged(ComposedTraitProperty){ .items = &.{}, .capacity = 0 };
+        var properties = std.ArrayListUnmanaged(ComposedTraitProperty).empty;
         defer properties.deinit(self.allocator);
-        var constants = std.ArrayListUnmanaged(ComposedTraitConstant){ .items = &.{}, .capacity = 0 };
+        var constants = std.ArrayListUnmanaged(ComposedTraitConstant).empty;
         defer constants.deinit(self.allocator);
 
         self.collectTraitUseMembers(
@@ -11409,11 +11409,11 @@ pub const VM = struct {
         class: *types.PHPClass,
         trait_use_data: anytype,
     ) !void {
-        var methods = std.ArrayListUnmanaged(ComposedTraitMethod){ .items = &.{}, .capacity = 0 };
+        var methods = std.ArrayListUnmanaged(ComposedTraitMethod).empty;
         defer methods.deinit(self.allocator);
-        var properties = std.ArrayListUnmanaged(ComposedTraitProperty){ .items = &.{}, .capacity = 0 };
+        var properties = std.ArrayListUnmanaged(ComposedTraitProperty).empty;
         defer properties.deinit(self.allocator);
-        var constants = std.ArrayListUnmanaged(ComposedTraitConstant){ .items = &.{}, .capacity = 0 };
+        var constants = std.ArrayListUnmanaged(ComposedTraitConstant).empty;
         defer constants.deinit(self.allocator);
 
         self.collectTraitUseMembers(

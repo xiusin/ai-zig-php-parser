@@ -712,7 +712,7 @@ pub fn scandirFn(vm: *VM, args: []const Value) !Value {
     };
     defer dir.close(io);
 
-    var entries = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
+    var entries = std.ArrayListUnmanaged([]const u8).empty;
     defer {
         for (entries.items) |entry| {
             vm.allocator.free(entry);

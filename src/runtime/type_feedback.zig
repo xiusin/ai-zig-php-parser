@@ -216,7 +216,7 @@ pub const TypeFeedbackCollector = struct {
 
     /// 获取所有热点调用点
     pub fn getHotSites(self: *TypeFeedbackCollector, threshold: u32, allocator: std.mem.Allocator) ![]u32 {
-        var hot_sites = std.ArrayListUnmanaged(u32){ .items = &.{}, .capacity = 0 };
+        var hot_sites = std.ArrayListUnmanaged(u32).empty;
         errdefer hot_sites.deinit(allocator);
 
         var iter = self.feedbacks.iterator();

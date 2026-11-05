@@ -34,10 +34,10 @@ pub const PHPContext = struct {
         return .{
             .allocator = allocator,
             .arena = std.heap.ArenaAllocator.init(allocator),
-            .nodes = .{ .items = &.{}, .capacity = 0 },
-            .tokens = .{ .items = &.{}, .capacity = 0 },
+            .nodes = .empty,
+            .tokens = .empty,
             .string_pool = .{},
-            .errors = .{ .items = &.{}, .capacity = 0 },
+            .errors = .empty,
             .imports = .{},
             .fast_pool = null,
             .use_fast_pool = false,
@@ -51,10 +51,10 @@ pub const PHPContext = struct {
         return .{
             .allocator = allocator,
             .arena = std.heap.ArenaAllocator.init(allocator),
-            .nodes = .{ .items = &.{}, .capacity = 0 },
-            .tokens = .{ .items = &.{}, .capacity = 0 },
+            .nodes = .empty,
+            .tokens = .empty,
             .string_pool = .{},
-            .errors = .{ .items = &.{}, .capacity = 0 },
+            .errors = .empty,
             .imports = .{},
             .fast_pool = pool,
             .use_fast_pool = true,
@@ -163,7 +163,7 @@ pub const PHPContext = struct {
         // 2. Append current namespace if exists
         if (self.current_namespace) |ns_id| {
             const ns_str = self.string_pool.keys()[ns_id];
-            var fqcn = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+            var fqcn = std.ArrayListUnmanaged(u8).empty;
             defer fqcn.deinit(self.allocator);
             try fqcn.appendSlice(self.allocator, ns_str);
             try fqcn.append(self.allocator, '\\');

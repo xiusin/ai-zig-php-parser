@@ -1,6 +1,6 @@
 # fuzzy_scripts_720/pass/ 回归测试报告
 
-测试时间: 2026-11-05 02:33:10
+测试时间: 2026-11-05 13:59:14
 AOT 编译器: /Users/wangjianjun/products/parser/zig-out/bin/php-interpreter
 
 ## 统计
@@ -8,12 +8,13 @@ AOT 编译器: /Users/wangjianjun/products/parser/zig-out/bin/php-interpreter
 | 类别 | 数量 |
 |------|------|
 | Total | 68 |
-| Pass | 66 |
+| Pass | 67 |
 | Fail (Compile) | 0
 0 |
 | Fail (Runtime) | 0
 0 |
-| Fail (Diff) | 1 |
+| Fail (Diff) | 0
+0 |
 | Skip | 1 |
 
 ## 失败明细
@@ -21,4 +22,3 @@ AOT 编译器: /Users/wangjianjun/products/parser/zig-out/bin/php-interpreter
 | 脚本 | 类型 | 详情 |
 |------|------|------|
 | f004_oop_deep_inheritance_magic.php | SKIP | PHP_error_exit=255 |
-| f095_compiler_opt_constfold_dce_cse.php | FAIL_DIFF | PHP:=== f095: Compiler Optimization + ConstFold + DCE + CSE ===|--- Before Optimization ---|Instructions:||AOT:=== f095: Compiler Optimization + Const |

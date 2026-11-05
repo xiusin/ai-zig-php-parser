@@ -60,7 +60,7 @@ pub const Profiler = struct {
             .allocator = allocator,
             .profiler_type = profiler_type,
             .enabled = false,
-            .call_stack = .{ .items = &.{}, .capacity = 0 },
+            .call_stack = .empty,
             .function_stats = .{},
             .total_calls = 0,
             .total_time_ns = 0,
@@ -177,7 +177,7 @@ pub const Profiler = struct {
         while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
         defer self.mutex.unlock();
 
-        var list: std.ArrayListUnmanaged(FunctionStats) = .{ .items = &.{}, .capacity = 0 };
+        var list: std.ArrayListUnmanaged(FunctionStats) = .empty;
         errdefer list.deinit(allocator);
 
         var iter = self.function_stats.iterator();

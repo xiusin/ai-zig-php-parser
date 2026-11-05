@@ -269,7 +269,7 @@ const StaticStringEntry = struct {
 };
 
 var static_string_pool: ?std.StringHashMap(*StaticStringEntry) = null;
-var static_string_entries: std.ArrayListUnmanaged(*StaticStringEntry) = .{ .items = &.{}, .capacity = 0 };
+var static_string_entries: std.ArrayListUnmanaged(*StaticStringEntry) = .empty;
 var php_string_pool: ?std.heap.MemoryPool(PHPString) = null;
 var php_array_pool: ?std.heap.MemoryPool(PHPArray) = null;
 var php_closure_pool: ?std.heap.MemoryPool(PHPClosure) = null;
@@ -393,7 +393,7 @@ var stats_allocator: StatsAllocator = undefined;
 const GCColor = enum(u2) { white = 0, gray = 1, black = 2, purple = 3 };
 const GCInfo = packed struct { color: GCColor = .white, buffered: bool = false };
 const CycleRoot = union(enum) { array: *PHPArray, object: *PHPObject, closure: *PHPClosure };
-var cycle_roots: std.ArrayListUnmanaged(CycleRoot) = .{ .items = &.{}, .capacity = 0 };
+var cycle_roots: std.ArrayListUnmanaged(CycleRoot) = .empty;
 var gc_in_progress: bool = false;
 var gc_enabled: bool = true;
 var gc_release_events: usize = 0;
@@ -529,8 +529,8 @@ pub fn initRuntime(allocator: Allocator) !void {
     static_vars = std.StringHashMap(Value).init(runtime_allocator);
     array_internal_pointers = std.AutoHashMap(*PHPArray, usize).init(runtime_allocator);
     static_string_pool = std.StringHashMap(*StaticStringEntry).init(runtime_allocator);
-    static_string_entries = .{ .items = &.{}, .capacity = 0 };
-    cycle_roots = .{ .items = &.{}, .capacity = 0 };
+    static_string_entries = .empty;
+    cycle_roots = .empty;
     gc_in_progress = false;
     gc_enabled = true;
 
@@ -1039,14 +1039,14 @@ pub fn deinitRuntime() void {
     // 跳过循环收集，避免 iterator 整数溢出问题
     // gcCollectCycles(true);
     cycle_roots.deinit(runtime_allocator);
-    cycle_roots = .{ .items = &.{}, .capacity = 0 };
+    cycle_roots = .empty;
     // std.debug.print("deinitRuntime: cleaning up {d} static strings\n", .{static_string_entries.items.len});
     for (static_string_entries.items) |e| {
         // std.debug.print("deinitRuntime: cleaning static string: {s}\n", .{e.php.data});
         e.deinit(runtime_allocator);
     }
     static_string_entries.deinit(runtime_allocator);
-    static_string_entries = .{ .items = &.{}, .capacity = 0 };
+    static_string_entries = .empty;
     if (static_string_pool) |*pool| {
         pool.deinit();
         static_string_pool = null;
@@ -1190,7 +1190,7 @@ fn gcCollectCycles(force: bool) usize {
     for (cycle_roots.items[0..batch_end]) |r| gcScan(r);
 
     // Phase 3: GatherWhite + CollectWhite
-    var white_items: std.ArrayListUnmanaged(CycleRoot) = .{ .items = &.{}, .capacity = 0 };
+    var white_items: std.ArrayListUnmanaged(CycleRoot) = .empty;
     defer white_items.deinit(runtime_allocator);
     var seen_arrays = std.AutoHashMap(*PHPArray, void).init(runtime_allocator);
     defer seen_arrays.deinit();
@@ -1529,8 +1529,8 @@ fn gcCountCollectedPhpRule(
         for (radj) |*l| l.deinit(allocator);
         allocator.free(radj);
     }
-    for (adj) |*l| l.* = .{ .items = &.{}, .capacity = 0 };
-    for (radj) |*l| l.* = .{ .items = &.{}, .capacity = 0 };
+    for (adj) |*l| l.* = .empty;
+    for (radj) |*l| l.* = .empty;
 
     const addEdge = struct {
         fn f(al: Allocator, a: *std.ArrayListUnmanaged(u32), r: *std.ArrayListUnmanaged(u32), from: u32, to: u32) bool {
@@ -2017,13 +2017,8 @@ pub const PHPString = struct {
     /// 增加引用计数
     pub fn retain(self: *PHPString) void {
         if (!self.is_static) {
-            // [LEDGER-TMP F-236] 用完必须清零
-            if (self.length == 2 and self.data.len >= 2 and self.data[0] == '2' and self.data[1] == '1') {
-                var b: [96]u8 = undefined;
-                const m = std.fmt.bufPrint(&b, "[L+] \"21\" rc={d}->{d} ptr={*}\n", .{ self.ref_count, self.ref_count + 1, self }) catch "";
-                fileWriteAll(2, m);
-            }
             self.ref_count += 1;
+            // std.debug.print("PHPString.retain: data={s} ref_count={d}\n", .{self.data, self.ref_count});
         }
     }
 
@@ -2032,12 +2027,8 @@ pub const PHPString = struct {
         if (self.is_static) {
             return;
         }
-        // [LEDGER-TMP F-236] 用完必须清零
-        if (self.length == 2 and self.data.len >= 2 and self.data[0] == '2' and self.data[1] == '1') {
-            var b: [96]u8 = undefined;
-            const m = std.fmt.bufPrint(&b, "[L-] \"21\" rc={d}->{d} ptr={*}\n", .{ self.ref_count, self.ref_count - 1, self }) catch "";
-            fileWriteAll(2, m);
-        }
+
+        // std.debug.print("PHPString.release: data={s} ref_count={d}\n", .{self.data, self.ref_count});
 
         if (self.ref_count == 0) {
             // Already freed (is_static should be true, but safety check)
@@ -2053,12 +2044,7 @@ pub const PHPString = struct {
     /// 释放字符串
     fn deinit(self: *PHPString, allocator: Allocator) void {
         if (!self.is_static) {
-            // [LEDGER-TMP F-236] 用完必须清零
-            if (self.length == 2 and self.data.len >= 2 and self.data[0] == '2' and self.data[1] == '1') {
-                var b: [96]u8 = undefined;
-                const m = std.fmt.bufPrint(&b, "[L!] FREE \"21\" ptr={*}\n", .{self}) catch "";
-                fileWriteAll(2, m);
-            }
+            // std.debug.print("PHPString.deinit called\n", .{});
             if (alloc_counters.php_string_live_objects > 0) {
                 alloc_counters.php_string_live_objects -= 1;
             }
@@ -2312,7 +2298,7 @@ pub const PHPArray = struct {
     ///   挂宿主数组：数组 rc=0 析构时统一拆 cell（此时无 COW 共享者；逃逸面已由 return/
     ///   global_set/属性写 的 deref 固化覆盖——f139d_escape 探针四形 SAME 取证）。
     ///   只登记 foreach 路径所建（显式 `&$b` 引用不经此通道，不受影响）。
-    ref_cells: std.ArrayListUnmanaged(*Value) = .{ .items = &.{}, .capacity = 0 },
+    ref_cells: std.ArrayListUnmanaged(*Value) = .empty,
 
     pub const ArrayContext = struct {
         pub fn hash(_: ArrayContext, key: ArrayKey) u32 {
@@ -2327,7 +2313,7 @@ pub const PHPArray = struct {
     pub const Elements = struct {
         allocator: Allocator,
         parent: ?*PHPArray = null, // 父数组引用
-        packed_values: std.ArrayListUnmanaged(Value) = .{ .items = &.{}, .capacity = 0 },
+        packed_values: std.ArrayListUnmanaged(Value) = .empty,
         mixed: ?std.ArrayHashMapUnmanaged(ArrayKey, Value, ArrayContext, true) = null,
 
         pub const Entry = struct { key_ptr: *const ArrayKey, value_ptr: *const Value };
@@ -2358,7 +2344,7 @@ pub const PHPArray = struct {
         }
 
         pub fn initMixed(allocator: Allocator, map: std.ArrayHashMapUnmanaged(ArrayKey, Value, ArrayContext, true)) Elements {
-            return .{ .allocator = allocator, .packed_values = .{ .items = &.{}, .capacity = 0 }, .mixed = map };
+            return .{ .allocator = allocator, .packed_values = .empty, .mixed = map };
         }
 
         pub fn count(self: *const Elements) usize {
@@ -2409,7 +2395,7 @@ pub const PHPArray = struct {
                 try map.put(self.allocator, .{ .integer = @intCast(idx) }, v);
             }
             self.packed_values.deinit(self.allocator);
-            self.packed_values = .{ .items = &.{}, .capacity = 0 };
+            self.packed_values = .empty;
             self.mixed = map;
         }
 
@@ -2474,7 +2460,7 @@ pub const PHPArray = struct {
                 self.mixed = null;
             }
             self.packed_values.deinit(self.allocator);
-            self.packed_values = .{ .items = &.{}, .capacity = 0 };
+            self.packed_values = .empty;
         }
     };
 
@@ -2490,7 +2476,7 @@ pub const PHPArray = struct {
         array.ref_lock_count = 0;
         // ★F-139d：逐字段初始化不走结构体默认值 ⇒ 池化复用槽位的 ref_cells 必须显式重置，
         // 否则沿用上一住户的表头（野指针/野长度），deinit 时 releaseRefCells 踩脏内存。
-        array.ref_cells = .{ .items = &.{}, .capacity = 0 };
+        array.ref_cells = .empty;
         alloc_counters.php_array_objects += 1;
         alloc_counters.php_array_live_objects += 1;
         alloc_counters.php_array_peak_live_objects = @max(
@@ -2662,7 +2648,7 @@ pub const PHPArray = struct {
             allocator.destroy(cell);
         }
         self.ref_cells.deinit(allocator);
-        self.ref_cells = .{ .items = &.{}, .capacity = 0 };
+        self.ref_cells = .empty;
     }
 
     /// 获取元素
@@ -3821,7 +3807,7 @@ pub fn php_create_closure(name: Value, captures: Value, is_static_val: Value, al
 
     // Convert PHPArray to []Value slice
     // We need to iterate the array.
-    var cap_list = std.ArrayListUnmanaged(Value){ .items = &.{}, .capacity = 0 };
+    var cap_list = std.ArrayListUnmanaged(Value).empty;
     defer cap_list.deinit(allocator);
 
     // Assuming captures is a list (indexed 0..N)
@@ -5086,7 +5072,7 @@ pub fn php_scandir(dir: Value, allocator: Allocator) !Value {
 
 /// stat/lstat 原始结构（失败返回 null，由调用方决定告警文案）。
 fn fsStatRaw(allocator: Allocator, path: []const u8, nofollow: bool) ?std.c.Stat {
-    const z = allocator.dupeZ(u8, path) catch return null;
+    const z = allocator.dupeSentinel(u8, path, 0) catch return null;
     defer allocator.free(z);
     var st: std.c.Stat = undefined;
     const flags: u32 = if (nofollow) @intCast(std.c.AT.SYMLINK_NOFOLLOW) else 0;
@@ -5178,7 +5164,7 @@ pub fn php_chmod(filename: Value, permissions: Value) !Value {
     if (!filename.isString()) return Value.initBool(false);
     const path = filename.asString().data;
     const mode: std.c.mode_t = if (permissions.isInt()) @intCast(permissions.asInt() & 0o7777) else 0o666;
-    const z = runtime_allocator.dupeZ(u8, path) catch return Value.initBool(false);
+    const z = runtime_allocator.dupeSentinel(u8, path, 0) catch return Value.initBool(false);
     defer runtime_allocator.free(z);
     if (std.c.chmod(z, mode) != 0) {
         var b: [1024]u8 = undefined;
@@ -5263,9 +5249,9 @@ pub fn php_umask(mode: Value) !Value {
 
 pub fn php_symlink(target: Value, linkpath: Value) !Value {
     if (!target.isString() or !linkpath.isString()) return Value.initBool(false);
-    const zt = runtime_allocator.dupeZ(u8, target.asString().data) catch return Value.initBool(false);
+    const zt = runtime_allocator.dupeSentinel(u8, target.asString().data, 0) catch return Value.initBool(false);
     defer runtime_allocator.free(zt);
-    const zl = runtime_allocator.dupeZ(u8, linkpath.asString().data) catch return Value.initBool(false);
+    const zl = runtime_allocator.dupeSentinel(u8, linkpath.asString().data, 0) catch return Value.initBool(false);
     defer runtime_allocator.free(zl);
     if (std.c.symlink(zt, zl) != 0) {
         var b: [1024]u8 = undefined;
@@ -5280,7 +5266,7 @@ pub fn php_symlink(target: Value, linkpath: Value) !Value {
 
 pub fn php_readlink(path: Value, allocator: Allocator) !Value {
     if (!path.isString()) return Value.initBool(false);
-    const z = allocator.dupeZ(u8, path.asString().data) catch return Value.initBool(false);
+    const z = allocator.dupeSentinel(u8, path.asString().data, 0) catch return Value.initBool(false);
     defer allocator.free(z);
     var buf: [4096]u8 = undefined;
     const n = std.c.readlink(z, &buf, buf.len);
@@ -5677,7 +5663,7 @@ extern "c" fn strerror(errnum: c_int) [*:0]const u8;
 
 fn diskQuery(path: []const u8) DiskQuery {
     if (path.len == 0) return .skip;
-    const z = runtime_allocator.dupeZ(u8, path) catch return .skip;
+    const z = runtime_allocator.dupeSentinel(u8, path, 0) catch return .skip;
     defer runtime_allocator.free(z);
     if (comptime builtin.os.tag == .macos or builtin.os.tag == .ios) {
         var buf: StatFsDarwin = undefined;
@@ -6347,7 +6333,7 @@ fn wrapBuiltin_forward_static_call_array(ctx: Value, args: []const Value, alloca
     if (!args[1].isArray()) return error.InvalidArgument;
 
     const arr = args[1].asArray();
-    var list = std.ArrayListUnmanaged(Value){ .items = &.{}, .capacity = 0 };
+    var list = std.ArrayListUnmanaged(Value).empty;
     defer list.deinit(allocator);
 
     var iter = arr.elements.iterator();
@@ -7534,7 +7520,7 @@ pub fn php_object_call_named_args(obj_val: Value, method_name_val: Value, args_a
     };
 
     // 收集位置参数（整数键，按顺序）
-    var positional = std.ArrayListUnmanaged(Value){ .items = &.{}, .capacity = 0 };
+    var positional = std.ArrayListUnmanaged(Value).empty;
     defer positional.deinit(allocator);
     var pos_idx: usize = 0;
     while (true) : (pos_idx += 1) {
@@ -11229,7 +11215,7 @@ pub fn registerPHPPredefinedConstants(allocator: Allocator) !void {
     //     `where=NULL` 时同样返回所需长度；JIT 请求 rc=0 且出参为 0/1；非法请求码返回负值（实测 -34）。
     //   ★取不到（rc≤0 或串形不合）时**不注册**而非给假值：那样 `defined('PCRE_VERSION')` 为 false，
     //     门 PERR 的 `e4` 臂必然红 ⇒ 失败可观测，不会静默错值（宪法 §四「禁止占位实现」）。
-    var pcre_ver_buf = [_]u8{0} ** 64; // PCRE2 规定 VERSION 需 ≥64 个 code unit
+    var pcre_ver_buf = @as([64]u8, @splat(0)); // PCRE2 规定 VERSION 需 ≥64 个 code unit
     if (pcre2_config_8(PCRE2_CONFIG_VERSION_REQUEST, &pcre_ver_buf) > 0) {
         const ver = std.mem.sliceTo(&pcre_ver_buf, 0);
         const key_ver = try allocator.dupe(u8, "PCRE_VERSION");
@@ -13365,7 +13351,7 @@ fn arrayObject_asort(ctx: Value, args: []const Value, allocator: Allocator) !Val
         _ = flags;
 
         // 收集所有键
-        var keys = std.ArrayListUnmanaged(ArrayKey){ .items = &.{}, .capacity = 0 };
+        var keys = std.ArrayListUnmanaged(ArrayKey).empty;
         defer keys.deinit(allocator);
         var iter = arr.elements.iterator();
         while (iter.next()) |entry| try keys.append(allocator, entry.key_ptr.*);
@@ -13489,7 +13475,7 @@ fn arrayObject_getIterator(ctx: Value, _: []const Value, allocator: Allocator) a
 fn arrayObject_ksort(ctx: Value, _: []const Value, allocator: Allocator) !Value {
     const obj = Value_asObject(ctx);
     if (arrayObjectStorage(obj)) |arr| {
-        var keys = std.ArrayListUnmanaged(ArrayKey){ .items = &.{}, .capacity = 0 };
+        var keys = std.ArrayListUnmanaged(ArrayKey).empty;
         defer keys.deinit(allocator);
         var iter = arr.elements.iterator();
         while (iter.next()) |entry| try keys.append(allocator, entry.key_ptr.*);
@@ -13603,7 +13589,7 @@ fn arrayObject_offsetUnset(ctx: Value, args: []const Value, _: Allocator) anyerr
 ///   `x:` ser(flags) ser(storage) `m:` ser(动态属性面)；`x:`/`m:` 为 Zend 分隔标记。
 fn arrayObject_serialize(ctx: Value, _: []const Value, allocator: Allocator) anyerror!Value {
     const obj = Value_asObject(ctx);
-    var result = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+    var result = std.ArrayListUnmanaged(u8).empty;
     defer result.deinit(allocator);
 
     try result.appendSlice(allocator, "x:");
@@ -14590,7 +14576,7 @@ pub fn php_strtr(str_val: Value, from_val: Value, to_val: Value, allocator: Allo
     // 形式2: from_val 是数组（键值对替换）
     if (from_val.isArray()) {
         const arr = from_val.asArray();
-        var result = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+        var result = std.ArrayListUnmanaged(u8).empty;
         defer result.deinit(allocator);
 
         var i: usize = 0;
@@ -15727,7 +15713,7 @@ pub fn preg_match_all(pattern_val: Value, subject_val: Value, matches_ref: *Valu
     defer pcre2_match_data_free_8(match_data);
 
     // 存储所有匹配（临时）
-    var all_matches = std.ArrayListUnmanaged(std.ArrayListUnmanaged([]const u8)){ .items = &.{}, .capacity = 0 };
+    var all_matches = std.ArrayListUnmanaged(std.ArrayListUnmanaged([]const u8)).empty;
     defer {
         for (all_matches.items) |*match_groups| {
             match_groups.deinit(allocator);
@@ -15760,7 +15746,7 @@ pub fn preg_match_all(pattern_val: Value, subject_val: Value, matches_ref: *Valu
         const ovec = pcre2_get_ovector_pointer_8(match_data);
 
         // 保存当前匹配的所有组
-        var match_groups = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
+        var match_groups = std.ArrayListUnmanaged([]const u8).empty;
         var i: usize = 0;
         while (i < @as(usize, @intCast(rc))) : (i += 1) {
             const start = ovec[i * 2];
@@ -16748,7 +16734,7 @@ pub fn php_implode(glue: Value, pieces: Value, allocator: Allocator) !Value {
 
     // 计算总长度（★F-168/R-319：每元素只 toString 一次并保留结果——旧实现两遍各转换一次，
     // 使 NAN 的字符串化告警每元素发两条，而 PHP 实测每条元素只发一条）
-    var strs: std.ArrayListUnmanaged(*PHPString) = .{ .items = &.{}, .capacity = 0 };
+    var strs: std.ArrayListUnmanaged(*PHPString) = .empty;
     defer {
         for (strs.items) |s| s.release(allocator);
         strs.deinit(allocator);
@@ -19660,15 +19646,16 @@ pub const ClassMeta = struct {
         };
         for (dt_consts) |c| {
             const k = try allocator.dupe(u8, c.key);
-            try constants.put(k, Value.initString(try PHPString.init(allocator, c.val)));
+            // ★内建类常量值是进程级固定数据 ⇒ 走静态字符串池（is_static 不引计，deinitRuntime 统一释放）
+            try constants.put(k, Value.initString(PHPString.initStatic(c.val)));
         }
         // ★F-215（R-325）：内部类常量同时登记进 ClassMeta 名单（public）——defined/直读走
         //   findClassConstant（名单路径），constant() 的 :: 分支同样经此；全局表 C::K 键保留兼容。
         //   PHP 内部类常量均 public（无 private/protected 形态）。
         for (dt_consts) |c| {
             const cname = c.key["DateTimeInterface::".len..];
-            // ★F-217：值入 class_constants（与 static_properties 隔离）
-            try iface.setClassConst(cname, Value.initString(try PHPString.init(allocator, c.val)), .public);
+            // ★F-217：值入 class_constants（与 static_properties 隔离）；is_static 静态串（不引计）
+            try iface.setClassConst(cname, Value.initString(PHPString.initStatic(c.val)), .public);
         }
 
         // 注册辅助类
@@ -24798,7 +24785,7 @@ pub fn registerClassTraitUse(class_name: []const u8, trait_name: []const u8) !vo
     const meta = findClass(class_name) orelse return;
     if (class_trait_uses) |*map_ptr| {
         const gop = try map_ptr.getOrPut(meta.name);
-        if (!gop.found_existing) gop.value_ptr.* = .{ .items = &.{}, .capacity = 0 };
+        if (!gop.found_existing) gop.value_ptr.* = .empty;
         for (gop.value_ptr.items) |existing| {
             if (std.ascii.eqlIgnoreCase(existing, trait_name)) return;
         }
@@ -27791,7 +27778,7 @@ fn serializeValue(buffer: *std.ArrayListUnmanaged(u8), value: Value, allocator: 
 }
 
 pub fn php_serialize(value: Value, allocator: Allocator) !Value {
-    var buffer = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+    var buffer = std.ArrayListUnmanaged(u8).empty;
     defer buffer.deinit(allocator);
     try serializeValue(&buffer, value, allocator);
     const s = try PHPString.init(allocator, buffer.items);
@@ -28954,7 +28941,7 @@ pub fn php_array_reverse(arr: Value, preserve_keys_val: Value, allocator: Alloca
 
     if (preserve_keys) {
         // 保留原始键名
-        var entries = std.ArrayListUnmanaged(struct { key: ArrayKey, val: Value }){ .items = &.{}, .capacity = 0 };
+        var entries = std.ArrayListUnmanaged(struct { key: ArrayKey, val: Value }).empty;
         defer entries.deinit(allocator);
         var it = php_arr.elements.iterator();
         while (it.next()) |entry| {
@@ -28967,7 +28954,7 @@ pub fn php_array_reverse(arr: Value, preserve_keys_val: Value, allocator: Alloca
         }
     } else {
         // 默认行为：数字键重新索引，字符串键保留
-        var entries = std.ArrayListUnmanaged(struct { key: ArrayKey, val: Value }){ .items = &.{}, .capacity = 0 };
+        var entries = std.ArrayListUnmanaged(struct { key: ArrayKey, val: Value }).empty;
         defer entries.deinit(allocator);
         var it = php_arr.elements.iterator();
         while (it.next()) |entry| {
@@ -31535,7 +31522,7 @@ pub fn php_realpath(path_val: Value, allocator: Allocator) !Value {
     if (!path_val.isString()) return Value.initBool(false);
     const path = path_val.asString().data;
 
-    const c_path = try allocator.dupeSentinel(u8, path, 0);
+    const c_path = try allocator.dupeSentinel(u8, path, 0, 0);
     defer allocator.free(c_path);
 
     var buf: [std.posix.PATH_MAX]u8 = undefined;
@@ -31742,16 +31729,16 @@ pub fn php_http_response_code(code: Value) !Value {
 
 /// 输出缓冲栈
 const OBLevel = struct {
-    buffer: std.ArrayListUnmanaged(u8) = .{ .items = &.{}, .capacity = 0 },
+    buffer: std.ArrayListUnmanaged(u8) = .empty,
     callback: ?Value = null,
 };
 
-threadlocal var ob_stack: std.ArrayListUnmanaged(OBLevel) = .{ .items = &.{}, .capacity = 0 };
+threadlocal var ob_stack: std.ArrayListUnmanaged(OBLevel) = .empty;
 threadlocal var ob_initialized: bool = false;
 
 fn ensureObInit() void {
     if (!ob_initialized) {
-        ob_stack = .{ .items = &.{}, .capacity = 0 };
+        ob_stack = .empty;
         ob_initialized = true;
     }
 }
@@ -31920,7 +31907,7 @@ pub fn php_json_encode(value: Value, flags: Value, depth: Value, allocator: Allo
     const depth_int = if (depth.isInt()) depth.asInt() else 512;
     _ = depth_int;
 
-    var buffer = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+    var buffer = std.ArrayListUnmanaged(u8).empty;
     defer buffer.deinit(allocator);
 
     const pretty = (flags_int & 128) != 0; // JSON_PRETTY_PRINT
@@ -32463,7 +32450,7 @@ fn jsonDecodeValue(json: []const u8, pos: *usize, assoc: bool, depth: usize, all
 fn jsonDecodeString(json: []const u8, pos: *usize, allocator: Allocator) !Value {
     pos.* += 1; // 跳过开头的引号
 
-    var buffer = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+    var buffer = std.ArrayListUnmanaged(u8).empty;
     defer buffer.deinit(allocator);
 
     while (pos.* < json.len and json[pos.*] != '"') {
@@ -33148,7 +33135,7 @@ pub fn php_posix_mkfifo(
     const mode: std.posix.mode_t = @intCast(
         @max(0, mode_val.toInt()),
     );
-    const path_z = try allocator.dupeSentinel(u8, path_str.data, 0);
+    const path_z = try allocator.dupeSentinel(u8, path_str.data, 0, 0);
     defer allocator.free(path_z);
     const ret = mkfifo(path_z, mode);
     return Value.initBool(ret == 0);
@@ -34294,7 +34281,7 @@ pub fn php_preg_match_all(pattern: Value, subject: Value, matches: *Value, flags
     defer pcre2_match_data_free_8(match_data);
 
     // 存储所有匹配（临时）
-    var all_matches = std.ArrayListUnmanaged(std.ArrayListUnmanaged(PcreCaptureSpan)){ .items = &.{}, .capacity = 0 };
+    var all_matches = std.ArrayListUnmanaged(std.ArrayListUnmanaged(PcreCaptureSpan)).empty;
     defer {
         for (all_matches.items) |*spans| {
             spans.deinit(allocator);
@@ -34327,7 +34314,7 @@ pub fn php_preg_match_all(pattern: Value, subject: Value, matches: *Value, flags
         const ovec = pcre2_get_ovector_pointer_8(match_data);
 
         // 保存当前匹配的所有组偏移
-        var spans = std.ArrayListUnmanaged(PcreCaptureSpan){ .items = &.{}, .capacity = 0 };
+        var spans = std.ArrayListUnmanaged(PcreCaptureSpan).empty;
         var i: usize = 0;
         while (i < @as(usize, @intCast(rc))) : (i += 1) {
             const start = ovec[i * 2];
@@ -36056,7 +36043,7 @@ fn hashValueFromBytes(comptime N: usize, hash: [N]u8, raw: bool, allocator: Allo
 /// HMAC over a one-shot hash（RIPEMD/MD2 无 std Hash 接口）；Blen = 哈希内部压缩块长。
 fn hmacOneShot(comptime Hlen: usize, comptime Blen: usize, comptime hashFn: anytype, key: []const u8, data: []const u8, out: *[Hlen]u8, allocator: Allocator) !void {
     // HMAC（RFC 2104）：Blen = 哈希内部压缩块长（md4/ripemd/sha 族=64，md2=16）。
-    var kbuf: [Blen]u8 = [_]u8{0} ** Blen;
+    var kbuf: [Blen]u8 = @as([Blen]u8, @splat(0));
     if (key.len > Blen) {
         const kh = hashFn(key);
         @memcpy(kbuf[0..Hlen], kh[0..Hlen]);
@@ -36257,8 +36244,8 @@ fn md2Transform(state: *[16]u8, checksum: *[16]u8, block: *const [16]u8) void {
 }
 
 fn md2Hash(input: []const u8) [16]u8 {
-    var state: [16]u8 = [_]u8{0} ** 16;
-    var checksum: [16]u8 = [_]u8{0} ** 16;
+    var state: [16]u8 = @as([16]u8, @splat(0));
+    var checksum: [16]u8 = @as([16]u8, @splat(0));
     var block: [16]u8 = undefined;
     var count: usize = 0;
     for (input) |b| {
@@ -36854,19 +36841,19 @@ fn whirlpoolTransform(state: *[8]u64, buffer: *const [64]u8) void {
 }
 
 fn whirlpoolHash(input: []const u8) [64]u8 {
-    var state: [8]u64 = [_]u64{0} ** 8;
+    var state: [8]u64 = @as([8]u64, @splat(0));
     var i: usize = 0;
     while (i + 64 <= input.len) : (i += 64) {
         whirlpoolTransform(&state, input[i..][0..64]);
     }
     // 填充：补 0x80，补零到末 32 字节前，最后 32 字节为位长（256 位大端）
-    var block: [64]u8 = [_]u8{0} ** 64;
+    var block: [64]u8 = @as([64]u8, @splat(0));
     const rem = input[i..];
     @memcpy(block[0..rem.len], rem);
     block[rem.len] = 0x80;
     if (rem.len + 1 > 64 - 32) {
         whirlpoolTransform(&state, &block);
-        block = [_]u8{0} ** 64;
+        block = @as([64]u8, @splat(0));
     }
     std.mem.writeInt(u256, block[32..64], @as(u256, input.len) * 8, .big);
     whirlpoolTransform(&state, &block);
@@ -37223,7 +37210,7 @@ fn tigerHash(comptime extra_passes: u32, comptime out_len: usize, input: []const
     while (i + 64 <= input.len) : (i += 64) {
         tigerCompress(extra_passes, input[i..][0..64], &state);
     }
-    var block: [64]u8 = [_]u8{0} ** 64;
+    var block: [64]u8 = @as([64]u8, @splat(0));
     const rem = input[i..];
     @memcpy(block[0..rem.len], rem);
     var length: usize = rem.len;
@@ -37232,7 +37219,7 @@ fn tigerHash(comptime extra_passes: u32, comptime out_len: usize, input: []const
     if (length % 8 != 0) length += 8 - length % 8;
     if (length > 56) {
         tigerCompress(extra_passes, &block, &state);
-        block = [_]u8{0} ** 64;
+        block = @as([64]u8, @splat(0));
     }
     std.mem.writeInt(u64, block[56..64], @as(u64, input.len) * 8, .little);
     tigerCompress(extra_passes, &block, &state);
@@ -37668,17 +37655,17 @@ fn gostTransform(state: *[16]u32, tables: *const [4][256]u32, input: *const [32]
 
 fn gostHash(comptime crypto: bool, input: []const u8) [32]u8 {
     const tables = if (crypto) &GOST_TABLES_CRYPTO else &GOST_TABLES_TEST;
-    var state: [16]u32 = [_]u32{0} ** 16;
+    var state: [16]u32 = @as([16]u32, @splat(0));
     var i: usize = 0;
     while (i + 32 <= input.len) : (i += 32) {
         gostTransform(&state, tables, input[i..][0..32]);
     }
     if (input.len % 32 != 0) {
-        var block: [32]u8 = [_]u8{0} ** 32;
+        var block: [32]u8 = @as([32]u8, @splat(0));
         @memcpy(block[0 .. input.len - i], input[i..]);
         gostTransform(&state, tables, &block);
     }
-    var l: [8]u32 = [_]u32{0} ** 8;
+    var l: [8]u32 = @as([8]u32, @splat(0));
     const bits: u64 = @as(u64, input.len) * 8;
     l[0] = @truncate(bits);
     l[1] = @truncate(bits >> 32);
@@ -37784,7 +37771,7 @@ fn havalHash(comptime passes: u32, comptime out_bits: u32, input: []const u8) [o
         havalTransform(passes, &state, input[i..][0..128]);
     }
     // 填充：0x01 后补零到 118 (mod 128)，再 10 字节尾（版本|轮数|摘要长 + 位长 u64 小端）
-    var tail: [256]u8 = [_]u8{0} ** 256;
+    var tail: [256]u8 = @as([256]u8, @splat(0));
     const rem = input[i..];
     @memcpy(tail[0..rem.len], rem);
     tail[rem.len] = 0x01;
@@ -38437,13 +38424,13 @@ fn snefruTransform(state: *[16]u32, input: *const [32]u8) void {
 }
 
 fn snefruHash(input: []const u8) [32]u8 {
-    var state: [16]u32 = [_]u32{0} ** 16;
+    var state: [16]u32 = @as([16]u32, @splat(0));
     var i: usize = 0;
     while (i + 32 <= input.len) : (i += 32) {
         snefruTransform(&state, input[i..][0..32]);
     }
     if (input.len % 32 != 0) {
-        var block: [32]u8 = [_]u8{0} ** 32;
+        var block: [32]u8 = @as([32]u8, @splat(0));
         @memcpy(block[0 .. input.len - i], input[i..]);
         snefruTransform(&state, &block);
     }
@@ -41079,7 +41066,7 @@ pub fn php_natsort(arr: Value, allocator: Allocator) !Value {
     const sort_arr = php_arr;
 
     const Entry = struct { key: ArrayKey, val: Value };
-    var entries = std.ArrayListUnmanaged(Entry){ .items = &.{}, .capacity = 0 };
+    var entries = std.ArrayListUnmanaged(Entry).empty;
     defer entries.deinit(allocator);
     var it = sort_arr.elements.iterator();
     while (it.next()) |entry| {
@@ -41134,7 +41121,7 @@ pub fn php_natcasesort(arr: Value, allocator: Allocator) !Value {
     const sort_arr = php_arr;
 
     const Entry = struct { key: ArrayKey, val: Value };
-    var entries = std.ArrayListUnmanaged(Entry){ .items = &.{}, .capacity = 0 };
+    var entries = std.ArrayListUnmanaged(Entry).empty;
     defer entries.deinit(allocator);
     var it = sort_arr.elements.iterator();
     while (it.next()) |entry| {

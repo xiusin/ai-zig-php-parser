@@ -183,7 +183,7 @@ pub const Profiler = struct {
             .allocator = allocator,
             .profiler_type = profiler_type,
             .enabled = profiler_type != .none,
-            .call_stack = .{ .items = &.{}, .capacity = 0 },
+            .call_stack = .empty,
             .function_stats = std.StringHashMap(FunctionStats).init(allocator),
             .total_calls = 0,
             .total_time_ns = 0,
@@ -311,7 +311,7 @@ pub const Profiler = struct {
 
     /// 获取所有函数统计
     pub fn getAllStats(self: *const Profiler, allocator: std.mem.Allocator) ![]FunctionStats {
-        var stats_list: std.ArrayListUnmanaged(FunctionStats) = .{ .items = &.{}, .capacity = 0 };
+        var stats_list: std.ArrayListUnmanaged(FunctionStats) = .empty;
         errdefer stats_list.deinit(allocator);
 
         var iter = self.function_stats.valueIterator();
@@ -586,7 +586,7 @@ test "Profiler JSON 导出" {
     try profiler.exitFunction("test_func");
 
     // 导出为 JSON
-    var buffer: std.ArrayListUnmanaged(u8) = .{ .items = &.{}, .capacity = 0 };
+    var buffer: std.ArrayListUnmanaged(u8) = .empty;
     defer buffer.deinit(allocator);
 
     try profiler.exportJSON(buffer.writer(allocator));

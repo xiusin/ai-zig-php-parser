@@ -20,7 +20,7 @@ pub fn getTimestamp() i64 {
 
 /// 0.16: std.process.getEnvVarOwned() 移除，用 std.c.getenv 替代
 pub fn getEnvVarOwned(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
-    const name_z = try allocator.dupeZ(u8, name);
+    const name_z = try allocator.dupeSentinel(u8, name, 0);
     defer allocator.free(name_z);
     const c_val = std.c.getenv(name_z.ptr);
     if (c_val == null) return error.EnvironmentVariableNotFound;

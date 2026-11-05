@@ -437,7 +437,7 @@ pub fn pregMatchAllFn(vm: *VM, args: []const Value) !Value {
         match_count += 1;
         const ovec = pcre_pattern.getOvector();
 
-        var match_groups = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
+        var match_groups = std.ArrayListUnmanaged([]const u8).empty;
         var i: usize = 0;
         while (i < @as(usize, @intCast(rc))) : (i += 1) {
             const start = ovec[i * 2];

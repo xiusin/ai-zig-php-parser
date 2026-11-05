@@ -737,8 +737,8 @@ pub const NativeLinker = struct {
                 if (value) |inner| try collectRegisterRefs(opt.child, inner, set);
             },
             .@"struct" => |st| {
-                inline for (st.fields) |field| {
-                    try collectRegisterRefs(field.type, @field(value, field.name), set);
+                inline for (st.field_names, st.field_types) |f_name, f_type| {
+                    try collectRegisterRefs(f_type, @field(value, f_name), set);
                 }
             },
             .@"union" => {
@@ -3218,17 +3218,17 @@ pub const NativeLinker = struct {
             return error.TraitNotFound;
         };
 
-        var imported_methods: std.ArrayListUnmanaged(ComposedTraitMethod) = .{ .items = &.{}, .capacity = 0 };
-        var resolved_methods: std.ArrayListUnmanaged(ComposedTraitMethod) = .{ .items = &.{}, .capacity = 0 };
-        var imported_properties: std.ArrayListUnmanaged(ComposedTraitProperty) = .{ .items = &.{}, .capacity = 0 };
-        var resolved_properties: std.ArrayListUnmanaged(ComposedTraitProperty) = .{ .items = &.{}, .capacity = 0 };
-        var imported_constants: std.ArrayListUnmanaged(ComposedTraitConstant) = .{ .items = &.{}, .capacity = 0 };
-        var resolved_constants: std.ArrayListUnmanaged(ComposedTraitConstant) = .{ .items = &.{}, .capacity = 0 };
+        var imported_methods: std.ArrayListUnmanaged(ComposedTraitMethod) = .empty;
+        var resolved_methods: std.ArrayListUnmanaged(ComposedTraitMethod) = .empty;
+        var imported_properties: std.ArrayListUnmanaged(ComposedTraitProperty) = .empty;
+        var resolved_properties: std.ArrayListUnmanaged(ComposedTraitProperty) = .empty;
+        var imported_constants: std.ArrayListUnmanaged(ComposedTraitConstant) = .empty;
+        var resolved_constants: std.ArrayListUnmanaged(ComposedTraitConstant) = .empty;
 
         for (trait_td.traits) |used_trait_name| {
-            var nested_methods: std.ArrayListUnmanaged(ComposedTraitMethod) = .{ .items = &.{}, .capacity = 0 };
-            var nested_properties: std.ArrayListUnmanaged(ComposedTraitProperty) = .{ .items = &.{}, .capacity = 0 };
-            var nested_constants: std.ArrayListUnmanaged(ComposedTraitConstant) = .{ .items = &.{}, .capacity = 0 };
+            var nested_methods: std.ArrayListUnmanaged(ComposedTraitMethod) = .empty;
+            var nested_properties: std.ArrayListUnmanaged(ComposedTraitProperty) = .empty;
+            var nested_constants: std.ArrayListUnmanaged(ComposedTraitConstant) = .empty;
             try self.resolveTraitExports(
                 ir_module,
                 used_trait_name,
@@ -3334,9 +3334,9 @@ pub const NativeLinker = struct {
         out_properties: *std.ArrayListUnmanaged(ComposedTraitProperty),
         out_constants: *std.ArrayListUnmanaged(ComposedTraitConstant),
     ) !void {
-        var imported_methods: std.ArrayListUnmanaged(ComposedTraitMethod) = .{ .items = &.{}, .capacity = 0 };
-        var imported_properties: std.ArrayListUnmanaged(ComposedTraitProperty) = .{ .items = &.{}, .capacity = 0 };
-        var imported_constants: std.ArrayListUnmanaged(ComposedTraitConstant) = .{ .items = &.{}, .capacity = 0 };
+        var imported_methods: std.ArrayListUnmanaged(ComposedTraitMethod) = .empty;
+        var imported_properties: std.ArrayListUnmanaged(ComposedTraitProperty) = .empty;
+        var imported_constants: std.ArrayListUnmanaged(ComposedTraitConstant) = .empty;
 
         for (class_td.traits) |trait_name| {
             try self.resolveTraitExports(
@@ -3645,7 +3645,7 @@ pub const NativeLinker = struct {
         // 从IR函数定义获取参数计数和参数名
         var pc: usize = 0;
         var rp: usize = 0;
-        var func_param_names: std.ArrayListUnmanaged([]const u8) = .{ .items = &.{}, .capacity = 0 };
+        var func_param_names: std.ArrayListUnmanaged([]const u8) = .empty;
         defer func_param_names.deinit(self.allocator);
         if (self.ir_module) |ir_mod| {
             if (self.findFunction(ir_mod, full_method_name)) |func| {
@@ -3870,9 +3870,9 @@ pub const NativeLinker = struct {
             if (type_def_idx[ci]) |tdi| {
                 const td_ptr = ir_module.types.items[tdi];
                 const td = td_ptr.*;
-                var trait_methods: std.ArrayListUnmanaged(ComposedTraitMethod) = .{ .items = &.{}, .capacity = 0 };
-                var trait_properties: std.ArrayListUnmanaged(ComposedTraitProperty) = .{ .items = &.{}, .capacity = 0 };
-                var trait_constants: std.ArrayListUnmanaged(ComposedTraitConstant) = .{ .items = &.{}, .capacity = 0 };
+                var trait_methods: std.ArrayListUnmanaged(ComposedTraitMethod) = .empty;
+                var trait_properties: std.ArrayListUnmanaged(ComposedTraitProperty) = .empty;
+                var trait_constants: std.ArrayListUnmanaged(ComposedTraitConstant) = .empty;
                 try self.resolveClassTraitMembers(
                     ir_module,
                     td_ptr,
@@ -4226,7 +4226,7 @@ pub const NativeLinker = struct {
     fn hasMissingTraitInClosure(self: *Self, ir_module: *const IR.Module, td: *const IR.TypeDef) bool {
         var visited = std.StringHashMap(void).init(self.allocator);
         defer visited.deinit();
-        var worklist = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
+        var worklist = std.ArrayListUnmanaged([]const u8).empty;
         defer worklist.deinit(self.allocator);
         worklist.appendSlice(self.allocator, td.traits) catch return false;
         while (worklist.pop()) |tn| {
@@ -4289,9 +4289,9 @@ pub const NativeLinker = struct {
                 const full_cname = class_names[ci];
                 const short_cname = class_short_names[ci];
                 _ = short_cname; // 这个循环中只需要full_cname
-                var trait_methods: std.ArrayListUnmanaged(ComposedTraitMethod) = .{ .items = &.{}, .capacity = 0 };
-                var trait_properties: std.ArrayListUnmanaged(ComposedTraitProperty) = .{ .items = &.{}, .capacity = 0 };
-                var trait_constants: std.ArrayListUnmanaged(ComposedTraitConstant) = .{ .items = &.{}, .capacity = 0 };
+                var trait_methods: std.ArrayListUnmanaged(ComposedTraitMethod) = .empty;
+                var trait_properties: std.ArrayListUnmanaged(ComposedTraitProperty) = .empty;
+                var trait_constants: std.ArrayListUnmanaged(ComposedTraitConstant) = .empty;
                 try self.resolveClassTraitMembers(
                     ir_module,
                     td_ptr,
@@ -5687,7 +5687,15 @@ pub const NativeLinker = struct {
                             corrected_type == .php_array or corrected_type == .php_string or
                             corrected_type == .php_callable or corrected_type == .php_resource)
                         {
-                            try cleanup_registers_set.put(reg.id, {});
+                            // ★F-236：非 by_ref 的 capture_get 结果是「借用」——注入时 `_=reg.retain()`
+                            //   的份额经 val_assign（调用者 retain 新值约定）转移给 store 目标槽，
+                            //   目标槽已由下方 F-136c（5704）单独纳入 cleanup 归还。借用寄存器自身若
+                            //   也入 cleanup ⇒ 同一份额被双重 release（净 -1/捕获/调用）；当捕获变量未在
+                            //   箭头函数体使用（无使用点补 retain）时累积成 UAF（f095 的 ret.args[0] 提前释放）。
+                            const is_borrowed_capture_get = inst.op == .capture_get and !inst.op.capture_get.by_ref;
+                            if (!is_borrowed_capture_get) {
+                                try cleanup_registers_set.put(reg.id, {});
+                            }
                         }
                     } else {
                         // alloca 指令（局部变量）也需要在函数结束时释放
@@ -6600,7 +6608,7 @@ pub const NativeLinker = struct {
         defer self.allocator.free(reg_may_heap);
         @memset(reg_may_heap, false);
 
-        var phi_and_select: std.ArrayListUnmanaged(*const IR.Instruction) = .{ .items = &.{}, .capacity = 0 };
+        var phi_and_select: std.ArrayListUnmanaged(*const IR.Instruction) = .empty;
         defer phi_and_select.deinit(self.allocator);
 
         for (func.blocks.items) |block| {
@@ -29576,7 +29584,7 @@ pub const NativeLinker = struct {
         // 后续迭代：来自 increment 块
         // 我们需要在循环体末尾更新 phi 值
         const PhiUpdate = struct { phi_reg: usize, value_reg: usize };
-        var phi_updates: std.ArrayListUnmanaged(PhiUpdate) = .{ .items = &.{}, .capacity = 0 };
+        var phi_updates: std.ArrayListUnmanaged(PhiUpdate) = .empty;
         defer phi_updates.deinit(self.allocator);
 
         // 从 phi 节点的 incoming 值中提取更新信息
@@ -31638,7 +31646,7 @@ pub const NativeLinker = struct {
         }
 
         // 收集 phi 节点更新信息
-        var phi_updates: std.ArrayListUnmanaged(PhiUpdate) = .{ .items = &.{}, .capacity = 0 };
+        var phi_updates: std.ArrayListUnmanaged(PhiUpdate) = .empty;
         defer phi_updates.deinit(self.allocator);
 
         for (header_block.instructions.items) |inst| {

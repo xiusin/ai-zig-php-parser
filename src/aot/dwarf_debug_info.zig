@@ -764,7 +764,7 @@ pub const DwarfDebugInfoBuilder = struct {
         var buf = std.ArrayList(u8).empty;
 
         // 编译单元头部
-        try buf.appendSlice(self.allocator, &[_]u8{0} ** 4); // 长度（稍后填充）
+        try buf.appendSlice(self.allocator, &@as([4]u8, @splat(0))); // 长度（稍后填充）
         try writeU16(&buf, self.allocator, DWARF_VERSION);
         try writeU32(&buf, self.allocator, 0); // .debug_abbrev 偏移
         try buf.append(self.allocator, 8); // 地址大小
@@ -882,7 +882,7 @@ pub const DwarfDebugInfoBuilder = struct {
         var buf = std.ArrayList(u8).empty;
 
         // 行号表头部
-        try buf.appendSlice(&[_]u8{0} ** 4); // 长度（稍后填充）
+        try buf.appendSlice(&@as([4]u8, @splat(0))); // 长度（稍后填充）
         try writeU16(&buf, DWARF_VERSION);
         try writeU32(&buf, 0); // 头部长度（稍后填充）
         try buf.append(1); // 最小指令长度
@@ -945,7 +945,7 @@ pub const DwarfDebugInfoBuilder = struct {
         var buf = std.ArrayList(u8).empty;
 
         // 地址范围表头部
-        try buf.appendSlice(&[_]u8{0} ** 4); // 长度（稍后填充）
+        try buf.appendSlice(&@as([4]u8, @splat(0))); // 长度（稍后填充）
         try writeU16(&buf, DWARF_VERSION);
         try writeU32(&buf, 0); // .debug_info 偏移
         try buf.append(8); // 地址大小

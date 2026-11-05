@@ -32,10 +32,10 @@ pub const DominatorTree = struct {
         @memset(idoms, null);
 
         const frontiers = try allocator.alloc(std.ArrayListUnmanaged(*BasicBlock), size);
-        for (frontiers) |*f| f.* = .{ .items = &.{}, .capacity = 0 };
+        for (frontiers) |*f| f.* = .empty;
 
         const children = try allocator.alloc(std.ArrayListUnmanaged(*BasicBlock), size);
-        for (children) |*c| c.* = .{ .items = &.{}, .capacity = 0 };
+        for (children) |*c| c.* = .empty;
 
         const levels = try allocator.alloc(u32, size);
         @memset(levels, 0);
@@ -178,7 +178,7 @@ pub fn computeDominators(allocator: Allocator, func: *const Function) !Dominator
     }
 
     // Compute levels using BFS on the dominator tree
-    var queue = std.ArrayListUnmanaged(*BasicBlock){ .items = &.{}, .capacity = 0 };
+    var queue = std.ArrayListUnmanaged(*BasicBlock).empty;
     defer queue.deinit(allocator);
 
     try queue.append(allocator, entry_block);
@@ -346,8 +346,8 @@ pub const Loop = struct {
         _ = allocator;
         return .{
             .header = header,
-            .blocks = .{ .items = &.{}, .capacity = 0 },
-            .sub_loops = .{ .items = &.{}, .capacity = 0 },
+            .blocks = .empty,
+            .sub_loops = .empty,
             .parent = null,
         };
     }
@@ -383,7 +383,7 @@ pub const LoopInfo = struct {
     pub fn init(allocator: Allocator) Self {
         return .{
             .allocator = allocator,
-            .loops = .{ .items = &.{}, .capacity = 0 },
+            .loops = .empty,
             .loop_map = std.AutoHashMap(*BasicBlock, *Loop).init(allocator),
         };
     }
@@ -438,7 +438,7 @@ pub fn computeLoops(allocator: Allocator, func: *const Function, dt: *const Domi
     // So we just check if loop A's header is contained in loop B's blocks.
 
     // We need to iterate carefully. Let's collect all loops first.
-    var all_loops = std.ArrayListUnmanaged(*Loop){ .items = &.{}, .capacity = 0 };
+    var all_loops = std.ArrayListUnmanaged(*Loop).empty;
     defer all_loops.deinit(allocator);
 
     var it = info.loop_map.iterator();
@@ -593,7 +593,7 @@ fn addLoopBlocks(allocator: Allocator, loop: *Loop, back_edge_source: *BasicBloc
     if (back_edge_source == header) return;
 
     // Worklist for reverse traversal
-    var worklist = std.ArrayListUnmanaged(*BasicBlock){ .items = &.{}, .capacity = 0 };
+    var worklist = std.ArrayListUnmanaged(*BasicBlock).empty;
     defer worklist.deinit(allocator);
 
     try worklist.append(allocator, back_edge_source);

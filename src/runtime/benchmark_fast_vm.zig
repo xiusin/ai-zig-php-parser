@@ -163,7 +163,7 @@ fn benchSuperInstruction(allocator: std.mem.Allocator) !u64 {
     defer vm.deinit();
 
     // 使用超级指令 load_inc_store 进行 1000 次自增
-    var code_list = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+    var code_list = std.ArrayListUnmanaged(u8).empty;
     defer code_list.deinit(allocator);
 
     // i = 0

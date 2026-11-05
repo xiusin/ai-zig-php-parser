@@ -561,7 +561,7 @@ test "SIMDArray.arraySumInt - basic" {
     try std.testing.expectEqual(@as(i64, 15), simd.arraySumInt(&[_]i64{ 1, 2, 3, 4, 5 }));
 
     // 测试大数组（触发 SIMD）
-    var large_arr = [_]i64{1} ** 100;
+    var large_arr = @as([100]i64, @splat(1));
     try std.testing.expectEqual(@as(i64, 100), simd.arraySumInt(&large_arr));
 
     // 测试负数
@@ -582,7 +582,7 @@ test "SIMDArray.arraySumFloat - basic" {
     try std.testing.expectApproxEqAbs(@as(f64, 7.0), sum, 0.0001);
 
     // 测试大数组（触发 SIMD）
-    var large_arr = [_]f64{1.0} ** 100;
+    var large_arr = @as([100]f64, @splat(1.0));
     try std.testing.expectApproxEqAbs(@as(f64, 100.0), simd.arraySumFloat(&large_arr), 0.0001);
 }
 
@@ -606,7 +606,7 @@ test "SIMDArray.arrayMapInt - basic" {
     try std.testing.expectEqualSlices(i64, &[_]i64{ 2, 4, 6 }, small_result);
 
     // 测试大数组
-    var large_arr = [_]i64{5} ** 50;
+    var large_arr = @as([50]i64, @splat(5));
     const large_result = try simd.arrayMapInt(&large_arr, double);
     defer simd.allocator.free(large_result);
     for (large_result) |val| {

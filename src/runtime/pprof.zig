@@ -54,7 +54,7 @@ fn writeEmbedded(writer: anytype, field_number: u32, bytes: []const u8) !void {
 
 const StringTable = struct {
     allocator: std.mem.Allocator,
-    strings: std.ArrayListUnmanaged([]const u8) = .{ .items = &.{}, .capacity = 0 },
+    strings: std.ArrayListUnmanaged([]const u8) = .empty,
     index: std.StringHashMapUnmanaged(u64) = .{},
 
     fn init(allocator: std.mem.Allocator) !StringTable {
@@ -103,7 +103,7 @@ fn collectProfileData(
     func_ids: *std.StringHashMapUnmanaged(u64),
     loc_ids: *std.StringHashMapUnmanaged(u64),
 ) !void {
-    var stack: std.ArrayListUnmanaged(u64) = .{ .items = &.{}, .capacity = 0 };
+    var stack: std.ArrayListUnmanaged(u64) = .empty;
     defer stack.deinit(allocator);
 
     try walkNode(allocator, root, funcs, locs, samples, func_ids, loc_ids, &stack);
@@ -174,7 +174,7 @@ fn walkNode(
 }
 
 fn writeValueType(allocator: std.mem.Allocator, st: *StringTable, type_name: []const u8, unit: []const u8) ![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .{ .items = &.{}, .capacity = 0 };
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(allocator);
     var w = BufWriter{ .buf = &buf, .allocator = allocator };
 
@@ -190,7 +190,7 @@ fn writeValueType(allocator: std.mem.Allocator, st: *StringTable, type_name: []c
 }
 
 fn writeFunctionMsg(allocator: std.mem.Allocator, st: *StringTable, f: FunctionEntry) ![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .{ .items = &.{}, .capacity = 0 };
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(allocator);
     var w = BufWriter{ .buf = &buf, .allocator = allocator };
 
@@ -208,14 +208,14 @@ fn writeFunctionMsg(allocator: std.mem.Allocator, st: *StringTable, f: FunctionE
 }
 
 fn writeLocationMsg(allocator: std.mem.Allocator, loc: LocationEntry) ![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .{ .items = &.{}, .capacity = 0 };
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(allocator);
     var w = BufWriter{ .buf = &buf, .allocator = allocator };
 
     try writeKey(&w, 1, .varint);
     try writeVarint(&w, loc.id);
 
-    var line_buf: std.ArrayListUnmanaged(u8) = .{ .items = &.{}, .capacity = 0 };
+    var line_buf: std.ArrayListUnmanaged(u8) = .empty;
     defer line_buf.deinit(allocator);
     var lw = BufWriter{ .buf = &line_buf, .allocator = allocator };
     try writeKey(&lw, 1, .varint);
@@ -226,7 +226,7 @@ fn writeLocationMsg(allocator: std.mem.Allocator, loc: LocationEntry) ![]u8 {
 }
 
 fn writeSampleMsg(allocator: std.mem.Allocator, s: SampleEntry) ![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .{ .items = &.{}, .capacity = 0 };
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     errdefer buf.deinit(allocator);
     var w = BufWriter{ .buf = &buf, .allocator = allocator };
 
@@ -249,11 +249,11 @@ pub fn writeCpuProfileFromFlameGraph(
     var st = try StringTable.init(allocator);
     defer st.deinit();
 
-    var funcs: std.ArrayListUnmanaged(FunctionEntry) = .{ .items = &.{}, .capacity = 0 };
+    var funcs: std.ArrayListUnmanaged(FunctionEntry) = .empty;
     defer funcs.deinit(allocator);
-    var locs: std.ArrayListUnmanaged(LocationEntry) = .{ .items = &.{}, .capacity = 0 };
+    var locs: std.ArrayListUnmanaged(LocationEntry) = .empty;
     defer locs.deinit(allocator);
-    var samples: std.ArrayListUnmanaged(SampleEntry) = .{ .items = &.{}, .capacity = 0 };
+    var samples: std.ArrayListUnmanaged(SampleEntry) = .empty;
     defer {
         for (samples.items) |s| allocator.free(s.location_ids);
         samples.deinit(allocator);
@@ -269,14 +269,16 @@ pub fn writeCpuProfileFromFlameGraph(
     const cpu_type = try writeValueType(allocator, &st, "cpu", "nanoseconds");
     defer allocator.free(cpu_type);
 
-    var profile_buf: std.ArrayListUnmanaged(u8) = .{ .items = &.{}, .capacity = 0 };
+    var profile_buf: std.ArrayListUnmanaged(u8) = .empty;
     defer profile_buf.deinit(allocator);
     var pw = BufWriter{ .buf = &profile_buf, .allocator = allocator };
 
     const now_ns: u64 = blk: {
-        var ts: std.os.linux.timespec = undefined;
-        if (std.os.linux.clock_gettime(std.os.linux.CLOCK.MONOTONIC, &ts) != 0) return error.ClockFailed;
-        break :blk @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+        // Zig 0.17.1：std.os.linux.clock_gettime 是 linux 专属 ⇒ 跨平台用 Io.Clock
+        // （.awake ⇔ linux CLOCK_MONOTONIC / macOS CLOCK_UPTIME_RAW）
+        const io = std.Io.Threaded.global_single_threaded.io();
+        const ts = std.Io.Clock.now(.awake, io);
+        break :blk @intCast(@max(0, ts.nanoseconds));
     };
     try writeKey(&pw, 1, .varint);
     try writeVarint(&pw, now_ns);
@@ -334,7 +336,7 @@ test "pprof writes cpu profile protobuf" {
     _ = try a.addChild(allocator, "hot", 2_000_000);
     root.calculateSelfTime();
 
-    var buf: std.ArrayListUnmanaged(u8) = .{ .items = &.{}, .capacity = 0 };
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
 
     try writeCpuProfileFromFlameGraph(allocator, buf.writer(), root, 1_000_000);

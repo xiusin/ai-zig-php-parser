@@ -189,7 +189,7 @@ test "Optimizer: Mem2Reg on If-Else" {
     defer optimizer.deinit();
 
     // Debug: Print IR
-    var list = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+    var list = std.ArrayListUnmanaged(u8).empty;
     defer list.deinit(allocator);
     // var printer = IR.IRPrinter.initUnmanaged(&list, allocator);
 

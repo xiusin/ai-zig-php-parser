@@ -40,7 +40,7 @@ PASS|f081_bplustree_index_range_query.php
 PASS|f085_geo_rtree_knn_geocoder.php
 PASS|f087_rbac_abac_policy_inheritance.php
 PASS|f090_promise_future_async_concurrent.php
-FAIL_DIFF|f095_compiler_opt_constfold_dce_cse.php|PHP:=== f095: Compiler Optimization + ConstFold + DCE + CSE ===|--- Before Optimization ---|Instructions:||AOT:=== f095: Compiler Optimization + ConstFold + DCE + CSE ===|--- Before Optimization ---|Instructions:|
+PASS|f095_compiler_opt_constfold_dce_cse.php
 PASS|f097_search_engine_inverted_index_tfidf.php
 PASS|f102_memory_gc_marksweep_refcount_gen.php
 PASS|f104_game_engine_ecs_collision_render.php

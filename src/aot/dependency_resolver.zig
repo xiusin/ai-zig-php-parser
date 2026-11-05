@@ -54,8 +54,8 @@ pub const FileNode = struct {
     pub fn init() FileNode {
         return .{
             .path = "",
-            .dependencies = .{ .items = &.{}, .capacity = 0 },
-            .includes = .{ .items = &.{}, .capacity = 0 },
+            .dependencies = .empty,
+            .includes = .empty,
             .processed = false,
             .in_progress = false,
             .source = null,
@@ -146,10 +146,10 @@ pub const DependencyResolver = struct {
             .diagnostics = diagnostics,
             .files = .{},
             .base_dir = "",
-            .include_paths = .{ .items = &.{}, .capacity = 0 },
-            .cycles = .{ .items = &.{}, .capacity = 0 },
-            .unresolved = .{ .items = &.{}, .capacity = 0 },
-            .visit_stack = .{ .items = &.{}, .capacity = 0 },
+            .include_paths = .empty,
+            .cycles = .empty,
+            .unresolved = .empty,
+            .visit_stack = .empty,
         };
         return self;
     }
@@ -304,7 +304,7 @@ pub const DependencyResolver = struct {
 
     /// Extract include/require statements from source code
     pub fn extractIncludes(self: *Self, source: []const u8, file_path: []const u8) ![]IncludeStatement {
-        var includes = std.ArrayListUnmanaged(IncludeStatement){ .items = &.{}, .capacity = 0 };
+        var includes = std.ArrayListUnmanaged(IncludeStatement).empty;
         errdefer {
             for (includes.items) |inc| {
                 self.allocator.free(inc.path);
@@ -604,7 +604,7 @@ pub const DependencyResolver = struct {
 
     /// Get the compilation order (topological sort)
     pub fn getCompilationOrder(self: *Self) ![]const []const u8 {
-        var order = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
+        var order = std.ArrayListUnmanaged([]const u8).empty;
         var visited = std.StringHashMapUnmanaged(void){};
         defer visited.deinit(self.allocator);
 
@@ -670,7 +670,7 @@ pub const DependencyResolver = struct {
 
     /// Get all file paths
     pub fn getAllFiles(self: *Self) ![]const []const u8 {
-        var paths = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
+        var paths = std.ArrayListUnmanaged([]const u8).empty;
         var it = self.files.iterator();
         while (it.next()) |entry| {
             try paths.append(self.allocator, entry.key_ptr.*);

@@ -156,7 +156,7 @@ pub const PDO = struct {
     /// 转义字符串
     pub fn quote(self: *PDO, string: []const u8) ![]const u8 {
         // 简单的转义实现
-        var result = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+        var result = std.ArrayListUnmanaged(u8).empty;
         try result.append(self.allocator, '\'');
 
         for (string) |c| {
@@ -293,7 +293,7 @@ pub const PDOStatement = struct {
     }
 
     fn buildSQL(self: *PDOStatement) ![]const u8 {
-        var result = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+        var result = std.ArrayListUnmanaged(u8).empty;
         try result.ensureTotalCapacity(self.allocator, self.sql.len);
         defer result.deinit(self.allocator);
 
@@ -875,7 +875,7 @@ pub const MemoryDatabase = struct {
         i += 1; // Skip '('
 
         // Parse values (simplified - assumes string values)
-        var values = std.ArrayListUnmanaged(Value){ .items = &.{}, .capacity = 0 };
+        var values = std.ArrayListUnmanaged(Value).empty;
         defer values.deinit(self.allocator);
 
         var val_start = i;
@@ -1084,7 +1084,7 @@ pub const MySQLi = struct {
 
     /// 转义字符串
     pub fn realEscapeString(self: *MySQLi, string: []const u8) ![]const u8 {
-        var result = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+        var result = std.ArrayListUnmanaged(u8).empty;
 
         for (string) |c| {
             switch (c) {

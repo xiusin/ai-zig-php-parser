@@ -153,7 +153,7 @@ pub const FlameGraphGenerator = struct {
             .io = io,
             .profiler = profiler,
             .root = root,
-            .samples = .{ .items = &.{}, .capacity = 0 },
+            .samples = .empty,
             .sampling_interval_ns = 1_000_000, // 1ms 默认采样间隔
             .min_display_time_ns = 100_000, // 0.1ms 最小显示时间
             .mutex = std.Io.Mutex.init,
@@ -372,10 +372,10 @@ pub const FlameGraphGenerator = struct {
         self.mutex.lock(self.io) catch {};
         defer self.mutex.unlock(self.io);
 
-        var buffer: std.ArrayListUnmanaged(u8) = .{ .items = &.{}, .capacity = 0 };
+        var buffer: std.ArrayListUnmanaged(u8) = .empty;
         errdefer buffer.deinit(allocator);
 
-        var stack: std.ArrayListUnmanaged([]const u8) = .{ .items = &.{}, .capacity = 0 };
+        var stack: std.ArrayListUnmanaged([]const u8) = .empty;
         defer stack.deinit(allocator);
 
         try self.writeFoldedNode(&buffer, allocator, self.root, &stack);
@@ -435,7 +435,7 @@ pub const FlameGraphGenerator = struct {
         self.mutex.lock(self.io) catch {};
         defer self.mutex.unlock(self.io);
 
-        var hotspots: std.ArrayListUnmanaged(HotspotInfo) = .{ .items = &.{}, .capacity = 0 };
+        var hotspots: std.ArrayListUnmanaged(HotspotInfo) = .empty;
         errdefer hotspots.deinit(allocator);
 
         // 收集所有节点
@@ -494,7 +494,7 @@ pub const FlameGraphGenerator = struct {
         self.mutex.lock(self.io) catch {};
         defer self.mutex.unlock(self.io);
 
-        var buffer: std.ArrayListUnmanaged(u8) = .{ .items = &.{}, .capacity = 0 };
+        var buffer: std.ArrayListUnmanaged(u8) = .empty;
         errdefer buffer.deinit(allocator);
 
         // SVG 头部

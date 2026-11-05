@@ -1946,7 +1946,7 @@ pub const BytecodeGenerator = struct {
         const closure_name_id = self.context.intern(closure_name_buf) catch return CompileError.OutOfMemory;
         const closure_name = self.getString(closure_name_id);
 
-        var capture_local_slots = std.ArrayListUnmanaged(u16){ .items = &.{}, .capacity = 0 };
+        var capture_local_slots = std.ArrayListUnmanaged(u16).empty;
         defer capture_local_slots.deinit(self.allocator);
 
         // 保存并重置状态：编译闭包体为独立 CompiledFunction
@@ -2086,7 +2086,7 @@ pub const BytecodeGenerator = struct {
             param_set.put(self.allocator, param_name, {}) catch return CompileError.OutOfMemory;
         }
 
-        var capture_names = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
+        var capture_names = std.ArrayListUnmanaged([]const u8).empty;
         defer capture_names.deinit(self.allocator);
         var iter = self.locals.iterator();
         while (iter.next()) |entry| {
@@ -2101,7 +2101,7 @@ pub const BytecodeGenerator = struct {
             }
         }.lessThan);
 
-        var capture_local_slots = std.ArrayListUnmanaged(u16){ .items = &.{}, .capacity = 0 };
+        var capture_local_slots = std.ArrayListUnmanaged(u16).empty;
         defer capture_local_slots.deinit(self.allocator);
 
         const saved_locals = self.locals;

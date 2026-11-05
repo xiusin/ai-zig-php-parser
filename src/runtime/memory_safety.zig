@@ -62,9 +62,9 @@ pub const SafeAllocator = struct {
     wrapped_allocator: Allocator,
 
     // 调试信息（仅在 Debug 模式下启用）
-    allocation_count: if (builtin.mode == .Debug) std.atomic.Value(usize) else void,
-    deallocation_count: if (builtin.mode == .Debug) std.atomic.Value(usize) else void,
-    total_allocated: if (builtin.mode == .Debug) std.atomic.Value(usize) else void,
+    allocation_count: if (builtin.mode == .debug) std.atomic.Value(usize) else void,
+    deallocation_count: if (builtin.mode == .debug) std.atomic.Value(usize) else void,
+    total_allocated: if (builtin.mode == .debug) std.atomic.Value(usize) else void,
 
     const Self = @This();
 
@@ -73,9 +73,9 @@ pub const SafeAllocator = struct {
     pub fn init(base_allocator: Allocator) Self {
         return .{
             .wrapped_allocator = base_allocator,
-            .allocation_count = if (builtin.mode == .Debug) std.atomic.Value(usize).init(0) else {},
-            .deallocation_count = if (builtin.mode == .Debug) std.atomic.Value(usize).init(0) else {},
-            .total_allocated = if (builtin.mode == .Debug) std.atomic.Value(usize).init(0) else {},
+            .allocation_count = if (builtin.mode == .debug) std.atomic.Value(usize).init(0) else {},
+            .deallocation_count = if (builtin.mode == .debug) std.atomic.Value(usize).init(0) else {},
+            .total_allocated = if (builtin.mode == .debug) std.atomic.Value(usize).init(0) else {},
         };
     }
 
@@ -99,7 +99,7 @@ pub const SafeAllocator = struct {
         const result = self.wrapped_allocator.rawAlloc(len, ptr_align, ret_addr);
 
         // 更新统计信息（Debug 模式）
-        if (builtin.mode == .Debug and result != null) {
+        if (builtin.mode == .debug and result != null) {
             _ = self.allocation_count.fetchAdd(1, .monotonic);
             _ = self.total_allocated.fetchAdd(len, .monotonic);
         }
@@ -116,12 +116,12 @@ pub const SafeAllocator = struct {
         const self: *Self = @ptrCast(@alignCast(ctx));
 
         // 更新统计信息（Debug 模式）
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             _ = self.deallocation_count.fetchAdd(1, .monotonic);
         }
 
         // 在 Debug 模式下，释放后填充特殊值以检测 use-after-free
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             @memset(buf, 0xAA);
         }
 
@@ -135,7 +135,7 @@ pub const SafeAllocator = struct {
 
     /// 获取分配统计信息（仅 Debug 模式）
     pub fn getStats(self: *const Self) ?AllocationStats {
-        if (builtin.mode != .Debug) return null;
+        if (builtin.mode != .debug) return null;
 
         return AllocationStats{
             .allocation_count = self.allocation_count.load(.monotonic),
@@ -222,7 +222,7 @@ pub fn BoundsCheckedArray(comptime T: type) type {
 pub fn LifetimePtr(comptime T: type) type {
     return struct {
         ptr: *T,
-        valid: if (builtin.mode == .Debug) *std.atomic.Value(bool) else void,
+        valid: if (builtin.mode == .debug) *std.atomic.Value(bool) else void,
 
         const Self = @This();
 
@@ -230,7 +230,7 @@ pub fn LifetimePtr(comptime T: type) type {
         /// @ownership NON-OWNING (ptr)
         /// @pre ptr 必须有效
         pub fn init(ptr: *T, allocator: Allocator) !Self {
-            if (builtin.mode == .Debug) {
+            if (builtin.mode == .debug) {
                 const valid = try allocator.create(std.atomic.Value(bool));
                 valid.* = std.atomic.Value(bool).init(true);
                 return .{
@@ -247,14 +247,14 @@ pub fn LifetimePtr(comptime T: type) type {
 
         /// 标记指针为无效
         pub fn invalidate(self: *Self) void {
-            if (builtin.mode == .Debug) {
+            if (builtin.mode == .debug) {
                 self.valid.store(false, .release);
             }
         }
 
         /// 检查指针是否有效
         pub fn isValid(self: *const Self) bool {
-            if (builtin.mode == .Debug) {
+            if (builtin.mode == .debug) {
                 return self.valid.load(.acquire);
             }
             return true;
@@ -264,7 +264,7 @@ pub fn LifetimePtr(comptime T: type) type {
         /// @pre self.isValid() == true
         /// @post 返回有效引用或错误
         pub fn deref(self: *const Self) !*T {
-            if (builtin.mode == .Debug) {
+            if (builtin.mode == .debug) {
                 if (!self.isValid()) {
                     return error.DanglingPointer;
                 }
@@ -274,7 +274,7 @@ pub fn LifetimePtr(comptime T: type) type {
 
         /// 释放生命周期跟踪资源
         pub fn deinit(self: *Self, allocator: Allocator) void {
-            if (builtin.mode == .Debug) {
+            if (builtin.mode == .debug) {
                 allocator.destroy(self.valid);
             }
         }
@@ -327,8 +327,8 @@ pub fn guard(resource: anytype, comptime deinit_fn: fn (@TypeOf(resource)) void)
 /// 内存泄漏检测器
 /// 跟踪所有分配和释放，检测泄漏
 pub const LeakDetector = struct {
-    allocations: if (builtin.mode == .Debug) std.AutoHashMap(usize, AllocationInfo) else void,
-    mutex: if (builtin.mode == .Debug) std.Thread.Mutex else void,
+    allocations: if (builtin.mode == .debug) std.AutoHashMap(usize, AllocationInfo) else void,
+    mutex: if (builtin.mode == .debug) std.Thread.Mutex else void,
     allocator: Allocator,
 
     const Self = @This();
@@ -342,7 +342,7 @@ pub const LeakDetector = struct {
 
     /// 初始化泄漏检测器
     pub fn init(allocator: Allocator) !Self {
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             return .{
                 .allocations = std.AutoHashMap(usize, AllocationInfo).init(allocator),
                 .mutex = .{},
@@ -359,7 +359,7 @@ pub const LeakDetector = struct {
 
     /// 记录分配
     pub fn recordAllocation(self: *Self, ptr: usize, size: usize, ret_addr: usize) !void {
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             self.mutex.lock();
             defer self.mutex.unlock();
 
@@ -373,7 +373,7 @@ pub const LeakDetector = struct {
 
     /// 记录释放
     pub fn recordDeallocation(self: *Self, ptr: usize) void {
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             self.mutex.lock();
             defer self.mutex.unlock();
 
@@ -383,7 +383,7 @@ pub const LeakDetector = struct {
 
     /// 检查泄漏
     pub fn checkLeaks(self: *Self) ![]const AllocationInfo {
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             self.mutex.lock();
             defer self.mutex.unlock();
 
@@ -407,7 +407,7 @@ pub const LeakDetector = struct {
 
     /// 清理
     pub fn deinit(self: *Self) void {
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             self.allocations.deinit();
         }
     }
@@ -429,7 +429,7 @@ test "SafeAllocator - basic allocation" {
 
     try std.testing.expect(data.len == 100);
 
-    if (builtin.mode == .Debug) {
+    if (builtin.mode == .debug) {
         const stats = safe.getStats().?;
         try std.testing.expect(stats.allocation_count >= 1);
         try std.testing.expect(stats.total_allocated >= 100);
@@ -479,7 +479,7 @@ test "LifetimePtr - valid pointer" {
 }
 
 test "LifetimePtr - dangling pointer detection" {
-    if (builtin.mode != .Debug) return error.SkipZigTest;
+    if (builtin.mode != .debug) return error.SkipZigTest;
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -542,7 +542,7 @@ test "LeakDetector - no leaks" {
 }
 
 test "LeakDetector - detect leaks" {
-    if (builtin.mode != .Debug) return error.SkipZigTest;
+    if (builtin.mode != .debug) return error.SkipZigTest;
 
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();

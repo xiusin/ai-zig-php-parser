@@ -511,8 +511,8 @@ pub const GarbageCollector = struct {
             .allocator = allocator,
             .memory_threshold = memory_threshold,
             .allocated_memory = 0,
-            .gray_list = .{ .items = &.{}, .capacity = 0 },
-            .write_barrier_buffer = .{ .items = &.{}, .capacity = 0 },
+            .gray_list = .empty,
+            .write_barrier_buffer = .empty,
         };
     }
 

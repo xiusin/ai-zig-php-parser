@@ -81,8 +81,8 @@ test "AOT runtime - sort and ksort" {
             const arr_val = Value.initArray(arr);
 
             const sorted = try runtime.php_sort(arr_val, allocator);
-            // php_sort 返回排序后的数组（原地排序，返回数组引用）
-            try testing.expect(sorted.isArray());
+            // php_sort 原地排序 + 返 true（R-334 对齐 PHP 语义）
+            try testing.expect(sorted.asBool());
             const v0 = try runtime.php_array_shift(arr_val, allocator);
             const v1 = try runtime.php_array_shift(arr_val, allocator);
             const v2 = try runtime.php_array_shift(arr_val, allocator);
@@ -97,8 +97,8 @@ test "AOT runtime - sort and ksort" {
             const assoc_val = Value.initArray(assoc);
 
             const sorted2 = try runtime.php_ksort(assoc_val, allocator);
-            // php_ksort 返回排序后的数组（原地排序，返回数组引用）
-            try testing.expect(sorted2.isArray());
+            // php_ksort 原地排序 + 返 true（R-334 对齐 PHP 语义）
+            try testing.expect(sorted2.asBool());
 
             var it = assoc.elements.iterator();
             const e0 = it.next().?;

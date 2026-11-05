@@ -105,7 +105,7 @@ pub const JsonParser = struct {
 
     pub fn parseString(self: *JsonParser, allocator: std.mem.Allocator) !Value {
         self.pos += 1; // Skip opening quote
-        var result = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+        var result = std.ArrayListUnmanaged(u8).empty;
         defer result.deinit(allocator);
 
         while (self.pos < self.input.len) {
@@ -259,7 +259,7 @@ pub const JsonParser = struct {
 
                 // Parse key
                 self.pos += 1;
-                var key_builder = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+                var key_builder = std.ArrayListUnmanaged(u8).empty;
                 defer key_builder.deinit(allocator);
 
                 while (self.pos < self.input.len) {
@@ -372,7 +372,7 @@ pub fn encodeValueAsJson(value: Value, allocator: std.mem.Allocator) ![]u8 {
 
             // Pre-allocate with estimated capacity (avg 10 chars per element + overhead)
             const estimated_cap = if (len == 0) 2 else len * 12 + 4;
-            var result = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+            var result = std.ArrayListUnmanaged(u8).empty;
             try result.ensureTotalCapacity(allocator, estimated_cap);
             defer result.deinit(allocator);
 

@@ -170,7 +170,7 @@ test "Property 23.1: Error isolation - errors don't affect other coroutines" {
     while (i < TEST_ITERATIONS) : (i += 1) {
         // Register multiple coroutines
         const num_coroutines = rng.random().intRangeAtMost(usize, 3, 10);
-        var coroutine_ids = std.ArrayListUnmanaged(u64){ .items = &.{}, .capacity = 0 };
+        var coroutine_ids = std.ArrayListUnmanaged(u64).empty;
         defer coroutine_ids.deinit(allocator);
 
         for (0..num_coroutines) |j| {
@@ -450,7 +450,7 @@ test "Property 24.4: Error reporter statistics accuracy" {
     defer reporter.deinit();
 
     var expected_count: u64 = 0;
-    var severity_counts = [_]u64{0} ** 5;
+    var severity_counts = @as([5]u64, @splat(0));
 
     // Run TEST_ITERATIONS random tests
     var i: usize = 0;
@@ -677,7 +677,7 @@ test "Property 23.5: Error manager concurrent registration consistency" {
     while (i < TEST_ITERATIONS) : (i += 1) {
         // Register random number of coroutines
         const num_coroutines = rng.random().intRangeAtMost(usize, 5, 20);
-        var registered = std.ArrayListUnmanaged(u64){ .items = &.{}, .capacity = 0 };
+        var registered = std.ArrayListUnmanaged(u64).empty;
         defer registered.deinit(allocator);
 
         for (0..num_coroutines) |j| {

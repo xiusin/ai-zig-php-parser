@@ -84,7 +84,7 @@ pub const MemoryRegion = struct {
             .base = memory.ptr,
             .size = size,
             .used = 0,
-            .objects = std.ArrayListUnmanaged(MemoryObject){ .items = &.{}, .capacity = 0 },
+            .objects = std.ArrayListUnmanaged(MemoryObject).empty,
             .allocator = allocator,
         };
     }
@@ -173,7 +173,7 @@ pub const ForwardingTable = struct {
 
     pub fn init(allocator: std.mem.Allocator) ForwardingTable {
         return .{
-            .entries = std.ArrayListUnmanaged(ForwardingEntry){ .items = &.{}, .capacity = 0 },
+            .entries = std.ArrayListUnmanaged(ForwardingEntry).empty,
             .allocator = allocator,
         };
     }
@@ -498,7 +498,7 @@ pub const CompactingGC = struct {
 
     /// 清理死对象
     fn cleanupDeadObjects(self: *CompactingGC) !void {
-        var new_objects = std.ArrayListUnmanaged(MemoryRegion.MemoryObject){ .items = &.{}, .capacity = 0 };
+        var new_objects = std.ArrayListUnmanaged(MemoryRegion.MemoryObject).empty;
 
         for (self.region.objects.items) |obj| {
             if (obj.alive) {

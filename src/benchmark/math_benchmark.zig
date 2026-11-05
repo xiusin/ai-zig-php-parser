@@ -1372,7 +1372,7 @@ pub const MathBenchmark = struct {
 
         const start = std.time.nanoTimestamp();
 
-        var result = Matrix3x3.init([_]f64{0} ** 9);
+        var result = Matrix3x3.init(@as([9]f64, @splat(0)));
         var i: u32 = 0;
         while (i < self.config.iterations) : (i += 1) {
             const m = Matrix3x3.init([_]f64{
@@ -1413,7 +1413,7 @@ pub const MathBenchmark = struct {
 
         const start = std.time.nanoTimestamp();
 
-        var result = Matrix3x3.init([_]f64{1000000} ** 9);
+        var result = Matrix3x3.init(@as([9]f64, @splat(1000000)));
         var i: u32 = 0;
         while (i < self.config.iterations) : (i += 1) {
             const m = Matrix3x3.init([_]f64{
@@ -1508,7 +1508,7 @@ pub const MathBenchmark = struct {
 
         const start = std.time.nanoTimestamp();
 
-        var result = Matrix3x3.init([_]f64{0} ** 9);
+        var result = Matrix3x3.init(@as([9]f64, @splat(0)));
         var i: u32 = 0;
         while (i < self.config.iterations) : (i += 1) {
             const m = Matrix3x3.init([_]f64{

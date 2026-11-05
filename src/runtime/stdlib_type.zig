@@ -188,7 +188,7 @@ pub fn boolvalFn(vm: *VM, args: []const Value) !Value {
 // Serialization Functions
 pub fn serializeFn(vm: *VM, args: []const Value) !Value {
     const value = args[0];
-    var buffer = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+    var buffer = std.ArrayListUnmanaged(u8).empty;
     defer buffer.deinit(vm.allocator);
 
     try serializeValue(vm, &buffer, value);

@@ -109,7 +109,7 @@ pub const StackTrace = struct {
     pub fn capture(allocator: std.mem.Allocator) !StackTrace {
         var trace = init();
 
-        if (builtin.mode == .Debug) {
+        if (builtin.mode == .debug) {
             // 在 Debug 模式下捕获栈跟踪
             var stack_trace = std.builtin.StackTrace{
                 .instruction_addresses = undefined,
@@ -265,7 +265,7 @@ pub const LeakDetector = struct {
             .allocator = allocator,
             .allocations = std.AutoHashMap(usize, AllocationInfo).init(allocator),
             .mutex = .{},
-            .enabled = builtin.mode == .Debug,
+            .enabled = builtin.mode == .debug,
             .stats = .{},
         };
     }
@@ -647,7 +647,7 @@ pub const LeakAnalyzer = struct {
 // ============================================================================
 
 test "StackTrace - capture" {
-    if (builtin.mode != .Debug) return error.SkipZigTest;
+    if (builtin.mode != .debug) return error.SkipZigTest;
 
     const trace = try StackTrace.capture(std.testing.allocator);
     // 在 Debug 模式下应该能捕获到栈帧

@@ -51,7 +51,7 @@ pub const GCMarker = struct {
         self.stats.max_worklist_depth = 0;
 
         // 工作列表：使用显式栈避免递归栈溢出
-        var worklist = std.ArrayListUnmanaged(*GCObjectHeader){ .items = &.{}, .capacity = 0 };
+        var worklist = std.ArrayListUnmanaged(*GCObjectHeader).empty;
         defer worklist.deinit(self.allocator);
 
         // 第一阶段：将所有根对象加入工作列表
@@ -318,7 +318,7 @@ pub const MarkingValidator = struct {
         var reachable = std.AutoHashMapUnmanaged(*GCObjectHeader, void){};
         defer reachable.deinit(self.allocator);
 
-        var queue = std.ArrayListUnmanaged(*GCObjectHeader){ .items = &.{}, .capacity = 0 };
+        var queue = std.ArrayListUnmanaged(*GCObjectHeader).empty;
         defer queue.deinit(self.allocator);
 
         // 添加所有根对象
@@ -341,7 +341,7 @@ pub const MarkingValidator = struct {
             };
 
             // 使用 ObjectTraverser 遍历引用
-            var child_worklist = std.ArrayListUnmanaged(*GCObjectHeader){ .items = &.{}, .capacity = 0 };
+            var child_worklist = std.ArrayListUnmanaged(*GCObjectHeader).empty;
             defer child_worklist.deinit(self.allocator);
 
             self.traverser.traverseReferences(typed_obj, &child_worklist) catch |err| {

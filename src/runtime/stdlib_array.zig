@@ -139,7 +139,7 @@ pub fn compareArrayKeys(a: ArrayKey, b: ArrayKey) i8 {
 }
 
 pub fn collectArraySortItems(vm: *VM, php_array: *types.PHPArray) !std.ArrayListUnmanaged(ArraySortItem) {
-    var items = std.ArrayListUnmanaged(ArraySortItem){ .items = &.{}, .capacity = 0 };
+    var items = std.ArrayListUnmanaged(ArraySortItem).empty;
     errdefer items.deinit(vm.allocator);
 
     var iterator = php_array.getElements().iterator();
@@ -1328,7 +1328,7 @@ pub fn sortFn(vm: *VM, args: []const Value) !Value {
     const php_array = array.getAsArray().data;
 
     // Collect values into a temporary list for sorting
-    var values = std.ArrayListUnmanaged(Value){ .items = &.{}, .capacity = 0 };
+    var values = std.ArrayListUnmanaged(Value).empty;
     defer values.deinit(vm.allocator);
 
     var iterator = php_array.getElements().iterator();
@@ -1367,7 +1367,7 @@ pub fn rsortFn(vm: *VM, args: []const Value) !Value {
 
     const php_array = array.getAsArray().data;
 
-    var values = std.ArrayListUnmanaged(Value){ .items = &.{}, .capacity = 0 };
+    var values = std.ArrayListUnmanaged(Value).empty;
     defer values.deinit(vm.allocator);
 
     var iterator = php_array.getElements().iterator();
@@ -2086,7 +2086,7 @@ pub fn arrayChunkFn(vm: *VM, args: []const Value) !Value {
     const count = arr.count();
 
     // Pre-allocate temp ArrayList with exact size
-    var temp = std.ArrayListUnmanaged(struct { key: ArrayKey, value: Value }){ .items = &.{}, .capacity = 0 };
+    var temp = std.ArrayListUnmanaged(struct { key: ArrayKey, value: Value }).empty;
     try temp.ensureTotalCapacity(vm.allocator, count);
     defer temp.deinit(vm.allocator);
 

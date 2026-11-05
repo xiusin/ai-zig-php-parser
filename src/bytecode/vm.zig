@@ -2650,7 +2650,7 @@ pub const BytecodeVM = struct {
     /// @post 所有可达对象被标记
     fn markPhase(self: *BytecodeVM) !void {
         // 工作列表：待处理的值
-        var worklist = std.ArrayListUnmanaged(Value){ .items = &.{}, .capacity = 0 };
+        var worklist = std.ArrayListUnmanaged(Value).empty;
         defer worklist.deinit(self.allocator);
 
         // 1. 标记栈上的根对象
@@ -3335,7 +3335,7 @@ fn builtinSprintf(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
         else => valueToString(vm, args[0]) catch return BytecodeVM.VMError.OutOfMemory,
     };
 
-    var out = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+    var out = std.ArrayListUnmanaged(u8).empty;
     defer out.deinit(vm.allocator);
 
     var i: usize = 0;
@@ -3781,7 +3781,7 @@ fn builtinPregReplace(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
     };
     defer pcre2_match_data_free_8(match_data);
 
-    var out_buf = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+    var out_buf = std.ArrayListUnmanaged(u8).empty;
     defer out_buf.deinit(vm.allocator);
 
     var offset: usize = 0;
@@ -3846,7 +3846,7 @@ fn builtinPregMatchAll(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value 
         match_count += 1;
         const ovec = pcre2_get_ovector_pointer_8(match_data);
 
-        var match_groups = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
+        var match_groups = std.ArrayListUnmanaged([]const u8).empty;
         var i: usize = 0;
         while (i < @as(usize, @intCast(rc))) : (i += 1) {
             const start = ovec[i * 2];
@@ -5494,7 +5494,7 @@ fn replaceAllAlloc(
     repl: []const u8,
 ) ![]u8 {
     if (needle.len == 0) return allocator.dupe(u8, hay);
-    var out = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+    var out = std.ArrayListUnmanaged(u8).empty;
     errdefer out.deinit(allocator);
 
     var pos: usize = 0;
@@ -5537,7 +5537,7 @@ fn builtinStrIReplace(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
     defer vm.allocator.free(lower_search);
     for (lower_search) |*c| c.* = std.ascii.toLower(c.*);
 
-    var out = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+    var out = std.ArrayListUnmanaged(u8).empty;
     defer out.deinit(vm.allocator);
 
     var pos: usize = 0;
@@ -5694,7 +5694,7 @@ fn builtinImplode(vm: *BytecodeVM, args: []Value) BytecodeVM.VMError!Value {
         else => return .null_val,
     };
 
-    var out = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+    var out = std.ArrayListUnmanaged(u8).empty;
     defer out.deinit(vm.allocator);
     for (arr.elements.items, 0..) |v, i| {
         if (i != 0) {
@@ -6572,7 +6572,7 @@ fn deepCopyArray(vm: *BytecodeVM, value: Value) !Value {
     const src = value.array_val;
     const new_arr = try vm.allocator.create(Value.Array);
     new_arr.* = .{
-        .elements = .{ .items = &.{}, .capacity = 0 },
+        .elements = .empty,
         .keys = .{},
         .ref_count = 1,
         .marked = false,
@@ -8140,7 +8140,7 @@ fn handleNewObject(vm: *BytecodeVM, frame: *CallFrame, inst: Instruction) Byteco
         var dyn_args: ?std.ArrayListUnmanaged(Value) = null;
         defer if (dyn_args) |*da| da.deinit(vm.allocator);
         if (arg_count > 16) {
-            var da = std.ArrayListUnmanaged(Value){ .items = &.{}, .capacity = 0 };
+            var da = std.ArrayListUnmanaged(Value).empty;
             // 先把已弹出的16个参数保存
             var j: u16 = 0;
             while (j < actual_count) : (j += 1) {

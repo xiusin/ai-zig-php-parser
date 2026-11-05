@@ -49,10 +49,10 @@ pub const Module = struct {
             .allocator = allocator,
             .name = name,
             .source_file = source_file,
-            .functions = .{ .items = &.{}, .capacity = 0 },
-            .globals = .{ .items = &.{}, .capacity = 0 },
-            .types = .{ .items = &.{}, .capacity = 0 },
-            .string_table = .{ .items = &.{}, .capacity = 0 },
+            .functions = .empty,
+            .globals = .empty,
+            .types = .empty,
+            .string_table = .empty,
             .inferred_types = std.StringHashMap(std.AutoHashMap(usize, Type)).init(allocator),
         };
     }
@@ -342,9 +342,9 @@ pub const Function = struct {
     /// Whether this function has multi-level break/continue (requires state machine)
     has_multi_level_break: bool = false,
     /// Global variables used in this function
-    global_vars: std.ArrayListUnmanaged([]const u8) = .{ .items = &.{}, .capacity = 0 },
+    global_vars: std.ArrayListUnmanaged([]const u8) = .empty,
     /// Reference parameter indices (0-based)
-    ref_params: std.ArrayListUnmanaged(u32) = .{ .items = &.{}, .capacity = 0 },
+    ref_params: std.ArrayListUnmanaged(u32) = .empty,
     /// 参数索引集合（0-based），这些参数的数组值不会被修改，可跳过 COW 检查
     cow_skip_params: std.AutoHashMapUnmanaged(u32, void) = .{},
     /// Whether this function is a generator (contains yield)
@@ -373,9 +373,9 @@ pub const Function = struct {
         return .{
             .allocator = allocator,
             .name = name,
-            .params = .{ .items = &.{}, .capacity = 0 },
+            .params = .empty,
             .return_type = .void,
-            .blocks = .{ .items = &.{}, .capacity = 0 },
+            .blocks = .empty,
             .is_exported = false,
             .register_at_startup = true,
             .is_method = false,
@@ -522,10 +522,10 @@ pub const BasicBlock = struct {
             .allocator = allocator,
             .label = label,
             .index = index,
-            .instructions = .{ .items = &.{}, .capacity = 0 },
+            .instructions = .empty,
             .terminator = null,
-            .predecessors = .{ .items = &.{}, .capacity = 0 },
-            .successors = .{ .items = &.{}, .capacity = 0 },
+            .predecessors = .empty,
+            .successors = .empty,
             .exception_handler = null,
             .loop_metadata = .{},
         };
@@ -1775,7 +1775,7 @@ pub const IRPrinter = struct {
 
 /// Serialize a module to a string
 pub fn serializeModule(allocator: Allocator, module: *const Module) ![]const u8 {
-    var list = std.ArrayListUnmanaged(u8){ .items = &.{}, .capacity = 0 };
+    var list = std.ArrayListUnmanaged(u8).empty;
     errdefer list.deinit(allocator);
 
     var printer = IRPrinter.initUnmanaged(&list, allocator);
