@@ -5225,6 +5225,8 @@ pub const NativeLinker = struct {
         .{ "php_object_call_safe_args_array", bi(.{ .runtime_name = "php_object_call_safe_args_array", .needs_allocator = true }) },
         .{ "php_object_call_args_array", bi(.{ .runtime_name = "php_object_call_args_array", .needs_allocator = true }) },
         .{ "php_object_call_named_args", bi(.{ .runtime_name = "php_object_call_named_args", .needs_allocator = true }) },
+        // ★批次十八②：静态方法命名/展开调用的数组通道（Calc::m(...["y"=>7])/$var::m(...)，含 __callStatic 原始包）
+        .{ "php_call_static_args_array", bi(.{ .runtime_name = "php_call_static_args_array", .needs_allocator = true, .may_raise = true }) },
         .{ "php_constant_get", bi(.{ .runtime_name = "php_constant_get", .needs_allocator = true }) },
         .{ "php_go_builtin", bi(.{ .runtime_name = "php_go_builtin", .needs_allocator = true }) },
         .{ "php_json_encode", bi(.{ .runtime_name = "php_json_encode", .needs_allocator = true }) },

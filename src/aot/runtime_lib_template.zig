@@ -10076,21 +10076,106 @@ pub fn php_invoke_callable_args_array(callback: Value, args_array: Value, alloca
     return php_invoke_callable(callback, tmp_args[0..used], allocator);
 }
 
-/// ★批次十七②：命名实参绑定器（PHP 8.5.8 实测语义）。
-///   规则：位置值按序填声明形参 → 命名项按形参名绑定（重复填充报
-///   `Named parameter $x overwrites previous argument`）→ 未知名变参收集（保字符串键，
-///   经信标对象过切片通道）/ 非变参报 `Unknown named parameter $x`。
-///   内建函数与本族方法（"Class::m"/数组形回调）无运行期形参名表 ⇒ 命名项显式抛
-///   `Unknown named parameter`（PHP 对内建按名绑定，此为本族能力边界的**响亮**口径，登记在案）。
-fn php_invoke_callable_named_pack(callback: Value, arr: *PHPArray, allocator: Allocator) !Value {
-    // 1) 切分：位置值（整数键按出现序）与命名项（字符串键按出现序）
-    var positional = std.ArrayListUnmanaged(Value).empty;
-    defer positional.deinit(allocator);
-    var named_keys = std.ArrayListUnmanaged(*PHPString).empty;
-    defer named_keys.deinit(allocator);
-    var named_vals = std.ArrayListUnmanaged(Value).empty;
-    defer named_vals.deinit(allocator);
+/// ★批次十八①：命名绑定共享核心（函数/方法/静态三路复用；PHP 8.5.8 实测语义）。
+///   位置值按序填声明形参槽（未填＝missing 哨兵，被调 prologue 补默认值）→ 命名按名绑
+///  （重复填充＝`Named parameter $x overwrites previous argument`）→ 未知名：变参收信标包
+///  （保字符串键）/ 非变参 `Unknown named parameter $x`。位置余量尾随、信标永远最后。
+const NamedBindOut = struct {
+    final_args: []Value,
+    marker: ?Value,
+    fn deinit(self: NamedBindOut, allocator: Allocator) void {
+        allocator.free(self.final_args);
+        // 信标必须活到调用返回——defer 挂调用方函数级（挂 if 块级会在调用前 release ⇒ use-after-free）
+        if (self.marker) |m| m.release(allocator);
+    }
+};
 
+fn phpBindNamedArgs(
+    positional: []const Value,
+    named_keys: []const *PHPString,
+    named_vals: []const Value,
+    param_names: []const []const u8,
+    variadic_index: u16,
+    allocator: Allocator,
+) !NamedBindOut {
+    const n_declared: u16 = if (variadic_index != 0xFFFF) variadic_index else @as(u16, @intCast(param_names.len));
+    const slots = try allocator.alloc(Value, n_declared);
+    defer allocator.free(slots);
+    const filled = try allocator.alloc(bool, n_declared);
+    defer allocator.free(filled);
+    for (slots, 0..) |*s, idx| {
+        s.* = Value.initMissing();
+        filled[idx] = false;
+    }
+
+    var extra_positional = std.ArrayListUnmanaged(Value).empty;
+    defer extra_positional.deinit(allocator);
+    var pack: ?Value = null; // 变参命名包（懒建）
+    defer if (pack) |p| p.release(allocator);
+
+    for (positional, 0..) |v, pi| {
+        if (pi < n_declared) {
+            slots[pi] = v;
+            filled[pi] = true;
+        } else {
+            try extra_positional.append(allocator, v);
+        }
+    }
+
+    for (named_keys, named_vals) |nk, nv| {
+        const name = nk.data;
+        var hit: ?u16 = null;
+        for (param_names[0..n_declared], 0..) |pn, idx| {
+            if (std.mem.eql(u8, pn, name)) {
+                hit = @intCast(idx);
+                break;
+            }
+        }
+        if (hit) |hi| {
+            if (filled[hi]) {
+                var buf: [256]u8 = undefined;
+                const msg = std.fmt.bufPrint(&buf, "Named parameter ${s} overwrites previous argument", .{name}) catch "Named parameter overwrites previous argument";
+                // 异常惯例：throwThrowable 设 pending + 返回异常 Value（setException 已持有份额，
+                // 本地份额 release 配平）；控制流用 error.RuntimeError（生成码 hasException 路由同款）。
+                const ex = throwThrowable("Error", msg, allocator) catch |e| return e;
+                ex.release(allocator);
+                return error.RuntimeError;
+            }
+            slots[hi] = nv;
+            filled[hi] = true;
+        } else if (variadic_index != 0xFFFF) {
+            if (pack == null) pack = Value.initArray(try PHPArray.init(allocator));
+            _ = nk.retain();
+            try pack.?.asArray().set(allocator, .{ .string = nk }, nv);
+        } else {
+            var buf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "Unknown named parameter ${s}", .{name}) catch "Unknown named parameter";
+            const ex = throwThrowable("Error", msg, allocator) catch |e| return e;
+            ex.release(allocator);
+            return error.RuntimeError;
+        }
+    }
+
+    var final_args = std.ArrayListUnmanaged(Value).empty;
+    errdefer final_args.deinit(allocator);
+    try final_args.appendSlice(allocator, slots);
+    try final_args.appendSlice(allocator, extra_positional.items);
+    var marker: ?Value = null;
+    if (pack) |p| {
+        marker = try php_named_pack(p, allocator);
+        try final_args.append(allocator, marker.?);
+    }
+    return .{ .final_args = try final_args.toOwnedSlice(allocator), .marker = marker };
+}
+
+/// 拆分实参数组：位置（整数键按出现序）/ 命名（字符串键按出现序）
+fn splitPositionalNamed(
+    arr: *PHPArray,
+    positional: *std.ArrayListUnmanaged(Value),
+    named_keys: *std.ArrayListUnmanaged(*PHPString),
+    named_vals: *std.ArrayListUnmanaged(Value),
+    allocator: Allocator,
+) !void {
     var it = arr.elements.iterator();
     while (it.next()) |entry| {
         switch (entry.key_ptr.*) {
@@ -10101,6 +10186,41 @@ fn php_invoke_callable_named_pack(callback: Value, arr: *PHPArray, allocator: Al
             },
         }
     }
+}
+
+/// ClassMethod 的变参下标（param_variadic 平行数组扫 true；无 ⇒ 0xFFFF）
+fn methodVariadicIndex(m: *const ClassMethod) u16 {
+    for (m.param_variadic, 0..) |v, i| {
+        if (v) return @intCast(i);
+    }
+    return 0xFFFF;
+}
+
+/// 数组通道 ⇒ 共享绑定核心（方法/静态两路复用）
+fn phpBindNamedValueArray(arr: *PHPArray, param_names: []const []const u8, variadic_index: u16, allocator: Allocator) !NamedBindOut {
+    var positional = std.ArrayListUnmanaged(Value).empty;
+    defer positional.deinit(allocator);
+    var named_keys = std.ArrayListUnmanaged(*PHPString).empty;
+    defer named_keys.deinit(allocator);
+    var named_vals = std.ArrayListUnmanaged(Value).empty;
+    defer named_vals.deinit(allocator);
+    try splitPositionalNamed(arr, &positional, &named_keys, &named_vals, allocator);
+    return phpBindNamedArgs(positional.items, named_keys.items, named_vals.items, param_names, variadic_index, allocator);
+}
+
+/// ★批次十七②：命名实参绑定器（PHP 8.5.8 实测语义）。批次十八①起绑定逻辑下沉共享核心
+///   phpBindNamedArgs；本函数只留「回调形态 → 形参元数据」解析。
+///   内建函数与本族方法（"Class::m"/数组形回调）无运行期形参名表 ⇒ 命名项显式抛
+///   `Unknown named parameter`（PHP 对内建按名绑定，此为本族能力边界的**响亮**口径，登记在案）。
+fn php_invoke_callable_named_pack(callback: Value, arr: *PHPArray, allocator: Allocator) !Value {
+    // 1) 切分：位置值（整数键按出现序）与命名项（字符串键按出现序）
+    var positional = std.ArrayListUnmanaged(Value).empty;
+    defer positional.deinit(allocator);
+    var named_keys = std.ArrayListUnmanaged(*PHPString).empty;
+    defer named_keys.deinit(allocator);
+    var named_vals = std.ArrayListUnmanaged(Value).empty;
+    defer named_vals.deinit(allocator);
+    try splitPositionalNamed(arr, &positional, &named_keys, &named_vals, allocator);
 
     // 2) 取被调形参元数据（用户函数经注册表 CI 查；闭包自带同构元数据）
     var param_names: []const []const u8 = &.{};
@@ -10142,74 +10262,10 @@ fn php_invoke_callable_named_pack(callback: Value, arr: *PHPArray, allocator: Al
         return php_invoke_callable(callback, positional.items, allocator);
     }
 
-    // 3) 绑定：声明形参槽位 + 变参包
-    const n_declared = if (variadic_index != 0xFFFF) variadic_index else @as(u16, @intCast(param_names.len));
-    var slots = try allocator.alloc(Value, n_declared);
-    defer allocator.free(slots);
-    var filled = try allocator.alloc(bool, n_declared);
-    defer allocator.free(filled);
-    for (slots, 0..) |*s, idx| {
-        s.* = Value.initMissing();
-        filled[idx] = false;
-    }
-
-    var extra_positional = std.ArrayListUnmanaged(Value).empty;
-    defer extra_positional.deinit(allocator);
-    var pack: ?Value = null; // 变参命名包（懒建）
-    defer if (pack) |p| p.release(allocator);
-
-    var pi: u16 = 0;
-    for (positional.items) |v| {
-        if (pi < n_declared) {
-            slots[pi] = v;
-            filled[pi] = true;
-        } else {
-            try extra_positional.append(allocator, v);
-        }
-        pi += 1;
-    }
-
-    for (named_keys.items, named_vals.items) |nk, nv| {
-        const name = nk.data;
-        var hit: ?u16 = null;
-        for (param_names[0..n_declared], 0..) |pn, idx| {
-            if (std.mem.eql(u8, pn, name)) {
-                hit = @intCast(idx);
-                break;
-            }
-        }
-        if (hit) |hi| {
-            if (filled[hi]) {
-                var buf: [256]u8 = undefined;
-                const msg = std.fmt.bufPrint(&buf, "Named parameter ${s} overwrites previous argument", .{name}) catch "Named parameter overwrites previous argument";
-                return try throwThrowable("Error", msg, allocator);
-            }
-            slots[hi] = nv;
-            filled[hi] = true;
-        } else if (variadic_index != 0xFFFF) {
-            if (pack == null) pack = Value.initArray(try PHPArray.init(allocator));
-            _ = nk.retain();
-            try pack.?.asArray().set(allocator, .{ .string = nk }, nv);
-        } else {
-            var buf: [256]u8 = undefined;
-            const msg = std.fmt.bufPrint(&buf, "Unknown named parameter ${s}", .{name}) catch "Unknown named parameter";
-            return try throwThrowable("Error", msg, allocator);
-        }
-    }
-
-    // 4) 组装最终切片：声明槽位（未填给 missing 哨兵）+ 位置余量 + 命名包信标（变参收集器拆并）
-    var final_args = std.ArrayListUnmanaged(Value).empty;
-    defer final_args.deinit(allocator);
-    try final_args.appendSlice(allocator, slots);
-    try final_args.appendSlice(allocator, extra_positional.items);
-    // 信标必须活到调用返回——defer 挂函数级（挂 if 块级会在调用前就 release，use-after-free）
-    var marker_opt: ?Value = null;
-    defer if (marker_opt) |m| m.release(allocator);
-    if (pack) |p| {
-        marker_opt = try php_named_pack(p, allocator);
-        try final_args.append(allocator, marker_opt.?);
-    }
-    return php_invoke_callable(callback, final_args.items, allocator);
+    // 3) 共享核心绑定 → 调用（final_args 切片/beacon 的所有权随 NamedBindOut，活到调用返回）
+    const bind = try phpBindNamedArgs(positional.items, named_keys.items, named_vals.items, param_names, variadic_index, allocator);
+    defer bind.deinit(allocator);
+    return php_invoke_callable(callback, bind.final_args, allocator);
 }
 
 /// Closure::bind / $closure->bindTo — 创建新闭包并绑定 $this 和作用域
@@ -10308,6 +10364,10 @@ pub fn php_object_call_safe_args_array(obj_val: Value, method_name_val: Value, a
     }
 
     const arr = args_array.asArray();
+    // ★批次十八①：含字符串键 ⇒ 命名绑定通道（`?->` 非空接收者与 `->` 同语义）
+    if (arr.hasStringKeys()) {
+        return callObjectMethodNamedChecked(obj_val, method_name_val.asString().data, arr, allocator);
+    }
     const max_count: usize = @intCast(arr.next_index);
     const tmp_args = try allocator.alloc(Value, max_count);
     defer allocator.free(tmp_args);
@@ -10342,6 +10402,10 @@ pub fn php_object_call_args_array(obj_val: Value, method_name_val: Value, args_a
     }
 
     const arr = args_array.asArray();
+    // ★批次十八①：含字符串键 ⇒ 命名绑定通道（`->` 展开/命名实参）
+    if (arr.hasStringKeys()) {
+        return callObjectMethodNamedChecked(obj_val, method_name_val.asString().data, arr, allocator);
+    }
     const max_count: usize = @intCast(arr.next_index);
     const tmp_args = try allocator.alloc(Value, max_count);
     defer allocator.free(tmp_args);
@@ -10359,7 +10423,7 @@ pub fn php_object_call_args_array(obj_val: Value, method_name_val: Value, args_a
     return php_object_call(obj_val, method_name_val.asString().data, tmp_args[0..used]);
 }
 
-/// 使用命名参数调用对象方法
+/// 使用命名参数调用对象方法（★批次十八①：原桩「假设参数顺序正确」违宪 ⇒ 真绑定重写）。
 /// args_array 包含位置参数（整数键）和命名参数（字符串键）
 pub fn php_object_call_named_args(obj_val: Value, method_name_val: Value, args_array: Value, allocator: Allocator) !Value {
     // 实测（$x=null; $m=1; $x->$m()）：方法名检查先于接收者检查。
@@ -10377,83 +10441,24 @@ pub fn php_object_call_named_args(obj_val: Value, method_name_val: Value, args_a
         // 命名实参数组由发射器构造，非数组属内部不变量；仍用 TypeError 保持可捕获。
         return throwThrowable("TypeError", "Arguments must be an array", allocator);
     }
+    return callObjectMethodNamedChecked(obj_val, method_name_val.asString().data, args_array.asArray(), allocator);
+}
 
+/// ★批次十八①：命名方法调用的共享落点（-> / ?-> / 显式命名三路汇聚）。
+///   未命中方法且无 __call ⇒ 与 php_object_call 同口径的可捕获 Error。
+fn callObjectMethodNamedChecked(obj_val: Value, method_name: []const u8, arr: *PHPArray, allocator: Allocator) !Value {
+    _ = allocator;
     const obj = Value_asObject(obj_val);
-    const method_name = method_name_val.asString().data;
-    const arr = args_array.asArray();
-
-    // 获取方法的参数信息
-    const meta = obj.class_meta orelse return throwThrowable("Error", "Cannot find class metadata", allocator);
-    _ = meta.findMethod(method_name) orelse {
-        var ubuf: [512]u8 = undefined;
-        const umsg = std.fmt.bufPrint(&ubuf, "Call to undefined method {s}::{s}()", .{ meta.name, method_name }) catch
-            "Call to undefined method";
-        return throwThrowable("Error", umsg, allocator);
+    return obj.callMethodNamed(method_name, arr) catch |err| {
+        if (err == error.MethodNotFound) {
+            const class_name = if (obj.class_meta) |m| m.name else "unknown";
+            var buf: [512]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "Call to undefined method {s}::{s}()", .{ class_name, method_name }) catch
+                "Call to undefined method";
+            return throwThrowable("Error", msg, obj.allocator);
+        }
+        return err;
     };
-
-    // 收集位置参数（整数键，按顺序）
-    var positional = std.ArrayListUnmanaged(Value).empty;
-    defer positional.deinit(allocator);
-    var pos_idx: usize = 0;
-    while (true) : (pos_idx += 1) {
-        const key = ArrayKey{ .integer = @intCast(pos_idx) };
-        if (arr.get(key)) |v| {
-            try positional.append(allocator, v);
-        } else {
-            break;
-        }
-    }
-
-    // 收集命名参数（字符串键）
-    var named = std.StringHashMap(Value).init(allocator);
-    defer {
-        var it = named.iterator();
-        while (it.next()) |entry| {
-            entry.value_ptr.*.release(allocator);
-        }
-        named.deinit();
-    }
-    var iter = arr.elements.iterator();
-    while (iter.next()) |entry| {
-        switch (entry.key_ptr.*) {
-            .string => |s| {
-                const val = entry.value_ptr.*;
-                _ = val.retain();
-                try named.put(s.data, val);
-            },
-            else => {},
-        }
-    }
-
-    // 获取方法参数名（从函数元数据）
-    const full_method_name = try std.fmt.allocPrint(allocator, "{s}::{s}", .{ meta.name, method_name });
-    defer allocator.free(full_method_name);
-
-    // 尝试获取参数信息
-    const param_count: u16 = if (function_meta_registry) |meta_reg|
-        (if (meta_reg.get(full_method_name)) |m| m.param_count else 0)
-    else
-        0;
-
-    // 构建最终参数列表
-    const final_args = try allocator.alloc(Value, @max(param_count, positional.items.len));
-    defer allocator.free(final_args);
-    var final_count: usize = 0;
-
-    // 首先填充位置参数
-    for (positional.items) |arg| {
-        if (final_count < final_args.len) {
-            final_args[final_count] = arg;
-            final_count += 1;
-        }
-    }
-
-    // 然后用命名参数覆盖/填充
-    // 我们需要从类方法中获取参数名
-    // 这是一个简化实现：假设参数顺序正确
-    // 完整实现需要在编译时记录参数名
-
-    return php_object_call(obj_val, method_name, final_args[0..final_count]);
 }
 
 // ============================================================================
@@ -28535,6 +28540,37 @@ pub const PHPObject = struct {
         return error.MethodNotFound;
     }
 
+    /// ★批次十八①：命名/展开实参的方法调用（arr 整数键＝位置、字符串键＝命名，PHP 8.1+ 语义）。
+    ///   命中方法 ⇒ 共享核心按 ClassMethod 形参名绑定（overwrites/Unknown 同函数口径）；
+    ///   未命中且具 __call ⇒ 收**原始关联数组**（保字符串键，M4 真值）。
+    pub fn callMethodNamed(self: *PHPObject, method_name: []const u8, arr: *PHPArray) !Value {
+        const this_val = Value_initObject(self);
+        const allocator = self.allocator;
+
+        if (self.class_meta) |meta| {
+            if (meta.findMethodLookup(method_name)) |lookup| {
+                const bind = try phpBindNamedValueArray(arr, lookup.method.param_names, methodVariadicIndex(lookup.method), allocator);
+                defer bind.deinit(allocator);
+                const guard = ClassContext.init(meta, lookup.owner);
+                defer guard.deinit();
+                return lookup.method.func(this_val, bind.final_args, allocator);
+            }
+            // __call：收原始关联数组（保字符串键）
+            if (meta.findMethodLookup("__call")) |lookup| {
+                const name_val = Value.initString(try PHPString.init(allocator, method_name));
+                defer name_val.release(allocator);
+                const arr_val = Value.initArray(arr);
+                _ = arr_val.retain();
+                defer arr_val.release(allocator);
+                const call_args = [_]Value{ name_val, arr_val };
+                const guard = ClassContext.init(meta, lookup.owner);
+                defer guard.deinit();
+                return lookup.method.func(this_val, &call_args, allocator);
+            }
+        }
+        return error.MethodNotFound;
+    }
+
     /// 检查属性是否存在（支持 __isset 魔法函数）
     pub fn hasProperty(self: *PHPObject, name: []const u8) bool {
         if (self.properties.contains(name)) return true;
@@ -30647,26 +30683,37 @@ fn resolveStaticCallMetas(class_name: []const u8, allocator: Allocator) !StaticC
     const lookup_meta = blk: {
         if (std.mem.eql(u8, class_name, "self")) {
             break :blk getCurrentScopeClass() orelse {
-                return throwThrowable("Error", "Cannot access \"self\" when no class scope is active", allocator);
+                // 异常惯例：pending 旗标 + error.RuntimeError 控制流（setException 持份额，本地 release 配平）
+                const ex0 = throwThrowable("Error", "Cannot access \"self\" when no class scope is active", allocator) catch |e| return e;
+                ex0.release(allocator);
+                return error.RuntimeError;
             };
         }
         if (std.mem.eql(u8, class_name, "parent")) {
             const scope = getCurrentScopeClass() orelse {
-                return throwThrowable("Error", "Cannot access \"parent\" when no class scope is active", allocator);
+                const ex1 = throwThrowable("Error", "Cannot access \"parent\" when no class scope is active", allocator) catch |e| return e;
+                ex1.release(allocator);
+                return error.RuntimeError;
             };
             break :blk scope.parent orelse {
-                return throwThrowable("Error", "Cannot use \"parent\" when current class scope has no parent", allocator);
+                const ex2 = throwThrowable("Error", "Cannot use \"parent\" when current class scope has no parent", allocator) catch |e| return e;
+                ex2.release(allocator);
+                return error.RuntimeError;
             };
         }
         if (std.mem.eql(u8, class_name, "static")) {
             break :blk getCurrentCalledClass() orelse getCurrentScopeClass() orelse {
-                return throwThrowable("Error", "Cannot access \"static\" when no class scope is active", allocator);
+                const ex3 = throwThrowable("Error", "Cannot access \"static\" when no class scope is active", allocator) catch |e| return e;
+                ex3.release(allocator);
+                return error.RuntimeError;
             };
         }
         break :blk findClass(class_name) orelse {
-            const msg = std.fmt.allocPrint(allocator, "Class \"{s}\" not found", .{class_name}) catch return Value.initNull();
+            const msg = std.fmt.allocPrint(allocator, "Class \"{s}\" not found", .{class_name}) catch return error.OutOfMemory;
             defer allocator.free(msg);
-            return throwThrowable("Error", msg, allocator);
+            const ex4 = throwThrowable("Error", msg, allocator) catch |e| return e;
+            ex4.release(allocator);
+            return error.RuntimeError;
         };
     };
 

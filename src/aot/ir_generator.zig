@@ -7387,7 +7387,17 @@ pub const IRGenerator = struct {
 
                 const expr_idx = if (arg_node.tag == .named_arg) arg_node.data.named_arg.value else arg_idx;
                 const val_reg = try self.generateExpression(expr_idx);
-                _ = try self.emit(.{ .array_push = .{ .array = args_arr, .value = val_reg } }, null);
+                // ★批次十八②：方法调用展开/命名实参必须以字符串键入包（与函数面 :7542 同口径）——
+                //   原 array_push 丢键 ⇒ 命名退化为位置错填。键名剥 `$` 前缀。
+                if (arg_node.tag == .named_arg) {
+                    const raw_name = self.getString(arg_node.data.named_arg.name);
+                    const arg_name = if (raw_name.len > 0 and raw_name[0] == '$') raw_name[1..] else raw_name;
+                    const key_id = try self.module.?.internString(arg_name);
+                    const key_reg = try self.emitWithResult(.{ .const_string = key_id }, .php_value);
+                    _ = try self.emit(.{ .array_set = .{ .array = args_arr, .key = key_reg, .value = val_reg } }, null);
+                } else {
+                    _ = try self.emit(.{ .array_push = .{ .array = args_arr, .value = val_reg } }, null);
+                }
             }
 
             const safe_call_args = try self.allocator.alloc(Register, 3);
@@ -7447,7 +7457,17 @@ pub const IRGenerator = struct {
 
                 const expr_idx = if (arg_node.tag == .named_arg) arg_node.data.named_arg.value else arg_idx;
                 const val_reg = try self.generateExpression(expr_idx);
-                _ = try self.emit(.{ .array_push = .{ .array = args_arr, .value = val_reg } }, null);
+                // ★批次十八②：方法调用展开/命名实参必须以字符串键入包（与函数面 :7542 同口径）——
+                //   原 array_push 丢键 ⇒ 命名退化为位置错填。键名剥 `$` 前缀。
+                if (arg_node.tag == .named_arg) {
+                    const raw_name = self.getString(arg_node.data.named_arg.name);
+                    const arg_name = if (raw_name.len > 0 and raw_name[0] == '$') raw_name[1..] else raw_name;
+                    const key_id = try self.module.?.internString(arg_name);
+                    const key_reg = try self.emitWithResult(.{ .const_string = key_id }, .php_value);
+                    _ = try self.emit(.{ .array_set = .{ .array = args_arr, .key = key_reg, .value = val_reg } }, null);
+                } else {
+                    _ = try self.emit(.{ .array_push = .{ .array = args_arr, .value = val_reg } }, null);
+                }
             }
 
             const dyn_call_args = try self.allocator.alloc(Register, 3);
@@ -8952,7 +8972,17 @@ prop_name: ?[]const u8 = null,
 
                 const expr_idx = if (arg_node.tag == .named_arg) arg_node.data.named_arg.value else arg_idx;
                 const val_reg = try self.generateExpression(expr_idx);
-                _ = try self.emit(.{ .array_push = .{ .array = args_arr, .value = val_reg } }, null);
+                // ★批次十八②：方法调用展开/命名实参必须以字符串键入包（与函数面 :7542 同口径）——
+                //   原 array_push 丢键 ⇒ 命名退化为位置错填。键名剥 `$` 前缀。
+                if (arg_node.tag == .named_arg) {
+                    const raw_name = self.getString(arg_node.data.named_arg.name);
+                    const arg_name = if (raw_name.len > 0 and raw_name[0] == '$') raw_name[1..] else raw_name;
+                    const key_id = try self.module.?.internString(arg_name);
+                    const key_reg = try self.emitWithResult(.{ .const_string = key_id }, .php_value);
+                    _ = try self.emit(.{ .array_set = .{ .array = args_arr, .key = key_reg, .value = val_reg } }, null);
+                } else {
+                    _ = try self.emit(.{ .array_push = .{ .array = args_arr, .value = val_reg } }, null);
+                }
             }
 
             const call_args = try self.allocator.alloc(Register, 3);
@@ -9161,7 +9191,55 @@ prop_name: ?[]const u8 = null,
         return call_result;
     }
 
-    /// Generate IR for static method call
+    /// ★批次十八②：实参是否含命名/展开（方法/静态多路共用判定）
+    fn argsContainNamedOrUnpacking(self: *Self, arg_nodes: []const Node.Index) bool {
+        for (arg_nodes) |arg_idx| {
+            const arg_node = self.getNode(arg_idx) orelse continue;
+            if (arg_node.tag == .named_arg or arg_node.tag == .unpacking_expr) return true;
+        }
+        return false;
+    }
+
+    /// ★批次十八②：静态调用（含动态类名 `$var::m()`/`($expr)::m()`）的命名/展开实参数组通道——
+    ///   位置 push、命名保键 array_set、展开经 php_args_append_spread（保字符串键），
+    ///   末尾 php_call_static_args_array 分流（纯位置→既有切片通道；含键→ClassMethod 绑定；
+    ///   魔术 __callStatic→原始关联包）。此前该面对 named_arg/unpacking_expr 节点直接
+    ///   generateExpression ⇒ 实参变 null（深层缺口），按真值钉死后补全。
+    fn emitStaticCallArrayRoute(self: *Self, class_val_reg: Register, method_name_reg: Register, arg_nodes: []const Node.Index) !Register {
+        const args_arr = try self.emitWithResult(.{ .array_new = .{ .capacity = @intCast(arg_nodes.len) } }, .php_array);
+        for (arg_nodes) |arg_idx| {
+            const arg_node = self.getNode(arg_idx) orelse continue;
+            if (arg_node.tag == .unpacking_expr) {
+                const spread_reg = try self.generateExpression(arg_node.data.unpacking_expr.expr);
+                const spread_args = try self.allocator.alloc(Register, 2);
+                spread_args[0] = args_arr;
+                spread_args[1] = spread_reg;
+                _ = try self.emit(.{ .call = .{ .func_name = "php_args_append_spread", .args = spread_args, .return_type = .php_value } }, null);
+                continue;
+            }
+            if (arg_node.tag == .named_arg) {
+                const raw_name = self.getString(arg_node.data.named_arg.name);
+                const arg_name = if (raw_name.len > 0 and raw_name[0] == '$') raw_name[1..] else raw_name;
+                const key_id = try self.module.?.internString(arg_name);
+                const key_reg = try self.emitWithResult(.{ .const_string = key_id }, .php_value);
+                const val_reg = try self.generateExpression(arg_node.data.named_arg.value);
+                _ = try self.emit(.{ .array_set = .{ .array = args_arr, .key = key_reg, .value = val_reg } }, null);
+                continue;
+            }
+            const val_reg = try self.generateExpression(arg_idx);
+            _ = try self.emit(.{ .array_push = .{ .array = args_arr, .value = val_reg } }, null);
+        }
+        const sc_args = try self.allocator.alloc(Register, 3);
+        sc_args[0] = class_val_reg;
+        sc_args[1] = method_name_reg;
+        sc_args[2] = args_arr;
+        return self.emitWithResult(.{ .call = .{
+            .func_name = "php_call_static_args_array",
+            .args = sc_args,
+            .return_type = .php_value,
+        } }, .php_value);
+    }
+
     fn generateStaticMethodCall(self: *Self, node: *const Node) !Register {
         const call_data = node.data.static_method_call;
         const short_class_name = self.getString(call_data.class_name);
@@ -9217,6 +9295,10 @@ prop_name: ?[]const u8 = null,
             else
                 try self.emitWithResult(.{ .global_get = .{ .name = short_class_name } }, .php_value);
             const method_name_reg = try self.emitWithResult(.{ .const_string = try self.module.?.internString(method_name) }, .php_string);
+            // ★批次十八②：命名/展开 ⇒ 数组通道（实参保键/展开保序）
+            if (self.argsContainNamedOrUnpacking(call_data.args)) {
+                return self.emitStaticCallArrayRoute(class_val_reg, method_name_reg, call_data.args);
+            }
             const dyn_args = try self.allocator.alloc(Register, call_data.args.len + 2);
             dyn_args[0] = class_val_reg;
             dyn_args[1] = method_name_reg;
@@ -9228,6 +9310,13 @@ prop_name: ?[]const u8 = null,
                 .args = dyn_args,
                 .return_type = .php_value,
             } }, .php_value);
+        }
+
+        // ★批次十八②：编译期类名的命名/展开实参 ⇒ 数组通道（不经 .static_method_call 直调）
+        if (self.argsContainNamedOrUnpacking(call_data.args)) {
+            const class_name_reg = try self.emitWithResult(.{ .const_string = try self.module.?.internString(class_name) }, .php_string);
+            const method_name_reg = try self.emitWithResult(.{ .const_string = try self.module.?.internString(method_name) }, .php_string);
+            return self.emitStaticCallArrayRoute(class_name_reg, method_name_reg, call_data.args);
         }
 
         // 查找静态方法的引用参数信息（与 generateMethodCall 逻辑一致）
@@ -9821,6 +9910,11 @@ prop_name: ?[]const u8 = null,
 
         // 构造方法名常量
         const method_name_reg = try self.emitWithResult(.{ .const_string = try self.module.?.internString(method_name) }, .php_string);
+
+        // ★批次十八②：命名/展开 ⇒ 数组通道（实参保键/展开保序）
+        if (self.argsContainNamedOrUnpacking(call_data.args)) {
+            return self.emitStaticCallArrayRoute(class_val_reg, method_name_reg, call_data.args);
+        }
 
         // 构造参数：[class_val, method_name, ...args]
         const dyn_args = try self.allocator.alloc(Register, call_data.args.len + 2);
