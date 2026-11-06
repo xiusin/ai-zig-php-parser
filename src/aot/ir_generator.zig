@@ -7541,7 +7541,17 @@ pub const IRGenerator = struct {
 
                 const expr_idx = if (arg_node.tag == .named_arg) arg_node.data.named_arg.value else arg_idx;
                 const val_reg = try self.generateExpression(expr_idx);
-                _ = try self.emit(.{ .array_push = .{ .array = args_arr, .value = val_reg } }, null);
+                // ★批次十七②：展开调用里混写的显式命名实参（`f(...$a, c: 9)`）必须以字符串键入包——
+                //   原 array_push 丢键 ⇒ 命名退化为位置错填。键名剥 `$` 前缀（与 :7869 同口径）。
+                if (arg_node.tag == .named_arg) {
+                    const raw_name = self.getString(arg_node.data.named_arg.name);
+                    const arg_name = if (raw_name.len > 0 and raw_name[0] == '$') raw_name[1..] else raw_name;
+                    const key_id = try self.module.?.internString(arg_name);
+                    const key_reg = try self.emitWithResult(.{ .const_string = key_id }, .php_value);
+                    _ = try self.emit(.{ .array_set = .{ .array = args_arr, .key = key_reg, .value = val_reg } }, null);
+                } else {
+                    _ = try self.emit(.{ .array_push = .{ .array = args_arr, .value = val_reg } }, null);
+                }
             }
 
             const invoke_args = try self.allocator.alloc(Register, 2);
@@ -7778,7 +7788,8 @@ pub const IRGenerator = struct {
         var has_named: bool = false;
         var positional_args = std.ArrayListUnmanaged(Node.Index).empty;
         defer positional_args.deinit(self.allocator);
-        var named_args = std.StringHashMapUnmanaged(Node.Index){};
+        // ★批次十七②：StringArrayHashMap 保插入序——未消耗命名项进变参包时 PHP 按书写序收集
+        var named_args = std.StringArrayHashMapUnmanaged(Node.Index){};
         defer named_args.deinit(self.allocator);
 
         for (call_data.args) |arg_idx| {
@@ -7832,7 +7843,20 @@ prop_name: ?[]const u8 = null,
             defer final_args.deinit(self.allocator);
             try final_args.ensureTotalCapacity(self.allocator, param_count + positional_args.items.len);
 
-            var pos_i: usize = 0;
+            // ★批次十八①：命名绑定按 PHP 8.5.8 实测口径重写——
+            //   · 位置参按形参下标直占前 N 槽（旧「跳过命名已占槽」消耗 ⇒ 覆盖错误漏检、槽位漂移）；
+            //   · 命名命中位置已占槽 ⇒ Error「Named parameter $x overwrites previous argument」；
+            //   · 命名命中变参名本身 ⇒ 以该名作字符串键入包（E4 真值）；
+            //   · 位置溢出（含变参位上的位置源 chosen）⇒ 普通尾随位置参（整数键入 $rest、进 func_get_args）；
+            //   · 未被声明形参消耗的命名项 ⇒ 变参包（保书写序）；无变参出口 ⇒ Error「Unknown named parameter $x」；
+            //   · 信标包永远最后追加（保「位置在前、命名在后」序）；命名错误在实参全求值后、调用前抛（实测副作用先行）。
+            var consumed_named = std.StringHashMapUnmanaged(void){};
+            defer consumed_named.deinit(self.allocator);
+            var pending_pack_reg: ?Register = null;
+            var pending_named_err: ?[]const u8 = null;
+            var pending_err_is_overwrite = false;
+            var variadic_seen = false;
+            var overflow_from: usize = param_count;
             for (0..param_count) |pi| {
                 // 从 symbol_table 或 module 获取参数名和引用标志
                 const raw_name: []const u8 = if (use_symbol) func_symbol.?.metadata.function.params[pi].name else module_func_params.?[pi].name;
@@ -7866,37 +7890,54 @@ prop_name: ?[]const u8 = null,
                 };
 
                 var chosen: ?Node.Index = null;
+                var chosen_named = false;
                 const p_name = if (raw_name.len > 0 and raw_name[0] == '$') raw_name[1..] else raw_name;
                 if (named_args.get(p_name)) |named_idx| {
                     chosen = named_idx;
-                } else if (pos_i < positional_args.items.len) {
-                    chosen = positional_args.items[pos_i];
-                    pos_i += 1;
+                    chosen_named = true;
+                    try consumed_named.put(self.allocator, p_name, {});
+                    // 位置参先占前 N 槽 ⇒ 命名命中已占槽＝重复填充（实测可捕获 Error；仅记首枚）
+                    if (pi < positional_args.items.len and pending_named_err == null) {
+                        pending_named_err = p_name;
+                        pending_err_is_overwrite = true;
+                    }
+                } else if (pi < positional_args.items.len) {
+                    chosen = positional_args.items[pi];
                 }
 
-                // 对 variadic 参数的命名参数：构建完整的关联数组作为 variadic 数组
-                // PHP: func(context: val) + ...$context → $context = ['context' => val]
-                // 遍历所有未消耗的 named_args，用 string key 收集到一个数组
-                if (chosen != null and p_is_variadic) {
+                // ★批次十八①：变参收集（PHP 8.5.8 实测口径）
+                if (p_is_variadic and (chosen != null or named_args.count() > consumed_named.count())) {
+                    variadic_seen = true;
+                    // 位置溢出（含位置源 chosen）⇒ 普通尾随位置参
+                    if (pi < positional_args.items.len) {
+                        for (positional_args.items[pi..]) |overflow_idx| {
+                            const ov_reg = try self.generateExpression(overflow_idx);
+                            try final_args.append(self.allocator, ov_reg);
+                        }
+                        overflow_from = positional_args.items.len;
+                    }
                     const arr_reg = try self.emitWithResult(.{ .array_new = .{ .capacity = @intCast(named_args.count()) } }, .php_value);
-                    // 先添加匹配到的参数
-                    const val_reg = try self.generateExpression(chosen.?);
-                    const key_id = try self.module.?.internString(p_name);
-                    const key_reg = try self.emitWithResult(.{ .const_string = key_id }, .php_value);
-                    _ = try self.emit(.{ .array_set = .{ .array = arr_reg, .key = key_reg, .value = val_reg } }, null);
-                    // 添加其余未消耗的 named_args
+                    var pack_has = false;
+                    // 命名命中变参名本身（E4 真值：f(r:7) ⇒ $r["r"]=7）
+                    if (chosen != null and chosen_named) {
+                        const val_reg = try self.generateExpression(chosen.?);
+                        const key_id = try self.module.?.internString(p_name);
+                        const key_reg = try self.emitWithResult(.{ .const_string = key_id }, .php_value);
+                        _ = try self.emit(.{ .array_set = .{ .array = arr_reg, .key = key_reg, .value = val_reg } }, null);
+                        pack_has = true;
+                    }
+                    // 未被声明形参消耗的命名项按书写序收包（E1 真值：已消耗的不重复进包）
                     var named_it = named_args.iterator();
                     while (named_it.next()) |entry| {
-                        if (std.mem.eql(u8, entry.key_ptr.*, p_name)) continue; // 已添加
+                        if (consumed_named.contains(entry.key_ptr.*)) continue;
                         const other_val = try self.generateExpression(entry.value_ptr.*);
                         const other_key_id = try self.module.?.internString(entry.key_ptr.*);
                         const other_key_reg = try self.emitWithResult(.{ .const_string = other_key_id }, .php_value);
                         _ = try self.emit(.{ .array_set = .{ .array = arr_reg, .key = other_key_reg, .value = other_val } }, null);
+                        pack_has = true;
                     }
-                    // 传入预构建的关联数组作为 variadic 参数的值
-                    // 使用 store 直接写入 variadic 参数的 alloca（跳过收集器）
-                    try final_args.append(self.allocator, arr_reg);
-                    // 标记此函数调用有命名 variadic 参数
+                    // 信标包装延后到位置余量尾随之后追加（保「位置在前、命名在后」序）
+                    if (pack_has) pending_pack_reg = arr_reg;
                     break; // variadic 是最后一个参数，终止循环
                 }
 
@@ -7962,9 +8003,44 @@ prop_name: ?[]const u8 = null,
                 }
             }
 
-            while (pos_i < positional_args.items.len) : (pos_i += 1) {
-                const r = try self.generateExpression(positional_args.items[pos_i]);
+            // ★批次十八①：位置余量尾随（变参分支已消费则空）；信标永远最后追加
+            for (positional_args.items[@min(overflow_from, positional_args.items.len)..]) |overflow_idx| {
+                const r = try self.generateExpression(overflow_idx);
                 try final_args.append(self.allocator, r);
+            }
+            if (pending_pack_reg) |pack_reg| {
+                // 裸关联数组经信标对象包装（runtime.php_named_pack）——
+                //   变参收集器只拆信标，不再误吞「位置参单关联数组」。
+                const pack_args = try self.allocator.alloc(Register, 1);
+                pack_args[0] = pack_reg;
+                const marked_reg = try self.emitWithResult(.{ .call = .{
+                    .func_name = "php_named_pack",
+                    .args = pack_args,
+                    .return_type = .php_value,
+                } }, .php_value);
+                try final_args.append(self.allocator, marked_reg);
+            }
+            // 无变参出口的未消耗命名 ⇒ Unknown named parameter（E2 真值；仅记首枚）
+            if (!variadic_seen and pending_named_err == null and named_args.count() > consumed_named.count()) {
+                var unk_it = named_args.iterator();
+                while (unk_it.next()) |entry| {
+                    if (consumed_named.contains(entry.key_ptr.*)) continue;
+                    pending_named_err = entry.key_ptr.*;
+                    pending_err_is_overwrite = false;
+                    break;
+                }
+            }
+            // 命名错误统一在实参全部求值后、调用前抛（实测：实参副作用先于 Error 可见）
+            if (pending_named_err) |bad_name| {
+                const err_key = try self.module.?.internString(bad_name);
+                const err_name_reg = try self.emitWithResult(.{ .const_string = err_key }, .php_value);
+                const err_args = try self.allocator.alloc(Register, 1);
+                err_args[0] = err_name_reg;
+                _ = try self.emitWithResult(.{ .call = .{
+                    .func_name = if (pending_err_is_overwrite) "php_throw_named_overwrite" else "php_throw_unknown_named",
+                    .args = err_args,
+                    .return_type = .php_value,
+                } }, .php_value);
             }
 
             args = try final_args.toOwnedSlice(self.allocator);

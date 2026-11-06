@@ -418,14 +418,103 @@ pub fn setSourceLocation(file: []const u8, line: u32) void {
     src_line = line;
 }
 
-pub fn setCurrentCallArgs(args: []const Value) ?[]const Value {
+/// ★批次十八①：慢路径自建视图的拥有权栈。与 setCurrentCallArgs/restoreCurrentCallArgs
+///   的 LIFO 严格配对（生成码 prologue 定式 set→defer restore）；净调用入栈 null（零分配）。
+threadlocal var call_args_owned_stack: std.ArrayListUnmanaged(?[]Value) = .empty;
+
+/// ★批次十八①：func_get_args/func_num_args/debug_backtrace 的统一数据源（PHP 8.5.8 实测口径：
+///   命名/展开调用后按形参序铺开、缺失槽位补默认值、命名包信标不可见）。
+///   self_name = 被调函数 IR 名（"func" / "Class::method" / "__closure_N"），仅脏路径用于查默认值元数据。
+///   快路径：无 missing 哨兵且无命名信标 ⇒ 借用来调切片，零分配零查找。
+pub fn setCurrentCallArgs(args: []const Value, self_name: []const u8) ?[]const Value {
     const prev = current_call_args;
-    current_call_args = args;
+    var owned: ?[]Value = null;
+    var dirty = false;
+    for (args) |a| {
+        if (a.isMissing() or php_namedPackUnwrap(a) != null) {
+            dirty = true;
+            break;
+        }
+    }
+    if (dirty) {
+        if (buildCallArgsView(args, self_name)) |view| {
+            owned = view;
+            current_call_args = view;
+        } else |_| {
+            // OOM 兜底：宁可空视图也绝不泄信标/哨兵（OOM 本身已属病理路径）
+            current_call_args = &.{};
+        }
+    } else {
+        current_call_args = args;
+    }
+    call_args_owned_stack.append(runtime_allocator, owned) catch {};
     return prev;
 }
 
 pub fn restoreCurrentCallArgs(prev: ?[]const Value) void {
+    if (call_args_owned_stack.items.len > 0) {
+        const owned_opt = call_args_owned_stack.items[call_args_owned_stack.items.len - 1];
+        call_args_owned_stack.items.len -= 1;
+        if (owned_opt) |owned| {
+            for (owned) |v| v.release(runtime_allocator);
+            runtime_allocator.free(owned);
+        }
+    }
     current_call_args = prev;
+}
+
+/// 脏调用视图构建：信标剔除、missing 槽位补默认值（工厂每次新产、折叠值借用 retain）、
+/// 位置余量原样尾随。元素一律 retain（工厂产物自带所有权除外）⇒ 视图释放时逐元素 release 配平。
+fn buildCallArgsView(args: []const Value, self_name: []const u8) ![]Value {
+    const alloc = runtime_allocator;
+    var def_vals: []const Value = &.{};
+    var def_known: []const bool = &.{};
+    var def_factories: []const ?MethodFn = &.{};
+    if (std.mem.indexOf(u8, self_name, "::")) |sep| {
+        // 方法（含 trait 方法："Trait::m"——findClass 覆盖类/trait 注册表）
+        if (findClass(self_name[0..sep])) |cm| {
+            if (cm.findMethod(self_name[sep + 2 ..])) |m| {
+                def_vals = m.param_default_values;
+                def_known = m.param_default_known;
+                def_factories = m.param_default_factories;
+            }
+        }
+    } else if (function_meta_registry) |*reg| {
+        if (reg.get(self_name)) |fm| {
+            def_vals = fm.param_default_values;
+            def_known = fm.param_default_known;
+            def_factories = fm.param_default_factories;
+        }
+    }
+
+    var view = std.ArrayListUnmanaged(Value).empty;
+    errdefer {
+        for (view.items) |v| v.release(alloc);
+        view.deinit(alloc);
+    }
+    for (args, 0..) |a, i| {
+        if (php_namedPackUnwrap(a) != null) continue; // 信标剔除（命名收集项不进 func_get_args，PHP 实测）
+        if (!a.isMissing()) {
+            _ = a.retain();
+            try view.append(alloc, a);
+            continue;
+        }
+        // missing 槽位 ⇒ 补声明默认值（T1/T2 实测：命名跳参时 func_get_args 含默认值填入）
+        if (i < def_factories.len) {
+            if (def_factories[i]) |factory| {
+                const fv = try factory(Value.initNull(), &[_]Value{}, alloc);
+                try view.append(alloc, fv); // 工厂产物所有权随视图（不再 retain）
+                continue;
+            }
+        }
+        if (i < def_known.len and i < def_vals.len and def_known[i]) {
+            _ = def_vals[i].retain();
+            try view.append(alloc, def_vals[i]);
+            continue;
+        }
+        // 无默认的 missing（必填位被命名跳过 ⇒ 调用点 ArgumentCountError，本不可达）⇒ 不伪造值
+    }
+    return view.toOwnedSlice(alloc);
 }
 
 // ========== F-6：debug_backtrace 帧栈 ==========
@@ -493,7 +582,16 @@ pub fn php_debug_backtrace(options_v: Value, limit_v: Value, allocator: Allocato
         if (!ignore_args) {
             const args_arr = try PHPArray.init(allocator);
             errdefer args_arr.release(allocator);
-            for (f.args) |a| try args_arr.push(allocator, a);
+            // ★批次十八①：bt args 口径（PHP 8.5.8 实测 B1-B5）＝原始入参切片「missing 槽位剔除、
+            //   命名信标解包保字符串键」，**无默认值物化**（与 func_get_args 视图刻意不同径）：
+            //   B1 probe(...[1],...["b"=>7,"x"=>9]) ⇒ [0=>1, 1=>7, "x"=>9]；B2 未填默认槽不出现。
+            for (f.args) |a| {
+                if (php_namedPackUnwrap(a)) |pack_v| {
+                    try php_namedPackMergeInto(args_arr, pack_v, allocator);
+                } else if (!a.isMissing()) {
+                    try args_arr.push(allocator, a);
+                }
+            }
             try frame.set(allocator, .{ .string = PHPString.initStatic("args") }, Value.initArray(args_arr));
             args_arr.release(allocator); // set 已 retain；归还 init 的初始份额
         }
@@ -3803,7 +3901,10 @@ const builtin_function_map = std.StaticStringMap(BuiltinFn).initComptime(.{
     .{ "ob_start", wrapBuiltin_ob_start },
     .{ "ob_gzhandler", wrapBuiltin_ob_gzhandler },
     .{ "usort", wrapBuiltin_usort },
-    .{ "select", wrapBuiltin_select },
+    // ★批次十六⑤：幽灵条目 select 摘除——PHP 无 select() 函数（php 内建全集实测 2143 名无此名）；
+    //   Go 语法 select 语句走发射器生成的 @"select" 顶层函数（native_linker.zig :1910），不经本表串名派发；
+    //   残留副作用清理：function_exists("select") 此前误报 true，摘除后与 PHP 一致（false）。
+    //   wrapBuiltin_select 实现体保留（Zig\Select 通道仍在用 php_select），仅摘表项。
     .{ "get_class_methods", wrapBuiltin_get_class_methods },
     .{ "get_class_vars", wrapBuiltin_get_class_vars },
     .{ "get_object_vars", wrapBuiltin_get_object_vars },
@@ -3896,10 +3997,348 @@ const builtin_function_map = std.StaticStringMap(BuiltinFn).initComptime(.{
     .{ "spl_object_id", wrapBuiltin_spl_object_id },
     .{ "spl_object_hash", wrapBuiltin_spl_object_hash },
     .{ "array_splice", wrapBuiltin_array_splice },
+    // ★批次十六②：包装器早已定义但漏登记（纯登记缺口，每枚 1 行；ob_* 宪法 §七 排除但直调已可用，登记不违宪、不扩实现）
+    .{ "get_resource_id", wrapBuiltin_get_resource_id },
+    .{ "mysqli_connect", wrapBuiltin_mysqli_connect },
+    .{ "token_get_all", wrapBuiltin_token_get_all },
+    .{ "ob_end_clean", wrapBuiltin_ob_end_clean },
+    .{ "ob_end_flush", wrapBuiltin_ob_end_flush },
+    .{ "ob_flush", wrapBuiltin_ob_flush },
+    .{ "ob_get_clean", wrapBuiltin_ob_get_clean },
+    .{ "ob_get_contents", wrapBuiltin_ob_get_contents },
+    .{ "ob_get_length", wrapBuiltin_ob_get_length },
+    .{ "ob_get_level", wrapBuiltin_ob_get_level },
+    .{ "ob_get_status", wrapBuiltin_ob_get_status },
+    .{ "ob_implicit_flush", wrapBuiltin_ob_implicit_flush },
+    // ★批次十六③-sort 族（usort 既有）
+    .{ "sort", wrapBuiltin_sort },
+    .{ "rsort", wrapBuiltin_rsort },
+    .{ "asort", wrapBuiltin_asort },
+    .{ "arsort", wrapBuiltin_arsort },
+    .{ "ksort", wrapBuiltin_ksort },
+    .{ "krsort", wrapBuiltin_krsort },
+    .{ "natsort", wrapBuiltin_natsort },
+    .{ "natcasesort", wrapBuiltin_natcasesort },
+    .{ "shuffle", wrapBuiltin_shuffle },
+    .{ "uasort", wrapBuiltin_uasort },
+    .{ "uksort", wrapBuiltin_uksort },
+    // ★批次十六③-preg 族（preg_last_error_msg 既有）
+    .{ "preg_split", wrapBuiltin_preg_split },
+    .{ "preg_grep", wrapBuiltin_preg_grep },
+    .{ "preg_quote", wrapBuiltin_preg_quote },
+    .{ "preg_last_error", wrapBuiltin_preg_last_error },
+    // ★批次十六③-serial/url 族
+    .{ "json_encode", wrapBuiltin_json_encode },
+    .{ "json_last_error", wrapBuiltin_json_last_error },
+    .{ "serialize", wrapBuiltin_serialize },
+    .{ "unserialize", wrapBuiltin_unserialize },
+    .{ "http_build_query", wrapBuiltin_http_build_query },
+    .{ "urlencode", wrapBuiltin_urlencode },
+    .{ "urldecode", wrapBuiltin_urldecode },
+    .{ "rawurlencode", wrapBuiltin_rawurlencode },
+    .{ "rawurldecode", wrapBuiltin_rawurldecode },
+    // ★批次十六③-sprintf 族
+    .{ "sprintf", wrapBuiltin_sprintf },
+    .{ "printf", wrapBuiltin_printf },
+    .{ "vsprintf", wrapBuiltin_vsprintf },
+    // ★批次十六③-math 族
+    .{ "abs", wrapBuiltin_abs },
+    .{ "acos", wrapBuiltin_acos },
+    .{ "asin", wrapBuiltin_asin },
+    .{ "atan", wrapBuiltin_atan },
+    .{ "atan2", wrapBuiltin_atan2 },
+    .{ "cosh", wrapBuiltin_cosh },
+    .{ "sinh", wrapBuiltin_sinh },
+    .{ "tanh", wrapBuiltin_tanh },
+    .{ "log10", wrapBuiltin_log10 },
+    .{ "pi", wrapBuiltin_pi },
+    .{ "deg2rad", wrapBuiltin_deg2rad },
+    .{ "rad2deg", wrapBuiltin_rad2deg },
+    .{ "fmod", wrapBuiltin_fmod },
+    .{ "fdiv", wrapBuiltin_fdiv },
+    .{ "intdiv", wrapBuiltin_intdiv },
+    // ★批次十七①-A 批
+    .{ "base64_decode", wrapBuiltin_base64_decode },
+    .{ "base64_encode", wrapBuiltin_base64_encode },
+    .{ "base_convert", wrapBuiltin_base_convert },
+    .{ "bcadd", wrapBuiltin_bcadd },
+    .{ "bccomp", wrapBuiltin_bccomp },
+    .{ "bcdiv", wrapBuiltin_bcdiv },
+    .{ "bcmod", wrapBuiltin_bcmod },
+    .{ "bcmul", wrapBuiltin_bcmul },
+    .{ "bcpow", wrapBuiltin_bcpow },
+    .{ "bcsqrt", wrapBuiltin_bcsqrt },
+    .{ "bcsub", wrapBuiltin_bcsub },
+    .{ "bin2hex", wrapBuiltin_bin2hex },
+    .{ "bindec", wrapBuiltin_bindec },
+    .{ "boolval", wrapBuiltin_boolval },
+    .{ "checkdate", wrapBuiltin_checkdate },
+    .{ "current", wrapBuiltin_current },
+    .{ "date", wrapBuiltin_date },
+    .{ "decbin", wrapBuiltin_decbin },
+    .{ "dechex", wrapBuiltin_dechex },
+    .{ "decoct", wrapBuiltin_decoct },
+    .{ "end", wrapBuiltin_end },
+    .{ "filter_var", wrapBuiltin_filter_var },
+    .{ "floatval", wrapBuiltin_floatval },
+    .{ "getdate", wrapBuiltin_getdate },
+    .{ "gettype", wrapBuiltin_gettype },
+    .{ "gmdate", wrapBuiltin_gmdate },
+    .{ "hash", wrapBuiltin_hash },
+    .{ "hash_algos", wrapBuiltin_hash_algos },
+    .{ "hash_equals", wrapBuiltin_hash_equals },
+    .{ "hash_file", wrapBuiltin_hash_file },
+    .{ "hash_hmac", wrapBuiltin_hash_hmac },
+    .{ "hash_hmac_algos", wrapBuiltin_hash_hmac_algos },
+    .{ "hash_pbkdf2", wrapBuiltin_hash_pbkdf2 },
+    .{ "hex2bin", wrapBuiltin_hex2bin },
+    .{ "hexdec", wrapBuiltin_hexdec },
+    .{ "idate", wrapBuiltin_idate },
+    .{ "in_array", wrapBuiltin_in_array },
+    .{ "intval", wrapBuiltin_intval },
+    .{ "is_countable", wrapBuiltin_is_countable },
+    .{ "is_finite", wrapBuiltin_is_finite },
+    .{ "is_infinite", wrapBuiltin_is_infinite },
+    .{ "is_iterable", wrapBuiltin_is_iterable },
+    .{ "is_nan", wrapBuiltin_is_nan },
+    .{ "is_numeric", wrapBuiltin_is_numeric },
+    .{ "is_object", wrapBuiltin_is_object },
+    .{ "is_resource", wrapBuiltin_is_resource },
+    .{ "is_scalar", wrapBuiltin_is_scalar },
+    .{ "iterator_to_array", wrapBuiltin_iterator_to_array },
+    .{ "key", wrapBuiltin_key },
+    .{ "mb_detect_encoding", wrapBuiltin_mb_detect_encoding },
+    .{ "mb_strpos", wrapBuiltin_mb_strpos },
+    .{ "microtime", wrapBuiltin_microtime },
+    .{ "mktime", wrapBuiltin_mktime },
+    .{ "mt_getrandmax", wrapBuiltin_mt_getrandmax },
+    .{ "mt_rand", wrapBuiltin_mt_rand },
+    .{ "mt_srand", wrapBuiltin_mt_srand },
+    .{ "next", wrapBuiltin_next },
+    .{ "number_format", wrapBuiltin_number_format },
+    .{ "octdec", wrapBuiltin_octdec },
+    .{ "pack", wrapBuiltin_pack },
+    .{ "password_get_info", wrapBuiltin_password_get_info },
+    .{ "password_hash", wrapBuiltin_password_hash },
+    .{ "password_needs_rehash", wrapBuiltin_password_needs_rehash },
+    .{ "password_verify", wrapBuiltin_password_verify },
+    .{ "prev", wrapBuiltin_prev },
+    .{ "rand", wrapBuiltin_rand },
+    .{ "random_bytes", wrapBuiltin_random_bytes },
+    .{ "random_int", wrapBuiltin_random_int },
+    .{ "range", wrapBuiltin_range },
+    .{ "reset", wrapBuiltin_reset },
+    .{ "sizeof", wrapBuiltin_sizeof },
+    .{ "srand", wrapBuiltin_srand },
+    .{ "sleep", wrapBuiltin_sleep },
+    .{ "strtotime", wrapBuiltin_strtotime },
+    .{ "time", wrapBuiltin_time },
+    .{ "uniqid", wrapBuiltin_uniqid },
+    .{ "unpack", wrapBuiltin_unpack },
+    // ★批次十七①-B 批
+    .{ "class_alias", wrapBuiltin_class_alias },
+    .{ "class_exists", wrapBuiltin_class_exists },
+    .{ "class_implements", wrapBuiltin_class_implements },
+    .{ "class_uses", wrapBuiltin_class_uses },
+    .{ "constant", wrapBuiltin_constant },
+    .{ "debug_backtrace", wrapBuiltin_debug_backtrace },
+    .{ "debug_print_backtrace", wrapBuiltin_debug_print_backtrace },
+    .{ "debug_zval_dump", wrapBuiltin_debug_zval_dump },
+    .{ "define", wrapBuiltin_define },
+    .{ "defined", wrapBuiltin_defined },
+    .{ "enum_exists", wrapBuiltin_enum_exists },
+    .{ "error_clear_last", wrapBuiltin_error_clear_last },
+    .{ "error_get_last", wrapBuiltin_error_get_last },
+    .{ "extension_loaded", wrapBuiltin_extension_loaded },
+    .{ "get_class", wrapBuiltin_get_class },
+    .{ "get_defined_constants", wrapBuiltin_get_defined_constants },
+    .{ "get_loaded_extensions", wrapBuiltin_get_loaded_extensions },
+    .{ "get_parent_class", wrapBuiltin_get_parent_class },
+    .{ "get_resource_type", wrapBuiltin_get_resource_type },
+    .{ "interface_exists", wrapBuiltin_interface_exists },
+    .{ "is_a", wrapBuiltin_is_a },
+    .{ "is_subclass_of", wrapBuiltin_is_subclass_of },
+    .{ "method_exists", wrapBuiltin_method_exists },
+    .{ "print_r", wrapBuiltin_print_r },
+    .{ "property_exists", wrapBuiltin_property_exists },
+    .{ "register_shutdown_function", wrapBuiltin_register_shutdown_function },
+    .{ "restore_exception_handler", wrapBuiltin_restore_exception_handler },
+    .{ "set_exception_handler", wrapBuiltin_set_exception_handler },
+    .{ "trait_exists", wrapBuiltin_trait_exists },
+    .{ "user_error", wrapBuiltin_user_error },
+    .{ "var_dump", wrapBuiltin_var_dump },
+    .{ "var_export", wrapBuiltin_var_export },
+    .{ "usleep", wrapBuiltin_usleep },
+    // ★批次十六③-str 族
+    .{ "chunk_split", wrapBuiltin_chunk_split },
+    .{ "count_chars", wrapBuiltin_count_chars },
+    .{ "htmlentities", wrapBuiltin_htmlentities },
+    .{ "htmlspecialchars", wrapBuiltin_htmlspecialchars },
+    .{ "htmlspecialchars_decode", wrapBuiltin_htmlspecialchars_decode },
+    .{ "nl2br", wrapBuiltin_nl2br },
+    .{ "quotemeta", wrapBuiltin_quotemeta },
+    .{ "str_pad", wrapBuiltin_str_pad },
+    .{ "str_repeat", wrapBuiltin_str_repeat },
+    .{ "str_shuffle", wrapBuiltin_str_shuffle },
+    .{ "strcasecmp", wrapBuiltin_strcasecmp },
+    .{ "strchr", wrapBuiltin_strchr },
+    .{ "strcmp", wrapBuiltin_strcmp },
+    .{ "stristr", wrapBuiltin_stristr },
+    .{ "strnatcasecmp", wrapBuiltin_strnatcasecmp },
+    .{ "strnatcmp", wrapBuiltin_strnatcmp },
+    .{ "strncasecmp", wrapBuiltin_strncasecmp },
+    .{ "strncmp", wrapBuiltin_strncmp },
+    .{ "strrchr", wrapBuiltin_strrchr },
+    .{ "strtr", wrapBuiltin_strtr },
+    .{ "strip_tags", wrapBuiltin_strip_tags },
+    .{ "substr_replace", wrapBuiltin_substr_replace },
+    .{ "wordwrap", wrapBuiltin_wordwrap },
+    .{ "join", wrapBuiltin_implode },
+    // ★批次十六③-array 族
+    .{ "array_chunk", wrapBuiltin_array_chunk },
+    .{ "array_column", wrapBuiltin_array_column },
+    .{ "array_combine", wrapBuiltin_array_combine },
+    .{ "array_count_values", wrapBuiltin_array_count_values },
+    .{ "array_diff", wrapBuiltin_array_diff },
+    .{ "array_diff_assoc", wrapBuiltin_array_diff_assoc },
+    .{ "array_diff_key", wrapBuiltin_array_diff_key },
+    .{ "array_fill", wrapBuiltin_array_fill },
+    .{ "array_fill_keys", wrapBuiltin_array_fill_keys },
+    .{ "array_find", wrapBuiltin_array_find },
+    .{ "array_find_key", wrapBuiltin_array_find_key },
+    .{ "array_flip", wrapBuiltin_array_flip },
+    .{ "array_intersect", wrapBuiltin_array_intersect },
+    .{ "array_intersect_key", wrapBuiltin_array_intersect_key },
+    .{ "array_is_list", wrapBuiltin_array_is_list },
+    .{ "array_key_exists", wrapBuiltin_array_key_exists },
+    .{ "array_key_first", wrapBuiltin_array_key_first },
+    .{ "array_key_last", wrapBuiltin_array_key_last },
+    .{ "array_keys", wrapBuiltin_array_keys },
+    .{ "array_pad", wrapBuiltin_array_pad },
+    .{ "array_pop", wrapBuiltin_array_pop },
+    .{ "array_product", wrapBuiltin_array_product },
+    .{ "array_push", wrapBuiltin_array_push },
+    .{ "array_rand", wrapBuiltin_array_rand },
+    .{ "array_replace", wrapBuiltin_array_replace },
+    .{ "array_reverse", wrapBuiltin_array_reverse },
+    .{ "array_search", wrapBuiltin_array_search },
+    .{ "array_shift", wrapBuiltin_array_shift },
+    .{ "array_slice", wrapBuiltin_array_slice },
+    .{ "array_unique", wrapBuiltin_array_unique },
+    .{ "array_unshift", wrapBuiltin_array_unshift },
+    .{ "array_values", wrapBuiltin_array_values },
+    // ★批次十七①-C 批
+    .{ "basename", wrapBuiltin_basename },
+    .{ "chmod", wrapBuiltin_chmod },
+    .{ "clearstatcache", wrapBuiltin_clearstatcache },
+    .{ "closedir", wrapBuiltin_closedir },
+    .{ "copy", wrapBuiltin_copy },
+    .{ "dirname", wrapBuiltin_dirname },
+    .{ "disk_free_space", wrapBuiltin_disk_free_space },
+    .{ "disk_total_space", wrapBuiltin_disk_total_space },
+    .{ "fclose", wrapBuiltin_fclose },
+    .{ "feof", wrapBuiltin_feof },
+    .{ "fgetc", wrapBuiltin_fgetc },
+    .{ "fgetcsv", wrapBuiltin_fgetcsv },
+    .{ "fgets", wrapBuiltin_fgets },
+    .{ "file", wrapBuiltin_file },
+    .{ "file_exists", wrapBuiltin_file_exists },
+    .{ "file_get_contents", wrapBuiltin_file_get_contents },
+    .{ "file_put_contents", wrapBuiltin_file_put_contents },
+    .{ "fileperms", wrapBuiltin_fileperms },
+    .{ "filesize", wrapBuiltin_filesize },
+    .{ "filetype", wrapBuiltin_filetype },
+    .{ "flock", wrapBuiltin_flock },
+    .{ "fnmatch", wrapBuiltin_fnmatch },
+    .{ "fopen", wrapBuiltin_fopen },
+    .{ "fpassthru", wrapBuiltin_fpassthru },
+    .{ "fputcsv", wrapBuiltin_fputcsv },
+    .{ "fread", wrapBuiltin_fread },
+    .{ "fseek", wrapBuiltin_fseek },
+    .{ "fstat", wrapBuiltin_fstat },
+    .{ "fsync", wrapBuiltin_fsync },
+    .{ "ftell", wrapBuiltin_ftell },
+    .{ "ftruncate", wrapBuiltin_ftruncate },
+    .{ "fwrite", wrapBuiltin_fwrite },
+    .{ "getcwd", wrapBuiltin_getcwd },
+    .{ "glob", wrapBuiltin_glob },
+    .{ "is_dir", wrapBuiltin_is_dir },
+    .{ "is_file", wrapBuiltin_is_file },
+    .{ "is_link", wrapBuiltin_is_link },
+    .{ "is_readable", wrapBuiltin_is_readable },
+    .{ "is_writable", wrapBuiltin_is_writable },
+    .{ "lstat", wrapBuiltin_lstat },
+    .{ "mkdir", wrapBuiltin_mkdir },
+    .{ "opendir", wrapBuiltin_opendir },
+    .{ "pathinfo", wrapBuiltin_pathinfo },
+    .{ "readdir", wrapBuiltin_readdir },
+    .{ "readfile", wrapBuiltin_readfile },
+    .{ "readlink", wrapBuiltin_readlink },
+    .{ "realpath", wrapBuiltin_realpath },
+    .{ "rename", wrapBuiltin_rename },
+    .{ "rewind", wrapBuiltin_rewind },
+    .{ "rewinddir", wrapBuiltin_rewinddir },
+    .{ "rmdir", wrapBuiltin_rmdir },
+    .{ "scandir", wrapBuiltin_scandir },
+    .{ "stat", wrapBuiltin_stat },
+    .{ "symlink", wrapBuiltin_symlink },
+    .{ "sys_get_temp_dir", wrapBuiltin_sys_get_temp_dir },
+    .{ "tempnam", wrapBuiltin_tempnam },
+    .{ "touch", wrapBuiltin_touch },
+    .{ "umask", wrapBuiltin_umask },
+    .{ "unlink", wrapBuiltin_unlink },
+
+    // ★批次十七①-D 批
+    .{ "die", wrapBuiltin_die },
+    .{ "exit", wrapBuiltin_exit },
+    .{ "escapeshellarg", wrapBuiltin_escapeshellarg },
+    .{ "escapeshellcmd", wrapBuiltin_escapeshellcmd },
+    .{ "ftok", wrapBuiltin_ftok },
+    .{ "gc_enabled", wrapBuiltin_gc_enabled },
+    .{ "gethostbyaddr", wrapBuiltin_gethostbyaddr },
+    .{ "getmygid", wrapBuiltin_getmygid },
+    .{ "getmypid", wrapBuiltin_getmypid },
+    .{ "header", wrapBuiltin_header },
+    .{ "headers_list", wrapBuiltin_headers_list },
+    .{ "http_response_code", wrapBuiltin_http_response_code },
+    .{ "msg_get_queue", wrapBuiltin_msg_get_queue },
+    .{ "msg_remove_queue", wrapBuiltin_msg_remove_queue },
+    .{ "pcntl_alarm", wrapBuiltin_pcntl_alarm },
+    .{ "pcntl_fork", wrapBuiltin_pcntl_fork },
+    .{ "pcntl_signal", wrapBuiltin_pcntl_signal },
+    .{ "pcntl_signal_dispatch", wrapBuiltin_pcntl_signal_dispatch },
+    .{ "pcntl_sigprocmask", wrapBuiltin_pcntl_sigprocmask },
+    .{ "pcntl_wait", wrapBuiltin_pcntl_wait },
+    .{ "pcntl_waitpid", wrapBuiltin_pcntl_waitpid },
+    .{ "pcntl_wexitstatus", wrapBuiltin_pcntl_wexitstatus },
+    .{ "php_sapi_name", wrapBuiltin_php_sapi_name },
+    .{ "php_uname", wrapBuiltin_php_uname },
+    .{ "phpversion", wrapBuiltin_phpversion },
+    .{ "posix_getpid", wrapBuiltin_posix_getpid },
+    .{ "posix_kill", wrapBuiltin_posix_kill },
+    .{ "posix_mkfifo", wrapBuiltin_posix_mkfifo },
+    .{ "sem_get", wrapBuiltin_sem_get },
+    .{ "sem_remove", wrapBuiltin_sem_remove },
+    .{ "shell_exec", wrapBuiltin_shell_exec },
+    .{ "shmop_close", wrapBuiltin_shmop_close },
+    .{ "shmop_open", wrapBuiltin_shmop_open },
+    .{ "socket_close", wrapBuiltin_socket_close },
+    .{ "socket_create_pair", wrapBuiltin_socket_create_pair },
+    .{ "stream_register_wrapper", wrapBuiltin_stream_register_wrapper },
+    .{ "stream_wrapper_register", wrapBuiltin_stream_wrapper_register },
+
 });
 
 fn lookupBuiltinFunction(name: []const u8) ?BuiltinFn {
-    return builtin_function_map.get(name);
+    // ★批次十六④：PHP 内建函数名大小写不敏感——与编译期 builtinInfo（native_linker.zig :4584 一带）
+    //   同口径：先精确命中，未中再小写折叠复核（≤64 栈缓冲，超长名不折叠，与编译期一致）。
+    if (builtin_function_map.get(name)) |f| return f;
+    if (name.len <= 64) {
+        var folded: [64]u8 = undefined;
+        for (name, 0..) |c, i| folded[i] = std.ascii.toLower(c);
+        return builtin_function_map.get(folded[0..name.len]);
+    }
+    return null;
 }
 
 pub fn php_create_closure(name: Value, captures: Value, is_static_val: Value, allocator: Allocator) !Value {
@@ -4274,16 +4713,2082 @@ fn wrapBuiltin_usort(ctx: Value, args: []const Value, allocator: Allocator) !Val
     return php_usort(args[0], args[1], allocator);
 }
 
+// ★批次十六③-sort 族：AOT 直调早已实现，纯登记缺口。数组为引用语义 Value，原地排序经 args[0] 生效（与既有 usort 同形制）。
+fn wrapBuiltin_sort(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_sort(args[0], allocator);
+}
+
+fn wrapBuiltin_rsort(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_rsort(args[0], allocator);
+}
+
+fn wrapBuiltin_asort(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_asort(args[0], allocator);
+}
+
+fn wrapBuiltin_arsort(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_arsort(args[0], allocator);
+}
+
+fn wrapBuiltin_ksort(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_ksort(args[0], allocator);
+}
+
+fn wrapBuiltin_krsort(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_krsort(args[0], allocator);
+}
+
+fn wrapBuiltin_natsort(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_natsort(args[0], allocator);
+}
+
+fn wrapBuiltin_natcasesort(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_natcasesort(args[0], allocator);
+}
+
+fn wrapBuiltin_shuffle(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_shuffle(args[0], allocator);
+}
+
+fn wrapBuiltin_uasort(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_uasort(args[0], args[1], allocator);
+}
+
+fn wrapBuiltin_uksort(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_uksort(args[0], args[1], allocator);
+}
+
 fn wrapBuiltin_strtoupper(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     _ = ctx;
     if (args.len < 1) return error.InvalidArgumentCount;
     return php_strtoupper(args[0], allocator);
 }
 
+// ★批次十六③-preg 族：纯登记缺口（preg_match/preg_match_all/preg_replace/preg_filter/preg_replace_callback 带 out 参，另列 TODO）。
+//   可选参缺省与发射器同口径（preg_split: limit=-1/flags=0，见 native_linker.zig :25686 注释族）。
+fn wrapBuiltin_preg_split(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const limit = if (args.len >= 3) args[2] else Value.initInt(-1);
+    const flags = if (args.len >= 4) args[3] else Value.initInt(0);
+    return preg_split(args[0], args[1], limit, flags, allocator);
+}
+
+fn wrapBuiltin_preg_grep(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const flags = if (args.len >= 3) args[2] else Value.initInt(0);
+    return preg_grep(args[0], args[1], flags, allocator);
+}
+
+fn wrapBuiltin_preg_quote(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const delimiter = if (args.len >= 2) args[1] else Value.initNull();
+    return preg_quote(args[0], delimiter, allocator);
+}
+
+fn wrapBuiltin_preg_last_error(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = args;
+    _ = allocator;
+    return preg_last_error();
+}
+
+// ★批次十六③-str 族：23 枚 + join→implode 别名（生成器产出+人工逐枚核对签名/缺省口径）。
+fn wrapBuiltin_chunk_split(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initNull();
+    const opt2 = if (args.len >= 3) args[2] else Value.initNull();
+    return php_chunk_split(args[0], opt1, opt2, allocator);
+}
+
+fn wrapBuiltin_count_chars(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initInt(0);
+    return php_count_chars(args[0], opt1, allocator);
+}
+
+fn wrapBuiltin_htmlentities(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initInt(11);
+    const opt2 = if (args.len >= 3) args[2] else Value.initNull();
+    const opt3 = if (args.len >= 4) args[3] else Value.initBool(true);
+    return php_htmlentities(args[0], opt1, opt2, opt3, allocator);
+}
+
+fn wrapBuiltin_htmlspecialchars(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initInt(11);
+    const opt2 = if (args.len >= 3) args[2] else Value.initNull();
+    const opt3 = if (args.len >= 4) args[3] else Value.initBool(true);
+    return php_htmlspecialchars(args[0], opt1, opt2, opt3, allocator);
+}
+
+fn wrapBuiltin_htmlspecialchars_decode(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initInt(11);
+    return php_htmlspecialchars_decode(args[0], opt1, allocator);
+}
+
+fn wrapBuiltin_nl2br(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initBool(true);
+    return php_nl2br(args[0], opt1, allocator);
+}
+
+fn wrapBuiltin_quotemeta(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_quotemeta(args[0], allocator);
+}
+
+fn wrapBuiltin_str_pad(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const opt2 = if (args.len >= 3) args[2] else Value.initNull();
+    const opt3 = if (args.len >= 4) args[3] else Value.initInt(1);
+    return php_str_pad(args[0], args[1], opt2, opt3, allocator);
+}
+
+fn wrapBuiltin_str_repeat(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_str_repeat(args[0], args[1], allocator);
+}
+
+fn wrapBuiltin_str_shuffle(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_str_shuffle(args[0], allocator);
+}
+
+fn wrapBuiltin_strcasecmp(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_strcasecmp(args[0], args[1], allocator);
+}
+
+fn wrapBuiltin_strchr(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    // strchr 是 strstr 别名（编译期表 :4733 同口径）；before_needle 缺省 false（同 wrapBuiltin_strstr）
+    return php_strstr(args[0], args[1], if (args.len > 2) args[2] else Value.initBool(false), allocator);
+}
+
+fn wrapBuiltin_strcmp(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_strcmp(args[0], args[1]);
+}
+
+fn wrapBuiltin_stristr(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_stristr(args[0], args[1], allocator);
+}
+
+fn wrapBuiltin_strnatcasecmp(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_strnatcasecmp(args[0], args[1]);
+}
+
+fn wrapBuiltin_strnatcmp(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_strnatcmp(args[0], args[1]);
+}
+
+fn wrapBuiltin_strncasecmp(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 3) return error.InvalidArgumentCount;
+    return php_strncasecmp(args[0], args[1], args[2]);
+}
+
+fn wrapBuiltin_strncmp(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 3) return error.InvalidArgumentCount;
+    return php_strncmp(args[0], args[1], args[2]);
+}
+
+fn wrapBuiltin_strrchr(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_strrchr(args[0], args[1], allocator);
+}
+
+fn wrapBuiltin_strtr(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const opt2 = if (args.len >= 3) args[2] else Value.initNull();
+    return php_strtr(args[0], args[1], opt2, allocator);
+}
+
+fn wrapBuiltin_strip_tags(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initNull();
+    return php_strip_tags(args[0], opt1, allocator);
+}
+
+fn wrapBuiltin_substr_replace(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 3) return error.InvalidArgumentCount;
+    return php_substr_replace(args, allocator);
+}
+
+fn wrapBuiltin_wordwrap(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initInt(75);
+    const opt2 = if (args.len >= 3) args[2] else Value.initNull();
+    const opt3 = if (args.len >= 4) args[3] else Value.initBool(false);
+    return php_wordwrap(args[0], opt1, opt2, opt3, allocator);
+}
+
+// ★批次十六③-array 族：32 枚纯登记缺口（生成器产出+人工逐枚核对签名/缺省口径，可选参缺省与发射器特判同口径）。
+fn wrapBuiltin_array_chunk(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const opt2 = if (args.len >= 3) args[2] else Value.initBool(false);
+    return php_array_chunk(args[0], args[1], opt2, allocator);
+}
+
+fn wrapBuiltin_array_column(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const opt2 = if (args.len >= 3) args[2] else Value.initNull();
+    return php_array_column(args[0], args[1], opt2, allocator);
+}
+
+fn wrapBuiltin_array_combine(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_array_combine(args[0], args[1], allocator);
+}
+
+fn wrapBuiltin_array_count_values(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_array_count_values(args[0], allocator);
+}
+
+fn wrapBuiltin_array_diff(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_array_diff(args, allocator);
+}
+
+fn wrapBuiltin_array_diff_assoc(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_array_diff_assoc(args, allocator);
+}
+
+fn wrapBuiltin_array_diff_key(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_array_diff_key(args, allocator);
+}
+
+fn wrapBuiltin_array_fill(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 3) return error.InvalidArgumentCount;
+    return php_array_fill(args[0], args[1], args[2], allocator);
+}
+
+fn wrapBuiltin_array_fill_keys(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_array_fill_keys(args[0], args[1], allocator);
+}
+
+fn wrapBuiltin_array_find(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_array_find(args[0], args[1], allocator);
+}
+
+fn wrapBuiltin_array_find_key(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_array_find_key(args[0], args[1], allocator);
+}
+
+fn wrapBuiltin_array_flip(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_array_flip(args[0], allocator);
+}
+
+fn wrapBuiltin_array_intersect(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_array_intersect(args, allocator);
+}
+
+fn wrapBuiltin_array_intersect_key(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_array_intersect_key(args, allocator);
+}
+
+fn wrapBuiltin_array_is_list(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_array_is_list(args[0]);
+}
+
+fn wrapBuiltin_array_key_exists(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_array_key_exists(args[0], args[1]);
+}
+
+fn wrapBuiltin_array_key_first(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_array_key_first(args[0]);
+}
+
+fn wrapBuiltin_array_key_last(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_array_key_last(args[0]);
+}
+
+fn wrapBuiltin_array_keys(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initNull();
+    const opt2 = if (args.len >= 3) args[2] else Value.initBool(false);
+    return php_array_keys(args[0], opt1, opt2, allocator);
+}
+
+fn wrapBuiltin_array_pad(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 3) return error.InvalidArgumentCount;
+    return php_array_pad(args[0], args[1], args[2], allocator);
+}
+
+fn wrapBuiltin_array_pop(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_array_pop(args[0], allocator);
+}
+
+fn wrapBuiltin_array_product(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_array_product(args[0]);
+}
+
+fn wrapBuiltin_array_push(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_array_push(args[0], args[1..], allocator);
+}
+
+fn wrapBuiltin_array_rand(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initInt(1);
+    return php_array_rand(args[0], opt1, allocator);
+}
+
+fn wrapBuiltin_array_replace(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_array_replace(args, allocator);
+}
+
+fn wrapBuiltin_array_reverse(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initBool(false);
+    return php_array_reverse(args[0], opt1, allocator);
+}
+
+fn wrapBuiltin_array_search(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const opt2 = if (args.len >= 3) args[2] else Value.initBool(false);
+    return php_array_search(args[0], args[1], opt2);
+}
+
+fn wrapBuiltin_array_shift(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_array_shift(args[0], allocator);
+}
+
+fn wrapBuiltin_array_slice(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const opt2 = if (args.len >= 3) args[2] else Value.initNull();
+    const opt3 = if (args.len >= 4) args[3] else Value.initBool(false);
+    return php_array_slice(args[0], args[1], opt2, opt3, allocator);
+}
+
+fn wrapBuiltin_array_unique(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_array_unique(args[0], allocator);
+}
+
+fn wrapBuiltin_array_unshift(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_array_unshift(args[0], args[1..], allocator);
+}
+
+fn wrapBuiltin_array_values(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_array_values(args[0], allocator);
+}
+
 fn wrapBuiltin_strtolower(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     _ = ctx;
     if (args.len < 1) return error.InvalidArgumentCount;
     return php_strtolower(args[0], allocator);
+}
+
+// ★批次十六③-serial/url 族：9 枚纯登记缺口（json_encode 缺省 flags=0/depth=512 与发射器 :25591 特判同口径）。
+fn wrapBuiltin_json_encode(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initInt(0);
+    const opt2 = if (args.len >= 3) args[2] else Value.initInt(512);
+    return php_json_encode(args[0], opt1, opt2, allocator);
+}
+
+fn wrapBuiltin_json_last_error(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = args;
+    _ = allocator;
+    return php_json_last_error();
+}
+
+fn wrapBuiltin_serialize(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_serialize(args[0], allocator);
+}
+
+fn wrapBuiltin_unserialize(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_unserialize(args[0], allocator);
+}
+
+fn wrapBuiltin_http_build_query(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_http_build_query(args[0], allocator);
+}
+
+fn wrapBuiltin_urlencode(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_urlencode(args[0], allocator);
+}
+
+fn wrapBuiltin_urldecode(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_urldecode(args[0], allocator);
+}
+
+fn wrapBuiltin_rawurlencode(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_rawurlencode(args[0], allocator);
+}
+
+fn wrapBuiltin_rawurldecode(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_rawurldecode(args[0], allocator);
+}
+
+// ★批次十六③-sprintf 族：变参切片直传（与发射器同形制）。
+fn wrapBuiltin_sprintf(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_sprintf(args[0], args[1..], allocator);
+}
+
+fn wrapBuiltin_printf(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_printf(args[0], args[1..], allocator);
+}
+
+fn wrapBuiltin_vsprintf(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_vsprintf(args[0], args[1], allocator);
+}
+
+// ★批次十六③-math 族：15 枚纯登记缺口（实现均不带 allocator，包装器弃置）。
+fn wrapBuiltin_abs(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_abs(args[0]);
+}
+
+fn wrapBuiltin_acos(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_acos(args[0]);
+}
+
+fn wrapBuiltin_asin(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_asin(args[0]);
+}
+
+fn wrapBuiltin_atan(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_atan(args[0]);
+}
+
+fn wrapBuiltin_atan2(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_atan2(args[0], args[1]);
+}
+
+fn wrapBuiltin_cosh(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_cosh(args[0]);
+}
+
+fn wrapBuiltin_sinh(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_sinh(args[0]);
+}
+
+fn wrapBuiltin_tanh(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_tanh(args[0]);
+}
+
+fn wrapBuiltin_log10(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_log10(args[0]);
+}
+
+fn wrapBuiltin_pi(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = args;
+    _ = allocator;
+    return php_pi();
+}
+
+fn wrapBuiltin_deg2rad(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_deg2rad(args[0]);
+}
+
+fn wrapBuiltin_rad2deg(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_rad2deg(args[0]);
+}
+
+fn wrapBuiltin_fmod(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_fmod(args[0], args[1]);
+}
+
+fn wrapBuiltin_fdiv(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_fdiv(args[0], args[1]);
+}
+
+fn wrapBuiltin_intdiv(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_intdiv(args[0], args[1]);
+}
+
+// ★批次十七①-A 批（78 枚：纯值/转换/日期/hash/bc/数组指针；生成器+人工核对签名，缺省与发射器 hp/od 同口径）。
+fn wrapBuiltin_base64_decode(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initBool(false);
+    return php_base64_decode(args[0], opt1, allocator);
+}
+
+fn wrapBuiltin_base64_encode(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_base64_encode(args[0], allocator);
+}
+
+fn wrapBuiltin_base_convert(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 3) return error.InvalidArgumentCount;
+    return php_base_convert(args[0], args[1], args[2], allocator);
+}
+
+fn wrapBuiltin_bcadd(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_bcadd(args, allocator);
+}
+
+fn wrapBuiltin_bccomp(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_bccomp(args, allocator);
+}
+
+fn wrapBuiltin_bcdiv(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_bcdiv(args, allocator);
+}
+
+fn wrapBuiltin_bcmod(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_bcmod(args, allocator);
+}
+
+fn wrapBuiltin_bcmul(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_bcmul(args, allocator);
+}
+
+fn wrapBuiltin_bcpow(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_bcpow(args, allocator);
+}
+
+fn wrapBuiltin_bcsqrt(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_bcsqrt(args, allocator);
+}
+
+fn wrapBuiltin_bcsub(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_bcsub(args, allocator);
+}
+
+fn wrapBuiltin_bin2hex(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_bin2hex(args[0], allocator);
+}
+
+fn wrapBuiltin_bindec(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_bindec(args[0]);
+}
+
+fn wrapBuiltin_boolval(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_boolval(args[0]);
+}
+
+fn wrapBuiltin_checkdate(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 3) return error.InvalidArgumentCount;
+    return php_checkdate(args[0], args[1], args[2]);
+}
+
+fn wrapBuiltin_current(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_current(args[0], allocator);
+}
+
+fn wrapBuiltin_date(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initNull();
+    return php_date(args[0], opt1, allocator);
+}
+
+fn wrapBuiltin_decbin(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_decbin(args[0], allocator);
+}
+
+fn wrapBuiltin_dechex(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_dechex(args[0], allocator);
+}
+
+fn wrapBuiltin_decoct(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_decoct(args[0], allocator);
+}
+
+fn wrapBuiltin_end(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_end(args[0], allocator);
+}
+
+fn wrapBuiltin_filter_var(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initNull();
+    const opt2 = if (args.len >= 3) args[2] else Value.initNull();
+    return php_filter_var(args[0], opt1, opt2, allocator);
+}
+
+fn wrapBuiltin_floatval(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_floatval(args[0]);
+}
+
+fn wrapBuiltin_getdate(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    const opt0 = if (args.len >= 1) args[0] else Value.initNull();
+    return php_getdate(opt0, allocator);
+}
+
+fn wrapBuiltin_gettype(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_gettype(args[0], allocator);
+}
+
+fn wrapBuiltin_gmdate(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initNull();
+    return php_gmdate(args[0], opt1, allocator);
+}
+
+fn wrapBuiltin_hash(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const opt2 = if (args.len >= 3) args[2] else Value.initBool(false);
+    return php_hash(args[0], args[1], opt2, allocator);
+}
+
+fn wrapBuiltin_hash_algos(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = args;
+    return php_hash_algos(allocator);
+}
+
+fn wrapBuiltin_hash_equals(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_hash_equals(args[0], args[1]);
+}
+
+fn wrapBuiltin_hash_file(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const opt2 = if (args.len >= 3) args[2] else Value.initBool(false);
+    const opt3 = if (args.len >= 4) args[3] else Value.initArray(try PHPArray.init(allocator));
+    return php_hash_file(args[0], args[1], opt2, opt3, allocator);
+}
+
+fn wrapBuiltin_hash_hmac(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 3) return error.InvalidArgumentCount;
+    const opt3 = if (args.len >= 4) args[3] else Value.initBool(false);
+    return php_hash_hmac(args[0], args[1], args[2], opt3, allocator);
+}
+
+fn wrapBuiltin_hash_hmac_algos(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = args;
+    return php_hash_hmac_algos(allocator);
+}
+
+fn wrapBuiltin_hash_pbkdf2(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 4) return error.InvalidArgumentCount;
+    const opt4 = if (args.len >= 5) args[4] else Value.initInt(0);
+    const opt5 = if (args.len >= 6) args[5] else Value.initBool(false);
+    const opt6 = if (args.len >= 7) args[6] else Value.initArray(try PHPArray.init(allocator));
+    return php_hash_pbkdf2(args[0], args[1], args[2], args[3], opt4, opt5, opt6, allocator);
+}
+
+fn wrapBuiltin_hex2bin(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_hex2bin(args[0], allocator);
+}
+
+fn wrapBuiltin_hexdec(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_hexdec(args[0]);
+}
+
+fn wrapBuiltin_idate(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initNull();
+    return php_idate(args[0], opt1, allocator);
+}
+
+fn wrapBuiltin_in_array(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const opt2 = if (args.len >= 3) args[2] else Value.initBool(false);
+    return php_in_array(args[0], args[1], opt2);
+}
+
+fn wrapBuiltin_intval(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initInt(10);
+    return php_intval(args[0], opt1);
+}
+
+fn wrapBuiltin_is_countable(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_is_countable(args[0]);
+}
+
+fn wrapBuiltin_is_finite(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_is_finite(args[0]);
+}
+
+fn wrapBuiltin_is_infinite(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_is_infinite(args[0]);
+}
+
+fn wrapBuiltin_is_iterable(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_is_iterable(args[0]);
+}
+
+fn wrapBuiltin_is_nan(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_is_nan(args[0]);
+}
+
+fn wrapBuiltin_is_numeric(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_is_numeric(args[0]);
+}
+
+fn wrapBuiltin_is_object(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_is_object(args[0]);
+}
+
+fn wrapBuiltin_is_resource(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_is_resource(args[0]);
+}
+
+fn wrapBuiltin_is_scalar(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_is_scalar(args[0]);
+}
+
+fn wrapBuiltin_iterator_to_array(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initBool(true);
+    return php_iterator_to_array(args[0], opt1, allocator);
+}
+
+fn wrapBuiltin_key(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_key(args[0], allocator);
+}
+
+fn wrapBuiltin_mb_detect_encoding(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initNull();
+    const opt2 = if (args.len >= 3) args[2] else Value.initBool(false);
+    return php_mb_detect_encoding(args[0], opt1, opt2, allocator);
+}
+
+fn wrapBuiltin_mb_strpos(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const opt2 = if (args.len >= 3) args[2] else Value.initInt(0);
+    const opt3 = if (args.len >= 4) args[3] else Value.initNull();
+    return php_mb_strpos(args[0], args[1], opt2, opt3, allocator);
+}
+
+fn wrapBuiltin_microtime(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    const opt0 = if (args.len >= 1) args[0] else Value.initBool(false);
+    return php_microtime(opt0, allocator);
+}
+
+fn wrapBuiltin_mktime(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    const opt0 = if (args.len >= 1) args[0] else Value.initNull();
+    const opt1 = if (args.len >= 2) args[1] else Value.initNull();
+    const opt2 = if (args.len >= 3) args[2] else Value.initNull();
+    const opt3 = if (args.len >= 4) args[3] else Value.initNull();
+    const opt4 = if (args.len >= 5) args[4] else Value.initNull();
+    const opt5 = if (args.len >= 6) args[5] else Value.initNull();
+    return php_mktime(opt0, opt1, opt2, opt3, opt4, opt5);
+}
+
+fn wrapBuiltin_mt_getrandmax(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    _ = args;
+    return php_mt_getrandmax();
+}
+
+fn wrapBuiltin_mt_rand(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    const opt0 = if (args.len >= 1) args[0] else Value.initNull();
+    const opt1 = if (args.len >= 2) args[1] else Value.initNull();
+    return php_mt_rand(opt0, opt1);
+}
+
+fn wrapBuiltin_mt_srand(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    const opt0 = if (args.len >= 1) args[0] else Value.initNull();
+    const opt1 = if (args.len >= 2) args[1] else Value.initInt(0);
+    return php_mt_srand(opt0, opt1);
+}
+
+fn wrapBuiltin_next(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_next(args[0], allocator);
+}
+
+fn wrapBuiltin_number_format(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initNull();
+    const opt2 = if (args.len >= 3) args[2] else Value.initNull();
+    const opt3 = if (args.len >= 4) args[3] else Value.initNull();
+    return php_number_format(args[0], opt1, opt2, opt3, allocator);
+}
+
+fn wrapBuiltin_octdec(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_octdec(args[0]);
+}
+
+fn wrapBuiltin_pack(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_pack(args[0], args[1..], allocator);
+}
+
+fn wrapBuiltin_password_get_info(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_password_get_info(args[0], allocator);
+}
+
+fn wrapBuiltin_password_hash(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const opt2 = if (args.len >= 3) args[2] else Value.initArray(try PHPArray.init(allocator));
+    return php_password_hash(args[0], args[1], opt2, allocator);
+}
+
+fn wrapBuiltin_password_needs_rehash(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const opt2 = if (args.len >= 3) args[2] else Value.initArray(try PHPArray.init(allocator));
+    return php_password_needs_rehash(args[0], args[1], opt2, allocator);
+}
+
+fn wrapBuiltin_password_verify(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_password_verify(args[0], args[1], allocator);
+}
+
+fn wrapBuiltin_prev(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_prev(args[0], allocator);
+}
+
+fn wrapBuiltin_rand(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    const opt0 = if (args.len >= 1) args[0] else Value.initNull();
+    const opt1 = if (args.len >= 2) args[1] else Value.initNull();
+    return php_rand(opt0, opt1);
+}
+
+fn wrapBuiltin_random_bytes(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_random_bytes(args[0], allocator);
+}
+
+fn wrapBuiltin_random_int(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_random_int(args[0], args[1]);
+}
+
+fn wrapBuiltin_range(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const opt2 = if (args.len >= 3) args[2] else Value.initInt(1);
+    return php_range(args[0], args[1], opt2, allocator);
+}
+
+fn wrapBuiltin_reset(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_reset(args[0], allocator);
+}
+
+fn wrapBuiltin_sizeof(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_sizeof(args[0]);
+}
+
+fn wrapBuiltin_srand(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    const opt0 = if (args.len >= 1) args[0] else Value.initNull();
+    const opt1 = if (args.len >= 2) args[1] else Value.initInt(0);
+    return php_srand(opt0, opt1);
+}
+
+fn wrapBuiltin_sleep(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_sleep(args[0]);
+}
+
+fn wrapBuiltin_strtotime(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initNull();
+    return php_strtotime(args[0], opt1, allocator);
+}
+
+fn wrapBuiltin_time(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    _ = args;
+    return php_time();
+}
+
+fn wrapBuiltin_uniqid(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    const opt0 = if (args.len >= 1) args[0] else Value.initString(PHPString.initStatic(""));
+    const opt1 = if (args.len >= 2) args[1] else Value.initBool(false);
+    return php_uniqid(opt0, opt1, allocator);
+}
+
+fn wrapBuiltin_unpack(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_unpack(args[0], args[1], allocator);
+}
+
+fn wrapBuiltin_usleep(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_usleep(args[0]);
+}
+
+// ★批次十七①-B 批（32 枚：类/常量/错误/输出内省；同生成器口径）。
+fn wrapBuiltin_class_alias(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_class_alias(args[0], args[1]);
+}
+
+fn wrapBuiltin_class_exists(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initBool(true);
+    return php_class_exists(args[0], opt1, allocator);
+}
+
+fn wrapBuiltin_class_implements(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_class_implements(args[0], allocator);
+}
+
+fn wrapBuiltin_class_uses(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_class_uses(args[0], allocator);
+}
+
+fn wrapBuiltin_constant(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_constant_get(args[0], allocator);
+}
+
+fn wrapBuiltin_debug_backtrace(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    const opt0 = if (args.len >= 1) args[0] else Value.initNull();
+    const opt1 = if (args.len >= 2) args[1] else Value.initNull();
+    return php_debug_backtrace(opt0, opt1, allocator);
+}
+
+fn wrapBuiltin_debug_print_backtrace(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    const opt0 = if (args.len >= 1) args[0] else Value.initNull();
+    const opt1 = if (args.len >= 2) args[1] else Value.initNull();
+    return php_debug_print_backtrace(opt0, opt1, allocator);
+}
+
+fn wrapBuiltin_debug_zval_dump(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_debug_zval_dump(args[0]);
+}
+
+fn wrapBuiltin_define(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_define(args[0], args[1], allocator);
+}
+
+fn wrapBuiltin_defined(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_defined(args[0]);
+}
+
+fn wrapBuiltin_enum_exists(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initBool(true);
+    return php_enum_exists(args[0], opt1, allocator);
+}
+
+fn wrapBuiltin_error_clear_last(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    _ = args;
+    return php_error_clear_last();
+}
+
+fn wrapBuiltin_error_get_last(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = args;
+    return php_error_get_last(allocator);
+}
+
+fn wrapBuiltin_extension_loaded(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_extension_loaded(args[0]);
+}
+
+fn wrapBuiltin_get_class(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_get_class(args[0], allocator);
+}
+
+fn wrapBuiltin_get_defined_constants(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    const opt0 = if (args.len >= 1) args[0] else Value.initNull();
+    return php_get_defined_constants(opt0, allocator);
+}
+
+fn wrapBuiltin_get_loaded_extensions(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = args;
+    return php_get_loaded_extensions(allocator);
+}
+
+fn wrapBuiltin_get_parent_class(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_get_parent_class(args[0], allocator);
+}
+
+fn wrapBuiltin_get_resource_type(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_get_resource_type(args[0], allocator);
+}
+
+fn wrapBuiltin_interface_exists(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initBool(true);
+    return php_interface_exists(args[0], opt1, allocator);
+}
+
+fn wrapBuiltin_is_a(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const opt2 = if (args.len >= 3) args[2] else Value.initBool(false);
+    return php_is_a(args[0], args[1], opt2);
+}
+
+fn wrapBuiltin_is_subclass_of(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const opt2 = if (args.len >= 3) args[2] else Value.initBool(true);
+    return php_is_subclass_of(args[0], args[1], opt2);
+}
+
+fn wrapBuiltin_method_exists(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_method_exists(args[0], args[1]);
+}
+
+fn wrapBuiltin_print_r(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initBool(false);
+    return print_r(args[0], opt1);
+}
+
+fn wrapBuiltin_property_exists(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_property_exists(args[0], args[1]);
+}
+
+fn wrapBuiltin_register_shutdown_function(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_register_shutdown_function(args[0], args[1..], allocator);
+}
+
+fn wrapBuiltin_restore_exception_handler(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    _ = args;
+    return php_restore_exception_handler();
+}
+
+fn wrapBuiltin_set_exception_handler(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_set_exception_handler(args[0], allocator);
+}
+
+fn wrapBuiltin_trait_exists(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initBool(true);
+    return php_trait_exists(args[0], opt1, allocator);
+}
+
+fn wrapBuiltin_user_error(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    const opt0 = if (args.len >= 1) args[0] else Value.initString(try PHPString.init(allocator, ""));
+    const opt1 = if (args.len >= 2) args[1] else Value.initNull();
+    return php_trigger_error(opt0, opt1, allocator);
+}
+
+fn wrapBuiltin_var_dump(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    for (args) |a| {
+        _ = try php_var_dump(a);
+    }
+    return Value.initNull();
+}
+
+fn wrapBuiltin_var_export(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initBool(false);
+    return var_export(args[0], opt1);
+}
+
+// ★批次十七①-C 批（59 枚：文件系统/文件 IO）。
+fn wrapBuiltin_basename(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initNull();
+    return php_basename(args[0], opt1, allocator);
+}
+
+fn wrapBuiltin_chmod(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_chmod(args[0], args[1]);
+}
+
+fn wrapBuiltin_clearstatcache(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    const opt0 = if (args.len >= 1) args[0] else Value.initBool(false);
+    // 缺省空串用 initStatic（无分配，免与上方 allocator 弃置打架）
+    const opt1 = if (args.len >= 2) args[1] else Value.initString(PHPString.initStatic(""));
+    return php_clearstatcache(opt0, opt1);
+}
+
+fn wrapBuiltin_closedir(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    const opt0 = if (args.len >= 1) args[0] else Value.initNull();
+    return php_closedir(opt0);
+}
+
+fn wrapBuiltin_copy(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_copy(args[0], args[1]);
+}
+
+fn wrapBuiltin_dirname(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initInt(1);
+    return php_dirname(args[0], opt1, allocator);
+}
+
+fn wrapBuiltin_disk_free_space(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_disk_free_space(args[0]);
+}
+
+fn wrapBuiltin_disk_total_space(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_disk_total_space(args[0]);
+}
+
+fn wrapBuiltin_fclose(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_fclose(args[0]);
+}
+
+fn wrapBuiltin_feof(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_feof(args[0]);
+}
+
+fn wrapBuiltin_fgetc(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_fgetc(args[0], allocator);
+}
+
+fn wrapBuiltin_fgetcsv(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initNull();
+    const opt2 = if (args.len >= 3) args[2] else Value.initNull();
+    const opt3 = if (args.len >= 4) args[3] else Value.initNull();
+    const opt4 = if (args.len >= 5) args[4] else Value.initNull();
+    return php_fgetcsv(args[0], opt1, opt2, opt3, opt4, allocator);
+}
+
+fn wrapBuiltin_fgets(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initNull();
+    return php_fgets(args[0], opt1);
+}
+
+fn wrapBuiltin_file(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initInt(0);
+    const opt2 = if (args.len >= 3) args[2] else Value.initNull();
+    return php_file(args[0], opt1, opt2, allocator);
+}
+
+fn wrapBuiltin_file_exists(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_file_exists(args[0]);
+}
+
+fn wrapBuiltin_file_get_contents(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initBool(false);
+    const opt2 = if (args.len >= 3) args[2] else Value.initNull();
+    const opt3 = if (args.len >= 4) args[3] else Value.initInt(0);
+    const opt4 = if (args.len >= 5) args[4] else Value.initNull();
+    return php_file_get_contents(args[0], opt1, opt2, opt3, opt4, allocator);
+}
+
+fn wrapBuiltin_file_put_contents(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const opt2 = if (args.len >= 3) args[2] else Value.initInt(0);
+    const opt3 = if (args.len >= 4) args[3] else Value.initNull();
+    return php_file_put_contents(args[0], args[1], opt2, opt3, allocator);
+}
+
+fn wrapBuiltin_fileperms(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_fileperms(args[0], allocator);
+}
+
+fn wrapBuiltin_filesize(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_filesize(args[0]);
+}
+
+fn wrapBuiltin_filetype(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_filetype(args[0], allocator);
+}
+
+fn wrapBuiltin_flock(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_flock(args[0], args[1]);
+}
+
+fn wrapBuiltin_fnmatch(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_fnmatch(args[0], args[1]);
+}
+
+fn wrapBuiltin_fopen(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_fopen(args[0], args[1], allocator);
+}
+
+fn wrapBuiltin_fpassthru(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_fpassthru(args[0]);
+}
+
+fn wrapBuiltin_fputcsv(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const opt2 = if (args.len >= 3) args[2] else Value.initNull();
+    const opt3 = if (args.len >= 4) args[3] else Value.initNull();
+    const opt4 = if (args.len >= 5) args[4] else Value.initNull();
+    const opt5 = if (args.len >= 6) args[5] else Value.initNull();
+    return php_fputcsv(args[0], args[1], opt2, opt3, opt4, opt5, allocator);
+}
+
+fn wrapBuiltin_fread(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_fread(args[0], args[1], allocator);
+}
+
+fn wrapBuiltin_fseek(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const opt2 = if (args.len >= 3) args[2] else Value.initInt(0);
+    return php_fseek(args[0], args[1], opt2);
+}
+
+fn wrapBuiltin_fstat(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_fstat(args[0], allocator);
+}
+
+fn wrapBuiltin_fsync(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_fsync(args[0]);
+}
+
+fn wrapBuiltin_ftell(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_ftell(args[0]);
+}
+
+fn wrapBuiltin_ftruncate(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_ftruncate(args[0], args[1]);
+}
+
+fn wrapBuiltin_fwrite(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_fwrite(args[0], args[1], allocator);
+}
+
+fn wrapBuiltin_getcwd(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = args;
+    return php_getcwd(allocator);
+}
+
+fn wrapBuiltin_glob(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_glob(args[0], allocator);
+}
+
+fn wrapBuiltin_is_dir(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_is_dir(args[0]);
+}
+
+fn wrapBuiltin_is_file(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_is_file(args[0]);
+}
+
+fn wrapBuiltin_is_link(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_is_link(args[0]);
+}
+
+fn wrapBuiltin_is_readable(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_is_readable(args[0]);
+}
+
+fn wrapBuiltin_is_writable(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_is_writable(args[0]);
+}
+
+fn wrapBuiltin_lstat(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_lstat(args[0], allocator);
+}
+
+fn wrapBuiltin_mkdir(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initNull();
+    const opt2 = if (args.len >= 3) args[2] else Value.initBool(false);
+    return php_mkdir(args[0], opt1, opt2);
+}
+
+fn wrapBuiltin_opendir(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initNull();
+    return php_opendir(args[0], opt1, allocator);
+}
+
+fn wrapBuiltin_pathinfo(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initNull();
+    return php_pathinfo(args[0], opt1, allocator);
+}
+
+fn wrapBuiltin_readdir(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    const opt0 = if (args.len >= 1) args[0] else Value.initNull();
+    return php_readdir(opt0, allocator);
+}
+
+fn wrapBuiltin_readfile(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_readfile(args[0], allocator);
+}
+
+fn wrapBuiltin_readlink(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_readlink(args[0], allocator);
+}
+
+fn wrapBuiltin_realpath(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_realpath(args[0], allocator);
+}
+
+fn wrapBuiltin_rename(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_rename(args[0], args[1]);
+}
+
+fn wrapBuiltin_rewind(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_rewind(args[0]);
+}
+
+fn wrapBuiltin_rewinddir(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    const opt0 = if (args.len >= 1) args[0] else Value.initNull();
+    return php_rewinddir(opt0);
+}
+
+fn wrapBuiltin_rmdir(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_rmdir(args[0]);
+}
+
+fn wrapBuiltin_scandir(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_scandir(args[0], allocator);
+}
+
+fn wrapBuiltin_stat(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_stat(args[0], allocator);
+}
+
+fn wrapBuiltin_symlink(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_symlink(args[0], args[1]);
+}
+
+fn wrapBuiltin_sys_get_temp_dir(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = args;
+    return php_sys_get_temp_dir(allocator);
+}
+
+fn wrapBuiltin_tempnam(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_tempnam(args[0], args[1], allocator);
+}
+
+fn wrapBuiltin_touch(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_touch(args[0]);
+}
+
+fn wrapBuiltin_umask(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    const opt0 = if (args.len >= 1) args[0] else Value.initNull();
+    return php_umask(opt0);
+}
+
+fn wrapBuiltin_unlink(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_unlink(args[0]);
+}
+
+// ★批次十七①-D 批（37 枚：进程/IPC/出口/header；pcntl/posix/sem/shmop/socket/msg 为 AOT 既有实现，登记不扩能力）。
+fn wrapBuiltin_die(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    const opt0 = if (args.len >= 1) args[0] else Value.initNull();
+    // php_exit 是 !noreturn：try 传播错误支，正常支永不返回（错误联合载荷 noreturn 不能当 Value return）
+    try php_exit(opt0);
+    unreachable;
+}
+
+fn wrapBuiltin_exit(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    const opt0 = if (args.len >= 1) args[0] else Value.initNull();
+    // php_exit 是 !noreturn：try 传播错误支，正常支永不返回（错误联合载荷 noreturn 不能当 Value return）
+    try php_exit(opt0);
+    unreachable;
+}
+
+fn wrapBuiltin_escapeshellarg(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_escapeshellarg(args[0], allocator);
+}
+
+fn wrapBuiltin_escapeshellcmd(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_escapeshellcmd(args[0], allocator);
+}
+
+fn wrapBuiltin_ftok(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_ftok(args[0], args[1], allocator);
+}
+
+fn wrapBuiltin_gc_enabled(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    _ = args;
+    return php_gc_enabled();
+}
+
+fn wrapBuiltin_gethostbyaddr(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_gethostbyaddr(args[0], allocator);
+}
+
+fn wrapBuiltin_getmygid(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    _ = args;
+    return php_getmygid();
+}
+
+fn wrapBuiltin_getmypid(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    _ = args;
+    return php_getmypid();
+}
+
+fn wrapBuiltin_header(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initBool(true);
+    const opt2 = if (args.len >= 3) args[2] else Value.initNull();
+    return php_header(args[0], opt1, opt2);
+}
+
+fn wrapBuiltin_headers_list(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = args;
+    return php_headers_list(allocator);
+}
+
+fn wrapBuiltin_http_response_code(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    const opt0 = if (args.len >= 1) args[0] else Value.initNull();
+    return php_http_response_code(opt0);
+}
+
+fn wrapBuiltin_msg_get_queue(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_msg_get_queue(args[0], allocator);
+}
+
+fn wrapBuiltin_msg_remove_queue(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_msg_remove_queue(args[0]);
+}
+
+fn wrapBuiltin_pcntl_alarm(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_pcntl_alarm(args[0]);
+}
+
+fn wrapBuiltin_pcntl_fork(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    _ = args;
+    return php_pcntl_fork();
+}
+
+fn wrapBuiltin_pcntl_signal(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_pcntl_signal(args[0], args[1], allocator);
+}
+
+fn wrapBuiltin_pcntl_signal_dispatch(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = args;
+    return php_pcntl_signal_dispatch(allocator);
+}
+
+fn wrapBuiltin_pcntl_sigprocmask(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_pcntl_sigprocmask(args[0], args[1], allocator);
+}
+
+fn wrapBuiltin_pcntl_wait(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_pcntl_wait(args[0], allocator);
+}
+
+fn wrapBuiltin_pcntl_waitpid(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_pcntl_waitpid(args[0], args[1], allocator);
+}
+
+fn wrapBuiltin_pcntl_wexitstatus(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_pcntl_wexitstatus(args[0]);
+}
+
+fn wrapBuiltin_php_sapi_name(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = args;
+    return php_sapi_name(allocator);
+}
+
+fn wrapBuiltin_php_uname(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = args;
+    return php_uname(allocator);
+}
+
+fn wrapBuiltin_phpversion(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = args;
+    return php_phpversion(allocator);
+}
+
+fn wrapBuiltin_posix_getpid(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    _ = args;
+    return php_posix_getpid();
+}
+
+fn wrapBuiltin_posix_kill(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_posix_kill(args[0], args[1]);
+}
+
+fn wrapBuiltin_posix_mkfifo(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_posix_mkfifo(args[0], args[1], allocator);
+}
+
+fn wrapBuiltin_sem_get(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const opt1 = if (args.len >= 2) args[1] else Value.initInt(1);
+    return php_sem_get(args[0], opt1, allocator);
+}
+
+fn wrapBuiltin_sem_remove(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_sem_remove(args[0]);
+}
+
+fn wrapBuiltin_shell_exec(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_shell_exec(args, allocator);
+}
+
+fn wrapBuiltin_shmop_close(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_shmop_close(args[0]);
+}
+
+fn wrapBuiltin_shmop_open(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 4) return error.InvalidArgumentCount;
+    return php_shmop_open(args[0], args[1], args[2], args[3], allocator);
+}
+
+fn wrapBuiltin_socket_close(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_socket_close(args[0]);
+}
+
+fn wrapBuiltin_socket_create_pair(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 4) return error.InvalidArgumentCount;
+    return php_socket_create_pair(args[0], args[1], args[2], args[3], allocator);
+}
+
+fn wrapBuiltin_stream_register_wrapper(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_stream_register_wrapper(args[0], args[1], allocator);
+}
+
+fn wrapBuiltin_stream_wrapper_register(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_stream_register_wrapper(args[0], args[1], allocator);
 }
 
 fn wrapBuiltin_str_ireplace(ctx: Value, args: []const Value, allocator: Allocator) !Value {
@@ -4396,6 +6901,10 @@ pub fn php_memory_get_peak_usage(args: []const Value, allocator: Allocator) !Val
 }
 
 /// shell_exec - 执行shell命令并返回完整输出
+extern "c" fn popen(command: [*:0]const u8, mode: [*:0]const u8) ?*anyopaque;
+extern "c" fn pclose(stream: ?*anyopaque) c_int;
+extern "c" fn fread(ptr: [*]u8, size: usize, nmemb: usize, stream: ?*anyopaque) usize;
+
 pub fn php_shell_exec(args: []const Value, allocator: Allocator) !Value {
     if (args.len < 1) return Value.initNull();
 
@@ -4404,19 +6913,24 @@ pub fn php_shell_exec(args: []const Value, allocator: Allocator) !Value {
 
     const cmd_str = cmd_val.asString().data;
 
-    // 执行命令
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &[_][]const u8{ "/bin/sh", "-c", cmd_str },
-        .max_output_bytes = 1024 * 1024,
-    }) catch return Value.initNull();
+    // ★批次十七①：Zig 0.17 移除 Child.run；std.process.run 在模板 getIo()（single_threaded Io）下
+    //   spawn 返回错误（直调 shell_exec 实测 NULL）。改走 libc popen/fread/pclose（与既有 extern
+    //   fork/waitpid 同族，产物链接行自带 -lc）。
+    const cmd_z = allocator.dupeSentinel(u8, cmd_str, 0) catch return Value.initNull();
+    defer allocator.free(cmd_z);
+    const pipe = popen(cmd_z.ptr, "r") orelse return Value.initNull();
+    defer _ = pclose(pipe);
 
-    defer {
-        allocator.free(result.stdout);
-        allocator.free(result.stderr);
+    var out = try std.ArrayList(u8).initCapacity(allocator, 0);
+    defer out.deinit(allocator);
+    var rbuf: [4096]u8 = undefined;
+    while (true) {
+        const n = fread(rbuf[0..].ptr, 1, rbuf.len, pipe);
+        if (n == 0) break;
+        try out.appendSlice(allocator, rbuf[0..n]);
     }
 
-    const output = try PHPString.init(allocator, result.stdout);
+    const output = try PHPString.init(allocator, out.items);
     return Value.initString(output);
 }
 
@@ -6876,6 +9390,29 @@ pub fn php_array_get_ref(arr_val: Value, key_val: Value, allocator: Allocator) !
     }
     if (!arr_resolved.isArray()) return error.InvalidArgument;
     const arr = arr_resolved.asArray();
+    return arrayElemRefInner(arr, key_val, allocator);
+}
+
+/// ★批次十五：by-ref 实参的数组元素引用（嵌套下钻形）——PHP auto-vivify 契约：
+///   中间层槽为 null/非数组 ⇒ 原地 vivify 为 []（`byref($b['new']['deep'])` 的 $b['new'] 变数组）；
+///   未定义元素不告警、静默建 null 槽。返回元素槽的稳定 Ref（装槽语义同 php_array_get_ref）。
+pub fn php_array_elem_ref_vivify(arr_val: Value, key_val: Value, allocator: Allocator) !Value {
+    var arr_resolved = arr_val;
+    if (arr_resolved.isRef()) {
+        // 中间层：Ref 槽值非数组 ⇒ vivify 为 []（写穿 cell）
+        const cell = arr_resolved.asRef();
+        if (!cell.isArray()) {
+            cell.release(allocator);
+            cell.* = Value.initArray(try PHPArray.init(allocator));
+        }
+        arr_resolved = cell.*;
+    }
+    if (!arr_resolved.isArray()) return error.InvalidArgument;
+    const arr = arr_resolved.asArray();
+    return arrayElemRefInner(arr, key_val, allocator);
+}
+
+fn arrayElemRefInner(arr: *PHPArray, key_val: Value, allocator: Allocator) !Value {
 
     const key = normalizeArrayKeyFromValue(key_val);
 
@@ -7345,8 +9882,13 @@ pub fn php_invoke_callable(callback: Value, args: []const Value, allocator: Allo
         if (lookupUserFunctionCI(func_name)) |func| {
             return func(Value.initNull(), args, allocator);
         }
-        // PHP: 对不存在的函数发出 warning 并返回 false
-        return Value.initBool(false);
+        // ★批次十六①：PHP 8.5.8 实测——未定义/未登记函数的变量调用抛**可捕获** Error：
+        //   `Call to undefined function xxx()`（旧注释「warning 并返回 false」为错误描述，
+        //   PHP 8 无此行为；静默 false 会吞掉全部未登记缺口）。throwThrowable 内含
+        //   setException，生成码 hasException 通道接管；未捕获走既有未捕获通道 fatal。
+        var ubuf: [512]u8 = undefined;
+        const umsg = std.fmt.bufPrint(&ubuf, "Call to undefined function {s}()", .{func_name}) catch "Call to undefined function";
+        return try throwThrowable("Error", umsg, allocator);
     }
     if (actual_cb.isArray()) {
         const arr = actual_cb.asArray();
@@ -7395,9 +9937,19 @@ pub fn php_args_append_spread(dest: Value, src: Value, allocator: Allocator) !Va
     defer _ = php_array_iter_free(iter_val, allocator) catch {};
 
     while ((try php_array_iter_valid(iter_val)).toBool()) {
+        // ★批次十七②：字符串键 ⇒ 命名实参，键保留进参数包（PHP 8.1+ 展开语义）；
+        //   整数键按位置顺序追加（键值本身丢弃，与 PHP 位置铺开一致）。
+        const key_val = try php_array_iter_key(iter_val, allocator);
+        defer key_val.release(allocator);
         const value = try php_array_iter_value(iter_val);
         defer value.release(allocator);
-        try dest_arr.push(allocator, value);
+        if (key_val.isString()) {
+            const ks = key_val.asString();
+            _ = ks.retain();
+            try dest_arr.set(allocator, .{ .string = ks }, value);
+        } else {
+            try dest_arr.push(allocator, value);
+        }
 
         const next_iter = try php_array_iter_next(iter_val);
         next_iter.release(allocator);
@@ -7445,6 +9997,59 @@ pub fn php_method_call_precheck(obj_val: Value, method_name_val: Value, nullsafe
     return throwThrowable("Error", msg, allocator);
 }
 
+/// ★批次十七②：命名实参包信标类名（未注册 ⇒ 用户态 `new` 不到，不可伪造碰撞）。
+///   展开（...）里的字符串键在 PHP 8.1+ 是命名实参；调用 ABI 是 `[]const Value` 切片（不带键），
+///   命名包只能以信标对象携带穿过切片通道，被调方变参收集器拆信标并保键合并。
+const NAMED_PACK_CLASS = "Zig\\NamedArgsPack";
+
+/// 把「命名实参包」（关联数组）包成信标对象
+pub fn php_named_pack(pack: Value, allocator: Allocator) !Value {
+    const obj = try PHPObject.init(allocator, NAMED_PACK_CLASS);
+    const v = Value_initObject(obj);
+    try obj.setProperty("pack", pack);
+    return v;
+}
+
+/// 拆信标：是命名包 ⇒ 返回包数组；否则 null
+pub fn php_namedPackUnwrap(v: Value) ?Value {
+    if (!Value_isObject(v)) return null;
+    const obj = Value_asObject(v);
+    if (!std.mem.eql(u8, obj.class_name, NAMED_PACK_CLASS)) return null;
+    return obj.getProperty("pack");
+}
+
+/// 命名包并入变参收集数组：字符串键保留，整数键防御性位置追加
+pub fn php_namedPackMergeInto(dest: *PHPArray, pack: Value, allocator: Allocator) !void {
+    if (!pack.isArray()) return;
+    const arr = pack.asArray();
+    var it = arr.elements.iterator();
+    while (it.next()) |entry| {
+        switch (entry.key_ptr.*) {
+            .integer => try dest.push(allocator, entry.value_ptr.*),
+            .string => |ks| {
+                _ = ks.retain();
+                try dest.set(allocator, .{ .string = ks }, entry.value_ptr.*);
+            },
+        }
+    }
+}
+
+/// ★批次十八①：直调命名实参重复填充（PHP 8.5.8 实测措辞；发射点在实参全部求值后、调用前）
+pub fn php_throw_named_overwrite(name: Value) !Value {
+    const n = if (name.isString()) name.asString().data else "";
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "Named parameter ${s} overwrites previous argument", .{n}) catch "Named parameter overwrites previous argument";
+    return throwThrowable("Error", msg, runtime_allocator);
+}
+
+/// ★批次十八①：直调命名实参未知名且无变参出口（PHP 8.5.8 实测措辞）
+pub fn php_throw_unknown_named(name: Value) !Value {
+    const n = if (name.isString()) name.asString().data else "";
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "Unknown named parameter ${s}", .{n}) catch "Unknown named parameter";
+    return throwThrowable("Error", msg, runtime_allocator);
+}
+
 pub fn php_invoke_callable_args_array(callback: Value, args_array: Value, allocator: Allocator) !Value {
     if (!args_array.isArray()) {
         // 常规入口由 php_call_user_func_array 先审查（带函数专有措辞）；此处兜内部调用方。
@@ -7452,6 +10057,9 @@ pub fn php_invoke_callable_args_array(callback: Value, args_array: Value, alloca
     }
 
     const arr = args_array.asArray();
+    // ★批次十七②：包含字符串键 ⇒ 命名实参通道（PHP 8.1+ 展开/call_user_func_array 语义）
+    if (arr.hasStringKeys()) return php_invoke_callable_named_pack(callback, arr, allocator);
+
     const max_count: usize = @intCast(arr.next_index);
     const tmp_args = try allocator.alloc(Value, max_count);
     defer allocator.free(tmp_args);
@@ -7466,6 +10074,142 @@ pub fn php_invoke_callable_args_array(callback: Value, args_array: Value, alloca
         }
     }
     return php_invoke_callable(callback, tmp_args[0..used], allocator);
+}
+
+/// ★批次十七②：命名实参绑定器（PHP 8.5.8 实测语义）。
+///   规则：位置值按序填声明形参 → 命名项按形参名绑定（重复填充报
+///   `Named parameter $x overwrites previous argument`）→ 未知名变参收集（保字符串键，
+///   经信标对象过切片通道）/ 非变参报 `Unknown named parameter $x`。
+///   内建函数与本族方法（"Class::m"/数组形回调）无运行期形参名表 ⇒ 命名项显式抛
+///   `Unknown named parameter`（PHP 对内建按名绑定，此为本族能力边界的**响亮**口径，登记在案）。
+fn php_invoke_callable_named_pack(callback: Value, arr: *PHPArray, allocator: Allocator) !Value {
+    // 1) 切分：位置值（整数键按出现序）与命名项（字符串键按出现序）
+    var positional = std.ArrayListUnmanaged(Value).empty;
+    defer positional.deinit(allocator);
+    var named_keys = std.ArrayListUnmanaged(*PHPString).empty;
+    defer named_keys.deinit(allocator);
+    var named_vals = std.ArrayListUnmanaged(Value).empty;
+    defer named_vals.deinit(allocator);
+
+    var it = arr.elements.iterator();
+    while (it.next()) |entry| {
+        switch (entry.key_ptr.*) {
+            .integer => try positional.append(allocator, entry.value_ptr.*),
+            .string => |ks| {
+                try named_keys.append(allocator, ks);
+                try named_vals.append(allocator, entry.value_ptr.*);
+            },
+        }
+    }
+
+    // 2) 取被调形参元数据（用户函数经注册表 CI 查；闭包自带同构元数据）
+    var param_names: []const []const u8 = &.{};
+    var variadic_index: u16 = 0xFFFF;
+    var resolvable = false;
+    if (callback.isString()) {
+        const name = callback.asString().data;
+        if (std.mem.indexOf(u8, name, "::") == null) {
+            if (lookupUserFunctionCI(name) != null) {
+                if (function_meta_registry) |*reg| {
+                    var reg_it = reg.iterator();
+                    while (reg_it.next()) |e| {
+                        if (std.ascii.eqlIgnoreCase(e.key_ptr.*, name)) {
+                            param_names = e.value_ptr.param_names;
+                            variadic_index = e.value_ptr.variadic_index;
+                            resolvable = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            // 未知名不在用户表 ⇒ 可能是内建/静态方法/未知——统一走下方 !resolvable 响亮报错
+        }
+    } else if (callback.isFunction()) {
+        const cl = callback.asFunction();
+        param_names = cl.param_names;
+        variadic_index = cl.variadic_index;
+        resolvable = true;
+    }
+
+    if (!resolvable) {
+        // 内建/静态方法/数组形回调/未知：有命名项 ⇒ 响亮报错（PHP 对内建按名绑定，本族暂无边名表）
+        if (named_keys.items.len > 0) {
+            var buf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "Unknown named parameter ${s}", .{named_keys.items[0].data}) catch "Unknown named parameter";
+            return try throwThrowable("Error", msg, allocator);
+        }
+        // 纯位置（理论到不了：hasStringKeys 已保证有命名项）兜底走原通道
+        return php_invoke_callable(callback, positional.items, allocator);
+    }
+
+    // 3) 绑定：声明形参槽位 + 变参包
+    const n_declared = if (variadic_index != 0xFFFF) variadic_index else @as(u16, @intCast(param_names.len));
+    var slots = try allocator.alloc(Value, n_declared);
+    defer allocator.free(slots);
+    var filled = try allocator.alloc(bool, n_declared);
+    defer allocator.free(filled);
+    for (slots, 0..) |*s, idx| {
+        s.* = Value.initMissing();
+        filled[idx] = false;
+    }
+
+    var extra_positional = std.ArrayListUnmanaged(Value).empty;
+    defer extra_positional.deinit(allocator);
+    var pack: ?Value = null; // 变参命名包（懒建）
+    defer if (pack) |p| p.release(allocator);
+
+    var pi: u16 = 0;
+    for (positional.items) |v| {
+        if (pi < n_declared) {
+            slots[pi] = v;
+            filled[pi] = true;
+        } else {
+            try extra_positional.append(allocator, v);
+        }
+        pi += 1;
+    }
+
+    for (named_keys.items, named_vals.items) |nk, nv| {
+        const name = nk.data;
+        var hit: ?u16 = null;
+        for (param_names[0..n_declared], 0..) |pn, idx| {
+            if (std.mem.eql(u8, pn, name)) {
+                hit = @intCast(idx);
+                break;
+            }
+        }
+        if (hit) |hi| {
+            if (filled[hi]) {
+                var buf: [256]u8 = undefined;
+                const msg = std.fmt.bufPrint(&buf, "Named parameter ${s} overwrites previous argument", .{name}) catch "Named parameter overwrites previous argument";
+                return try throwThrowable("Error", msg, allocator);
+            }
+            slots[hi] = nv;
+            filled[hi] = true;
+        } else if (variadic_index != 0xFFFF) {
+            if (pack == null) pack = Value.initArray(try PHPArray.init(allocator));
+            _ = nk.retain();
+            try pack.?.asArray().set(allocator, .{ .string = nk }, nv);
+        } else {
+            var buf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "Unknown named parameter ${s}", .{name}) catch "Unknown named parameter";
+            return try throwThrowable("Error", msg, allocator);
+        }
+    }
+
+    // 4) 组装最终切片：声明槽位（未填给 missing 哨兵）+ 位置余量 + 命名包信标（变参收集器拆并）
+    var final_args = std.ArrayListUnmanaged(Value).empty;
+    defer final_args.deinit(allocator);
+    try final_args.appendSlice(allocator, slots);
+    try final_args.appendSlice(allocator, extra_positional.items);
+    // 信标必须活到调用返回——defer 挂函数级（挂 if 块级会在调用前就 release，use-after-free）
+    var marker_opt: ?Value = null;
+    defer if (marker_opt) |m| m.release(allocator);
+    if (pack) |p| {
+        marker_opt = try php_named_pack(p, allocator);
+        try final_args.append(allocator, marker_opt.?);
+    }
+    return php_invoke_callable(callback, final_args.items, allocator);
 }
 
 /// Closure::bind / $closure->bindTo — 创建新闭包并绑定 $this 和作用域
@@ -15077,7 +17821,8 @@ pub fn php_strtr(str_val: Value, from_val: Value, to_val: Value, allocator: Allo
         while (i < subject.data.len) {
             var matched = false;
             // 遍历数组中的所有键值对
-            var iter = arr.iterator();
+            // ★批次十六③：PHPArray 无 .iterator()（门径是 .elements.iterator()）——数组形 strtr 此前永不可达，登记后 Zig 懒分析暴露。
+            var iter = arr.elements.iterator();
             while (iter.next()) |entry| {
                 const key = entry.key_ptr.*;
                 const val = entry.value_ptr.*;
@@ -16343,7 +19088,9 @@ fn pregFreeStringList(list: *std.ArrayList([]const u8), allocator: Allocator) vo
     list.deinit(allocator);
 }
 
-const PregOutcome = struct { data: []u8, matched: bool };
+// ★批次十五：`count`＝本次替换数（PHP preg_replace*/preg_filter 的 &$count 语义，
+//   快路径取 pcre2_substitute 返回码、手写路径取循环计数、未命中 0；调用方跨 pattern/元素累加）。
+const PregOutcome = struct { data: []u8, matched: bool, count: usize = 0 };
 
 /// ★F-165：单次处理的三态——`ok`；`pcre_error`（匹配/替换运行期错误，如坏 UTF-8）；
 ///   `fatal`（模式非法/编译失败）。**数组主题**两者都只是丢弃该元素，**标量主题**两者都整调用 NULL。
@@ -16418,7 +19165,7 @@ fn pregReplaceOnce(
 
         // ★F-165（R-259）：substitute 的返回值是**替换计数**——无匹配时为 0（实测），
         //   故 `matched` 必须用 `rc > 0`；用 `rc >= 0` 会让 preg_filter 把未命中元素当命中。
-        return .{ .ok = .{ .data = try allocator.realloc(output, output_size), .matched = rc > 0 } };
+        return .{ .ok = .{ .data = try allocator.realloc(output, output_size), .matched = rc > 0, .count = @intCast(rc) } };
     }
 
     // limit > 0 或替换串含 `$`/`\`：在原始 subject 中逐个查找匹配并手写拼接（PHP 替换语法）
@@ -16473,7 +19220,7 @@ fn pregReplaceOnce(
 
     if (replacements_done == 0) return .{ .ok = .{ .data = try allocator.dupe(u8, subject_str), .matched = false } };
 
-    return .{ .ok = .{ .data = try result_buf.toOwnedSlice(allocator), .matched = true } };
+    return .{ .ok = .{ .data = try result_buf.toOwnedSlice(allocator), .matched = true, .count = replacements_done } };
 }
 
 /// 多模式序列：替换按位置配对（缺位补 `""`；标量替换广播到全部模式），模式按序作用在上一步结果上。
@@ -16490,6 +19237,8 @@ fn pregReplaceSequence(
     errdefer allocator.free(current);
 
     var matched = false;
+    // ★批次十五：跨 pattern 累加替换计数（PHP $count 语义＝所有模式/主题元素的替换总数）
+    var total_count: usize = 0;
     for (patterns, 0..) |pat, i| {
         const repl: []const u8 = if (broadcast)
             (if (replacements.len > 0) replacements[0] else "")
@@ -16500,6 +19249,7 @@ fn pregReplaceSequence(
                 allocator.free(current);
                 current = outcome.data;
                 matched = matched or outcome.matched;
+                total_count += outcome.count;
             },
             .pcre_error => {
                 allocator.free(current);
@@ -16511,10 +19261,19 @@ fn pregReplaceSequence(
             },
         }
     }
-    return .{ .ok = .{ .data = current, .matched = matched } };
+    return .{ .ok = .{ .data = current, .matched = matched, .count = total_count } };
 }
 
-pub fn preg_replace(pattern_val: Value, replacement_val: Value, subject_val: Value, limit_val: Value, allocator: Allocator) !Value {
+pub fn preg_replace(pattern_val: Value, replacement_val: Value, subject_val: Value, limit_val: Value, count_out: Value, allocator: Allocator) !Value {
+    // ★批次十五：补 $count 形参（同批次十四⑤ preg_replace_callback 成例）——
+    //   入口即清零，defer 统一写回（所有模式 × 所有主题元素的替换总数）。
+    if (count_out.isRef()) {
+        count_out.asRef().* = Value.initInt(0);
+    }
+    var total_count: usize = 0;
+    defer if (count_out.isRef()) {
+        count_out.asRef().* = Value.initInt(@intCast(total_count));
+    };
     const pat = requirePregArgParam("preg_replace", 1, "pattern", pattern_val) orelse return Value.initNull();
     if (pat.isNull()) emitDeprecatedPassingNull("preg_replace", 1, "pattern", "array|string");
     const rep = requirePregArgParam("preg_replace", 2, "replacement", replacement_val) orelse return Value.initNull();
@@ -16551,6 +19310,7 @@ pub fn preg_replace(pattern_val: Value, replacement_val: Value, subject_val: Val
                 .pcre_error, .fatal => continue,
             };
             defer allocator.free(outcome.data);
+            total_count += outcome.count;
             const res_str = try PHPString.init(allocator, outcome.data);
             const v = Value.initString(res_str);
             defer v.release(allocator);
@@ -16574,6 +19334,7 @@ pub fn preg_replace(pattern_val: Value, replacement_val: Value, subject_val: Val
         .pcre_error, .fatal => return Value.initNull(),
     };
     defer allocator.free(outcome.data);
+    total_count += outcome.count;
     return Value.initString(try PHPString.init(allocator, outcome.data));
 }
 
@@ -16674,8 +19435,16 @@ fn pregAppendGroupRef(
 }
 
 /// preg_filter - 类似 preg_replace，但只返回匹配的元素
-/// preg_filter - 类似 preg_replace，但只返回匹配的元素
-pub fn preg_filter(pattern_val: Value, replacement_val: Value, subject_val: Value, limit_val: Value, allocator: Allocator) !Value {
+pub fn preg_filter(pattern_val: Value, replacement_val: Value, subject_val: Value, limit_val: Value, count_out: Value, allocator: Allocator) !Value {
+    // ★批次十五：补 $count 形参（同 preg_replace；preg_filter 的 $count 同样是替换总数，
+    //   与「未命中元素被丢弃」互不影响——PHP 实测口径）
+    if (count_out.isRef()) {
+        count_out.asRef().* = Value.initInt(0);
+    }
+    var total_count: usize = 0;
+    defer if (count_out.isRef()) {
+        count_out.asRef().* = Value.initInt(@intCast(total_count));
+    };
     const pat = requirePregArgParam("preg_filter", 1, "pattern", pattern_val) orelse return Value.initNull();
     if (pat.isNull()) emitDeprecatedPassingNull("preg_filter", 1, "pattern", "array|string");
     const rep = requirePregArgParam("preg_filter", 2, "replacement", replacement_val) orelse return Value.initNull();
@@ -16712,6 +19481,7 @@ pub fn preg_filter(pattern_val: Value, replacement_val: Value, subject_val: Valu
                 .pcre_error, .fatal => continue,
             };
             defer allocator.free(outcome.data);
+            total_count += outcome.count;
             // preg_filter 特性：只保留有命中的元素（未命中标量主题 ⇒ NULL）
             if (!outcome.matched) continue;
             const res_str = try PHPString.init(allocator, outcome.data);
@@ -16737,6 +19507,7 @@ pub fn preg_filter(pattern_val: Value, replacement_val: Value, subject_val: Valu
         .pcre_error, .fatal => return Value.initNull(),
     };
     defer allocator.free(outcome.data);
+    total_count += outcome.count;
     if (!outcome.matched) return Value.initNull();
     return Value.initString(try PHPString.init(allocator, outcome.data));
 }
@@ -26476,6 +29247,18 @@ pub fn php_object_get_ref(obj_val: Value, prop_name_val: Value, allocator: Alloc
     // 获取属性值指针
     const entry_ptr = obj.properties.getPtr(name) orelse blk: {
         // 属性不存在，创建一个 null 值
+        // ★批次十五：PHP 8.2+ 动态属性创建发 Deprecated（与 php_object_set :26840 同口径——
+        //   stdClass / #[AllowDynamicProperties] 豁免）。by-ref 实参 `byref($p->undef)` 的
+        //   PHP 真值＝Deprecated + 建槽（魔术方法 __get/__set 的间接修改边界未覆盖，登记）。
+        if (obj.class_meta) |meta| {
+            if (findPropertyDeclaringClass(meta, name) == null and
+                !std.mem.eql(u8, meta.name, "stdClass") and !hasAllowDynamicProperties(meta))
+            {
+                var dbuf: [256]u8 = undefined;
+                const dmsg = std.fmt.bufPrint(&dbuf, "Creation of dynamic property {s}::${s} is deprecated", .{ meta.name, name }) catch "Creation of dynamic property is deprecated";
+                emitDeprecated(dmsg);
+            }
+        }
         try obj.putProperty(name, Value.initNull());
         break :blk obj.properties.getPtr(name).?;
     };
@@ -27857,11 +30640,13 @@ fn scopeClassMatches(owner: *const ClassMeta) bool {
     return classMetaSameFamily(scope, owner);
 }
 
-pub fn php_call_static_with_ctx(ctx: Value, class_name: []const u8, method_name: []const u8, args: []const Value, allocator: Allocator) !Value {
+/// ★批次十八①：静态调用元数据解析（self/parent/static/类名 → lookup/called 二元组），
+///   从 php_call_static_with_ctx 抽出让命名数组通道复用（DRY：门禁矩阵只此一份）。
+const StaticCallMetas = struct { lookup_meta: *const ClassMeta, called_meta: *const ClassMeta };
+fn resolveStaticCallMetas(class_name: []const u8, allocator: Allocator) !StaticCallMetas {
     const lookup_meta = blk: {
         if (std.mem.eql(u8, class_name, "self")) {
             break :blk getCurrentScopeClass() orelse {
-                // F-134：必须抛 Throwable 对象；throwException 设的是字符串，catch 派发恒不命中 ⇒ 假致命。
                 return throwThrowable("Error", "Cannot access \"self\" when no class scope is active", allocator);
             };
         }
@@ -27870,12 +30655,10 @@ pub fn php_call_static_with_ctx(ctx: Value, class_name: []const u8, method_name:
                 return throwThrowable("Error", "Cannot access \"parent\" when no class scope is active", allocator);
             };
             break :blk scope.parent orelse {
-                // PHP 8.5.8 该形是编译期 Fatal（不可捕获）；AOT 侧保留运行期兜底，措辞对齐 PHP。
                 return throwThrowable("Error", "Cannot use \"parent\" when current class scope has no parent", allocator);
             };
         }
         if (std.mem.eql(u8, class_name, "static")) {
-            // static:: 回退：先查 called class，再查 scope class
             break :blk getCurrentCalledClass() orelse getCurrentScopeClass() orelse {
                 return throwThrowable("Error", "Cannot access \"static\" when no class scope is active", allocator);
             };
@@ -27892,11 +30675,17 @@ pub fn php_call_static_with_ctx(ctx: Value, class_name: []const u8, method_name:
             std.mem.eql(u8, class_name, "parent") or
             std.mem.eql(u8, class_name, "static"))
         {
-            // 与 lookup_meta 同步回退逻辑
             break :blk getCurrentCalledClass() orelse getCurrentScopeClass() orelse lookup_meta;
         }
         break :blk lookup_meta;
     };
+    return .{ .lookup_meta = lookup_meta, .called_meta = called_meta };
+}
+
+pub fn php_call_static_with_ctx(ctx: Value, class_name: []const u8, method_name: []const u8, args: []const Value, allocator: Allocator) !Value {
+    const metas = try resolveStaticCallMetas(class_name, allocator);
+    const lookup_meta = metas.lookup_meta;
+    const called_meta = metas.called_meta;
 
     // 查找方法（静态或实例方法）
     if (lookup_meta.findMethodLookup(method_name)) |lookup| {
@@ -27949,6 +30738,77 @@ pub fn php_call_static_with_ctx(ctx: Value, class_name: []const u8, method_name:
             try args_arr.push(allocator, arg);
         }
         const call_args = [_]Value{ name_val, Value.initArray(args_arr) };
+        const guard = ClassContext.init(called_meta, lookup.owner);
+        defer guard.deinit();
+        return lookup.method.func(Value.initNull(), &call_args, allocator);
+    }
+
+    return error.MethodNotFound;
+}
+
+/// ★批次十八①：静态方法命名/展开调用的数组通道（`Calc::m(...)`、`$var::m(...)` 的
+///   has_named/has_unpacking 发射目标）。纯位置数组 ⇒ 收编后回切片通道（门禁矩阵单一口径）；
+///   含字符串键 ⇒ 按 ClassMethod 形参名绑定（overwrites/Unknown 同函数口径）；
+///   未命中且具 __callStatic ⇒ 收**原始关联数组**（保字符串键，M5 真值）。
+pub fn php_call_static_args_array(class_val: Value, method_val: Value, args_array: Value, allocator: Allocator) !Value {
+    if (!class_val.isString()) return throwThrowable("Error", "Class name must be a string", allocator);
+    if (!method_val.isString()) return throwThrowable("Error", "Method name must be a string", allocator);
+    if (!args_array.isArray()) return throwUnpackTypeError(args_array, allocator);
+    const class_name = class_val.asString().data;
+    const method_name = method_val.asString().data;
+    const arr = args_array.asArray();
+    if (!arr.hasStringKeys()) {
+        const max_count: usize = @intCast(arr.next_index);
+        const tmp = try allocator.alloc(Value, max_count);
+        defer allocator.free(tmp);
+        var used: usize = 0;
+        var i: usize = 0;
+        while (i < max_count) : (i += 1) {
+            if (arr.get(.{ .integer = @intCast(i) })) |v| {
+                tmp[used] = v;
+                used += 1;
+            }
+        }
+        return php_call_static_with_ctx(Value.initNull(), class_name, method_name, tmp[0..used], allocator);
+    }
+
+    const metas = try resolveStaticCallMetas(class_name, allocator);
+    const lookup_meta = metas.lookup_meta;
+    const called_meta = metas.called_meta;
+    if (lookup_meta.findMethodLookup(method_name)) |lookup| {
+        // 非静态门禁：与切片通道同一矩阵（self/parent/static 限定 或 作用域同族）
+        if (!lookup.method.is_static) {
+            const scope_qualified = std.mem.eql(u8, class_name, "self") or
+                std.mem.eql(u8, class_name, "parent") or
+                std.mem.eql(u8, class_name, "static");
+            const legal = scope_qualified or scopeClassMatches(lookup.owner);
+            if (!legal) {
+                const msg = std.fmt.allocPrint(allocator, "Non-static method {s}::{s}() cannot be called statically", .{ lookup.owner.name, method_name }) catch return Value.initNull();
+                defer allocator.free(msg);
+                return throwThrowable("Error", msg, allocator);
+            }
+        }
+        const bind = try phpBindNamedValueArray(arr, lookup.method.param_names, methodVariadicIndex(lookup.method), allocator);
+        defer bind.deinit(allocator);
+        const guard = ClassContext.init(called_meta, lookup.owner);
+        defer guard.deinit();
+        return lookup.method.func(Value.initNull(), bind.final_args, allocator);
+    }
+
+    // Enum 内置静态方法（命名通道同序保留）
+    if (std.mem.eql(u8, method_name, "cases")) {
+        return enumCases(lookup_meta, allocator);
+    }
+
+    // __callStatic：收原始关联数组（保字符串键，M5 真值）
+    if (lookup_meta.findMethodLookup("__callStatic")) |lookup| {
+        const name_str = try PHPString.init(allocator, method_name);
+        const name_val = Value.initString(name_str);
+        defer name_val.release(allocator);
+        const arr_val = Value.initArray(arr);
+        _ = arr_val.retain();
+        defer arr_val.release(allocator);
+        const call_args = [_]Value{ name_val, arr_val };
         const guard = ClassContext.init(called_meta, lookup.owner);
         defer guard.deinit();
         return lookup.method.func(Value.initNull(), &call_args, allocator);
@@ -30154,7 +33014,8 @@ pub fn php_array_splice(arr: Value, offset: Value, length: Value, replacement: V
         const cell = arr.asRef();
         break :blk cell.*;
     } else arr;
-    if (!derefed.isArray()) return Value.initNull();
+    // ★批次十四④：非数组首参 ⇒ 可捕获 TypeError（PHP 8.5.8 实测；旧静默 null 缺口）
+    if (!derefed.isArray()) return throwArgTypeError("array_splice", 1, "array", "array", derefed, allocator);
     const php_arr = derefed.asArray();
     const n = php_arr.count();
 
@@ -30259,11 +33120,214 @@ pub fn php_array_splice(arr: Value, offset: Value, length: Value, replacement: V
     return Value.initArray(removed);
 }
 
-pub fn php_sort(arr: Value, allocator: Allocator) !Value {
-    if (!arr.isArray()) {
-        const got = valueTypeName(arr);
-        emitTypeFatalError("sort", 1, "array", got);
+/// ★批次十四③：PHP ZPP 风格「{type} given」类型词（bool⇒true/false、对象⇒类名）。
+///   PHP 8.5.8 实测：`sort(true)` ⇒ "true given"，`sort(new P)` ⇒ "P given"。
+fn zppGivenTypeName(v: Value) []const u8 {
+    const actual = if (v.isRef()) v.asRef().* else v;
+    if (actual.isNull()) return "null";
+    if (actual.isBool()) return if (actual.asBool()) "true" else "false";
+    if (actual.isInt()) return "int";
+    if (actual.isFloat()) return "float";
+    if (actual.isString()) return "string";
+    if (actual.isArray()) return "array";
+    if (Value_isObject(actual)) {
+        const obj = Value_asObject(actual);
+        if (obj.class_meta) |meta| return meta.name;
+        return "object";
     }
+    return "unknown";
+}
+
+/// ★批次十四③：可捕获 ZPP TypeError——`{fn}(): Argument #{n} (${param}) must be of type {expected}, {got} given`。
+///   替代 emitTypeFatalError 的 noreturn fatal 形：PHP 8 内建参数 TypeError 可 catch；
+///   未捕获时仍走既有未捕获通道（调用点 hasException 路由 ⇒ 无 handler ⇒ RuntimeError ⇒ main fatal）。
+fn throwArgTypeError(func_name: []const u8, arg_num: u32, param_name: []const u8, expected: []const u8, v: Value, allocator: Allocator) !Value {
+    var mbuf: [320]u8 = undefined;
+    const msg = std.fmt.bufPrint(&mbuf, "{s}(): Argument #{d} (${s}) must be of type {s}, {s} given", .{ func_name, arg_num, param_name, expected, zppGivenTypeName(v) }) catch "must be of type array";
+    return throwThrowable("TypeError", msg, allocator);
+}
+
+/// ★批次十四①：usort/uasort/uksort 比较器可调用校验（PHP 8.5.8 实测文案族，逐形对齐）：
+///   closure ⇒ 合法；对象有 __invoke ⇒ 合法（无 ⇒ "no array or string given"）；
+///   "func" / "Class::method" / [obj|class, method] 按 PHP zpp 文案分别报；
+///   其余（int/float/bool/null…）⇒ "no array or string given"。
+/// 合法 ⇒ null；非法 ⇒ 已 setException 的 TypeError（调用方直接 return，数组保持原样）。
+fn validateSortCallback(func_name: []const u8, callback: Value, allocator: Allocator) !?Value {
+    const cb = if (callback.isRef()) callback.asRef().* else callback;
+    var mbuf: [512]u8 = undefined;
+    if (cb.isFunction()) return null;
+    if (Value_isObject(cb)) {
+        const obj = Value_asObject(cb);
+        if (obj.class_meta) |meta| {
+            if (meta.findMethodLookup("__invoke") != null) return null;
+        }
+        const msg = std.fmt.bufPrint(&mbuf, "{s}(): Argument #2 ($callback) must be a valid callback, no array or string given", .{func_name}) catch "must be a valid callback";
+        return try throwThrowable("TypeError", msg, allocator);
+    }
+    if (cb.isString()) {
+        const name = cb.asString().data;
+        if (std.mem.indexOf(u8, name, "::")) |sep| {
+            const cname = name[0..sep];
+            const mname = name[sep + 2 ..];
+            const meta = findClass(cname) orelse {
+                const msg = std.fmt.bufPrint(&mbuf, "{s}(): Argument #2 ($callback) must be a valid callback, class \"{s}\" not found", .{ func_name, cname }) catch "must be a valid callback";
+                return try throwThrowable("TypeError", msg, allocator);
+            };
+            if (meta.findMethodLookup(mname) == null) {
+                const msg = std.fmt.bufPrint(&mbuf, "{s}(): Argument #2 ($callback) must be a valid callback, class {s} does not have a method \"{s}\"", .{ func_name, cname, mname }) catch "must be a valid callback";
+                return try throwThrowable("TypeError", msg, allocator);
+            }
+            return null;
+        }
+        if (lookupBuiltinFunction(name) != null or lookupUserFunctionCI(name) != null) return null;
+        const msg = std.fmt.bufPrint(&mbuf, "{s}(): Argument #2 ($callback) must be a valid callback, function \"{s}\" not found or invalid function name", .{ func_name, name }) catch "must be a valid callback";
+        return try throwThrowable("TypeError", msg, allocator);
+    }
+    if (cb.isArray()) {
+        const arr = cb.asArray();
+        if (arr.elements.count() != 2) {
+            const msg = std.fmt.bufPrint(&mbuf, "{s}(): Argument #2 ($callback) must be a valid callback, array callback must have exactly two members", .{func_name}) catch "must be a valid callback";
+            return try throwThrowable("TypeError", msg, allocator);
+        }
+        const e0 = arr.elements.get(ArrayKey{ .integer = 0 }) orelse {
+            const msg = std.fmt.bufPrint(&mbuf, "{s}(): Argument #2 ($callback) must be a valid callback, first array member is not a valid class name or object", .{func_name}) catch "must be a valid callback";
+            return try throwThrowable("TypeError", msg, allocator);
+        };
+        const e1 = arr.elements.get(ArrayKey{ .integer = 1 }) orelse {
+            const msg = std.fmt.bufPrint(&mbuf, "{s}(): Argument #2 ($callback) must be a valid callback, second array member is not a valid method", .{func_name}) catch "must be a valid callback";
+            return try throwThrowable("TypeError", msg, allocator);
+        };
+        if (!e1.isString()) {
+            const msg = std.fmt.bufPrint(&mbuf, "{s}(): Argument #2 ($callback) must be a valid callback, second array member is not a valid method", .{func_name}) catch "must be a valid callback";
+            return try throwThrowable("TypeError", msg, allocator);
+        }
+        const method = e1.asString().data;
+        if (Value_isObject(e0)) {
+            const meta = Value_asObject(e0).class_meta orelse {
+                const msg = std.fmt.bufPrint(&mbuf, "{s}(): Argument #2 ($callback) must be a valid callback, first array member is not a valid class name or object", .{func_name}) catch "must be a valid callback";
+                return try throwThrowable("TypeError", msg, allocator);
+            };
+            if (meta.findMethodLookup(method) == null) {
+                const msg = std.fmt.bufPrint(&mbuf, "{s}(): Argument #2 ($callback) must be a valid callback, class {s} does not have a method \"{s}\"", .{ func_name, meta.name, method }) catch "must be a valid callback";
+                return try throwThrowable("TypeError", msg, allocator);
+            }
+            return null;
+        }
+        if (e0.isString()) {
+            const cname = e0.asString().data;
+            const meta = findClass(cname) orelse {
+                const msg = std.fmt.bufPrint(&mbuf, "{s}(): Argument #2 ($callback) must be a valid callback, class \"{s}\" not found", .{ func_name, cname }) catch "must be a valid callback";
+                return try throwThrowable("TypeError", msg, allocator);
+            };
+            if (meta.findMethodLookup(method) == null) {
+                const msg = std.fmt.bufPrint(&mbuf, "{s}(): Argument #2 ($callback) must be a valid callback, class {s} does not have a method \"{s}\"", .{ func_name, cname, method }) catch "must be a valid callback";
+                return try throwThrowable("TypeError", msg, allocator);
+            }
+            return null;
+        }
+        const msg = std.fmt.bufPrint(&mbuf, "{s}(): Argument #2 ($callback) must be a valid callback, first array member is not a valid class name or object", .{func_name}) catch "must be a valid callback";
+        return try throwThrowable("TypeError", msg, allocator);
+    }
+    const msg = std.fmt.bufPrint(&mbuf, "{s}(): Argument #2 ($callback) must be a valid callback, no array or string given", .{func_name}) catch "must be a valid callback";
+    return try throwThrowable("TypeError", msg, allocator);
+}
+
+/// ★批次十六⑥：call_user_func/call_user_func_array 的 #1 $callback 校验（PHP 8.5.8 实测文案族）。
+///   批次十六①把 php_invoke_callable 的未知名兜底改为 Error「Call to undefined function」，
+///   但 call_user_func 入口 PHP 抛的是 **TypeError**（ZPP 校验措辞），两类不能混。
+///   形制同 validateSortCallback（Argument #2 版），本助手为 Argument #1 版并补非静态方法拦截：
+///   类串形式（"P::m"/["P","m"]）命中非静态方法 ⇒ `non-static method P::m() cannot be called statically`。
+///   合法 ⇒ null；非法 ⇒ 已 setException 的 TypeError（调用方直接 return）。
+fn validateCallableArg(func_name: []const u8, callback: Value, allocator: Allocator) !?Value {
+    const cb = if (callback.isRef()) callback.asRef().* else callback;
+    var mbuf: [512]u8 = undefined;
+    if (cb.isFunction()) return null;
+    if (Value_isObject(cb)) {
+        const obj = Value_asObject(cb);
+        if (obj.class_meta) |meta| {
+            if (meta.findMethodLookup("__invoke") != null) return null;
+        }
+        const msg = std.fmt.bufPrint(&mbuf, "{s}(): Argument #1 ($callback) must be a valid callback, no array or string given", .{func_name}) catch "must be a valid callback";
+        return try throwThrowable("TypeError", msg, allocator);
+    }
+    if (cb.isString()) {
+        const name = cb.asString().data;
+        if (std.mem.indexOf(u8, name, "::")) |sep| {
+            const cname = name[0..sep];
+            const mname = name[sep + 2 ..];
+            const meta = findClass(cname) orelse {
+                const msg = std.fmt.bufPrint(&mbuf, "{s}(): Argument #1 ($callback) must be a valid callback, class \"{s}\" not found", .{ func_name, cname }) catch "must be a valid callback";
+                return try throwThrowable("TypeError", msg, allocator);
+            };
+            const lookup = meta.findMethodLookup(mname) orelse {
+                const msg = std.fmt.bufPrint(&mbuf, "{s}(): Argument #1 ($callback) must be a valid callback, class {s} does not have a method \"{s}\"", .{ func_name, cname, mname }) catch "must be a valid callback";
+                return try throwThrowable("TypeError", msg, allocator);
+            };
+            if (!lookup.method.is_static) {
+                const msg = std.fmt.bufPrint(&mbuf, "{s}(): Argument #1 ($callback) must be a valid callback, non-static method {s}::{s}() cannot be called statically", .{ func_name, cname, mname }) catch "must be a valid callback";
+                return try throwThrowable("TypeError", msg, allocator);
+            }
+            return null;
+        }
+        if (lookupBuiltinFunction(name) != null or lookupUserFunctionCI(name) != null) return null;
+        const msg = std.fmt.bufPrint(&mbuf, "{s}(): Argument #1 ($callback) must be a valid callback, function \"{s}\" not found or invalid function name", .{ func_name, name }) catch "must be a valid callback";
+        return try throwThrowable("TypeError", msg, allocator);
+    }
+    if (cb.isArray()) {
+        const arr = cb.asArray();
+        if (arr.elements.count() != 2) {
+            const msg = std.fmt.bufPrint(&mbuf, "{s}(): Argument #1 ($callback) must be a valid callback, array callback must have exactly two members", .{func_name}) catch "must be a valid callback";
+            return try throwThrowable("TypeError", msg, allocator);
+        }
+        const e0 = arr.elements.get(ArrayKey{ .integer = 0 }) orelse {
+            const msg = std.fmt.bufPrint(&mbuf, "{s}(): Argument #1 ($callback) must be a valid callback, first array member is not a valid class name or object", .{func_name}) catch "must be a valid callback";
+            return try throwThrowable("TypeError", msg, allocator);
+        };
+        const e1 = arr.elements.get(ArrayKey{ .integer = 1 }) orelse {
+            const msg = std.fmt.bufPrint(&mbuf, "{s}(): Argument #1 ($callback) must be a valid callback, second array member is not a valid method", .{func_name}) catch "must be a valid callback";
+            return try throwThrowable("TypeError", msg, allocator);
+        };
+        if (!e1.isString()) {
+            const msg = std.fmt.bufPrint(&mbuf, "{s}(): Argument #1 ($callback) must be a valid callback, second array member is not a valid method", .{func_name}) catch "must be a valid callback";
+            return try throwThrowable("TypeError", msg, allocator);
+        }
+        const method = e1.asString().data;
+        if (Value_isObject(e0)) {
+            const meta = Value_asObject(e0).class_meta orelse {
+                const msg = std.fmt.bufPrint(&mbuf, "{s}(): Argument #1 ($callback) must be a valid callback, first array member is not a valid class name or object", .{func_name}) catch "must be a valid callback";
+                return try throwThrowable("TypeError", msg, allocator);
+            };
+            if (meta.findMethodLookup(method) == null) {
+                const msg = std.fmt.bufPrint(&mbuf, "{s}(): Argument #1 ($callback) must be a valid callback, class {s} does not have a method \"{s}\"", .{ func_name, meta.name, method }) catch "must be a valid callback";
+                return try throwThrowable("TypeError", msg, allocator);
+            }
+            return null;
+        }
+        if (e0.isString()) {
+            const cname = e0.asString().data;
+            const meta = findClass(cname) orelse {
+                const msg = std.fmt.bufPrint(&mbuf, "{s}(): Argument #1 ($callback) must be a valid callback, class \"{s}\" not found", .{ func_name, cname }) catch "must be a valid callback";
+                return try throwThrowable("TypeError", msg, allocator);
+            };
+            const lookup = meta.findMethodLookup(method) orelse {
+                const msg = std.fmt.bufPrint(&mbuf, "{s}(): Argument #1 ($callback) must be a valid callback, class {s} does not have a method \"{s}\"", .{ func_name, cname, method }) catch "must be a valid callback";
+                return try throwThrowable("TypeError", msg, allocator);
+            };
+            if (!lookup.method.is_static) {
+                const msg = std.fmt.bufPrint(&mbuf, "{s}(): Argument #1 ($callback) must be a valid callback, non-static method {s}::{s}() cannot be called statically", .{ func_name, cname, method }) catch "must be a valid callback";
+                return try throwThrowable("TypeError", msg, allocator);
+            }
+            return null;
+        }
+        const msg = std.fmt.bufPrint(&mbuf, "{s}(): Argument #1 ($callback) must be a valid callback, first array member is not a valid class name or object", .{func_name}) catch "must be a valid callback";
+        return try throwThrowable("TypeError", msg, allocator);
+    }
+    const msg = std.fmt.bufPrint(&mbuf, "{s}(): Argument #1 ($callback) must be a valid callback, no array or string given", .{func_name}) catch "must be a valid callback";
+    return try throwThrowable("TypeError", msg, allocator);
+}
+
+pub fn php_sort(arr: Value, allocator: Allocator) !Value {
+    if (!arr.isArray()) return throwArgTypeError("sort", 1, "array", "array", arr, allocator);
     const php_arr = arr.asArray();
 
     // 原地排序：直接修改 PHPArray，所有引用均可见排序结果
@@ -30291,7 +33355,7 @@ pub fn php_sort(arr: Value, allocator: Allocator) !Value {
 }
 
 pub fn php_rsort(arr: Value, allocator: Allocator) !Value {
-    if (!arr.isArray()) return Value.initBool(false);
+    if (!arr.isArray()) return throwArgTypeError("rsort", 1, "array", "array", arr, allocator);
     const php_arr = arr.asArray();
 
     // 原地排序：直接修改 PHPArray，所有引用均可见排序结果
@@ -30319,7 +33383,7 @@ pub fn php_rsort(arr: Value, allocator: Allocator) !Value {
 }
 
 pub fn php_asort(arr: Value, allocator: Allocator) !Value {
-    if (!arr.isArray()) return Value.initBool(false);
+    if (!arr.isArray()) return throwArgTypeError("asort", 1, "array", "array", arr, allocator);
     const php_arr = arr.asArray();
 
     // 原地排序：直接修改 PHPArray，所有引用均可见排序结果
@@ -30339,7 +33403,7 @@ pub fn php_asort(arr: Value, allocator: Allocator) !Value {
 }
 
 pub fn php_arsort(arr: Value, allocator: Allocator) !Value {
-    if (!arr.isArray()) return Value.initBool(false);
+    if (!arr.isArray()) return throwArgTypeError("arsort", 1, "array", "array", arr, allocator);
     const php_arr = arr.asArray();
 
     // 原地排序：直接修改 PHPArray，所有引用均可见排序结果
@@ -30359,7 +33423,7 @@ pub fn php_arsort(arr: Value, allocator: Allocator) !Value {
 }
 
 pub fn php_ksort(arr: Value, allocator: Allocator) !Value {
-    if (!arr.isArray()) return Value.initBool(false);
+    if (!arr.isArray()) return throwArgTypeError("ksort", 1, "array", "array", arr, allocator);
     const php_arr = arr.asArray();
 
     // 原地排序：直接修改 PHPArray，所有引用均可见排序结果
@@ -30379,7 +33443,7 @@ pub fn php_ksort(arr: Value, allocator: Allocator) !Value {
 }
 
 pub fn php_krsort(arr: Value, allocator: Allocator) !Value {
-    if (!arr.isArray()) return Value.initBool(false);
+    if (!arr.isArray()) return throwArgTypeError("krsort", 1, "array", "array", arr, allocator);
     const php_arr = arr.asArray();
 
     // 原地排序：直接修改 PHPArray，所有引用均可见排序结果
@@ -30515,7 +33579,8 @@ fn quickSortEntriesByKeyWithCallback(items: []KV, callback: Value, allocator: Al
 }
 
 pub fn php_usort(arr: Value, callback: Value, allocator: Allocator) !Value {
-    if (!arr.isArray()) return Value.initBool(false);
+    if (!arr.isArray()) return throwArgTypeError("usort", 1, "array", "array", arr, allocator);
+    if (try validateSortCallback("usort", callback, allocator)) |terr| return terr;
     const php_arr = arr.asArray();
 
     // 原地排序：直接修改 PHPArray，所有引用（对象属性/alloca/全局变量）均可见排序结果
@@ -30544,7 +33609,8 @@ pub fn php_usort(arr: Value, callback: Value, allocator: Allocator) !Value {
 }
 
 pub fn php_uasort(arr: Value, callback: Value, allocator: Allocator) !Value {
-    if (!arr.isArray()) return Value.initBool(false);
+    if (!arr.isArray()) return throwArgTypeError("uasort", 1, "array", "array", arr, allocator);
+    if (try validateSortCallback("uasort", callback, allocator)) |terr| return terr;
     const php_arr = arr.asArray();
 
     // 原地排序：直接修改 PHPArray，所有引用均可见排序结果
@@ -30565,7 +33631,8 @@ pub fn php_uasort(arr: Value, callback: Value, allocator: Allocator) !Value {
 }
 
 pub fn php_uksort(arr: Value, callback: Value, allocator: Allocator) !Value {
-    if (!arr.isArray()) return Value.initBool(false);
+    if (!arr.isArray()) return throwArgTypeError("uksort", 1, "array", "array", arr, allocator);
+    if (try validateSortCallback("uksort", callback, allocator)) |terr| return terr;
     const php_arr = arr.asArray();
 
     // 原地排序：直接修改 PHPArray，所有引用均可见排序结果
@@ -30628,15 +33695,56 @@ fn quickSortIndicesByValues(indices: []usize, values: []Value, allocator: Alloca
 }
 
 pub fn php_array_multisort(arrays: []const Value, allocator: Allocator) !Value {
-    if (arrays.len == 0 or !arrays[0].isArray()) return Value.initBool(false);
+    if (arrays.len == 0) return Value.initBool(false); // 0 参：维持旧口径（ArgumentCountError 属 F-41 arity 域）
+
+    // ★批次十四②：PHP 契约＝**先校验后排序**——任一参数非法 ⇒ 所有数组保持原样。
+    //   PHP 8.5.8 实测文案：非 array/flag ⇒ TypeError「Argument #N must be an array or a sort flag」
+    //   （#1 带 ($array) 段，#1 为合法 flag 值时带「that has not already been specified」后缀）；
+    //   非法 flag 值 ⇒ ValueError「Argument #N must be a valid sort flag」（#1 带 ($array) 段）；
+    //   数组尺寸不一致 ⇒ ValueError「Array sizes are inconsistent」。
+    //   合法 flag 集实测：v ∈ [0,6] ∪ [8,14]（SORT_FLAG_CASE=8 可与类型位或，8|7=15 非法）。
+    var first_count: usize = 0;
+    var first_is_array = false;
+    var mbuf: [224]u8 = undefined;
+    for (arrays, 0..) |arg, i| {
+        if (arg.isArray()) {
+            if (!first_is_array) {
+                first_count = arg.asArray().count();
+                first_is_array = true;
+            } else if (arg.asArray().count() != first_count) {
+                return throwThrowable("ValueError", "Array sizes are inconsistent", allocator);
+            }
+        } else if (arg.isInt()) {
+            const f = arg.asInt();
+            const legal = (f >= 0 and f <= 6) or (f >= 8 and f <= 14);
+            if (!legal) {
+                const msg = if (i == 0)
+                    std.fmt.bufPrint(&mbuf, "array_multisort(): Argument #1 ($array) must be a valid sort flag", .{}) catch "must be a valid sort flag"
+                else
+                    std.fmt.bufPrint(&mbuf, "array_multisort(): Argument #{d} must be a valid sort flag", .{i + 1}) catch "must be a valid sort flag";
+                return throwThrowable("ValueError", msg, allocator);
+            }
+        } else {
+            const msg = if (i == 0)
+                std.fmt.bufPrint(&mbuf, "array_multisort(): Argument #1 ($array) must be an array or a sort flag", .{}) catch "must be an array or a sort flag"
+            else
+                std.fmt.bufPrint(&mbuf, "array_multisort(): Argument #{d} must be an array or a sort flag", .{i + 1}) catch "must be an array or a sort flag";
+            return throwThrowable("TypeError", msg, allocator);
+        }
+    }
+    if (!first_is_array) {
+        // #1 是合法 flag 值（参数里没有任何数组）⇒ PHP 后缀版 TypeError
+        return throwThrowable("TypeError", "array_multisort(): Argument #1 ($array) must be an array or a sort flag that has not already been specified", allocator);
+    }
 
     // 解析参数：找到第一个数组（排序键）和排序方向
     const first_arr = arrays[0].asArray();
     const n = first_arr.count();
     var descending = false;
-    // 检查SORT_DESC(2)
+    // ★批次十四②：SORT_DESC 常量订正——PHP 常量为 SORT_ASC=4 / SORT_DESC=3
+    //   （旧硬编码 ==2 实为 SORT_STRING，DESC 永不命中，探针实测显形）
     for (arrays[1..]) |arg| {
-        if (arg.isInt() and arg.asInt() == 2) {
+        if (arg.isInt() and arg.asInt() == 3) {
             descending = true;
             break;
         }
@@ -31229,7 +34337,10 @@ pub fn php_parse_str(str: Value, result_arr: Value, allocator: Allocator) !Value
     if (!str.isString()) return Value.initNull();
 
     const query = str.asString().data;
-    const arr = if (result_arr.isArray()) result_arr.asArray() else try PHPArray.init(allocator);
+    // ★批次十五：第二参 by-ref＝**整体替换**（PHP 8.5.8 实测：旧键不残留、空串⇒空数组、
+    //   非数组原值被替换）——旧实现复用传入数组合并 ⇒ 旧键残留；非 Ref 按值形新建数组
+    //   不回写 ⇒ $out 滞留未定义。Ref 形释放旧值、直写 cell（IR ref_params 已登记）。
+    const arr = try PHPArray.init(allocator);
 
     var pairs = std.mem.splitScalar(u8, query, '&');
     while (pairs.next()) |pair| {
@@ -31247,10 +34358,17 @@ pub fn php_parse_str(str: Value, result_arr: Value, allocator: Allocator) !Value
         }
     }
 
+    if (result_arr.isRef()) {
+        const cell = result_arr.asRef();
+        cell.release(allocator);
+        cell.* = Value.initArray(arr);
+        return Value.initNull();
+    }
     if (!result_arr.isArray()) {
         return Value.initArray(arr);
     }
-    return Value.initNull();
+    // 按值传入的数组（IR 未 make_ref 的边界，如字面量实参）：替换式返回新数组
+    return Value.initArray(arr);
 }
 
 /// glob - 查找匹配模式的文件路径
@@ -31745,8 +34863,10 @@ pub fn php_gettype(val: Value, allocator: Allocator) !Value {
 /// PHP签名: settype(mixed &$var, string $type): bool
 /// 第一个参数是引用，直接修改变量的值
 pub fn php_settype(var_ref: Value, type_val: Value, allocator: Allocator) !Value {
+    // ★批次十四④：非法 $type（非字符串/未知类型名）⇒ 可捕获 ValueError
+    //   （PHP 8.5.8 实测同文案同出口；旧静默 false 缺口），变量保持原值。
     if (!type_val.isString()) {
-        return Value.initBool(false);
+        return throwThrowable("ValueError", "settype(): Argument #2 ($type) must be a valid type", allocator);
     }
 
     // 检查第一个参数是否是引用
@@ -31793,8 +34913,8 @@ pub fn php_settype(var_ref: Value, type_val: Value, allocator: Allocator) !Value
     else if (std.mem.eql(u8, type_name, "null"))
         Value.initNull()
     else
-        // 未知类型，返回 false 但不修改变量
-        return Value.initBool(false);
+        // ★批次十四④：未知类型名 ⇒ 可捕获 ValueError（变量保持原值）
+        return throwThrowable("ValueError", "settype(): Argument #2 ($type) must be a valid type", allocator);
 
     // 释放旧值，设置新值
     ptr.release(allocator);
@@ -31977,7 +35097,8 @@ pub fn php_get_loaded_extensions(allocator: Allocator) !Value {
     const arr = try PHPArray.init(allocator);
     const exts = [_][]const u8{ "Core", "standard", "date", "pcre", "json", "ctype", "mbstring", "SPL" };
     for (exts) |e| {
-        try arr.pushValue(Value.initString(try PHPString.init(allocator, e)));
+        // ★批次十七①：PHPArray 无 pushValue（门径 push/pushRaw :2842）——直调 get_loaded_extensions 此前同样编不过，登记后懒分析暴露。
+        try arr.push(allocator, Value.initString(try PHPString.init(allocator, e)));
     }
     return Value.initArray(arr);
 }
@@ -32036,7 +35157,8 @@ pub fn php_realpath(path_val: Value, allocator: Allocator) !Value {
     if (!path_val.isString()) return Value.initBool(false);
     const path = path_val.asString().data;
 
-    const c_path = try allocator.dupeSentinel(u8, path, 0, 0);
+    // ★批次十七①：dupeSentinel 门径是 3 参（:7324 等同族），旧多传一枚 0 ⇒ 直调 realpath 此前同样编不过，登记后懒分析暴露。
+    const c_path = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(c_path);
 
     var buf: [std.posix.PATH_MAX]u8 = undefined;
@@ -33649,7 +36771,8 @@ pub fn php_posix_mkfifo(
     const mode: std.posix.mode_t = @intCast(
         @max(0, mode_val.toInt()),
     );
-    const path_z = try allocator.dupeSentinel(u8, path_str.data, 0, 0);
+    // ★批次十七①：dupeSentinel 门径是 3 参（:7324 同族），旧多传一枚 0 ⇒ 直调 posix_mkfifo 此前同样编不过，登记后懒分析暴露。
+    const path_z = try allocator.dupeSentinel(u8, path_str.data, 0);
     defer allocator.free(path_z);
     const ret = mkfifo(path_z, mode);
     return Value.initBool(ret == 0);
@@ -33986,8 +37109,9 @@ pub fn php_array_find_key(arr: Value, callback: Value, allocator: Allocator) !Va
         defer result.release(allocator);
         if (result.toBool()) {
             return switch (entry.key_ptr.*) {
-                .int => |k| Value.initInt(k),
-                .string => |s| Value.initString(try PHPString.init(allocator, s)),
+                // ★批次十六③：ArrayKey 成员名是 .integer（:2324），旧写 .int 永不可达——变量表登记后 Zig 懒分析才暴露；直调 array_find_key 此前同样编不过。
+                .integer => |k| Value.initInt(k),
+                .string => |s| Value.initString(try PHPString.init(allocator, s.data)),
             };
         }
     }
@@ -34150,7 +37274,10 @@ fn php_array_walk_recursive_inner(arr: *PHPArray, callback: Value, userdata: Val
         };
 
         var args_buf: [3]Value = undefined;
-        args_buf[0] = value;
+        // ★批次十四⑥：叶子首参 by-ref 装槽（AOT-REF-002 R-1b 同 php_array_walk 成例）——
+        //   旧形按值拷贝传参，回调对 &$v 的赋值落不到容器槽（实测回调整体不生效）；
+        //   make_ref 后容器槽自身存 Ref，回调写回经 cell 落到容器。数组值语义不受装槽影响。
+        args_buf[0] = try make_ref(@constCast(entry.value_ptr), allocator);
         args_buf[1] = key_val;
         const arg_count: usize = if (userdata.isNull()) 2 else blk: {
             args_buf[2] = userdata;
@@ -34164,7 +37291,9 @@ fn php_array_walk_recursive_inner(arr: *PHPArray, callback: Value, userdata: Val
 
 /// @enhancement AOT超越PHP: 首参数允许数组字面量(PHP解释器报Fatal Error: could not be passed by reference)
 pub fn php_array_walk_recursive(arr: Value, callback: Value, userdata: Value, allocator: Allocator) !Value {
-    if (!arr.isArray()) return error.InvalidArgument;
+    // ★批次十四⑥：非数组首参 ⇒ 可捕获 TypeError（PHP 8.5.8 口径；旧裸 error.InvalidArgument
+    //   无挂起异常 ⇒ 顶层 Uncaught RuntimeError 文案失真）
+    if (!arr.isArray()) return throwArgTypeError("array_walk_recursive", 1, "array", "array", arr, allocator);
     try php_array_walk_recursive_inner(arr.asArray(), callback, userdata, allocator);
     return Value.initBool(true);
 }
@@ -34940,7 +38069,23 @@ pub fn php_preg_replace(pattern: Value, replacement: Value, subject: Value, allo
     return Value.initString(output);
 }
 
-pub fn php_preg_replace_callback(pattern: Value, callback: Value, subject: Value, allocator: Allocator) !Value {
+pub fn php_preg_replace_callback(pattern: Value, callback: Value, subject: Value, limit_val: Value, count_out: Value, allocator: Allocator) !Value {
+    // ★批次十四⑤：补 limit/$count 形参（旧 4 形参 ⇒ 发射器 5+1 实参 arity 编译失败）。
+    //   PHP 8.5.8 实测契约：$count 入口即清零（非法 pattern/无匹配 ⇒ 0）；
+    //   回调 throw 时保留**已处理数**（增量计数）；limit<0 ⇒ 无限，limit>=0 ⇒ 上限。
+    if (count_out.isRef()) {
+        count_out.asRef().* = Value.initInt(0);
+    }
+    const limit: usize = if (limit_val.isInt() and limit_val.asInt() >= 0) @intCast(limit_val.asInt()) else std.math.maxInt(usize);
+    var replace_count: usize = 0;
+    // 回调 throw（error 上抛）时按增量语义写回已处理数
+    errdefer if (count_out.isRef()) {
+        count_out.asRef().* = Value.initInt(@intCast(replace_count));
+    };
+    defer if (count_out.isRef()) {
+        count_out.asRef().* = Value.initInt(@intCast(replace_count));
+    };
+
     if (!pattern.isString() or !subject.isString())
         return Value.initBool(false);
 
@@ -34970,8 +38115,6 @@ pub fn php_preg_replace_callback(pattern: Value, callback: Value, subject: Value
     defer result.deinit(allocator);
 
     var subject_offset: usize = 0;
-    var replace_count: usize = 0;
-    const limit: usize = std.math.maxInt(usize);
 
     while (subject_offset < subject_str.len and replace_count < limit) {
         const rc = pcre2_match_8(
@@ -35014,7 +38157,13 @@ pub fn php_preg_replace_callback(pattern: Value, callback: Value, subject: Value
         }
 
         // 调用回调函数
-        const callback_result = try php_invoke_callable(callback, &[_]Value{Value.initArray(matches_arr)}, allocator);
+        // ★批次十四⑤：回调 throw ⇒ Style-A（挂起异常 + 返 null）交还调用点 hasException 路由——
+        //   PHP 契约＝异常传播且 $count 保留已处理数（defer 已写 Ref cell；error 上抛旧形会跳过
+        //   发射器 ref_params 异常写回块，$count 滞留旧值）。
+        const callback_result = php_invoke_callable(callback, &[_]Value{Value.initArray(matches_arr)}, allocator) catch |err| {
+            if (hasException()) return Value.initNull();
+            return err;
+        };
         defer callback_result.release(allocator);
 
         // 将回调结果添加到输出
@@ -41479,7 +44628,7 @@ pub fn php_array_rand(arr: Value, num: Value, allocator: Allocator) !Value {
 
 /// shuffle() - 随机打乱数组
 pub fn php_shuffle(arr: Value, allocator: Allocator) !Value {
-    if (!arr.isArray()) return error.InvalidArgument;
+    if (!arr.isArray()) return throwArgTypeError("shuffle", 1, "array", "array", arr, allocator);
 
     const php_arr = arr.asArray();
 
@@ -41581,7 +44730,7 @@ pub fn php_array_fill_keys(keys: Value, value: Value, allocator: Allocator) !Val
 
 /// natsort() - 用自然排序算法对数组排序
 pub fn php_natsort(arr: Value, allocator: Allocator) !Value {
-    if (!arr.isArray()) return error.InvalidArgument;
+    if (!arr.isArray()) return throwArgTypeError("natsort", 1, "array", "array", arr, allocator);
     const php_arr = arr.asArray();
 
     // 原地排序：直接修改 PHPArray，所有引用均可见排序结果
@@ -41636,7 +44785,7 @@ pub fn php_natsort(arr: Value, allocator: Allocator) !Value {
 
 /// 大小写不敏感的自然排序
 pub fn php_natcasesort(arr: Value, allocator: Allocator) !Value {
-    if (!arr.isArray()) return error.InvalidArgument;
+    if (!arr.isArray()) return throwArgTypeError("natcasesort", 1, "array", "array", arr, allocator);
     const php_arr = arr.asArray();
 
     // 原地排序：直接修改 PHPArray，所有引用均可见排序结果
@@ -42925,12 +46074,16 @@ pub fn php_call_user_func(args: []const Value, allocator: Allocator) !Value {
     if (args.len < 1) return error.InvalidArgumentCount;
 
     const callback = args[0];
+    // ★批次十六⑥：入口 ZPP 校验——无效回调抛 TypeError（PHP 实测措辞族），不到 invoke 层才炸 Error
+    if (try validateCallableArg("call_user_func", callback, allocator)) |errv| return errv;
     const call_args = args[1..];
     return php_invoke_callable(callback, call_args, allocator);
 }
 
 /// call_user_func_array - 使用数组参数调用回调函数
 pub fn php_call_user_func_array(callback: Value, args_arr: Value, allocator: Allocator) !Value {
+    // ★批次十六⑥：PHP ZPP 先验 #1 $callback 再验 #2 $args（形参序），两处措辞均实测钉死
+    if (try validateCallableArg("call_user_func_array", callback, allocator)) |errv| return errv;
     if (!args_arr.isArray()) {
         // PHP 8.5.8：TypeError `call_user_func_array(): Argument #2 ($args) must be of type array, int given`
         var buf: [256]u8 = undefined;

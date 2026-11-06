@@ -12966,3 +12966,93 @@ PHP 8.5.8 实测口径：纯 enum ⇒ **返回 false**（不抛错，last_error=
 ### 244.4 变更文件
 
 `src/aot/native_linker.zig`（dim-set 解引用 + 预扫描产 Ref + preg_replace 专列站补 count + 三处注册）；`src/aot/runtime_lib_template.zig`（PregOutcome 计数 + preg_replace/preg_filter $count + php_array_elem_ref_vivify + get_ref Deprecated + parse_str 替换式）；`src/aot/ir_generator.zig`（array_access/property ref 实参支重写）。
+
+## 245. 批次十六：变量函数调用面语义对齐 + 登记补齐 110 枚（2026-11-06，并行只读会话起手的普查落地）
+
+### 245.0 背景与普查账
+
+批次十四发现 `$fn = "rsort"; $fn($a)` 静默 `false`（`rsort` 不在 `builtin_function_map`）。普查实测：PHP 8.5.8 内建全集 2143 名（`get_defined_functions()["internal"]`），变量函数表仅 122 键（含 1 枚幽灵 `select`）。差集 2022：**A 类 328**（编译期 `builtin_map` 已实现、变量表未登记）、**B 类 1659**（核心 425 + 扩展族 1234）、**C 类 35**（宪法 §七 排除）。两表独立维护是结构性成因：直调走 `builtinInfo`（nlz `builtin_map`），变量/回调走 `lookupBuiltinFunction`（模板 `builtin_function_map`）。
+
+### 245.1 落地清单（全部 AOT-only，仅 `src/aot/runtime_lib_template.zig`）
+
+| 步 | 站点 | 变更 |
+|---|---|---|
+| ① 语义 | `php_invoke_callable` 字符串兜底 | 静默 `false` ⇒ 可捕获 `Error: Call to undefined function {name}()`（PHP 8.5.8 实测措辞；旧注释「warning 并返回 false」为错误描述）。未捕获走既有通道 rc=255 |
+| ② 已备未登记 | map 尾段 | 12 枚各 1 行：`get_resource_id`/`mysqli_connect`/`token_get_all`/9×`ob_*`（ob 宪法排除但直调已可用，登记不违宪） |
+| ③ 高频补齐 | 新增 98 枚包装器 + 98 行表项 | sort 11 / preg 4 / array 32 / str 23+`join`别名 / serial·url 9 / sprintf 3 / math 15。缺省口径全部对齐发射器特判（preg_split limit=-1/flags=0、json_encode 0/512、wordwrap 75 等）。生成器产出 + 人工逐枚核对签名，键↔包装器对齐机械校验（唯二别名：`mb_str_split→str_split` 既有、`join→implode` 新增） |
+| ④ 大小写折叠 | `lookupBuiltinFunction` | 精确未中再小写折叠（≤64 栈缓冲），与编译期 `builtinInfo` 同口径；`"STRTOUPPER"`≡`"strtoupper"` 实测绿 |
+| ⑤ 幽灵摘除 | map `select` 条目 | PHP 无 `select()`（2143 名实测无）；Go 语法 `select` 走发射器 `@"select"` 顶层函数不经本表。副作用清理：`function_exists("select")` 归位 false。实现体 `wrapBuiltin_select` 保留 |
+| ⑥ ZPP 分流 | 新增 `validateCallableArg` + 两处接线 | `call_user_func`/`call_user_func_array` 的 #1 `$callback` 预校验抛 **TypeError**（PHP 实测文案族 9 形全对齐，含 `non-static method P::m() cannot be called statically` 拦截——`validateSortCallback` 未覆盖此形） |
+
+### 245.2 ①显形裁决记录
+
+①落地后 41 格防护面（14 回调面 + 12 批次十四探针 + 15 pass 语料）：**翻红仅 2 枚**（`probe_b14_rsort_direct`/`probe_b14_sort_na`，均 A 类 sort 族变量调用），③补登记后转绿。语料中无靠静默 false 存活的脚本 ⇒ 用户裁决走「全对齐」方案（C 类不保留旧行为）。`call_user_func` 残余分歧按令分流为 ⑥（未混入对齐账）。
+
+### 245.3 挡路潜伏修复（登记后 Zig 懒分析暴露，直调同样编不过/跑错）
+
+| 站点 | 病征 | 修法 |
+|---|---|---|
+| `php_array_find_key` | `ArrayKey.int` 成员不存在（应为 `.integer`）+ 字符串臂错传 `*PHPString` 给 `PHPString.init` | 改 `.integer` + `s.data`（array_keys 同形制） |
+| `php_strtr` 数组臂 | `arr.iterator()` 不存在（门径 `.elements.iterator()`） | 改门径 |
+
+### 245.4 新发现登记（本批未修，均需独立裁决）
+
+1. **双展开传参错位**：`function v($n, ...$a) { $n(...$a); }` 单关联数组实参经双展开后到达错位（`v("count", ["a"=>1,"b"=>2])` 收到 int）。既有发射缺陷，与登记面无关（`count` 为既有登记同样复现）。
+2. `preg_grep` 不保留原键（直调同病）。
+3. `php_strip_tags` 实现体丢弃 `allowed_tags`（`_ = allowed_tags`；直调同病）。
+4. `get_resource_id` 直调恒 `int(0)`（PHP `int(5)`；变量调用与直调一致）。
+5. `array_map`/`array_filter` 等族未定义字符串回调仍走 ① 的 Error（PHP 为 `TypeError: ...(): Argument #1 ($callback) must be a valid callback or null, ...`）——与 ⑥ 同族待推广。
+6. `php_invoke_callable` 数组形回调/非标量兜底仍静默 `false`（①只改字符串支）。
+
+### 245.5 defer TODO（out 参 13 枚，变量调用 `[]const Value` 无法回写，需调用点特判，按令不扩实现）
+
+`preg_match` / `preg_match_all` / `preg_replace` / `preg_filter` / `preg_replace_callback`（`$count`）/ `str_replace`（`$count`）/ `str_ireplace` 已登记但 `$count` 同形丢失（既有）/ `parse_str`（`$result`）/ `settype` / `exec` / `system` / `sscanf` / `fscanf` / `array_multisort`（多重 by-ref）。
+
+### 245.6 验收读数（2026-11-06）
+
+- `timeout 600 zig build` rc=0（模板改动另以真编 AOT 产物逐族验证）。
+- 族探针全绿：sort 13 行全等（含 TypeError 校验文案）；preg 4 枚 SAME；array 32 枚归一化 SAME（嵌套缩进 §七.4）；serial/url 9 枚 SAME；sprintf+math 18 枚 SAME（4 行浮点末位微差 §七.6）；④⑤⑥ 综合探针 21 行全等（CI 折叠/`select` 摘除/ZPP 9 形）。
+- 41 格面板复跑：**35 SAME + 2 翻红治愈**（`rsort_direct` 全等、`sort_na` 仅剩 `object(P)#0/#1` 编号差，既有）+ 6 DIFF 全部既有解释（§七.5 栈帧 ×4、§七.7 时间戳 ×1、并行会话在途 `php_uasort` 中间态 ×1，git diff hunks 佐证非本批引入）。
+- 实测命令与探针：`/tmp/aot_census/probe_s3_*.php`、`probe_s456.php`、`panel_one.sh`（`--compile --output=/tmp/aot_census/aot_compile_<name>`，PHP ≤10s 对照，产物已清场）。
+
+## 246. 批次十七：剩余 A 类 206 枚四批收官 + `...` 展开命名实参通道（2026-11-06）
+
+### 246.0 ① 剩余 A 类批量登记（206 枚 = 328 − 批次十六 110 − defer 12 交集）
+
+口径修正：defer 清单 13 枚中 `fscanf` 实为 B 类（编译期表无此名），defer∩A 实为 12 枚；故本批目标 206（非 218）。
+
+- **形制**：规格表生成器（`/tmp/aot_census/gen_b17.php`，内建断言：规格参数数≡模板签名实数、覆盖集≡a_todo.txt 全等）+ 生成物人工复核 + 键↔包装器机械对齐校验（白名单别名仅 `mb_str_split→str_split`、`join→implode`）。
+- **缺省口径**：全部对齐发射器 `handler_params/optional_defaults` 真值表逐枚提取（如 `file_get_contents` 5 参 4 缺省、`hash_pbkdf2` 7 参 3 缺省），无 hp 者按 PHP 文档默认 + 实现体自带缺省（`chunk_split` null→76、`wordwrap` 75 须显式补，否则实现读 null 得 1）。
+- **分批实测**（每批真编产物 + PHP 8.5.8 对参）：
+  - A 批 78（纯值/日期/hash/bc/数组指针）：61 项输出全等（含 hash 值、password_hash/verify 往返、pack/unpack 往返、数组指针族）。
+  - B 批 32（类/常量/错误/输出内省）：注册面全通；3 处输出差均为实现口径（`get_resource_type` 流恒 `Unknown`、`debug_zval_dump` 直写 fd 绕过 ob），变量调用≡直调。
+  - C 批 59（文件系统/IO）：归一化 SAME；`tempnam` 不建文件（直调同病）、`sys_get_temp_dir` 恒 `/tmp`（直调同病）登记；csv 误告警实为 ② 同族缺陷，随 ② 修复消失。
+  - D 批 37（进程/IPC/出口/header）：全绿（双侧 rc=0）；`socket_create_pair`/`shmop_*` 走 AOT 自洽对照（out 参双侧不回写，与 defer 口径一致）。
+- **挡路潜伏修复**（登记后 Zig 懒分析暴露，直调同样编不过）：`php_get_loaded_extensions` 的 `pushValue`→`push`；`php_realpath`/`php_posix_mkfifo` 的 `dupeSentinel` 多参；`php_shell_exec` 的 `Child.run`（Zig 0.17 已移除）迁移至 libc `popen/fread/pclose`（`std.process.run` 在模板 single_threaded Io 下 spawn 不可用，实测 NULL）。
+- **生成器自身两处修复**：0 参+allocator 前导逗号；0 参 normal 形 `_ = args` 弃置。
+- **终态**：表键 122 → 231 → **437**（净增 316 − 幽灵 1）；PHP 内建全集覆盖 5.6% → 20.4%。B 类 0 枚混入（`comm` 复核）。
+
+### 246.1 ② `...$a` 展开传参错位修复 + 命名实参通道
+
+**根因**（三层叠加）：①发射器变参收集特判「恰好一枚且关联数组 ⇒ 直接当变参包」（nlz 旧 :24199，`hasStringKeys`）误吞**位置参**单关联数组（`v(["a"=>1])` 的 `$args` 变成本体而非 `[本体]`）；②`php_args_append_spread` 逐值 push 丢字符串键；③`php_invoke_callable_args_array` 按整数键切片再丢一次。
+
+**PHP 8.5.8 实测真值**（探针 `probe_spread_truth.php`）：位置展开顺序铺开；字符串键→命名实参（按名绑定）；混合展开保序（`{"0":1,"1":2,"k":9}`）；`f(0,...[1,2],99)` 是 PHP **编译期 Fatal**（AOT 旧静默接受，登记为差异项）；`v(...$a)` 双展开须原样转发。
+
+**修法**（切片 ABI 不动，信标携带命名包）：
+- `php_args_append_spread`：字符串键 `set` 保留进参数包。
+- 新增信标 `php_named_pack`/`php_namedPackUnwrap`/`php_namedPackMergeInto`（类名 `Zig\NamedArgsPack` 未注册，用户态不可伪造）。
+- 新增 `php_invoke_callable_named_pack` 绑定器：位置填槽（缺省给 `Value.initMissing()` 哨兵，生成码慢路径按声明默认值接管）→ 命名按名绑（覆盖已填报 `Named parameter $x overwrites previous argument`）→ 未知名变参收信标 / 非变参报 `Unknown named parameter $x`。用户函数走 `function_meta_registry` CI 查形参名；闭包自带同构元数据同法绑定；内建/静态方法/数组回调无运行期名表 ⇒ 响亮报错（PHP 对内建按名绑定，能力边界登记）。
+- 变参收集器（nlz 24188）：拆旧特判，逐枚扫描——信标拆包保键合并，普通值位置追加。
+- IR（irg）：编译期命名→变参通道包信标（:7896）；展开调用混写的显式命名实参以字符串键入包（:7542）；`named_args` 换 `StringArrayHashMap` 保插入序；变参收集条件从「命中变参名」放宽为「变参且有未消耗命名项」（`vv(x:1)` 旧静默 [null] 修复）。
+
+**实测**：S1-S5/S7-S9 八形全等 PHP；DUP/UNK 错误措辞逐字全等；`call_user_func_array` 关联数组命名绑定全等；原复现（`v("count", ["a"=>1,"b"=>2])`）由 `count(int)` 炸 → 正确得 2。信标 defer 曾挂块级作用域致 UAF（类名被覆写），已改函数级并实测。
+
+**防护面**：41 格面板与批次十六终态**逐格一致**（35 SAME + 6 DIFF 全为既有解释：§七.5 栈帧 ×4、§七.7 时间戳 ×1、并行会话在途 uasort 中间态 ×1——git diff hunks 佐证非本批）；A/B/C/D 族探针复测零新漂移；`zig build` rc=0。
+
+### 246.2 仍不覆盖清单（诚实口径）
+
+- **defer 12 枚**（out 参回写，需调用点特判）：`preg_match` `preg_match_all` `preg_replace` `preg_filter` `preg_replace_callback` `str_replace` `parse_str` `settype` `exec` `system` `sscanf` `array_multisort`。
+- **B 类核心 425**（AOT 未实现，见 `/tmp/aot_census/B_core.txt`）。
+- **B 类扩展族 1234**（mysqli/openssl/curl/intl…，项目现实范围外）。
+- **C 类宪法排除 35**。
+- **登记了但实现有缺**（不算覆盖数，直调同病）：`get_resource_id` 恒 0、`get_resource_type` 流恒 `Unknown`、`tempnam` 不建文件、`sys_get_temp_dir` 恒 `/tmp`、`filter_var` 缺 FILTER_DEFAULT(516)、`debug_zval_dump` 直写 fd、`header()` CLI 缺「headers already sent」告警、`preg_grep` 不保留原键、`strip_tags` 丢 `allowed_tags`、内建命名实参（响亮报错边）、`f($x,...$a,$y)` 位置后接展开未按 PHP 报编译期 Fatal。

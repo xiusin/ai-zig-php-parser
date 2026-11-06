@@ -5217,6 +5217,11 @@ pub const NativeLinker = struct {
         .{ "php_args_append_spread_safe", bi(.{ .runtime_name = "php_args_append_spread_safe", .needs_allocator = true }) },
         .{ "php_method_call_precheck", bi(.{ .runtime_name = "php_method_call_precheck", .needs_allocator = true }) },
         .{ "php_invoke_callable_args_array", bi(.{ .runtime_name = "php_invoke_callable_args_array", .needs_allocator = true }) },
+        // ★批次十七②：命名实参包信标（编译期命名→变参通道的包装厂；非 PHP 函数，仅内部 IR 调用）
+        .{ "php_named_pack", bi(.{ .runtime_name = "php_named_pack", .needs_allocator = true, .may_raise = false }) },
+        // ★批次十八①：直调命名实参绑定错误（overwrites / Unknown named；措辞＝PHP 8.5.8 实测）
+        .{ "php_throw_named_overwrite", bi(.{ .runtime_name = "php_throw_named_overwrite", .needs_allocator = false, .may_raise = true }) },
+        .{ "php_throw_unknown_named", bi(.{ .runtime_name = "php_throw_unknown_named", .needs_allocator = false, .may_raise = true }) },
         .{ "php_object_call_safe_args_array", bi(.{ .runtime_name = "php_object_call_safe_args_array", .needs_allocator = true }) },
         .{ "php_object_call_args_array", bi(.{ .runtime_name = "php_object_call_args_array", .needs_allocator = true }) },
         .{ "php_object_call_named_args", bi(.{ .runtime_name = "php_object_call_named_args", .needs_allocator = true }) },
@@ -5402,7 +5407,13 @@ pub const NativeLinker = struct {
         try code.appendSlice(self.allocator, "ctx: runtime.Value, args: []const runtime.Value, allocator: std.mem.Allocator) anyerror!runtime.Value {\n");
         try code.appendSlice(self.allocator, "    _ = &ctx;\n");
         try code.appendSlice(self.allocator, "    _ = allocator; // 标记为故意未使用\n");
-        try code.appendSlice(self.allocator, "    const __prev_call_args = runtime.setCurrentCallArgs(args);\n");
+        // ★批次十八①：self_name（IR 原名＝注册表键）供 setCurrentCallArgs 慢路径查默认值元数据
+        //（命名/展开调用含 missing 哨兵或信标时，自建「形参序铺开、默认值填入、信标剔除」净视图）。
+        const escaped_self_name = try self.escapeString(func.name);
+        defer self.allocator.free(escaped_self_name);
+        try code.appendSlice(self.allocator, "    const __prev_call_args = runtime.setCurrentCallArgs(args, \"");
+        try code.appendSlice(self.allocator, escaped_self_name);
+        try code.appendSlice(self.allocator, "\");\n");
         try code.appendSlice(self.allocator, "    defer runtime.restoreCurrentCallArgs(__prev_call_args);\n");
 
         // 如果是类方法，设置 ClassContext
@@ -24187,7 +24198,10 @@ pub const NativeLinker = struct {
 
                             if (is_variadic) {
                                 // 可变参数：收集从 args_index 开始的所有参数到数组
-                                // 特殊处理：如果恰好一个参数且是关联数组（命名 variadic 参数），直接使用
+                                // ★批次十七②：旧「恰好一枚且关联数组 ⇒ 直接使用」特判误吞**位置参**单关联数组
+                                //   （v(["a"=>1]) 的 $args 变成本体而非 [本体]，count 经双展开收到 int）。
+                                //   命名实参包改走信标对象（php_named_pack，类名未注册不可伪造）：
+                                //   逐枚扫描，信标拆包保键合并，普通值位置追加——位置/命名/混合三形同构。
                                 const is_alloca = if (self.current_alloca_regs) |allocas| allocas.contains(reg.id) else false;
                                 if (is_alloca) {
                                     try writer.print("    reg_{d}.* = runtime.Value.initNull();\n", .{reg.id});
@@ -24196,24 +24210,21 @@ pub const NativeLinker = struct {
                                 }
                                 try writer.print("    {{\n", .{});
                                 try writer.print("        const __va_start: usize = {d};\n", .{args_index});
-                                try writer.print("        if (args.len == __va_start + 1 and args[__va_start].isArray() and args[__va_start].asArray().hasStringKeys()) {{\n", .{});
-                                if (is_alloca) {
-                                    try writer.print("            reg_{d}.* = args[__va_start];\n", .{reg.id});
-                                } else {
-                                    try writer.print("            reg_{d} = args[__va_start];\n", .{reg.id});
-                                }
-                                try writer.print("        }} else {{\n", .{});
-                                try writer.print("            var variadic_array = try runtime.PHPArray.init(runtime.runtime_allocator);\n", .{});
-                                try writer.print("            var i: usize = __va_start;\n", .{});
-                                try writer.print("            while (i < args.len) : (i += 1) {{\n", .{});
+                                try writer.print("        var variadic_array = try runtime.PHPArray.init(runtime.runtime_allocator);\n", .{});
+                                try writer.print("        var i: usize = __va_start;\n", .{});
+                                try writer.print("        while (i < args.len) : (i += 1) {{\n", .{});
+                                try writer.print("            if (runtime.php_namedPackUnwrap(args[i])) |__np| {{\n", .{});
+                                try writer.print("                try runtime.php_namedPackMergeInto(variadic_array, __np, runtime.runtime_allocator);\n", .{});
+                                // ★批次十八①：missing 哨兵＝「未提供」（如 t3(a:1) 的变参槽），跳过不收集
+                                try writer.print("            }} else if (!args[i].isMissing()) {{\n", .{});
                                 try writer.print("                try variadic_array.push(runtime.runtime_allocator, args[i]);\n", .{});
                                 try writer.print("            }}\n", .{});
-                                if (is_alloca) {
-                                    try writer.print("            reg_{d}.* = runtime.Value.initArray(variadic_array);\n", .{reg.id});
-                                } else {
-                                    try writer.print("            reg_{d} = runtime.Value.initArray(variadic_array);\n", .{reg.id});
-                                }
                                 try writer.print("        }}\n", .{});
+                                if (is_alloca) {
+                                    try writer.print("        reg_{d}.* = runtime.Value.initArray(variadic_array);\n", .{reg.id});
+                                } else {
+                                    try writer.print("        reg_{d} = runtime.Value.initArray(variadic_array);\n", .{reg.id});
+                                }
                                 try writer.print("    }}\n", .{});
                             } else {
                                 // 普通参数 - 现在所有寄存器都是 Value 类型
