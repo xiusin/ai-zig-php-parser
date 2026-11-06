@@ -4103,32 +4103,22 @@ pub const IRGenerator = struct {
             if (var_node != null and var_node.?.tag == .variable) {
                 const var_name = self.getString(var_node.?.data.variable.name);
 
-                // 保存旧的映射
-                const old_mapping = self.getVarRegister(var_name);
-
-                // 临时移除旧映射，确保创建新寄存器
-                self.removeVarRegister(var_name);
-
-                // 为每个 catch 块创建唯一的变量名，避免寄存器重用
-                const unique_var_name = try std.fmt.allocPrint(self.allocator, "{s}_catch_{d}_{d}", .{ var_name, index, @intFromPtr(node) });
-                defer self.allocator.free(unique_var_name);
-
-                // 创建新的寄存器
-                const var_reg = try self.getOrCreateVarRegister(unique_var_name, .php_value);
-                _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = catch_reg } }, null);
-
-                // 在当前作用域中注册异常变量
-                try self.putVarRegister(var_name, var_reg);
+                // ★P2-1 修复（PHP 8.5.8 实测语义）：catch 变量＝**普通赋值重绑**，无块作用域——
+                //   catch 后变量保持异常对象（嵌套同名内层值外溢亦为 PHP 真值）。
+                //   旧实现「unique 名 alloca + putVarRegister + 块后恢复旧映射」双错：
+                //   ①main/全局变量读走 global_get 不看 SSA 映射 ⇒ 体内读到旧值（不重绑事故）；
+                //   ②块后恢复旧映射 ⇒ 与 PHP「catch 后保持」语义相反。
+                const cur_fname = if (self.current_function) |f| f.name else "__main__";
+                const is_global_wb = self.global_vars.contains(var_name) or std.mem.eql(u8, cur_fname, "__main__");
+                if (is_global_wb) {
+                    _ = try self.emit(.{ .global_set = .{ .name = var_name, .value = catch_reg } }, null);
+                } else {
+                    const var_reg = try self.getOrCreateVarRegister(var_name, .php_value);
+                    _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = catch_reg } }, null);
+                }
 
                 // Generate catch body
                 try self.generateStatement(catch_data.body);
-
-                // 恢复旧的映射
-                if (old_mapping) |old_reg| {
-                    try self.putVarRegister(var_name, old_reg);
-                } else {
-                    self.removeVarRegister(var_name);
-                }
 
                 if (!self.isBlockTerminated()) {
                     self.setTerminator(.{ .br = next_block });

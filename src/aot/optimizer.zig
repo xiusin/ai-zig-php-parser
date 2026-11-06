@@ -5364,6 +5364,17 @@ pub const IROptimizer = struct {
                 if (expr_map.get(hash)) |entry| {
                     // Check if the defining block dominates the current block
                     if (dt.dominates(entry.block, block)) {
+                        // ★P2-1 关联修复：纯常量（const_string/int/float/bool/null）**只在同块内**消重——
+                        //   跨块共享常量寄存器会在 native_linker 的按块物化/释放框架里失联
+                        //   （实测：catch 带变量 + finally + 后续 echo 共享 "\n" ⇒ 尾部实参打成空）。
+                        //   常量物化是静态表包装（零成本），同块限制无性能损失；非常量表达式维持原规则。
+                        const is_pure_const = switch (inst.op) {
+                            .const_int, .const_float, .const_bool, .const_string, .const_null, .const_missing, .const_array => true,
+                            else => false,
+                        };
+                        if (is_pure_const and entry.block != block) {
+                            // 不消重：落入下方记录分支之前直接跳过（保留本指令物化）
+                        } else {
                         // Found common subexpression - replace usage
                         if (inst.result) |result| {
                             // We can replace 'result' with 'entry.reg'

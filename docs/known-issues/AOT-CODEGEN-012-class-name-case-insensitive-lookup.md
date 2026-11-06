@@ -13212,3 +13212,66 @@ PHP 8.5.8 实测口径：纯 enum ⇒ **返回 false**（不抛错，last_error=
 - **修法**（irz `emitRefWritebackTarget` 单点）：alloca（.ptr）且非引用变量 ⇒ **原地 `store`**（与普通赋值 :5684 同口径）；已换绑为值型/引用变量维持原换绑路径（边界不扩）。
 - **复验**：f047/f152/f164 转 SAME；Q3 本批 12 探针 + 回归 5 探针全等（`probe_q3_ref`/`refassign`/`refflow`/`truth` 的残余 DIFF 全属 §250.4 数组元素引用待批族 + 警告行号宪法忽略项，逐枚钉死非本次引入）；41 格面板与 b17 基线逐格一致零转移。
 
+---
+
+## §251 Q4：B 类核心 32 枚落地（真值驱动 + 双表同口径）
+
+### 251.1 范围与机制
+
+- 队列 Q4 清单 32 枚全落：`str_rot13` `html_entity_decode` `levenshtein` `similar_text` `soundex` `metaphone` `addcslashes` `stripcslashes` `strspn` `strcspn` `strpbrk` `substr_compare` `strcoll` `vprintf` `fprintf` `str_increment` `str_decrement` `quoted_printable_encode/decode` `convert_uuencode/decode` `array_all/any/first/last` `array_change_key_case` `array_merge_recursive` `array_replace_recursive` `version_compare` `json_validate` `gc_disable` `gc_status`。
+- **双表同口径**：handler 单一实现（`runtime_lib_template.zig` Q4 区）⇒ 编译期 `builtin_map`（nlk :4737-4770，A 风格逐个传参 + `optional_defaults` 声明式补齐；B 风格变参/整切片 6 枚进名单站接球通道）+ 运行期变量调用表（rt :4213-4245 包装器全走 `q3Deref`/`q3WarnByRefValue` 的 Q3 协议）。
+- **实体表反射生成**：`scripts/gen_html_entity_table.php`（`get_html_translation_table` 四档 flags 导出，键序稳定可 diff）⇒ `src/aot/html_entity_table_generated.zig`（HTML401=253/XHTML=253/XML1=5/HTML5=1511，生成命令在文件头），随构建拷备（nlk copyOtherRuntimeFiles）。
+- **metaphone/soundex 照 PHP 8.5.8 源码移植**：metaphone.c 逐条规则（traditional=1 硬编码同 PHP 调用点）；soundex 规则经五词反推钉死（码 0=元音/H/W/Y ⇒ last=0 阻断；非字母跳过不碰 last；首字母+前 3 码补零；无字母 ⇒ "0000"）。
+- **version_compare**：段=交替数字/非数字；特殊秩 dev<alpha/a<beta/b<RC/rc<空(4)<pl/p/patch；数字段比去前导零后长度+字典序（任意精度无溢出）；**尾部规则**＝剩余侧首段定胜负（数字⇒该侧大；字母秩<4⇒该侧小、>4⇒大）——实测 1.0<1.0.0 / 1.0.0>1.0.0RC1 / 1.0<1.0.0pl1 / 1.0<1.0.0alpha（剩余首段数字优先于预发布序）全自洽。
+- **json_validate**：复用 `jsonDecodeValue` + **整文本 UTF-8 校验**（JSON 非 ASCII 合法位只在字符串字面量 ⇒ 等价口径）+ 成功重置 `last_json_error_code=NONE`、失败置 SYNTAX/DEPTH/UTF8（实测污染语义）。
+- **gc_status**：12 键结构如实取 AOT 真实 GC 状态（running=gc_enabled、runs/collected=新增全局累计 `gc_runs_total`/`gc_collected_total`、roots/threshold/buffer_size 取 cycle_roots 现量，时间计数器未埋点=0.0）。
+- **常量族补登**：ENT_*（10 枚）与 JSON_ERROR_*（12 枚）——既有缺口随探针暴露补齐。
+
+### 251.2 落地期坑（已修）
+
+| 坑 | 根因 | 修法 |
+|---|---|---|
+| convert_uuencode 45 字节行行首坍缩（'M'→'-'） | **Zig 0.17 `@min(comptime_int 45, usize)` 把结果收成窄型 u6**，n+32=76 溢出（Debug panic / ReleaseFast UB 静默错值） | `const n: usize = @min(...)` 显式宽型 |
+| quoted_printable_decode `=3D`→']' | hex 求值 `toLower(c)` 后按**原字符**分支减基（'D'→'d'-('A'-10)=45） | 抽 `q4HexVal`（统一基准），三处同病同修（qp_decode/html 数字实体/stripcslashes） |
+| needs_allocator=false 与 handler 形参错位 | strspn/strcspn/strcoll/array_first/array_last 声明不需要 allocator 但签名带着 ⇒ 生成码少一参 | handler 去 allocator 形参（真不用），wrapper 同步 |
+| version_compare 尾部方向反 | rem_side 符号表意混乱 | 重述为 side_wins（剩余侧大⇒±1）+ 预发布秩翻转 |
+| `[_]bool{false} ** 256` 语法 | Zig 0.17 `**` 空白规则 | `@splat` |
+| 内嵌 struct 方法形参 shadow | norm.f 形参 allocator 撞外层 | 改名 alloc |
+
+### 251.3 验收
+
+- 真值探针 4 枚（q4_truth_str/fmt/arr/misc）+ 边界探针（q4_edge：qp 行尾/长行/软换行、uu 44/45/46 字节、soundex/metaphone 词表 15 词、version_compare 段形 11 形、inc/dec 边界、levenshtein 256/300、addcslashes 警告形、json_validate UTF8/空白/污染）**全等 PHP 8.5.8**（arr 族残余为 var_dump 嵌套缩进，宪法 §7.4 忽略项）。
+- 双表核验：q4_edge 末段 24 枚 `直调 === call_user_func_array` 全 OK；similar_text out 参直调写回 ✓（cufa 的 `[&$p]` 形属 §250.4 数组元素引用待批族，探针已标注移除）。
+- 41 格面板：**34 SAME + 7 DIFF，与 b17 基线逐格一致、零转移**（panel_q4.txt）。
+
+---
+
+## §252 Q5：覆盖重普查（Q4 后）
+
+### 252.1 口径与读数
+
+普查脚本 `/tmp/aot_census/q5_census.php`：语料 `fuzzy_scripts_720` 全量 token 级扫描自由函数调用（排除 `->`/`::`/`function`/`new` 与语言构造），已覆盖集＝编译期 builtin_map ∪ 运行期 registry。
+
+| 类 | 口径 | 名（去重） | 调用点 | 占比 |
+|---|---|---|---|---|
+| A | 已覆盖 | **243** | **7128 / 7965** | **89.5%** |
+| B | PHP 内建未覆盖 | **0** | 0 | 0% |
+| C | 非内建未覆盖 | 217 | 837 | 10.5% |
+
+**B=0：语料触及的 PHP 内建函数全部覆盖**（批十五→Q4 连续登记的结果）。
+
+### 252.2 C 类分解（仍不覆盖清单）
+
+| 桶 | 名 | 点 | 性质 | 处置 |
+|---|---|---|---|---|
+| `gmp_*` 扩展 | 10（init/pow/mul/strval/add/mod/div_q/sub/sign/abs） | 63 | GMP 大数扩展族（非核心函数，反射表不收） | **待立项评估**（知识库 `bigdecimal` 为 bcmath 蓝本可参考；GMP 语义面更大） |
+| 用户函数/探针助手 | 207（t/show/probe/out/round_str/…） | 774 | 语料脚本自定义函数的调用点 | **非缺口**（用户函数由编译器自身编译） |
+
+### 252.3 顺手修复
+
+- `fputs` 别名缺失（C 类暴露，fwrite 同义）⇒ 双表各补一条别名条目（nlk :4663 / rt :4333）。
+
+### 252.4 下一步方向（据普查）
+
+语料内建已清零（B=0）⇒ 「内建函数覆盖」战线收口。后续覆盖面的增长点只剩：① GMP 扩展族（63 点，独立立项）；② 既有函数的**深层语义边角**（非普查口径能及——面板/回归电池驱动）。
+

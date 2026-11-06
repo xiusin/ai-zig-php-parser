@@ -4660,6 +4660,7 @@ pub const NativeLinker = struct {
         .{ "file_get_contents", .{ .runtime_name = "php_file_get_contents", .needs_allocator = true, .handler_params = 5, .optional_defaults = &.{ "runtime.Value.initBool(false)", "runtime.Value.initNull()", "runtime.Value.initInt(0)", "runtime.Value.initNull()" } } },
         .{ "fopen", .{ .runtime_name = "php_fopen", .needs_allocator = true } },
         .{ "fwrite", .{ .runtime_name = "php_fwrite", .needs_allocator = true } },
+        .{ "fputs", .{ .runtime_name = "php_fwrite", .needs_allocator = true } }, // ★Q5：fputs=fwrite 别名（普查 C 类暴露）
         .{ "fread", .{ .runtime_name = "php_fread", .needs_allocator = true } },
         .{ "fclose", .{ .runtime_name = "php_fclose", .needs_allocator = false } },
         .{ "is_resource", .{ .runtime_name = "php_is_resource", .needs_allocator = false } },
