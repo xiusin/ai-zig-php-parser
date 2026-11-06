@@ -36295,6 +36295,8 @@ pub const NativeLinker = struct {
             .{ .src = "src/aot/concurrency_runtime.zig", .dst = "concurrency_runtime.zig" },
             .{ .src = "src/aot/array_ops_shared.zig", .dst = "array_ops_shared.zig" },
             .{ .src = "src/aot/nanbox_abi.zig", .dst = "nanbox_abi.zig" },
+            // ★批次十九①：内建形参名表（反射自动导出生成，AOT 构建期随模板拷备）
+            .{ .src = "src/aot/builtin_param_table_generated.zig", .dst = "builtin_param_table_generated.zig" },
         };
 
         const io = getIo();

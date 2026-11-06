@@ -13056,3 +13056,44 @@ PHP 8.5.8 实测口径：纯 enum ⇒ **返回 false**（不抛错，last_error=
 - **B 类扩展族 1234**（mysqli/openssl/curl/intl…，项目现实范围外）。
 - **C 类宪法排除 35**。
 - **登记了但实现有缺**（不算覆盖数，直调同病）：`get_resource_id` 恒 0、`get_resource_type` 流恒 `Unknown`、`tempnam` 不建文件、`sys_get_temp_dir` 恒 `/tmp`、`filter_var` 缺 FILTER_DEFAULT(516)、`debug_zval_dump` 直写 fd、`header()` CLI 缺「headers already sent」告警、`preg_grep` 不保留原键、`strip_tags` 丢 `allowed_tags`、内建命名实参（响亮报错边）、`f($x,...$a,$y)` 位置后接展开未按 PHP 报编译期 Fatal。
+
+## 247. 批次十八：func_get_args 信标污染清零 + 方法调用命名展开接入（2026-11-06）
+
+### 247.1 ① 信标污染清零（视图下移 prologue 单点）
+
+**设计裁决**：pending-view 通道（批次十七②延伸案）只覆盖经 binder 的间接调用，而 T1-T5 全是编译期直调 ⇒ 视图构建下放**被调 prologue 单点** `setCurrentCallArgs(args, self_name)`（nlz :5407 发射带 IR 原名）：
+
+- 快路径：无 `missing` 哨兵且无 `Zig\NamedArgsPack` 信标 ⇒ 借用来调切片，**零分配零查找**（O(n_args) NaN 标签扫描）。
+- 慢路径：`buildCallArgsView` 按被调自身元数据（`function_meta_registry` / `ClassMethod` 平行数组，闭包注册同表）物化净视图——信标剔除、missing 槽位补声明默认值（工厂每次新产/折叠值借用 retain）、位置余量尾随。
+- 生命周期：`call_args_owned_stack` 与 set/restore 严格 LIFO（prologue 定式 defer，异常路径同覆盖）；嵌套命名调用实测（`probe_b18_nest.php`）全等。
+
+**两套口径分别钉真值**（PHP 8.5.8）：
+
+- `func_get_args`/`func_num_args`/`func_get_arg`：形参序铺开**含默认值填入**（T1 `t1(...[1],...["c"=>9])` ⇒ `[1,2,9]`/num=3；T2 命名乱序同径）；命名收集项不进（T3 `[1,2]`、`$rest=[2,x=>9,y=>8]`；T5 纯命名变参 `[]`/0）。
+- `debug_backtrace` 帧 args 是**另一口径**（B1-B5）：missing 剔除、信标解包**保字符串键**（B1 `[0=>1,1=>7,"x"=>9]`）、**无默认值物化**（B2 `[0=>1,"x"=>9]`）、B5 全默认无参 `[]`。⇒ 帧仍存原始切片（借用零拷贝），`php_debug_backtrace` 物化点净化，热路径零成本。
+
+**直调发射重写**（irg :7846-8046，PHP 真值口径）：位置参按形参下标直占前 N 槽（旧 skip-消耗漏检覆盖且槽位漂移）；`consumed_named` 消耗集（E1：`e1(a:5,x:9)` 的 `a` 不再重复进 `$rest`）；位置源变参 chosen 出包改普通尾随位置参（T3 根因：旧以变参名 `"rest"` 作字符串键入包）；信标永远最后追加；overwrites/Unknown 两 Error 直调面补齐（`php_throw_named_overwrite`/`php_throw_unknown_named`，发射点＝实参全求值后、调用前——实测 `t(1, a: se())` 副作用 `SE` 先行）。被调侧变参收集器补 `isMissing` 跳过（`t3(a:1)` ⇒ `$rest=[]`）。
+
+**污染面探针**（`probe_b18_faces.php`，debug_frames 构建）：`var_dump`/`print_r`/`json_encode`/`serialize`/`gettype`/`is_object`/`count`/字符串转换/`(array)` 强转 + `call_user_func_array` 关联数组命名——全等 PHP。
+
+### 247.2 ② 方法调用命名展开接入
+
+- **共享核心** `phpBindNamedArgs`（槽位填/missing 哨兵/信标包/overwrites+Unknown 两 Error 单一口径）；函数绑定器 `php_invoke_callable_named_pack` 重构为薄壳。
+- **`->`/`?->`/动态方法**：`callMethodNamed`（命中 ⇒ ClassMethod 形参名绑定；未命中 + `__call` ⇒ 收**原始关联数组**保字符串键，M4 真值）；违宪桩 `php_object_call_named_args`（「假设参数顺序正确」）摘除换真绑定；`php_object_call_(safe_)args_array` hasStringKeys 分流；irg 三站点（:7388/:7448/:8953）展开·命名保键入包。
+- **`::`（含 `$var::`/`($expr)::`）**：`php_call_static_args_array` 数组通道（纯位置回切片通道单一口径；含键经 `resolveStaticCallMetas` 抽取件复用门禁矩阵）；`__callStatic` 收原始关联包（M5 真值）；原静态面对 named_arg/unpacking_expr 节点直发生成 ⇒ **实参变 null 的深层缺口**（M2 基线 `[null]`），按真值修复。
+- **`?->` 空接收者**：短路 NULL 且实参不求值（M6，既有行为保持）。
+- **异常惯例勘误**：`throwThrowable`＝设 pending + 返回异常 Value（**非** error 返回）；非 `!Value` 返回型函数按 `setException` 持份额 + 本地 release 配平 + `error.RuntimeError` 控制流（`throwClassLinkError` 先例）。初版误判 `unreachable` ⇒ lldb 钉栈（`phpBindNamedArgs` overwrite 支 panic）后改正。
+
+**实测**：M1-M8 全等（`add(a=1,b=99)`/`mul(x=3,y=7)`/`{"p":1,"q":2}`/`__call:nope:{"k":5}`/`__callStatic:nopeS:{"k":6}`/NULL 短路/`add(a=2,b=7)`/overwrites 措辞逐字）；M9 系列（`->`/`?->`/`::` 非展开命名 + 动态类名展开命名）全等。
+
+### 247.3 顺带评估：内建形参名表自动导出（只评估不落码）
+
+**结论：可行、机械、低成本，建议 P1 立项。** 实测探针（`refl_probe.php`）：2143 枚内建**全量可反射**（2143/2143），`ReflectionParameter` 给名字/可选/变参/默认值可用性；仅 67 参 `isDefaultValueAvailable=false`（需工厂或哨兵标记）、44 变参。形态：~30 行 PHP 导 JSON → ~60 行生成器产 Zig StaticStringMap 表（先覆盖已登记 437 键即可关掉 `BLT:` 边界）；绑定侧复用 `phpBindNamedArgs`。风险：与 defer 12 枚 out 参族交叉（by-ref 命名回写未实现，须响亮拒绝）；版本钉 8.5.8。
+
+### 247.4 验收读数（2026-11-06）
+
+- `timeout 600 zig build` rc=0；debug_frames 变体构建 rc=0（bt 面专测）。
+- 探针全等 PHP 8.5.8：T1-T5（truth）/ E1-E4（edge）/ 污染面十面（faces，debug_frames）/ B1-B5（bt args）/ M1-M8（方法）/ M9 系列（非展开命名三形态+动态类名）/ 嵌套 LIFO / 批次十七 spread 族复测（spread_truth/spread/spread2/spread_iso）。
+- E5（命名跳必填 ⇒ ArgumentCountError）为 F-41 arity 域既有缺口（位置欠参同病），登记待专项；`new` 构造器命名绑定仍旧 skip-消耗路径（irg :9637 区），登记。
+- `probe_spread_extra` 的 `BLT:Unknown named parameter $string` 行为既定能力边界（探针自带注释口径），非回归。
+- 41 格面板复跑：**34 SAME + 7 DIFF，与批次十七终态逐格一致、零转移**（7 枚 DIFF 全为既有解释：§七.5 栈帧 ×4、§七.7 时间戳 ×1、并行会话在途 uasort 中间态 ×1、`sort_na` 对象编号差 ×1）

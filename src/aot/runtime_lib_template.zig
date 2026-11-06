@@ -19,6 +19,7 @@ const Allocator = std.mem.Allocator;
 const concurrency = @import("concurrency_runtime.zig");
 const array_ops_shared = @import("array_ops_shared.zig");
 const nanbox_abi = @import("nanbox_abi.zig");
+const builtin_param_table = @import("builtin_param_table_generated.zig");
 pub const profiler = @import("profiler.zig");
 pub const flamegraph = @import("flamegraph.zig");
 pub const pprof = @import("pprof.zig");
@@ -10252,7 +10253,20 @@ fn php_invoke_callable_named_pack(callback: Value, arr: *PHPArray, allocator: Al
     }
 
     if (!resolvable) {
-        // 内建/静态方法/数组形回调/未知：有命名项 ⇒ 响亮报错（PHP 对内建按名绑定，本族暂无边名表）
+        // ★批次十九①：内建函数 ⇒ 反射形参名表真绑定（K1-K17 真值；BLT 边界据实销账）
+        if (callback.isString()) {
+            const name = callback.asString().data;
+            if (std.mem.indexOf(u8, name, "::") == null) {
+                if (lookupBuiltinFunction(name) != null) {
+                    return phpInvokeBuiltinNamed(name, positional.items, named_keys.items, named_vals.items, allocator);
+                }
+                // PHP 顺序：函数解析先于命名绑定 ⇒ 用户表/内建表均无 ⇒ 交原通道报 undefined function（而非 Unknown named）
+                if (lookupUserFunctionCI(name) == null) {
+                    return php_invoke_callable(callback, positional.items, allocator);
+                }
+            }
+        }
+        // 静态方法字符串/数组形回调：有命名项 ⇒ 响亮报错（能力边界，登记在案）
         if (named_keys.items.len > 0) {
             var buf: [256]u8 = undefined;
             const msg = std.fmt.bufPrint(&buf, "Unknown named parameter ${s}", .{named_keys.items[0].data}) catch "Unknown named parameter";
@@ -10266,6 +10280,184 @@ fn php_invoke_callable_named_pack(callback: Value, arr: *PHPArray, allocator: Al
     const bind = try phpBindNamedArgs(positional.items, named_keys.items, named_vals.items, param_names, variadic_index, allocator);
     defer bind.deinit(allocator);
     return php_invoke_callable(callback, bind.final_args, allocator);
+}
+
+/// ★批次十九①：内建函数命名实参绑定（PHP 8.5.8 实测口径；形参表＝反射自动导出，禁手抄）。
+///   真值要点（probe_b19_truth*.php）：
+///   - 形参名大小写敏感（K12）、函数名 CI（表键小写，此处折叠查）；
+///   - 重复填充 ⇒ Error `Named parameter $x overwrites previous argument`（K3）；
+///   - 未知名：非变参 ⇒ Error `Unknown named parameter $x`（K2）；变参内建 ⇒
+///     ArgumentCountError `{name}() does not accept unknown named parameters`（K6/K14，变参不收命名）；
+///   - 命名指向 by-ref 形参 ⇒ 响亮 Error 边界（defer-12 写回通道不存在，不发明兜底；K7 的 PHP 行为是写回）；
+///   - 缺必填：given < required ⇒ ArgumentCountError `{name}() expects exactly R argument(s), P given`
+///     （无可选且非变参 ⇒ exactly，否则 at least；K4）；given ≥ required 但必填有洞 ⇒
+///     `{name}(): Argument #i ($name) not passed`（K5b）；
+///   - 位置超填（非变参）⇒ `expects exactly T`（无可选）/ `at most T`（K13）；变参位置溢出正常尾随（K15）；
+///   - 可选缺省：表内默认值物化（null/bool/int/float/str）；.unknown（如实标注：不可反射）⇒
+///     尾部可截断则截（包装器自带缺省接管），中段不可位置表达 ⇒ 响亮 Error 边界。
+fn phpInvokeBuiltinNamed(name: []const u8, positional: []const Value, named_keys: []const *PHPString, named_vals: []const Value, allocator: Allocator) !Value {
+    // 表键小写（K12：函数名 CI、形参名大小写敏感）——≤64 栈缓冲，同 lookupBuiltinFunction 折叠口径
+    var lbuf: [64]u8 = undefined;
+    var canon: []const u8 = name;
+    const params = builtin_param_table.table.get(name) orelse blk: {
+        if (name.len > 64) break :blk null;
+        canon = std.ascii.lowerString(&lbuf, name);
+        break :blk builtin_param_table.table.get(canon);
+    };
+    const ps = params orelse {
+        // 表全量 2143 覆盖内建全集，理论不到；防御维持登记边界
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Unknown named parameter ${s}", .{if (named_keys.len > 0) named_keys[0].data else ""}) catch "Unknown named parameter";
+        return try throwThrowable("Error", msg, allocator);
+    };
+    // 报错文案用规范名（PHP 内建名注册即小写；`STR_REPEAT()` 的措辞仍为 str_repeat()）
+    const name_c = canon;
+
+    var has_variadic = false;
+    var required: usize = 0;
+    var decl_total: usize = 0;
+    for (ps) |p| {
+        if (p.variadic) {
+            has_variadic = true;
+        } else {
+            decl_total += 1;
+            if (!p.optional) required += 1;
+        }
+    }
+
+    // 声明槽位（变参不占位）；decl_of[di] = 形参表下标
+    const slots = try allocator.alloc(Value, decl_total);
+    defer allocator.free(slots);
+    const filled = try allocator.alloc(bool, decl_total);
+    defer allocator.free(filled);
+    const decl_of = try allocator.alloc(usize, decl_total);
+    defer allocator.free(decl_of);
+    {
+        var di: usize = 0;
+        for (ps, 0..) |p, pi| {
+            if (p.variadic) continue;
+            slots[di] = Value.initMissing();
+            filled[di] = false;
+            decl_of[di] = pi;
+            di += 1;
+        }
+    }
+
+    var extra = std.ArrayListUnmanaged(Value).empty;
+    defer extra.deinit(allocator);
+    for (positional, 0..) |v, pi| {
+        if (pi < decl_total) {
+            slots[pi] = v;
+            filled[pi] = true;
+        } else {
+            try extra.append(allocator, v);
+        }
+    }
+
+    for (named_keys, named_vals) |nk, nv| {
+        const nname = nk.data;
+        var hit_di: ?usize = null;
+        var di: usize = 0;
+        for (ps) |p| {
+            if (p.variadic) continue;
+            const cur = di;
+            di += 1;
+            if (std.mem.eql(u8, p.name, nname)) {
+                hit_di = cur;
+                break;
+            }
+        }
+        if (hit_di == null) {
+            if (has_variadic) {
+                var buf: [256]u8 = undefined;
+                const msg = std.fmt.bufPrint(&buf, "{s}() does not accept unknown named parameters", .{name_c}) catch "does not accept unknown named parameters";
+                return try throwThrowable("ArgumentCountError", msg, allocator);
+            }
+            var buf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "Unknown named parameter ${s}", .{nname}) catch "Unknown named parameter";
+            return try throwThrowable("Error", msg, allocator);
+        }
+        const di2 = hit_di.?;
+        if (ps[decl_of[di2]].by_ref) {
+            // defer-12 边界：命名绑定 by-ref 形参的写回通道不存在 ⇒ 响亮报错（不静默丢写回）
+            var buf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "{s}(): named argument ${s} targets a by-reference parameter (AOT boundary: by-ref writeback unsupported)", .{ name_c, nname }) catch "by-reference named argument unsupported";
+            return try throwThrowable("Error", msg, allocator);
+        }
+        if (filled[di2]) {
+            var buf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "Named parameter ${s} overwrites previous argument", .{nname}) catch "Named parameter overwrites previous argument";
+            return try throwThrowable("Error", msg, allocator);
+        }
+        slots[di2] = nv;
+        filled[di2] = true;
+    }
+
+    const provided = positional.len + named_vals.len;
+
+    // 缺必填：given 口径＝用户实参总数（命名亦计，K4）
+    var missing_req: ?usize = null;
+    for (filled, 0..) |f, di| {
+        if (!f and !ps[decl_of[di]].optional) {
+            missing_req = di;
+            break;
+        }
+    }
+    if (missing_req) |di| {
+        if (provided < required) {
+            const word: []const u8 = if (!has_variadic and required == decl_total) "exactly" else "at least";
+            const plural: []const u8 = if (required == 1) "" else "s";
+            var buf: [320]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "{s}() expects {s} {d} argument{s}, {d} given", .{ name_c, word, required, plural, provided }) catch "expects more arguments";
+            return try throwThrowable("ArgumentCountError", msg, allocator);
+        }
+        const p = ps[decl_of[di]];
+        var buf: [320]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "{s}(): Argument #{d} (${s}) not passed", .{ name_c, di + 1, p.name }) catch "required argument not passed";
+        return try throwThrowable("ArgumentCountError", msg, allocator);
+    }
+
+    // 位置超填（非变参）：K13/K9
+    if (!has_variadic and extra.items.len > 0) {
+        const word: []const u8 = if (required == decl_total) "exactly" else "at most";
+        const plural: []const u8 = if (decl_total == 1) "" else "s";
+        var buf: [320]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "{s}() expects {s} {d} argument{s}, {d} given", .{ name_c, word, decl_total, plural, provided }) catch "expects fewer arguments";
+        return try throwThrowable("ArgumentCountError", msg, allocator);
+    }
+
+    // 可选缺省物化：尾部 unknown 截断（包装器自带缺省接管）；中段 unknown 不可位置表达 ⇒ 响亮边界
+    var final_len = decl_total;
+    while (final_len > 0 and !filled[final_len - 1] and ps[decl_of[final_len - 1]].default.kind == .unknown) final_len -= 1;
+
+    var final = std.ArrayListUnmanaged(Value).empty;
+    defer final.deinit(allocator);
+    for (0..final_len) |di| {
+        if (filled[di]) {
+            try final.append(allocator, slots[di]);
+            continue;
+        }
+        const p = ps[decl_of[di]];
+        switch (p.default.kind) {
+            .none => unreachable, // 必填洞已在上方拦截
+            .unknown => {
+                var buf: [320]u8 = undefined;
+                const msg = std.fmt.bufPrint(&buf, "{s}(): default value of ${s} is not reflectable (AOT boundary)", .{ name_c, p.name }) catch "default value not reflectable";
+                return try throwThrowable("Error", msg, allocator);
+            },
+            .null_ => try final.append(allocator, Value.initNull()),
+            .boolean => try final.append(allocator, Value.initBool(p.default.b)),
+            .int => try final.append(allocator, Value.initInt(p.default.i)),
+            .float => try final.append(allocator, Value.initFloat(p.default.f)),
+            .str => try final.append(allocator, Value.initString(try PHPString.init(allocator, p.default.s))),
+        }
+    }
+    // 变参内建：位置余量尾随（K15）
+    if (has_variadic) try final.appendSlice(allocator, extra.items);
+
+    const cb = Value.initString(try PHPString.init(allocator, canon));
+    defer cb.release(allocator);
+    return php_invoke_callable(cb, final.items, allocator);
 }
 
 /// Closure::bind / $closure->bindTo — 创建新闭包并绑定 $this 和作用域

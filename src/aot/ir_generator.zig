@@ -8064,6 +8064,36 @@ prop_name: ?[]const u8 = null,
             }
 
             args = try final_args.toOwnedSlice(self.allocator);
+        } else if (has_named) {
+            // ★批次十九①：编译期不可解析（内建/前向引用/动态名）或间接回调 + 命名实参 ⇒
+            //   运行时表绑定通道（原路径剥名按位置填 ⇒ 乱序即错填：str_repeat(times:3, string:"ab") 变 [3,"ab"]）。
+            //   运行时顺序：用户函数注册表 → 闭包元数据 → 内建形参名表 → 登记边界。
+            const callback_reg = if (indirect_callee) |r| r else blk: {
+                if (func_name.len == 0) {
+                    break :blk try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                }
+                const sid = try self.module.?.internString(func_name);
+                break :blk try self.emitWithResult(.{ .const_string = sid }, .php_value);
+            };
+            const named_arr = try self.emitWithResult(.{ .array_new = .{ .capacity = @intCast(call_data.args.len) } }, .php_array);
+            for (call_data.args) |arg_idx| {
+                const arg_node = self.getNode(arg_idx) orelse continue;
+                if (arg_node.tag == .named_arg) {
+                    const raw_name = self.getString(arg_node.data.named_arg.name);
+                    const arg_name = if (raw_name.len > 0 and raw_name[0] == '$') raw_name[1..] else raw_name;
+                    const key_id = try self.module.?.internString(arg_name);
+                    const key_reg = try self.emitWithResult(.{ .const_string = key_id }, .php_value);
+                    const val_reg = try self.generateExpression(arg_node.data.named_arg.value);
+                    _ = try self.emit(.{ .array_set = .{ .array = named_arr, .key = key_reg, .value = val_reg } }, null);
+                } else {
+                    const val_reg = try self.generateExpression(arg_idx);
+                    _ = try self.emit(.{ .array_push = .{ .array = named_arr, .value = val_reg } }, null);
+                }
+            }
+            const invoke_args = try self.allocator.alloc(Register, 2);
+            invoke_args[0] = callback_reg;
+            invoke_args[1] = named_arr;
+            return self.emitWithResult(.{ .call = .{ .func_name = "php_invoke_callable_args_array", .args = invoke_args, .return_type = .php_value } }, .php_value);
         } else {
             // 查找函数的引用参数信息
             const target_func = if (func_name.len > 0 and self.module != null)
