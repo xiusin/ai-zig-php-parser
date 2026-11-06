@@ -5227,6 +5227,10 @@ pub const NativeLinker = struct {
         // ★Q2-c：编译期直调命名面的欠参/必填洞（Value 形参版；异常值+pending 通道）
         .{ "php_arity_too_few_v", bi(.{ .runtime_name = "php_arity_too_few_v", .needs_allocator = false, .may_raise = true }) },
         .{ "php_arity_not_passed_v", bi(.{ .runtime_name = "php_arity_not_passed_v", .needs_allocator = false, .may_raise = true }) },
+        .{ "php_throw_could_not_pass_byref", bi(.{ .runtime_name = "php_throw_could_not_pass_byref", .needs_allocator = false, .may_raise = true }) },
+        // ★Q3：保 Ref 数组存/推（by-ref 写回链路）
+        .{ "php_array_set_keep_ref", bi(.{ .runtime_name = "php_array_set_keep_ref", .needs_allocator = true, .may_raise = true }) },
+        .{ "php_array_push_keep_ref", bi(.{ .runtime_name = "php_array_push_keep_ref", .needs_allocator = true, .may_raise = true }) },
         .{ "php_object_call_safe_args_array", bi(.{ .runtime_name = "php_object_call_safe_args_array", .needs_allocator = true }) },
         .{ "php_object_call_args_array", bi(.{ .runtime_name = "php_object_call_args_array", .needs_allocator = true }) },
         .{ "php_object_call_named_args", bi(.{ .runtime_name = "php_object_call_named_args", .needs_allocator = true }) },
@@ -24238,6 +24242,19 @@ pub const NativeLinker = struct {
                             // 引用参数：返回args中的指针（不解引用）
                             // AOT-REFPTR-002 修复：引用参数存储的是 *Value 指针，
                             // 不能用 writeRegAssignmentFmt（会对 alloca 生成 .* 解引用）
+                            // ★Q3：变量调用面收到普通值（非 Ref）⇒ PHP 实测警告
+                            //   `must be passed by reference, value given`（直调面实参恒为 Ref，不触发）。
+                            if (self.current_function_for_resolve) |func_warn| {
+                                if (op.index < func_warn.params.items.len) {
+                                    const wp_name = func_warn.params.items[op.index].name;
+                                    const wp_stripped = if (wp_name.len > 0 and wp_name[0] == '$') wp_name[1..] else wp_name;
+                                    const escaped_fn = try self.escapeString(func_warn.name);
+                                    defer self.allocator.free(escaped_fn);
+                                    const escaped_pn = try self.escapeString(wp_stripped);
+                                    defer self.allocator.free(escaped_pn);
+                                    try writer.print("    if (args.len > {d} and !args[{d}].isMissing() and !args[{d}].isRef()) runtime.q3WarnByRefValue(\"{s}\", {d}, \"{s}\");\n", .{ args_index, args_index, args_index, escaped_fn, args_index + 1, escaped_pn });
+                                }
+                            }
                             try writer.print("    reg_{d} = if (args.len > {d} and !args[{d}].isMissing() and args[{d}].isRef()) args[{d}].asRef() else &null_val;\n", .{ reg.id, args_index, args_index, args_index, args_index });
 
                             // 初始化对应的alloca（如果存在）
@@ -24298,7 +24315,8 @@ pub const NativeLinker = struct {
                                 try writer.print("                try runtime.php_namedPackMergeInto(variadic_array, __np, runtime.runtime_allocator);\n", .{});
                                 // ★批次十八①：missing 哨兵＝「未提供」（如 t3(a:1) 的变参槽），跳过不收集
                                 try writer.print("            }} else if (!args[i].isMissing()) {{\n", .{});
-                                try writer.print("                try variadic_array.push(runtime.runtime_allocator, args[i]);\n", .{});
+                                // ★Q3：by-value 变参元素解引用（by-ref 写回链只走 by-ref 形参，变参收集按值语义）
+                                try writer.print("                try variadic_array.push(runtime.runtime_allocator, runtime.q3Deref(args[i]));\n", .{});
                                 try writer.print("            }}\n", .{});
                                 try writer.print("        }}\n", .{});
                                 if (is_alloca) {
@@ -24313,11 +24331,11 @@ pub const NativeLinker = struct {
                                 const orig_type_tag = @as(std.meta.Tag(IR.Type), reg.type_);
 
                                 if (orig_type_tag == .i64) {
-                                    try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) runtime.Value.initInt(args[{d}].toInt()) else runtime.Value.initInt(0);\n", .{ args_index, args_index, args_index });
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) runtime.Value.initInt(runtime.q3Deref(args[{d}]).toInt()) else runtime.Value.initInt(0);\n", .{ args_index, args_index, args_index });
                                 } else if (orig_type_tag == .f64) {
-                                    try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) runtime.Value.initFloat(args[{d}].toFloat()) else runtime.Value.initFloat(0.0);\n", .{ args_index, args_index, args_index });
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) runtime.Value.initFloat(runtime.q3Deref(args[{d}]).toFloat()) else runtime.Value.initFloat(0.0);\n", .{ args_index, args_index, args_index });
                                 } else if (orig_type_tag == .bool) {
-                                    try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) runtime.Value.initBool(args[{d}].toBool()) else runtime.Value.initBool(false);\n", .{ args_index, args_index, args_index });
+                                    try self.writeRegAssignmentFmt(writer, reg.id, "if (args.len > {d} and !args[{d}].isMissing()) runtime.Value.initBool(runtime.q3Deref(args[{d}]).toBool()) else runtime.Value.initBool(false);\n", .{ args_index, args_index, args_index });
                                 } else {
                                     // 普通参数 - COW: 数组参数在 ref_count > 1 时深拷贝，确保函数内修改不影响调用者
                                     // P2-2 优化：如果参数被标记为 cow_skip（只读数组），跳过 COW 检查
@@ -24342,9 +24360,9 @@ pub const NativeLinker = struct {
                                         // 跳过 COW：只做 retain + 赋值
                                         try writer.print("    {{\n", .{});
                                         if (php_ptype.len > 0) {
-                                            try writer.print("        var __pv = if (args.len > {d} and !args[{d}].isMissing()) (if (args[{d}].isNull() and {s}) args[{d}] else runtime.php_coerce_value(args[{d}], \"{s}\", runtime.runtime_allocator)) else runtime.Value.initNull();\n", .{ args_index, args_index, args_index, if (php_nullable) "true" else "false", args_index, args_index, try self.escapeString(php_ptype) });
+                                            try writer.print("        var __pv = if (args.len > {d} and !args[{d}].isMissing()) (if (runtime.q3Deref(args[{d}]).isNull() and {s}) runtime.q3Deref(args[{d}]) else runtime.php_coerce_value(runtime.q3Deref(args[{d}]), \"{s}\", runtime.runtime_allocator)) else runtime.Value.initNull();\n", .{ args_index, args_index, args_index, if (php_nullable) "true" else "false", args_index, args_index, try self.escapeString(php_ptype) });
                                         } else {
-                                            try writer.print("        const __pv = if (args.len > {d} and !args[{d}].isMissing()) args[{d}] else runtime.Value.initNull();\n", .{ args_index, args_index, args_index });
+                                            try writer.print("        const __pv = if (args.len > {d} and !args[{d}].isMissing()) runtime.q3Deref(args[{d}]) else runtime.Value.initNull();\n", .{ args_index, args_index, args_index });
                                         }
                                         try writer.print("        _ = __pv.retain();\n", .{});
                                         if (is_alloca) {
@@ -24357,9 +24375,9 @@ pub const NativeLinker = struct {
                                         // COW 检查：数组在 ref_count > 1 时深拷贝
                                         try writer.print("    {{\n", .{});
                                         if (php_ptype.len > 0) {
-                                            try writer.print("        var __pv = if (args.len > {d} and !args[{d}].isMissing()) (if (args[{d}].isNull() and {s}) args[{d}] else runtime.php_coerce_value(args[{d}], \"{s}\", runtime.runtime_allocator)) else runtime.Value.initNull();\n", .{ args_index, args_index, args_index, if (php_nullable) "true" else "false", args_index, args_index, try self.escapeString(php_ptype) });
+                                            try writer.print("        var __pv = if (args.len > {d} and !args[{d}].isMissing()) (if (runtime.q3Deref(args[{d}]).isNull() and {s}) runtime.q3Deref(args[{d}]) else runtime.php_coerce_value(runtime.q3Deref(args[{d}]), \"{s}\", runtime.runtime_allocator)) else runtime.Value.initNull();\n", .{ args_index, args_index, args_index, if (php_nullable) "true" else "false", args_index, args_index, try self.escapeString(php_ptype) });
                                         } else {
-                                            try writer.print("        const __pv = if (args.len > {d} and !args[{d}].isMissing()) args[{d}] else runtime.Value.initNull();\n", .{ args_index, args_index, args_index });
+                                            try writer.print("        const __pv = if (args.len > {d} and !args[{d}].isMissing()) runtime.q3Deref(args[{d}]) else runtime.Value.initNull();\n", .{ args_index, args_index, args_index });
                                         }
                                         try writer.print("        if (__pv.isArray() and !__pv.isRef() and __pv.asArray().ref_count > 1) {{\n", .{});
                                         try writer.print("            const __cloned = try __pv.asArray().cloneShallow(runtime.runtime_allocator);\n", .{});

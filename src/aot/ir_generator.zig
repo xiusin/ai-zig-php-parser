@@ -46,6 +46,8 @@ const TypeInferenceMod = @import("type_inference.zig");
 const TypeInferencer = TypeInferenceMod.TypeInferencer;
 const compiler = @import("compiler");
 const ast = compiler.ast;
+// ★批次十九①：内建形参名表（反射导出生成）——Q3 命名通道 by-ref 形参的编译期判定数据源
+const builtin_param_table = @import("builtin_param_table_generated.zig");
 pub const Node = ast.Node;
 pub const Token = compiler.token.Token;
 pub const TokenTag = compiler.token.Token.Tag;
@@ -203,6 +205,66 @@ pub const IRGenerator = struct {
         from_block: *BasicBlock,
         label_name: []const u8,
     };
+
+    /// by-ref 实参写回登记（原 generateFunctionCall 局部；Q3 提升到容器级供 emitTempVarRef 复用）
+    const RefWriteback = struct {
+        var_name: []const u8,
+        temp_reg: Register,
+        // 数组元素写回信息：当参数是 $arr[$key] 时使用
+        array_base: ?[]const u8 = null,
+        array_key: ?Register = null,
+        // 对象属性写回信息：当参数是 $obj->prop 时使用
+        prop_obj: ?Register = null,
+        prop_name: ?[]const u8 = null,
+    };
+
+    /// ★Q3：纯变量的 Ref 化（temp 单元 + ref_writebacks 登记，调用方负责调用后写回）。
+    ///   引用形参直传其指针（不二次 make_ref）；全局/顶层静默读当前值（F-146-c）；
+    ///   未声明变量静默 null 起（批十五 by-ref 语境 vivify 口径）。从 generateFunctionCall 的
+    ///   引用参数形制抽出，供 `$f($v)` 变量调用面与命名通道 by-ref 面复用（DRY）。
+    fn emitTempVarRef(self: *Self, var_name: []const u8, ref_writebacks: *std.ArrayListUnmanaged(RefWriteback)) !Register {
+        // 变量本身是引用形参 ⇒ 直传其指针
+        if (self.reference_params.contains(var_name)) {
+            if (self.getVarRegister(var_name)) |var_reg| return var_reg;
+        }
+        const func = self.current_function orelse return error.NoCurrentFunction;
+        const alloca_type = Type{ .php_value = {} };
+        const type_ptr = try self.allocator.create(Type);
+        type_ptr.* = alloca_type;
+        const ptr_type = Type{ .ptr = type_ptr };
+        const temp_reg = func.newRegister(ptr_type);
+        const alloca_inst = try self.allocator.create(Instruction);
+        alloca_inst.* = .{
+            .result = temp_reg,
+            .op = .{ .alloca = .{ .type_ = alloca_type, .count = 1, .no_optimize = true } },
+            .location = self.current_location,
+        };
+        try self.entry_allocas.append(self.allocator, alloca_inst);
+        const is_global_wb = self.global_vars.contains(var_name) or std.mem.eql(u8, func.name, "__main__");
+        if (is_global_wb) {
+            const current_val = try self.emitWithResult(.{ .global_get = .{ .name = var_name, .no_warn = true } }, .php_value);
+            _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = current_val } }, null);
+        } else if (self.getVarRegister(var_name)) |var_reg| {
+            _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = var_reg } }, null);
+        } else {
+            const null_val = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+            _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = null_val } }, null);
+        }
+        const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = temp_reg } }, .php_value);
+        try ref_writebacks.append(self.allocator, .{ .var_name = var_name, .temp_reg = temp_reg });
+        return ref_reg;
+    }
+
+    /// ★Q3：纯变量写回（emitTempVarRef 登记的配套；数组/属性形不在此列）。
+    ///   供两条早退支路复用：变量调用 `call_indirect`（:8936 区）与命名数组通道早退。
+    fn emitPlainVarWritebacks(self: *Self, ref_writebacks: []const RefWriteback) !void {
+        for (ref_writebacks) |wb| {
+            const wb_is_global = self.global_vars.contains(wb.var_name) or
+                (if (self.current_function) |func| std.mem.eql(u8, func.name, "__main__") else false);
+            const new_val = try self.emitWithResult(.{ .load = .{ .ptr = wb.temp_reg, .type_ = .php_value, .no_deref = wb_is_global } }, .php_value);
+            try self.emitRefWritebackTarget(wb.var_name, new_val);
+        }
+    }
 
     const Self = @This();
 
@@ -7826,16 +7888,6 @@ pub const IRGenerator = struct {
         var args: []Register = &[_]Register{};
 
         // 记录需要写回的全局变量（用于引用参数）
-const RefWriteback = struct {
-var_name: []const u8,
-temp_reg: Register,
-// 数组元素写回信息：当参数是 $arr[$key] 时使用
-array_base: ?[]const u8 = null,
-array_key: ?Register = null,
-// 对象属性写回信息：当参数是 $obj->prop 时使用
-prop_obj: ?Register = null,
-prop_name: ?[]const u8 = null,
-};
         var ref_writebacks = std.ArrayListUnmanaged(RefWriteback).empty;
         defer ref_writebacks.deinit(self.allocator);
 
@@ -8126,24 +8178,81 @@ prop_name: ?[]const u8 = null,
                 break :blk try self.emitWithResult(.{ .const_string = sid }, .php_value);
             };
             const named_arr = try self.emitWithResult(.{ .array_new = .{ .capacity = @intCast(call_data.args.len) } }, .php_array);
+            // ★Q3：目标内建的 by-ref 形参表（编译期查反射表）——命中位的纯变量实参做成 Ref
+            //   （temp 单元 + 写回），PHP R5 真值：命名直调 by-ref 写回成立。
+            const bpt: ?[]const builtin_param_table.Param = if (indirect_callee == null and func_name.len > 0) blk: {
+                if (builtin_param_table.table.get(func_name)) |ps| break :blk ps;
+                if (func_name.len <= 64) {
+                    var lbuf: [64]u8 = undefined;
+                    break :blk builtin_param_table.table.get(std.ascii.lowerString(&lbuf, func_name));
+                }
+                break :blk null;
+            } else null;
+            var b19_named_pos: usize = 0; // 位置参序（与 PHP 位次一致：命名不占位次）
             for (call_data.args) |arg_idx| {
                 const arg_node = self.getNode(arg_idx) orelse continue;
-                if (arg_node.tag == .named_arg) {
+                const is_named = arg_node.tag == .named_arg;
+                const val_idx = if (is_named) arg_node.data.named_arg.value else arg_idx;
+                // 目标位次的 by-ref 判定
+                var byref_hit = false;
+                if (bpt) |ps| {
+                    if (is_named) {
+                        const raw_name = self.getString(arg_node.data.named_arg.name);
+                        const arg_name = if (raw_name.len > 0 and raw_name[0] == '$') raw_name[1..] else raw_name;
+                        for (ps) |p| {
+                            if (std.mem.eql(u8, p.name, arg_name)) {
+                                byref_hit = p.by_ref;
+                                break;
+                            }
+                        }
+                    } else if (b19_named_pos < ps.len) {
+                        byref_hit = ps[b19_named_pos].by_ref;
+                    }
+                }
+                if (!is_named) b19_named_pos += 1;
+
+                const val_node = self.getNode(val_idx);
+                if (byref_hit and val_node != null and val_node.?.tag == .variable) {
+                    const var_name = self.getString(val_node.?.data.variable.name);
+                    if (!std.mem.eql(u8, var_name, "this")) {
+                        const ref_reg = try self.emitTempVarRef(var_name, &ref_writebacks);
+                        if (is_named) {
+                            const raw_name = self.getString(arg_node.data.named_arg.name);
+                            const arg_name = if (raw_name.len > 0 and raw_name[0] == '$') raw_name[1..] else raw_name;
+                            const key_reg = try self.emitWithResult(.{ .const_string = try self.module.?.internString(arg_name) }, .php_value);
+                            const ks_args = try self.allocator.alloc(Register, 3);
+                            ks_args[0] = named_arr;
+                            ks_args[1] = key_reg;
+                            ks_args[2] = ref_reg;
+                            _ = try self.emit(.{ .call = .{ .func_name = "php_array_set_keep_ref", .args = ks_args, .return_type = .php_value } }, null);
+                        } else {
+                            const kp_args = try self.allocator.alloc(Register, 2);
+                            kp_args[0] = named_arr;
+                            kp_args[1] = ref_reg;
+                            _ = try self.emit(.{ .call = .{ .func_name = "php_array_push_keep_ref", .args = kp_args, .return_type = .php_value } }, null);
+                        }
+                        continue;
+                    }
+                }
+                if (is_named) {
                     const raw_name = self.getString(arg_node.data.named_arg.name);
                     const arg_name = if (raw_name.len > 0 and raw_name[0] == '$') raw_name[1..] else raw_name;
                     const key_id = try self.module.?.internString(arg_name);
                     const key_reg = try self.emitWithResult(.{ .const_string = key_id }, .php_value);
-                    const val_reg = try self.generateExpression(arg_node.data.named_arg.value);
+                    const val_reg = try self.generateExpression(val_idx);
                     _ = try self.emit(.{ .array_set = .{ .array = named_arr, .key = key_reg, .value = val_reg } }, null);
                 } else {
-                    const val_reg = try self.generateExpression(arg_idx);
+                    const val_reg = try self.generateExpression(val_idx);
                     _ = try self.emit(.{ .array_push = .{ .array = named_arr, .value = val_reg } }, null);
                 }
             }
             const invoke_args = try self.allocator.alloc(Register, 2);
             invoke_args[0] = callback_reg;
             invoke_args[1] = named_arr;
-            return self.emitWithResult(.{ .call = .{ .func_name = "php_invoke_callable_args_array", .args = invoke_args, .return_type = .php_value } }, .php_value);
+            // Q3：本支自带 by-ref 写回（ref_writebacks 仅纯变量形）——先出结果、写回、再返回
+            const named_result = try self.emitWithResult(.{ .call = .{ .func_name = "php_invoke_callable_args_array", .args = invoke_args, .return_type = .php_value } }, .php_value);
+            try self.emitPlainVarWritebacks(ref_writebacks.items);
+            return named_result;
         } else {
             // 查找函数的引用参数信息
             const target_func = if (func_name.len > 0 and self.module != null)
@@ -8369,6 +8478,31 @@ prop_name: ?[]const u8 = null,
                             continue;
                         }
                     }
+
+                    // ★Q3：直调面右值传 by-ref 形参 ⇒ PHP 8.5.8 实测可捕获 Error
+                    //   `f(): Argument #i ($x) could not be passed by reference`（变量调用面是 Warning，不同形）。
+                    //   发射点＝调用前（hasException 路由 ⇒ 被调不进）。
+                    {
+                        var pname: []const u8 = "param";
+                        if (target_func) |tf| {
+                            if (i < tf.params.items.len) pname = tf.params.items[i].name;
+                        } else if (self.module) |mod| {
+                            if (mod.findFunction(func_name)) |ff| {
+                                if (i < ff.params.items.len) pname = ff.params.items[i].name;
+                            }
+                        }
+                        if (pname.len > 0 and pname[0] == '$') pname = pname[1..];
+                        const fn_reg = try self.emitWithResult(.{ .const_string = try self.module.?.internString(func_name) }, .php_value);
+                        const idx_reg = try self.emitWithResult(.{ .const_int = @intCast(i + 1) }, .i64);
+                        const pn_reg = try self.emitWithResult(.{ .const_string = try self.module.?.internString(pname) }, .php_value);
+                        const br_args = try self.allocator.alloc(Register, 3);
+                        br_args[0] = fn_reg;
+                        br_args[1] = idx_reg;
+                        br_args[2] = pn_reg;
+                        _ = try self.emitWithResult(.{ .call = .{ .func_name = "php_throw_could_not_pass_byref", .args = br_args, .return_type = .php_value } }, .php_value);
+                        args[i] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                        continue;
+                    }
                 }
 
                 // 特殊处理：preg_match/preg_match_all的第3个参数（引用参数）
@@ -8377,6 +8511,18 @@ prop_name: ?[]const u8 = null,
                     // 用null占位，后续特殊处理会替换
                     args[i] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
                     continue;
+                }
+
+                // ★Q3（R3 真值）：变量调用 `$f($v)`——PHP 运行期按被调签名绑定 by-ref 并写回
+                //  （`$f='byref_probe'; $f($v)` ⇒ $v 变）。编译期不知目标 ⇒ 纯变量实参做成 Ref
+                //  （emitTempVarRef：temp 单元 + ref_writebacks 调用后写回）；by-value 被调
+                //   收到 Ref 取现值即可（引用透明，probe_q3_refsafe 实测零副作用）。
+                if (indirect_callee != null and arg_node != null and arg_node.?.tag == .variable) {
+                    const var_name = self.getString(arg_node.?.data.variable.name);
+                    if (!std.mem.eql(u8, var_name, "this")) {
+                        args[i] = try self.emitTempVarRef(var_name, &ref_writebacks);
+                        continue;
+                    }
                 }
 
                 args[i] = try self.generateExpression(expr_idx);
@@ -8826,11 +8972,14 @@ prop_name: ?[]const u8 = null,
         }
 
         if (indirect_callee) |callee_reg| {
-            return self.emitWithResult(.{ .call_indirect = .{
+            const call_result = try self.emitWithResult(.{ .call_indirect = .{
                 .func_ptr = callee_reg,
                 .args = args,
                 .return_type = .php_value,
             } }, .php_value);
+            // ★Q3：变量调用 by-ref 写回（R3 真值；emitTempVarRef 登记在尾部总循环够不着的早退支）
+            try self.emitPlainVarWritebacks(ref_writebacks.items);
+            return call_result;
         }
 
         const result = try self.emitWithResult(.{ .call = .{
@@ -8978,11 +9127,21 @@ prop_name: ?[]const u8 = null,
     }
 
     /// F-146：byref 参数的写回目标。
-    /// 局部变量 ⇒ 更新 SSA 映射；函数/闭包内未声明的非 global 变量 ⇒ 按 PHP 语义建立局部变量；
-    /// 只有 __main__ 或显式 `global` 名才写回全局。
+    /// 局部变量 ⇒ 原地 store 到 alloca（与普通赋值 :5684 同口径）；函数/闭包内未声明的
+    /// 非 global 变量 ⇒ 按 PHP 语义建立局部变量；只有 __main__ 或显式 `global` 名才写回全局。
+    /// ★Q3-reg（f047/f152/f164 回归修复）：原实现对已持有 alloca 的局部变量走
+    ///   `putVarRegister` 纯 SSA 换绑（零指令）——换绑把变量引到新值寄存器，而循环体内
+    ///   先前烘焙的读点位仍指旧寄存器 ⇒ 回边后变量被重置回进入循环前的快照
+    ///   （闭包内 `$v = $f($v)`：第一次迭代算出的新值在第二次迭代开头丢失）。
+    ///   alloca 变量必须原地 store 保住「同一寄存器跨迭代持久」的编译器循环约定；
+    ///   引用变量与已换绑为值型的寄存器维持原换绑路径（边界不扩）。
     fn emitRefWritebackTarget(self: *Self, var_name: []const u8, new_val: Register) !void {
-        if (self.getVarRegister(var_name) != null) {
-            try self.putVarRegister(var_name, new_val);
+        if (self.getVarRegister(var_name)) |var_reg| {
+            if (var_reg.type_ == .ptr and !self.isRefVar(var_name)) {
+                _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = new_val } }, null);
+            } else {
+                try self.putVarRegister(var_name, new_val);
+            }
             return;
         }
         const is_main = if (self.current_function) |f|

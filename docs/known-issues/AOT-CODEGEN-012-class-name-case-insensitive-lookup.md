@@ -13144,3 +13144,71 @@ PHP 8.5.8 实测口径：纯 enum ⇒ **返回 false**（不抛错，last_error=
 - ② 探针：`probe_b19_ctor`（C1-C10）/ `probe_b19_anon`（匿名类+展开）——全等。
 - 回归：批十八全族（truth/edge/method/m9/nest/faces/bt）+ 批十七 spread 族（含 spread_extra **销账转 SAME**）——零新漂移。
 - 41 格面板复跑：**34 SAME + 7 DIFF，与批次十七/十八终态逐格一致、零转移**（7 枚 DIFF 全为既有解释：§七.5 栈帧 ×4、§七.7 时间戳 ×1、并行会话在途 uasort 中间态 ×1、`sort_na` 对象编号差 ×1）
+
+## 249. 批次二十（Q2）：E5/F-41 arity 域落地——全通道 ArgumentCountError（2026-11-06）
+
+按 §248.3 评估结论实施，三层全落：
+
+### 249.1 Q2-a 内建直调 arity（编译期炸 → 运行期可捕获）
+
+- **数据**：批次十九①反射形参表 + 共享判定 `builtin_param_table.arityOf`（编译期/运行期单一来源，禁两处各造）。
+- **发射点**：直降双漏斗（有值支/语句支）顶置 `emitBuiltinArityGuard`——欠参/超填 ⇒ 替换原调用为运行期 `php_arity_error`（`ArgumentCountError`，措辞逐字：`expects exactly|at least|at most N argument(s), P given`）。原状＝生成码 Zig 实参数不合 ⇒ **编译期炸**；现全灭（探针 `probe_q2a`：strlen()/substr("h")/超填两形/变参不受影响/CI 名/语句形 var_dump() 全等）。
+- **通道勘误（实测钉死）**：本族异常通道是「**异常 Value 正常返回 + pending 旗标 + 调用后 hasException 路由**」（直调站点是 `catch initNull()`，call_user_func 类是 `try`+后检）；Zig error 通道在后者会把局部 try 绕过去。故 `php_arity_error` 返回**纯 Value**（不用 catch 后缀那支）。
+
+### 249.2 Q2-b 变量调用 arity（裸 InvalidArgumentCount 进程死 → 可捕获）
+
+- `php_invoke_callable` 内建分发点顶置同表守卫（`arityOf`），措辞共用 `php_arity_error`。实测 `call_user_func('strlen')`/`('strlen',"a","b")`/`('substr',"hello")` 全部进 catch 且措辞逐字（`iso_b2`）。
+
+### 249.3 Q2-c 用户函数/方法/构造器欠参（静默 null 补齐 → ArgumentCountError）
+
+- **位置通道**（直调/间接/`new` 单点）：prologue 欠参守卫（`setCurrentCallArgs` 后）——`args.len < required` ⇒ `php_userfn_arity_too_few`（措辞 `Too few arguments to function {C::m|u}(), N passed in F on line L and exactly|at least R expected`，file/line 取调用点运行时位置；闭包名映射 `{closure}`，`{closure:file:line}` 后缀差按 §七.5 豁免疫）。返回约定＝**值返回**（`return Value.initNull()`，与 `.throw` 无 handler 帧同口径）——初版 `error.RuntimeError` 在 try+后检通道冒顶成未捕获，实测钉死后改正。
+- **命名通道**（绑定侧先拦）：`phpBindNamedArgs` 增必填洞检——分流规则（实测）：洞位后有已填 ⇒ `{f}(): Argument #i ($x) not passed`；纯尾部短 ⇒ Too few。编译期直调命名面同规则（`php_arity_too_few_v`/`php_arity_not_passed_v`，发射点＝实参全求值后、调用前）。
+- 实测：U1-U3/M1-M3（too-few/方法/静态）+ 函数洞首 `u(b: 2)` + 构造器欠参/命名洞/乱序 + 闭包欠参 + 用户函数超填容忍 + 变参零参——**全等 PHP 8.5.8**。
+
+### 249.4 验收读数（2026-11-06）
+
+- `zig build` rc=0；debug_frames 变体 faces/bt 复测全等。
+- 全量回归电池（17 探针：批十六 spread 族/批十八全族/批十九 K 族·构造器族/Q2 三族）零漂移。
+- 41 格面板复跑：**34 SAME + 7 DIFF，与批十七/十八/十九终态逐格一致、零转移**
+
+## 250. 批次二十一（Q3）：13 枚 out 参族的变量/间接调用面（2026-11-06）
+
+### 250.1 真值（PHP 8.5.8 实测 R1-R9 + 补形）
+
+- `call_user_func`/`call_user_func_array` 普通值 ⇒ **Warning** `{f}(): Argument #i ($x) must be passed by reference, value given` + **不写回** + 结果照算；
+- 数组元素是引用 ⇒ 写回（AOT 数组元素引用缺失——本批如实登记，见 §250.4）；
+- **变量调用 `$f(...)` ⇒ 写回成立**（PHP 运行期按被调签名绑定 by-ref）；
+- **命名直调 by-ref ⇒ 写回成立**；命名经 cufa 关联数组的非引用值 ⇒ 警告+不写回；
+- 直调右值传 by-ref ⇒ **可捕获 Error** `f(): Argument #i ($x) could not be passed by reference`（与变量调用 Warning 不同形）；
+- `settype` 非引用 ⇒ 警告 + **返回 true** + 不写回；`sscanf` 带 out vars 返回已指派计数、解析全败变量不动。
+
+### 250.2 落地（方案＝Ref 直通 + 写回链，无第二套语义）
+
+- **登记**：11 枚新包装器 + 既有 str_replace/str_ireplace 修复警告协议（共 13 枚）。全部对接既有 handler 的 Ref 写穿协议（`isRef → asRef().*`）。
+- **潜伏修复**：`php_exec`/`php_system` 的 `Child.run`（Zig 0.17 已移除）随登记暴露 ⇒ 迁 libc `popen/fread/pclose`（批十七 `php_shell_exec` 同族成例；退出码＝`pclose` wait 状态 `(status>>8)&0xFF`）。
+- **引用流动**：`$f($v)` 变量调用与命名通道的 by-ref 命中位，纯变量实参经 `emitTempVarRef`（temp 单元 + 写回登记，从既有引用参数形制抽出共享）做成 Ref；写回在 `call_indirect` 早退支与命名通道早退支补挂 `emitPlainVarWritebacks`（**根因**：两支在尾部总循环前 return）。
+- **Ref 过数组保链**：`PHPArray.setKeepRef`（`pushRaw` 键值对版）+ `php_array_set_keep_ref`/`php_array_push_keep_ref`——`set`/`push` 按 PHP 值语义存储前解引用会丢链。
+- **归一化**：`php_invoke_callable` 内建分发处按形参表把 by-value 位的 Ref 解引用、by-ref 位直通（变参尾继承变参位的 by-ref——`sscanf` 的 `&...$vars`）；快路径无 Ref 零分配。
+- **命名通道 by-ref**（phpInvokeBuiltinNamed）：Ref ⇒ 直通写回；非 Ref ⇒ 警告 + 隔离 Ref 槽（写回丢弃、不重复告警）；未填 ⇒ 隔离 Ref 槽。批十九①的 Error 边界按真值改正。
+- **直调右值**：is_ref_param 块尾补 `php_throw_could_not_pass_byref`（Error 形）。
+- **prologue 警告**（nlz :24243 区）：by-ref 绑定收到非 Ref ⇒ `q3WarnByRefValue`（直调面实参恒为 Ref，不触发）。
+
+### 250.3 验收
+
+- 探针全等 PHP：`probe_q3_truth`（R1/R4 警告形、R3 写回、R5 命名写回、R6 全形）、`probe_q3_accept`（W1 变量调用双族写回 / W2 命名直调 / W2b 警告 / W3 异常路径写回＝preg 先清槽后报错，批十四约定 / W4 exec+system 双 out / W5 parse_str+settype+sscanf / W6 vivify / W7 multisort）、`iso_r3`、`iso_rval`（直调右值 Error 逐字）。
+- 回归电池 19 探针零漂移；debug_frames 变体面不动。
+- 41 格面板：**34 SAME + 7 DIFF，与 b17 基线逐格一致、零转移**
+
+### 250.4 遗留/边界（诚实口径）
+
+- **数组元素引用**（`[&$m]` / `$a[] =&$m` 不产活引用，PHPArray 值语义 set/push 存储前解引用）：`call_user_func_array`/`exec` 等经数组携带引用的写回形（R2/R7-cufa/R9）⇒ 本族按「值」处理（警告+不写回）。**修复需动共享层 parser.zig/ast.zig（`&` 元素节点）+ PHPArray 元素 Ref 语义——入待批清单**。
+- `fscanf` 为 B 类（编译期表无此名），不在本批。
+- 变量调用面对「by-value 被调 + 未定义变量」静默（by-ref 偏置；PHP 在 by-value 时发 Undefined variable 警告）——登记。
+### 250.5 回归事故与修复（f047/f152/f164——循环内写回断链）
+
+- **事故**：Q3 中期面板翻红 5 格（f006/f047/f104/f152/f164 闭包/OO 密集格 DIFF）。第一段修复＝by-value 形参绑定各分支 `runtime.q3Deref` 化（nlk :24233-:24319，PHP 本体语义：by-value 绑定时解引用）修好 f006/f104，但 f047/f152/f164 仍 DIFF。
+- **二分定位**（探针 q3_regress2/3/4，A/B/C/H/I/L/M 全错；D/E/F/G/J/K 全对）：**闭包内 + 变量调用（`$f($v)` 或 `$fns[$i]($v)`）+ 纯变量实参 + 循环** ⇒ 该变量每次迭代被重置回进入循环前的快照。生成码铁证（q3_min）：循环体实参读烘焙为 `reg_10 = reg_0`，而写回 `putVarRegister` 把 `$v` 换绑到 reg_13 ⇒ 后续 assign `val_assign(&reg_13, ...)` 写新寄存器，**reg_0 跨迭代永不更新**（对照：`$i++` 走普通赋值 val_assign(&reg_5) 原地写 ⇒ 循环正确）。
+- **根因**：`emitRefWritebackTarget`（F-146 既有）对已持 alloca 的局部变量走 `putVarRegister` 纯 SSA 换绑（零指令），与本编译器「循环变量＝固定 alloca + val_assign 原地写」的持久性约定冲突。批十四的写回若发生在循环体内同样断链（隐藏共病，一并治好）。
+- **修法**（irz `emitRefWritebackTarget` 单点）：alloca（.ptr）且非引用变量 ⇒ **原地 `store`**（与普通赋值 :5684 同口径）；已换绑为值型/引用变量维持原换绑路径（边界不扩）。
+- **复验**：f047/f152/f164 转 SAME；Q3 本批 12 探针 + 回归 5 探针全等（`probe_q3_ref`/`refassign`/`refflow`/`truth` 的残余 DIFF 全属 §250.4 数组元素引用待批族 + 警告行号宪法忽略项，逐枚钉死非本次引入）；41 格面板与 b17 基线逐格一致零转移。
+
