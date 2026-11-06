@@ -398,6 +398,9 @@ var cycle_roots: std.ArrayListUnmanaged(CycleRoot) = .empty;
 var gc_in_progress: bool = false;
 var gc_enabled: bool = true;
 var gc_release_events: usize = 0;
+/// ★Q4（gc_status 如实数据源）：gcCollectCycles 的调用次数与实际收集总数累计。
+var gc_runs_total: i64 = 0;
+var gc_collected_total: i64 = 0;
 const GC_RELEASE_EVENT_THRESHOLD: usize = 4096;
 const GC_ROOT_THRESHOLD: usize = 256;
 const GC_BATCH_SIZE: usize = 64;
@@ -845,6 +848,13 @@ fn initPredefinedConstants() !void {
     const keys = [_][]const u8{ "STR_PAD_LEFT", "STR_PAD_RIGHT", "STR_PAD_BOTH" };
     const values = [_]i64{ 0, 1, 2 };
     for (keys, values) |key, val| {
+        const key_copy = try runtime_allocator.dupe(u8, key);
+        try constants.put(key_copy, Value.initInt(val));
+    }
+    // ★Q4：ENT_* HTML 实体常量族（html_entity_decode/htmlentities flags 面）
+    const ent_keys = [_][]const u8{ "ENT_COMPAT", "ENT_QUOTES", "ENT_NOQUOTES", "ENT_IGNORE", "ENT_SUBSTITUTE", "ENT_HTML401", "ENT_XML1", "ENT_XHTML", "ENT_HTML5", "ENT_DISALLOWED" };
+    const ent_vals = [_]i64{ 2, 3, 0, 4, 8, 0, 16, 32, 48, 128 };
+    for (ent_keys, ent_vals) |key, val| {
         const key_copy = try runtime_allocator.dupe(u8, key);
         try constants.put(key_copy, Value.initInt(val));
     }
@@ -1412,6 +1422,8 @@ fn gcCollectCycles(force: bool) usize {
     }
 
     const collected = gcCountCollectedPhpRule(white_items.items, &seen_arrays, &seen_objects, &seen_closures) orelse white_items.items.len;
+    gc_runs_total += 1;
+    gc_collected_total += @intCast(collected);
     for (white_items.items) |r| {
         gcCollectWhiteKnown(r, &seen_arrays, &seen_objects, &seen_closures);
     }
@@ -2965,6 +2977,17 @@ pub const PHPArray = struct {
         self.next_index += 1;
     }
 
+    /// ★Q3：保 Ref 的键值存储（by-ref 写回链路用；pushRaw 的键值对版）。
+    ///   普通值与 set 全同（值语义解引用+COW 簿记）；Ref 原样存储保链。
+    pub fn setKeepRef(self: *PHPArray, allocator: Allocator, key: ArrayKey, value: Value) !void {
+        if (!value.isRef()) return self.set(allocator, key, value);
+        if (self.elements.getPtr(key)) |slot| slot.*.release(allocator);
+        _ = value.retain();
+        if (key == .string) key.string.retain();
+        if (key == .integer and key.integer >= self.next_index) self.next_index = key.integer + 1;
+        try self.elements.put(key, value);
+    }
+
     /// 检查是否包含字符串键（关联数组）
     pub fn hasStringKeys(self: *PHPArray) bool {
         return self.elements.hasStringKeys();
@@ -3861,6 +3884,19 @@ const BuiltinFn = *const fn (ctx: Value, args: []const Value, allocator: Allocat
 
 const builtin_function_map = std.StaticStringMap(BuiltinFn).initComptime(.{
     .{ "is_int", wrapBuiltin_is_int },
+    // ★Q3：defer-12 out 参族登记（包装器带 Ref 直通写回 + 非引用警告协议）
+    .{ "preg_match", wrapBuiltin_preg_match },
+    .{ "preg_match_all", wrapBuiltin_preg_match_all },
+    .{ "preg_replace", wrapBuiltin_preg_replace },
+    .{ "preg_filter", wrapBuiltin_preg_filter },
+    .{ "preg_replace_callback", wrapBuiltin_preg_replace_callback },
+    .{ "str_replace", wrapBuiltin_str_replace },
+    .{ "parse_str", wrapBuiltin_parse_str },
+    .{ "settype", wrapBuiltin_settype },
+    .{ "exec", wrapBuiltin_exec },
+    .{ "system", wrapBuiltin_system },
+    .{ "sscanf", wrapBuiltin_sscanf },
+    .{ "array_multisort", wrapBuiltin_array_multisort },
     .{ "is_float", wrapBuiltin_is_float },
     .{ "is_string", wrapBuiltin_is_string },
     .{ "is_bool", wrapBuiltin_is_bool },
@@ -4181,6 +4217,39 @@ const builtin_function_map = std.StaticStringMap(BuiltinFn).initComptime(.{
     .{ "str_pad", wrapBuiltin_str_pad },
     .{ "str_repeat", wrapBuiltin_str_repeat },
     .{ "str_shuffle", wrapBuiltin_str_shuffle },
+    // ★Q4：B 类核心 32 枚（运行期变量调用表）
+    .{ "str_rot13", wrapBuiltin_str_rot13 },
+    .{ "html_entity_decode", wrapBuiltin_html_entity_decode },
+    .{ "levenshtein", wrapBuiltin_levenshtein },
+    .{ "similar_text", wrapBuiltin_similar_text },
+    .{ "soundex", wrapBuiltin_soundex },
+    .{ "metaphone", wrapBuiltin_metaphone },
+    .{ "addcslashes", wrapBuiltin_addcslashes },
+    .{ "stripcslashes", wrapBuiltin_stripcslashes },
+    .{ "strspn", wrapBuiltin_strspn },
+    .{ "strcspn", wrapBuiltin_strcspn },
+    .{ "strpbrk", wrapBuiltin_strpbrk },
+    .{ "substr_compare", wrapBuiltin_substr_compare },
+    .{ "strcoll", wrapBuiltin_strcoll },
+    .{ "vprintf", wrapBuiltin_vprintf },
+    .{ "fprintf", wrapBuiltin_fprintf },
+    .{ "str_increment", wrapBuiltin_str_increment },
+    .{ "str_decrement", wrapBuiltin_str_decrement },
+    .{ "quoted_printable_encode", wrapBuiltin_quoted_printable_encode },
+    .{ "quoted_printable_decode", wrapBuiltin_quoted_printable_decode },
+    .{ "convert_uuencode", wrapBuiltin_convert_uuencode },
+    .{ "convert_uudecode", wrapBuiltin_convert_uudecode },
+    .{ "array_all", wrapBuiltin_array_all },
+    .{ "array_any", wrapBuiltin_array_any },
+    .{ "array_first", wrapBuiltin_array_first },
+    .{ "array_last", wrapBuiltin_array_last },
+    .{ "array_change_key_case", wrapBuiltin_array_change_key_case },
+    .{ "array_merge_recursive", wrapBuiltin_array_merge_recursive },
+    .{ "array_replace_recursive", wrapBuiltin_array_replace_recursive },
+    .{ "version_compare", wrapBuiltin_version_compare },
+    .{ "json_validate", wrapBuiltin_json_validate },
+    .{ "gc_disable", wrapBuiltin_gc_disable },
+    .{ "gc_status", wrapBuiltin_gc_status },
     .{ "strcasecmp", wrapBuiltin_strcasecmp },
     .{ "strchr", wrapBuiltin_strchr },
     .{ "strcmp", wrapBuiltin_strcmp },
@@ -6796,8 +6865,1765 @@ fn wrapBuiltin_str_ireplace(ctx: Value, args: []const Value, allocator: Allocato
     _ = ctx;
     if (args.len < 3) return error.InvalidArgumentCount;
     const count_out = if (args.len >= 4) args[3] else Value.initNull();
-    return php_str_ireplace(args[0], args[1], args[2], count_out, allocator);
+    // ★Q3：by-ref 形参收到非引用值 ⇒ PHP 实测警告（结果照算、不写回）
+    if (args.len >= 4 and !count_out.isRef()) q3WarnByRefValue("str_ireplace", 4, "count");
+    return php_str_ireplace(q3Deref(args[0]), q3Deref(args[1]), q3Deref(args[2]), count_out, allocator);
 }
+
+// ============================================================================
+// ★批次十九·Q3：defer-12 out 参族的变量/间接调用面（与直调同口径：Ref 直通写回、
+//   非 Ref ⇒ PHP 8.5.8 实测警告 + 不写回但结果照算；by-value 位解引用）。
+// ============================================================================
+
+/// Q3：by-value 形参解引用（Ref 实参取现值；普通值直通；生成码 prologue 与包装器共用）
+pub inline fn q3Deref(v: Value) Value {
+    var x = v;
+    while (x.isRef()) x = x.asRef().*;
+    return x;
+}
+
+/// Q3：by-ref 形参收到非引用值 ⇒ PHP 8.5.8 实测警告文案（R1/R4 真值；生成码 prologue 直调本函数）
+pub fn q3WarnByRefValue(fn_name: []const u8, arg_idx: usize, pname: []const u8) void {
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s}(): Argument #{d} (${s}) must be passed by reference, value given", .{ fn_name, arg_idx, pname }) catch return;
+    emitWarning(msg);
+}
+
+/// Q3：保 Ref 数组存/推（命名/展开实参包的 by-ref 写回链路；普通 set/push 存储前解引用会丢链）
+pub fn php_array_set_keep_ref(arr: Value, key: Value, value: Value, allocator: Allocator) !void {
+    if (!arr.isArray()) return;
+    const k: ArrayKey = if (key.isString()) .{ .string = key.asString() } else .{ .integer = key.toInt() };
+    try arr.asArray().setKeepRef(allocator, k, value);
+}
+
+pub fn php_array_push_keep_ref(arr: Value, value: Value, allocator: Allocator) !void {
+    if (!arr.isArray()) return;
+    try arr.asArray().pushRaw(allocator, value);
+}
+
+/// Q3：直调面右值传 by-ref 形参 ⇒ PHP 8.5.8 实测可捕获 Error
+///   `f(): Argument #i ($x) could not be passed by reference`（与变量调用面的 Warning 不同形）。
+pub fn php_throw_could_not_pass_byref(fn_name: Value, arg_idx: Value, pname: Value) !Value {
+    const n = if (fn_name.isString()) fn_name.asString().data else "?";
+    const p = if (pname.isString()) pname.asString().data else "?";
+    var buf: [320]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s}(): Argument #{d} (${s}) could not be passed by reference", .{ n, arg_idx.toInt(), p }) catch "could not be passed by reference";
+    return throwThrowable("Error", msg, runtime_allocator);
+}
+
+fn wrapBuiltin_preg_match(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    var matches_scratch = Value.initNull();
+    var matches_ptr: *Value = &matches_scratch;
+    if (args.len > 2) {
+        if (args[2].isRef()) {
+            matches_ptr = args[2].asRef();
+        } else {
+            q3WarnByRefValue("preg_match", 3, "matches");
+        }
+    }
+    const flags = if (args.len > 3) q3Deref(args[3]) else Value.initInt(0);
+    const offset = if (args.len > 4) q3Deref(args[4]) else Value.initInt(0);
+    return php_preg_match(q3Deref(args[0]), q3Deref(args[1]), matches_ptr, flags, offset, allocator);
+}
+
+fn wrapBuiltin_preg_match_all(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    var matches_scratch = Value.initNull();
+    var matches_ptr: *Value = &matches_scratch;
+    if (args.len > 2) {
+        if (args[2].isRef()) {
+            matches_ptr = args[2].asRef();
+        } else {
+            q3WarnByRefValue("preg_match_all", 3, "matches");
+        }
+    }
+    const flags = if (args.len > 3) q3Deref(args[3]) else Value.initInt(0);
+    const offset = if (args.len > 4) q3Deref(args[4]) else Value.initInt(0);
+    return php_preg_match_all(q3Deref(args[0]), q3Deref(args[1]), matches_ptr, flags, offset, allocator);
+}
+
+fn wrapBuiltin_preg_replace(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 3) return error.InvalidArgumentCount;
+    const limit = if (args.len > 3) q3Deref(args[3]) else Value.initInt(-1);
+    const count_out = if (args.len > 4) args[4] else Value.initNull();
+    if (args.len > 4 and !count_out.isRef()) q3WarnByRefValue("preg_replace", 5, "count");
+    return preg_replace(q3Deref(args[0]), q3Deref(args[1]), q3Deref(args[2]), limit, count_out, allocator);
+}
+
+fn wrapBuiltin_preg_filter(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 3) return error.InvalidArgumentCount;
+    const limit = if (args.len > 3) q3Deref(args[3]) else Value.initInt(-1);
+    const count_out = if (args.len > 4) args[4] else Value.initNull();
+    if (args.len > 4 and !count_out.isRef()) q3WarnByRefValue("preg_filter", 5, "count");
+    return preg_filter(q3Deref(args[0]), q3Deref(args[1]), q3Deref(args[2]), limit, count_out, allocator);
+}
+
+fn wrapBuiltin_preg_replace_callback(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 3) return error.InvalidArgumentCount;
+    const limit = if (args.len > 3) q3Deref(args[3]) else Value.initInt(-1);
+    const count_out = if (args.len > 4) args[4] else Value.initNull();
+    if (args.len > 4 and !count_out.isRef()) q3WarnByRefValue("preg_replace_callback", 5, "count");
+    return php_preg_replace_callback(q3Deref(args[0]), args[1], q3Deref(args[2]), limit, count_out, allocator);
+}
+
+fn wrapBuiltin_str_replace(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 3) return error.InvalidArgumentCount;
+    const count_out = if (args.len > 3) args[3] else Value.initNull();
+    if (args.len > 3 and !count_out.isRef()) q3WarnByRefValue("str_replace", 4, "count");
+    return php_str_replace(q3Deref(args[0]), q3Deref(args[1]), q3Deref(args[2]), count_out, allocator);
+}
+
+fn wrapBuiltin_parse_str(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const result = if (args.len > 1) args[1] else Value.initNull();
+    if (args.len > 1 and !result.isRef()) q3WarnByRefValue("parse_str", 2, "result");
+    return php_parse_str(q3Deref(args[0]), result, allocator);
+}
+
+fn wrapBuiltin_settype(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    // PHP 实测：非引用值 ⇒ 警告 + 返回 true + 不写回（注意不是 false）
+    if (!args[0].isRef()) q3WarnByRefValue("settype", 1, "var");
+    return php_settype(args[0], q3Deref(args[1]), allocator);
+}
+
+fn wrapBuiltin_exec(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    if (args.len > 1 and !args[1].isRef()) q3WarnByRefValue("exec", 2, "output");
+    if (args.len > 2 and !args[2].isRef()) q3WarnByRefValue("exec", 3, "result_code");
+    // command 位非 by-ref ⇒ 解引用；out 位直通（handler 自带 Ref 写穿协议）
+    var norm: [3]Value = undefined;
+    const n = @min(args.len, 3);
+    norm[0] = q3Deref(args[0]);
+    if (n > 1) norm[1] = args[1];
+    if (n > 2) norm[2] = args[2];
+    return php_exec(norm[0..n], allocator);
+}
+
+fn wrapBuiltin_system(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    if (args.len > 1 and !args[1].isRef()) q3WarnByRefValue("system", 2, "output");
+    if (args.len > 2 and !args[2].isRef()) q3WarnByRefValue("system", 3, "result_code");
+    var norm: [3]Value = undefined;
+    const n = @min(args.len, 3);
+    norm[0] = q3Deref(args[0]);
+    if (n > 1) norm[1] = args[1];
+    if (n > 2) norm[2] = args[2];
+    return php_system(norm[0..n], allocator);
+}
+
+fn wrapBuiltin_sscanf(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const parsed = try php_sscanf(q3Deref(args[0]), q3Deref(args[1]), allocator);
+    if (args.len <= 2) return parsed; // 无 out vars ⇒ 返回数组
+    // 带 out vars：PHP 逐位指派已解析值、未解析位**不动**、返回已指派计数；解析全败 ⇒ 0 且全不动
+    var assigned: i64 = 0;
+    if (parsed.isArray()) {
+        const arr = parsed.asArray();
+        var i: usize = 0;
+        while (i < arr.count() and i + 2 < args.len) : (i += 1) {
+            const out = args[i + 2];
+            if (!out.isRef()) {
+                q3WarnByRefValue("sscanf", i + 3, "var");
+                continue;
+            }
+            if (arr.get(.{ .integer = @intCast(i) })) |v| {
+                const cell = out.asRef();
+                _ = v.retain(); // 元素留在数组份额不动；cell 另持一份
+                cell.release(allocator);
+                cell.* = v;
+                assigned += 1;
+            }
+        }
+    }
+    const r = Value.initInt(assigned);
+    parsed.release(allocator);
+    return r;
+}
+
+fn wrapBuiltin_array_multisort(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const norm = try allocator.alloc(Value, args.len);
+    defer allocator.free(norm);
+    for (args, 0..) |a, i| {
+        const v = q3Deref(a);
+        if (v.isArray() and !a.isRef()) {
+            // 非引用数组 ⇒ PHP 不写回 ⇒ 克隆后排序（克隆体受影响、调用方原数组不动）
+            q3WarnByRefValue("array_multisort", i + 1, "array");
+            norm[i] = Value.initArray(try v.asArray().cloneShallow(allocator));
+        } else {
+            norm[i] = v;
+        }
+    }
+    return php_array_multisort(norm, allocator);
+}
+
+// ============================================================================
+// Q4：B 类核心 32 枚（PHP 8.5.8 真值驱动；直调 ≡ 变量调用双表登记）
+// ============================================================================
+
+const html_entity_table = @import("html_entity_table_generated.zig");
+
+/// ★Q4：hex 字符求值（'0'-'9'/'a'-'f'/'A'-'F' ⇒ 0-15）。调用前须 isHex 保序。
+inline fn q4HexVal(c: u8) u8 {
+    if (c >= '0' and c <= '9') return c - '0';
+    if (c >= 'a' and c <= 'f') return c - 'a' + 10;
+    return c - 'A' + 10;
+}
+
+/// str_rot13 - ROT13 变换（自逆）
+pub fn php_str_rot13(str: Value, allocator: Allocator) !Value {
+    if (!str.isString()) return str;
+    const s = str.asString();
+    const buf = try allocator.alloc(u8, s.length);
+    defer allocator.free(buf);
+    for (s.data, 0..) |c, i| {
+        buf[i] = if (c >= 'a' and c <= 'z')
+            'a' + (c - 'a' + 13) % 26
+        else if (c >= 'A' and c <= 'Z')
+            'A' + (c - 'A' + 13) % 26
+        else
+            c;
+    }
+    return Value.initString(try PHPString.init(allocator, buf));
+}
+
+/// html_entity_decode - HTML 实体解码（表由 scripts/gen_html_entity_table.php 反射导出）
+/// flags 文档类型位（ENT_HTML401=0/ENT_XML1=16/ENT_XHTML=32/ENT_HTML5=48）选表；
+/// 命名实体严格分号匹配（实测 `&amp` 不解）；数字实体 &#NN;/&#xHH;（x 大小写均可），
+/// 码点 0、>0x10FFFF、代理区 D800-DFFF 不解（原样保留）。
+pub fn php_html_entity_decode(str: Value, flags: Value, encoding: Value, allocator: Allocator) !Value {
+    _ = encoding;
+    if (!str.isString()) return str;
+    const f: i64 = if (flags.isInt()) flags.asInt() else if (flags.isNull()) 11 else flags.toInt();
+    const table = switch (f & 48) {
+        16 => html_entity_table.xml1,
+        32 => html_entity_table.xhtml,
+        48 => html_entity_table.html5,
+        else => html_entity_table.html401,
+    };
+    const input = str.asString().data;
+    var result = try std.ArrayList(u8).initCapacity(allocator, input.len);
+    defer result.deinit(allocator);
+
+    var i: usize = 0;
+    while (i < input.len) {
+        const c = input[i];
+        if (c != '&') {
+            try result.append(allocator, c);
+            i += 1;
+            continue;
+        }
+        // 数字实体 &#NN; / &#xHH;
+        if (i + 1 < input.len and input[i + 1] == '#') {
+            var j = i + 2;
+            var code: u32 = 0;
+            var valid = false;
+            var hex = false;
+            if (j < input.len and (input[j] == 'x' or input[j] == 'X')) {
+                hex = true;
+                j += 1;
+            }
+            const digit_start = j;
+            while (j < input.len and j - i <= 10) : (j += 1) {
+                const d = input[j];
+                if (hex) {
+                    if (!std.ascii.isHex(d)) break;
+                    code = code * 16 + q4HexVal(d);
+                } else {
+                    if (!std.ascii.isDigit(d)) break;
+                    code = code * 10 + (d - '0');
+                }
+                if (code > 0x10FFFF) break;
+                valid = true;
+            }
+            if (valid and j > digit_start and j < input.len and input[j] == ';' and
+                code > 0 and code <= 0x10FFFF and !(code >= 0xD800 and code <= 0xDFFF))
+            {
+                // UTF-8 编码
+                var ubuf: [4]u8 = undefined;
+                const ulen = std.unicode.utf8Encode(@intCast(code), &ubuf) catch 0;
+                if (ulen > 0) try result.appendSlice(allocator, ubuf[0..ulen]);
+                i = j + 1;
+                continue;
+            }
+            try result.append(allocator, '&');
+            i += 1;
+            continue;
+        }
+        // 命名实体：&name;（字母数字名，窗口 ≤33）
+        var j = i + 1;
+        while (j < input.len and j - i <= 33 and std.ascii.isAlphanumeric(input[j])) j += 1;
+        if (j > i + 1 and j < input.len and input[j] == ';') {
+            if (table.get(input[i..j])) |rep| {
+                try result.appendSlice(allocator, rep);
+                i = j + 1;
+                continue;
+            }
+        }
+        try result.append(allocator, '&');
+        i += 1;
+    }
+    return Value.initString(try PHPString.init(allocator, result.items));
+}
+
+/// levenshtein - 编辑距离（DP；ins/rep/del 自定义代价；PHP 8 无 255 限制实测）
+pub fn php_levenshtein(s1v: Value, s2v: Value, ins_cost: Value, rep_cost: Value, del_cost: Value, allocator: Allocator) !Value {
+    if (!s1v.isString() or !s2v.isString()) return Value.initInt(-1);
+    const a = s1v.asString().data;
+    const b = s2v.asString().data;
+    const ci: i64 = if (ins_cost.isInt()) ins_cost.asInt() else 1;
+    const cr: i64 = if (rep_cost.isInt()) rep_cost.asInt() else 1;
+    const cd: i64 = if (del_cost.isInt()) del_cost.asInt() else 1;
+    const n = a.len;
+    const m = b.len;
+    if (n == 0) return Value.initInt(@as(i64, @intCast(m)) * ci);
+    if (m == 0) return Value.initInt(@as(i64, @intCast(n)) * cd);
+    // 两行 DP
+    var prev = try allocator.alloc(i64, m + 1);
+    defer allocator.free(prev);
+    var curr = try allocator.alloc(i64, m + 1);
+    defer allocator.free(curr);
+    for (0..m + 1) |j| prev[j] = @as(i64, @intCast(j)) * ci;
+    for (a, 0..) |ca, ia| {
+        curr[0] = (@as(i64, @intCast(ia)) + 1) * cd;
+        for (b, 0..) |cb, jb| {
+            const sub = prev[jb] + (if (ca == cb) @as(i64, 0) else cr);
+            const del = prev[jb + 1] + cd;
+            const ins = curr[jb] + ci;
+            curr[jb + 1] = @min(sub, @min(del, ins));
+        }
+        @memcpy(prev, curr);
+    }
+    return Value.initInt(prev[m]);
+}
+
+/// similar_text 递归核：最长公共子串分治计数（p1 外层 p2 内层、严格大于 ⇒ 保最早发现）
+fn similarStrCount(a: []const u8, b: []const u8) i64 {
+    var max_len: usize = 0;
+    var pos1: usize = 0;
+    var pos2: usize = 0;
+    for (0..a.len) |p1| {
+        for (0..b.len) |p2| {
+            var l: usize = 0;
+            while (p1 + l < a.len and p2 + l < b.len and a[p1 + l] == b[p2 + l]) l += 1;
+            if (l > max_len) {
+                max_len = l;
+                pos1 = p1;
+                pos2 = p2;
+            }
+        }
+    }
+    if (max_len == 0) return 0;
+    var sum: i64 = @intCast(max_len);
+    sum += similarStrCount(a[0..pos1], b[0..pos2]);
+    sum += similarStrCount(a[pos1 + max_len ..], b[pos2 + max_len ..]);
+    return sum;
+}
+
+/// similar_text - 相似度（out 参 $percent 走 Q3 Ref 写穿协议）
+pub fn php_similar_text(s1v: Value, s2v: Value, percent: Value, allocator: Allocator) !Value {
+    _ = allocator;
+    const a = if (s1v.isString()) s1v.asString().data else "";
+    const b = if (s2v.isString()) s2v.asString().data else "";
+    const sum = similarStrCount(a, b);
+    if (percent.isRef()) {
+        const denom: f64 = @floatFromInt(a.len + b.len);
+        const pct: f64 = if (denom > 0) @as(f64, @floatFromInt(sum)) * 200.0 / denom else 0.0;
+        percent.asRef().* = Value.initFloat(pct);
+    }
+    return Value.initInt(sum);
+}
+
+/// soundex - PHP 口径：码 0（元音/H/W/Y）⇒ last=0 阻断（实测 shs=S200 与 ashcraft=A226 自洽）；
+/// 非字母跳过不碰 last；输出=首字母+前 3 码右侧补 0；无字母 ⇒ "0000"。
+pub fn php_soundex(str: Value, allocator: Allocator) !Value {
+    if (!str.isString()) return str;
+    const table = [26]u8{ 0, 1, 2, 3, 0, 1, 2, 0, 0, 2, 2, 4, 5, 5, 0, 1, 2, 6, 2, 3, 0, 1, 0, 2, 0, 2 };
+    const input = str.asString().data;
+    var out: [4]u8 = .{ '0', '0', '0', '0' };
+    var out_len: usize = 0;
+    var idx: usize = 0;
+    // 找第一个字母作首字符
+    var first: u8 = 0;
+    while (idx < input.len) : (idx += 1) {
+        if (std.ascii.isAlphabetic(input[idx])) {
+            first = std.ascii.toUpper(input[idx]);
+            idx += 1;
+            break;
+        }
+    }
+    if (first == 0) return Value.initString(try PHPString.init(allocator, &out));
+    out[0] = first;
+    out_len = 1;
+    var last: u8 = table[first - 'A'];
+    while (idx < input.len and out_len < 4) : (idx += 1) {
+        const c = input[idx];
+        if (!std.ascii.isAlphabetic(c)) continue;
+        const code = table[std.ascii.toUpper(c) - 'A'];
+        if (code == 0) {
+            last = 0;
+            continue;
+        }
+        if (code != last) {
+            out[out_len] = '0' + code;
+            out_len += 1;
+        }
+        last = code;
+    }
+    return Value.initString(try PHPString.init(allocator, &out));
+}
+
+/// metaphone - 照 PHP 8.5.8 ext/standard/metaphone.c 逐条移植（traditional=1 硬编码同 PHP）
+fn metaIsVowel(c: u8) bool {
+    return c == 'A' or c == 'E' or c == 'I' or c == 'O' or c == 'U';
+}
+fn metaMakeSoft(c: u8) bool {
+    return c == 'E' or c == 'I' or c == 'Y';
+}
+fn metaAffectH(c: u8) bool {
+    return c == 'C' or c == 'G' or c == 'P' or c == 'S' or c == 'T';
+}
+fn metaNoGhtOf(c: u8) bool {
+    return c == 'B' or c == 'D' or c == 'H';
+}
+
+pub fn php_metaphone(str: Value, phonemes: Value, allocator: Allocator) !Value {
+    if (!str.isString()) return str;
+    const max_phonemes: i64 = if (phonemes.isInt()) phonemes.asInt() else 0;
+    if (max_phonemes < 0) {
+        return throwThrowable("ValueError", "metaphone(): Argument #2 ($phonemes) must be greater than or equal to 0", allocator);
+    }
+    const word = str.asString().data;
+    const wlen = word.len;
+    const limit: usize = if (max_phonemes == 0) wlen else @intCast(max_phonemes);
+    var out = try std.ArrayList(u8).initCapacity(allocator, @min(limit, wlen));
+    defer out.deinit(allocator);
+
+    const SH: u8 = 'X';
+    const TH: u8 = '0';
+    // 读字符助手（C 的 NUL 结尾语义 ⇒ 越界返 0）
+    const Helpers = struct {
+        word: []const u8,
+        fn raw(self: @This(), i: usize) u8 {
+            return if (i < self.word.len) self.word[i] else 0;
+        }
+        fn up(self: @This(), i: usize) u8 {
+            const c = self.raw(i);
+            return if (c != 0) std.ascii.toUpper(c) else 0;
+        }
+    };
+    const h = Helpers{ .word = word };
+
+    var w: usize = 0;
+    // 首字母特例段
+    while (w < wlen and !std.ascii.isAlphabetic(h.raw(w))) w += 1;
+    if (w >= wlen) return Value.initString(try PHPString.init(allocator, ""));
+    const first = h.up(w);
+    switch (first) {
+        'A' => {
+            if (h.up(w + 1) == 'E') {
+                try out.append(allocator, 'E');
+                w += 2;
+            } else {
+                try out.append(allocator, 'A');
+                w += 1;
+            }
+        },
+        'G', 'K', 'P' => {
+            if (h.up(w + 1) == 'N') {
+                try out.append(allocator, 'N');
+                w += 2;
+            }
+        },
+        'W' => {
+            const nx = h.up(w + 1);
+            if (nx == 'R') {
+                try out.append(allocator, 'R');
+                w += 2;
+            } else if (nx == 'H' or metaIsVowel(nx)) {
+                try out.append(allocator, 'W');
+                w += 2;
+            }
+        },
+        'X' => {
+            try out.append(allocator, 'S');
+            w += 1;
+        },
+        'E', 'I', 'O', 'U' => {
+            try out.append(allocator, first);
+            w += 1;
+        },
+        else => {},
+    }
+    // 主循环
+    while (w < wlen and (max_phonemes == 0 or out.items.len < limit)) : (w += 1) {
+        const raw_c = h.raw(w);
+        if (!std.ascii.isAlphabetic(raw_c)) continue;
+        const curr = h.up(w);
+        const prev = if (w >= 1) h.up(w - 1) else 0;
+        // 双写辅音去重（除 CC）
+        if (curr == prev and curr != 'C') continue;
+        var skip: usize = 0;
+        switch (curr) {
+            'B' => {
+                if (prev != 'M') try out.append(allocator, 'B');
+            },
+            'C' => {
+                const nx = h.up(w + 1);
+                if (metaMakeSoft(nx)) {
+                    if (nx == 'I' and h.up(w + 2) == 'A') {
+                        try out.append(allocator, SH);
+                    } else if (prev == 'S') {
+                        // dropped
+                    } else {
+                        try out.append(allocator, 'S');
+                    }
+                } else if (nx == 'H') {
+                    // traditional=1：Christ/School 的 K 分支不启用
+                    try out.append(allocator, SH);
+                    skip += 1;
+                } else {
+                    try out.append(allocator, 'K');
+                }
+            },
+            'D' => {
+                if (h.up(w + 1) == 'G' and metaMakeSoft(h.up(w + 2))) {
+                    try out.append(allocator, 'J');
+                    skip += 1;
+                } else {
+                    try out.append(allocator, 'T');
+                }
+            },
+            'G' => {
+                const nx = h.up(w + 1);
+                if (nx == 'H') {
+                    const back3 = if (w >= 3) h.up(w - 3) else 0;
+                    const back4 = if (w >= 4) h.up(w - 4) else 0;
+                    if (!(metaNoGhtOf(back3) or back4 == 'H')) {
+                        try out.append(allocator, 'F');
+                        skip += 1;
+                    }
+                } else if (nx == 'N') {
+                    const an = h.up(w + 2);
+                    if (an == 0 or !std.ascii.isAlphabetic(an) or
+                        (an == 'E' and h.up(w + 3) == 'D'))
+                    {
+                        // dropped
+                    } else {
+                        try out.append(allocator, 'K');
+                    }
+                } else if (metaMakeSoft(nx) and prev != 'G') {
+                    try out.append(allocator, 'J');
+                } else {
+                    try out.append(allocator, 'K');
+                }
+            },
+            'H' => {
+                if (metaIsVowel(h.up(w + 1)) and !metaAffectH(prev)) try out.append(allocator, 'H');
+            },
+            'K' => {
+                if (prev != 'C') try out.append(allocator, 'K');
+            },
+            'P' => {
+                try out.append(allocator, if (h.up(w + 1) == 'H') 'F' else 'P');
+            },
+            'Q' => try out.append(allocator, 'K'),
+            'S' => {
+                const nx = h.up(w + 1);
+                const an = h.up(w + 2);
+                if (nx == 'I' and (an == 'O' or an == 'A')) {
+                    try out.append(allocator, SH);
+                } else if (nx == 'H') {
+                    try out.append(allocator, SH);
+                    skip += 1;
+                } else {
+                    // traditional=1：SCHW 分支不启用
+                    try out.append(allocator, 'S');
+                }
+            },
+            'T' => {
+                const nx = h.up(w + 1);
+                const an = h.up(w + 2);
+                if (nx == 'I' and (an == 'O' or an == 'A')) {
+                    try out.append(allocator, SH);
+                } else if (nx == 'H') {
+                    try out.append(allocator, TH);
+                    skip += 1;
+                } else if (!(nx == 'C' and an == 'H')) {
+                    try out.append(allocator, 'T');
+                }
+            },
+            'V' => try out.append(allocator, 'F'),
+            'W' => {
+                if (metaIsVowel(h.up(w + 1))) try out.append(allocator, 'W');
+            },
+            'X' => {
+                try out.append(allocator, 'K');
+                try out.append(allocator, 'S');
+            },
+            'Y' => {
+                if (metaIsVowel(h.up(w + 1))) try out.append(allocator, 'Y');
+            },
+            'Z' => try out.append(allocator, 'S'),
+            'F', 'J', 'L', 'M', 'N', 'R' => try out.append(allocator, curr),
+            else => {},
+        }
+        w += skip;
+    }
+    return Value.initString(try PHPString.init(allocator, out.items));
+}
+
+/// addcslashes - charlist（支持 a..z 范围与 C 转义解析）内字符转义。
+/// 转义形：\0\t\n\v\f\r\a\b 用 C 名；其余 <32 或 >126 ⇒ \ooo（3 位八进制）；可打印 ⇒ \c 字面。
+/// 范围颠倒 ⇒ Warning「Invalid '..'-range, '..'-range needs to be incrementing」+ 范围按字面字符（实测）。
+pub fn php_addcslashes(str: Value, charlist: Value, allocator: Allocator) !Value {
+    if (!str.isString() or !charlist.isString()) return str;
+    const input = str.asString().data;
+    const cl = charlist.asString().data;
+    var in_set: [256]bool = @splat(false);
+    var i: usize = 0;
+    while (i < cl.len) {
+        // 范围解析：x..y（x<y 才合法；否则警告并把字符按字面计入）
+        if (i + 3 < cl.len and cl[i + 1] == '.' and cl[i + 2] == '.') {
+            const lo = cl[i];
+            const hi = cl[i + 3];
+            if (lo < hi) {
+                var c: u16 = lo;
+                while (c <= hi) : (c += 1) in_set[c] = true;
+                i += 4;
+                continue;
+            }
+            emitWarning("addcslashes(): Invalid '..'-range, '..'-range needs to be incrementing");
+            in_set[lo] = true;
+            i += 1;
+            continue;
+        }
+        in_set[cl[i]] = true;
+        i += 1;
+    }
+    var result = try std.ArrayList(u8).initCapacity(allocator, input.len);
+    defer result.deinit(allocator);
+    for (input) |c| {
+        if (!in_set[c]) {
+            try result.append(allocator, c);
+            continue;
+        }
+        switch (c) {
+            0 => try result.appendSlice(allocator, "\\0"),
+            '\t' => try result.appendSlice(allocator, "\\t"),
+            '\n' => try result.appendSlice(allocator, "\\n"),
+            11 => try result.appendSlice(allocator, "\\v"),
+            12 => try result.appendSlice(allocator, "\\f"),
+            '\r' => try result.appendSlice(allocator, "\\r"),
+            7 => try result.appendSlice(allocator, "\\a"),
+            8 => try result.appendSlice(allocator, "\\b"),
+            else => {
+                if (c < 32 or c > 126) {
+                    var buf: [4]u8 = undefined;
+                    const s = std.fmt.bufPrint(&buf, "\\{o:0>3}", .{c}) catch unreachable;
+                    try result.appendSlice(allocator, s);
+                } else {
+                    try result.append(allocator, '\\');
+                    try result.append(allocator, c);
+                }
+            },
+        }
+    }
+    return Value.initString(try PHPString.init(allocator, result.items));
+}
+
+/// stripcslashes - C 转义解码：\a\b\f\n\r\t\v\\ 名转义、\0-\777 八进制（1-3 位）、\xHH 十六进制（1-2 位）；
+/// 未识别 ⇒ 去反斜杠保字面。
+pub fn php_stripcslashes(str: Value, allocator: Allocator) !Value {
+    if (!str.isString()) return str;
+    const input = str.asString().data;
+    var result = try std.ArrayList(u8).initCapacity(allocator, input.len);
+    defer result.deinit(allocator);
+    var i: usize = 0;
+    while (i < input.len) {
+        if (input[i] != '\\' or i + 1 >= input.len) {
+            try result.append(allocator, input[i]);
+            i += 1;
+            continue;
+        }
+        const e = input[i + 1];
+        switch (e) {
+            'a' => {
+                try result.append(allocator, 7);
+                i += 2;
+            },
+            'b' => {
+                try result.append(allocator, 8);
+                i += 2;
+            },
+            'f' => {
+                try result.append(allocator, 12);
+                i += 2;
+            },
+            'n' => {
+                try result.append(allocator, '\n');
+                i += 2;
+            },
+            'r' => {
+                try result.append(allocator, '\r');
+                i += 2;
+            },
+            't' => {
+                try result.append(allocator, '\t');
+                i += 2;
+            },
+            'v' => {
+                try result.append(allocator, 11);
+                i += 2;
+            },
+            '0'...'7' => {
+                // 八进制 1-3 位
+                var val: u32 = 0;
+                var n: usize = 0;
+                while (n < 3 and i + 1 + n < input.len and input[i + 1 + n] >= '0' and input[i + 1 + n] <= '7') : (n += 1) {
+                    val = val * 8 + (input[i + 1 + n] - '0');
+                }
+                try result.append(allocator, @truncate(val));
+                i += 1 + n;
+            },
+            'x' => {
+                // 十六进制 1-2 位
+                var val: u32 = 0;
+                var n: usize = 0;
+                while (n < 2 and i + 2 + n < input.len and std.ascii.isHex(input[i + 2 + n])) : (n += 1) {
+                    val = val * 16 + q4HexVal(input[i + 2 + n]);
+                }
+                if (n > 0) {
+                    try result.append(allocator, @truncate(val));
+                    i += 2 + n;
+                } else {
+                    try result.append(allocator, 'x');
+                    i += 2;
+                }
+            },
+            else => {
+                try result.append(allocator, e);
+                i += 2;
+            },
+        }
+    }
+    return Value.initString(try PHPString.init(allocator, result.items));
+}
+
+/// strspn 族共享：offset/length 归一（负 offset 自尾、负 length 自尾截）。
+fn spnNormalize(total: usize, offset: i64, length: ?i64) struct { start: usize, len: usize } {
+    var start: i64 = offset;
+    if (start < 0) start += @intCast(total);
+    if (start < 0) start = 0;
+    if (start > @as(i64, @intCast(total))) start = @intCast(total);
+    const s: usize = @intCast(start);
+    var l: i64 = if (length) |lv| lv else @as(i64, @intCast(total)) - start;
+    if (l < 0) l += @as(i64, @intCast(total)) - start;
+    if (l < 0) l = 0;
+    const remain = total - s;
+    const ln: usize = @min(@as(usize, @intCast(l)), remain);
+    return .{ .start = s, .len = ln };
+}
+
+/// strspn - 起始段全在字符集内的长度
+pub fn php_strspn(str: Value, mask: Value, offset: Value, length: Value) !Value {
+    if (!str.isString() or !mask.isString()) return Value.initInt(0);
+    const input = str.asString().data;
+    const m = mask.asString().data;
+    const off: i64 = if (offset.isInt()) offset.asInt() else 0;
+    const len_opt: ?i64 = if (length.isNull()) null else length.toInt();
+    const r = spnNormalize(input.len, off, len_opt);
+    var in_set: [256]bool = @splat(false);
+    for (m) |c| in_set[c] = true;
+    var n: i64 = 0;
+    for (input[r.start .. r.start + r.len]) |c| {
+        if (!in_set[c]) break;
+        n += 1;
+    }
+    return Value.initInt(n);
+}
+
+/// strcspn - 起始段不含字符集成员的长度
+pub fn php_strcspn(str: Value, mask: Value, offset: Value, length: Value) !Value {
+    if (!str.isString() or !mask.isString()) return Value.initInt(0);
+    const input = str.asString().data;
+    const m = mask.asString().data;
+    const off: i64 = if (offset.isInt()) offset.asInt() else 0;
+    const len_opt: ?i64 = if (length.isNull()) null else length.toInt();
+    const r = spnNormalize(input.len, off, len_opt);
+    var in_set: [256]bool = @splat(false);
+    for (m) |c| in_set[c] = true;
+    var n: i64 = 0;
+    for (input[r.start .. r.start + r.len]) |c| {
+        if (in_set[c]) break;
+        n += 1;
+    }
+    return Value.initInt(n);
+}
+
+/// strpbrk - 首个字符集命中起的子串；空字符集 ⇒ ValueError（实测措辞）
+pub fn php_strpbrk(str: Value, chars: Value, allocator: Allocator) !Value {
+    if (!str.isString()) return str;
+    if (!chars.isString()) return Value.initBool(false);
+    const input = str.asString().data;
+    const set = chars.asString().data;
+    if (set.len == 0) {
+        return throwThrowable("ValueError", "strpbrk(): Argument #2 ($characters) must be a non-empty string", allocator);
+    }
+    var in_set: [256]bool = @splat(false);
+    for (set) |c| in_set[c] = true;
+    for (input, 0..) |c, idx| {
+        if (in_set[c]) {
+            return Value.initString(try PHPString.init(allocator, input[idx..]));
+        }
+    }
+    return Value.initBool(false);
+}
+
+/// substr_compare - 二进制段比较（返回字节差值非符号；offset 越界 ValueError 实测措辞）
+pub fn php_substr_compare(hay: Value, needle: Value, offset: Value, length: Value, ci: Value, allocator: Allocator) !Value {
+    if (!hay.isString() or !needle.isString()) return error.InvalidArgument;
+    const h = hay.asString().data;
+    const n = needle.asString().data;
+    const hlen: i64 = @intCast(h.len);
+    var off: i64 = if (offset.isInt()) offset.asInt() else offset.toInt();
+    if (off < 0) off += hlen;
+    if (off < 0 or off > hlen) {
+        return throwThrowable("ValueError", "substr_compare(): Argument #3 ($offset) must be contained in argument #1 ($haystack)", allocator);
+    }
+    var cmp_len: usize = n.len;
+    if (!length.isNull()) {
+        const l = length.toInt();
+        if (l < 0) {
+            return throwThrowable("ValueError", "substr_compare(): Argument #4 ($length) must be greater than or equal to 0", allocator);
+        }
+        cmp_len = @min(@as(usize, @intCast(l)), n.len);
+    }
+    const avail = h.len - @as(usize, @intCast(off));
+    const n_cmp = @min(cmp_len, avail);
+    const case_i = ci.toBool();
+    var idx: usize = 0;
+    while (idx < n_cmp) : (idx += 1) {
+        var a = h[@as(usize, @intCast(off)) + idx];
+        var b = n[idx];
+        if (case_i) {
+            a = std.ascii.toLower(a);
+            b = std.ascii.toLower(b);
+        }
+        if (a != b) return Value.initInt(@as(i64, a) - @as(i64, b));
+    }
+    // 段相等 ⇒ 长度差决胜（PHP：比较长 needle 剩余或 haystack 剩余）
+    if (cmp_len > n_cmp) {
+        // haystack 段短 ⇒ needle 还有剩余 ⇒ haystack 小
+        return Value.initInt(-@as(i64, @intCast(n[cmp_len - 1])));
+    }
+    return Value.initInt(0);
+}
+
+/// strcoll - 本进程 locale=C ⇒ 字节序（与 PHP 默认 CLI 同口径）
+pub fn php_strcoll(a: Value, b: Value) !Value {
+    const sa = if (a.isString()) a.asString().data else "";
+    const sb = if (b.isString()) b.asString().data else "";
+    const min_len = @min(sa.len, sb.len);
+    for (0..min_len) |i| {
+        if (sa[i] != sb[i]) return Value.initInt(@as(i64, sa[i]) - @as(i64, sb[i]));
+    }
+    return Value.initInt(@as(i64, @intCast(sa.len)) - @as(i64, @intCast(sb.len)));
+}
+
+/// quoted_printable_encode - RFC 2045 + PHP 8.5.8 实测口径：
+///   可打印（33-126 除 '='）原样；'='/tab/控制/高位 ⇒ =XX 大写；tab 恒编码（实测行中也编）；
+///   空格仅真行尾（\r\n 前）编 =20，其余原样（含串尾，实测）；\r\n 原样（col 归零）；
+///   裸 \n ⇒ =0A、裸 \r ⇒ =0D；行宽上限 75（col+本次输出 >75 ⇒ 先插软换行 "=\r\n"）。
+pub fn php_quoted_printable_encode(str: Value, allocator: Allocator) !Value {
+    if (!str.isString()) return str;
+    const input = str.asString().data;
+    var result = try std.ArrayList(u8).initCapacity(allocator, input.len + input.len / 3 + 8);
+    defer result.deinit(allocator);
+    const hexdig = "0123456789ABCDEF";
+    var col: usize = 0;
+    var i: usize = 0;
+    while (i < input.len) : (i += 1) {
+        const c = input[i];
+        // 输出片段（1-3 字符）先物化再按列宽切行
+        var piece: [3]u8 = undefined;
+        var piece_len: usize = 0;
+        if (c == '\r' and i + 1 < input.len and input[i + 1] == '\n') {
+            // \r\n 原样（软换行语义行结束）
+            try result.appendSlice(allocator, "\r\n");
+            i += 1;
+            col = 0;
+            continue;
+        } else if (c == '=') {
+            piece[0] = '=';
+            piece[1] = '3';
+            piece[2] = 'D';
+            piece_len = 3;
+        } else if (c == '\t') {
+            piece[0] = '=';
+            piece[1] = '0';
+            piece[2] = '9';
+            piece_len = 3;
+        } else if (c == ' ') {
+            // 仅 \r\n 前（真行尾）编码
+            if (i + 2 < input.len and input[i + 1] == '\r' and input[i + 2] == '\n') {
+                piece[0] = '=';
+                piece[1] = '2';
+                piece[2] = '0';
+                piece_len = 3;
+            } else {
+                piece[0] = ' ';
+                piece_len = 1;
+            }
+        } else if (c == '\n' or c == '\r' or c < 32 or c > 126) {
+            piece[0] = '=';
+            piece[1] = hexdig[c >> 4];
+            piece[2] = hexdig[c & 15];
+            piece_len = 3;
+        } else {
+            piece[0] = c;
+            piece_len = 1;
+        }
+        if (col + piece_len > 75) {
+            try result.appendSlice(allocator, "=\r\n");
+            col = 0;
+        }
+        try result.appendSlice(allocator, piece[0..piece_len]);
+        col += piece_len;
+    }
+    return Value.initString(try PHPString.init(allocator, result.items));
+}
+
+/// quoted_printable_decode - =XX 解码；=\r\n/=\n/=\r 软换行删除；= 后非 hex/换行 ⇒ 原样保留；
+/// 串尾孤立 = ⇒ 丢弃（实测 "end=" ⇒ "end"）。
+pub fn php_quoted_printable_decode(str: Value, allocator: Allocator) !Value {
+    if (!str.isString()) return str;
+    const input = str.asString().data;
+    var result = try std.ArrayList(u8).initCapacity(allocator, input.len);
+    defer result.deinit(allocator);
+    var i: usize = 0;
+    while (i < input.len) {
+        if (input[i] == '=') {
+            if (i + 1 >= input.len) break; // 串尾孤立 = 丢弃
+            const n1 = input[i + 1];
+            if (n1 == '\n') {
+                i += 2;
+                continue;
+            }
+            if (n1 == '\r') {
+                if (i + 2 < input.len and input[i + 2] == '\n') {
+                    i += 3;
+                } else {
+                    i += 2;
+                }
+                continue;
+            }
+            if (i + 2 < input.len and std.ascii.isHex(n1) and std.ascii.isHex(input[i + 2])) {
+                const hi = q4HexVal(n1);
+                const lo = q4HexVal(input[i + 2]);
+                try result.append(allocator, hi * 16 + lo);
+                i += 3;
+                continue;
+            }
+            // 非法 = 序列：= 原样保留
+            try result.append(allocator, '=');
+            i += 1;
+            continue;
+        }
+        try result.append(allocator, input[i]);
+        i += 1;
+    }
+    return Value.initString(try PHPString.init(allocator, result.items));
+}
+
+/// convert_uuencode - 45 字节/行；行首 chr(len+32)；3→4 每 6 位 +32（0 ⇒ '`'）；
+/// 恒以 "`\n" 结束行收尾（空输入也产——实测 uu_empty="`\n"）。
+pub fn php_convert_uuencode(str: Value, allocator: Allocator) !Value {
+    if (!str.isString()) return str;
+    const input = str.asString().data;
+    var result = try std.ArrayList(u8).initCapacity(allocator, input.len + input.len / 3 + 8);
+    defer result.deinit(allocator);
+    var pos: usize = 0;
+    while (pos < input.len) {
+        const n = @min(45, input.len - pos);
+        try result.append(allocator, @intCast(n + 32));
+        var j: usize = 0;
+        while (j < n) : (j += 3) {
+            const b0: u16 = input[pos + j];
+            const b1: u16 = if (j + 1 < n) input[pos + j + 1] else 0;
+            const b2: u16 = if (j + 2 < n) input[pos + j + 2] else 0;
+            const quads = [4]u8{
+                @intCast(b0 >> 2),
+                @intCast(((b0 << 4) | (b1 >> 4)) & 0x3F),
+                @intCast(((b1 << 2) | (b2 >> 6)) & 0x3F),
+                @intCast(b2 & 0x3F),
+            };
+            for (quads) |qv| {
+                try result.append(allocator, if (qv == 0) '`' else qv + 32);
+            }
+        }
+        try result.append(allocator, '\n');
+        pos += n;
+    }
+    try result.appendSlice(allocator, "`\n");
+    return Value.initString(try PHPString.init(allocator, result.items));
+}
+
+/// convert_uudecode - 逐行：行首 (c-32)&63=本行字节数（0 ⇒ 结束）；数据 4 字符→3 字节。
+/// 非法结构/空输入 ⇒ Warning「convert_uudecode(): Argument #1 ($data) is not a valid uuencoded string」+ false（实测）。
+pub fn php_convert_uudecode(str: Value, allocator: Allocator) !Value {
+    if (!str.isString()) return str;
+    const input = str.asString().data;
+    const warn_false = "convert_uudecode(): Argument #1 ($data) is not a valid uuencoded string";
+    if (input.len == 0) {
+        emitWarning(warn_false);
+        return Value.initBool(false);
+    }
+    var result = try std.ArrayList(u8).initCapacity(allocator, input.len);
+    defer result.deinit(allocator);
+    var pos: usize = 0;
+    var saw_any_line = false;
+    while (pos < input.len) {
+        // 取一行（到 \n 或 EOF）
+        var line_end = pos;
+        while (line_end < input.len and input[line_end] != '\n') line_end += 1;
+        var line = input[pos..line_end];
+        // 去尾 \r
+        if (line.len > 0 and line[line.len - 1] == '\r') line = line[0 .. line.len - 1];
+        pos = if (line_end < input.len) line_end + 1 else line_end;
+        if (line.len == 0) continue;
+        saw_any_line = true;
+        const n: usize = @intCast(@as(u16, line[0]) -% 32 & 0x3F);
+        if (n == 0) break; // 结束行
+        const need_chars = ((n + 2) / 3) * 4;
+        if (line.len - 1 < need_chars) {
+            emitWarning(warn_false);
+            return Value.initBool(false);
+        }
+        var out_left = n;
+        var k: usize = 1;
+        while (out_left > 0) : (k += 4) {
+            var quads: [4]u16 = undefined;
+            for (0..4) |q| {
+                const c = line[k + @as(usize, @intCast(q))];
+                if (c < 32 or c > 96) {
+                    emitWarning(warn_false);
+                    return Value.initBool(false);
+                }
+                quads[q] = @as(u16, c) -% 32 & 0x3F;
+            }
+            const b0: u8 = @intCast((quads[0] << 2) | (quads[1] >> 4));
+            const b1: u8 = @intCast((quads[1] << 4) | (quads[2] >> 2));
+            const b2: u8 = @intCast((quads[2] << 6) | quads[3]);
+            try result.append(allocator, b0);
+            if (out_left > 1) try result.append(allocator, b1);
+            if (out_left > 2) try result.append(allocator, b2);
+            out_left -|= 3;
+        }
+    }
+    if (!saw_any_line) {
+        emitWarning(warn_false);
+        return Value.initBool(false);
+    }
+    return Value.initString(try PHPString.init(allocator, result.items));
+}
+
+/// str_increment - 字母数字 Perl 式进位（z→aa/Z9→AA0/99→100）。
+/// 空串 ⇒ ValueError「must not be empty」；非 ASCII 字母数字 ⇒ ValueError「composed only of...」（实测逐字）。
+pub fn php_str_increment(str: Value, allocator: Allocator) !Value {
+    if (!str.isString()) return error.InvalidArgument;
+    const input = str.asString().data;
+    if (input.len == 0) {
+        return throwThrowable("ValueError", "str_increment(): Argument #1 ($string) must not be empty", allocator);
+    }
+    for (input) |c| {
+        if (!std.ascii.isAlphanumeric(c)) {
+            return throwThrowable("ValueError", "str_increment(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters", allocator);
+        }
+    }
+    const buf = try allocator.dupe(u8, input);
+    defer allocator.free(buf);
+    var i: usize = input.len;
+    var carry = true;
+    while (i > 0 and carry) {
+        i -= 1;
+        const c = buf[i];
+        if (c >= '0' and c <= '8') {
+            buf[i] = c + 1;
+            carry = false;
+        } else if (c == '9') {
+            buf[i] = '0';
+        } else if (c >= 'a' and c <= 'y') {
+            buf[i] = c + 1;
+            carry = false;
+        } else if (c == 'z') {
+            buf[i] = 'a';
+        } else if (c >= 'A' and c <= 'Y') {
+            buf[i] = c + 1;
+            carry = false;
+        } else if (c == 'Z') {
+            buf[i] = 'A';
+        }
+    }
+    if (carry) {
+        // 全进位：前缀按**首**字符类别补（实测 Z9→AA0/z9→aa0/99→100）
+        const first_c = input[0];
+        const prefix: u8 = if (first_c >= '0' and first_c <= '9') '1' else if (first_c >= 'a' and first_c <= 'z') 'a' else 'A';
+        var result = try std.ArrayList(u8).initCapacity(allocator, input.len + 1);
+        defer result.deinit(allocator);
+        try result.append(allocator, prefix);
+        try result.appendSlice(allocator, buf);
+        return Value.initString(try PHPString.init(allocator, result.items));
+    }
+    return Value.initString(try PHPString.init(allocator, buf));
+}
+
+/// str_decrement - 借位形；首字符仍要借 ⇒ 串长 1 ValueError「"a" is out of decrement range」（带值），
+/// 串长>1 收缩首字符（aa→z）。空串/非字母数字同 increment 措辞族。
+pub fn php_str_decrement(str: Value, allocator: Allocator) !Value {
+    if (!str.isString()) return error.InvalidArgument;
+    const input = str.asString().data;
+    if (input.len == 0) {
+        return throwThrowable("ValueError", "str_decrement(): Argument #1 ($string) must not be empty", allocator);
+    }
+    for (input) |c| {
+        if (!std.ascii.isAlphanumeric(c)) {
+            return throwThrowable("ValueError", "str_decrement(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters", allocator);
+        }
+    }
+    const buf = try allocator.dupe(u8, input);
+    defer allocator.free(buf);
+    var i: usize = input.len;
+    var borrow = true;
+    while (i > 0 and borrow) {
+        i -= 1;
+        const c = buf[i];
+        if (c >= '1' and c <= '9') {
+            buf[i] = c - 1;
+            borrow = false;
+        } else if (c == '0') {
+            buf[i] = '9';
+        } else if (c >= 'b' and c <= 'z') {
+            buf[i] = c - 1;
+            borrow = false;
+        } else if (c == 'a') {
+            buf[i] = 'z';
+        } else if (c >= 'B' and c <= 'Z') {
+            buf[i] = c - 1;
+            borrow = false;
+        } else if (c == 'A') {
+            buf[i] = 'Z';
+        }
+    }
+    if (borrow) {
+        // 借位穿透首字符
+        if (input.len == 1) {
+            const msg = try std.fmt.allocPrint(allocator, "str_decrement(): Argument #1 ($string) \"{s}\" is out of decrement range", .{input});
+            defer allocator.free(msg);
+            return throwThrowable("ValueError", msg, allocator);
+        }
+        return Value.initString(try PHPString.init(allocator, buf[1..]));
+    }
+    return Value.initString(try PHPString.init(allocator, buf));
+}
+
+/// vprintf - vsprintf + 直出 + 返回输出长度
+pub fn php_vprintf(format: Value, args_arr: Value, allocator: Allocator) !Value {
+    const out = try php_vsprintf(format, args_arr, allocator);
+    defer out.release(allocator);
+    try php_echo(out);
+    if (out.isString()) return Value.initInt(@intCast(out.asString().length));
+    return Value.initInt(0);
+}
+
+/// fprintf - B 风格整切片：args[0]=stream, args[1]=format, args[2:]=values。
+/// 返回写入长度（fwrite 口径）。
+pub fn php_fprintf(args: []const Value, allocator: Allocator) !Value {
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const out = try php_sprintf(args[1], args[2..], allocator);
+    defer out.release(allocator);
+    return php_fwrite(args[0], out, allocator);
+}
+
+// ---- Q4 数组族 ----
+
+/// array_all/array_any 共享核：逐 (value, key) 回调（回调异常经 php_invoke_callable 通道传播）。
+fn q4ArrayEverySome(arr_v: Value, cb: Value, comptime want_all: bool, allocator: Allocator) !Value {
+    if (!arr_v.isArray()) return error.InvalidArgument;
+    const arr = arr_v.asArray();
+    var it = arr.elements.iterator();
+    while (it.next()) |entry| {
+        const key_v = switch (entry.key_ptr.*) {
+            .integer => |ki| Value.initInt(ki),
+            .string => |ks| Value.initString(ks),
+        };
+        const cb_args = [_]Value{ entry.value_ptr.*, key_v };
+        var r = try php_invoke_callable(cb, &cb_args, allocator);
+        const pass = r.toBool();
+        r.release(allocator);
+        if (want_all and !pass) return Value.initBool(false);
+        if (!want_all and pass) return Value.initBool(true);
+    }
+    return Value.initBool(want_all);
+}
+
+pub fn php_array_all(arr_v: Value, cb: Value, allocator: Allocator) !Value {
+    return q4ArrayEverySome(arr_v, cb, true, allocator);
+}
+
+pub fn php_array_any(arr_v: Value, cb: Value, allocator: Allocator) !Value {
+    return q4ArrayEverySome(arr_v, cb, false, allocator);
+}
+
+/// array_first/array_last：序列表首/尾值；空 ⇒ null（PHP 8.5 语义）
+pub fn php_array_first(arr_v: Value) !Value {
+    if (!arr_v.isArray()) return Value.initNull();
+    var it = arr_v.asArray().elements.iterator();
+    if (it.next()) |entry| return entry.value_ptr.*;
+    return Value.initNull();
+}
+
+pub fn php_array_last(arr_v: Value) !Value {
+    if (!arr_v.isArray()) return Value.initNull();
+    const arr = arr_v.asArray();
+    var it = arr.elements.iterator();
+    var last = Value.initNull();
+    while (it.next()) |entry| last = entry.value_ptr.*;
+    return last;
+}
+
+/// array_change_key_case - 字符串键大小写变换；数字字符串键转整数键（PHP 键规范化）；
+/// case 非 CASE_LOWER(0) ⇒ 一律 upper（实测 99 不抛错、按 upper）。
+pub fn php_array_change_key_case(arr_v: Value, case_v: Value, allocator: Allocator) !Value {
+    if (!arr_v.isArray()) return error.InvalidArgument;
+    const to_upper = if (case_v.isInt()) case_v.asInt() != 0 else false;
+    const src = arr_v.asArray();
+    const out = try PHPArray.init(allocator);
+    var it = src.elements.iterator();
+    while (it.next()) |entry| {
+        var key = entry.key_ptr.*;
+        if (key == .string) {
+            const ks = key.string.data;
+            if (parsePhpArrayIntKey(ks)) |ik| {
+                key = .{ .integer = ik };
+            } else {
+                const buf = try allocator.dupe(u8, ks);
+                defer allocator.free(buf);
+                for (buf) |*c| c.* = if (to_upper) std.ascii.toUpper(c.*) else std.ascii.toLower(c.*);
+                key = .{ .string = try PHPString.init(allocator, buf) };
+            }
+        }
+        try out.set(allocator, key, entry.value_ptr.*);
+    }
+    return Value.initArray(out);
+}
+
+/// array_merge_recursive 递归核：字符串键冲突——双数组递归合、否则合数组 [old..., new...]；
+/// 整数键恒追加。产生全新数组（不动入参）。
+fn q4MergeRecursiveInto(dst: *PHPArray, src: *const PHPArray, allocator: Allocator) anyerror!void {
+    var it = src.elements.iterator();
+    while (it.next()) |entry| {
+        const v = entry.value_ptr.*;
+        switch (entry.key_ptr.*) {
+            .integer => try dst.push(allocator, v),
+            .string => |ks| {
+                const key = ArrayKey{ .string = ks };
+                const existing = dst.elements.get(key);
+                if (existing == null) {
+                    try dst.set(allocator, key, v);
+                    continue;
+                }
+                const ev = existing.?;
+                const ev_arr = ev.isArray();
+                const v_arr = v.isArray();
+                if (ev_arr and v_arr) {
+                    const merged = try PHPArray.init(allocator);
+                    try q4MergeRecursiveInto(merged, ev.asArray(), allocator);
+                    try q4MergeRecursiveInto(merged, v.asArray(), allocator);
+                    try dst.set(allocator, key, Value.initArray(merged));
+                } else {
+                    const pack = try PHPArray.init(allocator);
+                    if (ev_arr) {
+                        try q4MergeRecursiveInto(pack, ev.asArray(), allocator);
+                    } else {
+                        try pack.push(allocator, ev);
+                    }
+                    if (v_arr) {
+                        try q4MergeRecursiveInto(pack, v.asArray(), allocator);
+                    } else {
+                        try pack.push(allocator, v);
+                    }
+                    try dst.set(allocator, key, Value.initArray(pack));
+                }
+            },
+        }
+    }
+}
+
+/// array_merge_recursive(...$arrays)——B 风格整切片（变参）。
+pub fn php_array_merge_recursive(args: []const Value, allocator: Allocator) !Value {
+    const out = try PHPArray.init(allocator);
+    for (args) |a| {
+        if (!a.isArray()) return error.InvalidArgument;
+        try q4MergeRecursiveInto(out, a.asArray(), allocator);
+    }
+    return Value.initArray(out);
+}
+
+/// array_replace_recursive 递归核：字符串/整数键冲突——双数组递归替换、否则新值替旧；新键追加。
+fn q4ReplaceRecursiveInto(dst: *PHPArray, src: *const PHPArray, allocator: Allocator) anyerror!void {
+    var it = src.elements.iterator();
+    while (it.next()) |entry| {
+        const v = entry.value_ptr.*;
+        const key = entry.key_ptr.*;
+        const existing = dst.elements.get(key);
+        if (existing != null and existing.?.isArray() and v.isArray()) {
+            const merged = try PHPArray.init(allocator);
+            try q4ReplaceRecursiveInto(merged, existing.?.asArray(), allocator);
+            try q4ReplaceRecursiveInto(merged, v.asArray(), allocator);
+            try dst.set(allocator, key, Value.initArray(merged));
+        } else {
+            try dst.set(allocator, key, v);
+        }
+    }
+}
+
+/// array_replace_recursive(...$arrays)——B 风格整切片（变参）。
+pub fn php_array_replace_recursive(args: []const Value, allocator: Allocator) !Value {
+    if (args.len == 0) return Value.initArray(try PHPArray.init(allocator));
+    if (!args[0].isArray()) return error.InvalidArgument;
+    // 首数组浅拷贝为底（不动入参）
+    const out = try PHPArray.init(allocator);
+    try q4ReplaceRecursiveInto(out, args[0].asArray(), allocator);
+    for (args[1..]) |a| {
+        if (!a.isArray()) return error.InvalidArgument;
+        try q4ReplaceRecursiveInto(out, a.asArray(), allocator);
+    }
+    return Value.initArray(out);
+}
+
+// ---- Q4 misc 族 ----
+
+/// version_compare 段序表：dev=0 < alpha/a=1 < beta/b=2 < RC/rc=3 < 空/数字=4 < pl/p/patch=5。
+/// （PHP 8.5.8 实测校准：pl1==patch1、RC 大小写不敏感、a==alpha。）
+fn vcSpecialRank(seg: []const u8) i64 {
+    var lbuf: [16]u8 = undefined;
+    if (seg.len > 16) return -1; // 超长按未知
+    const ls = std.ascii.lowerString(&lbuf, seg);
+    if (std.mem.eql(u8, ls, "dev")) return 0;
+    if (std.mem.eql(u8, ls, "alpha") or std.mem.eql(u8, ls, "a")) return 1;
+    if (std.mem.eql(u8, ls, "beta") or std.mem.eql(u8, ls, "b")) return 2;
+    if (std.mem.eql(u8, ls, "rc")) return 3;
+    if (std.mem.eql(u8, ls, "pl") or std.mem.eql(u8, ls, "p") or std.mem.eql(u8, ls, "patch")) return 5;
+    return -1;
+}
+
+const VcSeg = struct { is_num: bool, text: []const u8 };
+
+/// 取下一段（跳过分隔符 .；段=连续数字 或 连续非数字非点）。
+fn vcNextSeg(v: []const u8, pos: *usize) ?VcSeg {
+    while (pos.* < v.len and v[pos.*] == '.') pos.* += 1;
+    if (pos.* >= v.len) return null;
+    const start = pos.*;
+    const is_num = std.ascii.isDigit(v[start]);
+    while (pos.* < v.len) {
+        const c = v[pos.*];
+        if (c == '.') break;
+        if (std.ascii.isDigit(c) != is_num) break;
+        pos.* += 1;
+    }
+    return .{ .is_num = is_num, .text = v[start..pos.*] };
+}
+
+/// 数字段比较：去前导零后长度优先、同长字典序（任意精度，无溢出）。
+fn vcNumCmp(a: []const u8, b: []const u8) i64 {
+    const ta = std.mem.trimStart(u8, a, "0");
+    const tbb = std.mem.trimStart(u8, b, "0");
+    if (ta.len != tbb.len) return if (ta.len < tbb.len) -1 else 1;
+    const c = std.mem.order(u8, ta, tbb);
+    return switch (c) {
+        .lt => -1,
+        .gt => 1,
+        .eq => 0,
+    };
+}
+
+/// version_compare 核心：规范化（-_+ ⇒ .）后逐段比；段尽尾部规则——剩余侧首段数字 ⇒ 该侧大；
+/// 字母 ⇒ 特殊秩 vs 空秩 4（<4 该侧小 / >4 该侧大）。
+fn vcCompare(v1: []const u8, v2: []const u8) i64 {
+    var p1: usize = 0;
+    var p2: usize = 0;
+    while (true) {
+        const s1 = vcNextSeg(v1, &p1);
+        const s2 = vcNextSeg(v2, &p2);
+        if (s1 == null and s2 == null) return 0;
+        if (s1 == null or s2 == null) {
+            // 尾部规则（实测校准：1.0<1.0.0 / 1.0.0.1>1.0.0 / 1.0.0>1.0.0RC1 / 1.0<1.0.0pl1）：
+            //   剩余首段数字 ⇒ 剩余侧大；字母 ⇒ 特殊秩 vs 空秩 4（<4 预发布 ⇒ 剩余侧小）。
+            const rem = if (s1 == null) s2.? else s1.?;
+            const side_wins: i64 = if (s1 == null) -1 else 1; // 剩余在 p2 ⇒ p2 大 ⇒ 返回 -1
+            if (rem.is_num) return side_wins;
+            const rank = vcSpecialRank(rem.text);
+            if (rank < 0) return side_wins; // 未知字母段：按「剩余侧大」保守（PHP 罕见面）
+            if (rank < 4) return -side_wins;
+            if (rank > 4) return side_wins;
+            return 0;
+        }
+        if (s1.?.is_num and s2.?.is_num) {
+            const c = vcNumCmp(s1.?.text, s2.?.text);
+            if (c != 0) return c;
+        } else if (!s1.?.is_num and !s2.?.is_num) {
+            const r1 = vcSpecialRank(s1.?.text);
+            const r2 = vcSpecialRank(s2.?.text);
+            if (r1 >= 0 and r2 >= 0) {
+                if (r1 != r2) return if (r1 < r2) -1 else 1;
+            } else {
+                const c = std.mem.order(u8, s1.?.text, s2.?.text);
+                if (c != .eq) return if (c == .lt) -1 else 1;
+            }
+        } else {
+            // 数字段 vs 字母段 ⇒ 数字大
+            return if (s1.?.is_num) 1 else -1;
+        }
+    }
+}
+
+/// version_compare - op null ⇒ int(-1/0/1)；合法 op ⇒ bool；非法 ⇒ ValueError（实测措辞）。
+pub fn php_version_compare(v1: Value, v2: Value, op_v: Value, allocator: Allocator) !Value {
+    if (!v1.isString() or !v2.isString()) return error.InvalidArgument;
+    // 规范化：- _ + ⇒ .
+    const norm = struct {
+        fn f(s: []const u8, alloc: Allocator) ![]u8 {
+            const buf = try alloc.dupe(u8, s);
+            for (buf) |*c| {
+                if (c.* == '-' or c.* == '_' or c.* == '+') c.* = '.';
+            }
+            return buf;
+        }
+    };
+    const n1 = try norm.f(v1.asString().data, allocator);
+    defer allocator.free(n1);
+    const n2 = try norm.f(v2.asString().data, allocator);
+    defer allocator.free(n2);
+    const cmp = vcCompare(n1, n2);
+    if (op_v.isNull()) return Value.initInt(cmp);
+    if (!op_v.isString()) return Value.initNull();
+    const op = op_v.asString().data;
+    const result: ?bool = blk: {
+        if (std.mem.eql(u8, op, "<") or std.mem.eql(u8, op, "lt")) break :blk cmp < 0;
+        if (std.mem.eql(u8, op, "<=") or std.mem.eql(u8, op, "le")) break :blk cmp <= 0;
+        if (std.mem.eql(u8, op, ">") or std.mem.eql(u8, op, "gt")) break :blk cmp > 0;
+        if (std.mem.eql(u8, op, ">=") or std.mem.eql(u8, op, "ge")) break :blk cmp >= 0;
+        if (std.mem.eql(u8, op, "==") or std.mem.eql(u8, op, "=") or std.mem.eql(u8, op, "eq")) break :blk cmp == 0;
+        if (std.mem.eql(u8, op, "!=") or std.mem.eql(u8, op, "<>") or std.mem.eql(u8, op, "ne")) break :blk cmp != 0;
+        break :blk null;
+    };
+    if (result) |r| return Value.initBool(r);
+    return throwThrowable("ValueError", "version_compare(): Argument #3 ($operator) must be a valid comparison operator", allocator);
+}
+
+/// json_validate - 复用 jsonDecodeValue 做语法校验（depth 同 json_decode 口径）；
+/// 实测会写 last_json_error_code（成功 ⇒ NONE，失败 ⇒ SYNTAX/DEPTH）。
+pub fn php_json_validate(args: []const Value, allocator: Allocator) !Value {
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const json = args[0];
+    if (!json.isString()) {
+        last_json_error_code = json_error_syntax;
+        return Value.initBool(false);
+    }
+    var depth: usize = 512;
+    if (args.len >= 2 and !args[1].isNull()) {
+        const d = args[1].toInt();
+        if (d < 1) {
+            return throwThrowable("ValueError", "json_validate(): Argument #2 ($depth) must be greater than 0", allocator);
+        }
+        depth = @intCast(d);
+    }
+    const json_str = json.asString().data;
+    var pos: usize = 0;
+    const result = jsonDecodeValue(json_str, &pos, true, depth, allocator) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.MaxDepthExceeded => {
+            last_json_error_code = json_error_depth;
+            return Value.initBool(false);
+        },
+        else => {
+            last_json_error_code = json_error_syntax;
+            return Value.initBool(false);
+        },
+    };
+    result.release(allocator);
+    skipWhitespace(json_str, &pos);
+    if (pos != json_str.len) {
+        last_json_error_code = json_error_syntax;
+        return Value.initBool(false);
+    }
+    last_json_error_code = json_error_none;
+    return Value.initBool(true);
+}
+
+/// gc_disable - 关闭循环收集（AOT 有真实 cycle GC，如实关）
+pub fn php_gc_disable(args: []const Value, allocator: Allocator) !Value {
+    _ = allocator;
+    if (args.len != 0) return error.InvalidArgumentCount;
+    gc_enabled = false;
+    return Value.initNull();
+}
+
+/// gc_status - 12 键固定结构（PHP 8.5.8 键序实测）；值取 AOT 真实 GC 状态：
+/// running=gc_enabled、runs/collected=真实累计、roots=cycle_roots 现量、
+/// threshold=GC_ROOT_THRESHOLD、buffer_size=capacity；时间计数器 AOT 未埋点 ⇒ 0.0。
+pub fn php_gc_status(args: []const Value, allocator: Allocator) !Value {
+    _ = args;
+    const out = try PHPArray.init(allocator);
+    const put = struct {
+        fn f(arr: *PHPArray, comptime name: []const u8, v: Value, alloc: Allocator) !void {
+            try arr.set(alloc, .{ .string = try PHPString.init(alloc, name) }, v);
+        }
+    };
+    try put.f(out, "running", Value.initBool(gc_enabled), allocator);
+    try put.f(out, "protected", Value.initBool(false), allocator);
+    try put.f(out, "full", Value.initBool(cycle_roots.items.len >= GC_ROOT_THRESHOLD), allocator);
+    try put.f(out, "runs", Value.initInt(gc_runs_total), allocator);
+    try put.f(out, "collected", Value.initInt(gc_collected_total), allocator);
+    try put.f(out, "threshold", Value.initInt(@intCast(GC_ROOT_THRESHOLD)), allocator);
+    try put.f(out, "buffer_size", Value.initInt(@intCast(cycle_roots.capacity)), allocator);
+    try put.f(out, "roots", Value.initInt(@intCast(cycle_roots.items.len)), allocator);
+    try put.f(out, "application_time", Value.initFloat(0.0), allocator);
+    try put.f(out, "collector_time", Value.initFloat(0.0), allocator);
+    try put.f(out, "destructor_time", Value.initFloat(0.0), allocator);
+    try put.f(out, "free_time", Value.initFloat(0.0), allocator);
+    return Value.initArray(out);
+}
+
+// ---- Q4 包装器（运行期变量调用表用；与直调面同 handler ⇒ 双表同口径）----
+
+fn wrapBuiltin_str_rot13(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_str_rot13(q3Deref(args[0]), allocator);
+}
+
+fn wrapBuiltin_html_entity_decode(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const flags = if (args.len >= 2) q3Deref(args[1]) else Value.initInt(11);
+    const encoding = if (args.len >= 3) q3Deref(args[2]) else Value.initNull();
+    return php_html_entity_decode(q3Deref(args[0]), flags, encoding, allocator);
+}
+
+fn wrapBuiltin_levenshtein(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const ins = if (args.len >= 3) q3Deref(args[2]) else Value.initInt(1);
+    const rep = if (args.len >= 4) q3Deref(args[3]) else Value.initInt(1);
+    const del = if (args.len >= 5) q3Deref(args[4]) else Value.initInt(1);
+    return php_levenshtein(q3Deref(args[0]), q3Deref(args[1]), ins, rep, del, allocator);
+}
+
+fn wrapBuiltin_similar_text(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    // $percent 可选 by-ref：Ref ⇒ 写穿；非 Ref ⇒ 警告（Q3 协议）；缺省 ⇒ 隔离 null
+    const pct = if (args.len >= 3) args[2] else Value.initNull();
+    if (args.len >= 3 and !pct.isRef()) q3WarnByRefValue("similar_text", 3, "percent");
+    return php_similar_text(q3Deref(args[0]), q3Deref(args[1]), pct, allocator);
+}
+
+fn wrapBuiltin_soundex(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_soundex(q3Deref(args[0]), allocator);
+}
+
+fn wrapBuiltin_metaphone(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const phonemes = if (args.len >= 2) q3Deref(args[1]) else Value.initInt(0);
+    return php_metaphone(q3Deref(args[0]), phonemes, allocator);
+}
+
+fn wrapBuiltin_addcslashes(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_addcslashes(q3Deref(args[0]), q3Deref(args[1]), allocator);
+}
+
+fn wrapBuiltin_stripcslashes(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_stripcslashes(q3Deref(args[0]), allocator);
+}
+
+fn wrapBuiltin_strspn(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const offset = if (args.len >= 3) q3Deref(args[2]) else Value.initInt(0);
+    const length = if (args.len >= 4) q3Deref(args[3]) else Value.initNull();
+    return php_strspn(q3Deref(args[0]), q3Deref(args[1]), offset, length);
+}
+
+fn wrapBuiltin_strcspn(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const offset = if (args.len >= 3) q3Deref(args[2]) else Value.initInt(0);
+    const length = if (args.len >= 4) q3Deref(args[3]) else Value.initNull();
+    return php_strcspn(q3Deref(args[0]), q3Deref(args[1]), offset, length);
+}
+
+fn wrapBuiltin_strpbrk(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_strpbrk(q3Deref(args[0]), q3Deref(args[1]), allocator);
+}
+
+fn wrapBuiltin_substr_compare(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 3) return error.InvalidArgumentCount;
+    const length = if (args.len >= 4) q3Deref(args[3]) else Value.initNull();
+    const ci = if (args.len >= 5) q3Deref(args[4]) else Value.initBool(false);
+    return php_substr_compare(q3Deref(args[0]), q3Deref(args[1]), q3Deref(args[2]), length, ci, allocator);
+}
+
+fn wrapBuiltin_strcoll(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_strcoll(q3Deref(args[0]), q3Deref(args[1]));
+}
+
+fn wrapBuiltin_quoted_printable_encode(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_quoted_printable_encode(q3Deref(args[0]), allocator);
+}
+
+fn wrapBuiltin_quoted_printable_decode(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_quoted_printable_decode(q3Deref(args[0]), allocator);
+}
+
+fn wrapBuiltin_convert_uuencode(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_convert_uuencode(q3Deref(args[0]), allocator);
+}
+
+fn wrapBuiltin_convert_uudecode(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_convert_uudecode(q3Deref(args[0]), allocator);
+}
+
+fn wrapBuiltin_str_increment(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_str_increment(q3Deref(args[0]), allocator);
+}
+
+fn wrapBuiltin_str_decrement(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_str_decrement(q3Deref(args[0]), allocator);
+}
+
+fn wrapBuiltin_vprintf(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_vprintf(q3Deref(args[0]), q3Deref(args[1]), allocator);
+}
+
+fn wrapBuiltin_fprintf(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_fprintf(args, allocator);
+}
+
+fn wrapBuiltin_array_all(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_array_all(q3Deref(args[0]), args[1], allocator);
+}
+
+fn wrapBuiltin_array_any(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_array_any(q3Deref(args[0]), args[1], allocator);
+}
+
+fn wrapBuiltin_array_first(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_array_first(q3Deref(args[0]));
+}
+
+fn wrapBuiltin_array_last(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_array_last(q3Deref(args[0]));
+}
+
+fn wrapBuiltin_array_change_key_case(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const case_v = if (args.len >= 2) q3Deref(args[1]) else Value.initInt(0);
+    return php_array_change_key_case(q3Deref(args[0]), case_v, allocator);
+}
+
+fn wrapBuiltin_array_merge_recursive(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    return php_array_merge_recursive(args, allocator);
+}
+
+fn wrapBuiltin_array_replace_recursive(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    return php_array_replace_recursive(args, allocator);
+}
+
+fn wrapBuiltin_version_compare(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const op = if (args.len >= 3) q3Deref(args[2]) else Value.initNull();
+    return php_version_compare(q3Deref(args[0]), q3Deref(args[1]), op, allocator);
+}
+
+fn wrapBuiltin_json_validate(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    return php_json_validate(args, allocator);
+}
+
+fn wrapBuiltin_gc_disable(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    return php_gc_disable(args, allocator);
+}
+
+fn wrapBuiltin_gc_status(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    return php_gc_status(args, allocator);
+}
+
+
+
+
 
 fn wrapBuiltin_str_getcsv(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     _ = ctx;
@@ -6945,21 +8771,25 @@ pub fn php_exec(args: []const Value, allocator: Allocator) !Value {
 
     const cmd_str = cmd_val.asString().data;
 
-    // 执行命令
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &[_][]const u8{ "/bin/sh", "-c", cmd_str },
-        .max_output_bytes = 1024 * 1024,
-    }) catch return Value.initBool(false);
-
-    defer {
-        allocator.free(result.stdout);
-        allocator.free(result.stderr);
+    // ★批次十九·Q3：Zig 0.17 移除 Child.run ⇒ 迁 libc popen/fread/pclose（与 php_shell_exec 同族）；
+    //   pclose 返回 wait 状态，退出码 = (status >> 8) & 0xFF（POSIX WEXITSTATUS）。
+    const cmd_z = allocator.dupeSentinel(u8, cmd_str, 0) catch return Value.initBool(false);
+    defer allocator.free(cmd_z);
+    const pipe = popen(cmd_z.ptr, "r") orelse return Value.initBool(false);
+    var out = try std.ArrayList(u8).initCapacity(allocator, 0);
+    defer out.deinit(allocator);
+    var rbuf: [4096]u8 = undefined;
+    while (true) {
+        const n = fread(rbuf[0..].ptr, 1, rbuf.len, pipe);
+        if (n == 0) break;
+        try out.appendSlice(allocator, rbuf[0..n]);
     }
+    const wait_status = pclose(pipe);
+    const exit_code: i64 = @intCast(@as(u32, @bitCast(wait_status)) >> 8 & 0xFF);
 
     // 将输出按行分割成数组
     const arr = try PHPArray.init(allocator);
-    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+    var lines = std.mem.splitScalar(u8, out.items, '\n');
     var idx: i64 = 0;
     var last_line: []const u8 = "";
     while (lines.next()) |line| {
@@ -6979,7 +8809,7 @@ pub fn php_exec(args: []const Value, allocator: Allocator) !Value {
             if (ptr.isArray()) {
                 const existing_arr = ptr.asArray();
                 // 追加新行到现有数组
-                var new_lines = std.mem.splitScalar(u8, result.stdout, '\n');
+                var new_lines = std.mem.splitScalar(u8, out.items, '\n');
                 while (new_lines.next()) |line| {
                     if (line.len == 0 and new_lines.peek() == null) break;
                     const line_str = try PHPString.init(allocator, line);
@@ -7000,7 +8830,6 @@ pub fn php_exec(args: []const Value, allocator: Allocator) !Value {
         if (return_code_ref.isRef()) {
             const ptr = return_code_ref.asRef();
             ptr.release(allocator);
-            const exit_code: i64 = @intCast(result.term.Exited);
             ptr.* = Value.initInt(exit_code);
         }
     }
@@ -7023,21 +8852,24 @@ pub fn php_system(args: []const Value, allocator: Allocator) !Value {
 
     const cmd_str = cmd_val.asString().data;
 
-    // 执行命令
-    const result = std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = &[_][]const u8{ "/bin/sh", "-c", cmd_str },
-        .max_output_bytes = 1024 * 1024,
-    }) catch return Value.initBool(false);
-
-    defer {
-        allocator.free(result.stdout);
-        allocator.free(result.stderr);
+    // ★批次十九·Q3：Zig 0.17 移除 Child.run ⇒ 迁 libc popen/fread/pclose（与 php_shell_exec 同族）
+    const cmd_z = allocator.dupeSentinel(u8, cmd_str, 0) catch return Value.initBool(false);
+    defer allocator.free(cmd_z);
+    const pipe = popen(cmd_z.ptr, "r") orelse return Value.initBool(false);
+    var out = try std.ArrayList(u8).initCapacity(allocator, 0);
+    defer out.deinit(allocator);
+    var rbuf: [4096]u8 = undefined;
+    while (true) {
+        const n = fread(rbuf[0..].ptr, 1, rbuf.len, pipe);
+        if (n == 0) break;
+        try out.appendSlice(allocator, rbuf[0..n]);
     }
+    const wait_status = pclose(pipe);
+    const exit_code: i64 = @intCast(@as(u32, @bitCast(wait_status)) >> 8 & 0xFF);
 
     // 输出到stdout（模拟PHP的system行为）
-    if (result.stdout.len > 0) {
-        fileWriteAll(1, result.stdout);
+    if (out.items.len > 0) {
+        fileWriteAll(1, out.items);
     }
 
     // 如果有第二个参数（&$return_var引用），写回返回码
@@ -7046,15 +8878,14 @@ pub fn php_system(args: []const Value, allocator: Allocator) !Value {
         if (return_var_ref.isRef()) {
             const ptr = return_var_ref.asRef();
             ptr.release(allocator);
-            const exit_code: i64 = @intCast(result.term.Exited);
             ptr.* = Value.initInt(exit_code);
         }
     }
 
     // 返回最后一行
-    if (result.stdout.len == 0) return Value.initBool(false);
+    if (out.items.len == 0) return Value.initBool(false);
 
-    var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+    var lines = std.mem.splitScalar(u8, out.items, '\n');
     var last_line: []const u8 = "";
     while (lines.next()) |line| {
         if (line.len > 0) last_line = line;
@@ -9891,6 +11722,40 @@ pub fn php_invoke_callable(callback: Value, args: []const Value, allocator: Allo
                     return php_arity_error(canon, @intCast(info.min), @intCast(info.max), @intCast(given), info.has_variadic, allocator);
                 }
             }
+            // ★Q3：Ref 实参按形参表归一——by-value 位解引用、by-ref 位直通（快路径：无 Ref 零分配）。
+            //   必要因由：`$f($v)` 变量调用面变量实参一律做成 Ref（R3 写回真值）；by-value 内建包装器
+            //   直接读 args[i]（不解 Ref）⇒ 不在此归一就会全族错型。
+            var has_ref = false;
+            for (args) |a| {
+                if (a.isRef()) {
+                    has_ref = true;
+                    break;
+                }
+            }
+            if (has_ref) {
+                var lbuf2: [64]u8 = undefined;
+                const canon2: []const u8 = if (builtin_param_table.table.get(func_name) != null or func_name.len > 64)
+                    func_name
+                else
+                    std.ascii.lowerString(&lbuf2, func_name);
+                if (builtin_param_table.table.get(canon2)) |ps| {
+                    // 变参尾的 by-ref 属性由变参形参继承（sscanf 的 &...$vars 实测：全部位可写回）
+                    var var_by_ref = false;
+                    for (ps) |p| {
+                        if (p.variadic) {
+                            var_by_ref = p.by_ref;
+                            break;
+                        }
+                    }
+                    const norm = try allocator.alloc(Value, args.len);
+                    defer allocator.free(norm);
+                    for (args, 0..) |a, i| {
+                        const p_by_ref = if (i < ps.len) ps[i].by_ref else var_by_ref;
+                        norm[i] = if (a.isRef() and !p_by_ref) q3Deref(a) else a;
+                    }
+                    return func(Value.initNull(), norm, allocator);
+                }
+            }
             return func(Value.initNull(), args, allocator);
         }
         // §8 #6：用户函数名 CI（$f = "dyn"; $f() 跨大小写动态调用）
@@ -10476,18 +12341,23 @@ fn phpInvokeBuiltinNamed(name: []const u8, positional: []const Value, named_keys
             return try throwThrowable("Error", msg, allocator);
         }
         const di2 = hit_di.?;
-        if (ps[decl_of[di2]].by_ref) {
-            // defer-12 边界：命名绑定 by-ref 形参的写回通道不存在 ⇒ 响亮报错（不静默丢写回）
-            var buf: [256]u8 = undefined;
-            const msg = std.fmt.bufPrint(&buf, "{s}(): named argument ${s} targets a by-reference parameter (AOT boundary: by-ref writeback unsupported)", .{ name_c, nname }) catch "by-reference named argument unsupported";
-            return try throwThrowable("Error", msg, allocator);
-        }
         if (filled[di2]) {
             var buf: [256]u8 = undefined;
             const msg = std.fmt.bufPrint(&buf, "Named parameter ${s} overwrites previous argument", .{nname}) catch "Named parameter overwrites previous argument";
             return try throwThrowable("Error", msg, allocator);
         }
-        slots[di2] = nv;
+        if (ps[decl_of[di2]].by_ref) {
+            // ★Q3：by-ref 命名命中——Ref ⇒ 直通写回（PHP R5 真值）；非 Ref ⇒ PHP 实测警告 +
+            //   隔离 Ref 槽（写回丢弃、包装器不重复告警；批十九①的 Error 边界按真值改正）
+            if (nv.isRef()) {
+                slots[di2] = nv;
+            } else {
+                q3WarnByRefValue(name_c, di2 + 1, nname);
+                slots[di2] = try php_make_ref_from_value(nv);
+            }
+        } else {
+            slots[di2] = nv;
+        }
         filled[di2] = true;
     }
 
@@ -10524,9 +12394,10 @@ fn phpInvokeBuiltinNamed(name: []const u8, positional: []const Value, named_keys
         return try throwThrowable("ArgumentCountError", msg, allocator);
     }
 
-    // 可选缺省物化：尾部 unknown 截断（包装器自带缺省接管）；中段 unknown 不可位置表达 ⇒ 响亮边界
+    // 可选缺省物化：尾部 unknown 截断（包装器自带缺省接管）；中段 unknown 不可位置表达 ⇒ 响亮边界。
+    // by-ref 未填位不截断（隔离 Ref 槽：写穿至隔离槽＝不写回、不告警）
     var final_len = decl_total;
-    while (final_len > 0 and !filled[final_len - 1] and ps[decl_of[final_len - 1]].default.kind == .unknown) final_len -= 1;
+    while (final_len > 0 and !filled[final_len - 1] and !ps[decl_of[final_len - 1]].by_ref and ps[decl_of[final_len - 1]].default.kind == .unknown) final_len -= 1;
 
     var final = std.ArrayListUnmanaged(Value).empty;
     defer final.deinit(allocator);
@@ -10536,6 +12407,11 @@ fn phpInvokeBuiltinNamed(name: []const u8, positional: []const Value, named_keys
             continue;
         }
         const p = ps[decl_of[di]];
+        if (p.by_ref) {
+            // 未提供的 by-ref 可选形参 ⇒ 隔离 Ref 槽（包装器写穿至隔离槽＝不写回、不告警）
+            try final.append(allocator, try php_make_ref_from_value(Value.initNull()));
+            continue;
+        }
         switch (p.default.kind) {
             .none => unreachable, // 必填洞已在上方拦截
             .unknown => {
@@ -14274,6 +16150,19 @@ pub fn registerPHPPredefinedConstants(allocator: Allocator) !void {
         .{ .name = "JSON_PARTIAL_OUTPUT_ON_ERROR", .value = 1024 },
         .{ .name = "JSON_INVALID_UTF8_IGNORE", .value = 1048576 },
         .{ .name = "JSON_INVALID_UTF8_SUBSTITUTE", .value = 2097152 },
+        // ★Q4：JSON_ERROR_* 错误码族（json_last_error/json_validate 对照常量）
+        .{ .name = "JSON_ERROR_NONE", .value = 0 },
+        .{ .name = "JSON_ERROR_DEPTH", .value = 1 },
+        .{ .name = "JSON_ERROR_STATE_MISMATCH", .value = 2 },
+        .{ .name = "JSON_ERROR_CTRL_CHAR", .value = 3 },
+        .{ .name = "JSON_ERROR_SYNTAX", .value = 4 },
+        .{ .name = "JSON_ERROR_UTF8", .value = 5 },
+        .{ .name = "JSON_ERROR_RECURSION", .value = 6 },
+        .{ .name = "JSON_ERROR_INF_OR_NAN", .value = 7 },
+        .{ .name = "JSON_ERROR_UNSUPPORTED_TYPE", .value = 8 },
+        .{ .name = "JSON_ERROR_INVALID_PROPERTY_NAME", .value = 9 },
+        .{ .name = "JSON_ERROR_UTF16", .value = 10 },
+        .{ .name = "JSON_ERROR_NON_BACKED_ENUM", .value = 11 },
         // 错误级别
         .{ .name = "E_ERROR", .value = 1 },
         .{ .name = "E_WARNING", .value = 2 },
