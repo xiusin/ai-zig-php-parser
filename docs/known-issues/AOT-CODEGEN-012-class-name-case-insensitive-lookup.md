@@ -12887,10 +12887,82 @@ PHP 8.5.8 实测口径：纯 enum ⇒ **返回 false**（不抛错，last_error=
 
 ### 241.5 主回归（串行单跑）
 
-（待补）
+`run_regression.sh` 串行单跑（未与其他门并发）：**Total 68 / Pass 67 / Fail(Compile·Runtime·Diff) 0 / Skip 1**（唯一 SKIP＝f004 既有跳项 PHP_error_exit=255）。**与批次十一 F-236 修复后基线逐枚一致，批次十二零回归零转移**。var_dump 对象分支重写（可见性标记+声明序）对 68 语料发射中性（语料无 var_dump(带私有/多属性对象) 命中面，探针面已另行对齐）。
 
 ### 241.6 变更文件
 
 - `src/aot/runtime_lib_template.zig`：SplDoublyLinkedList 基类统型（splDll* 全集 + 三注册函数 + initRuntime 注册序）+ var_dump 对象分支重写 + AS_PROPS 四挂点 + 常量值/通道修正 + `pregMatchesAssign`（12 处覆盖点）+ storage 可见性字段补正。
 - `src/aot/native_linker.zig`：`emitPregByrefWriteback`（含链甲/链乙）+ 预扫描三映射（make_ref_ptr/store_ptr_value/preg_coalesce_calls）+ preg 两臂调用点 + `php_array_get_coalesce` 进 builtin_map。
 - `src/aot/ir_generator.zig`：preg_match/preg_match_all 专属支补 `.array_access`（temp_reg + coalesce copy-in + ref_writebacks）。
+
+## 242. 批次十三：抛出型 by-ref 内建普查 + 内建调用 try 区接球后缀（2026-11-05，并行会话）
+
+### 242.1 命题修正（普查实证）
+
+原命题（§232.3 P1）：preg 异常写回推广到 sort 族。**15 枚探针（PHP 8.5.8 取真值）实证**：sort 族的 copy-out 链路（AOT-COW-002 + R-334-b store-back）已完备，无写回缺口；真身缺口是**内建回调 throw 的 Zig error 直穿 hasException 路由**——usort/uasort/uksort/array_walk 回调 throw 全部 Uncaught fatal。`emitPregByrefWriteback` 维持 preg 专属（无新消费者，不泛化）。
+
+### 242.2 修法（发射器，native_linker.zig）
+
+新增 `emitBuiltinCallCatchSuffix`（:22559）+ 三处通用内建尾站接入（valued+alloc :25845 / valued+no-alloc :26359 / void+alloc :26551）：try 区内 `runtime.x(...) catch |err| { if (hasException()) { 清理+路由 } return err; }`，与用户/间接调用 `catch` 惯用法（:26364/:26626）及 main 未捕获通道（:2575）对齐。成功路径逐字节同构；无 handler 维持裸 `try`。
+
+### 242.3 读数
+
+- `timeout 600 zig build` rc=0。
+- 修复面：usort/uasort/uksort 回调 throw 可捕获（元素保持，中间态见遗留 a）；array_walk 回调 throw **逐字 SAME**；函数上下文/嵌套 try/rethrow/未捕获通道全 SAME。
+- 防护面零转移：f042/f164/test_063/test_029/test_010/test_051/preg_guard/probe_direct 全 SAME；usort_nc/sort_na/multisort×2/settype/splice_na/walk_rec 改前 vs 改后逐一零转移。
+
+### 242.4 遗留（详见批次十三变更摘要 §7）
+
+半排序中间态（PHP 未定义，登记待裁决）；模板 hot-zone 七项（usort 不可调用缺 TypeError、multisort 缺校验、sort 非数组 noreturn fatal、settype/splice 缺校验、preg_replace_callback 5 参 arity、array_walk_recursive 回调不生效）**全部登记待 SPL/preg 会话裁决，本批零触碰 runtime_lib_template.zig**；array_map/array_filter 命名专列站未覆盖（P1 后续）；test_065_array_walk 编译失败为既有 dim-set 缺陷（与本批无关）。
+
+## 243. 批次十四：回调 throw 可捕获推广 + by-ref/校验缺口六连修（2026-11-05，模板热区已空）
+
+### 243.1 回调 throw 可捕获（发射器）
+
+批十三 `emitBuiltinCallCatchSuffix` 接三专列站：valued 名单站（array_map 等）、valued php_array_filter 支、void 名单站。验收：array_filter 三形（含 USE_BOTH/USE_KEY flag）/array_map 函数上下文可捕获、嵌套 try+rethrow、顶层未捕获 rc=255，全与 PHP 8.5.8 逐字对参（顶层仅栈帧细节，§7.5 豁免）。
+
+### 243.2 模板六连修（每项先取 PHP 8.5.8 真值，每刀后 AOT 产物实测，无 F-38 类错位）
+
+| # | 项 | 修法 | 验证 |
+|---|---|---|---|
+| ① | usort 族比较器校验 | `validateSortCallback`（12 形态文案逐形对齐）+ arg1 优先 `throwArgTypeError` | 12 用例 SAME |
+| ② | array_multisort | 全参数前置校验（合法 flag [0,6]∪[8,14] 实测；尺寸一致）+ **SORT_DESC==3 常量订正**（旧 ==2 硬编码永不命中） | 10 用例 SAME |
+| ③ | sort 族九成员非数组 | `throwArgTypeError`（可捕获，替 noreturn fatal/静默 false；bool⇒true/false、对象⇒类名） | 全 SAME，顶层 rc=255 文案一致 |
+| ④ | settype/array_splice | 非法 $type⇒ValueError（非字符串同出口）；splice 非数组⇒TypeError | SAME |
+| ⑤ | preg_replace_callback | +limit/$count 形参（修 arity 4vs6 编译失败）；count 入口清零+defer/errdefer 三态写回；回调点 **Style-A 化**；builtin_map ref_params={4}+handler_params=5+缺省；发射器新 `emitRefParamsExceptionWriteback` 挂两通用尾站 | SAME（throw 时 count=1 增量） |
+| ⑥ | array_walk_recursive | 叶子 make_ref 装槽（R-1b 成例）⇒ 回调 by-ref 生效；首参非数组 TypeError | SAME |
+
+### 243.3 登记（不修）
+
+- `builtin_function_map` 缺 sort 族（仅收 usort/array_walk×2）⇒ varfn 调用 `$fn="rsort"` 静默 false，既有独立缺口（覆盖差远超 sort 族），专项盘点。
+- `preg_replace`/`preg_filter` $count 未接（需改 `pregReplaceSequence` 返回结构带计数，深入替换引擎）；同案：by-ref 实参未定义变量 AOT 发 Warning（PHP 静默 vivify）。
+- `fuzzy_scripts/test_065_array_walk.php` 编译失败（dim-set 字符串分支 alloca 缺 `.*`，既有，与本批无关）。
+- array_walk 非数组首参仍 error.InvalidArgument 裸错（同 ③⑥ 口径，一行，P3）。
+
+### 243.4 读数
+
+`timeout 600 zig build` rc=0；守护面 f042/f164/test_063/test_029/test_010/test_051/preg_guard 全 SAME；批十三 throw 探针复测与批十三后状态逐字一致。产物已清场，探针 .php 全留。
+
+## 244. 批次十五：dim-set alloca 解引用 + by-ref 实参 vivify 全链（2026-11-06）
+
+### 244.1 dim-set 编译失败（test_065 销票）
+
+`.array_set` 字符串分支②（nlk :26921）原假设 `op.array` 恒为「非 alloca 的 load 临时」，数组字面量构建等路径把 **alloca 直参**送入 ⇒ `reg_N = __arr_deref` 得 `*Value=Value` 编译错。按 alloca 判定补 `.*`；三面扫（字符串/数组/对象 × 顶层/局部/引用形参）全 SAME。
+
+### 244.2 by-ref 实参 vivify（PHP 8.5.8 真值驱动）
+
+| 面 | 修法 | 验证 |
+|---|---|---|
+| 内建 ref_params 未定义读取 | preg_replace/preg_filter 补 `$count`（PregOutcome 计数穿透 + defer 写回 + ref_params={4}；⑦-b 提前闭环）；parse_str 替换式 + Ref 写 cell + ref_params={1} | SAME |
+| 数组元素（单层/嵌套） | IR 支重写：展平链 + `php_array_elem_ref_vivify` 逐层下钻（装槽 Ref 直传，无需 copy-out） | missing=77/deep=77（缩进 §七.4 豁免） |
+| 对象属性 | IR 改 `php_object_get_ref` 直传；模板补动态属性 **Deprecated**（stdClass/豁免同 php_object_set） | Deprecated 文案对齐、undef=55 |
+| Ref 打包断链 | 发射器预扫描把 vivify/get_ref 系 call 与 array_get.get_ref 结果并入 `make_ref_result_regs` ⇒ ref 实参不再 `initRef(&reg)` 二次包裹（写入曾落临时寄存器） | r3/r4 值写穿 |
+
+### 244.3 读数与登记
+
+- `timeout 600 zig build` rc=0；守护 25 枚 24 SAME + 1 登记（usort 中间态，批十三已裁决）。
+- 登记：未定义基座嵌套 vivify（⑦-a）；by-ref append 形（⑦-b）；魔术方法类 by-ref 属性（⑦-c）；方法/静态/间接打包支产 Ref 判定统一（⑦-d）。
+
+### 244.4 变更文件
+
+`src/aot/native_linker.zig`（dim-set 解引用 + 预扫描产 Ref + preg_replace 专列站补 count + 三处注册）；`src/aot/runtime_lib_template.zig`（PregOutcome 计数 + preg_replace/preg_filter $count + php_array_elem_ref_vivify + get_ref Deprecated + parse_str 替换式）；`src/aot/ir_generator.zig`（array_access/property ref 实参支重写）。

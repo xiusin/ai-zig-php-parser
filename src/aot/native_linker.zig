@@ -4737,9 +4737,14 @@ pub const NativeLinker = struct {
         .{ "preg_match", bi(.{ .runtime_name = "php_preg_match", .needs_allocator = true }) },
         .{ "preg_match_with_matches", bi(.{ .runtime_name = "preg_match_with_matches", .needs_allocator = true }) },
         .{ "preg_match_all", bi(.{ .runtime_name = "php_preg_match_all", .needs_allocator = true }) },
-        .{ "preg_replace", bi(.{ .runtime_name = "preg_replace", .needs_allocator = true }) },
-        .{ "preg_filter", bi(.{ .runtime_name = "preg_filter", .needs_allocator = true, .handler_params = 4, .optional_defaults = &.{"runtime.Value.initInt(-1)"} }) },
-        .{ "preg_replace_callback", bi(.{ .runtime_name = "php_preg_replace_callback", .needs_allocator = true }) },
+        // ★批次十五：preg_replace/preg_filter 模板补 $count 形参——ref_params 登记（IR 对 count 位
+        //   make_ref 静默读，修「未定义 $count 误发 Warning」）+ handler_params=5 声明式补齐。
+        .{ "preg_replace", bi(.{ .runtime_name = "preg_replace", .needs_allocator = true, .ref_params = &[_]u8{4}, .handler_params = 5, .optional_defaults = &.{ "runtime.Value.initInt(-1)", "runtime.Value.initNull()" } }) },
+        .{ "preg_filter", bi(.{ .runtime_name = "preg_filter", .needs_allocator = true, .ref_params = &[_]u8{4}, .handler_params = 5, .optional_defaults = &.{ "runtime.Value.initInt(-1)", "runtime.Value.initNull()" } }) },
+        // ★批次十四⑤：模板补 limit/$count 形参后按 F-75 声明式补齐——3/4 实参调用自动补
+        //   limit=-1、count=null（非 Ref ⇒ 写回自然跳过）；count 位须 ref_params 登记（同 str_replace {3} 成例）
+        //   ⇒ IR 对该实参 make_ref，模板 count_out.asRef() 写回生效。
+        .{ "preg_replace_callback", bi(.{ .runtime_name = "php_preg_replace_callback", .needs_allocator = true, .ref_params = &[_]u8{4}, .handler_params = 5, .optional_defaults = &.{ "runtime.Value.initInt(-1)", "runtime.Value.initNull()" } }) },
         .{ "preg_split", bi(.{ .runtime_name = "preg_split", .needs_allocator = true }) },
         .{ "preg_grep", bi(.{ .runtime_name = "preg_grep", .needs_allocator = true }) },
         .{ "preg_quote", bi(.{ .runtime_name = "preg_quote", .needs_allocator = true }) },
@@ -4778,8 +4783,10 @@ pub const NativeLinker = struct {
         .{ "sscanf", .{ .runtime_name = "php_sscanf", .needs_allocator = true } },
         .{ "preg_match", .{ .runtime_name = "php_preg_match", .needs_allocator = true } },
         .{ "preg_match_all", .{ .runtime_name = "php_preg_match_all", .needs_allocator = true } },
-        .{ "preg_replace", .{ .runtime_name = "preg_replace", .needs_allocator = true } },
-        .{ "preg_replace_callback", .{ .runtime_name = "php_preg_replace_callback", .needs_allocator = true } },
+        // ★批次十五：同 :4740 条目（双注册点同步）
+        .{ "preg_replace", bi(.{ .runtime_name = "preg_replace", .needs_allocator = true, .ref_params = &[_]u8{4}, .handler_params = 5, .optional_defaults = &.{ "runtime.Value.initInt(-1)", "runtime.Value.initNull()" } }) },
+        // ★批次十四⑤：同 :4742 条目（双注册点同步）
+        .{ "preg_replace_callback", bi(.{ .runtime_name = "php_preg_replace_callback", .needs_allocator = true, .ref_params = &[_]u8{4}, .handler_params = 5, .optional_defaults = &.{ "runtime.Value.initInt(-1)", "runtime.Value.initNull()" } }) },
         .{ "preg_split", .{ .runtime_name = "php_preg_split", .needs_allocator = true } },
         .{ "filter_var", bi(.{ .runtime_name = "php_filter_var", .needs_allocator = true }) },
         .{ "printf", bi(.{ .runtime_name = "php_printf", .needs_allocator = true }) },
@@ -4823,6 +4830,8 @@ pub const NativeLinker = struct {
         .{ "array_shift", bi(.{ .runtime_name = "php_array_shift", .needs_allocator = true }) },
         .{ "array_unshift", bi(.{ .runtime_name = "php_array_unshift", .needs_allocator = true }) },
         .{ "php_array_get_ref", bi(.{ .runtime_name = "php_array_get_ref", .needs_allocator = true }) },
+        // ★批次十五：by-ref 实参数组元素的静默 vivify 下钻（IR generateCall ref 实参支发射）
+        .{ "php_array_elem_ref_vivify", bi(.{ .runtime_name = "php_array_elem_ref_vivify", .needs_allocator = true }) },
         .{ "php_object_get_ref", bi(.{ .runtime_name = "php_object_get_ref", .needs_allocator = true }) },
         // ★批次十二（F-13b）：preg by-ref 数组下标的 copy-in 静默读（coalesce 语义，
         //   不存在 ⇒ null 不告警——PHP by-ref auto-vivify 不对未定义元素告警）。
@@ -5003,7 +5012,9 @@ pub const NativeLinker = struct {
         .{ "strval", .{ .runtime_name = "php_strval", .needs_allocator = true } },
         .{ "boolval", .{ .runtime_name = "php_boolval", .needs_allocator = false } },
         .{ "gettype", .{ .runtime_name = "php_gettype", .needs_allocator = true } },
-        .{ "settype", bi(.{ .runtime_name = "php_settype", .needs_allocator = true, .may_raise = false, .ref_params = &[_]u8{0} }) },
+        // ★批次十四④：非法 $type 现抛可捕获 ValueError ⇒ may_raise 必须归位 true
+        //   （旧 false 口径下调用点无 hasException 路由，异常 Value 被当返回值赋给 $r）。
+        .{ "settype", bi(.{ .runtime_name = "php_settype", .needs_allocator = true, .ref_params = &[_]u8{0} }) },
         .{ "exit", .{ .runtime_name = "php_exit", .needs_allocator = false } },
         .{ "die", .{ .runtime_name = "php_exit", .needs_allocator = false } },
 
@@ -5143,7 +5154,8 @@ pub const NativeLinker = struct {
 
         // URL/网络
         .{ "http_build_query", bi(.{ .runtime_name = "php_http_build_query", .needs_allocator = true }) },
-        .{ "parse_str", bi(.{ .runtime_name = "php_parse_str", .needs_allocator = true }) },
+        // ★批次十五：第二参 by-ref 登记（IR make_ref 静默读 ⇒ 未定义 $out 不告警；模板替换式写 cell）
+        .{ "parse_str", bi(.{ .runtime_name = "php_parse_str", .needs_allocator = true, .ref_params = &[_]u8{1} }) },
 
         // 文件系统
         .{ "glob", bi(.{ .runtime_name = "php_glob", .needs_allocator = true }) },
@@ -6385,6 +6397,21 @@ pub const NativeLinker = struct {
                     if (inst_scan.result) |res| {
                         try make_ref_result_regs.put(res.id, {});
                     }
+                }
+                // ★批次十五：产 Ref 的 call/array_get 结果同「已是 Ref」——否则 ref 实参打包处
+                //   再包 initRef(&reg_N)（Ref 指向生成码临时寄存器），函数内写入落在临时上、
+                //   容器槽/属性槽收不到（byref($a['missing'])/byref($p->undef) 写穿断链实测）。
+                if (inst_scan.op == .call) {
+                    const rn = inst_scan.op.call.func_name;
+                    if (std.mem.eql(u8, rn, "php_array_elem_ref_vivify") or
+                        std.mem.eql(u8, rn, "php_array_get_ref") or
+                        std.mem.eql(u8, rn, "php_object_get_ref"))
+                    {
+                        if (inst_scan.result) |res| try make_ref_result_regs.put(res.id, {});
+                    }
+                }
+                if (inst_scan.op == .array_get and inst_scan.op.array_get.get_ref) {
+                    if (inst_scan.result) |res| try make_ref_result_regs.put(res.id, {});
                 }
             }
         }
@@ -22548,6 +22575,27 @@ pub const NativeLinker = struct {
         try writer.writeAll("    }\n");
     }
 
+    /// ★批次十三：try 区内**内建调用**的 Zig-error 接球后缀（与 emitThrowSiteRouting 互补）。
+    /// 背景：内建回调用户函数（usort/uasort/uksort 比较器、array_walk 回调等）时，用户 throw
+    ///   以 error.RuntimeError 携带挂起异常逐层 `try` 上抛；旧形 `try runtime.x(...)` 让 error
+    ///   直穿调用点之后的 hasException 路由 ⇒ PHP try/catch 接不到（实测 Uncaught fatal）。
+    ///   与用户/间接调用点的 `catch` 惯用法（:26364/:26626）及 main 未捕获通道（:2575）对齐：
+    ///   挂起 PHP 异常 ⇒ 路由到 handler；无挂起异常的真错误（OOM 等）⇒ 原样上抛（行为同旧 `try`）。
+    /// 仅 current_exception_handler 非空时由调用点拼用；空调用点保持 `try`（未捕获通道不变）。
+    /// 成功路径与旧形逐字节同构（后缀只在 error 时介入）⇒ 既有探针零转移。
+    fn emitBuiltinCallCatchSuffix(self: *Self, writer: anytype) !void {
+        const handler_idx = self.current_exception_handler.?;
+        try writer.writeAll(") catch |__builtin_call_err| {\n");
+        try writer.writeAll("    if (runtime.hasException()) {\n");
+        try writer.writeAll("        @branchHint(.unlikely);\n");
+        try self.generateCleanupCode(writer);
+        try writer.print("        current_block = {d};\n", .{handler_idx});
+        try writer.writeAll("        continue;\n");
+        try writer.writeAll("    }\n");
+        try writer.writeAll("    return __builtin_call_err;\n");
+        try writer.writeAll("};\n");
+    }
+
     /// ★批次十二（§232.3-2）：preg by-ref 异常写回——ValueError 等异常路由
     /// （`if (runtime.hasException()) continue`）会跳过 IR 后续的 copy-out（global_set），
     /// 在 call 生成后**前置**写回全局变量形（PHP 别名语义：throw 前已清空 $matches，
@@ -22592,6 +22640,34 @@ pub const NativeLinker = struct {
                 try self.writeRegRef(writer, cc.key);
                 try writer.print(", reg_{d}.*);\n        try setGlobalVar(\"{s}\", __preg_wb_base);\n    }}\n", .{ temp_id, escaped });
             }
+        }
+    }
+
+    /// ★批次十四⑤：`ref_params` 实参的「异常路径写回」——内建以 Style-A 抛错（挂起异常+正常返回）
+    ///   时，调用点之后的 IR copy-out（global_set）被 hasException 路由跳过 ⇒ 在此前置写回。
+    ///   与批次十二 `emitPregByrefWriteback` 同链（args[idx] →（make_ref）→ base →（store）→ src
+    ///   →（global_get）→ 变量名），但面向「Ref 直传形」（模板收 `Value`=Ref，写 cell 即写 base，
+    ///   本块把 base 写回全局）；preg 两臂的 `&reg` 取地址形仍走原 helper，互不替代。
+    ///   仅 `builtin_map` 声明 `ref_params` 的函数触发；链解析不命中即不生成（自然过滤同批次十二）。
+    fn emitRefParamsExceptionWriteback(self: *Self, writer: anytype, func_name: []const u8, args: []const IR.Register) !void {
+        const info = builtinInfo(func_name) orelse return;
+        if (info.ref_params.len == 0) return;
+        const make_ref_map = self.current_make_ref_ptr orelse return;
+        const store_map = self.current_store_ptr_value orelse return;
+        const ggn = self.current_global_get_names orelse return;
+        for (info.ref_params) |idx| {
+            if (idx >= args.len) continue;
+            const base = make_ref_map.get(args[idx].id) orelse continue;
+            const src = store_map.get(base) orelse continue;
+            const name = ggn.get(src) orelse continue;
+            const escaped = try self.escapeString(name);
+            defer self.allocator.free(escaped);
+            const base_alloca = if (self.current_alloca_regs) |regs| regs.contains(base) else false;
+            const deref: []const u8 = if (base_alloca) ".*" else "";
+            try writer.print(
+                "    if (runtime.hasException()) {{\n        @branchHint(.unlikely);\n        try setGlobalVar(\"{s}\", reg_{d}{s});\n    }}\n",
+                .{ escaped, base, deref },
+            );
         }
     }
 
@@ -25384,9 +25460,21 @@ pub const NativeLinker = struct {
                                     try self.writeStrGetcsvArgs(writer, op.args);
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
                                 } else if (std.mem.eql(u8, runtime_name, "php_array_merge") or std.mem.eql(u8, runtime_name, "php_array_replace") or std.mem.eql(u8, runtime_name, "php_array_intersect") or std.mem.eql(u8, runtime_name, "php_array_diff") or std.mem.eql(u8, runtime_name, "php_array_diff_key") or std.mem.eql(u8, runtime_name, "php_array_diff_assoc") or std.mem.eql(u8, runtime_name, "php_array_intersect_key") or std.mem.eql(u8, runtime_name, "php_array_multisort") or std.mem.eql(u8, runtime_name, "php_compact") or std.mem.eql(u8, runtime_name, "php_array_map") or std.mem.eql(u8, runtime_name, "php_json_decode") or std.mem.eql(u8, runtime_name, "php_func_get_args") or std.mem.eql(u8, runtime_name, "php_memory_get_usage") or std.mem.eql(u8, runtime_name, "php_memory_get_peak_usage") or std.mem.eql(u8, runtime_name, "php_shell_exec") or std.mem.eql(u8, runtime_name, "php_exec") or std.mem.eql(u8, runtime_name, "php_system") or std.mem.eql(u8, runtime_name, "php_substr_replace") or std.mem.eql(u8, runtime_name, "php_function_exists") or std.mem.eql(u8, runtime_name, "php_gc_enable") or std.mem.eql(u8, runtime_name, "php_gc_collect_cycles") or std.mem.eql(u8, runtime_name, "php_ini_get") or std.mem.eql(u8, runtime_name, "php_getrusage") or std.mem.eql(u8, runtime_name, "php_unset") or std.mem.eql(u8, runtime_name, "php_bcadd") or std.mem.eql(u8, runtime_name, "php_bcsub") or std.mem.eql(u8, runtime_name, "php_bcmul") or std.mem.eql(u8, runtime_name, "php_bcdiv") or std.mem.eql(u8, runtime_name, "php_bcmod") or std.mem.eql(u8, runtime_name, "php_bcpow") or std.mem.eql(u8, runtime_name, "php_bcsqrt") or std.mem.eql(u8, runtime_name, "php_bccomp") or std.mem.eql(u8, runtime_name, "php_call_static_dynamic") or std.mem.eql(u8, runtime_name, "php_get_static_property_dynamic") or std.mem.eql(u8, runtime_name, "php_get_class_constant_dynamic") or std.mem.eql(u8, runtime_name, "php_class_constant_read")) {
-                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                    try self.writeValueArgsArray(writer, op.args);
-                                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    // ★批次十四：名单站接球（array_map 回调 throw 可捕获）——
+                                    //   与本批 array_filter 支（:25572）及批次十三三处通用尾站同一 helper；
+                                    //   名单内 may_raise=false 成员（memory_*/exec/system/gc 等）保持旧形。
+                                    const nl_info = builtinInfo(op.func_name);
+                                    const nl_may_raise = if (nl_info) |info| info.may_raise else true;
+                                    if (nl_may_raise and self.current_exception_handler != null) {
+                                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.{s}(", .{runtime_name});
+                                        try self.writeValueArgsArray(writer, op.args);
+                                        try writer.writeAll(", runtime.runtime_allocator");
+                                        try self.emitBuiltinCallCatchSuffix(writer);
+                                    } else {
+                                        try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                        try self.writeValueArgsArray(writer, op.args);
+                                        try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    }
                                 } else if (std.mem.eql(u8, runtime_name, "php_array_push") or std.mem.eql(u8, runtime_name, "php_array_unshift")) {
                                     if (op.args.len == 0) {
                                         try writer.print("    reg_{d} = runtime.Value.initNull();\n", .{reg.id});
@@ -25551,7 +25639,12 @@ pub const NativeLinker = struct {
                                 } else if (std.mem.eql(u8, runtime_name, "php_array_filter")) {
                                     // array_filter(arr, callback = null, mode = 0)
                                     // 函数签名: php_array_filter(arr, callback, mode, allocator)
-                                    try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                    // ★批次十四：回调 throw 可捕获（USE_BOTH/USE_KEY 三形同），同批次十三 helper
+                                    if (self.current_exception_handler != null) {
+                                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.{s}(", .{runtime_name});
+                                    } else {
+                                        try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                    }
                                     if (op.args.len >= 1) {
                                         // arr 参数
                                         try self.writeValueArgs(writer, op.args[0..1]);
@@ -25572,7 +25665,12 @@ pub const NativeLinker = struct {
                                     } else {
                                         try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull(), runtime.Value.initInt(0)");
                                     }
-                                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    if (self.current_exception_handler != null) {
+                                        try writer.writeAll(", runtime.runtime_allocator");
+                                        try self.emitBuiltinCallCatchSuffix(writer);
+                                    } else {
+                                        try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    }
                                 } else if (std.mem.eql(u8, runtime_name, "php_hash")) {
                                     // hash(algo, data, raw_output=false, allocator)
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
@@ -25610,7 +25708,8 @@ pub const NativeLinker = struct {
                                     }
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
                                 } else if (std.mem.eql(u8, runtime_name, "preg_replace")) {
-                                    // preg_replace(pattern, replacement, subject, limit=-1, allocator)
+                                    // preg_replace(pattern, replacement, subject, limit=-1, count=null, allocator)
+                                    // ★批次十五：模板补 $count 形参 ⇒ 专列站同补第 5 实参（缺省 null 非 Ref ⇒ 写回跳过）
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len >= 3) {
                                         try self.writeValueArgs(writer, op.args[0..3]);
@@ -25621,9 +25720,16 @@ pub const NativeLinker = struct {
                                         } else {
                                             try writer.writeAll(", runtime.Value.initNull()");
                                         }
+                                        // count (optional, by-ref)
+                                        if (op.args.len >= 5) {
+                                            try writer.writeAll(", ");
+                                            try self.writeValueArgs(writer, op.args[4..5]);
+                                        } else {
+                                            try writer.writeAll(", runtime.Value.initNull()");
+                                        }
                                     } else {
                                         try self.writeValueArgs(writer, op.args);
-                                        try writer.writeAll(", runtime.Value.initNull()");
+                                        try writer.writeAll(", runtime.Value.initNull(), runtime.Value.initNull()");
                                     }
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
                                 } else if (std.mem.eql(u8, runtime_name, "php_ob_get_status")) {
@@ -25814,9 +25920,25 @@ pub const NativeLinker = struct {
                                                 try writer.writeAll("    }\n");
                                             }
                                         }
-                                        try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                        try self.writeBuiltinArgs(writer, op.args, op.func_name);
-                                        try writer.writeAll(", runtime.runtime_allocator);\n");
+                                        // ★批次十三：try 区内接球（usort 比较器/array_walk 回调 throw 可捕获）——
+                                        //   本支是「需要 allocator 的有返回值通用尾站」，sort 族/array_walk 等全走这里。
+                                        //   接球后路由在 store-back（R-334-b）之前生效：异常时 copy-out 不执行，
+                                        //   COW 克隆体随清理释放，全局/属性槽保持原数组（与 PHP 元素保持同义；
+                                        //   PHP 的半排序中间态属实现未定义，不复刻 zend_sort 合并序）。
+                                        const vg_info = builtinInfo(op.func_name);
+                                        const vg_may_raise = if (vg_info) |info| info.may_raise else true;
+                                        if (vg_may_raise and self.current_exception_handler != null) {
+                                            try self.writeRegAssignmentFmt(writer, reg.id, "runtime.{s}(", .{runtime_name});
+                                            try self.writeBuiltinArgs(writer, op.args, op.func_name);
+                                            try writer.writeAll(", runtime.runtime_allocator");
+                                            try self.emitBuiltinCallCatchSuffix(writer);
+                                        } else {
+                                            try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                            try self.writeBuiltinArgs(writer, op.args, op.func_name);
+                                            try writer.writeAll(", runtime.runtime_allocator);\n");
+                                        }
+                                        // ★批次十四⑤：ref_params 实参异常写回（Style-A 抛错时 copy-out 被路由跳过的前置补写）
+                                        try self.emitRefParamsExceptionWriteback(writer, op.func_name, op.args);
                                     }
                                     // ★R-334-b（f164 回归红修复）：排序族 by-ref 契约＝原地排序。AOT-COW-002 的
                                     //   克隆把参数从共享数组分离（保 PHP 值语义：usort($a) 不得动 $b=$a 的共享体），
@@ -26323,13 +26445,20 @@ pub const NativeLinker = struct {
                                     const builtin_info = builtinInfo(op.func_name);
                                     const may_raise = if (builtin_info) |info| info.may_raise else true;
 
-                                    if (may_raise) {
+                                    if (may_raise and self.current_exception_handler != null) {
+                                        // ★批次十三：try 区内接球（usort 比较器/array_walk 回调 throw 可捕获）
+                                        try self.writeRegAssignmentFmt(writer, reg.id, "runtime.{s}(", .{runtime_name});
+                                        try self.writeBuiltinArgs(writer, op.args, op.func_name);
+                                        try self.emitBuiltinCallCatchSuffix(writer);
+                                    } else if (may_raise) {
                                         try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
+                                        try self.writeBuiltinArgs(writer, op.args, op.func_name);
+                                        try writer.writeAll(");\n");
                                     } else {
                                         try self.writeRegAssignmentFmt(writer, reg.id, "runtime.{s}(", .{runtime_name});
+                                        try self.writeBuiltinArgs(writer, op.args, op.func_name);
+                                        try writer.writeAll(");\n");
                                     }
-                                    try self.writeBuiltinArgs(writer, op.args, op.func_name);
-                                    try writer.writeAll(");\n");
                                 }
                             }
                         } else {
@@ -26461,9 +26590,19 @@ pub const NativeLinker = struct {
                                     try self.writeStrGetcsvArgs(writer, op.args);
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
                                 } else if (std.mem.eql(u8, runtime_name, "php_array_merge") or std.mem.eql(u8, runtime_name, "php_array_intersect") or std.mem.eql(u8, runtime_name, "php_array_diff") or std.mem.eql(u8, runtime_name, "php_array_diff_key") or std.mem.eql(u8, runtime_name, "php_array_diff_assoc") or std.mem.eql(u8, runtime_name, "php_array_multisort") or std.mem.eql(u8, runtime_name, "php_array_map") or std.mem.eql(u8, runtime_name, "php_json_decode") or std.mem.eql(u8, runtime_name, "php_memory_get_usage") or std.mem.eql(u8, runtime_name, "php_memory_get_peak_usage") or std.mem.eql(u8, runtime_name, "php_shell_exec") or std.mem.eql(u8, runtime_name, "php_exec") or std.mem.eql(u8, runtime_name, "php_system") or std.mem.eql(u8, runtime_name, "php_substr_replace") or std.mem.eql(u8, runtime_name, "php_function_exists") or std.mem.eql(u8, runtime_name, "php_gc_enable") or std.mem.eql(u8, runtime_name, "php_gc_collect_cycles") or std.mem.eql(u8, runtime_name, "php_ini_get") or std.mem.eql(u8, runtime_name, "php_getrusage") or std.mem.eql(u8, runtime_name, "php_unset") or std.mem.eql(u8, runtime_name, "php_call_static_dynamic") or std.mem.eql(u8, runtime_name, "php_get_static_property_dynamic") or std.mem.eql(u8, runtime_name, "php_get_class_constant_dynamic") or std.mem.eql(u8, runtime_name, "php_class_constant_read")) {
-                                    try writer.print("    _ = try runtime.{s}(", .{runtime_name});
-                                    try self.writeValueArgsArray(writer, op.args);
-                                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    // ★批次十四：语句形名单站接球（array_map 语句形回调 throw 可捕获），口径同 valued 支
+                                    const vn_info = builtinInfo(op.func_name);
+                                    const vn_may_raise = if (vn_info) |info| info.may_raise else true;
+                                    if (vn_may_raise and self.current_exception_handler != null) {
+                                        try writer.print("    _ = runtime.{s}(", .{runtime_name});
+                                        try self.writeValueArgsArray(writer, op.args);
+                                        try writer.writeAll(", runtime.runtime_allocator");
+                                        try self.emitBuiltinCallCatchSuffix(writer);
+                                    } else {
+                                        try writer.print("    _ = try runtime.{s}(", .{runtime_name});
+                                        try self.writeValueArgsArray(writer, op.args);
+                                        try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    }
                                 } else if (std.mem.eql(u8, runtime_name, "php_array_push") or std.mem.eql(u8, runtime_name, "php_array_unshift")) {
                                     if (op.args.len > 0) {
                                         const first_arg = op.args[0];
@@ -26516,9 +26655,22 @@ pub const NativeLinker = struct {
                                     }
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
                                 } else if (op.args.len > 0) {
-                                    try writer.print("    _ = try runtime.{s}(", .{runtime_name});
-                                    try self.writeBuiltinArgs(writer, op.args, op.func_name);
-                                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    // ★批次十三：try 区内接球（usort/array_walk 语句形回调 throw 可捕获）；
+                                    //   may_raise=false 的函数保持旧形（与有返回值通用站同口径）。
+                                    const void_info = builtinInfo(op.func_name);
+                                    const void_may_raise = if (void_info) |info| info.may_raise else true;
+                                    if (void_may_raise and self.current_exception_handler != null) {
+                                        try writer.print("    _ = runtime.{s}(", .{runtime_name});
+                                        try self.writeBuiltinArgs(writer, op.args, op.func_name);
+                                        try writer.writeAll(", runtime.runtime_allocator");
+                                        try self.emitBuiltinCallCatchSuffix(writer);
+                                    } else {
+                                        try writer.print("    _ = try runtime.{s}(", .{runtime_name});
+                                        try self.writeBuiltinArgs(writer, op.args, op.func_name);
+                                        try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    }
+                                    // ★批次十四⑤：语句形同上（ref_params 实参异常写回）
+                                    try self.emitRefParamsExceptionWriteback(writer, op.func_name, op.args);
                                 } else {
                                     // ★R-207：语句形 0 实参同上。
                                     const info0 = builtinInfo(op.func_name);
@@ -26791,8 +26943,13 @@ pub const NativeLinker = struct {
                     try writer.writeAll(", ");
                     try self.writeRegRef(writer, op.value.id);
                     try writer.writeAll(", runtime.runtime_allocator);\n");
-                    try writer.print("            reg_{d}.release(runtime.runtime_allocator);\n", .{op.array.id});
-                    try writer.print("            reg_{d} = __arr_deref;\n", .{op.array.id});
+                    // ★批次十五：分支②原假设 op.array 恒为「非 alloca 的 load 临时」；
+                    //   数组字面量构建等路径会把顶层/局部变量 **alloca 直参**（*Value）送进来——
+                    //   回写 `reg_N = __arr_deref` 得 *Value=Value 类型错（test_065 编译失败显形）。
+                    //   按 alloca 判定补解引用（release 行经 Zig 自动解引用等价，一并补齐保形）。
+                    const str_op_suffix: []const u8 = if (str_arr_is_alloca) ".*" else "";
+                    try writer.print("            reg_{d}{s}.release(runtime.runtime_allocator);\n", .{ op.array.id, str_op_suffix });
+                    try writer.print("            reg_{d}{s} = __arr_deref;\n", .{ op.array.id, str_op_suffix });
                 }
                 // 空串赋偏移会抛可捕获 `Error`（F-202 契约）⇒ 字符串分支内补异常路由
                 try writer.writeAll("            if (runtime.hasException()) {\n");

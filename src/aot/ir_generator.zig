@@ -8120,71 +8120,77 @@ prop_name: ?[]const u8 = null,
                             continue;
                         }
                     }
-                    // 创建临时 alloca 存储当前值，调用后写回
+                    // ★批次十五：by-ref 对象属性 ⇒ php_object_get_ref 直传（Ref 直指属性槽，
+                    //   未声明属性静默建槽 + 模板侧 Deprecated 与 php_object_set 同口径）——
+                    //   旧支「generateExpression 带 Warning 读 + temp_reg + php_object_set 写回」
+                    //   对未定义属性误发 `Undefined property`（PHP 是 Deprecated『Creation of
+                    //   dynamic property』），且 read→temp→write 链路两次触碰属性表。
                     if (expr_node != null and (expr_node.?.tag == .property_access or expr_node.?.tag == .safe_property_access)) {
                         const pa = expr_node.?.data.property_access;
                         const obj_reg = try self.generateExpression(pa.target);
                         const prop_name = self.getString(pa.property_name);
-                        const func = self.current_function orelse return error.NoCurrentFunction;
-                        const alloca_type = Type.php_value;
-                        const type_ptr = try self.allocator.create(Type);
-                        type_ptr.* = alloca_type;
-                        const ptr_type = Type{ .ptr = type_ptr };
-                        const temp_reg = func.newRegister(ptr_type);
-                        const alloca_inst = try self.allocator.create(Instruction);
-                        alloca_inst.* = .{
-                            .result = temp_reg,
-                            .op = .{ .alloca = .{ .type_ = alloca_type, .count = 1, .no_optimize = true } },
-                            .location = self.current_location,
+                        const prop_name_id = self.module.?.internString(prop_name) catch {
+                            args[i] = try self.generateExpression(expr_idx);
+                            continue;
                         };
-                        try self.entry_allocas.append(self.allocator, alloca_inst);
-                        const current_val = try self.generateExpression(expr_idx);
-                        _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = current_val } }, null);
-                        const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = temp_reg } }, .php_value);
-                        args[i] = ref_reg;
-                        try ref_writebacks.append(self.allocator, .{
-                            .var_name = "",
-                            .temp_reg = temp_reg,
-                            .prop_obj = obj_reg,
-                            .prop_name = prop_name,
-                        });
+                        const prop_name_reg = try self.emitWithResult(.{ .const_string = prop_name_id }, .php_value);
+                        const ref_args = try self.allocator.alloc(Register, 2);
+                        ref_args[0] = obj_reg;
+                        ref_args[1] = prop_name_reg;
+                        args[i] = try self.emitWithResult(.{ .call = .{
+                            .func_name = "php_object_get_ref",
+                            .args = ref_args,
+                            .return_type = .php_value,
+                        } }, .php_value);
                         continue;
                     }
 
                     // 数组元素引用参数：modifyContainer($arr['key'], ...)
-                    // 创建临时 alloca 存储当前值，调用后写回
+                    // ★批次十五：静默 auto-vivify 元素引用链（PHP 契约：by-ref 语境未定义元素
+                    //   不告警、逐层 vivify）——旧支「generateExpression 带 Warning 读 + temp_reg
+                    //   + copy-out 写回」对未定义元素误发 `Undefined array key`，且只认单层 variable
+                    //   基座（嵌套 $b['new']['deep'] 落回按值传参，引用整体丢失）。
+                    //   新支：Ref 直指容器槽（模板 vivify helper 装槽），调用后**无需 copy-out**。
                     if (expr_node != null and expr_node.?.tag == .array_access) {
-                        const aa = expr_node.?.data.array_access;
-                        if (aa.index != null) {
-                            const base_node = self.getNode(aa.target);
-                            if (base_node != null and base_node.?.tag == .variable) {
-                                const base_var = self.getString(base_node.?.data.variable.name);
-                                const func = self.current_function orelse return error.NoCurrentFunction;
-                                const alloca_type = Type.php_value;
-                                const type_ptr = try self.allocator.create(Type);
-                                type_ptr.* = alloca_type;
-                                const ptr_type = Type{ .ptr = type_ptr };
-                                const temp_reg = func.newRegister(ptr_type);
-                                const alloca_inst = try self.allocator.create(Instruction);
-                                alloca_inst.* = .{
-                                    .result = temp_reg,
-                                    .op = .{ .alloca = .{ .type_ = alloca_type, .count = 1, .no_optimize = true } },
-                                    .location = self.current_location,
-                                };
-                                try self.entry_allocas.append(self.allocator, alloca_inst);
-                                const current_val = try self.generateExpression(expr_idx);
-                                _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = current_val } }, null);
-                                const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = temp_reg } }, .php_value);
-                                args[i] = ref_reg;
-                                const key_reg = try self.generateExpression(aa.index.?);
-                                try ref_writebacks.append(self.allocator, .{
-                                    .var_name = base_var,
-                                    .temp_reg = temp_reg,
-                                    .array_base = base_var,
-                                    .array_key = key_reg,
-                                });
-                                continue;
+                        // 展平嵌套链：$b['new']['deep'] ⇒ keys=['deep','new']（外向里收集，调用时反转）；
+                        // aa.target 本身是节点 idx ⇒ 沿链走到底即基座 idx
+                        var key_nodes = std.ArrayListUnmanaged(Node.Index).empty;
+                        defer key_nodes.deinit(self.allocator);
+                        var flatten_ok = true;
+                        var cur_idx = expr_idx;
+                        var base_idx = expr_idx;
+                        while (self.getNode(cur_idx)) |n| {
+                            if (n.tag != .array_access) break;
+                            const aa = n.data.array_access;
+                            if (aa.index == null) {
+                                // $arr[] 追加形无下钻键（append 语义的 by-ref 边界）⇒ 回退旧路径
+                                flatten_ok = false;
+                                break;
                             }
+                            try key_nodes.append(self.allocator, aa.index.?);
+                            cur_idx = aa.target;
+                            base_idx = cur_idx;
+                        }
+                        if (flatten_ok and key_nodes.items.len > 0) {
+                            const base_reg = try self.generateExpression(base_idx);
+                            // 逐层下钻：第一层起全部经 vivify helper（首层基座是数组值 ⇒ 普通建槽；
+                            // 后续层基座是上一层返回的 Ref ⇒ 槽值非数组时原地 vivify 为 []）
+                            var elem_ref = base_reg;
+                            var ki = key_nodes.items.len;
+                            while (ki > 0) {
+                                ki -= 1;
+                                const key_reg = try self.generateExpression(key_nodes.items[ki]);
+                                const vargs = try self.allocator.alloc(Register, 2);
+                                vargs[0] = elem_ref;
+                                vargs[1] = key_reg;
+                                elem_ref = try self.emitWithResult(.{ .call = .{
+                                    .func_name = "php_array_elem_ref_vivify",
+                                    .args = vargs,
+                                    .return_type = .php_value,
+                                } }, .php_value);
+                            }
+                            args[i] = elem_ref;
+                            continue;
                         }
                     }
                 }
