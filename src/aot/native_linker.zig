@@ -26,6 +26,8 @@ const Diagnostics = @import("diagnostics.zig");
 const DiagnosticEngine = Diagnostics.DiagnosticEngine;
 const compiler = @import("compiler");
 const ast = compiler.ast;
+// ★批次十九①：内建形参名表（反射导出生成）——Q2-a 直调 arity 真值守卫的数据源（编译期侧）
+const builtin_param_table = @import("builtin_param_table_generated.zig");
 // ★F-6：debug_backtrace 帧栈插桩开关（编译期；-Ddebug_frames，debug/safe 默认开）
 const build_options = @import("build_options");
 
@@ -5222,11 +5224,16 @@ pub const NativeLinker = struct {
         // ★批次十八①：直调命名实参绑定错误（overwrites / Unknown named；措辞＝PHP 8.5.8 实测）
         .{ "php_throw_named_overwrite", bi(.{ .runtime_name = "php_throw_named_overwrite", .needs_allocator = false, .may_raise = true }) },
         .{ "php_throw_unknown_named", bi(.{ .runtime_name = "php_throw_unknown_named", .needs_allocator = false, .may_raise = true }) },
+        // ★Q2-c：编译期直调命名面的欠参/必填洞（Value 形参版；异常值+pending 通道）
+        .{ "php_arity_too_few_v", bi(.{ .runtime_name = "php_arity_too_few_v", .needs_allocator = false, .may_raise = true }) },
+        .{ "php_arity_not_passed_v", bi(.{ .runtime_name = "php_arity_not_passed_v", .needs_allocator = false, .may_raise = true }) },
         .{ "php_object_call_safe_args_array", bi(.{ .runtime_name = "php_object_call_safe_args_array", .needs_allocator = true }) },
         .{ "php_object_call_args_array", bi(.{ .runtime_name = "php_object_call_args_array", .needs_allocator = true }) },
         .{ "php_object_call_named_args", bi(.{ .runtime_name = "php_object_call_named_args", .needs_allocator = true }) },
         // ★批次十八②：静态方法命名/展开调用的数组通道（Calc::m(...["y"=>7])/$var::m(...)，含 __callStatic 原始包）
         .{ "php_call_static_args_array", bi(.{ .runtime_name = "php_call_static_args_array", .needs_allocator = true, .may_raise = true }) },
+        // ★批次十九②：new 的命名/展开实参数组通道（继承构造器解析 + __construct 变参收命名）
+        .{ "php_new_object_named", bi(.{ .runtime_name = "php_new_object_named", .needs_allocator = true, .may_raise = true }) },
         .{ "php_constant_get", bi(.{ .runtime_name = "php_constant_get", .needs_allocator = true }) },
         .{ "php_go_builtin", bi(.{ .runtime_name = "php_go_builtin", .needs_allocator = true }) },
         .{ "php_json_encode", bi(.{ .runtime_name = "php_json_encode", .needs_allocator = true }) },
@@ -5417,6 +5424,36 @@ pub const NativeLinker = struct {
         try code.appendSlice(self.allocator, escaped_self_name);
         try code.appendSlice(self.allocator, "\");\n");
         try code.appendSlice(self.allocator, "    defer runtime.restoreCurrentCallArgs(__prev_call_args);\n");
+
+        // ★Q2-c（F-41）：欠参守卫——位置通道（直调/间接）单点；命名调用的洞由绑定侧
+        //   phpBindNamedArgs 先拦（final_args 槽位齐 ⇒ 此处不误伤）。PHP 8.5.8 措辞：
+        //   `Too few arguments to function {name}(), N passed in F on line L and exactly|at least R expected`。
+        {
+            var req_count: usize = 0;
+            var total_nv: usize = 0;
+            var has_variadic = false;
+            for (func.params.items) |p| {
+                if (std.mem.eql(u8, p.name, "this") or std.mem.eql(u8, p.name, "$this")) continue;
+                if (p.is_variadic) {
+                    has_variadic = true;
+                    continue;
+                }
+                total_nv += 1;
+                if (!p.has_default) req_count += 1;
+            }
+            const is_internal_body = std.mem.eql(u8, func.name, "__main__") or std.mem.startsWith(u8, func.name, "__gen_body_");
+            if (req_count > 0 and !is_internal_body) {
+                const display_name = if (std.mem.startsWith(u8, func.name, "__closure_") or std.mem.startsWith(u8, func.name, "__arrow_"))
+                    "{closure}"
+                else
+                    func.name;
+                const escaped_dn = try self.escapeString(display_name);
+                defer self.allocator.free(escaped_dn);
+                const snippet = try std.fmt.allocPrint(self.allocator, "    if (args.len < {d}) {{\n        const __arity_ex = runtime.php_userfn_arity_too_few(\"{s}\", @intCast(args.len), {d}, {d}, {}, runtime.runtime_allocator);\n        __arity_ex.release(runtime.runtime_allocator);\n        if (runtime.hasException()) {{\n            @branchHint(.unlikely);\n            return runtime.Value.initNull();\n        }}\n    }}\n", .{ req_count, escaped_dn, req_count, total_nv, has_variadic });
+                defer self.allocator.free(snippet);
+                try code.appendSlice(self.allocator, snippet);
+            }
+        }
 
         // 如果是类方法，设置 ClassContext
         if (std.mem.indexOf(u8, func.name, "::")) |_| {
@@ -21646,6 +21683,48 @@ pub const NativeLinker = struct {
         return false;
     }
 
+    /// ★Q2-a（F-41 甲型）：直调内建的 PHP arity 真值守卫（数据＝批次十九①反射形参表，编译期判定）。
+    ///   欠参（given<required）或超填（非变参且 given>declared）⇒ 返回措辞参数；
+    ///   原状是生成码 Zig 实参数不合 ⇒ 编译期炸（`expected N argument(s), found M`），
+    ///   本守卫把它变成运行期可捕获 ArgumentCountError（措辞与批十九① K4/K9/K13 逐字同源）。
+    const ArityMismatch = struct { min: usize, max: usize, given: usize, has_variadic: bool };
+    fn builtinArityMismatch(func_name: []const u8, given: usize) ?ArityMismatch {
+        // 判定共享生成表 arityOf（DRY）
+        const info = builtin_param_table.arityOf(func_name) orelse return null;
+        if (!(given < info.min or (!info.has_variadic and given > info.max))) return null;
+        return .{ .min = info.min, .max = info.max, .given = given, .has_variadic = info.has_variadic };
+    }
+
+    /// arity 违例发射：运行期 ArgumentCountError 替换原调用。
+    ///   通道＝「异常值正常返回 + pending 旗标」⇒ 调用后手发 hasException 路由
+    ///  （与 php_call_user_func 等站点同式；catch 后缀那支是 Zig 错误通道，会把局部 try 绕过去——不用）。
+    ///   返回 true ⇒ 已接管（调用方跳过本指令其余发射）。
+    fn emitBuiltinArityGuard(self: *Self, writer: anytype, op: IR.Instruction.CallOp, reg: ?IR.Register) !bool {
+        const mm = builtinArityMismatch(op.func_name, op.args.len) orelse return false;
+        // 措辞用规范小写名（PHP 内建名注册即小写；lbuf 活在本函数帧内 ✓）
+        var lbuf: [64]u8 = undefined;
+        var canon: []const u8 = op.func_name;
+        if (builtin_param_table.table.get(op.func_name) == null and op.func_name.len <= 64) {
+            canon = std.ascii.lowerString(&lbuf, op.func_name);
+        }
+        const escaped_name = try self.escapeString(canon);
+        defer self.allocator.free(escaped_name);
+        if (reg) |r| {
+            try self.writeRegAssignmentFmt(writer, r.id, "runtime.php_arity_error(\"{s}\", {d}, {d}, {d}, {}, runtime.runtime_allocator);\n", .{ escaped_name, mm.min, mm.max, mm.given, mm.has_variadic });
+        } else {
+            try writer.print("    _ = runtime.php_arity_error(\"{s}\", {d}, {d}, {d}, {}, runtime.runtime_allocator);\n", .{ escaped_name, mm.min, mm.max, mm.given, mm.has_variadic });
+        }
+        // hasException 路由：有 handler ⇒ 清场 + 跳 handler 块；无 ⇒ 冒出（未捕获通道）
+        if (self.current_exception_handler) |handler_idx| {
+            try writer.writeAll("    if (runtime.hasException()) {\n        @branchHint(.unlikely);\n");
+            try self.generateCleanupCode(writer);
+            try writer.print("        current_block = {d};\n        continue;\n    }}\n", .{handler_idx});
+        } else {
+            try writer.writeAll("    if (runtime.hasException()) {\n        @branchHint(.unlikely);\n        return error.RuntimeError;\n    }\n");
+        }
+        return true;
+    }
+
     /// ★F-75：内建调用的实参拼装＝`writeValueArgs` ＋ **声明式可选参补齐**。
     ///   旧状：模板 handler 是定长形参（Zig 无默认形参），可选参只在发射器里按名字手工补/裁
     ///   （`php_strstr`/`php_hash_pbkdf2`/`php_file_put_contents`/`php_str_word_count` 四处；其中 `file_put_contents`
@@ -25075,6 +25154,9 @@ pub const NativeLinker = struct {
 
                         // 有返回值寄存器
                         if (is_builtin) {
+                            // ★Q2-a（F-41 甲型）：PHP arity 真值守卫——欠参/超填改发运行期可捕获
+                            //   ArgumentCountError（原状＝生成码 Zig 实参数不合 ⇒ 编译期炸）
+                            if (try self.emitBuiltinArityGuard(writer, op, reg)) return;
                             const runtime_name = self.mapToRuntimeFunction(op.func_name);
 
                             // byref 数组内置函数（array_shift/array_pop）：传入存储指针就地修改并写回变量，
@@ -26563,6 +26645,8 @@ pub const NativeLinker = struct {
                                 }
                             }
                         } else if (is_builtin) {
+                            // ★Q2-a（F-41 甲型）：语句形内建同值守卫
+                            if (try self.emitBuiltinArityGuard(writer, op, null)) return;
                             const runtime_name = self.mapToRuntimeFunction(op.func_name);
                             const needs_alloc = self.functionNeedsAllocator(op.func_name);
 

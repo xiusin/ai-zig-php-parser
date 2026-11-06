@@ -7877,6 +7877,13 @@ prop_name: ?[]const u8 = null,
             var pending_err_is_overwrite = false;
             var variadic_seen = false;
             var overflow_from: usize = param_count;
+            // ★Q2-c：命名跳必填的编译期洞检追踪（PHP 分流：洞位后有已填 ⇒ Argument #i not passed；
+            //   纯尾部短 ⇒ Too few arguments）
+            var last_filled: i64 = -1;
+            var first_missing_req: ?struct { idx: usize, name: []const u8 } = null;
+            var required_count: usize = 0;
+            var total_nv: usize = 0;
+            var has_variadic_ct = false;
             for (0..param_count) |pi| {
                 // 从 symbol_table 或 module 获取参数名和引用标志
                 const raw_name: []const u8 = if (use_symbol) func_symbol.?.metadata.function.params[pi].name else module_func_params.?[pi].name;
@@ -7923,6 +7930,19 @@ prop_name: ?[]const u8 = null,
                     }
                 } else if (pi < positional_args.items.len) {
                     chosen = positional_args.items[pi];
+                }
+
+                // ★Q2-c：必填洞追踪（变参非必填；命名命中/位置占槽 ⇒ 已填）
+                {
+                    if (p_is_variadic) has_variadic_ct = true else total_nv += 1;
+                    const p_has_default = if (use_symbol) func_symbol.?.metadata.function.params[pi].has_default else module_func_params.?[pi].has_default;
+                    if (!p_is_variadic and !p_has_default) {
+                        required_count += 1;
+                        if (chosen == null and first_missing_req == null) {
+                            first_missing_req = .{ .idx = pi, .name = p_name };
+                        }
+                    }
+                    if (chosen != null) last_filled = @intCast(pi);
                 }
 
                 // ★批次十八①：变参收集（PHP 8.5.8 实测口径）
@@ -8061,6 +8081,36 @@ prop_name: ?[]const u8 = null,
                     .args = err_args,
                     .return_type = .php_value,
                 } }, .php_value);
+            }
+
+            // ★Q2-c：命名跳必填 ⇒ 编译期拦（绑定错误优先于 arity；发射点＝实参全求值后、调用前）
+            if (pending_named_err == null) {
+                if (first_missing_req) |fm| {
+                    const name_reg = try self.emitWithResult(.{ .const_string = try self.module.?.internString(func_name) }, .php_value);
+                    if (last_filled > @as(i64, @intCast(fm.idx))) {
+                        // 洞位后有已填 ⇒ `{f}(): Argument #i ($x) not passed`
+                        const idx_reg = try self.emitWithResult(.{ .const_int = @intCast(fm.idx + 1) }, .i64);
+                        const pn_reg = try self.emitWithResult(.{ .const_string = try self.module.?.internString(fm.name) }, .php_value);
+                        const np_args = try self.allocator.alloc(Register, 3);
+                        np_args[0] = name_reg;
+                        np_args[1] = idx_reg;
+                        np_args[2] = pn_reg;
+                        _ = try self.emitWithResult(.{ .call = .{ .func_name = "php_arity_not_passed_v", .args = np_args, .return_type = .php_value } }, .php_value);
+                    } else {
+                        // 纯尾部短 ⇒ `Too few arguments to function {f}(), N passed ... and exactly|at least R expected`
+                        const given_reg = try self.emitWithResult(.{ .const_int = @intCast(positional_args.items.len + named_args.count()) }, .i64);
+                        const req_reg = try self.emitWithResult(.{ .const_int = @intCast(required_count) }, .i64);
+                        const tot_reg = try self.emitWithResult(.{ .const_int = @intCast(total_nv) }, .i64);
+                        const var_reg = try self.emitWithResult(.{ .const_bool = has_variadic_ct }, .bool);
+                        const tf_args = try self.allocator.alloc(Register, 5);
+                        tf_args[0] = name_reg;
+                        tf_args[1] = given_reg;
+                        tf_args[2] = req_reg;
+                        tf_args[3] = tot_reg;
+                        tf_args[4] = var_reg;
+                        _ = try self.emitWithResult(.{ .call = .{ .func_name = "php_arity_too_few_v", .args = tf_args, .return_type = .php_value } }, .php_value);
+                    }
+                }
             }
 
             args = try final_args.toOwnedSlice(self.allocator);
@@ -9681,6 +9731,42 @@ prop_name: ?[]const u8 = null,
         var ctor_args = std.ArrayListUnmanaged(Register).empty;
         defer ctor_args.deinit(self.allocator);
 
+        // ★批次十九②：匿名类命名/展开实参 ⇒ 同一运行时绑定通道（类名编译期已定）
+        if (self.argsContainNamedOrUnpacking(anon_data.args)) {
+            const args_arr = try self.emitWithResult(.{ .array_new = .{ .capacity = @intCast(anon_data.args.len) } }, .php_array);
+            for (anon_data.args) |arg_idx| {
+                const arg_node = self.getNode(arg_idx) orelse continue;
+                if (arg_node.tag == .unpacking_expr) {
+                    const spread_reg = try self.generateExpression(arg_node.data.unpacking_expr.expr);
+                    const spread_args = try self.allocator.alloc(Register, 2);
+                    spread_args[0] = args_arr;
+                    spread_args[1] = spread_reg;
+                    _ = try self.emit(.{ .call = .{ .func_name = "php_args_append_spread", .args = spread_args, .return_type = .php_value } }, null);
+                    continue;
+                }
+                if (arg_node.tag == .named_arg) {
+                    const raw_name = self.getString(arg_node.data.named_arg.name);
+                    const arg_name = if (raw_name.len > 0 and raw_name[0] == '$') raw_name[1..] else raw_name;
+                    const key_id = try self.module.?.internString(arg_name);
+                    const key_reg = try self.emitWithResult(.{ .const_string = key_id }, .php_value);
+                    const val_reg = try self.generateExpression(arg_node.data.named_arg.value);
+                    _ = try self.emit(.{ .array_set = .{ .array = args_arr, .key = key_reg, .value = val_reg } }, null);
+                    continue;
+                }
+                const val_reg = try self.generateExpression(arg_idx);
+                _ = try self.emit(.{ .array_push = .{ .array = args_arr, .value = val_reg } }, null);
+            }
+            const class_reg = try self.emitWithResult(.{ .const_string = try self.module.?.internString(anon_class_name) }, .php_value);
+            const na_args = try self.allocator.alloc(Register, 2);
+            na_args[0] = class_reg;
+            na_args[1] = args_arr;
+            return self.emitWithResult(.{ .call = .{
+                .func_name = "php_new_object_named",
+                .args = na_args,
+                .return_type = .php_value,
+            } }, .{ .php_object = anon_class_name });
+        }
+
         for (anon_data.args) |arg_idx| {
             const arg_reg = try self.generateExpression(arg_idx);
             try ctor_args.append(self.allocator, arg_reg);
@@ -9754,73 +9840,57 @@ prop_name: ?[]const u8 = null,
             class_name = "static";
         }
 
-        var has_named: bool = false;
-        var positional_args = std.ArrayListUnmanaged(Node.Index).empty;
-        defer positional_args.deinit(self.allocator);
-        var named_args = std.StringHashMapUnmanaged(Node.Index){};
-        defer named_args.deinit(self.allocator);
-
-        for (inst_data.args) |arg_idx| {
-            const arg_node = self.getNode(arg_idx) orelse continue;
-            if (arg_node.tag == .named_arg) {
-                has_named = true;
-                const arg_name = self.getString(arg_node.data.named_arg.name);
-                try named_args.put(self.allocator, arg_name, arg_node.data.named_arg.value);
-            } else {
-                try positional_args.append(self.allocator, arg_idx);
+        // ★批次十九②：命名/展开实参 ⇒ 统一运行时绑定通道（php_new_object_named：
+        //   继承构造器沿父链解析、变参收命名、overwrites/Unknown 两 Error 与函数面同口径——
+        //   原编译期 skip-消耗块绑错继承构造器槽位、静默丢变参命名、漏报两 Error，已拆除）。
+        if (self.argsContainNamedOrUnpacking(inst_data.args)) {
+            const args_arr = try self.emitWithResult(.{ .array_new = .{ .capacity = @intCast(inst_data.args.len) } }, .php_array);
+            for (inst_data.args) |arg_idx| {
+                const arg_node = self.getNode(arg_idx) orelse continue;
+                if (arg_node.tag == .unpacking_expr) {
+                    const spread_reg = try self.generateExpression(arg_node.data.unpacking_expr.expr);
+                    const spread_args = try self.allocator.alloc(Register, 2);
+                    spread_args[0] = args_arr;
+                    spread_args[1] = spread_reg;
+                    _ = try self.emit(.{ .call = .{ .func_name = "php_args_append_spread", .args = spread_args, .return_type = .php_value } }, null);
+                    continue;
+                }
+                if (arg_node.tag == .named_arg) {
+                    const raw_name = self.getString(arg_node.data.named_arg.name);
+                    const arg_name = if (raw_name.len > 0 and raw_name[0] == '$') raw_name[1..] else raw_name;
+                    const key_id = try self.module.?.internString(arg_name);
+                    const key_reg = try self.emitWithResult(.{ .const_string = key_id }, .php_value);
+                    const val_reg = try self.generateExpression(arg_node.data.named_arg.value);
+                    _ = try self.emit(.{ .array_set = .{ .array = args_arr, .key = key_reg, .value = val_reg } }, null);
+                    continue;
+                }
+                const val_reg = try self.generateExpression(arg_idx);
+                _ = try self.emit(.{ .array_push = .{ .array = args_arr, .value = val_reg } }, null);
             }
+            // 类名通道：动态（$var / static / 表达式）求值；静态名 ⇒ 常量串
+            const class_reg = if (is_dynamic_class and class_node.tag == .static_expr)
+                try self.emitWithResult(.{ .call = .{
+                    .func_name = "php_get_called_class_name",
+                    .args = &.{},
+                    .return_type = .php_value,
+                } }, .php_value)
+            else if (is_dynamic_class or class_name.len == 0)
+                try self.generateExpression(inst_data.class_name)
+            else
+                try self.emitWithResult(.{ .const_string = try self.module.?.internString(class_name) }, .php_value);
+            const na_args = try self.allocator.alloc(Register, 2);
+            na_args[0] = class_reg;
+            na_args[1] = args_arr;
+            return self.emitWithResult(.{ .call = .{
+                .func_name = "php_new_object_named",
+                .args = na_args,
+                .return_type = .php_value,
+            } }, if (is_dynamic_class or class_name.len == 0) Type.php_value else Type{ .php_object = class_name });
         }
 
-        var args: []Register = &[_]Register{};
-        const ctor_name = if (class_name.len > 0)
-            try std.fmt.allocPrint(self.allocator, "{s}::__construct", .{class_name})
-        else
-            "";
-        defer if (ctor_name.len > 0) self.allocator.free(ctor_name);
-
-        const ctor_func = if (has_named and self.module != null and ctor_name.len > 0)
-            self.module.?.findFunction(ctor_name)
-        else
-            null;
-
-        if (has_named and ctor_func != null) {
-            var final_args = std.ArrayListUnmanaged(Register).empty;
-            defer final_args.deinit(self.allocator);
-            try final_args.ensureTotalCapacity(self.allocator, ctor_func.?.params.items.len + positional_args.items.len);
-
-            var pos_i: usize = 0;
-            for (ctor_func.?.params.items, 0..) |p, param_idx| {
-                if (param_idx == 0 and std.mem.eql(u8, p.name, "this")) continue;
-
-                var chosen: ?Node.Index = null;
-                const p_name = if (p.name.len > 0 and p.name[0] == '$') p.name[1..] else p.name;
-                if (named_args.get(p_name)) |named_idx| {
-                    chosen = named_idx;
-                } else if (pos_i < positional_args.items.len) {
-                    chosen = positional_args.items[pos_i];
-                    pos_i += 1;
-                }
-
-                if (chosen) |expr_idx| {
-                    const r = try self.generateExpression(expr_idx);
-                    try final_args.append(self.allocator, r);
-                } else {
-                    const r = try self.emitWithResult(.{ .const_missing = {} }, .php_value);
-                    try final_args.append(self.allocator, r);
-                }
-            }
-
-            while (pos_i < positional_args.items.len) : (pos_i += 1) {
-                const r = try self.generateExpression(positional_args.items[pos_i]);
-                try final_args.append(self.allocator, r);
-            }
-
-            args = try final_args.toOwnedSlice(self.allocator);
-        } else {
-            args = try self.allocator.alloc(Register, inst_data.args.len);
-            for (inst_data.args, 0..) |arg_idx, i| {
-                args[i] = try self.generateExpression(arg_idx);
-            }
+        const args = try self.allocator.alloc(Register, inst_data.args.len);
+        for (inst_data.args, 0..) |arg_idx, i| {
+            args[i] = try self.generateExpression(arg_idx);
         }
 
         // 动态类名实例化: new $var() 或 new static()

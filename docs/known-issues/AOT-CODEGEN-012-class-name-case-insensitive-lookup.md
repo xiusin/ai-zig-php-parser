@@ -13097,3 +13097,50 @@ PHP 8.5.8 实测口径：纯 enum ⇒ **返回 false**（不抛错，last_error=
 - E5（命名跳必填 ⇒ ArgumentCountError）为 F-41 arity 域既有缺口（位置欠参同病），登记待专项；`new` 构造器命名绑定仍旧 skip-消耗路径（irg :9637 区），登记。
 - `probe_spread_extra` 的 `BLT:Unknown named parameter $string` 行为既定能力边界（探针自带注释口径），非回归。
 - 41 格面板复跑：**34 SAME + 7 DIFF，与批次十七终态逐格一致、零转移**（7 枚 DIFF 全为既有解释：§七.5 栈帧 ×4、§七.7 时间戳 ×1、并行会话在途 uasort 中间态 ×1、`sort_na` 对象编号差 ×1）
+
+## 248. 批次十九：内建形参名表（反射自动导出）+ `new` 构造器命名绑定同口径化（2026-11-06）
+
+### 248.1 ① 内建形参名表（零手抄，可重跑可 diff）
+
+- **生成器**：`scripts/gen_builtin_param_table.php`（PHP 8.5.8 反射全量导出；重跑 `php scripts/gen_builtin_param_table.php`，产物 `src/aot/builtin_param_table_generated.zig` 进版本库，diff 即审计）。实测覆盖 2143/2143 内建、4424 形参；**如实标注**：`.unknown`=可选但默认值不可反射（109 枚，含数组/常量表达式默认）、变参 44、by-ref 168；必填 ⇒ `.none`（不冒充）。
+- **生成器修复**：必填误标 unknown（判定顺序）+ Zig 字符串字面量控制字节逐字节转义（`\v` 等 `\xNN`）。
+- **解析面**：命名标签按 PHP 实测放开关键字全族（`class_exists(class:)`/`array_slice(array:)`/`function_exists(function:)` 全合法）——`Parser.isNamedLabelStart`（实参起始位 `X:` 只可能是命名标签），5 站点统一。**注：动了共享层 `src/compiler/parser.zig`（此项入待批清单）**。
+- **运行侧**：`phpInvokeBuiltinNamed`——按名绑（名大小写敏感/函数名 CI）、overwrites/Unknown 措辞逐字、变参内建拒收命名（`{name}() does not accept unknown named parameters`）、缺必填双措辞（`expects exactly/at least R, P given` vs 洞位 ≤given 时 `Argument #i ($name) not passed`）、超填（`exactly/at most`）、可选缺省物化（unknown 尾部截断/中段响亮边界）、by-ref 命名命中 ⇒ 响亮边界 Error（defer-12 写回通道不存在，不静默丢写回）。
+- **发射面**：编译期不可解析（内建/前向/动态）或间接回调 + 命名实参 ⇒ 运行时表绑定通道（`php_invoke_callable_args_array`）；原剥名按位置填（乱序即错填）路径拆除。
+- **销账**：`BLT:` 边界消除（`probe_spread_extra` 现与 PHP 全等）；K1-K20 逐形全等 PHP 8.5.8（含 `call_user_func_array` 关联数组、展开字符串键、变参内建溢出、未知函数 named 的 undefined-function 优先序）。
+
+### 248.2 ② `new` 构造器命名绑定同口径化
+
+- **统一运行时通道** `php_new_object_named`：命名/展开实参 ⇒ 编译期改道；复用批十八共享核心 `phpBindNamedValueArray`（无第二套）；继承构造器经 `findMethodLookup` 父链解析；无构造器类+命名 ⇒ `Unknown named parameter $x`（C10 真值；纯位置参 PHP 静默忽略，维持）。
+- **拆除**旧编译期 skip-消耗块（绑错继承构造器槽位 C5、静默丢变参命名 C6、漏报 overwrites/Unknown C8/C9）。
+- 匿名类 `new class(x: 5)` 同通道；`new` 展开（`...[1]`, `...["b"=>9]` 混合）同通道。
+- 实测 C1-C10 全等 + 匿名类/展开全等。
+
+### 248.3 ③ E5/F-41 arity 域只评估（不落码）——现状读数与立项建议
+
+| 面 | PHP 8.5.8 | AOT 现状（实测） | 归属层 |
+|---|---|---|---|
+| 用户函数直调欠参 | `ArgumentCountError: Too few arguments to function u(), 1 passed in F:L and exactly 2 expected` | 静默 null 补齐 | ir_generator 直调发射 |
+| 用户函数间接欠参 | 同上 | 静默 null 补齐 | 运行时 prologue/binder |
+| 命名跳必填（用户/方法） | 洞位≤given ⇒ `{f}(): Argument #i ($x) not passed`；否则 Too few | 静默 null | 同上 |
+| 方法欠参（含默认值在途也报） | `C::add(), 0 passed and at least 1 expected` | 静默（`add(,10)`） | 方法 prologue |
+| 内建直调欠参/超填 | 运行期可捕获 ArgumentCountError | **编译期炸**（Zig arity 错） | native_linker 直降发射 |
+| 内建变量调用欠参/超填 | 同上 | **裸 `error: InvalidArgumentCount` 进程死** | 包装器错误未映射挂起异常 |
+| 内建命名欠参/超填 | 同上 | ✅ 本批①已修（措辞逐字） | — |
+| 用户函数超填 / 变参收尾 / 零参变参 | 容忍/正常 | ✅ 已一致 | — |
+| 构造器欠参 | Too few（`P::__construct()` 名） | 静默 null | 同用户函数面 |
+
+**立项建议（粒度/成本）**：
+1. **Q2-a 内建直调 arity**（最高严重度：编译期炸）——直降处实参数越界时改发运行期 arity 助手（措辞 exactly/at least/at most）。小成本。
+2. **Q2-b 内建变量调用 arity**——包装层统一 hasException 化 + 形参名表措辞（① 产物直接可用）。小-中。
+3. **Q2-c 用户函数/方法欠参**——prologue 缺参织入检查（被调名+required 元数据已备）；措辞含调用点 file/line（编译期可知，§七.5 豁免疫）。中。
+
+**本批另发现（登记）**：`catch (Error $e)` 在 `$e` 已存为字符串局部时**不重绑**（`$e="P"; try{throw...}catch(Error $e){$e->getMessage()}` ⇒ on string fatal）——既有缺陷，与本批无关，待立项。
+
+### 248.4 验收读数（2026-11-06）
+
+- `timeout 600 zig build` rc=0；debug_frames 变体 rc=0；批十八 faces/bt 探针在变体下复测全等。
+- ① 探针：`probe_b19_truth`（K1-K20 主探针）/ `probe_b19_k1417` / `probe_b19_direct` / `probe_b19_kw` / `probe_b19_boundary`（B1 defer-12 自洽 / B2 by-ref 响亮边界 / B3 不受影响）——全等或符合登记口径。
+- ② 探针：`probe_b19_ctor`（C1-C10）/ `probe_b19_anon`（匿名类+展开）——全等。
+- 回归：批十八全族（truth/edge/method/m9/nest/faces/bt）+ 批十七 spread 族（含 spread_extra **销账转 SAME**）——零新漂移。
+- 41 格面板复跑：**34 SAME + 7 DIFF，与批次十七/十八终态逐格一致、零转移**（7 枚 DIFF 全为既有解释：§七.5 栈帧 ×4、§七.7 时间戳 ×1、并行会话在途 uasort 中间态 ×1、`sort_na` 对象编号差 ×1）

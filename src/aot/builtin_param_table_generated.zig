@@ -27,6 +27,31 @@ pub const Param = struct {
     default: DefaultVal,
 };
 
+/// arity 三元组（required / 非变参声明总数 / 是否含变参）
+pub const ArityInfo = struct { min: usize, max: usize, has_variadic: bool };
+
+/// 按名查 arity（表键小写；函数名 CI ⇒ 内部折叠，≤64 栈缓冲）。编译期（native_linker）
+/// 与运行期（runtime_lib_template）共用同一份判定，禁两处各造。
+pub fn arityOf(name: []const u8) ?ArityInfo {
+    const params = table.get(name) orelse blk: {
+        if (name.len > 64) return null;
+        var lbuf: [64]u8 = undefined;
+        break :blk table.get(std.ascii.lowerString(&lbuf, name));
+    } orelse return null;
+    var min: usize = 0;
+    var max: usize = 0;
+    var has_variadic = false;
+    for (params) |p| {
+        if (p.variadic) {
+            has_variadic = true;
+            continue;
+        }
+        max += 1;
+        if (!p.optional) min += 1;
+    }
+    return .{ .min = min, .max = max, .has_variadic = has_variadic };
+}
+
 /// 小写函数名 ⇒ 形参表（声明序）
 pub const table = std.StaticStringMap([]const Param).initComptime(.{
     .{ "_", &[_]Param{.{ .name = "message", .optional = false, .variadic = false, .by_ref = false, .default = .{ .kind = .none } }} },

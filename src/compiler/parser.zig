@@ -115,6 +115,19 @@ pub const Parser = struct {
         self.all_tokens.append(self.allocator, self.peek) catch {};
     }
 
+    /// ★批次十九①：命名实参标签判定——PHP 8.5.8 实测接受**关键字**作标签
+    ///   （`class_exists(class: "X")`、`array_slice(array: [...])`、`function_exists(function: "x")` 全合法）。
+    ///   调用实参起始位上「标识符/关键字 + `:`」只可能是命名标签：三元 `?:` 的冒号必在中段、
+    ///   永不落在实参起始位；`true/false/null` 字面量非标签（PHP 同）。
+    ///   关键字块在 Token.Tag 中连续（k_class...k_void），用序数区间判定。
+    fn isNamedLabelStart(self: *Parser) bool {
+        if (self.peek.tag != .colon) return false;
+        const t = self.curr.tag;
+        if (t == .t_string) return true;
+        const v = @intFromEnum(t);
+        return v >= @intFromEnum(@TypeOf(t).k_class) and v <= @intFromEnum(@TypeOf(t).k_void);
+    }
+
     /// 当前行号（从当前 token 位置计算；R-135 提取自 reportError 供诊断复用）
     fn currLine(self: *Parser) u32 {
         var line: u32 = 1;
@@ -2750,7 +2763,7 @@ pub const Parser = struct {
                 var args = std.ArrayListUnmanaged(ast.Node.Index).empty;
                 while (self.curr.tag != .r_paren) {
                     // Check for named parameter: name: value
-                    if (self.curr.tag == .t_string and self.peek.tag == .colon) {
+                    if (self.isNamedLabelStart()) {
                         const name_tok = self.curr;
                         const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
                         self.nextToken(); // skip name
@@ -2923,7 +2936,7 @@ pub const Parser = struct {
                 var args = std.ArrayList(ast.Node.Index).empty;
                 while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
                     // Check for named argument: name: value
-                    if (self.curr.tag == .t_string and self.peek.tag == .colon) {
+                    if (self.isNamedLabelStart()) {
                         const name_tok = self.curr;
                         const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
                         self.nextToken(); // skip name
@@ -3752,7 +3765,7 @@ pub const Parser = struct {
             if (self.curr.tag == .l_paren) {
                 self.nextToken();
                 while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
-                    if (self.curr.tag == .t_string and self.peek.tag == .colon) {
+                    if (self.isNamedLabelStart()) {
                         const name_tok = self.curr;
                         const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
                         self.nextToken();
@@ -3823,7 +3836,7 @@ pub const Parser = struct {
         if (self.curr.tag == .l_paren) {
             self.nextToken();
             while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
-                if (self.curr.tag == .t_string and self.peek.tag == .colon) {
+                if (self.isNamedLabelStart()) {
                     const name_tok = self.curr;
                     const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
                     self.nextToken();

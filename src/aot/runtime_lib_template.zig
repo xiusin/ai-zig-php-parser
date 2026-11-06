@@ -9877,6 +9877,20 @@ pub fn php_invoke_callable(callback: Value, args: []const Value, allocator: Allo
             }
         }
         if (lookupBuiltinFunction(func_name)) |func| {
+            // ★Q2-b（F-41）：变量调用面 arity 真值守卫——欠参/超填 ⇒ 可捕获 ArgumentCountError
+            //  （原裸 error.InvalidArgumentCount 冒顶进程死；措辞与直调面共用 php_arity_error 单一来源）。
+            //   函数名 CI ⇒ 措辞用规范小写名。
+            if (builtin_param_table.arityOf(func_name)) |info| {
+                const given = args.len;
+                if (given < info.min or (!info.has_variadic and given > info.max)) {
+                    var lbuf: [64]u8 = undefined;
+                    const canon: []const u8 = if (builtin_param_table.table.get(func_name) != null or func_name.len > 64)
+                        func_name
+                    else
+                        std.ascii.lowerString(&lbuf, func_name);
+                    return php_arity_error(canon, @intCast(info.min), @intCast(info.max), @intCast(given), info.has_variadic, allocator);
+                }
+            }
             return func(Value.initNull(), args, allocator);
         }
         // §8 #6：用户函数名 CI（$f = "dyn"; $f() 跨大小写动态调用）
@@ -10051,6 +10065,53 @@ pub fn php_throw_unknown_named(name: Value) !Value {
     return throwThrowable("Error", msg, runtime_allocator);
 }
 
+/// ★Q2-a/b（F-41 甲型）：内建 arity 真值守卫的运行侧（直调编译期发射点 + 变量调用分发共用）。
+///   措辞（PHP 8.5.8 实测 K4/K9/K13）：欠参 `expects exactly R`（无可选且非变参）/ `at least R`；
+///   超填 `expects exactly T` / `at most T`；单复数 argument(s) 按数。
+///   返回约定＝本族通道惯例「**异常 Value 正常返回 + pending 旗标**」（生成码在调用后走
+///   hasException 路由；Zig error 通道会绕过局部 catch——批次十九②实测钉死）。
+pub fn php_arity_error(name: []const u8, min: i64, max: i64, given: i64, has_variadic: bool, allocator: Allocator) Value {
+    var buf: [320]u8 = undefined;
+    const msg = if (given < min) blk: {
+        const exact = (!has_variadic and min == max);
+        const word: []const u8 = if (exact) "exactly" else "at least";
+        const plural: []const u8 = if (min == 1) "" else "s";
+        break :blk std.fmt.bufPrint(&buf, "{s}() expects {s} {d} argument{s}, {d} given", .{ name, word, min, plural, given }) catch "expects more arguments";
+    } else blk: {
+        const word: []const u8 = if (min == max) "exactly" else "at most";
+        const plural: []const u8 = if (max == 1) "" else "s";
+        break :blk std.fmt.bufPrint(&buf, "{s}() expects {s} {d} argument{s}, {d} given", .{ name, word, max, plural, given }) catch "expects fewer arguments";
+    };
+    return throwThrowable("ArgumentCountError", msg, allocator) catch Value.initNull();
+}
+
+/// ★Q2-c：用户函数/方法欠参（位置通道）的 ArgumentCountError（PHP 8.5.8 实测措辞）。
+///   消息内嵌调用点 file/line（运行期 src_file/src_line＝调用语句位置，与 PHP「N passed in F on line L」同位）。
+///   exactly＝无可选且非变参；否则 at least。返回约定同 php_arity_error（异常值+pending）。
+pub fn php_userfn_arity_too_few(display_name: []const u8, given: i64, required: i64, total: i64, has_variadic: bool, allocator: Allocator) Value {
+    const word: []const u8 = if (!has_variadic and required == total) "exactly" else "at least";
+    var buf: [512]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "Too few arguments to function {s}(), {d} passed in {s} on line {d} and {s} {d} expected", .{
+        display_name, given, src_file, src_line, word, required,
+    }) catch "Too few arguments";
+    return throwThrowable("ArgumentCountError", msg, allocator) catch Value.initNull();
+}
+
+/// ★Q2-c：编译期直调命名面的欠参助手（Value 形参版，供 IR .call 发射；措辞同 php_userfn_arity_too_few）
+pub fn php_arity_too_few_v(name: Value, given: Value, required: Value, total: Value, variadic: Value) !Value {
+    const n = if (name.isString()) name.asString().data else "?";
+    return php_userfn_arity_too_few(n, given.toInt(), required.toInt(), total.toInt(), variadic.toBool(), runtime_allocator);
+}
+
+/// ★Q2-c：必填洞（命名跳过必填）措辞——`{name}(): Argument #i ($p) not passed`（PHP 8.5.8 实测）
+pub fn php_arity_not_passed_v(name: Value, index: Value, pname: Value) !Value {
+    const n = if (name.isString()) name.asString().data else "?";
+    const p = if (pname.isString()) pname.asString().data else "?";
+    var buf: [320]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{s}(): Argument #{d} (${s}) not passed", .{ n, index.toInt(), p }) catch "required argument not passed";
+    return throwThrowable("ArgumentCountError", msg, runtime_allocator) catch Value.initNull();
+}
+
 pub fn php_invoke_callable_args_array(callback: Value, args_array: Value, allocator: Allocator) !Value {
     if (!args_array.isArray()) {
         // 常规入口由 php_call_user_func_array 先审查（带函数专有措辞）；此处兜内部调用方。
@@ -10097,6 +10158,8 @@ fn phpBindNamedArgs(
     named_vals: []const Value,
     param_names: []const []const u8,
     variadic_index: u16,
+    required_params: u16,
+    display_name: []const u8,
     allocator: Allocator,
 ) !NamedBindOut {
     const n_declared: u16 = if (variadic_index != 0xFFFF) variadic_index else @as(u16, @intCast(param_names.len));
@@ -10159,6 +10222,36 @@ fn phpBindNamedArgs(
 
     var final_args = std.ArrayListUnmanaged(Value).empty;
     errdefer final_args.deinit(allocator);
+
+    // ★Q2-c：必填洞检（PHP 8.5.8 实测分流：洞位后有已填 ⇒ `Argument #i ($x) not passed`；
+    //   纯尾部短 ⇒ `Too few arguments ... N passed ... exactly|at least R expected`）
+    {
+        var last_filled: i64 = -1;
+        for (filled, 0..) |f, i| {
+            if (f) last_filled = @intCast(i);
+        }
+        var first_missing: ?usize = null;
+        const req_n: usize = @min(required_params, n_declared);
+        for (0..req_n) |i| {
+            if (!filled[i]) {
+                first_missing = i;
+                break;
+            }
+        }
+        if (first_missing) |mi| {
+            const given = positional.len + named_vals.len;
+            if (last_filled > @as(i64, @intCast(mi))) {
+                var buf: [320]u8 = undefined;
+                const msg = std.fmt.bufPrint(&buf, "{s}(): Argument #{d} (${s}) not passed", .{ display_name, mi + 1, param_names[mi] }) catch "required argument not passed";
+                const ex = throwThrowable("ArgumentCountError", msg, allocator) catch |e| return e;
+                ex.release(allocator);
+                return error.RuntimeError;
+            }
+            _ = php_userfn_arity_too_few(display_name, @intCast(given), required_params, n_declared, variadic_index != 0xFFFF, allocator);
+            return error.RuntimeError;
+        }
+    }
+
     try final_args.appendSlice(allocator, slots);
     try final_args.appendSlice(allocator, extra_positional.items);
     var marker: ?Value = null;
@@ -10198,7 +10291,7 @@ fn methodVariadicIndex(m: *const ClassMethod) u16 {
 }
 
 /// 数组通道 ⇒ 共享绑定核心（方法/静态两路复用）
-fn phpBindNamedValueArray(arr: *PHPArray, param_names: []const []const u8, variadic_index: u16, allocator: Allocator) !NamedBindOut {
+fn phpBindNamedValueArray(arr: *PHPArray, param_names: []const []const u8, variadic_index: u16, required_params: u16, display_name: []const u8, allocator: Allocator) !NamedBindOut {
     var positional = std.ArrayListUnmanaged(Value).empty;
     defer positional.deinit(allocator);
     var named_keys = std.ArrayListUnmanaged(*PHPString).empty;
@@ -10206,7 +10299,7 @@ fn phpBindNamedValueArray(arr: *PHPArray, param_names: []const []const u8, varia
     var named_vals = std.ArrayListUnmanaged(Value).empty;
     defer named_vals.deinit(allocator);
     try splitPositionalNamed(arr, &positional, &named_keys, &named_vals, allocator);
-    return phpBindNamedArgs(positional.items, named_keys.items, named_vals.items, param_names, variadic_index, allocator);
+    return phpBindNamedArgs(positional.items, named_keys.items, named_vals.items, param_names, variadic_index, required_params, display_name, allocator);
 }
 
 /// ★批次十七②：命名实参绑定器（PHP 8.5.8 实测语义）。批次十八①起绑定逻辑下沉共享核心
@@ -10226,6 +10319,8 @@ fn php_invoke_callable_named_pack(callback: Value, arr: *PHPArray, allocator: Al
     // 2) 取被调形参元数据（用户函数经注册表 CI 查；闭包自带同构元数据）
     var param_names: []const []const u8 = &.{};
     var variadic_index: u16 = 0xFFFF;
+    var required_params: u16 = 0;
+    var display_name: []const u8 = "{closure}";
     var resolvable = false;
     if (callback.isString()) {
         const name = callback.asString().data;
@@ -10237,6 +10332,8 @@ fn php_invoke_callable_named_pack(callback: Value, arr: *PHPArray, allocator: Al
                         if (std.ascii.eqlIgnoreCase(e.key_ptr.*, name)) {
                             param_names = e.value_ptr.param_names;
                             variadic_index = e.value_ptr.variadic_index;
+                            required_params = e.value_ptr.required_params;
+                            display_name = e.key_ptr.*;
                             resolvable = true;
                             break;
                         }
@@ -10249,6 +10346,7 @@ fn php_invoke_callable_named_pack(callback: Value, arr: *PHPArray, allocator: Al
         const cl = callback.asFunction();
         param_names = cl.param_names;
         variadic_index = cl.variadic_index;
+        required_params = cl.required_params;
         resolvable = true;
     }
 
@@ -10277,7 +10375,7 @@ fn php_invoke_callable_named_pack(callback: Value, arr: *PHPArray, allocator: Al
     }
 
     // 3) 共享核心绑定 → 调用（final_args 切片/beacon 的所有权随 NamedBindOut，活到调用返回）
-    const bind = try phpBindNamedArgs(positional.items, named_keys.items, named_vals.items, param_names, variadic_index, allocator);
+    const bind = try phpBindNamedArgs(positional.items, named_keys.items, named_vals.items, param_names, variadic_index, required_params, display_name, allocator);
     defer bind.deinit(allocator);
     return php_invoke_callable(callback, bind.final_args, allocator);
 }
@@ -28741,7 +28839,9 @@ pub const PHPObject = struct {
 
         if (self.class_meta) |meta| {
             if (meta.findMethodLookup(method_name)) |lookup| {
-                const bind = try phpBindNamedValueArray(arr, lookup.method.param_names, methodVariadicIndex(lookup.method), allocator);
+                const display = try std.fmt.allocPrint(allocator, "{s}::{s}", .{ lookup.owner.name, method_name });
+                defer allocator.free(display);
+                const bind = try phpBindNamedValueArray(arr, lookup.method.param_names, methodVariadicIndex(lookup.method), lookup.method.required_params, display, allocator);
                 defer bind.deinit(allocator);
                 const guard = ClassContext.init(meta, lookup.owner);
                 defer guard.deinit();
@@ -30252,6 +30352,73 @@ pub fn php_object_new_with_constructor(class_name: []const u8, args: []const Val
     return obj_val;
 }
 
+/// ★批次十九②：`new` 的命名/展开实参数组通道（命名或展开 ⇒ 编译期统一改道本函数）。
+///   口径（PHP 8.5.8 实测 C1-C10）：字符串键＝构造器命名实参，按 ClassMethod 元数据绑定
+///  （继承构造器经 findMethodLookup 沿父链解析）；构造器缺失且含命名 ⇒
+///   Error `Unknown named parameter $x`（C10；纯位置参 PHP 静默忽略，维持既有通道）；
+///   纯位置 ⇒ 收编回既有实例化通道（单一口径，不另造语义）。
+pub fn php_new_object_named(class_name_val: Value, args_array: Value, allocator: Allocator) !Value {
+    // 类名提取（与 php_new_object_dynamic 同径）
+    var class_name_buf: [256]u8 = undefined;
+    var class_name: []const u8 = "";
+    if (class_name_val.isString()) {
+        const s = class_name_val.asString();
+        if (s.length <= class_name_buf.len) {
+            @memcpy(class_name_buf[0..s.length], s.data[0..s.length]);
+            class_name = class_name_buf[0..s.length];
+        } else {
+            class_name = s.data[0..s.length];
+        }
+    } else {
+        return error.InvalidClassName;
+    }
+    if (class_name.len > 0 and class_name[0] == '\\') class_name = class_name[1..];
+    if (!args_array.isArray()) return throwUnpackTypeError(args_array, allocator);
+
+    const arr = args_array.asArray();
+    if (!arr.hasStringKeys()) {
+        const max_count: usize = @intCast(arr.next_index);
+        const tmp = try allocator.alloc(Value, max_count);
+        defer allocator.free(tmp);
+        var used: usize = 0;
+        var i: usize = 0;
+        while (i < max_count) : (i += 1) {
+            if (arr.get(.{ .integer = @intCast(i) })) |v| {
+                tmp[used] = v;
+                used += 1;
+            }
+        }
+        return php_object_new_with_constructor(class_name, tmp[0..used], allocator);
+    }
+
+    // 含命名 ⇒ 构造器元数据绑定（类未找到 ⇒ 复用既有 Class not found fatal 通道）
+    const resolved = try resolveSpecialClassName(class_name);
+    const meta = findClass(resolved) orelse
+        return php_object_new_with_constructor(class_name, &[_]Value{}, allocator);
+    const ctor_lookup = meta.findMethodLookup("__construct") orelse {
+        // 无构造器类 + 命名实参 ⇒ Error `Unknown named parameter $x`（C10 真值）
+        var first: []const u8 = "";
+        var it = arr.elements.iterator();
+        while (it.next()) |entry| {
+            switch (entry.key_ptr.*) {
+                .string => |ks| {
+                    first = ks.data;
+                    break;
+                },
+                else => {},
+            }
+        }
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Unknown named parameter ${s}", .{first}) catch "Unknown named parameter";
+        return try throwThrowable("Error", msg, allocator);
+    };
+    const ctor_display = try std.fmt.allocPrint(allocator, "{s}::__construct", .{meta.name});
+    defer allocator.free(ctor_display);
+    const bind = try phpBindNamedValueArray(arr, ctor_lookup.method.param_names, methodVariadicIndex(ctor_lookup.method), ctor_lookup.method.required_params, ctor_display, allocator);
+    defer bind.deinit(allocator);
+    return php_object_new_with_constructor(class_name, bind.final_args, allocator);
+}
+
 /// 检查类是否存在
 ///   ★F-75：`$autoload`／`$local_only`／`$allow_string` 一类参数在 AOT 下**惰性**（模板内 `autoload` 出现 0 次
 ///     ⇒ 无 autoloader；`getenv` 无 SAPI 环境分层），但**必须接收**——旧状是多传一参就 `expected N argument(s),
@@ -31027,7 +31194,9 @@ pub fn php_call_static_args_array(class_val: Value, method_val: Value, args_arra
                 return throwThrowable("Error", msg, allocator);
             }
         }
-        const bind = try phpBindNamedValueArray(arr, lookup.method.param_names, methodVariadicIndex(lookup.method), allocator);
+        const display = try std.fmt.allocPrint(allocator, "{s}::{s}", .{ lookup.owner.name, method_name });
+        defer allocator.free(display);
+        const bind = try phpBindNamedValueArray(arr, lookup.method.param_names, methodVariadicIndex(lookup.method), lookup.method.required_params, display, allocator);
         defer bind.deinit(allocator);
         const guard = ClassContext.init(called_meta, lookup.owner);
         defer guard.deinit();
