@@ -13563,6 +13563,52 @@ PHP 8.5.8 实测口径：纯 enum ⇒ **返回 false**（不抛错，last_error=
 
 PHPArray.release / PHPClosure.release 存在同款「rc==0 & buffered ⇒ 留置等 GC」结构。数组无 __destruct、序号观测面不涉及，按范围纪律未动；若后续观测到数组销毁时机差异（如 ArrayObject 包装语义），照本节 258.3 同法收口。
 
+## §259 批次二十九：流族收面（空壳/半壳清剿）
+
+### 259.1 普查三分（改前普查，不直接改码）
+
+| 类 | 成员 |
+|---|---|
+| 真实现且语义对 | fopen（真实文件全 mode）、fclose/fread/fwrite/fgets/fgetc/fgetcsv/fputcsv/fscanf/fprintf/fseek/ftell/feof/rewind/fflush/ftruncate/fstat、stream_get_contents、file_get_contents/file_put_contents/file/readfile/fpassthru/fputs(=fwrite)、php://memory/temp/stdout/stderr/stdin/input 承载 |
+| 空壳/半壳（红线病） | stream_register_wrapper/stream_wrapper_register（收下参数静默 `return true`）、get_resource_type（恒 "Unknown"）、php://output/filter 等未知子协议（file_handle=null 假资源）、flock（op 直传未映射、关流静默 false）、flock LOCK_UN 语义错 |
+| 完全未登记 | stream_get_meta_data、stream_set_blocking、stream_set_timeout、stream_get_line、stream_select、stream_context_create/set_option/get_options、tmpfile、stream_get_wrappers、popen/pclose、fsockopen/stream_socket_*、stream_filter_* 等 |
+
+### 259.2 PHP 8.5.8 真值锚点（实测钉死）
+
+- **stream_get_meta_data**：9 键定序 `timed_out, blocked, eof, wrapper_type, stream_type, mode, unread_bytes, seekable, uri`；wrapper/stream 分族（plainfile/STDIO；PHP/MEMORY|TEMP|STDIO|Input|Output）；mode 归一化「字母++?+b?」——memory/temp/input/output **恒带 b**，stdout/stderr/stdin/真实文件按实参。
+- **fopen mode**：字母必为 rwaxc（非法 ⇒ `Failed to open stream: \`q' is not a valid mode for fopen`）；`e`（CLOEXEC）受理；未知 php:// 子协议 ⇒ `Failed to open stream: operation failed` + false。
+- **stream_set_blocking**：真实文件/stdout/stderr/output 受理记账；**memory/temp/input 忽略非阻塞标志**（blocked 恒 true）；全族返 true。**stream_set_timeout**：文件流/memory/input 恒 false。
+- **stream_get_line**：length 0=不限、<0 ⇒ ValueError；分隔符命中 ⇒ 返回其前内容（消耗不返回）；无分隔符 ⇒ 至多 length 字节；EOF 空读 ⇒ false。
+- **tmpfile**：真实文件（存在至 fclose，PHP 实测 after close exists=false）、mode=r+b、uri=realpath。
+- **flock**：PHP LOCK_UN=3 ≠ POSIX LOCK_UN=8 ⇒ 需映射；op=99 ⇒ 掩 &7 ⇒ UN ⇒ true；关流 ⇒ TypeError「must be an open stream resource」。
+- **stream_context_set_option**：**两参数组形才 Deprecated**（"with 2 arguments…use stream_context_set_options() instead"）；四参形静默受理。
+- **stream_select**：无事件循环支撑 ⇒ 按令明确不支持（未登记即 Undefined function——诚实失败形，不打桩）。
+
+### 259.3 变更点
+
+| 文件 | 变更 |
+|---|---|
+| runtime_lib_template.zig :3328-3339 | PHPResource +uri/mode/blocked/timed_out/context_options/unlink_on_close（全带默认值，既有创建点零扰动）；release 路径统一回收（含 tmpfile 归零删除） |
+| runtime_lib_template.zig :9890-9935 | php_fopen 头：mode 全量解析（字母 rwaxc + 任意序 +/b/t/e/n；非法 ⇒ PHP 措辞 Warning+false）；'e' 受理即剥离 |
+| 同上 各创建点 | memory/temp/stdio/input/output/真实文件全挂 uri+归一化 mode（force_b 分族）；**php://output 新真实现**（dup(1)）；未知子协议 ⇒ 诚实 Warning+false（空壳废止） |
+| runtime_lib_template.zig :10708-10731 | q4StreamArgCheck（ZPP/函数体 TypeError 双口径，thrown-Value 联合——throwThrowable 是「置旗+返回异常值」非 error）+ q4StreamKinds（uri 单源推导 wrapper/stream） |
+| 同上 :10734-10900 | stream_get_meta_data（9 键 PHP 序）/ set_blocking（分族）/ set_timeout（恒 false）/ get_line / tmpfile（realpath+去尾斜杠）/ get_wrappers（诚实 ["php","file"]）/ context 三件套 / flock 修正（op 映射+TypeError） |
+| runtime_lib_template.zig :50114 | get_resource_type 废桩：返回 type_name 真值（非资源 ⇒ ZPP TypeError） |
+| runtime_lib_template.zig :50126 | stream_register_wrapper/wrapper_register：假成功桩 ⇒ Warning+false 诚实失败（真实现方案成本已报老铁） |
+| 双表 | builtin_function_map +9；nlk builtin_map +9（含 handler_params/optional_defaults 三处） |
+
+### 259.4 验收
+
+- 探针 7 枚：s1(meta 全形态) **SAME**；s2(e 后缀/非法 mode/output) **SAME**；s3(flock) 仅栈帧差（§7.5 豁免）；s4(context/blocking/timeout/get_line/tmpfile/wrappers) 仅嵌套数组缩进差（§7.4 豁免）；s5(meta2/get_line 边界) 仅栈帧差（§7.5 豁免）；s7(tmpfile uri/garbage/stdin) **SAME**；s8(set_blocking 分族) 真值对照落实进实现。
+- `zig build test`：186/187（唯一失败=test_loop_unroll 既有腐坏，§258.4 已登记）。
+- 46 探针面板（panel_p35）：**36 SAME + 10 DIFF，与批次二十八终态逐格一致、零转移**（10 格全为既有解释族：§七.5 栈帧 ×6、sort 中间态在途 ×3、§七.4 缩进 ×1）。
+
+### 259.5 遗留登记
+
+- **stream_register_wrapper 真实现方案与成本**（报老铁拍板）：需包装器注册表 + stream 层全协议派发桥（stream_open/close/read/write/eof/seek/tell/stat/url_stat/unlink/rename/mkdir/rmdir + dir_opendir/readdir/rewinddir/closedir 约 14 个方法面），并在 fopen/fread/… 每个流函数入口加「自定义包装器优先分派」。估计 runtime 派发桥 400-600 行 + 每函数入口插桩 + 全族回归。成本大、收益限于用户态协议模拟（测试替身场景）。
+- **stream_select / popen / fsockopen / stream_socket_* / stream_filter_***：未登记（Undefined function 诚实失败）；stream_select 按令明确不支持（无事件循环）。
+- var_dump 嵌套数组缩进 2 vs 4（§7.4 既有豁免项，不视为 BUG）。
+
 ---
 
 

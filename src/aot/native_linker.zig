@@ -4861,6 +4861,16 @@ pub const NativeLinker = struct {
         // ★批次二十六：stream_get_contents——offset 缺省⇒不 seek（missing 哨兵区分缺省与显式 0）。
         .{ "stream_get_contents", bi(.{ .runtime_name = "php_stream_get_contents", .needs_allocator = true, .handler_params = 3, .optional_defaults = &.{ "runtime.Value.initNull()", "runtime.Value.initMissing()" } }) },
         .{ "fflush", bi(.{ .runtime_name = "php_fflush", .needs_allocator = false }) },
+        // ★批次二十九：流族收面（双注册点同步——另一处在 :4719 区）
+        .{ "stream_get_meta_data", bi(.{ .runtime_name = "php_stream_get_meta_data", .needs_allocator = true }) },
+        .{ "stream_set_blocking", bi(.{ .runtime_name = "php_stream_set_blocking", .needs_allocator = false }) },
+        .{ "stream_set_timeout", bi(.{ .runtime_name = "php_stream_set_timeout", .needs_allocator = false, .handler_params = 3, .optional_defaults = &.{"runtime.Value.initInt(0)"} }) },
+        .{ "stream_get_line", bi(.{ .runtime_name = "php_stream_get_line", .needs_allocator = true, .handler_params = 3, .optional_defaults = &.{"runtime.Value.initNull()"} }) },
+        .{ "stream_get_wrappers", bi(.{ .runtime_name = "php_stream_get_wrappers", .needs_allocator = true }) },
+        .{ "tmpfile", bi(.{ .runtime_name = "php_tmpfile", .needs_allocator = true }) },
+        .{ "stream_context_create", bi(.{ .runtime_name = "php_stream_context_create", .needs_allocator = true, .handler_params = 1, .optional_defaults = &.{"runtime.Value.initNull()"} }) },
+        .{ "stream_context_set_option", bi(.{ .runtime_name = "php_stream_context_set_option", .needs_allocator = true, .handler_params = 4, .optional_defaults = &.{ "runtime.Value.initNull()", "runtime.Value.initNull()", "runtime.Value.initNull()" } }) },
+        .{ "stream_context_get_options", bi(.{ .runtime_name = "php_stream_context_get_options", .needs_allocator = true }) },
         .{ "preg_match", .{ .runtime_name = "php_preg_match", .needs_allocator = true } },
         .{ "preg_match_all", .{ .runtime_name = "php_preg_match_all", .needs_allocator = true } },
         // ★批次十五：同 :4740 条目（双注册点同步）

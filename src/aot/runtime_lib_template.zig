@@ -3325,6 +3325,18 @@ pub const Value = struct {
         append: bool = false,
         /// ★R-278：`opendir()` 的目录句柄（readdir/rewinddir/closedir 共用）
         dir_handle: ?*PhpDirHandle = null,
+        /// ★批次二十九（流族收面）：stream_get_meta_data 的承载字段。
+        ///   uri/mode 非空时归本资源所有（release 路径统一 free）。
+        uri: []const u8 = "",
+        mode: []const u8 = "",
+        /// stream_set_blocking 置位（PHP：普通文件流亦记账并在 meta 反映）
+        blocked: bool = true,
+        /// stream_set_timeout 不支持普通流（PHP 实测返 false），timed_out 恒 false
+        timed_out: bool = false,
+        /// stream_context_create 的选项表（type_name="stream-context" 时非空；归本资源所有）
+        context_options: ?*PHPArray = null,
+        /// ★批次二十九：tmpfile() 语义——fclose/释放时删除 uri 指向的临时文件
+        unlink_on_close: bool = false,
 
         pub fn retain(self: *PHPResource) void {
             self.ref_count += 1;
@@ -3345,6 +3357,17 @@ pub const Value = struct {
                     if (self.dir_handle) |dh| {
                         dh.dir.close(getIo());
                         allocator.destroy(dh);
+                    }
+                    // ★批次二十九：tmpfile 未 fclose 即归零 ⇒ 同样删除（PHP 请求结束语义）
+                    if (self.unlink_on_close and self.uri.len > 0) {
+                        std.Io.Dir.cwd().deleteFile(getIo(), self.uri) catch {};
+                        self.unlink_on_close = false;
+                    }
+                    // ★批次二十九：meta 承载字段与 context 选项表统一回收
+                    if (self.uri.len > 0) allocator.free(self.uri);
+                    if (self.mode.len > 0) allocator.free(self.mode);
+                    if (self.context_options) |opts| {
+                        opts.release(allocator);
                     }
                     allocator.destroy(self);
                 }
@@ -4117,6 +4140,15 @@ const builtin_function_map = std.StaticStringMap(BuiltinFn).initComptime(.{
     .{ "fscanf", wrapBuiltin_fscanf },
     // ★批次二十六：stream_get_contents（php://memory 承载落地的族成员）
     .{ "stream_get_contents", wrapBuiltin_stream_get_contents },
+    .{ "stream_get_meta_data", wrapBuiltin_stream_get_meta_data },
+    .{ "stream_set_blocking", wrapBuiltin_stream_set_blocking },
+    .{ "stream_set_timeout", wrapBuiltin_stream_set_timeout },
+    .{ "stream_get_line", wrapBuiltin_stream_get_line },
+    .{ "stream_get_wrappers", wrapBuiltin_stream_get_wrappers },
+    .{ "stream_context_create", wrapBuiltin_stream_context_create },
+    .{ "stream_context_set_option", wrapBuiltin_stream_context_set_option },
+    .{ "stream_context_get_options", wrapBuiltin_stream_context_get_options },
+    .{ "tmpfile", wrapBuiltin_tmpfile },
     .{ "fflush", wrapBuiltin_fflush },
     .{ "array_multisort", wrapBuiltin_array_multisort },
     .{ "is_float", wrapBuiltin_is_float },
@@ -9871,16 +9903,67 @@ pub fn php_file_get_contents(filename: Value, use_include_path: Value, context: 
     return Value.initString(output);
 }
 
+/// ★批次二十九：meta 归一化 mode 构造（字母 + +? + b?；force_b 由 php:// 子协议决定）。
+///   返回值归调用方（资源 uri/mode 字段生命周期与资源同）。
+fn q4CanonMode(allocator: Allocator, letter: u8, plus: bool, binary: bool) ![]const u8 {
+    var buf: [3]u8 = undefined;
+    var n: usize = 1;
+    buf[0] = letter;
+    if (plus) {
+        buf[n] = '+';
+        n += 1;
+    }
+    if (binary) {
+        buf[n] = 'b';
+        n += 1;
+    }
+    return allocator.dupe(u8, buf[0..n]);
+}
+
 /// fopen - ★R-275：补齐 r+/w+/a+/x/x+/c/c+ 与 `b`/`t` 后缀；打开失败发 PHP 措辞 Warning。
 ///   语义要点（PHP 实测）：`a`/`a+` 每次写前定位末尾（读位置仍在 0）；`c` 不截断；`x` 排他创建。
+///   ★批次二十九：mode 全量解析——字母必为 rwaxc（非法 ⇒ PHP 措辞 Warning+false）；
+///   标志位 `+`/`b`/`t`/`e`/`n` 字母后任意序（e=CLOEXEC、n=非阻塞：AOT 无 exec 子进程语义，
+///   受理不承载）；meta 的 mode 为归一化形「字母 + +? + b?」（memory/temp/input/output 恒带 b，
+///   stdout/stderr/stdin/真实文件按实参）。
 pub fn php_fopen(filename: Value, mode: Value, allocator: Allocator) !Value {
     if (!filename.isString() or !mode.isString()) return Value.initBool(false);
     const fname = filename.asString().data;
-    var fmode = mode.asString().data;
-    if (fmode.len > 1) {
-        const last = fmode[fmode.len - 1];
-        if (last == 'b' or last == 't') fmode = fmode[0 .. fmode.len - 1];
+    const raw_mode = mode.asString().data;
+    var mode_letter: u8 = 0;
+    var mode_plus = false;
+    var mode_binary = false;
+    var mode_ok = raw_mode.len > 0;
+    if (mode_ok) {
+        mode_letter = raw_mode[0];
+        switch (mode_letter) {
+            'r', 'w', 'a', 'x', 'c' => {},
+            else => mode_ok = false,
+        }
+        for (raw_mode[1..]) |c| {
+            switch (c) {
+                '+' => mode_plus = true,
+                'b', 't' => mode_binary = true,
+                'e', 'n' => {}, // CLOEXEC / nonblock 标志：受理即剥离（AOT 无 exec；阻塞语义走流层）
+                else => mode_ok = false,
+            }
+        }
     }
+    if (!mode_ok) {
+        var mbuf: [1024]u8 = undefined;
+        const msg = std.fmt.bufPrint(&mbuf, "fopen({s}): Failed to open stream: `{s}' is not a valid mode for fopen", .{ fname, raw_mode }) catch return Value.initBool(false);
+        emitWarning(msg);
+        return Value.initBool(false);
+    }
+    // 归一化两字符形（"r"/"r+"/"w"…）供既有分派串比较复用
+    var nbuf: [2]u8 = undefined;
+    var nlen: usize = 1;
+    nbuf[0] = mode_letter;
+    if (mode_plus) {
+        nbuf[1] = '+';
+        nlen = 2;
+    }
+    const fmode = nbuf[0..nlen];
 
     // 特殊处理php://流
     if (std.mem.startsWith(u8, fname, "php://")) {
@@ -9923,6 +10006,9 @@ pub fn php_fopen(filename: Value, mode: Value, allocator: Allocator) !Value {
                 return Value.initBool(false);
             };
             res.* = .{ .ref_count = 1, .file_handle = handle, .type_name = "stream" };
+            // ★批次二十九：meta 承载（uri=原始入参全文；mode 强制带 b——PHP 实测 memory/temp 恒 "w+b" 形）
+            res.uri = allocator.dupe(u8, fname) catch "";
+            res.mode = q4CanonMode(allocator, mode_letter, mode_plus, true) catch "";
             return Value.initResource(res);
         }
         // ★批次二十六：php://stdout/stderr/stdin ⇒ dup 标准 fd（fclose 关 dup 副本，
@@ -9950,6 +10036,30 @@ pub fn php_fopen(filename: Value, mode: Value, allocator: Allocator) !Value {
                 return Value.initBool(false);
             };
             res.* = .{ .ref_count = 1, .file_handle = handle, .type_name = "stream" };
+            // ★批次二十九：stdio 族 mode 按实参（PHP 实测 'w' 不强制 b）
+            res.uri = allocator.dupe(u8, fname) catch "";
+            res.mode = q4CanonMode(allocator, mode_letter, mode_plus, mode_binary) catch "";
+            return Value.initResource(res);
+        }
+        // ★批次二十九：php://output ⇒ dup(1)（PHP 实测等同 stdout 语义但 meta 归一化带 b、
+        //   stream_type=Output；fwrite 真实落进程标准输出）。
+        if (std.mem.eql(u8, sub, "output")) {
+            const fd = q4Dup(1) catch return Value.initBool(false);
+            const handle = allocator.create(std.Io.File) catch {
+                var tmpf = std.Io.File{ .handle = fd, .flags = .{ .nonblocking = false } };
+                tmpf.close(getIo());
+                return Value.initBool(false);
+            };
+            handle.* = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+            const res = allocator.create(Value.PHPResource) catch {
+                var tmpf = std.Io.File{ .handle = fd, .flags = .{ .nonblocking = false } };
+                tmpf.close(getIo());
+                allocator.destroy(handle);
+                return Value.initBool(false);
+            };
+            res.* = .{ .ref_count = 1, .file_handle = handle, .type_name = "stream" };
+            res.uri = allocator.dupe(u8, fname) catch "";
+            res.mode = q4CanonMode(allocator, mode_letter, mode_plus, true) catch "";
             return Value.initResource(res);
         }
         // ★批次二十六：php://input（CLI ⇒ 空**只读**请求体流；PHP 8.5.8 实测：
@@ -9978,12 +10088,19 @@ pub fn php_fopen(filename: Value, mode: Value, allocator: Allocator) !Value {
                 return Value.initBool(false);
             };
             res.* = .{ .ref_count = 1, .file_handle = handle, .type_name = "stream" };
+            // ★批次二十九：input 的 meta mode 强制带 b（PHP 实测 "rb"）
+            res.uri = allocator.dupe(u8, fname) catch "";
+            res.mode = q4CanonMode(allocator, mode_letter, mode_plus, true) catch "";
             return Value.initResource(res);
         }
-        // 其余 php://（output/filter 等）⇒ 空壳资源（历史口径保留）
-        const res = allocator.create(Value.PHPResource) catch return Value.initBool(false);
-        res.* = .{ .ref_count = 1, .file_handle = null, .type_name = "stream" };
-        return Value.initResource(res);
+        // ★批次二十九：未知 php:// 子协议（filter 等）⇒ 诚实失败（PHP 实测措辞）——
+        //   旧空壳（file_handle=null 假资源）属「静默假成功」红线病，废止。
+        {
+            var mbuf: [1024]u8 = undefined;
+            const msg = std.fmt.bufPrint(&mbuf, "fopen({s}): Failed to open stream: operation failed", .{fname}) catch return Value.initBool(false);
+            emitWarning(msg);
+            return Value.initBool(false);
+        }
     }
 
     const io = getIo();
@@ -10053,6 +10170,9 @@ pub fn php_fopen(filename: Value, mode: Value, allocator: Allocator) !Value {
         return Value.initBool(false);
     };
     res.* = .{ .ref_count = 1, .file_handle = handle, .type_name = "stream", .append = append };
+    // ★批次二十九：真实文件的 meta 承载（uri=路径原文；mode=归一化形，b 按实参）
+    res.uri = allocator.dupe(u8, fname) catch "";
+    res.mode = q4CanonMode(allocator, mode_letter, mode_plus, mode_binary) catch "";
     return Value.initResource(res);
 }
 
@@ -10134,6 +10254,11 @@ pub fn php_fclose(handle: Value) !Value {
         //   由 F-180 的 Value.release 修复另行归零）。
         runtime_allocator.destroy(fh);
         res.file_handle = null;
+    }
+    // ★批次二十九：tmpfile() 口径——fclose 即删除（PHP 实测 after close exists=false）
+    if (res.unlink_on_close and res.uri.len > 0) {
+        std.Io.Dir.cwd().deleteFile(getIo(), res.uri) catch {};
+        res.unlink_on_close = false;
     }
     res.closed = true;
     return Value.initBool(true);
@@ -10260,6 +10385,59 @@ fn wrapBuiltin_stream_get_contents(ctx: Value, args: []const Value, allocator: A
     const length = if (args.len >= 2) q3Deref(args[1]) else Value.initNull();
     const offset = if (args.len >= 3) q3Deref(args[2]) else Value.initMissing();
     return php_stream_get_contents(h, length, offset, allocator);
+}
+
+// ★批次二十九：流族收面 wrappers
+fn wrapBuiltin_stream_get_meta_data(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_stream_get_meta_data(q3Deref(args[0]), allocator);
+}
+fn wrapBuiltin_stream_set_blocking(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    return php_stream_set_blocking(q3Deref(args[0]), q3Deref(args[1]));
+}
+fn wrapBuiltin_stream_set_timeout(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const usec = if (args.len >= 3) q3Deref(args[2]) else Value.initInt(0);
+    return php_stream_set_timeout(q3Deref(args[0]), q3Deref(args[1]), usec);
+}
+fn wrapBuiltin_stream_get_line(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const ending = if (args.len >= 3) q3Deref(args[2]) else Value.initString(try PHPString.init(allocator, ""));
+    return php_stream_get_line(q3Deref(args[0]), q3Deref(args[1]), ending, allocator);
+}
+fn wrapBuiltin_tmpfile(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = args;
+    return php_tmpfile(allocator);
+}
+fn wrapBuiltin_stream_get_wrappers(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = args;
+    return php_stream_get_wrappers(allocator);
+}
+fn wrapBuiltin_stream_context_create(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    const options = if (args.len >= 1) q3Deref(args[0]) else Value.initNull();
+    return php_stream_context_create(options, allocator);
+}
+fn wrapBuiltin_stream_context_set_option(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const a3 = if (args.len >= 3) q3Deref(args[2]) else Value.initNull();
+    const a4 = if (args.len >= 4) q3Deref(args[3]) else Value.initNull();
+    return php_stream_context_set_option(q3Deref(args[0]), q3Deref(args[1]), a3, a4, allocator);
+}
+fn wrapBuiltin_stream_context_get_options(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_stream_context_get_options(q3Deref(args[0]), allocator);
 }
 
 /// lseek 封装（Zig 0.16 的 Io.File 无 seek 方法；经 libc lseek 走 fd）。
@@ -10509,11 +10687,310 @@ pub fn php_fsync(handle: Value) !Value {
     return Value.initBool(std.c.fsync(fh.handle) == 0);
 }
 
-pub fn php_flock(handle: Value, operation: Value) !Value {
-    if (!handle.isResource() or !operation.isInt()) return Value.initBool(false);
+// ============================================================================
+// ★批次二十九：流族收面（stream_get_meta_data / set_blocking / set_timeout /
+//   get_line / tmpfile / get_wrappers / context 族 / flock 修正 / wrapper 诚实失败）
+// ============================================================================
+
+/// 流资源的 wrapper_type/stream_type 推导（uri 方案为单一事实源，禁第二份判定）。
+fn q4StreamKinds(uri: []const u8) struct { wrapper: []const u8, stype: []const u8 } {
+    if (std.mem.startsWith(u8, uri, "php://")) {
+        const sub = uri[6..];
+        if (std.mem.eql(u8, sub, "memory")) return .{ .wrapper = "PHP", .stype = "MEMORY" };
+        if (std.mem.startsWith(u8, sub, "temp")) return .{ .wrapper = "PHP", .stype = "TEMP" };
+        if (std.mem.eql(u8, sub, "input")) return .{ .wrapper = "PHP", .stype = "Input" };
+        if (std.mem.eql(u8, sub, "output")) return .{ .wrapper = "PHP", .stype = "Output" };
+        return .{ .wrapper = "PHP", .stype = "STDIO" }; // stdin/stdout/stderr
+    }
+    return .{ .wrapper = "plainfile", .stype = "STDIO" };
+}
+
+/// 流形参 ZPP/函数体双口径（PHP 8.5.8 实测）：非 resource ⇒ 「must be of type resource, X given」；
+/// 已关闭/空壳 resource ⇒ 「must be an open stream resource」（fgetcsv 同款双口径）。
+/// 返回联合：ok=资源指针；thrown=异常值（与 `return throwThrowable(...)` 同语义——
+///   异常已 setException 挂旗，调用方原样 return 即可，**禁止**当 Zig error 传播）。
+const Q4StreamArg = union(enum) { ok: *Value.PHPResource, thrown: Value };
+
+fn q4StreamArgCheck(fn_name: []const u8, handle: Value) !Q4StreamArg {
+    if (!handle.isResource()) {
+        if (handle.hasResourceType()) {
+            return .{ .thrown = try throwThrowable("TypeError", std.fmt.bufPrint(&q4_te_buf, "{s}(): Argument #1 ($stream) must be an open stream resource", .{fn_name}) catch "", runtime_allocator) };
+        }
+        const tname = if (Value_isObject(handle)) Value_asObject(handle).class_name else valueTypeName(handle);
+        return .{ .thrown = try throwThrowable("TypeError", std.fmt.bufPrint(&q4_te_buf, "{s}(): Argument #1 ($stream) must be of type resource, {s} given", .{ fn_name, tname }) catch "", runtime_allocator) };
+    }
     const res = handle.asResource();
-    const fh = res.file_handle orelse return Value.initBool(false);
-    return Value.initBool(std.c.flock(fh.handle, @intCast(operation.asInt() & 0xFFFF)) == 0);
+    if (res.closed or res.file_handle == null) {
+        return .{ .thrown = try throwThrowable("TypeError", std.fmt.bufPrint(&q4_te_buf, "{s}(): Argument #1 ($stream) must be an open stream resource", .{fn_name}) catch "", runtime_allocator) };
+    }
+    return .{ .ok = res };
+}
+var q4_te_buf: [256]u8 = undefined;
+// （编译产物单线程运行；若未来启用协程再改 threadlocal——当前无并发写者）
+
+/// stream_get_meta_data - PHP 8.5.8 实测键序：timed_out, blocked, eof, wrapper_type,
+///   stream_type, mode, unread_bytes, seekable, uri。全键恒在（无 crypto/wrapper_data——
+///   二者仅 SSL/http 包装器存在，AOT 不支持该两族 ⇒ 不出键即诚实）。
+pub fn php_stream_get_meta_data(handle: Value, allocator: Allocator) !Value {
+    const res = switch (try q4StreamArgCheck("stream_get_meta_data", handle)) {
+        .ok => |r| r,
+        .thrown => |v| return v,
+    };
+    const kinds = q4StreamKinds(res.uri);
+    const arr = try PHPArray.init(allocator);
+    const Put = struct {
+        fn str(a: *PHPArray, al: Allocator, k: []const u8, v: []const u8) !void {
+            try a.set(al, ArrayKey{ .string = try PHPString.init(al, k) }, Value.initString(try PHPString.init(al, v)));
+        }
+        fn b(a: *PHPArray, al: Allocator, k: []const u8, v: bool) !void {
+            try a.set(al, ArrayKey{ .string = try PHPString.init(al, k) }, Value.initBool(v));
+        }
+        fn i(a: *PHPArray, al: Allocator, k: []const u8, v: i64) !void {
+            try a.set(al, ArrayKey{ .string = try PHPString.init(al, k) }, Value.initInt(v));
+        }
+    };
+    try Put.b(arr, allocator, "timed_out", res.timed_out);
+    try Put.b(arr, allocator, "blocked", res.blocked);
+    try Put.b(arr, allocator, "eof", res.eof);
+    try Put.str(arr, allocator, "wrapper_type", kinds.wrapper);
+    try Put.str(arr, allocator, "stream_type", kinds.stype);
+    try Put.str(arr, allocator, "mode", res.mode);
+    try Put.i(arr, allocator, "unread_bytes", 0); // fd 直读无用户态缓冲 ⇒ 恒 0
+    try Put.b(arr, allocator, "seekable", true); // AOT 全部流种均为 STDIO 语义承载（PHP 同报 true）
+    try Put.str(arr, allocator, "uri", res.uri);
+    return Value.initArray(arr);
+}
+
+/// stream_set_blocking - PHP 8.5.8 实测分族：真实文件/stdout/stderr/output 受理并记账
+///   （meta blocked 随置位）；php://memory/temp/input **忽略非阻塞标志**（blocked 恒 true——
+///   内存族与只读请求体无非阻塞语义）。返回值全族恒 true。
+pub fn php_stream_set_blocking(handle: Value, enabled: Value) !Value {
+    const res = switch (try q4StreamArgCheck("stream_set_blocking", handle)) {
+        .ok => |r| r,
+        .thrown => |v| return v,
+    };
+    const st = q4StreamKinds(res.uri).stype;
+    const ignorable = std.mem.eql(u8, st, "MEMORY") or std.mem.eql(u8, st, "TEMP") or std.mem.eql(u8, st, "Input");
+    if (!ignorable) {
+        res.blocked = enabled.toBool();
+    }
+    return Value.initBool(true);
+}
+
+/// stream_set_timeout - PHP 8.5.8 实测：普通文件流 / php://memory / php://input 恒 false
+///   （超时仅网络流语义）。AOT 流族无网络承载 ⇒ 恒 false 为诚实真值。
+pub fn php_stream_set_timeout(handle: Value, seconds: Value, microseconds: Value) !Value {
+    switch (try q4StreamArgCheck("stream_set_timeout", handle)) {
+        .ok => {},
+        .thrown => |v| return v,
+    }
+    _ = seconds;
+    _ = microseconds;
+    return Value.initBool(false);
+}
+
+/// stream_get_line - PHP 8.5.8 实测口径：length 0 ⇒ 不限（读至 EOF/分隔符）；
+///   length <0 ⇒ ValueError；命中分隔符 ⇒ 返回其前内容（分隔符消耗不返回）；
+///   无分隔符 ⇒ 至多 length 字节；EOF 且未读到任何字节 ⇒ false。
+pub fn php_stream_get_line(handle: Value, length: Value, ending: Value, allocator: Allocator) !Value {
+    const res = switch (try q4StreamArgCheck("stream_get_line", handle)) {
+        .ok => |r| r,
+        .thrown => |v| return v,
+    };
+    const fh = res.file_handle.?; // q4StreamArgCheck 已保证非空
+    var limit: usize = 0; // 0 = 不限
+    if (length.isInt()) {
+        const l = length.asInt();
+        if (l < 0) {
+            return throwThrowable("ValueError", "stream_get_line(): Argument #2 ($length) must be greater than or equal to 0", runtime_allocator);
+        }
+        limit = @intCast(l);
+    }
+    const delim: []const u8 = if (ending.isString()) ending.asString().data else "";
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    // 分隔符路径逐字节读（命中即停、不回读）；无分隔符路径分块读（无超读，无需回 seek）
+    if (delim.len > 0) {
+        var byte: [1]u8 = undefined;
+        var matched: usize = 0;
+        while (limit == 0 or buf.items.len < limit) {
+            const n = std.posix.read(fh.handle, &byte) catch break;
+            if (n == 0) {
+                res.eof = true;
+                break;
+            }
+            if (byte[0] == delim[matched]) {
+                matched += 1;
+                if (matched == delim.len) break; // 命中：分隔符消耗不返回
+            } else {
+                // 失配：已积累的前缀字节与当前字节全部归入结果
+                if (matched > 0) {
+                    try buf.appendSlice(allocator, delim[0..matched]);
+                    matched = 0;
+                    // 当前字节可能重新开始一轮匹配
+                    if (byte[0] == delim[0]) {
+                        matched = 1;
+                        if (matched == delim.len) break;
+                        continue;
+                    }
+                }
+                try buf.append(allocator, byte[0]);
+            }
+        }
+    } else {
+        var chunk: [8192]u8 = undefined;
+        while (limit == 0 or buf.items.len < limit) {
+            const room = if (limit == 0) chunk.len else @min(chunk.len, limit - buf.items.len);
+            const n = std.posix.read(fh.handle, chunk[0..room]) catch break;
+            if (n == 0) {
+                res.eof = true;
+                break;
+            }
+            try buf.appendSlice(allocator, chunk[0..n]);
+        }
+    }
+    if (buf.items.len == 0 and res.eof) return Value.initBool(false);
+    return Value.initString(try PHPString.init(allocator, buf.items));
+}
+
+/// tmpfile - PHP 实测：真实临时文件（存在至 fclose）、mode=r+b、meta wrapper=plainfile、
+///   get_resource_type=stream。承载：mkstemp 保留路径（不即时 unlink），fclose/归零时删除。
+pub fn php_tmpfile(allocator: Allocator) !Value {
+    // ★批次二十九：uri 按 PHP 实测取 realpath（macOS 的 TMPDIR 是 /var/… 软链 ⇒ /private/var/…），
+    //   且裁掉尾斜杠（TMPDIR 自带尾 "/"，拼路径不再叠 "//"）。
+    var tmp_dir: []const u8 = if (std.c.getenv("TMPDIR")) |td| std.mem.span(td) else "/tmp";
+    var rp_buf: [std.posix.PATH_MAX]u8 = undefined;
+    const tmp_dir_z = try allocator.dupeSentinel(u8, tmp_dir, 0);
+    defer allocator.free(tmp_dir_z);
+    if (std.c.realpath(tmp_dir_z.ptr, &rp_buf)) |rp| {
+        tmp_dir = std.mem.span(rp);
+    }
+    if (tmp_dir.len > 1 and tmp_dir[tmp_dir.len - 1] == '/') tmp_dir = tmp_dir[0 .. tmp_dir.len - 1];
+    const tmpl = std.fmt.allocPrintSentinel(allocator, "{s}/q4tmpXXXXXX", .{tmp_dir}, 0) catch return Value.initBool(false);
+    defer allocator.free(tmpl);
+    const fd = q4Mkstemp(tmpl.ptr);
+    if (fd < 0) return Value.initBool(false);
+    const handle = allocator.create(std.Io.File) catch {
+        var tmpf = std.Io.File{ .handle = fd, .flags = .{ .nonblocking = false } };
+        tmpf.close(getIo());
+        std.Io.Dir.cwd().deleteFile(getIo(), tmpl) catch {};
+        return Value.initBool(false);
+    };
+    handle.* = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+    const res = allocator.create(Value.PHPResource) catch {
+        var tmpf = handle.*;
+        tmpf.close(getIo());
+        allocator.destroy(handle);
+        std.Io.Dir.cwd().deleteFile(getIo(), tmpl) catch {};
+        return Value.initBool(false);
+    };
+    res.* = .{ .ref_count = 1, .file_handle = handle, .type_name = "stream", .unlink_on_close = true };
+    res.uri = allocator.dupe(u8, tmpl) catch "";
+    res.mode = allocator.dupe(u8, "r+b") catch "";
+    return Value.initResource(res);
+}
+
+/// stream_get_wrappers - 诚实能力表：AOT 实际支持的包装器（file/php）。谎报全量即红线病。
+pub fn php_stream_get_wrappers(allocator: Allocator) !Value {
+    const arr = try PHPArray.init(allocator);
+    try arr.set(allocator, ArrayKey{ .integer = 0 }, Value.initString(try PHPString.init(allocator, "php")));
+    try arr.set(allocator, ArrayKey{ .integer = 1 }, Value.initString(try PHPString.init(allocator, "file")));
+    return Value.initArray(arr);
+}
+
+/// stream_context_create - 选项表资源（type_name="stream-context"）。
+///   PHP 8.5.8：create() ⇒ 空表；create(array) ⇒ 预填。
+pub fn php_stream_context_create(options: Value, allocator: Allocator) !Value {
+    const res = try allocator.create(Value.PHPResource);
+    res.* = .{ .ref_count = 1, .file_handle = null, .type_name = "stream-context" };
+    const opts = try PHPArray.init(allocator);
+    res.context_options = opts;
+    if (options.isArray()) {
+        // 值语义复制（set 内 retain + 共享数组 COW 浅拷贝，与 PHP 值语义一致）
+        const src = options.asArray();
+        var it = src.elements.iterator();
+        while (it.next()) |entry| {
+            try opts.set(allocator, entry.key_ptr.*, entry.value_ptr.*);
+        }
+    }
+    return Value.initResource(res);
+}
+
+/// stream_context_set_option - PHP 8.5.8 实测双形：
+///   (ctx, array) 两参形 ⇒ **Deprecated**「Calling stream_context_set_option() with
+///   2 arguments is deprecated, use stream_context_set_options() instead」（PHP 原文）+ 合并嵌套表 true；
+///   (ctx, wrapper, option, value) 四参形 ⇒ 静默受理 true（不告警）。
+pub fn php_stream_context_set_option(ctx_val: Value, a2: Value, a3: Value, a4: Value, allocator: Allocator) !Value {
+    if (!ctx_val.isResource()) return Value.initBool(false);
+    const res = ctx_val.asResource();
+    const opts = res.context_options orelse return Value.initBool(false);
+    if (a2.isArray()) {
+        // ★两参数组形（PHP 8.5 已 Deprecated，原文措辞复刻）
+        emitDeprecated("Calling stream_context_set_option() with 2 arguments is deprecated, use stream_context_set_options() instead");
+        var it = a2.asArray().elements.iterator();
+        while (it.next()) |entry| {
+            // 同名 wrapper 且新旧值皆为表 ⇒ 合并进旧表（PHP set_options 语义）
+            if (entry.value_ptr.*.isArray()) {
+                if (opts.get(entry.key_ptr.*)) |old| {
+                    if (old.isArray()) {
+                        var sub_it = entry.value_ptr.*.asArray().elements.iterator();
+                        while (sub_it.next()) |se| {
+                            try old.asArray().set(allocator, se.key_ptr.*, se.value_ptr.*);
+                        }
+                        continue;
+                    }
+                }
+            }
+            try opts.set(allocator, entry.key_ptr.*, entry.value_ptr.*);
+        }
+        return Value.initBool(true);
+    }
+    // 四参形（不告警）
+    if (!a2.isString() or !a3.isString()) return Value.initBool(false);
+    const wrapper_key = ArrayKey{ .string = try PHPString.init(allocator, a2.asString().data) };
+    var sub_arr: *PHPArray = undefined;
+    if (opts.get(wrapper_key)) |old| {
+        if (old.isArray()) {
+            sub_arr = old.asArray();
+        } else {
+            sub_arr = try PHPArray.init(allocator);
+            try opts.set(allocator, wrapper_key, Value.initArray(sub_arr));
+        }
+    } else {
+        sub_arr = try PHPArray.init(allocator);
+        try opts.set(allocator, wrapper_key, Value.initArray(sub_arr));
+    }
+    try sub_arr.set(allocator, ArrayKey{ .string = try PHPString.init(allocator, a3.asString().data) }, a4);
+    return Value.initBool(true);
+}
+
+/// stream_context_get_options - 返回上下文选项表（PHP 实测：空上下文 ⇒ array(0)）。
+pub fn php_stream_context_get_options(ctx_val: Value, allocator: Allocator) !Value {
+    if (!ctx_val.isResource()) return Value.initBool(false);
+    const res = ctx_val.asResource();
+    const opts = res.context_options orelse return Value.initBool(false);
+    _ = allocator;
+    return Value.initArray(opts);
+}
+
+/// flock - ★批次二十九修正：PHP 常量到 POSIX flock(2) 的真实映射
+///   （PHP LOCK_UN=3 ⇒ POSIX LOCK_UN=8；低两位 0/1/2 直通；LOCK_NB=4 同值）；
+///   PHP 实测 op=99 ⇒ 掩 &7 ⇒ UN ⇒ true。关流/非资源 ⇒ TypeError 双口径。
+pub fn php_flock(handle: Value, operation: Value) !Value {
+    const res = switch (try q4StreamArgCheck("flock", handle)) {
+        .ok => |r| r,
+        .thrown => |v| return v,
+    };
+    if (!operation.isInt()) {
+        const tname = if (Value_isObject(operation)) Value_asObject(operation).class_name else valueTypeName(operation);
+        return throwThrowable("TypeError", std.fmt.bufPrint(&q4_te_buf, "flock(): Argument #2 ($operation) must be of type int, {s} given", .{tname}) catch "", runtime_allocator);
+    }
+    const fh = res.file_handle.?;
+    const op = operation.asInt();
+    const low2: i64 = op & 3;
+    const base: c_int = if (low2 == 3) 8 else @intCast(low2); // PHP LOCK_UN=3 ⇒ POSIX LOCK_UN=8
+    const nb: c_int = @intCast(op & 4); // LOCK_NB 同值
+    return Value.initBool(std.c.flock(fh.handle, base | nb) == 0);
 }
 
 pub fn php_umask(mode: Value) !Value {
@@ -49650,15 +50127,27 @@ pub fn php_hash_file(algo: Value, filename: Value, binary: Value, options_val: V
 }
 
 /// get_resource_type - 返回资源类型
+/// get_resource_type - ★批次二十九：废止恒 "Unknown" 桩（红线同类——静默假数据）。
+///   PHP 语义：返回资源类型名（AOT 资源自带 type_name 单一事实源）；非资源 ⇒ ZPP TypeError。
 pub fn php_get_resource_type(res: Value, allocator: Allocator) !Value {
-    _ = res;
-    return Value.initString(try PHPString.init(allocator, "Unknown"));
+    if (!res.isResource() and !res.hasResourceType()) {
+        const tname = if (Value_isObject(res)) Value_asObject(res).class_name else valueTypeName(res);
+        return throwThrowable("TypeError", std.fmt.bufPrint(&q4_te_buf, "get_resource_type(): Argument #1 ($resource) must be of type resource, {s} given", .{tname}) catch "", runtime_allocator);
+    }
+    const r = res.asResource();
+    return Value.initString(try PHPString.init(allocator, r.type_name));
 }
 
 /// stream_register_wrapper - 注册一个用 PHP 类实现的 URL 封装协议
 pub fn php_stream_register_wrapper(protocol: Value, classname: Value, allocator: Allocator) !Value {
-    _ = protocol;
-    _ = classname;
     _ = allocator;
-    return Value.initBool(true);
+    _ = classname;
+    // ★批次二十九（红线）：废止「收下参数静默 return true」假成功桩。
+    //   用户自定义包装器需要 stream_open/read/write/close/eof/… 全协议方法回调派发桥，
+    //   真实现为大工程（已报老铁方案与成本）；在此之前诚实失败（PHP 失败形：Warning+false）。
+    const proto: []const u8 = if (protocol.isString()) protocol.asString().data else "?";
+    var mbuf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&mbuf, "stream_wrapper_register(): AOT does not support user-defined stream wrapper '{s}://' (protocol dispatch bridge not implemented)", .{proto}) catch "stream_wrapper_register(): not supported in AOT";
+    emitWarning(msg);
+    return Value.initBool(false);
 }
