@@ -84,12 +84,210 @@ fn getRandomIntRange(comptime T: type, at_least: T, at_most: T) T {
 }
 
 // ============================================================================
+// ★批次二十六：php://memory / php://temp 承载（mkstemp 匿名临时 fd）
+// ============================================================================
+extern "c" fn mkstemp(template: [*:0]u8) c_int;
+/// 容器级 `dup` 与既有局部变量（:31001）撞名 ⇒ @extern 显式链接名避让。
+const q4c_dup = @extern(*const fn (c_int) callconv(.c) c_int, .{ .name = "dup", .library_name = "c" });
+
+/// mkstemp 薄封装（std.c 未收该符号 ⇒ 直连 libc）。
+fn q4Mkstemp(template: [*:0]u8) c_int {
+    return mkstemp(template);
+}
+
+/// dup 薄封装（std.posix.dup 在 0.17 已收 ⇒ 直连 libc）。
+fn q4Dup(oldfd: std.posix.fd_t) !std.posix.fd_t {
+    const r = q4c_dup(oldfd);
+    if (r < 0) return error.DupFailed;
+    return r;
+}
+
+// ============================================================================
 // 全局运行时状态
 // ============================================================================
 
 /// 全局分配器（由main函数初始化）
 /// 注意：这是一个全局变量，在AOT编译的代码中可以直接访问
 pub var runtime_allocator: Allocator = undefined;
+
+// ============================================================================
+// ★P2-3：变量调用面「by-value 被调 + 未定义变量」告警分流（PHP 8.5.8 真值）
+// ============================================================================
+// 缺口：`$f($undef)` 的变量实参被 Q3 全量 Ref 化 ⇒ 未定义不再经「变量读」通道 ⇒
+//   既有 Undefined variable 告警丢失；且 temp 写回把变量 vivify 成 null（PHP 不 vivify）。
+// 真值：by-value 被调 ⇒ Warning「Undefined variable $x」+ null 实参 + 不 vivify；
+//       by-ref 被调 ⇒ 静默 vivify（批十五口径）。编译期不知被调签名 ⇒ 运行期分流。
+// 机制：emitTempVarRef 对未定义实参建 Ref(missing) + q4_undef_note 注名（FIFO）；
+//   归一化点（内建）/ prologue（用户函数）遇 missing ⇒ take 得名 ⇒ 按 by-ref 性分流；
+//   写回点 missing ⇒ 跳过（不 vivify）。缺省物化的 missing 无 note（take 空）⇒ 两语义不撞。
+// 已知边界：实参求值期异常逃逸 ⇒ FIFO 残留 ⇒ 下一次 missing 消费可能错名（仅告警措辞错，低频）。
+threadlocal var q4_undef_fifo: [16][]const u8 = undefined;
+threadlocal var q4_undef_head: usize = 0;
+threadlocal var q4_undef_tail: usize = 0;
+
+pub fn q4_undef_note(name: []const u8) void {
+    q4_undef_fifo[q4_undef_tail] = name;
+    q4_undef_tail = (q4_undef_tail + 1) % q4_undef_fifo.len;
+    if (q4_undef_tail == q4_undef_head) q4_undef_head = (q4_undef_head + 1) % q4_undef_fifo.len;
+}
+
+pub fn q4_undef_take() ?[]const u8 {
+    if (q4_undef_head == q4_undef_tail) return null;
+    const n = q4_undef_fifo[q4_undef_head];
+    q4_undef_head = (q4_undef_head + 1) % q4_undef_fifo.len;
+    return n;
+}
+
+/// main/顶层面：全局表是生成码（main.zig）的局部结构，经 init 期挂钩暴露查询。
+pub var q4_global_lookup: ?*const fn (name: []const u8) ?Value = null;
+
+/// emitTempVarRef 的 main 分支：全局表存在 ⇒ 现值；不存在 ⇒ missing + 注名。
+pub fn q4_undef_temp(name: []const u8) Value {
+    if (q4_global_lookup) |f| {
+        if (f(name)) |v| return v;
+    }
+    q4_undef_note(name);
+    return Value.initMissing();
+}
+
+/// 用户函数 by-ref 形参下标表（nlk 随函数元数据发射；变量调用面 missing 分流的判定源）
+pub var function_ref_params: ?std.StringHashMap([]const u16) = null;
+pub fn registerFunctionRefParams(name: []const u8, refs: []const u16) void {
+    if (function_ref_params == null) {
+        function_ref_params = std.StringHashMap([]const u16).init(runtime_allocator);
+    }
+    function_ref_params.?.put(name, refs) catch {};
+}
+
+/// ★P2-3：missing 分流共享核（hook/内建/用户函数 CI 三支复用）。
+///   返回 null＝无 missing（调用方原样直传，零分配）；否则返回新切片（调用方负责 free）。
+///   by-ref 判定：内建反射表优先，回退用户函数 function_ref_params。
+fn q4SplitMissingArgs(func_name: []const u8, args: []const Value, allocator: Allocator) !?[]Value {
+    var has_missing_ref = false;
+    for (args) |a| {
+        if (a.isRef() and a.asRef().*.isMissing()) {
+            has_missing_ref = true;
+            break;
+        }
+    }
+    if (!has_missing_ref) return null;
+
+    // by-ref 判定闭包数据：内建反射表 ps / 用户函数 ref 下标表
+    var lbuf: [64]u8 = undefined;
+    const canon: []const u8 = if (builtin_param_table.table.get(func_name) != null or func_name.len > 64)
+        func_name
+    else
+        std.ascii.lowerString(&lbuf, func_name);
+    const ps: ?[]const builtin_param_table.Param = builtin_param_table.table.get(canon);
+    var var_by_ref = false;
+    if (ps) |pps| {
+        for (pps) |p| {
+            if (p.variadic) {
+                var_by_ref = p.by_ref;
+                break;
+            }
+        }
+    }
+    const ref_idx: []const u16 = if (function_ref_params) |*t| (t.get(func_name) orelse &.{}) else &.{};
+
+    const norm = try allocator.alloc(Value, args.len);
+    for (args, 0..) |a, i| {
+        norm[i] = a;
+        if (!a.isRef() or !a.asRef().*.isMissing()) continue;
+        const p_by_ref = if (ps) |pps|
+            (if (i < pps.len) pps[i].by_ref else var_by_ref)
+        else blk: {
+            var r = false;
+            for (ref_idx) |ri| {
+                if (ri == i) {
+                    r = true;
+                    break;
+                }
+            }
+            break :blk r;
+        };
+        const nm = q4_undef_take() orelse continue; // 非本族 missing（缺省物化等）⇒ 原样
+        if (p_by_ref) {
+            a.asRef().* = Value.initNull(); // vivify（静默）
+        } else {
+            emitUndefinedVariableWarning(nm); // by-value ⇒ 告警 + null 实参
+            norm[i] = Value.initNull();
+        }
+    }
+    return norm;
+}
+
+/// IR 直调桥（nlk builtin_map 直名映射）
+pub fn php_q4_is_missing(v: Value) Value {
+    return Value.initBool(v.isMissing());
+}
+pub fn php_q4_undef_note(name: Value) Value {
+    if (name.isString()) q4_undef_note(name.asString().data);
+    return Value.initNull();
+}
+pub fn php_q4_undef_temp(name: Value) Value {
+    if (name.isString()) return q4_undef_temp(name.asString().data);
+    return Value.initMissing();
+}
+
+/// ★Deprecated-null（批次二十四续）：内建调用入参归一化（by-value Ref deref + null 弱转）。
+///   返回 null ＝无需归一（零分配快路径：无 Ref 且无应警 null 位）；否则新切片（调用方负责 free）。
+///   by-ref 位直通原 Ref（depnull 不碰——by-ref 标量形参收 null 的 PHP 真值未覆盖，登记边界）。
+///   三处复用：php_invoke_callable 的 hook 支 / 内建支（含原直传路径的 null 触发）/ 直调面 nlk 不涉。
+fn q4NormalizeBuiltinArgs(func_name: []const u8, args: []const Value, allocator: Allocator) !?[]Value {
+    var lbuf: [64]u8 = undefined;
+    const canon: []const u8 = if (builtin_param_table.table.get(func_name) != null or func_name.len > 64)
+        func_name
+    else
+        std.ascii.lowerString(&lbuf, func_name);
+    const ps: []const builtin_param_table.Param = builtin_param_table.table.get(canon) orelse {
+        // 无反射条目 ⇒ 直通（保守：不知 by-ref 位分布，不 deref；Ref 留 wrapper 自理——既有口径）
+        return null;
+    };
+    // 变参位的 by-ref/类型/nullable 取变参声明位
+    var var_by_ref = false;
+    var var_p: ?builtin_param_table.Param = null;
+    for (ps) |p| {
+        if (p.variadic) {
+            var_by_ref = p.by_ref;
+            var_p = p;
+            break;
+        }
+    }
+    // 第一遍：是否需要归一（有 by-value Ref 位，或有应警 null 位）
+    var need = false;
+    for (args, 0..) |a, i| {
+        const pp: ?builtin_param_table.Param = if (i < ps.len) ps[i] else var_p;
+        const p_by_ref = if (i < ps.len) ps[i].by_ref else var_by_ref;
+        if (a.isRef() and !p_by_ref) {
+            need = true;
+            break;
+        }
+        if (pp) |p| {
+            if (p_by_ref) continue; // by-ref 位不警（直通原 Ref）
+            const naked = if (a.isRef()) a.asRef().* else a;
+            if (!p.nullable and p.type_name.len > 0 and naked.isNull()) {
+                need = true;
+                break;
+            }
+        }
+    }
+    if (!need) return null;
+    const norm = try allocator.alloc(Value, args.len);
+    for (args, 0..) |a, i| {
+        const pp: ?builtin_param_table.Param = if (i < ps.len) ps[i] else var_p;
+        const p_by_ref = if (i < ps.len) ps[i].by_ref else var_by_ref;
+        var v = if (a.isRef() and !p_by_ref) q3Deref(a) else a;
+        if (pp) |p| {
+            if (!p_by_ref and !p.nullable and p.type_name.len > 0 and v.isNull()) {
+                v = q4DepNull(v, canon, i + 1, p.name, p.type_name, allocator);
+            }
+        }
+        norm[i] = v;
+    }
+    return norm;
+}
+
 
 /// 运行时初始化完成标志（F-88）：initRuntime 完成分配器装配后置位。
 /// 测试直达路径（不经 initRuntime）调用可抛内置时，throwThrowable 依此短路
@@ -2123,6 +2321,8 @@ fn gcDestroyObject(o: *PHPObject) void {
         o.internal_data = null;
     }
     o.allocator.free(o.class_name);
+    // ★批次二十六续：GC 收集路径同样归还对象序号（与 deinit 同责）
+    q4ObjectIdFree(o.id);
     o.allocator.destroy(o);
 }
 
@@ -3896,6 +4096,12 @@ const builtin_function_map = std.StaticStringMap(BuiltinFn).initComptime(.{
     .{ "exec", wrapBuiltin_exec },
     .{ "system", wrapBuiltin_system },
     .{ "sscanf", wrapBuiltin_sscanf },
+    // ★P2-4：fscanf 只入运行期表（变参 by-ref；直调表逐参传递与变参不兼容——sscanf 直调带 vars 编译炸即先例），
+    //   直调面经「未命中 builtin_map ⇒ 内建名 fallback」路径同样汇聚到本 wrapper。
+    .{ "fscanf", wrapBuiltin_fscanf },
+    // ★批次二十六：stream_get_contents（php://memory 承载落地的族成员）
+    .{ "stream_get_contents", wrapBuiltin_stream_get_contents },
+    .{ "fflush", wrapBuiltin_fflush },
     .{ "array_multisort", wrapBuiltin_array_multisort },
     .{ "is_float", wrapBuiltin_is_float },
     .{ "is_string", wrapBuiltin_is_string },
@@ -4330,6 +4536,7 @@ const builtin_function_map = std.StaticStringMap(BuiltinFn).initComptime(.{
     .{ "ftell", wrapBuiltin_ftell },
     .{ "ftruncate", wrapBuiltin_ftruncate },
     .{ "fwrite", wrapBuiltin_fwrite },
+    .{ "fputs", wrapBuiltin_fwrite }, // ★Q5：fputs=fwrite 别名（普查 C 类暴露）
     .{ "getcwd", wrapBuiltin_getcwd },
     .{ "glob", wrapBuiltin_glob },
     .{ "is_dir", wrapBuiltin_is_dir },
@@ -7026,31 +7233,51 @@ fn wrapBuiltin_system(ctx: Value, args: []const Value, allocator: Allocator) !Va
 fn wrapBuiltin_sscanf(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     _ = ctx;
     if (args.len < 2) return error.InvalidArgumentCount;
-    const parsed = try php_sscanf(q3Deref(args[0]), q3Deref(args[1]), allocator);
-    if (args.len <= 2) return parsed; // 无 out vars ⇒ 返回数组
-    // 带 out vars：PHP 逐位指派已解析值、未解析位**不动**、返回已指派计数；解析全败 ⇒ 0 且全不动
-    var assigned: i64 = 0;
-    if (parsed.isArray()) {
-        const arr = parsed.asArray();
-        var i: usize = 0;
-        while (i < arr.count() and i + 2 < args.len) : (i += 1) {
-            const out = args[i + 2];
-            if (!out.isRef()) {
-                q3WarnByRefValue("sscanf", i + 3, "var");
-                continue;
-            }
-            if (arr.get(.{ .integer = @intCast(i) })) |v| {
-                const cell = out.asRef();
-                _ = v.retain(); // 元素留在数组份额不动；cell 另持一份
-                cell.release(allocator);
-                cell.* = v;
-                assigned += 1;
+    const str = q3Deref(args[0]);
+    const format = q3Deref(args[1]);
+    if (!str.isString() or !format.isString()) return Value.initBool(false);
+
+    // ★P0（批次二十四续）：共享 q4FscanfParse 核（fscanf 通路）；sscanf 口径与 fscanf 唯二差异：
+    //   输入耗尽（EOF 同族）⇒ 无 vars 返 **NULL**、有 vars 返 **int(-1)**（PHP 8.5.8 实测；
+    //   fscanf 同点返 false）。其余（失败槽 NULL/失败即停/抑制位计数）全同。
+    var outcome = try q4FscanfParse(str.asString().data, format.asString().data, allocator);
+    defer outcome.deinit(allocator);
+
+    if (outcome.eof_before_any) {
+        return if (args.len == 2) Value.initNull() else Value.initInt(-1);
+    }
+
+    // 无 vars ⇒ 数组（失败槽 NULL）
+    if (args.len == 2) {
+        const arr = try PHPArray.init(allocator);
+        for (outcome.slots.items) |ms| {
+            if (ms) |v| {
+                _ = v.retain(); // 槽持份 + 数组持份
+                try arr.push(allocator, v);
+            } else {
+                try arr.push(allocator, Value.initNull());
             }
         }
+        return Value.initArray(arr);
     }
-    const r = Value.initInt(assigned);
-    parsed.release(allocator);
-    return r;
+
+    // 有 vars ⇒ 写回成功槽、返回成功转换数（含抑制位）
+    var slot_idx: usize = 0;
+    for (args[2..], 0..) |out_arg, vi| {
+        if (slot_idx >= outcome.slots.items.len) break;
+        const ms = outcome.slots.items[slot_idx];
+        slot_idx += 1;
+        const v = ms orelse continue; // 失败/未达槽 ⇒ 不写
+        if (!out_arg.isRef()) {
+            q3WarnByRefValue("sscanf", vi + 3, "var");
+            continue;
+        }
+        const cell = out_arg.asRef();
+        _ = v.retain();
+        cell.release(allocator);
+        cell.* = v;
+    }
+    return Value.initInt(@intCast(outcome.conversions_ok));
 }
 
 fn wrapBuiltin_array_multisort(ctx: Value, args: []const Value, allocator: Allocator) !Value {
@@ -7305,7 +7532,7 @@ pub fn php_metaphone(str: Value, phonemes: Value, allocator: Allocator) !Value {
     if (!str.isString()) return str;
     const max_phonemes: i64 = if (phonemes.isInt()) phonemes.asInt() else 0;
     if (max_phonemes < 0) {
-        return throwThrowable("ValueError", "metaphone(): Argument #2 ($phonemes) must be greater than or equal to 0", allocator);
+        return throwThrowable("ValueError", "metaphone(): Argument #2 ($max_phonemes) must be greater than or equal to 0", allocator);
     }
     const word = str.asString().data;
     const wlen = word.len;
@@ -7859,8 +8086,10 @@ pub fn php_convert_uuencode(str: Value, allocator: Allocator) !Value {
     defer result.deinit(allocator);
     var pos: usize = 0;
     while (pos < input.len) {
-        const n = @min(45, input.len - pos);
-        try result.append(allocator, @intCast(n + 32));
+        // ★n 必须显式 usize：@min(comptime_int 45, usize) 在 Zig 0.17 会被收成窄型，
+        //   n+32 在窄型里溢出（Debug panic / ReleaseFast UB——实测 44 字节行行首坍缩）。
+        const n: usize = @min(45, input.len - pos);
+        try result.append(allocator, @as(u8, @intCast(n + 32)));
         var j: usize = 0;
         while (j < n) : (j += 3) {
             const b0: u16 = input[pos + j];
@@ -8354,6 +8583,12 @@ pub fn php_json_validate(args: []const Value, allocator: Allocator) !Value {
         depth = @intCast(d);
     }
     const json_str = json.asString().data;
+    // ★Q4：UTF-8 校验（实测 json_validate("\"\xC3\x28\"") ⇒ false + JSON_ERROR_UTF8）。
+    //   JSON 文本里非 ASCII 的合法位置只有字符串字面量 ⇒ 整文本校验与 PHP 口径等价。
+    if (!std.unicode.utf8ValidateSlice(json_str)) {
+        last_json_error_code = json_error_utf8;
+        return Value.initBool(false);
+    }
     var pos: usize = 0;
     const result = jsonDecodeValue(json_str, &pos, true, depth, allocator) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -8624,6 +8859,377 @@ fn wrapBuiltin_gc_status(ctx: Value, args: []const Value, allocator: Allocator) 
 
 
 
+
+// ============================================================================
+// ★P2-4：fscanf（B 类编译期表缺名补齐；PHP 8.5.8 真值驱动探针 p2_4*）
+// ============================================================================
+// 语义锚点（全部经 PHP 8.5.8 实测钉死）：
+//   返回形态：无 vars ⇒ 数组（每非抑制转换一槽，失败槽 NULL）；
+//             有 vars ⇒ int（成功转换数，**含 %* 抑制位**）；
+//             任何转换前 EOF ⇒ false（两形态同）；转换失败即停。
+//   %u：无符号 64 位，负号按模 2^64（"-5" ⇒ "18446744073709551611"），
+//       值超 i64 max ⇒ 十进制字符串（PHP 整数溢出行为），否则 int。
+//   %x 接受 0x 前缀；%o 遇非八进制即停（"89" ⇒ 零匹配失败）；%c/%[ 不跳前导空白。
+// 流策略：全读剩余到内存缓冲解析，未消耗后缀经 lseek(-n, SEEK_CUR) 回推
+//   （php://memory/普通文件可 seek；不可 seek 流回推失败时多读字节丢失——
+//     pipe 场景在 AOT 语料中未出现，登记为已知边界）。
+
+/// fscanf 单次解析结果
+const Q4FscanfOutcome = struct {
+    /// 首个转换前输入已尽 ⇒ fscanf 返回 false
+    eof_before_any: bool = false,
+    /// 每「非抑制转换」一槽：成功值或 null（失败/未达）
+    slots: std.ArrayListUnmanaged(?Value) = .empty,
+    /// 成功转换数（含 %* 抑制位）
+    conversions_ok: usize = 0,
+    /// 输入消耗量（供流位置回推）
+    consumed: usize = 0,
+
+    fn deinit(self: *Q4FscanfOutcome, allocator: Allocator) void {
+        for (self.slots.items) |ms| {
+            if (ms) |v| v.release(allocator);
+        }
+        self.slots.deinit(allocator);
+    }
+};
+
+inline fn q4FscanfIsSpace(c: u8) bool {
+    return c == ' ' or c == '\t' or c == '\n' or c == '\r' or c == 0x0b or c == 0x0c;
+}
+
+/// 数字转换公共：按给定进制累积，返回消耗字符数（0 ⇒ 失败）与 u128 值
+fn q4FscanfAccum(input: []const u8, base: u8) struct { used: usize, val: u128 } {
+    var used: usize = 0;
+    var val: u128 = 0;
+    while (used < input.len) : (used += 1) {
+        const c = input[used];
+        const d: u8 = switch (c) {
+            '0'...'9' => c - '0',
+            'a'...'z' => c - 'a' + 10,
+            'A'...'Z' => c - 'A' + 10,
+            else => break,
+        };
+        if (d >= base) break;
+        val = val * base + d;
+    }
+    return .{ .used = used, .val = val };
+}
+
+/// fscanf 格式解析核心：input 为流剩余内容快照；产出槽位/计数/EOF 标志/消耗量。
+fn q4FscanfParse(input: []const u8, fmt: []const u8, allocator: Allocator) !Q4FscanfOutcome {
+    var out = Q4FscanfOutcome{};
+    errdefer out.deinit(allocator);
+    var ip: usize = 0;
+    var fp: usize = 0;
+    var seen_any = false; // 是否已遇任一转换（EOF 判定锚点）
+
+    fmt_loop: while (fp < fmt.len) {
+        const fc = fmt[fp];
+        // 格式空白 ⇒ 跳过输入任意量空白
+        if (q4FscanfIsSpace(fc)) {
+            fp += 1;
+            while (ip < input.len and q4FscanfIsSpace(input[ip])) ip += 1;
+            continue;
+        }
+        if (fc != '%') {
+            // 字面字符：精确匹配，失败即停
+            if (ip < input.len and input[ip] == fc) {
+                ip += 1;
+                fp += 1;
+                continue;
+            }
+            break;
+        }
+        // '%' 转换
+        fp += 1;
+        if (fp >= fmt.len) break; // 孤立 % ⇒ 停
+        if (fmt[fp] == '%') {
+            if (ip < input.len and input[ip] == '%') {
+                ip += 1;
+                fp += 1;
+                continue;
+            }
+            break;
+        }
+        var suppress = false;
+        if (fmt[fp] == '*') {
+            suppress = true;
+            fp += 1;
+        }
+        var width: usize = std.math.maxInt(usize);
+        var w: usize = 0;
+        var has_width = false;
+        while (fp < fmt.len and fmt[fp] >= '0' and fmt[fp] <= '9') {
+            w = w * 10 + (fmt[fp] - '0');
+            has_width = true;
+            fp += 1;
+        }
+        if (has_width) width = w;
+        if (fp >= fmt.len) break;
+        const spec = fmt[fp];
+        fp += 1;
+
+        // 转换前 EOF：尚无任一转换 ⇒ eof_before_any；已有 ⇒ 按失败停
+        if (ip >= input.len) {
+            if (!seen_any) out.eof_before_any = true;
+            break;
+        }
+        seen_any = true;
+
+        // 前导空白跳过（%c/%[ 除外）
+        if (spec != 'c' and spec != '[') {
+            while (ip < input.len and q4FscanfIsSpace(input[ip])) ip += 1;
+        }
+
+        var produced: ?Value = null; // 本槽产出（抑制位不落槽）
+        var ok = false;
+
+        switch (spec) {
+            'd', 'i', 'u', 'x', 'X', 'o' => {
+                const start = ip;
+                var neg = false;
+                if (ip < input.len and (input[ip] == '-' or input[ip] == '+')) {
+                    neg = input[ip] == '-';
+                    ip += 1;
+                }
+                // 宽度限整个字段（含符号/前缀）
+                var budget = if (width == std.math.maxInt(usize)) input.len - ip else @min(width -| (ip - start), input.len - ip);
+                var base: u8 = switch (spec) {
+                    'x', 'X' => 16,
+                    'o' => 8,
+                    else => 10,
+                };
+                // %i 前缀判别：0x⇒hex、0+数字⇒oct
+                if (spec == 'i' and budget >= 1 and input[ip] == '0') {
+                    if (budget >= 3 and (input[ip + 1] == 'x' or input[ip + 1] == 'X')) {
+                        base = 16;
+                        ip += 2;
+                        budget -= 2;
+                    } else if (budget >= 2 and input[ip + 1] >= '0' and input[ip + 1] <= '7') {
+                        base = 8;
+                        ip += 1;
+                        budget -= 1;
+                    }
+                }
+                // %x 接受 0x 前缀（PHP 实测 0xFF ⇒ 255）
+                if ((spec == 'x' or spec == 'X') and budget >= 3 and input[ip] == '0' and
+                    (input[ip + 1] == 'x' or input[ip + 1] == 'X'))
+                {
+                    ip += 2;
+                    budget -= 2;
+                }
+                const field = input[ip..@min(ip + budget, input.len)];
+                const acc = q4FscanfAccum(field, base);
+                if (acc.used == 0) {
+                    ip = start; // 零匹配 ⇒ 整体失败，输入回退
+                } else {
+                    ip += acc.used;
+                    ok = true;
+                    if (spec == 'u') {
+                        // 无符号 64 位：负号模 2^64；超 u64 饱和（strtoul 语义）
+                        const v64: u64 = if (acc.val > std.math.maxInt(u64))
+                            std.math.maxInt(u64)
+                        else if (neg)
+                            0 -% @as(u64, @intCast(acc.val))
+                        else
+                            @intCast(acc.val);
+                        if (v64 <= @as(u64, @intCast(std.math.maxInt(i64)))) {
+                            produced = Value.initInt(@intCast(v64));
+                        } else {
+                            // PHP 整数溢出 ⇒ 十进制字符串
+                            const ds = try std.fmt.allocPrint(allocator, "{d}", .{v64});
+                            defer allocator.free(ds);
+                            produced = Value.initString(try PHPString.init(allocator, ds));
+                        }
+                    } else {
+                        const signed: i128 = if (neg) -@as(i128, @intCast(acc.val)) else @intCast(acc.val);
+                        if (signed >= std.math.minInt(i64) and signed <= std.math.maxInt(i64)) {
+                            produced = Value.initInt(@intCast(signed));
+                        } else {
+                            const ds = try std.fmt.allocPrint(allocator, "{d}", .{signed});
+                            defer allocator.free(ds);
+                            produced = Value.initString(try PHPString.init(allocator, ds));
+                        }
+                    }
+                }
+            },
+            'f', 'e', 'E', 'g', 'G' => {
+                const start = ip;
+                const budget = if (width == std.math.maxInt(usize)) input.len - ip else @min(width, input.len - ip);
+                const field = input[ip .. ip + budget];
+                // 浮点形态：[符号] 数字 [. 数字] [eE[符号]数字]
+                var j: usize = 0;
+                if (j < field.len and (field[j] == '-' or field[j] == '+')) j += 1;
+                var digits: usize = 0;
+                while (j < field.len and field[j] >= '0' and field[j] <= '9') : (j += 1) digits += 1;
+                if (j < field.len and field[j] == '.') {
+                    j += 1;
+                    while (j < field.len and field[j] >= '0' and field[j] <= '9') : (j += 1) digits += 1;
+                }
+                if (digits > 0 and j < field.len and (field[j] == 'e' or field[j] == 'E')) {
+                    var k = j + 1;
+                    if (k < field.len and (field[k] == '-' or field[k] == '+')) k += 1;
+                    var edigits: usize = 0;
+                    while (k < field.len and field[k] >= '0' and field[k] <= '9') : (k += 1) edigits += 1;
+                    if (edigits > 0) j = k;
+                }
+                if (digits == 0) {
+                    ip = start;
+                } else {
+                    ip += j;
+                    ok = true;
+                    produced = Value.initFloat(std.fmt.parseFloat(f64, field[0..j]) catch 0.0);
+                }
+            },
+            's' => {
+                const budget = if (width == std.math.maxInt(usize)) input.len - ip else @min(width, input.len - ip);
+                var j: usize = 0;
+                while (j < budget and !q4FscanfIsSpace(input[ip + j])) j += 1;
+                if (j > 0) {
+                    ok = true;
+                    produced = Value.initString(try PHPString.init(allocator, input[ip .. ip + j]));
+                    ip += j;
+                }
+            },
+            'c' => {
+                // %c：不跳空白；宽度默认 1
+                const n = if (width == std.math.maxInt(usize)) 1 else width;
+                if (ip + n <= input.len) {
+                    ok = true;
+                    produced = Value.initString(try PHPString.init(allocator, input[ip .. ip + n]));
+                    ip += n;
+                }
+            },
+            '[' => {
+                // 字符集：%[...] / %[^...]；] 紧邻 [ 或 [^ 时为成员字面
+                var negate = false;
+                if (fp < fmt.len and fmt[fp] == '^') {
+                    negate = true;
+                    fp += 1;
+                }
+                var set: [256]bool = @splat(false);
+                var first = true;
+                var prev: ?u8 = null;
+                while (fp < fmt.len and (fmt[fp] != ']' or first)) {
+                    const ch = fmt[fp];
+                    // 区间展开：a-z（'-' 前有字符、后非 ']'  ⇒ 范围；否则 '-' 为字面成员）
+                    if (ch == '-' and prev != null and fp + 1 < fmt.len and fmt[fp + 1] != ']') {
+                        const lo = prev.?;
+                        const hi = fmt[fp + 1];
+                        fp += 2;
+                        var cc: u16 = lo;
+                        while (cc <= hi) : (cc += 1) set[cc] = true;
+                        prev = hi;
+                        first = false;
+                        continue;
+                    }
+                    set[ch] = true;
+                    prev = ch;
+                    first = false;
+                    fp += 1;
+                }
+                if (fp >= fmt.len) break :fmt_loop; // 未闭合 ⇒ 停
+                fp += 1; // 跳过 ']'
+                const budget = if (width == std.math.maxInt(usize)) input.len - ip else @min(width, input.len - ip);
+                var j: usize = 0;
+                while (j < budget) : (j += 1) {
+                    const member = set[input[ip + j]];
+                    if (member == negate) break;
+                }
+                if (j > 0) {
+                    ok = true;
+                    produced = Value.initString(try PHPString.init(allocator, input[ip .. ip + j]));
+                    ip += j;
+                }
+            },
+            else => break :fmt_loop, // 未知转换符 ⇒ 停
+        }
+
+        if (!ok) {
+            // 失败即停；该非抑制槽产 NULL（槽表两形态共用：无 vars 产出 NULL，有 vars 不写回）
+            if (!suppress) try out.slots.append(allocator, null);
+            break;
+        }
+        out.conversions_ok += 1;
+        if (!suppress) try out.slots.append(allocator, produced);
+    }
+    out.consumed = ip;
+    return out;
+}
+
+/// fscanf 直调面入口（切片签名，php_fprintf 同族；nlk 打包名单生成 `php_fscanf(args_slice, alloc)`）
+pub fn php_fscanf(args: []const Value, allocator: Allocator) !Value {
+    return wrapBuiltin_fscanf(Value.initNull(), args, allocator);
+}
+
+fn wrapBuiltin_fscanf(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 2) return error.InvalidArgumentCount;
+    const handle = q3Deref(args[0]);
+    const format = q3Deref(args[1]);
+    if (!handle.isResource() or !format.isString()) return Value.initBool(false);
+    const res = handle.asResource();
+    const fh = res.file_handle orelse return Value.initBool(false);
+
+    // 全读剩余内容
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    var chunk: [8192]u8 = undefined;
+    while (true) {
+        const n = std.posix.read(fh.handle, &chunk) catch break;
+        if (n == 0) {
+            res.eof = true;
+            break;
+        }
+        try buf.appendSlice(allocator, chunk[0..n]);
+    }
+
+    var outcome = try q4FscanfParse(buf.items, format.asString().data, allocator);
+    defer outcome.deinit(allocator);
+
+    // 回推未消耗后缀；回推成功 ⇒ 尚有未读 ⇒ 清 eof 标志
+    if (outcome.consumed < buf.items.len) {
+        const unread: i64 = @intCast(buf.items.len - outcome.consumed);
+        if (streamLseek(fh, -unread, 1)) |_| {
+            res.eof = false;
+        } else |_| {} // 不可 seek 流：多读字节丢失（已知边界，见头注）
+    }
+
+    // 任何转换前 EOF ⇒ false（两形态同）
+    if (outcome.eof_before_any) return Value.initBool(false);
+
+    // 无 vars ⇒ 数组（失败槽 NULL）
+    if (args.len == 2) {
+        const arr = try PHPArray.init(allocator);
+        for (outcome.slots.items) |ms| {
+            if (ms) |v| {
+                _ = v.retain(); // 槽持份 + 数组持份
+                try arr.push(allocator, v);
+            } else {
+                try arr.push(allocator, Value.initNull());
+            }
+        }
+        return Value.initArray(arr);
+    }
+
+    // 有 vars ⇒ 写回成功槽、返回成功转换数（含抑制位）
+    var slot_idx: usize = 0;
+    for (args[2..], 0..) |out_arg, vi| {
+        if (slot_idx >= outcome.slots.items.len) break;
+        const ms = outcome.slots.items[slot_idx];
+        slot_idx += 1;
+        const v = ms orelse continue; // 失败/未达槽 ⇒ 不写
+        if (!out_arg.isRef()) {
+            q3WarnByRefValue("fscanf", vi + 3, "vars");
+            continue;
+        }
+        const cell = out_arg.asRef();
+        _ = v.retain();
+        cell.release(allocator);
+        cell.* = v;
+    }
+    return Value.initInt(@intCast(outcome.conversions_ok));
+}
 
 fn wrapBuiltin_str_getcsv(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     _ = ctx;
@@ -9193,6 +9799,25 @@ pub fn php_file_get_contents(filename: Value, use_include_path: Value, context: 
     if (!filename.isString()) return Value.initBool(false);
     const fname = filename.asString().data;
 
+    // ★批次二十六：php:// 流委托 fopen 同一承载路径（memory/temp/input/stdin/stdout 统一），
+    //   读取经 stream_get_contents（offset 语义同：显式 ⇒ seek；length null ⇒ 至 EOF）。
+    if (std.mem.startsWith(u8, fname, "php://")) {
+        const h = try php_fopen(filename, Value.initString(PHPString.initStatic("r")), allocator);
+        if (!h.isResource()) return Value.initBool(false);
+        defer {
+            var hv = h;
+            hv.release(allocator);
+        }
+        // file_get_contents 的负 offset＝自尾部（SEEK_END）；stream_get_contents 的 offset 仅 SEEK_SET ⇒ 先自行 seek
+        if (offset.isInt() and offset.asInt() < 0) {
+            if (h.asResource().file_handle) |fh2| {
+                _ = streamLseek(fh2, offset.asInt(), 2) catch return Value.initBool(false);
+            }
+            return php_stream_get_contents(h, length, Value.initMissing(), allocator);
+        }
+        return php_stream_get_contents(h, length, offset, allocator);
+    }
+
     const content = std.Io.Dir.cwd().readFileAlloc(getIo(), fname, allocator, .limited(10 * 1024 * 1024)) catch |err| {
         warnOpenStream("file_get_contents", fname, err);
         return Value.initBool(false);
@@ -9243,6 +9868,103 @@ pub fn php_fopen(filename: Value, mode: Value, allocator: Allocator) !Value {
 
     // 特殊处理php://流
     if (std.mem.startsWith(u8, fname, "php://")) {
+        const sub = fname[6..];
+        // ★批次二十六：php://memory / php://temp（含 /maxmemory:NN 阈值形）⇒ 匿名临时文件承载
+        //   （mkstemp + 立即 unlink）：真 fd ⇒ 全族流函数（fread/fwrite/fseek/ftell/fstat/
+        //   ftruncate/fgets/fgetc/fscanf/stream_get_contents…）与真实文件**同一套分派**，
+        //   不造内存流第二套语义。temp 阈值的「内存段」仅是介质选择（PHP 文档语义），
+        //   对外读写/定位/fstat 行为与文件介质无差 ⇒ 恒走文件介质。
+        if (std.mem.eql(u8, sub, "memory") or std.mem.eql(u8, sub, "temp") or std.mem.startsWith(u8, sub, "temp/")) {
+            const tmp_dir: []const u8 = if (std.c.getenv("TMPDIR")) |td| std.mem.span(td) else "/tmp";
+            const tmpl = std.fmt.allocPrintSentinel(allocator, "{s}/q4memXXXXXX", .{tmp_dir}, 0) catch return Value.initBool(false);
+            defer allocator.free(tmpl);
+            const fd = q4Mkstemp(tmpl.ptr);
+            if (fd < 0) return Value.initBool(false);
+            // ★批次二十六：'r'（无 +）⇒ O_RDONLY 降级重开（须在 unlink 前——路径尚在）——
+            //   PHP 实测 'r' 开 memory 后 fwrite 静默 false（写拒绝由 access mode 承载，
+            //   fwrite 的 std.c.write 自查命中 EBADF）。
+            var opened = std.Io.File{ .handle = fd, .flags = .{ .nonblocking = false } };
+            if (std.mem.eql(u8, fmode, "r")) {
+                const ro = std.Io.Dir.cwd().openFile(getIo(), tmpl, .{}) catch {
+                    opened.close(getIo());
+                    return Value.initBool(false);
+                };
+                opened.close(getIo());
+                opened = ro;
+            }
+            // 立即 unlink ⇒ 对外不可见（语义等价内存流）；fd 保持可用
+            std.Io.Dir.cwd().deleteFile(getIo(), tmpl) catch {};
+            // 错误清理走 File.close（与 php_fclose 同路径；std.posix.close 在 0.17 已收）
+            const handle = allocator.create(std.Io.File) catch {
+                opened.close(getIo());
+                return Value.initBool(false);
+            };
+            handle.* = opened;
+            const res = allocator.create(Value.PHPResource) catch {
+                var tmpf = handle.*;
+                tmpf.close(getIo());
+                allocator.destroy(handle);
+                return Value.initBool(false);
+            };
+            res.* = .{ .ref_count = 1, .file_handle = handle, .type_name = "stream" };
+            return Value.initResource(res);
+        }
+        // ★批次二十六：php://stdout/stderr/stdin ⇒ dup 标准 fd（fclose 关 dup 副本，
+        //   不动进程标准流——PHP 实测 fclose($stdout) 后 echo 照常）。
+        const std_fd: ?std.posix.fd_t = if (std.mem.eql(u8, sub, "stdout"))
+            1
+        else if (std.mem.eql(u8, sub, "stderr"))
+            2
+        else if (std.mem.eql(u8, sub, "stdin"))
+            0
+        else
+            null;
+        if (std_fd) |sfd| {
+            const fd = q4Dup(sfd) catch return Value.initBool(false);
+            const handle = allocator.create(std.Io.File) catch {
+                var tmpf = std.Io.File{ .handle = fd, .flags = .{ .nonblocking = false } };
+                tmpf.close(getIo());
+                return Value.initBool(false);
+            };
+            handle.* = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+            const res = allocator.create(Value.PHPResource) catch {
+                var tmpf = std.Io.File{ .handle = fd, .flags = .{ .nonblocking = false } };
+                tmpf.close(getIo());
+                allocator.destroy(handle);
+                return Value.initBool(false);
+            };
+            res.* = .{ .ref_count = 1, .file_handle = handle, .type_name = "stream" };
+            return Value.initResource(res);
+        }
+        // ★批次二十六：php://input（CLI ⇒ 空**只读**请求体流；PHP 8.5.8 实测：
+        //   file_get_contents ⇒ ""、fgets ⇒ false 且 feof 读后 true、fwrite ⇒ false 写拒绝）。
+        //   承载：mkstemp 空文件 ⇒ O_RDONLY 重开（写拒绝由 access mode 承载）⇒ unlink。
+        if (std.mem.eql(u8, sub, "input")) {
+            const tmp_dir: []const u8 = if (std.c.getenv("TMPDIR")) |td| std.mem.span(td) else "/tmp";
+            const tmpl = std.fmt.allocPrintSentinel(allocator, "{s}/q4memXXXXXX", .{tmp_dir}, 0) catch return Value.initBool(false);
+            defer allocator.free(tmpl);
+            const fd0 = q4Mkstemp(tmpl.ptr);
+            if (fd0 < 0) return Value.initBool(false);
+            var tmpf0 = std.Io.File{ .handle = fd0, .flags = .{ .nonblocking = false } };
+            tmpf0.close(getIo());
+            const ro_file = std.Io.Dir.cwd().openFile(getIo(), tmpl, .{}) catch return Value.initBool(false);
+            std.Io.Dir.cwd().deleteFile(getIo(), tmpl) catch {};
+            const handle = allocator.create(std.Io.File) catch {
+                var tmpf = ro_file;
+                tmpf.close(getIo());
+                return Value.initBool(false);
+            };
+            handle.* = ro_file;
+            const res = allocator.create(Value.PHPResource) catch {
+                var tmpf2 = handle.*;
+                tmpf2.close(getIo());
+                allocator.destroy(handle);
+                return Value.initBool(false);
+            };
+            res.* = .{ .ref_count = 1, .file_handle = handle, .type_name = "stream" };
+            return Value.initResource(res);
+        }
+        // 其余 php://（output/filter 等）⇒ 空壳资源（历史口径保留）
         const res = allocator.create(Value.PHPResource) catch return Value.initBool(false);
         res.* = .{ .ref_count = 1, .file_handle = null, .type_name = "stream" };
         return Value.initResource(res);
@@ -9354,8 +10076,17 @@ pub fn php_fwrite(handle: Value, data: Value, allocator: Allocator) !Value {
         break :blk temp.data;
     };
 
-    fileWriteAll(fh.handle, content);
-    return Value.initInt(@intCast(content.len));
+    // ★批次二十六：写结果自查（旧走 fileWriteAll 吞错误 ⇒ 只读 fd/满盘场景恒返全长）。
+    //   PHP 口径：写失败 ⇒ false；部分写 ⇒ 实际字节数。
+    var written: usize = 0;
+    while (written < content.len) {
+        // std.c.write：isize 返回，负值 = -errno（PHP 口径：写失败 ⇒ false；部分写 ⇒ 实际字节数）
+        const n = std.c.write(fh.handle, content[written..].ptr, content.len - written);
+        if (n < 0) return Value.initBool(false);
+        if (n == 0) break;
+        written += @intCast(n);
+    }
+    return Value.initInt(@intCast(written));
 }
 
 pub fn php_fread(handle: Value, length: Value, allocator: Allocator) !Value {
@@ -9390,6 +10121,21 @@ pub fn php_fclose(handle: Value) !Value {
     }
     res.closed = true;
     return Value.initBool(true);
+}
+
+/// fflush - AOT 写路径为 fd 直写（posix.write，无用户态缓冲）⇒ 恒成功语义。
+///   PHP 8.5.8 实测：资源 ⇒ true。
+pub fn php_fflush(handle: Value) !Value {
+    if (!handle.isResource()) return Value.initBool(false);
+    const res = handle.asResource();
+    return Value.initBool(!res.closed);
+}
+
+fn wrapBuiltin_fflush(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    return php_fflush(q3Deref(args[0]));
 }
 
 pub fn php_is_resource(val: Value) !Value {
@@ -9453,6 +10199,51 @@ pub fn php_feof(handle: Value) !Value {
     if (!handle.isResource()) return Value.initBool(false);
     const res = handle.asResource();
     return Value.initBool(res.closed or res.eof);
+}
+
+/// stream_get_contents - 从当前位读至 EOF（或 length 字节）。
+/// PHP 8.5.8 实测口径：length null/<0 ⇒ 读至 EOF；0 ⇒ ""；offset **缺省 ⇒ 不 seek**、
+///   显式（含 0）⇒ seek(offset) 再读（missing 哨兵区分缺省与显式 0）。
+pub fn php_stream_get_contents(handle: Value, length: Value, offset: Value, allocator: Allocator) !Value {
+    if (!handle.isResource()) return Value.initBool(false);
+    const res = handle.asResource();
+    const fh = res.file_handle orelse return Value.initBool(false);
+    if (!offset.isMissing() and !offset.isNull()) {
+        const off = offset.toInt();
+        if (off >= 0) {
+            _ = streamLseek(fh, off, 0) catch return Value.initBool(false); // SEEK_SET
+            res.eof = false;
+        }
+    }
+    var want: ?usize = null;
+    if (length.isInt()) {
+        const l = length.asInt();
+        if (l == 0) return Value.initString(try PHPString.init(allocator, ""));
+        if (l > 0) want = @intCast(l);
+    }
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(allocator);
+    var chunk: [8192]u8 = undefined;
+    while (true) {
+        const room: usize = if (want) |w| @min(chunk.len, w -| buf.items.len) else chunk.len;
+        if (room == 0) break;
+        const n = std.posix.read(fh.handle, chunk[0..room]) catch break;
+        if (n == 0) {
+            res.eof = true;
+            break;
+        }
+        try buf.appendSlice(allocator, chunk[0..n]);
+    }
+    return Value.initString(try PHPString.init(allocator, buf.items));
+}
+
+fn wrapBuiltin_stream_get_contents(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 1) return error.InvalidArgumentCount;
+    const h = q3Deref(args[0]);
+    const length = if (args.len >= 2) q3Deref(args[1]) else Value.initNull();
+    const offset = if (args.len >= 3) q3Deref(args[2]) else Value.initMissing();
+    return php_stream_get_contents(h, length, offset, allocator);
 }
 
 /// lseek 封装（Zig 0.16 的 Io.File 无 seek 方法；经 libc lseek 走 fd）。
@@ -11698,9 +12489,26 @@ pub fn php_invoke_callable(callback: Value, args: []const Value, allocator: Allo
     }
     if (actual_cb.isString()) {
         const func_name = actual_cb.asString().data;
+        // ★P2-3：missing 分流全调用面只做一次（hook→内建→CI 下落链共享同一 norm；
+        //   重复分流会二次消费 FIFO 注名 ⇒ take 空 ⇒ missing 原样漏进 handler）。
+        // ★Deprecated-null（批次二十四续）：归一同样全链一次（shared_dep）——
+        //   否则 hook 未命中落内建支时 null 位重复告警。
+        var shared_norm: ?[]Value = null;
+        defer if (shared_norm) |sn| allocator.free(sn);
+        var shared_split_done = false;
+        var shared_dep: ?[]Value = null;
+        defer if (shared_dep) |sd| allocator.free(sd);
+        var shared_dep_done = false;
         // AOT hook 优先：支持所有 AOT 注册的函数（包括内置函数分发）
         if (aot_callable_hook) |hook| {
-            if (hook(func_name, args, allocator)) |result| {
+            // ★P2-3：missing 分流（hook 覆盖用户函数直调——不入此支告警/vivify 全丢）
+            shared_norm = try q4SplitMissingArgs(func_name, args, allocator);
+            shared_split_done = true;
+            const hook_raw = if (shared_norm) |n| n else args;
+            shared_dep = try q4NormalizeBuiltinArgs(func_name, hook_raw, allocator);
+            shared_dep_done = true;
+            const hook_args = if (shared_dep) |d| d else hook_raw;
+            if (hook(func_name, hook_args, allocator)) |result| {
                 return result;
             } else |err| {
                 // AOT hook 返回错误则尝试其他路径
@@ -11722,45 +12530,22 @@ pub fn php_invoke_callable(callback: Value, args: []const Value, allocator: Allo
                     return php_arity_error(canon, @intCast(info.min), @intCast(info.max), @intCast(given), info.has_variadic, allocator);
                 }
             }
-            // ★Q3：Ref 实参按形参表归一——by-value 位解引用、by-ref 位直通（快路径：无 Ref 零分配）。
-            //   必要因由：`$f($v)` 变量调用面变量实参一律做成 Ref（R3 写回真值）；by-value 内建包装器
-            //   直接读 args[i]（不解 Ref）⇒ 不在此归一就会全族错型。
-            var has_ref = false;
-            for (args) |a| {
-                if (a.isRef()) {
-                    has_ref = true;
-                    break;
-                }
-            }
-            if (has_ref) {
-                var lbuf2: [64]u8 = undefined;
-                const canon2: []const u8 = if (builtin_param_table.table.get(func_name) != null or func_name.len > 64)
-                    func_name
-                else
-                    std.ascii.lowerString(&lbuf2, func_name);
-                if (builtin_param_table.table.get(canon2)) |ps| {
-                    // 变参尾的 by-ref 属性由变参形参继承（sscanf 的 &...$vars 实测：全部位可写回）
-                    var var_by_ref = false;
-                    for (ps) |p| {
-                        if (p.variadic) {
-                            var_by_ref = p.by_ref;
-                            break;
-                        }
-                    }
-                    const norm = try allocator.alloc(Value, args.len);
-                    defer allocator.free(norm);
-                    for (args, 0..) |a, i| {
-                        const p_by_ref = if (i < ps.len) ps[i].by_ref else var_by_ref;
-                        norm[i] = if (a.isRef() and !p_by_ref) q3Deref(a) else a;
-                    }
-                    return func(Value.initNull(), norm, allocator);
-                }
-            }
-            return func(Value.initNull(), args, allocator);
+            // ★Q3 + P2-3 + Deprecated-null：missing 分流 → 入参归一（by-value Ref deref + null 弱转）共享管线。
+            //   归一必要性（Ref 位/null 应警位）由 q4NormalizeBuiltinArgs 内部判定 ⇒ null 返回＝零分配直传。
+            const split: ?[]Value = if (shared_split_done) shared_norm else try q4SplitMissingArgs(func_name, args, allocator);
+            if (!shared_split_done) shared_norm = split;
+            const eff_args = if (split) |sp| sp else args;
+            const dep_norm: ?[]Value = if (shared_dep_done) shared_dep else try q4NormalizeBuiltinArgs(func_name, eff_args, allocator);
+            if (!shared_dep_done) shared_dep = dep_norm;
+            return func(Value.initNull(), if (dep_norm) |dn| dn else eff_args, allocator);
         }
         // §8 #6：用户函数名 CI（$f = "dyn"; $f() 跨大小写动态调用）
         if (lookupUserFunctionCI(func_name)) |func| {
-            return func(Value.initNull(), args, allocator);
+            // ★P2-3：missing 分流（共享核；hook 已拦的用户函数到不了这里——CI 名义兜特例）
+            const ci_norm: ?[]Value = if (shared_split_done) shared_norm else try q4SplitMissingArgs(func_name, args, allocator);
+            if (!shared_split_done) shared_norm = ci_norm;
+            const ci_args = if (ci_norm) |n| n else args;
+            return func(Value.initNull(), ci_args, allocator);
         }
         // ★批次十六①：PHP 8.5.8 实测——未定义/未登记函数的变量调用抛**可捕获** Error：
         //   `Call to undefined function xxx()`（旧注释「warning 并返回 false」为错误描述，
@@ -13532,6 +14317,57 @@ pub fn emitUndefinedVariableWarning(name: []const u8) void {
         .{ name, src_file, src_line },
     ) catch "";
     fileWriteAll(1, wmsg);
+}
+
+/// ★Deprecated-null（批次二十四续）：内建**非 nullable** 形参收 null ⇒
+///   Deprecated「{fn}(): Passing null to parameter #N ($name) of type T is deprecated」+ 弱转标量。
+///   口径（PHP 8.5.8 实测矩阵 p0b*）：仅内建函数（用户函数同点走 TypeError）；
+///   nullable/mixed/无类型不警；类型须含标量成员（纯 array/对象形参同点走 TypeError 域）；
+///   联合类型措辞取原文（"int|float"/"array|string"），弱转目标＝文本序首个标量成员。
+///   非 null ⇒ 原样返回（零开销快路径）。nlk 直调面 writeBuiltinArgs 与
+///   php_invoke_callable 变量调用面共用本枚。
+pub fn q4DepNull(v: Value, fn_name: []const u8, idx1: usize, pname: []const u8, ptype: []const u8, allocator: Allocator) Value {
+    if (!v.isNull()) return v;
+    // 弱转目标：文本序首个标量成员；无标量成员 ⇒ 不警不转（TypeError 域，非本机制）
+    const weak: Value = blk: {
+        var it = std.mem.splitScalar(u8, ptype, '|');
+        while (it.next()) |m| {
+            if (std.mem.eql(u8, m, "string")) break :blk Value.initString(PHPString.initStatic(""));
+            if (std.mem.eql(u8, m, "int")) break :blk Value.initInt(0);
+            if (std.mem.eql(u8, m, "float")) break :blk Value.initFloat(0.0);
+            if (std.mem.eql(u8, m, "bool")) break :blk Value.initBool(false);
+        }
+        return v; // 非标量族 ⇒ 原样（不警）
+    };
+    // Deprecated 发射（emitDeprecatedStrGetcsvEscape 同族三段式：处理器 → 抑制 → 掩码）
+    var mbuf: [512]u8 = undefined;
+    const hmsg = std.fmt.bufPrint(&mbuf, "{s}(): Passing null to parameter #{d} (${s}) of type {s} is deprecated", .{ fn_name, idx1, pname, ptype }) catch "Passing null is deprecated";
+    const loc = diagLoc();
+    if (dispatchToUserHandler(E_DEPRECATED, hmsg)) |handled| {
+        if (handled) {
+            restoreDiagLoc(loc);
+            return weak;
+        }
+    }
+    restoreDiagLoc(loc);
+    if (isErrorSuppressed()) return weak;
+    if ((E_DEPRECATED & global_error_types) == 0) return weak;
+    var ebuf: [1024]u8 = undefined;
+    const emsg = std.fmt.bufPrint(
+        &ebuf,
+        "PHP Deprecated:  {s} in {s} on line {d}\n",
+        .{ hmsg, src_file, src_line },
+    ) catch "";
+    fileWriteAll(2, emsg);
+    var buf: [1024]u8 = undefined;
+    const wmsg = std.fmt.bufPrint(
+        &buf,
+        "\nDeprecated: {s} in {s} on line {d}\n",
+        .{ hmsg, src_file, src_line },
+    ) catch "";
+    fileWriteAll(1, wmsg);
+    _ = allocator;
+    return weak;
 }
 
 /// ★F-46（R-165）：操作数类型错误改为**可捕获**的 TypeError。
@@ -15614,7 +16450,7 @@ pub fn php_var_dump(value: Value) !Value {
         //   `["flags":"SplDoublyLinkedList":private]`/`["dllist":...]`，且动态属性序在前。
         if (splDllFamilyOf(obj)) {
             if (splDllDataOf(obj)) |data| {
-                const header = try std.fmt.bufPrint(&buf, "object({s})#0 ({d}) {{\n", .{ obj.class_name, obj.properties.count() + 2 });
+                const header = try std.fmt.bufPrint(&buf, "object({s})#{d} ({d}) {{\n", .{ obj.class_name, obj.id, obj.properties.count() + 2 });
                 fileWriteAll(1, header);
                 var it = obj.properties.iterator();
                 while (it.next()) |entry| {
@@ -15635,7 +16471,7 @@ pub fn php_var_dump(value: Value) !Value {
         // 通用分支（★批次十二：对齐 PHP 真值——声明属性沿链**根→叶**按声明序输出并带
         // 可见性标记：`["name":"DeclClass":private]`/`["name":protected]`/`["name"]`；
         // 动态属性随后无标记。var_dump 不做可见性过滤——私有属性照出，仅标记归属）。
-        const header = try std.fmt.bufPrint(&buf, "object({s})#0 ({d}) {{\n", .{ obj.class_name, obj.properties.count() });
+        const header = try std.fmt.bufPrint(&buf, "object({s})#{d} ({d}) {{\n", .{ obj.class_name, obj.id, obj.properties.count() });
         fileWriteAll(1, header);
         var printed = std.StringHashMap(void).init(runtime_allocator);
         defer printed.deinit();
@@ -19650,7 +20486,7 @@ pub fn php_substr(str: Value, start: Value, length: Value, allocator: Allocator)
 
     const php_str = str.asString();
     const start_int = start_ok.toInt();
-    const length_int = if (length_ok.isNull()) null else length_ok.toInt();
+    const length_int = if (length_ok.isNull() or length_ok.isMissing()) null else length_ok.toInt();
 
     const result = try php_str.substring(start_int, length_int, allocator);
     return Value.initString(result);
@@ -21988,8 +22824,8 @@ pub fn php_spl_object_id(obj: Value) !Value {
         return Value.initInt(@intCast(fptr & 0x7FFFFFFF));
     }
     if (!Value_isObject(obj)) return Value.initInt(0);
-    const ptr = @intFromPtr(Value_asObject(obj));
-    return Value.initInt(@intCast(ptr & 0x7FFFFFFF));
+    // ★批次二十七：对象支取真实序号（PHPObject.id，与 var_dump 的 `#N` 同值，贴 PHP 递增序号真值）。
+    return Value.initInt(@intCast(Value_asObject(obj).id));
 }
 
 /// spl_object_hash - 返回对象唯一十六进制哈希字符串
@@ -22092,7 +22928,7 @@ pub fn php_explode(delimiter: Value, str: Value, limit: Value, allocator: Alloca
     }
 
     var lim: ?i64 = null;
-    if (!limit.isNull()) {
+    if (!limit.isNull() and !limit.isMissing()) {
         lim = limit_ok.toInt();
         if (lim.? == 0) lim = 1;
     }
@@ -30394,6 +31230,46 @@ pub fn cleanupAllClasses() void {
     }
 }
 
+/// ★批次二十六：对象序号全局计数器（PHP 从 1 起递增；atomic.fetchAdd 协程安全）。
+var g_object_id_counter: std.atomic.Value(u64) = std.atomic.Value(u64).init(1);
+
+/// ★批次二十六续：对象序号空闲栈（对齐 Zend objects_store 的 free_list LIFO 复用真值——
+///   对象销毁后其号被**下一个**新建对象复用，故 sort_na 格「catch 释放的异常让位、
+///   随后 new P 仍得 #1」。容量溢出时丢弃（该号不再复用），语义安全降级。
+var g_object_id_freelist: [4096]u64 = undefined;
+var g_object_id_freelist_len: usize = 0;
+/// 与 profiler.zig 同款的自旋锁（Zig 0.17：std.Thread.Mutex 已收）。
+var g_object_id_mutex: std.atomic.Mutex = .unlocked;
+
+/// 分配对象序号：空闲栈 LIFO 弹出优先，空则计数器递增（Zend 同构）。
+fn q4ObjectIdAlloc() u64 {
+    while (!g_object_id_mutex.tryLock()) std.atomic.spinLoopHint();
+    defer g_object_id_mutex.unlock();
+    if (g_object_id_freelist_len > 0) {
+        g_object_id_freelist_len -= 1;
+        const rid = g_object_id_freelist[g_object_id_freelist_len];
+        if (q4_objid_trace) std.debug.print("[objid] alloc {d} (freelist len {d})\n", .{ rid, g_object_id_freelist_len });
+        return rid;
+    }
+    const nid = g_object_id_counter.fetchAdd(1, .monotonic);
+    if (q4_objid_trace) std.debug.print("[objid] alloc {d} (bump)\n", .{nid});
+    return nid;
+}
+
+/// 归还对象序号（仅在 deinit/gcDestroyObject 销毁路径调用；溢出即弃）。
+fn q4ObjectIdFree(id: u64) void {
+    while (!g_object_id_mutex.tryLock()) std.atomic.spinLoopHint();
+    defer g_object_id_mutex.unlock();
+    if (g_object_id_freelist_len < g_object_id_freelist.len) {
+        g_object_id_freelist[g_object_id_freelist_len] = id;
+        g_object_id_freelist_len += 1;
+        if (q4_objid_trace) std.debug.print("[objid] free {d} (freelist len {d})\n", .{ id, g_object_id_freelist_len });
+    }
+}
+
+/// 临时追踪开关（排查后移除）。
+const q4_objid_trace = true;
+
 /// PHP对象类型
 /// 使用引用计数管理内存，属性存储在HashMap中
 pub const PHPObject = struct {
@@ -30403,6 +31279,9 @@ pub const PHPObject = struct {
     ref_count: usize,
     gc_info: GCInfo,
     allocator: Allocator,
+    /// ★批次二十六：对象序号（PHP `object(X)#N` 真值——全局递增从 1 起、克隆得新号）。
+    ///   atomic 分配（协程安全）；var_dump/spl_object_id 统一读本字段。
+    id: u64,
 
     /// ★批次十（i1/i2）：内建类的内部状态面（对应 Zend 的 internal object handlers）。
     /// 内部状态**不挂 properties** ⇒ get_object_vars / foreach 属性快照 / 默认 serialize
@@ -30426,6 +31305,7 @@ pub const PHPObject = struct {
         obj.class_meta = findClass(class_name);
         obj.internal_data = null;
         obj.internal_dtor = null;
+        obj.id = q4ObjectIdAlloc();
 
         alloc_counters.php_object_objects += 1;
         alloc_counters.php_object_live_objects += 1;
@@ -30451,6 +31331,7 @@ pub const PHPObject = struct {
         obj.class_meta = meta;
         obj.internal_data = null;
         obj.internal_dtor = null;
+        obj.id = q4ObjectIdAlloc();
 
         alloc_counters.php_object_objects += 1;
         alloc_counters.php_object_live_objects += 1;
@@ -30581,6 +31462,9 @@ pub const PHPObject = struct {
 
         // 释放类名
         self.allocator.free(self.class_name);
+
+        // ★批次二十六续：归还对象序号（Zend objects_store LIFO 复用；__destruct 之后、内存销毁之前）
+        q4ObjectIdFree(self.id);
 
         // 释放对象本身
         self.allocator.destroy(self);
@@ -32220,6 +33104,27 @@ pub fn php_object_new_with_constructor(class_name: []const u8, args: []const Val
     // 调用 __construct
     if (obj.class_meta) |m| {
         if (m.findMethodLookup("__construct")) |lookup| {
+            // ★P2-2：构造器可见性检查（PHP 8.5.8 实测：可捕获 Error；直调/命名/动态三路在本汇聚点同检）。
+            //   措辞：`Call to private|protected {声明类}::__construct() from global scope|scope {类}`。
+            const ctor_m = lookup.method;
+            if (ctor_m.is_private or ctor_m.is_protected) {
+                const scope = getCurrentScopeClass();
+                const allowed = if (ctor_m.is_private)
+                    (scope != null and std.mem.eql(u8, scope.?.name, lookup.owner.name))
+                else
+                    (scope != null and (scope.?.isSubclassOf(lookup.owner.name) or lookup.owner.isSubclassOf(scope.?.name)));
+                if (!allowed) {
+                    const vis: []const u8 = if (ctor_m.is_private) "private" else "protected";
+                    const msg = if (scope) |s|
+                        try std.fmt.allocPrint(allocator, "Call to {s} {s}::__construct() from scope {s}", .{ vis, lookup.owner.name, s.name })
+                    else
+                        try std.fmt.allocPrint(allocator, "Call to {s} {s}::__construct() from global scope", .{ vis, lookup.owner.name });
+                    defer allocator.free(msg);
+                    // 对象未交出 ⇒ 工厂引用归还（同下方构造器抛错支 :32236 先例）
+                    obj_val.release(allocator);
+                    return throwThrowable("Error", msg, allocator);
+                }
+            }
             const guard = ClassContext.init(m, lookup.owner);
             defer guard.deinit();
             _ = lookup.method.func(obj_val, args, allocator) catch |err| {
@@ -35326,7 +36231,7 @@ pub fn php_array_splice(arr: Value, offset: Value, length: Value, replacement: V
     };
 
     const delete_count: usize = blk: {
-        if (length.isNull()) break :blk n - start_idx;
+        if (length.isNull() or length.isMissing()) break :blk n - start_idx;
         const len_i = length.toInt();
         if (len_i >= 0) break :blk @min(@as(usize, @intCast(len_i)), n - start_idx);
         const abs_len = @as(usize, @intCast(@abs(len_i)));
@@ -35341,7 +36246,7 @@ pub fn php_array_splice(arr: Value, offset: Value, length: Value, replacement: V
     defer allocator.free(items);
 
     var rep_values: ?[]Value = null;
-    if (!replacement.isNull()) {
+    if (!replacement.isNull() and !replacement.isMissing()) {
         if (replacement.isArray()) {
             const rep_arr = replacement.asArray();
             const rep_n = rep_arr.count();
@@ -38258,6 +39163,7 @@ fn jsonEncodeValuePretty(value: Value, buffer: *std.ArrayListUnmanaged(u8), allo
 const json_error_none: i32 = 0;
 const json_error_depth: i32 = 1;
 const json_error_syntax: i32 = 4;
+const json_error_utf8: i32 = 5;
 /// ★F-218：纯 enum json_encode ⇒ PHP 的 JSON_ERROR_NON_BACKED_ENUM = 11
 const json_error_non_backed_enum: i32 = 11;
 
@@ -39957,57 +40863,10 @@ pub fn php_vsprintf(format: Value, args_arr: Value, allocator: Allocator) !Value
     return php_sprintf(format, &[_]Value{}, allocator);
 }
 
-pub fn php_sscanf(str: Value, format: Value, allocator: Allocator) !Value {
-    if (!str.isString() or !format.isString()) return Value.initBool(false);
-
-    const input = str.asString().data;
-    const fmt = format.asString().data;
-
-    var arr = try PHPArray.init(allocator);
-    var input_pos: usize = 0;
-    var fmt_pos: usize = 0;
-
-    while (fmt_pos < fmt.len and input_pos < input.len) {
-        if (fmt[fmt_pos] == '%' and fmt_pos + 1 < fmt.len) {
-            fmt_pos += 1;
-            const spec = fmt[fmt_pos];
-            fmt_pos += 1;
-
-            // 跳过空白
-            while (input_pos < input.len and input[input_pos] == ' ') input_pos += 1;
-
-            if (spec == 'd') {
-                // 解析整数
-                var num: i64 = 0;
-                var neg = false;
-                if (input_pos < input.len and input[input_pos] == '-') {
-                    neg = true;
-                    input_pos += 1;
-                }
-                while (input_pos < input.len and input[input_pos] >= '0' and input[input_pos] <= '9') {
-                    num = num * 10 + (input[input_pos] - '0');
-                    input_pos += 1;
-                }
-                if (neg) num = -num;
-                try arr.push(allocator, Value.initInt(num));
-            } else if (spec == 's') {
-                // 解析字符串（到空白）
-                const start = input_pos;
-                while (input_pos < input.len and input[input_pos] != ' ') input_pos += 1;
-                const s = try allocator.dupe(u8, input[start..input_pos]);
-                const php_str = try PHPString.init(allocator, s);
-                try arr.push(allocator, Value.initString(php_str));
-            }
-        } else {
-            // 匹配字面字符
-            if (input_pos < input.len and input[input_pos] == fmt[fmt_pos]) {
-                input_pos += 1;
-            }
-            fmt_pos += 1;
-        }
-    }
-
-    return Value.initArray(arr);
+/// sscanf 直调面入口（★P0 批次二十四续：切片签名，php_fprintf/php_fscanf 同族打包；
+///   旧定参实现（仅 %d/%s、无 by-ref、无 EOF 口径）由共享核 q4FscanfParse 全量替代）。
+pub fn php_sscanf(args: []const Value, allocator: Allocator) !Value {
+    return wrapBuiltin_sscanf(Value.initNull(), args, allocator);
 }
 
 /// preg_match / preg_match_all 的 offset 形参折算（PHP 8.5.8 实测）：

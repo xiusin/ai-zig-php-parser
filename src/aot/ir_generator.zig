@@ -222,7 +222,11 @@ pub const IRGenerator = struct {
     ///   引用形参直传其指针（不二次 make_ref）；全局/顶层静默读当前值（F-146-c）；
     ///   未声明变量静默 null 起（批十五 by-ref 语境 vivify 口径）。从 generateFunctionCall 的
     ///   引用参数形制抽出，供 `$f($v)` 变量调用面与命名通道 by-ref 面复用（DRY）。
-    fn emitTempVarRef(self: *Self, var_name: []const u8, ref_writebacks: *std.ArrayListUnmanaged(RefWriteback)) !Register {
+    /// ★P2-3：`undef_to_missing=true`（仅变量调用面 :8520）：未定义实参 ⇒ temp 填 missing +
+    ///   FIFO 注名（运行时按被调签名分流：by-value 告警+null、by-ref 静默 vivify）。
+    ///   main/顶层面经 `php_q4_undef_temp`（全局表存在性运行时判别）；
+    ///   函数内编译期确知未声明 ⇒ `const_missing` + `php_q4_undef_note` 直注。
+    fn emitTempVarRef(self: *Self, var_name: []const u8, ref_writebacks: *std.ArrayListUnmanaged(RefWriteback), undef_to_missing: bool) !Register {
         // 变量本身是引用形参 ⇒ 直传其指针
         if (self.reference_params.contains(var_name)) {
             if (self.getVarRegister(var_name)) |var_reg| return var_reg;
@@ -242,13 +246,32 @@ pub const IRGenerator = struct {
         try self.entry_allocas.append(self.allocator, alloca_inst);
         const is_global_wb = self.global_vars.contains(var_name) or std.mem.eql(u8, func.name, "__main__");
         if (is_global_wb) {
-            const current_val = try self.emitWithResult(.{ .global_get = .{ .name = var_name, .no_warn = true } }, .php_value);
-            _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = current_val } }, null);
+            if (undef_to_missing) {
+                // main/全局：运行时查存在性（存在 ⇒ 现值；不存在 ⇒ missing + 注名）
+                const name_reg = try self.emitWithResult(.{ .const_string = try self.module.?.internString(var_name) }, .php_value);
+                const note_args = try self.allocator.alloc(Register, 1);
+                note_args[0] = name_reg;
+                const temp_val = try self.emitWithResult(.{ .call = .{ .func_name = "php_q4_undef_temp", .args = note_args, .return_type = .php_value } }, .php_value);
+                _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = temp_val } }, null);
+            } else {
+                const current_val = try self.emitWithResult(.{ .global_get = .{ .name = var_name, .no_warn = true } }, .php_value);
+                _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = current_val } }, null);
+            }
         } else if (self.getVarRegister(var_name)) |var_reg| {
             _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = var_reg } }, null);
         } else {
-            const null_val = try self.emitWithResult(.{ .const_null = {} }, .php_value);
-            _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = null_val } }, null);
+            if (undef_to_missing) {
+                // 函数内编译期确知未声明 ⇒ missing + 注名（名字 intern 静态存活）
+                const miss_val = try self.emitWithResult(.{ .const_missing = {} }, .php_value);
+                _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = miss_val } }, null);
+                const name_reg = try self.emitWithResult(.{ .const_string = try self.module.?.internString(var_name) }, .php_value);
+                const note_args = try self.allocator.alloc(Register, 1);
+                note_args[0] = name_reg;
+                _ = try self.emitWithResult(.{ .call = .{ .func_name = "php_q4_undef_note", .args = note_args, .return_type = .php_value } }, .php_value);
+            } else {
+                const null_val = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                _ = try self.emit(.{ .store = .{ .ptr = temp_reg, .value = null_val } }, null);
+            }
         }
         const ref_reg = try self.emitWithResult(.{ .make_ref = .{ .ptr = temp_reg } }, .php_value);
         try ref_writebacks.append(self.allocator, .{ .var_name = var_name, .temp_reg = temp_reg });
@@ -257,12 +280,27 @@ pub const IRGenerator = struct {
 
     /// ★Q3：纯变量写回（emitTempVarRef 登记的配套；数组/属性形不在此列）。
     ///   供两条早退支路复用：变量调用 `call_indirect`（:8936 区）与命名数组通道早退。
+    /// ★P2-3：missing（未定义变量 by-value 吸收）⇒ 跳过写回（不 vivify）——条件块分流。
     fn emitPlainVarWritebacks(self: *Self, ref_writebacks: []const RefWriteback) !void {
         for (ref_writebacks) |wb| {
             const wb_is_global = self.global_vars.contains(wb.var_name) or
                 (if (self.current_function) |func| std.mem.eql(u8, func.name, "__main__") else false);
             const new_val = try self.emitWithResult(.{ .load = .{ .ptr = wb.temp_reg, .type_ = .php_value, .no_deref = wb_is_global } }, .php_value);
+            // missing 守卫：missing ⇒ 跳过；否则写回——条件块分流。
+            // 形状取「无 else 的 if」（then=do, else=cont，do br cont ⇒ else 即 merge）：
+            // 与 generateIfStmt 无 else 分支同构，nlk 边界算法的已验证路径；
+            // 三块（含空 skip）会被 optimizer 合并成 else 物理先于 then 的两块形，越出其支持面。
+            const is_miss_args = try self.allocator.alloc(Register, 1);
+            is_miss_args[0] = new_val;
+            const is_miss = try self.emitWithResult(.{ .call = .{ .func_name = "php_q4_is_missing", .args = is_miss_args, .return_type = .bool } }, .bool);
+            const can_write = try self.emitWithResult(.{ .not = .{ .operand = is_miss } }, .bool);
+            const do_block = try self.createBlock("wb_do");
+            const cont_block = try self.createBlock("wb_cont");
+            self.setTerminator(.{ .cond_br = .{ .cond = can_write, .then_block = do_block, .else_block = cont_block } });
+            self.setCurrentBlock(do_block);
             try self.emitRefWritebackTarget(wb.var_name, new_val);
+            self.setTerminator(.{ .br = cont_block });
+            self.setCurrentBlock(cont_block);
         }
     }
 
@@ -8205,7 +8243,7 @@ pub const IRGenerator = struct {
                 if (byref_hit and val_node != null and val_node.?.tag == .variable) {
                     const var_name = self.getString(val_node.?.data.variable.name);
                     if (!std.mem.eql(u8, var_name, "this")) {
-                        const ref_reg = try self.emitTempVarRef(var_name, &ref_writebacks);
+                        const ref_reg = try self.emitTempVarRef(var_name, &ref_writebacks, false);
                         if (is_named) {
                             const raw_name = self.getString(arg_node.data.named_arg.name);
                             const arg_name = if (raw_name.len > 0 and raw_name[0] == '$') raw_name[1..] else raw_name;
@@ -8259,6 +8297,8 @@ pub const IRGenerator = struct {
 
             // 获取内建函数的引用参数信息
             const builtin_ref_params = if (func_name.len > 0) NativeLinker.getBuiltinRefParams(func_name) else &[_]u8{};
+            // ★P2-4：变参 by-ref（fscanf `&...$vars`）——该下标起所有位按 Ref 处理
+            const builtin_ref_variadic_from = if (func_name.len > 0) NativeLinker.getBuiltinRefVariadicFrom(func_name) else null;
 
             args = try self.allocator.alloc(Register, call_data.args.len);
             for (call_data.args, 0..) |arg_idx, i| {
@@ -8280,6 +8320,10 @@ pub const IRGenerator = struct {
                     // 再检查内建函数引用参数
                     for (builtin_ref_params) |ref_idx| {
                         if (ref_idx == i) break :blk true;
+                    }
+                    // 变参 by-ref：下标 >= ref_variadic_from 全按 Ref
+                    if (builtin_ref_variadic_from) |from| {
+                        if (i >= from) break :blk true;
                     }
                     break :blk false;
                 };
@@ -8510,7 +8554,7 @@ pub const IRGenerator = struct {
                 if (indirect_callee != null and arg_node != null and arg_node.?.tag == .variable) {
                     const var_name = self.getString(arg_node.?.data.variable.name);
                     if (!std.mem.eql(u8, var_name, "this")) {
-                        args[i] = try self.emitTempVarRef(var_name, &ref_writebacks);
+                        args[i] = try self.emitTempVarRef(var_name, &ref_writebacks, true);
                         continue;
                     }
                 }
@@ -8543,14 +8587,14 @@ pub const IRGenerator = struct {
                     const padded = try self.allocator.alloc(Register, 3);
                     padded[0] = args[0];
                     padded[1] = args[1];
-                    padded[2] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    padded[2] = try self.emitWithResult(.{ .const_missing = {} }, .php_value);
                     args = padded;
                 }
             } else if (std.mem.eql(u8, func_name, "trim") or std.mem.eql(u8, func_name, "ltrim") or std.mem.eql(u8, func_name, "rtrim")) {
                 if (args.len == 1) {
                     const padded = try self.allocator.alloc(Register, 2);
                     padded[0] = args[0];
-                    padded[1] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    padded[1] = try self.emitWithResult(.{ .const_missing = {} }, .php_value);
                     args = padded;
                 }
             } else if (std.mem.eql(u8, func_name, "preg_match")) {
@@ -8769,7 +8813,7 @@ pub const IRGenerator = struct {
                 if (args.len == 1) {
                     const padded = try self.allocator.alloc(Register, 2);
                     padded[0] = args[0];
-                    padded[1] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    padded[1] = try self.emitWithResult(.{ .const_missing = {} }, .php_value);
                     args = padded;
                 }
             } else if (std.mem.eql(u8, func_name, "explode")) {
@@ -8777,7 +8821,7 @@ pub const IRGenerator = struct {
                     const padded = try self.allocator.alloc(Register, 3);
                     padded[0] = args[0];
                     padded[1] = args[1];
-                    padded[2] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    padded[2] = try self.emitWithResult(.{ .const_missing = {} }, .php_value);
                     args = padded;
                 }
             } else if (std.mem.eql(u8, func_name, "str_replace") or std.mem.eql(u8, func_name, "str_ireplace")) {
@@ -8786,7 +8830,7 @@ pub const IRGenerator = struct {
                     padded[0] = args[0];
                     padded[1] = args[1];
                     padded[2] = args[2];
-                    padded[3] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    padded[3] = try self.emitWithResult(.{ .const_missing = {} }, .php_value);
                     args = padded;
                 }
             } else if (std.mem.eql(u8, func_name, "strtr")) {
@@ -8795,7 +8839,7 @@ pub const IRGenerator = struct {
                     const padded = try self.allocator.alloc(Register, 3);
                     padded[0] = args[0];
                     padded[1] = args[1];
-                    padded[2] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    padded[2] = try self.emitWithResult(.{ .const_missing = {} }, .php_value);
                     args = padded;
                 }
             } else if (std.mem.eql(u8, func_name, "mb_strpos")) {
@@ -8806,22 +8850,22 @@ pub const IRGenerator = struct {
                     const padded = try self.allocator.alloc(Register, 4);
                     padded[0] = args[0];
                     padded[1] = args[1];
-                    padded[2] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
-                    padded[3] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    padded[2] = try self.emitWithResult(.{ .const_missing = {} }, .php_value);
+                    padded[3] = try self.emitWithResult(.{ .const_missing = {} }, .php_value);
                     args = padded;
                 } else if (args.len == 3) {
                     const padded = try self.allocator.alloc(Register, 4);
                     padded[0] = args[0];
                     padded[1] = args[1];
                     padded[2] = args[2];
-                    padded[3] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    padded[3] = try self.emitWithResult(.{ .const_missing = {} }, .php_value);
                     args = padded;
                 }
             } else if (std.mem.eql(u8, func_name, "ucwords")) {
                 if (args.len == 1) {
                     const padded = try self.allocator.alloc(Register, 2);
                     padded[0] = args[0];
-                    padded[1] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    padded[1] = try self.emitWithResult(.{ .const_missing = {} }, .php_value);
                     args = padded;
                 }
             } else if (std.mem.eql(u8, func_name, "str_split") or std.mem.eql(u8, func_name, "mb_str_split")) {
@@ -8878,7 +8922,7 @@ pub const IRGenerator = struct {
                 if (args.len == 1) {
                     const padded = try self.allocator.alloc(Register, 2);
                     padded[0] = args[0];
-                    padded[1] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    padded[1] = try self.emitWithResult(.{ .const_missing = {} }, .php_value);
                     args = padded;
                 }
             } else if (std.mem.eql(u8, func_name, "htmlspecialchars") or std.mem.eql(u8, func_name, "htmlentities")) {
@@ -8937,7 +8981,7 @@ pub const IRGenerator = struct {
                     const padded = try self.allocator.alloc(Register, 3);
                     padded[0] = args[0];
                     padded[1] = args[1];
-                    padded[2] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                    padded[2] = try self.emitWithResult(.{ .const_missing = {} }, .php_value);
                     args = padded;
                 }
             } else if (std.mem.eql(u8, func_name, "array_splice")) {

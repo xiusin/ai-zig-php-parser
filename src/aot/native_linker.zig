@@ -2266,6 +2266,12 @@ pub const NativeLinker = struct {
             \\    return global_vars.get(name) != null;
             \\}
             \\
+            \\/// ★P2-3：main 面「未定义实参」的运行时判别钩子（runtime.q4_global_lookup 挂载点）
+            \\pub fn q4GlobalLookupForUndef(name: []const u8) ?runtime.Value {
+            \\    if (!globalVarIsDefined(name)) return null;
+            \\    return getGlobalVarNoWarn(name);
+            \\}
+            \\
             \\// 返回全局变量表存储槽的 *Value 指针（无 retain），用于 byref 数组内置函数（如
             \\// array_shift/array_pop）就地修改并持久化。未定义或为常量时返回 null。
             \\pub fn getGlobalVarPtrRaw(name: []const u8) ?*runtime.Value {
@@ -2401,6 +2407,7 @@ pub const NativeLinker = struct {
             \\
             \\    try runtime.initRuntime(allocator);
             \\    defer runtime.deinitRuntime();
+            \\    runtime.q4_global_lookup = q4GlobalLookupForUndef;
             \\
             \\    // 初始化全局变量表
             \\    global_vars = std.StringHashMap(runtime.Value).init(allocator);
@@ -2649,6 +2656,26 @@ pub const NativeLinker = struct {
             try writer.writeAll("\", \"");
             try writeEscapedZigString(writer, func.location.file);
             try writer.print("\", {d});\n", .{func.location.line});
+            // ★P2-3：by-ref 形参下标表（变量调用面 missing 分流判定源；仅有 by-ref 时才发射，零开销）
+            {
+                var ref_count: usize = 0;
+                for (func.params.items) |p| {
+                    if (p.is_reference) ref_count += 1;
+                }
+                if (ref_count > 0) {
+                    try writer.writeAll("    runtime.registerFunctionRefParams(\"");
+                    try writeEscapedZigString(writer, func.name);
+                    try writer.writeAll("\", &[_]u16{");
+                    var first_ref = true;
+                    for (func.params.items, 0..) |p, i| {
+                        if (!p.is_reference) continue;
+                        if (!first_ref) try writer.writeAll(", ");
+                        try writer.print("{d}", .{i});
+                        first_ref = false;
+                    }
+                    try writer.writeAll("});\n");
+                }
+            }
             // 注册函数元数据（参数计数，用于反射 API）
             const param_count = func.params.items.len;
             var required_count: usize = 0;
@@ -4575,6 +4602,9 @@ pub const NativeLinker = struct {
         needs_allocator: bool,
         may_raise: bool = true,
         ref_params: []const u8 = &[_]u8{}, // indices of reference parameters (1-based for optional params)
+        /// ★P2-4：变参 by-ref（`&...$vars`）表达——该下标起**所有位**按 Ref 处理（fscanf 等）。
+        ///   与 `ref_params` 取并集；null ＝ 无变参 by-ref。
+        ref_variadic_from: ?u8 = null,
         /// ★F-75：该 handler 的**位置形参总数**（不含 `allocator`）。`0` ＝ 未声明 ⇒ 发射器完全不介入（旧行为）。
         ///   声明后，通用尾支会在 `op.args.len` 落在 [必填数, handler_params) 区间时逐个补 `optional_defaults[i]`。
         handler_params: u8 = 0,
@@ -4599,6 +4629,12 @@ pub const NativeLinker = struct {
     pub fn getBuiltinRefParams(func_name: []const u8) []const u8 {
         if (builtinInfo(func_name)) |info| return info.ref_params;
         return &[_]u8{};
+    }
+
+    /// ★P2-4：变参 by-ref 起始下标（fscanf `&...$vars` 等）；null ＝ 无。
+    pub fn getBuiltinRefVariadicFrom(func_name: []const u8) ?u8 {
+        if (builtinInfo(func_name)) |info| return info.ref_variadic_from;
+        return null;
     }
 
     const builtin_map = std.StaticStringMap(BuiltinInfo).initComptime(@as([]const struct { []const u8, BuiltinInfo }, &.{
@@ -4817,7 +4853,14 @@ pub const NativeLinker = struct {
         .{ "sprintf", bi(.{ .runtime_name = "php_sprintf", .needs_allocator = true }) },
         .{ "register_shutdown_function", bi(.{ .runtime_name = "php_register_shutdown_function", .needs_allocator = true }) },
         .{ "vsprintf", bi(.{ .runtime_name = "php_vsprintf", .needs_allocator = true }) },
-        .{ "sscanf", .{ .runtime_name = "php_sscanf", .needs_allocator = true } },
+        // ★P0（批次二十四续）：sscanf 重修照 fscanf 通路——切片签名 + 变参 by-ref（#3 起全 Ref）；
+        //   消「带 vars 直调编译炸」（定参 3 vs 实参 N）既有缺口。
+        .{ "sscanf", bi(.{ .runtime_name = "php_sscanf", .needs_allocator = true, .ref_variadic_from = 2 }) },
+        // ★P2-4：fscanf——切片签名（php_fprintf 同族打包）+ 变参 by-ref（#3 起全 Ref）。
+        .{ "fscanf", bi(.{ .runtime_name = "php_fscanf", .needs_allocator = true, .ref_variadic_from = 2 }) },
+        // ★批次二十六：stream_get_contents——offset 缺省⇒不 seek（missing 哨兵区分缺省与显式 0）。
+        .{ "stream_get_contents", bi(.{ .runtime_name = "php_stream_get_contents", .needs_allocator = true, .handler_params = 3, .optional_defaults = &.{ "runtime.Value.initNull()", "runtime.Value.initMissing()" } }) },
+        .{ "fflush", bi(.{ .runtime_name = "php_fflush", .needs_allocator = false }) },
         .{ "preg_match", .{ .runtime_name = "php_preg_match", .needs_allocator = true } },
         .{ "preg_match_all", .{ .runtime_name = "php_preg_match_all", .needs_allocator = true } },
         // ★批次十五：同 :4740 条目（双注册点同步）
@@ -5263,6 +5306,10 @@ pub const NativeLinker = struct {
         .{ "php_arity_too_few_v", bi(.{ .runtime_name = "php_arity_too_few_v", .needs_allocator = false, .may_raise = true }) },
         .{ "php_arity_not_passed_v", bi(.{ .runtime_name = "php_arity_not_passed_v", .needs_allocator = false, .may_raise = true }) },
         .{ "php_throw_could_not_pass_byref", bi(.{ .runtime_name = "php_throw_could_not_pass_byref", .needs_allocator = false, .may_raise = true }) },
+        // ★P2-3：变量调用面未定义实参分流三件套（missing 标记/注名/判定）
+        .{ "php_q4_undef_temp", bi(.{ .runtime_name = "php_q4_undef_temp", .needs_allocator = false, .may_raise = false }) },
+        .{ "php_q4_undef_note", bi(.{ .runtime_name = "php_q4_undef_note", .needs_allocator = false, .may_raise = false }) },
+        .{ "php_q4_is_missing", bi(.{ .runtime_name = "php_q4_is_missing", .needs_allocator = false, .may_raise = false }) },
         // ★Q3：保 Ref 数组存/推（by-ref 写回链路）
         .{ "php_array_set_keep_ref", bi(.{ .runtime_name = "php_array_set_keep_ref", .needs_allocator = true, .may_raise = true }) },
         .{ "php_array_push_keep_ref", bi(.{ .runtime_name = "php_array_push_keep_ref", .needs_allocator = true, .may_raise = true }) },
@@ -5621,7 +5668,11 @@ pub const NativeLinker = struct {
                                     const pidx_str = try std.fmt.allocPrint(self.allocator, "{d}", .{pidx});
                                     defer self.allocator.free(pidx_str);
                                     try code.appendSlice(self.allocator, pidx_str);
-                                    try code.appendSlice(self.allocator, ") {\n");
+                                    // ★P2-2b：missing 哨兵（命名绑定跳过的缺省形参）不查类型——
+                                    //   PHP 语义此时用默认值（编译期合法），旧码把 missing 送检查 ⇒ 「unknown given」误炸
+                                    try code.appendSlice(self.allocator, " and !args[");
+                                    try code.appendSlice(self.allocator, pidx_str);
+                                    try code.appendSlice(self.allocator, "].isMissing()) {\n");
                                     try code.appendSlice(self.allocator, "        try runtime.php_check_param_type(\"");
                                     try code.appendSlice(self.allocator, escaped_prof_name);
                                     try code.appendSlice(self.allocator, "\", ");
@@ -5663,7 +5714,10 @@ pub const NativeLinker = struct {
                 const pidx_str = try std.fmt.allocPrint(self.allocator, "{d}", .{pidx});
                 defer self.allocator.free(pidx_str);
                 try code.appendSlice(self.allocator, pidx_str);
-                try code.appendSlice(self.allocator, ") {\n");
+                // ★P2-2b：同方法支——missing 哨兵不查类型（缺省形参跳位是合法命名绑定形）
+                try code.appendSlice(self.allocator, " and !args[");
+                try code.appendSlice(self.allocator, pidx_str);
+                try code.appendSlice(self.allocator, "].isMissing()) {\n");
                 try code.appendSlice(self.allocator, "        try runtime.php_check_param_type(\"");
                 try code.appendSlice(self.allocator, escaped_prof_name);
                 try code.appendSlice(self.allocator, "\", ");
@@ -21776,7 +21830,9 @@ pub const NativeLinker = struct {
         args: []const IR.Register,
         func_name: []const u8,
     ) !void {
-        try self.writeValueArgs(writer, args);
+        // ★Deprecated-null（批次二十六续）：守卫下沉 writeDepNullArg 公共点（writeValueArgsNamed），
+        //   覆盖 writeBuiltinArgs 之外的直写特殊支（array_* 切片传参等）。
+        try self.writeValueArgsNamed(writer, args, func_name, 0);
         const info = builtinInfo(func_name) orelse return;
         const total: usize = info.handler_params;
         // ★R-207：旧条件带 `args.len == 0 ⇒ return`，把"全可选形参"的 0 实参调用（http_response_code()/
@@ -21796,16 +21852,76 @@ pub const NativeLinker = struct {
         }
     }
 
+    /// ★Deprecated-null（批次二十六续）：写参公共守卫——反射表命中且该位「非 by-ref、
+    ///   非 nullable、类型含标量成员」⇒ 包装 `runtime.q4DepNull(reg, fn, idx, name, type, alloc)` 并返回 true；
+    ///   否则写原样 `writeRegRef` 并返回 false。writeValueArgs / writeValueArgsArrayWithRefsOffset 共用。
+    fn writeDepNullArg(self: *Self, writer: anytype, arg: IR.Register, func_name: ?[]const u8, param_idx: usize) !bool {
+        const fname = func_name orelse {
+            try self.writeRegRef(writer, arg.id);
+            return false;
+        };
+        var lbuf: [64]u8 = undefined;
+        const canon: []const u8 = if (fname.len <= 64) std.ascii.lowerString(&lbuf, fname) else fname;
+        const ps = builtin_param_table.table.get(canon) orelse {
+            try self.writeRegRef(writer, arg.id);
+            return false;
+        };
+        // 变参位类型继承变参声明位
+        var variadic_p: ?builtin_param_table.Param = null;
+        for (ps) |p| {
+            if (p.variadic) {
+                variadic_p = p;
+                break;
+            }
+        }
+        const pp: ?builtin_param_table.Param = if (param_idx < ps.len) ps[param_idx] else variadic_p;
+        const p = pp orelse {
+            try self.writeRegRef(writer, arg.id);
+            return false;
+        };
+        if (p.by_ref or p.nullable or p.type_name.len == 0) {
+            try self.writeRegRef(writer, arg.id);
+            return false;
+        }
+        // 类型须含标量成员（与运行期 q4DepNull 同口径；编译期先剪一轮省生成码）
+        var has_scalar = false;
+        var it = std.mem.splitScalar(u8, p.type_name, '|');
+        while (it.next()) |m| {
+            if (std.mem.eql(u8, m, "string") or std.mem.eql(u8, m, "int") or std.mem.eql(u8, m, "float") or std.mem.eql(u8, m, "bool")) {
+                has_scalar = true;
+                break;
+            }
+        }
+        if (!has_scalar) {
+            try self.writeRegRef(writer, arg.id);
+            return false;
+        }
+        try writer.print("runtime.q4DepNull(", .{});
+        try self.writeRegRef(writer, arg.id);
+        try writer.print(", \"{s}\", {d}, \"{s}\", \"{s}\", runtime.runtime_allocator)", .{ canon, param_idx + 1, p.name, p.type_name });
+        return true;
+    }
+
     fn writeValueArgs(
         self: *Self,
         writer: anytype,
         args: []const IR.Register,
     ) !void {
+        try self.writeValueArgsNamed(writer, args, null, 0);
+    }
+
+    /// writeValueArgs + Deprecated-null 守卫（func_name 供反射表查询；null ⇒ 不守卫；
+    ///   param_offset 供切片形态（op.args[1..] 等）校正形参位次）
+    fn writeValueArgsNamed(
+        self: *Self,
+        writer: anytype,
+        args: []const IR.Register,
+        func_name: ?[]const u8,
+        param_offset: usize,
+    ) !void {
         for (args, 0..) |arg, i| {
             if (i > 0) try writer.writeAll(", ");
-
-            // 使用 writeRegRef 处理 alloca 解引用
-            try self.writeRegRef(writer, arg.id);
+            _ = try self.writeDepNullArg(writer, arg, func_name, i + param_offset);
         }
     }
 
@@ -21815,6 +21931,17 @@ pub const NativeLinker = struct {
         args: []const IR.Register,
     ) !void {
         return self.writeValueArgsArrayWithRefs(writer, args, null, &[_]u32{});
+    }
+
+    /// writeValueArgsArray + Deprecated-null 守卫（func_name 透传公共核；param_offset 供 [1..] 等切片校正）
+    fn writeValueArgsArrayNamed(
+        self: *Self,
+        writer: anytype,
+        args: []const IR.Register,
+        func_name: ?[]const u8,
+        param_offset: u32,
+    ) !void {
+        return self.writeValueArgsArrayWithRefsOffset(writer, args, func_name, &[_]u32{}, param_offset);
     }
 
     fn writeStrGetcsvArgs(
@@ -21872,8 +21999,6 @@ pub const NativeLinker = struct {
         ref_params: []const u32,
         param_offset: u32,
     ) !void {
-        _ = func_name;
-
         try writer.writeAll("&[_]runtime.Value{");
         if (args.len > 0) {
             for (args, 0..) |arg, i| {
@@ -21925,12 +22050,12 @@ pub const NativeLinker = struct {
                             try writer.print("runtime.Value.initRef(&reg_{d})", .{arg.id});
                         } else {
                             // 普通值：按值传递（fallback）
-                            try self.writeRegRef(writer, arg.id);
+                            _ = try self.writeDepNullArg(writer, arg, func_name, adjusted_idx);
                         }
                     }
                 } else {
                     // 普通参数
-                    try self.writeRegRef(writer, arg.id);
+                    _ = try self.writeDepNullArg(writer, arg, func_name, adjusted_idx);
                 }
             }
         }
@@ -25239,7 +25364,7 @@ pub const NativeLinker = struct {
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                 if (op.args.len >= 2) {
                                     // 前2个参数正常传递
-                                    try self.writeValueArgs(writer, op.args[0..2]);
+                                    try self.writeValueArgsNamed(writer, op.args[0..2], op.func_name, 0);
                                     try writer.writeAll(", ");
 
                                     // 第3个参数matches（引用）
@@ -25327,7 +25452,7 @@ pub const NativeLinker = struct {
                                 // preg_match_all与preg_match相同处理
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                 if (op.args.len >= 2) {
-                                    try self.writeValueArgs(writer, op.args[0..2]);
+                                    try self.writeValueArgsNamed(writer, op.args[0..2], op.func_name, 0);
                                     try writer.writeAll(", ");
 
                                     if (op.args.len >= 3) {
@@ -25383,7 +25508,7 @@ pub const NativeLinker = struct {
                                 if (op.args.len >= 3) {
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_preg_match(", .{});
                                     // 前2个参数正常传递
-                                    try self.writeValueArgs(writer, op.args[0..2]);
+                                    try self.writeValueArgsNamed(writer, op.args[0..2], op.func_name, 0);
                                     try writer.writeAll(", ");
                                     // 第3个参数：引用参数
                                     const matches_arg = op.args[2];
@@ -25402,17 +25527,17 @@ pub const NativeLinker = struct {
                                 } else {
                                     // 参数不足，fallback
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.php_preg_match(", .{});
-                                    try self.writeValueArgs(writer, op.args);
+                                    try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                     try writer.writeAll(", blk: { var tmp = runtime.Value.initNull(); break :blk &tmp; }, runtime.Value.initInt(0), runtime.Value.initInt(0), runtime.runtime_allocator);\n");
                                 }
                             } else if (std.mem.eql(u8, runtime_name, "php_max") or std.mem.eql(u8, runtime_name, "php_min")) {
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                try self.writeValueArgsArray(writer, op.args);
+                                try self.writeValueArgsArrayNamed(writer, op.args, op.func_name, 0);
                                 try writer.writeAll(");\n");
                             } else if (std.mem.eql(u8, runtime_name, "php_in_array")) {
                                 // in_array(needle, haystack, strict = false)
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                try self.writeValueArgs(writer, op.args);
+                                try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                 if (op.args.len < 3) {
                                     try writer.writeAll(", runtime.Value.initBool(false)");
                                 }
@@ -25441,7 +25566,7 @@ pub const NativeLinker = struct {
                                 // range(start, end, step=1)
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                 if (op.args.len > 0) {
-                                    try self.writeValueArgs(writer, op.args);
+                                    try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                     if (op.args.len == 2) {
                                         try writer.writeAll(", runtime.Value.initInt(1)");
                                     }
@@ -25453,7 +25578,7 @@ pub const NativeLinker = struct {
                                 // array_reverse(arr, preserve_keys=false)
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                 if (op.args.len > 0) {
-                                    try self.writeValueArgs(writer, op.args);
+                                    try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                     if (op.args.len == 1) {
                                         try writer.writeAll(", runtime.Value.initBool(false)");
                                     }
@@ -25465,7 +25590,7 @@ pub const NativeLinker = struct {
                                 // array_keys(arr, search = null, strict = false)
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                 if (op.args.len > 0) {
-                                    try self.writeValueArgs(writer, op.args);
+                                    try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                     if (op.args.len == 1) {
                                         try writer.writeAll(", runtime.Value.initNull()");
                                     }
@@ -25480,7 +25605,7 @@ pub const NativeLinker = struct {
                                 // array_slice(arr, offset, length=null, preserve_keys=false)
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                 if (op.args.len > 0) {
-                                    try self.writeValueArgs(writer, op.args);
+                                    try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                     if (op.args.len < 3) {
                                         try writer.writeAll(", runtime.Value.initNull()");
                                     }
@@ -25495,7 +25620,7 @@ pub const NativeLinker = struct {
                                 // basename(path, suffix="") - suffix 可选
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                 if (op.args.len > 0) {
-                                    try self.writeValueArgs(writer, op.args);
+                                    try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                     if (op.args.len == 1) {
                                         try writer.writeAll(", runtime.Value.initString(runtime.PHPString.initStatic(\"\"))");
                                     }
@@ -25507,7 +25632,7 @@ pub const NativeLinker = struct {
                                 // dirname(path, levels=1) - levels 可选
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                 if (op.args.len > 0) {
-                                    try self.writeValueArgs(writer, op.args);
+                                    try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                     if (op.args.len == 1) {
                                         try writer.writeAll(", runtime.Value.initInt(1)");
                                     }
@@ -25519,7 +25644,7 @@ pub const NativeLinker = struct {
                                 // pathinfo(path, flags=0) - flags 可选，0 表示返回全部信息
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                 if (op.args.len > 0) {
-                                    try self.writeValueArgs(writer, op.args);
+                                    try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                     if (op.args.len == 1) {
                                         try writer.writeAll(", runtime.Value.initInt(0)");
                                     }
@@ -25531,7 +25656,7 @@ pub const NativeLinker = struct {
                                 // filter_var(value, filter=FILTER_DEFAULT, options=0)
                                 try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                 if (op.args.len > 0) {
-                                    try self.writeValueArgs(writer, op.args);
+                                    try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                     if (op.args.len == 1) {
                                         try writer.writeAll(", runtime.Value.initInt(516), runtime.Value.initInt(0)");
                                     } else if (op.args.len == 2) {
@@ -25547,10 +25672,10 @@ pub const NativeLinker = struct {
                                 if (op.args.len == 0) {
                                     try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull()");
                                 } else if (op.args.len == 1) {
-                                    try self.writeValueArgs(writer, op.args);
+                                    try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                     try writer.writeAll(", runtime.Value.initNull()");
                                 } else {
-                                    try self.writeValueArgs(writer, op.args);
+                                    try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                 }
                                 try writer.writeAll(");\n");
                             } else if (std.mem.eql(u8, runtime_name, "php_log")) {
@@ -25563,7 +25688,7 @@ pub const NativeLinker = struct {
                                     try writer.writeAll(".toFloat()));\n");
                                 } else {
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                    try self.writeValueArgs(writer, op.args);
+                                    try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                     try writer.writeAll(");\n");
                                 }
                             } else if (self.functionNeedsAllocator(op.func_name)) {
@@ -25597,7 +25722,7 @@ pub const NativeLinker = struct {
                                         try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                         try self.writePhpValueExpr(writer, fmt_arg_type, fmt_arg.id);
                                         try writer.writeAll(", ");
-                                        try self.writeValueArgsArray(writer, op.args[1..]);
+                                        try self.writeValueArgsArrayNamed(writer, op.args[1..], op.func_name, 1);
                                         try writer.writeAll(", runtime.runtime_allocator);\n");
                                     }
                                 } else if (std.mem.eql(u8, runtime_name, "php_str_getcsv")) {
@@ -25607,7 +25732,7 @@ pub const NativeLinker = struct {
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     try self.writeStrGetcsvArgs(writer, op.args);
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
-                                } else if (std.mem.eql(u8, runtime_name, "php_array_merge") or std.mem.eql(u8, runtime_name, "php_array_replace") or std.mem.eql(u8, runtime_name, "php_array_intersect") or std.mem.eql(u8, runtime_name, "php_array_diff") or std.mem.eql(u8, runtime_name, "php_array_diff_key") or std.mem.eql(u8, runtime_name, "php_array_diff_assoc") or std.mem.eql(u8, runtime_name, "php_array_intersect_key") or std.mem.eql(u8, runtime_name, "php_array_multisort") or std.mem.eql(u8, runtime_name, "php_compact") or std.mem.eql(u8, runtime_name, "php_array_map") or std.mem.eql(u8, runtime_name, "php_json_decode") or std.mem.eql(u8, runtime_name, "php_func_get_args") or std.mem.eql(u8, runtime_name, "php_memory_get_usage") or std.mem.eql(u8, runtime_name, "php_memory_get_peak_usage") or std.mem.eql(u8, runtime_name, "php_shell_exec") or std.mem.eql(u8, runtime_name, "php_exec") or std.mem.eql(u8, runtime_name, "php_system") or std.mem.eql(u8, runtime_name, "php_substr_replace") or std.mem.eql(u8, runtime_name, "php_function_exists") or std.mem.eql(u8, runtime_name, "php_gc_enable") or std.mem.eql(u8, runtime_name, "php_gc_collect_cycles") or std.mem.eql(u8, runtime_name, "php_ini_get") or std.mem.eql(u8, runtime_name, "php_getrusage") or std.mem.eql(u8, runtime_name, "php_unset") or std.mem.eql(u8, runtime_name, "php_bcadd") or std.mem.eql(u8, runtime_name, "php_bcsub") or std.mem.eql(u8, runtime_name, "php_bcmul") or std.mem.eql(u8, runtime_name, "php_bcdiv") or std.mem.eql(u8, runtime_name, "php_bcmod") or std.mem.eql(u8, runtime_name, "php_bcpow") or std.mem.eql(u8, runtime_name, "php_bcsqrt") or std.mem.eql(u8, runtime_name, "php_bccomp") or std.mem.eql(u8, runtime_name, "php_call_static_dynamic") or std.mem.eql(u8, runtime_name, "php_get_static_property_dynamic") or std.mem.eql(u8, runtime_name, "php_get_class_constant_dynamic") or std.mem.eql(u8, runtime_name, "php_class_constant_read") or std.mem.eql(u8, runtime_name, "php_fprintf") or std.mem.eql(u8, runtime_name, "php_array_merge_recursive") or std.mem.eql(u8, runtime_name, "php_array_replace_recursive") or std.mem.eql(u8, runtime_name, "php_json_validate") or std.mem.eql(u8, runtime_name, "php_gc_disable") or std.mem.eql(u8, runtime_name, "php_gc_status")) {
+                                } else if (std.mem.eql(u8, runtime_name, "php_array_merge") or std.mem.eql(u8, runtime_name, "php_array_replace") or std.mem.eql(u8, runtime_name, "php_array_intersect") or std.mem.eql(u8, runtime_name, "php_array_diff") or std.mem.eql(u8, runtime_name, "php_array_diff_key") or std.mem.eql(u8, runtime_name, "php_array_diff_assoc") or std.mem.eql(u8, runtime_name, "php_array_intersect_key") or std.mem.eql(u8, runtime_name, "php_array_multisort") or std.mem.eql(u8, runtime_name, "php_compact") or std.mem.eql(u8, runtime_name, "php_array_map") or std.mem.eql(u8, runtime_name, "php_json_decode") or std.mem.eql(u8, runtime_name, "php_func_get_args") or std.mem.eql(u8, runtime_name, "php_memory_get_usage") or std.mem.eql(u8, runtime_name, "php_memory_get_peak_usage") or std.mem.eql(u8, runtime_name, "php_shell_exec") or std.mem.eql(u8, runtime_name, "php_exec") or std.mem.eql(u8, runtime_name, "php_system") or std.mem.eql(u8, runtime_name, "php_substr_replace") or std.mem.eql(u8, runtime_name, "php_function_exists") or std.mem.eql(u8, runtime_name, "php_gc_enable") or std.mem.eql(u8, runtime_name, "php_gc_collect_cycles") or std.mem.eql(u8, runtime_name, "php_ini_get") or std.mem.eql(u8, runtime_name, "php_getrusage") or std.mem.eql(u8, runtime_name, "php_unset") or std.mem.eql(u8, runtime_name, "php_bcadd") or std.mem.eql(u8, runtime_name, "php_bcsub") or std.mem.eql(u8, runtime_name, "php_bcmul") or std.mem.eql(u8, runtime_name, "php_bcdiv") or std.mem.eql(u8, runtime_name, "php_bcmod") or std.mem.eql(u8, runtime_name, "php_bcpow") or std.mem.eql(u8, runtime_name, "php_bcsqrt") or std.mem.eql(u8, runtime_name, "php_bccomp") or std.mem.eql(u8, runtime_name, "php_call_static_dynamic") or std.mem.eql(u8, runtime_name, "php_get_static_property_dynamic") or std.mem.eql(u8, runtime_name, "php_get_class_constant_dynamic") or std.mem.eql(u8, runtime_name, "php_class_constant_read") or std.mem.eql(u8, runtime_name, "php_fprintf") or std.mem.eql(u8, runtime_name, "php_fscanf") or std.mem.eql(u8, runtime_name, "php_sscanf") or std.mem.eql(u8, runtime_name, "php_array_merge_recursive") or std.mem.eql(u8, runtime_name, "php_array_replace_recursive") or std.mem.eql(u8, runtime_name, "php_json_validate") or std.mem.eql(u8, runtime_name, "php_gc_disable") or std.mem.eql(u8, runtime_name, "php_gc_status")) {
                                     // ★批次十四：名单站接球（array_map 回调 throw 可捕获）——
                                     //   与本批 array_filter 支（:25572）及批次十三三处通用尾站同一 helper；
                                     //   名单内 may_raise=false 成员（memory_*/exec/system/gc 等）保持旧形。
@@ -25615,12 +25740,12 @@ pub const NativeLinker = struct {
                                     const nl_may_raise = if (nl_info) |info| info.may_raise else true;
                                     if (nl_may_raise and self.current_exception_handler != null) {
                                         try self.writeRegAssignmentFmt(writer, reg.id, "runtime.{s}(", .{runtime_name});
-                                        try self.writeValueArgsArray(writer, op.args);
+                                        try self.writeValueArgsArrayNamed(writer, op.args, op.func_name, 0);
                                         try writer.writeAll(", runtime.runtime_allocator");
                                         try self.emitBuiltinCallCatchSuffix(writer);
                                     } else {
                                         try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                        try self.writeValueArgsArray(writer, op.args);
+                                        try self.writeValueArgsArrayNamed(writer, op.args, op.func_name, 0);
                                         try writer.writeAll(", runtime.runtime_allocator);\n");
                                     }
                                 } else if (std.mem.eql(u8, runtime_name, "php_array_push") or std.mem.eql(u8, runtime_name, "php_array_unshift")) {
@@ -25632,14 +25757,14 @@ pub const NativeLinker = struct {
                                         try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                         try self.writePhpValueExpr(writer, first_type, first_arg.id);
                                         try writer.writeAll(", ");
-                                        try self.writeValueArgsArray(writer, op.args[1..]);
+                                        try self.writeValueArgsArrayNamed(writer, op.args[1..], op.func_name, 1);
                                         try writer.writeAll(", runtime.runtime_allocator);\n");
                                     }
                                 } else if (std.mem.eql(u8, runtime_name, "php_getdate")) {
                                     // getdate(timestamp = null)
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len > 0) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                     } else {
                                         try writer.writeAll("runtime.Value.initNull()");
                                     }
@@ -25648,9 +25773,9 @@ pub const NativeLinker = struct {
                                     // idate(format, timestamp = null)
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len >= 2) {
-                                        try self.writeValueArgs(writer, op.args[0..2]);
+                                        try self.writeValueArgsNamed(writer, op.args[0..2], op.func_name, 0);
                                     } else if (op.args.len == 1) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         try writer.writeAll(", runtime.Value.initNull()");
                                     } else {
                                         try writer.writeAll("runtime.Value.initNull(), runtime.Value.initNull()");
@@ -25660,7 +25785,7 @@ pub const NativeLinker = struct {
                                     // microtime(get_as_float = false)
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len > 0) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                     } else {
                                         try writer.writeAll("runtime.Value.initBool(false)");
                                     }
@@ -25671,7 +25796,7 @@ pub const NativeLinker = struct {
                                     // date/gmdate(format, timestamp = null)
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len > 0) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         if (op.args.len == 1) {
                                             try writer.writeAll(", runtime.Value.initNull()");
                                         }
@@ -25683,7 +25808,7 @@ pub const NativeLinker = struct {
                                     // strtotime(time_str, now = null)
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len > 0) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         if (op.args.len == 1) {
                                             try writer.writeAll(", runtime.Value.initNull()");
                                         }
@@ -25695,7 +25820,7 @@ pub const NativeLinker = struct {
                                     // count(arr, mode = 0)
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len > 0) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         if (op.args.len == 1) {
                                             try writer.writeAll(", runtime.Value.initInt(0)");
                                         }
@@ -25707,7 +25832,7 @@ pub const NativeLinker = struct {
                                     // array_chunk(arr, size, preserve_keys = false)
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len > 0) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         if (op.args.len == 2) {
                                             try writer.writeAll(", runtime.Value.initBool(false)");
                                         } else if (op.args.len == 1) {
@@ -25719,7 +25844,7 @@ pub const NativeLinker = struct {
                                     // array_rand(arr, num = 1)
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len > 0) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         if (op.args.len == 1) {
                                             try writer.writeAll(", runtime.Value.initInt(1)");
                                         }
@@ -25729,7 +25854,7 @@ pub const NativeLinker = struct {
                                     // json_encode(value, flags = 0, depth = 512)
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len > 0) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         if (op.args.len == 1) {
                                             try writer.writeAll(", runtime.Value.initInt(0), runtime.Value.initInt(512)");
                                         } else if (op.args.len == 2) {
@@ -25743,7 +25868,7 @@ pub const NativeLinker = struct {
                                     // array_column(arr, column_key, index_key = null)
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len >= 2) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         if (op.args.len == 2) {
                                             try writer.writeAll(", runtime.Value.initNull()");
                                         }
@@ -25755,7 +25880,7 @@ pub const NativeLinker = struct {
                                     // extract(arr, flags = EXTR_OVERWRITE, prefix = "")
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len > 0) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         if (op.args.len == 1) {
                                             try writer.writeAll(", runtime.Value.initInt(0), runtime.Value.initString(runtime.PHPString.initStatic(\"\"))");
                                         } else if (op.args.len == 2) {
@@ -25778,7 +25903,7 @@ pub const NativeLinker = struct {
                                         try writer.writeAll(", runtime.runtime_allocator");
                                         if (op.args.len > 1) {
                                             try writer.writeAll(", ");
-                                            try self.writeValueArgs(writer, op.args[1..]);
+                                            try self.writeValueArgsNamed(writer, op.args[1..], op.func_name, 1);
                                         }
                                         try writer.writeAll(");\n");
                                     } else {
@@ -25795,18 +25920,18 @@ pub const NativeLinker = struct {
                                     }
                                     if (op.args.len >= 1) {
                                         // arr 参数
-                                        try self.writeValueArgs(writer, op.args[0..1]);
+                                        try self.writeValueArgsNamed(writer, op.args[0..1], op.func_name, 0);
                                         // callback 参数
                                         if (op.args.len >= 2) {
                                             try writer.writeAll(", ");
-                                            try self.writeValueArgs(writer, op.args[1..2]);
+                                            try self.writeValueArgsNamed(writer, op.args[1..2], op.func_name, 1);
                                         } else {
                                             try writer.writeAll(", runtime.Value.initNull()");
                                         }
                                         // mode 参数
                                         if (op.args.len >= 3) {
                                             try writer.writeAll(", ");
-                                            try self.writeValueArgs(writer, op.args[2..3]);
+                                            try self.writeValueArgsNamed(writer, op.args[2..3], op.func_name, 2);
                                         } else {
                                             try writer.writeAll(", runtime.Value.initInt(0)");
                                         }
@@ -25823,7 +25948,7 @@ pub const NativeLinker = struct {
                                     // hash(algo, data, raw_output=false, allocator)
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len > 0) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         if (op.args.len < 3) {
                                             try writer.writeAll(", runtime.Value.initBool(false)");
                                         }
@@ -25835,23 +25960,23 @@ pub const NativeLinker = struct {
                                     // preg_split(pattern, subject, limit=-1, flags=0, allocator)
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len >= 2) {
-                                        try self.writeValueArgs(writer, op.args[0..2]);
+                                        try self.writeValueArgsNamed(writer, op.args[0..2], op.func_name, 0);
                                         // limit (optional, default -1)
                                         if (op.args.len >= 3) {
                                             try writer.writeAll(", ");
-                                            try self.writeValueArgs(writer, op.args[2..3]);
+                                            try self.writeValueArgsNamed(writer, op.args[2..3], op.func_name, 2);
                                         } else {
                                             try writer.writeAll(", runtime.Value.initInt(-1)");
                                         }
                                         // flags (optional, default 0)
                                         if (op.args.len >= 4) {
                                             try writer.writeAll(", ");
-                                            try self.writeValueArgs(writer, op.args[3..4]);
+                                            try self.writeValueArgsNamed(writer, op.args[3..4], op.func_name, 3);
                                         } else {
                                             try writer.writeAll(", runtime.Value.initInt(0)");
                                         }
                                     } else {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         try writer.writeAll(", runtime.Value.initInt(-1), runtime.Value.initInt(0)");
                                     }
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
@@ -25860,23 +25985,23 @@ pub const NativeLinker = struct {
                                     // ★批次十五：模板补 $count 形参 ⇒ 专列站同补第 5 实参（缺省 null 非 Ref ⇒ 写回跳过）
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len >= 3) {
-                                        try self.writeValueArgs(writer, op.args[0..3]);
+                                        try self.writeValueArgsNamed(writer, op.args[0..3], op.func_name, 0);
                                         // limit (optional, default -1)
                                         if (op.args.len >= 4) {
                                             try writer.writeAll(", ");
-                                            try self.writeValueArgs(writer, op.args[3..4]);
+                                            try self.writeValueArgsNamed(writer, op.args[3..4], op.func_name, 3);
                                         } else {
                                             try writer.writeAll(", runtime.Value.initNull()");
                                         }
                                         // count (optional, by-ref)
                                         if (op.args.len >= 5) {
                                             try writer.writeAll(", ");
-                                            try self.writeValueArgs(writer, op.args[4..5]);
+                                            try self.writeValueArgsNamed(writer, op.args[4..5], op.func_name, 4);
                                         } else {
                                             try writer.writeAll(", runtime.Value.initNull()");
                                         }
                                     } else {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         try writer.writeAll(", runtime.Value.initNull(), runtime.Value.initNull()");
                                     }
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
@@ -25885,7 +26010,7 @@ pub const NativeLinker = struct {
                                     // 函数签名: php_ob_get_status(full_status: Value, allocator: Allocator)
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len >= 1) {
-                                        try self.writeValueArgs(writer, op.args[0..1]);
+                                        try self.writeValueArgsNamed(writer, op.args[0..1], op.func_name, 0);
                                     } else {
                                         try writer.writeAll("runtime.Value.initBool(false)");
                                     }
@@ -25894,7 +26019,7 @@ pub const NativeLinker = struct {
                                     // mb_detect_encoding(str, encodings = null, strict = false)
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len > 0) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         if (op.args.len == 1) {
                                             try writer.writeAll(", runtime.Value.initNull(), runtime.Value.initBool(false)");
                                         } else if (op.args.len == 2) {
@@ -25907,7 +26032,7 @@ pub const NativeLinker = struct {
                                 } else if (std.mem.eql(u8, runtime_name, "php_base64_decode")) {
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len > 0) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         if (op.args.len == 1) {
                                             try writer.writeAll(", runtime.Value.initBool(false)");
                                         }
@@ -25918,7 +26043,7 @@ pub const NativeLinker = struct {
                                 } else if (std.mem.eql(u8, runtime_name, "php_count_chars")) {
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len > 0) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         if (op.args.len == 1) {
                                             try writer.writeAll(", runtime.Value.initInt(0)");
                                         }
@@ -25971,7 +26096,7 @@ pub const NativeLinker = struct {
                                     // 特殊处理：strstr 可选第3参数 before_needle
                                     if (std.mem.eql(u8, runtime_name, "php_strstr")) {
                                         try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         if (op.args.len == 2) {
                                             try writer.writeAll(", runtime.Value.initBool(false)");
                                         }
@@ -25979,7 +26104,7 @@ pub const NativeLinker = struct {
                                     } else if (std.mem.eql(u8, runtime_name, "php_hash_pbkdf2")) {
                                         // hash_pbkdf2(algo, password, salt, iterations, length=0, binary=false, options=[])
                                         try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         if (op.args.len <= 4) {
                                             try writer.writeAll(", runtime.Value.initInt(0), runtime.Value.initBool(false), runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
                                         } else if (op.args.len == 5) {
@@ -25992,14 +26117,14 @@ pub const NativeLinker = struct {
                                         // file_put_contents(filename, data, flags = 0, context = null)　★R-274 四槽
                                         const max_args = @min(op.args.len, 4);
                                         try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                        try self.writeValueArgs(writer, op.args[0..max_args]);
+                                        try self.writeValueArgsNamed(writer, op.args[0..max_args], op.func_name, 0);
                                         if (op.args.len < 3) try writer.writeAll(", runtime.Value.initInt(0)");
                                         if (op.args.len < 4) try writer.writeAll(", runtime.Value.initNull()");
                                         try writer.writeAll(", runtime.runtime_allocator);\n");
                                     } else if (std.mem.eql(u8, runtime_name, "php_str_word_count")) {
                                         // str_word_count(str, format=0, charlist=null, allocator)
                                         try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         if (op.args.len == 1) {
                                             try writer.writeAll(", runtime.Value.initInt(0), runtime.Value.initNull()");
                                         } else if (op.args.len == 2) {
@@ -26011,7 +26136,7 @@ pub const NativeLinker = struct {
                                         try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                         if (op.args.len >= 2) {
                                             // 前2个参数正常传递
-                                            try self.writeValueArgs(writer, op.args[0..2]);
+                                            try self.writeValueArgsNamed(writer, op.args[0..2], op.func_name, 0);
                                             try writer.writeAll(", ");
                                             // 第3个参数matches（引用）
                                             if (op.args.len >= 3) {
@@ -26169,7 +26294,7 @@ pub const NativeLinker = struct {
                                     // round(val, precision=0, mode=0) -> 3 args
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len > 0) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         if (op.args.len == 1) {
                                             try writer.writeAll(", runtime.Value.initNull(), runtime.Value.initNull()");
                                         } else if (op.args.len == 2) {
@@ -26183,7 +26308,7 @@ pub const NativeLinker = struct {
                                     // count(arr, mode = 0)
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len > 0) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         if (op.args.len == 1) {
                                             try writer.writeAll(", runtime.Value.initInt(0)");
                                         }
@@ -26246,7 +26371,7 @@ pub const NativeLinker = struct {
                                     // str_word_count(str, format = 0, charlist = null)
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len > 0) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         if (op.args.len == 1) {
                                             try writer.writeAll(", runtime.Value.initInt(0), runtime.Value.initNull()");
                                         } else if (op.args.len == 2) {
@@ -26260,7 +26385,7 @@ pub const NativeLinker = struct {
                                     // mkdir(dirname, permissions = 0777, recursive = false)
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len > 0) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         if (op.args.len == 1) {
                                             try writer.writeAll(", runtime.Value.initInt(0o777), runtime.Value.initBool(false)");
                                         } else if (op.args.len == 2) {
@@ -26283,7 +26408,7 @@ pub const NativeLinker = struct {
                                     // set_error_handler(handler, error_types = E_ALL)
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len > 0) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         if (op.args.len == 1) {
                                             try writer.writeAll(", runtime.Value.initInt(32767)"); // E_ALL
                                         }
@@ -26333,7 +26458,7 @@ pub const NativeLinker = struct {
                                 } else if (std.mem.eql(u8, runtime_name, "php_is_a")) {
                                     // is_a(value, class, allow_string = false)
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                    try self.writeValueArgs(writer, op.args);
+                                    try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                     if (op.args.len == 2) {
                                         try writer.writeAll(", runtime.Value.initBool(false)");
                                     }
@@ -26349,13 +26474,13 @@ pub const NativeLinker = struct {
                                 } else if (std.mem.eql(u8, runtime_name, "php_call_user_func_array")) {
                                     // call_user_func_array(callback, args_array)
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                    try self.writeValueArgs(writer, op.args);
+                                    try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                     try writer.writeAll(", runtime.runtime_allocator);\n");
                                 } else if (std.mem.eql(u8, runtime_name, "php_mb_strlen")) {
                                     // mb_strlen(str, encoding = "UTF-8")
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len > 0) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         if (op.args.len == 1) {
                                             try writer.writeAll(", runtime.Value.initNull()");
                                         }
@@ -26365,7 +26490,7 @@ pub const NativeLinker = struct {
                                     // substr_count(haystack, needle, offset = 0, length = null)
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len > 0) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         if (op.args.len == 2) {
                                             try writer.writeAll(", runtime.Value.initInt(0), runtime.Value.initNull()");
                                         } else if (op.args.len == 3) {
@@ -26389,7 +26514,7 @@ pub const NativeLinker = struct {
                                     // 函数签名: php_ob_get_status(full_status: Value, allocator: Allocator)
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len >= 1) {
-                                        try self.writeValueArgs(writer, op.args[0..1]);
+                                        try self.writeValueArgsNamed(writer, op.args[0..1], op.func_name, 0);
                                     } else {
                                         try writer.writeAll("runtime.Value.initBool(false)");
                                     }
@@ -26399,7 +26524,7 @@ pub const NativeLinker = struct {
                                     if (op.args.len <= 1) {
                                         try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                         if (op.args.len == 1) {
-                                            try self.writeValueArgs(writer, op.args);
+                                            try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         } else {
                                             try writer.writeAll("runtime.Value.initNull()");
                                         }
@@ -26416,7 +26541,7 @@ pub const NativeLinker = struct {
                                     // header(string, replace = true, response_code = 0)
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len > 0) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         if (op.args.len == 1) {
                                             try writer.writeAll(", runtime.Value.initBool(true), runtime.Value.initInt(0)");
                                         } else if (op.args.len == 2) {
@@ -26428,7 +26553,7 @@ pub const NativeLinker = struct {
                                     // pathinfo(path, option = -1)
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len > 0) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         if (op.args.len == 1) {
                                             try writer.writeAll(", runtime.Value.initInt(-1)");
                                         }
@@ -26438,7 +26563,7 @@ pub const NativeLinker = struct {
                                     // trigger_error(message, error_type = E_USER_NOTICE)
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len > 0) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         if (op.args.len == 1) {
                                             try writer.writeAll(", runtime.Value.initInt(1024)"); // E_USER_NOTICE
                                         }
@@ -26448,7 +26573,7 @@ pub const NativeLinker = struct {
                                     // mb_strtoupper/mb_strtolower(str, encoding = "UTF-8")
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len > 0) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         if (op.args.len == 1) {
                                             try writer.writeAll(", runtime.Value.initNull()");
                                         }
@@ -26458,7 +26583,7 @@ pub const NativeLinker = struct {
                                     // mb_substr(str, start, length = null, encoding = null)
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len > 0) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         if (op.args.len == 2) {
                                             try writer.writeAll(", runtime.Value.initNull(), runtime.Value.initNull()");
                                         } else if (op.args.len == 3) {
@@ -26470,12 +26595,12 @@ pub const NativeLinker = struct {
                                     // password_hash(password, algo, options=[]) — 缺省 options 补真正的空数组（PHP 显式 null ⇒ TypeError）
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len >= 3) {
-                                        try self.writeValueArgs(writer, op.args[0..3]);
+                                        try self.writeValueArgsNamed(writer, op.args[0..3], op.func_name, 0);
                                     } else if (op.args.len == 2) {
-                                        try self.writeValueArgs(writer, op.args[0..2]);
+                                        try self.writeValueArgsNamed(writer, op.args[0..2], op.func_name, 0);
                                         try writer.writeAll(", runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
                                     } else if (op.args.len == 1) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         try writer.writeAll(", runtime.Value.initInt(1), runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
                                     } else {
                                         try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(1), runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
@@ -26485,12 +26610,12 @@ pub const NativeLinker = struct {
                                     // password_needs_rehash(hash, algo, options=[])
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len >= 3) {
-                                        try self.writeValueArgs(writer, op.args[0..3]);
+                                        try self.writeValueArgsNamed(writer, op.args[0..3], op.func_name, 0);
                                     } else if (op.args.len == 2) {
-                                        try self.writeValueArgs(writer, op.args[0..2]);
+                                        try self.writeValueArgsNamed(writer, op.args[0..2], op.func_name, 0);
                                         try writer.writeAll(", runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
                                     } else if (op.args.len == 1) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         try writer.writeAll(", runtime.Value.initInt(1), runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
                                     } else {
                                         try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(1), runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
@@ -26500,7 +26625,7 @@ pub const NativeLinker = struct {
                                     // hash(algo, data, raw_output=false, allocator)
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len > 0) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         if (op.args.len < 3) {
                                             try writer.writeAll(", runtime.Value.initBool(false)");
                                         }
@@ -26512,7 +26637,7 @@ pub const NativeLinker = struct {
                                     // hash_file(algo, filename, binary = false, options = [])　★R-269 四槽
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len > 0) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         if (op.args.len < 3) {
                                             try writer.writeAll(", runtime.Value.initBool(false)");
                                         }
@@ -26568,7 +26693,7 @@ pub const NativeLinker = struct {
                                     // array_search(needle, haystack, strict=false)
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
                                     if (op.args.len > 0) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         if (op.args.len < 3) {
                                             try writer.writeAll(", runtime.Value.initBool(false)");
                                         }
@@ -26579,7 +26704,7 @@ pub const NativeLinker = struct {
                                 } else if (std.mem.eql(u8, runtime_name, "php_hash_pbkdf2")) {
                                     // hash_pbkdf2(algo, password, salt, iterations, length=0, binary=false, options=[])
                                     try self.writeRegAssignmentFmt(writer, reg.id, "try runtime.{s}(", .{runtime_name});
-                                    try self.writeValueArgs(writer, op.args);
+                                    try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                     if (op.args.len <= 4) {
                                         try writer.writeAll(", runtime.Value.initInt(0), runtime.Value.initBool(false), runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
                                     } else if (op.args.len == 5) {
@@ -26729,7 +26854,7 @@ pub const NativeLinker = struct {
                                         try writer.print("    _ = try runtime.{s}(", .{runtime_name});
                                         try self.writePhpValueExpr(writer, fmt_arg_type, fmt_arg.id);
                                         try writer.writeAll(", ");
-                                        try self.writeValueArgsArray(writer, op.args[1..]);
+                                        try self.writeValueArgsArrayNamed(writer, op.args[1..], op.func_name, 1);
                                         try writer.writeAll(", runtime.runtime_allocator);\n");
                                     }
                                 } else if (std.mem.eql(u8, runtime_name, "php_str_getcsv")) {
@@ -26745,12 +26870,12 @@ pub const NativeLinker = struct {
                                     const vn_may_raise = if (vn_info) |info| info.may_raise else true;
                                     if (vn_may_raise and self.current_exception_handler != null) {
                                         try writer.print("    _ = runtime.{s}(", .{runtime_name});
-                                        try self.writeValueArgsArray(writer, op.args);
+                                        try self.writeValueArgsArrayNamed(writer, op.args, op.func_name, 0);
                                         try writer.writeAll(", runtime.runtime_allocator");
                                         try self.emitBuiltinCallCatchSuffix(writer);
                                     } else {
                                         try writer.print("    _ = try runtime.{s}(", .{runtime_name});
-                                        try self.writeValueArgsArray(writer, op.args);
+                                        try self.writeValueArgsArrayNamed(writer, op.args, op.func_name, 0);
                                         try writer.writeAll(", runtime.runtime_allocator);\n");
                                     }
                                 } else if (std.mem.eql(u8, runtime_name, "php_array_push") or std.mem.eql(u8, runtime_name, "php_array_unshift")) {
@@ -26760,7 +26885,7 @@ pub const NativeLinker = struct {
                                         try writer.print("    _ = try runtime.{s}(", .{runtime_name});
                                         try self.writePhpValueExpr(writer, first_type, first_arg.id);
                                         try writer.writeAll(", ");
-                                        try self.writeValueArgsArray(writer, op.args[1..]);
+                                        try self.writeValueArgsArrayNamed(writer, op.args[1..], op.func_name, 1);
                                         try writer.writeAll(", runtime.runtime_allocator);\n");
                                     } else {
                                         try writer.writeAll("    _ = runtime.Value.initNull();\n");
@@ -26769,12 +26894,12 @@ pub const NativeLinker = struct {
                                     // password_hash(password, algo, options=[]) — 缺省 options 补真正的空数组
                                     try writer.print("    _ = try runtime.{s}(", .{runtime_name});
                                     if (op.args.len >= 3) {
-                                        try self.writeValueArgs(writer, op.args[0..3]);
+                                        try self.writeValueArgsNamed(writer, op.args[0..3], op.func_name, 0);
                                     } else if (op.args.len == 2) {
-                                        try self.writeValueArgs(writer, op.args[0..2]);
+                                        try self.writeValueArgsNamed(writer, op.args[0..2], op.func_name, 0);
                                         try writer.writeAll(", runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
                                     } else if (op.args.len == 1) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         try writer.writeAll(", runtime.Value.initInt(1), runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
                                     } else {
                                         try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(1), runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
@@ -26784,12 +26909,12 @@ pub const NativeLinker = struct {
                                     // password_needs_rehash(hash, algo, options=[])
                                     try writer.print("    _ = try runtime.{s}(", .{runtime_name});
                                     if (op.args.len >= 3) {
-                                        try self.writeValueArgs(writer, op.args[0..3]);
+                                        try self.writeValueArgsNamed(writer, op.args[0..3], op.func_name, 0);
                                     } else if (op.args.len == 2) {
-                                        try self.writeValueArgs(writer, op.args[0..2]);
+                                        try self.writeValueArgsNamed(writer, op.args[0..2], op.func_name, 0);
                                         try writer.writeAll(", runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
                                     } else if (op.args.len == 1) {
-                                        try self.writeValueArgs(writer, op.args);
+                                        try self.writeValueArgsNamed(writer, op.args, op.func_name, 0);
                                         try writer.writeAll(", runtime.Value.initInt(1), runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
                                     } else {
                                         try writer.writeAll("runtime.Value.initNull(), runtime.Value.initInt(1), runtime.Value.initArray(try runtime.PHPArray.init(runtime.runtime_allocator))");
@@ -26799,7 +26924,7 @@ pub const NativeLinker = struct {
                                     // ob_get_status(full_status = false)
                                     try writer.print("    _ = try runtime.{s}(", .{runtime_name});
                                     if (op.args.len >= 1) {
-                                        try self.writeValueArgs(writer, op.args[0..1]);
+                                        try self.writeValueArgsNamed(writer, op.args[0..1], op.func_name, 0);
                                     } else {
                                         try writer.writeAll("runtime.Value.initBool(false)");
                                     }
@@ -26883,7 +27008,7 @@ pub const NativeLinker = struct {
                             const escaped_void = try self.escapeString(void_ident);
                             defer self.allocator.free(escaped_void);
                             try writer.print("    _ = try @\"{s}\"(runtime.Value.initNull(), ", .{escaped_void});
-                            try self.writeValueArgsArray(writer, op.args);
+                            try self.writeValueArgsArrayNamed(writer, op.args, op.func_name, 0);
                             try writer.writeAll(", runtime.runtime_allocator);\n");
                         }
 

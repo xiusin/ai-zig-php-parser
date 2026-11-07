@@ -13275,3 +13275,203 @@ PHP 8.5.8 实测口径：纯 enum ⇒ **返回 false**（不抛错，last_error=
 
 语料内建已清零（B=0）⇒ 「内建函数覆盖」战线收口。后续覆盖面的增长点只剩：① GMP 扩展族（63 点，独立立项）；② 既有函数的**深层语义边角**（非普查口径能及——面板/回归电池驱动）。
 
+---
+
+## §253 P2 批：变量调用面静默族收口 + fscanf + 普查固化
+
+> 队列位：P2-1 catch 重绑 / P2-2 构造器可见性 / P2-3 变量调用面未定义实参分流 / P2-4 fscanf / P2-5 普查脚本固化。全部 src/aot 内闭环（parser.zig 的 isNamedLabelStart 为批十九既提交项，patch 说明单列于 `docs/patches/2026-11-06/`）。
+
+### 253.1 P2-1：catch 变量重绑缺陷（PHP 无块作用域）
+
+- **缺陷**：`$e = "str"; try { throw ... } catch (Error $e) {...}` 后 `$e` 未重绑——旧实现「unique 名 alloca + putVarRegister + 块后恢复旧映射」双错：main/全局变量读走 global_get 不看 SSA 映射；块后恢复旧映射与 PHP 语义相反（catch 变量=普通赋值，catch 后保持绑定）。
+- **修法**（irg `generateCatchClause` :4082-4128）：catch 变量改普通赋值语义——main/全局 ⇒ `global_set`；函数内 ⇒ `getOrCreateVarRegister`+`store`；删 unique 名机制、不再恢复旧映射。
+- **连带暴露**：optimizer CSE 跨块纯常量共享洞（fn2 行的 `"\n"` 折成共享 fn 行的寄存器 ⇒ nlk 按块物化/释放框架下跨块引用失联）⇒ 纯常量（const_string/int/float/bool/null/missing/array）**只在同块内消重**（optimizer.zig :5364-5412；常量物化零成本，同块限制无性能损失）。
+- **验收**：p2_1_catch 探针 7 形全等（catch 内读、catch 后读、重抛链、finally 交互、嵌套 catch、异常类型窄化、预赋值覆盖）。
+
+### 253.2 P2-2：构造器可见性检查缺失（直调 + `new` 命名两通道同病）
+
+- **缺陷**：`new PrivCtor()` / `new PubNamed(b: 9)` 直调通道与命名通道都不查构造器可见性 ⇒ private/protected 构造器被外调不报错。
+- **修法**：汇聚点 `php_object_new_with_constructor`（rt :32231-32252）单点检查（直调/命名/动态三路同口径）——private ⇒ scope==声明类；protected ⇒ scope 与声明类互为子类；措辞 `Call to private|protected {声明类}::__construct() from global scope|scope {类}`（PHP 8.5.8 实测）；可捕获 Error；拒绝对象 release。
+- **伴生修复**：missing 哨兵送 `php_check_param_type` 误炸（`new PubNamed(b: 9)` 的缺省位）⇒ 两发射点（方法 :5620 / 全局函数 :5666）守卫补 `!args[i].isMissing()`。
+- **验收**：p2_2_ctor 探针（private 直调/protected 直调/类内自调/子类调 protected/命名参数通道/可捕获性）全等。
+
+### 253.3 P2-3：变量调用面「by-value 被调 + 未定义变量」静默（PHP 发 Undefined variable，需补）
+
+- **缺口**：Q3 把变量调用面实参全量 Ref 化 ⇒ 未定义变量不再经「变量读」通道 ⇒ 既有告警丢失，且 temp 写回把变量 vivify 成 null（PHP 不 vivify）。
+- **PHP 8.5.8 真值矩阵**（p2_3 探针逐形钉死）：
+
+| 被调形态 | 未定义实参行为 |
+|---|---|
+| by-value 形参 | Warning「Undefined variable $x」+ null 实参 + **不 vivify** |
+| by-ref 形参 | **静默 vivify**（批十五口径），函数写入反映回调用方 |
+| 带类型 by-value | Warning + TypeError（null given） |
+| 带默认值 by-value | Warning + null（**不吃默认值**） |
+
+- **机制**：`emitTempVarRef` 加 `undef_to_missing` 形参（仅变量调用面 :8550 传 true）——未定义 ⇒ temp=Ref(missing) + `q4_undef_note` FIFO 注名（16 槽 ring）；main 面经 `php_q4_undef_temp`（`q4_global_lookup` 钩子查生成码全局表，main.zig 挂 `q4GlobalLookupForUndef`）；归一化共享核 `q4SplitMissingArgs`（rt :146-207）按 by-ref 分流（内建反射表优先，回退用户函数 `function_ref_params`——nlk 仅对有 by-ref 形参的用户函数发射 `registerFunctionRefParams`，零开销）；写回点 missing ⇒ 跳过（`emitPlainVarWritebacks` 守卫）。
+- **落地期两坑（已修）**：
+  1. **写回守卫块形**：初版三块（do/skip/cont，skip 空块）被 optimizer 空块合并压成「then=cont, else=do」反序两块形 ⇒ nlk 的 cond_br 边界算法（`buildControlFlowBoundaries` :496-584，假设 then_idx < else_idx）区间错乱 ⇒ 守卫消失、写回位移尾声。修法：直接发射「无 else 的 if」两块形（`cond_br(!is_missing ⇒ do, else=cont)`，与 generateIfStmt 无 else 分支同构——nlk 已验证路径）。
+  2. **分流重复消费**：hook 支分流后 hook 未命中（dispatcher 只含编译期登记的内建）⇒ 落内建支用原 args 再分流 ⇒ FIFO 注名二次消费空 ⇒ missing 原样漏进 handler（`var_dump(strrev($u5))` 整行输出丢失）。修法：hook→内建→CI 三支共享一次分流结果（`shared_norm` + `shared_split_done`）。
+- **验收**：p2_3 主探针 8 形态全等（残余 diff 全属已登记 Deprecated-null 缺口——内建非 nullable 形参收 null 的 Deprecated 机制，gap 探针 `p2_3_gap_deprecated_null.php` 跟踪）；p2_3p 调试探针 byrefv 静默 vivify int(99) ✓。
+
+### 253.4 P2-4：fscanf（B 类编译期表缺名补齐）
+
+- **PHP 8.5.8 真值锚点**（p2_4/p2_4b/p2_4c 三探针钉死）：无 vars ⇒ 数组（失败槽 NULL）；有 vars ⇒ int（成功数**含 %* 抑制位**）；任何转换前 EOF ⇒ false；失败即停；`%u` 负号模 2^64 且超 i64 ⇒ 十进制字符串（`"-5"` ⇒ `"18446744073709551611"`）；`%x` 接受 0x 前缀；`%o` 遇非八进制零匹配失败；`%c`/`%[` 不跳前导空白；`%[a-z]` 区间展开。
+- **实现**：`q4FscanfParse` 完整格式族（%d %i %u %x %X %o %f %e %E %g %G %s %c %[...] %% + 宽度 + %* 抑制，u128 累积防溢出）；流策略=全读剩余 + `lseek(-unread, SEEK_CUR)` 回推（不可 seek 流边界已注释登记）。
+- **直调面通路（新机制）**：`BuiltinInfo` 加 **`ref_variadic_from: ?u8`** 字段（变参 by-ref 表达，与 ref_params 取并集）+ irg 判定支（:8324-8327）+ 切片签名 `php_fscanf(args, alloc)`（php_fprintf 同族，nlk 打包名单 :25659）+ `builtin_map` 登记（:4858）。**反面教材**：sscanf 裸登记直调表导致带 vars 直调编译炸（定参 vs 变参）——fscanf 不走那条路。
+- **验收**：三探针全 SAME + 变量调用面（`$fs='fscanf'; $fs(...)`）SAME ⇒ 直调 ≡ 变量调用。
+
+### 253.5 P2-5：普查脚本固化进仓
+
+- `scripts/q5_census.php`（`/tmp/aot_census/q5_census.php` 固化）：`$root` 改 `dirname(__DIR__)` 自动定位（去硬编码）；`token_get_all` 加 `@`（语料固有 `\777` 类字面量噪音静默）。
+- 复跑确认：**A=243 名/7128 点、B=0、C=217 名/837 点**（B=0 因 fscanf 入双表再确认）。
+- 两枚生成器此前已入库：`scripts/gen_builtin_param_table.php`（批十九①）、`scripts/gen_html_entity_table.php`（Q4）。
+
+### 253.6 验收总表
+
+| 子项 | 探针 | 结果 | 面板 |
+|---|---|---|---|
+| P2-1 catch 重绑 | p2_1_catch（7 形） | 全等 | 零转移（panel_p2.txt） |
+| P2-2 构造器可见性 | p2_2_ctor | 全等 | 同上 |
+| P2-3 变量调用面未定义 | p2_3（8 形态）+ p2_3p/q 隔离 | 全等（残余=已登记 Deprecated-null 缺口） | 同上 |
+| P2-4 fscanf | p2_4/p2_4b/p2_4c + p2_4v 变量调用 | 全 SAME | 零转移（panel_p24.txt：34SAME+7DIFF 与 b17 逐格一致） |
+| P2-5 普查固化 | 复跑 | B=0 | — |
+
+### 253.7 待批两项取证现状
+
+**① 数组元素引用（by-ref 形参收 `$arr['k']`）——需 parser/ast 介入，待批**
+
+- 现有产出点：irg 仅 **preg 专用支**两处（:8644-8652 / :8744-8756）支持元素实参，语义为 **copy-in（`php_array_get_coalesce` 静默读）→ temp → copy-out（写回点 :9113-9141 `array_set` + `global_set`）**——非真 Ref。
+- 通用面缺口：`emitTempVarRef`（:229）只接 `.variable` 节点；用户函数 `function f(&$x){}` 收 `$arr['k']` 在直调/变量调用面都无元素通道。
+- 真 Ref 化改动面：AST 已具备 `array_access` 节点（无需改 parser——**preg 支证明元素节点在 AST 层可达**）；缺的是 IR 层「数组元素 Ref」指令（`make_ref` 只接变量 alloca）+ nlk 生成 + 运行时元素 Ref 与 COW 的交互（`array_set` 写回 vs Ref 直写共享存储的语义差）。
+- **裁决点**：preg 支的 copy-in/copy-out 已覆盖语料高频面；真 Ref 化的增量价值=「函数体内对形参的多次写/读与元素实时同步」（如 `$x` 先读后写交叉）——语料中未见该形态。
+
+**② GMP 扩展族（63 调用点）——大工程，待批**
+
+- 需新增内核能力：a) 任意精度整数表示（limbs 堆数组，参照知识库 `bigdecimal` 的十进制实现但 GMP 为二进制）；b) 运算算法族（加减乘、Knuth D 除法、mod、pow、cmp、sign、abs）；c) GMP 值载体（PHP 8 为 GMP class 实例 ⇒ AOT 需新对象类型或 resource 变体）；d) `gmp_init` 的 string/int 导入与 `gmp_strval` 导出（2-62 进制）；e) 与 int 的互转边界（`gmp_intval` 溢出截断语义）。
+- 语料触及 10 枚：init/pow/mul/strval/add/mod/div_q/sub/sign/abs。
+- 工作面估算：运行时新模块 ~2000 行 + 对象系统集成 + 双表登记 10 枚；无 parser/nlk 改动。
+
+---
+
+## §254 Q1-Q5 队列完整收口总览
+
+> 队列全程贯穿验收：每批 `zig build` + 逐形探针对参 PHP 8.5.8 + 41 格面板零转移。各批细节见 §248（Q1/批十九）/§249（Q2）/§250（Q3）/§251（Q4）/§252（Q5），P2 清扫见 §253。
+
+| 批 | 目标 | 件数 | 关键读数 | 验收 |
+|---|---|---|---|---|
+| Q1（批十九） | 内建形参名表反射生成 + `new` 构造器命名绑定统一 | 生成器 1 枚 + 表 2143 函数/4424 参数 + 运行期 phpInvokeBuiltinNamed | 反射导出零手工誊抄；命名实参四通道（直调/变量/构造/内建）同口径 | 面板零转移 |
+| Q2 | arity 域三层 | 直调编译期 + 变量调用面运行期 + 用户函数 prologue 三枚守卫 | ArgumentCountError 可捕获化（措辞单一来源 php_arity_error）；欠参/超填/变参尾全形 | 面板零转移 |
+| Q3 | 13 枚 out 参族变量/间接调用面写回 | 13 枚（preg_match(_all)/preg_replace(_callback)/preg_filter/str_replace(_ireplace)/parse_str/settype/exec/system/sscanf/array_multisort） | 变量调用面全量 Ref 化 + emitTempVarRef/emitPlainVarWritebacks 通道；回归事故 2 枚修复（by-value deref 化 + alloca 原地写）后零转移 | 面板零转移（Q3 面板与 b17 逐格一致） |
+| Q4 | B 类核心 32 枚实现 | 32 枚（字符串 13/格式化 8/数组 7/杂项 4）+ ENT_*/JSON_ERROR_* 常量族 + 实体表生成器 | 双表同口径；直调 ≡ 变量调用 24 枚核验全 OK；metaphone/soundex 照 PHP 源码移植 | 面板零转移（34SAME+7DIFF 与 b17 一致） |
+| Q5 | 覆盖重普查 | 普查脚本 1 枚 + fputs 别名补登 | **B=0**（语料内建全覆盖）；C 类分桶：GMP 63 点待立项、207 名用户函数非缺口 | — |
+| P2 | 清扫 5 小项 | catch 重绑 / 构造器可见性 / 变量调用面未定义分流 / fscanf / 普查固化 | 见 §253.6 总表 | 面板两批零转移 |
+
+### 254.1 队列沉淀的横向机制（后续批次可复用）
+
+1. **反射表三用**：`builtin_param_table_generated.zig` 同时服务命名实参绑定（Q1）、arity 守卫（Q2）、missing 分流的 by-ref 判定（P2-3）——单一数据源零分叉。
+2. **out 参族协议**（Q3）：`q3Deref`/`q3WarnByRefValue`/`emitTempVarRef`/`emitPlainVarWritebacks` 四件套，fscanf 的变参 by-ref 直接复用。
+3. **ref_variadic_from**（P2-4）：变参内建直调面 by-ref 通路首通——sscanf 族可照此回头重修。
+4. **「无 else if」两块形**（P2-3a）：irg 发条件块的安全形状（nlk 边界算法的已验证路径）；三块含空块形会被 optimizer 合并反序 ⇒ 禁再发射。
+5. **分流单次消费**（P2-3b）：php_invoke_callable 下落链（hook→内建→CI）共享 `shared_norm`——凡「下落链 + 带副作用预处理」场景通用。
+
+---
+
+## §255 批次二十五：sscanf 直调面重修（P0）+ Deprecated-null 机制
+
+### 255.1 sscanf 直调面重修（P0，照 fscanf 通路）
+
+- **缺口**：sscanf 裸登记直调表（定参 `php_sscanf(str, fmt, alloc)`）⇒ 带 vars 直调 `sscanf($s, $f, $a, $b)` 生成码实参 5 vs 形参 3 ⇒ **编译炸**（`expected 3 argument(s), found 5`）。
+- **修法**（fscanf 通路复用）：
+  - `php_sscanf` 改**切片签名** `(args, alloc)`（php_fprintf 同族），转发 `wrapBuiltin_sscanf`；
+  - `wrapBuiltin_sscanf` 重写走**共享核 `q4FscanfParse`**（输入与来源无关——fscanf 流缓冲、sscanf 字符串实参同核）；旧定参实现（仅 %d/%s、无 by-ref、无 EOF 口径）全量退役；
+  - `builtin_map` 条目加 `ref_variadic_from=2`（P2-4 新机制）+ nlk 打包名单加 `php_sscanf`。
+- **sscanf vs fscanf 的口径差**（PHP 8.5.8 实测钉死）：输入耗尽 ⇒ sscanf 无 vars 返 **NULL**、有 vars 返 **int(-1)**（C 的 EOF 约定）；fscanf 同点返 **false**。其余（失败槽 NULL/失败即停/%* 抑制计数/%u 溢出转字符串/%[a-z] 区间）全同。
+- **验收**：p0_sscanf 全形态探针 SAME（13 形态：两返回形态/EOF 两口径/首败两口径/%u 溢出/%[a-z]/%* 抑制/%i 前缀/宽度/变量调用面）+ 旧炸点探针 p2_4d 修复 SAME + **面板 41 格零转移**（panel_p25.txt）。
+
+### 255.2 Deprecated-null 机制（内建非 nullable 标量形参收 null）
+
+- **缺口**（P2-3 残余 diff 全属此族）：`strrev(null)` 等 PHP 8.5.8 发 `Deprecated: {fn}(): Passing null to parameter #N ($name) of type T is deprecated` + 弱转继续；AOT 此前静默 NULL。
+- **真值矩阵**（p0b/p0b2 实测）：仅内建（用户函数同点 TypeError）；nullable/mixed/无类型不警；纯 array/对象形参收 null 走 TypeError 域（不属本机制）；联合类型措辞原文（`int|float`/`array|string`）；弱转目标=文本序首个标量成员（string⇒""/int⇒0/float⇒0.0/bool⇒false）；未定义变量实参 ⇒ Warning + Deprecated **双发**。
+- **数据源扩展**：生成器 `scripts/gen_builtin_param_table.php` 加 `typeToZig`（ReflectionType 原文 + allowsNull）⇒ `Param` 加 `type_name`/`nullable` 字段，全量 2143 函数重生成（param 计数 4424 不变，diff 可审计）。
+- **机制**：
+  - 运行期 `q4DepNull`（rt :14086）：非 null 原样（零开销快路径）；null ⇒ 三段式发射（用户处理器→抑制→掩码，emitDeprecatedStrGetcsvEscape 同族）+ 弱转值返回。
+  - 变量调用面：`q4NormalizeBuiltinArgs`（rt :218）统一归一（by-value Ref deref + null 弱转），hook/内建/CI 下落链共享一次（`shared_dep`——否则 hook 未命中后内建支重复告警）；无反射条目保守直通不 deref（既有口径）。
+  - 直调面：nlk `writeBuiltinArgs`（:21824）写参循环按反射表包装 `runtime.q4DepNull(reg, fn, idx, pname, ptype, alloc)`——覆盖 10 个调用支；编译期先剪非标量类型（省生成码）；直写 `writeValueArgs` 的少数特殊支（array_* 族的切片传参）不插桩（登记边界）。
+- **验收**：p0c 探针双面对照 SAME（直调 6 形 + 变量调用 2 形 + 非 null 不警 + Warning+Deprecated 双发）；p2_3 主探针从「残余 diff」转 **FULLY_SAME**；面板 41 格复跑见 §253.6 续。
+
+### 255.3 遗留登记
+
+| 项 | 处置 |
+|---|---|
+| ~~by-ref 标量形参收 null 的 Deprecated~~ | **已勾销**（批次二十六验证：PHP 不警——写入目标非读入值；归一 helper 对 by-ref 位本就直通 ⇒ SAME） |
+| ~~直写 `writeValueArgs` 的特殊支不插桩~~ | **已收口**（§255.5） |
+| `php://memory` 流空壳（file_handle=null，fwrite 静默丢） | **已收口**（§256 批次二十六） |
+| Deprecated-null 对**对象属性/数组元素**实参 | 走同一实参寄存器 ⇒ 已覆盖（包装在写参层） |
+
+### 255.5 续：depnull 插桩下沉公共核（直写特殊支补齐）
+
+- **缺口**：Deprecated-null 直调面首版只覆盖 writeBuiltinArgs 的 10 支；`writeValueArgs`/`writeValueArgsArray` 的直写特殊支（array_* 切片传参、php_fprintf 名单族等 56+27 调用点）裸 null 不警。
+- **修法**：守卫下沉公共核 `writeDepNullArg`（反射表命中 + 非 by-ref + 非 nullable + 类型含标量 ⇒ 包装 `runtime.q4DepNull`）——`writeValueArgsNamed`/`writeValueArgsArrayNamed`（带 func_name + param_offset 切片位偏校正）统一替换 83 处直写点；writeBuiltinArgs 手写循环删除回归公共点（防双重包装）。
+- **误包装回退**：sed 批量后人工核查语境——`call_indirect`（变量调用，运行期已覆盖）、`php_object_new_with_constructor`、`php_call_static`、channel/mutex 族等 **7 处非内建支**回退（这些支的 func_name 是类名/方法名/构造名，反射表可能误中同名内建）。
+- **验收**：p0i_special 探针（fprintf/str_repeat/str_pad/substr_count/wordwrap 的 null 实参）——Deprecated 措辞全等 + substr_count 空针 ValueError 命中（残余仅栈帧差，宪法 §7.5 同族）；p0c/p0d/p0f/p2_3 全回归 SAME；面板 panel_p30。
+
+### 255.4 连带修复：irg 缺省占位 `const_null` ⇒ `const_missing` 语义化（f105/f110/f161 翻红事故）
+
+- **事故**：Deprecated-null 插桩首版面板翻红 3 格（f105/f110/f161）——irg 的 12 枚内建占位特判（substr/trim 族/preg_quote/explode/str_replace 族/strtr/mb_strpos/ucwords/strip_tags/htmlspecialchars 族/array_splice）把**缺省位补 `const_null`** ⇒ 被 depnull 当「显式 null」误警 + 弱转改变行为（explode limit null→0→1 ⇒ 不切）。
+- **根因**：IR 层「缺省占位」与「字面 null」同为 const.null ⇒ 下游不可区分。PHP 真值钉死区分必要：`trim($s, null)` 显式 ⇒ Deprecated + 弱转 ""（不剥）；`trim($s)` 缺省 ⇒ 不警 + 默认字符集（剥）。
+- **修法**：12 处占位改 `const_missing`（missing 哨兵的设计本义即缺省；depnull 的 `isNull()` 对 missing 天然 false 不警）；4 枚 handler 的缺省判定从 `isNull()` 扩为 `isNull() or isMissing()`（substr `$length`、explode `$limit`、array_splice `$length`/`$replacement`）；其余 handler 天然兼容（`isString()` 判定族走默认分支；`requireOptionalNumParam` :14414 本就 `isNull() or isMissing()` 直通）。
+- **验收**：p0f 双形态探针（缺省 8 形 + 显式 null 2 形）SAME + f105 专项 SAME + 面板复跑。
+
+---
+
+## §256 批次二十六：php://memory/temp 承载落地 + stdio 族 dup + stream_get_contents/fflush
+
+### 256.1 缺口与方案选型
+
+- **缺口**：`php://memory`/`php://temp`/`php://stdout` 全系空壳（`file_handle=null`，fwrite 静默丢数据、fread 恒 ""）——语料触及 4 点（stdout×2 + memory×2）。
+- **方案选型**（宪法「不造第二套语义」红线驱动）：
+  - ✗ 落选：PHPResource 加 `mem_buf` 内存缓冲 ⇒ fwrite/fread/fseek/ftell/fstat/ftruncate/fgets/fgetc/fscanf/fflush/fclose 全族 12+ 函数各加内存分支 ⇒ 第二套语义实锤。
+  - ✓ 中选：**mkstemp 匿名临时文件承载**（+ 立即 unlink 对外不可见）——真 fd ⇒ 全族流函数与真实文件**零分派差异**；temp 的 maxmemory 阈值仅介质选择（PHP 文档语义），对外读写/定位/fstat 行为与文件介质无差 ⇒ 恒文件介质。
+
+### 256.2 真值锚点（PHP 8.5.8 实测，p0m/p0m2 探针）
+
+- fwrite 返长/ftell 游标/feof 仅读触末后真/rewind 归零/fread(N)/fgets 至行尾或 EOF
+- fseek 越界（如 100 > size）**合法**（返 0），读后 EOF 置位
+- 跨 seek 覆盖写（fseek(0)+fwrite ⇒ 原地覆盖不截断）
+- ftruncate 截断 ⇒ true；fstat size 如实；fflush ⇒ true（fd 直写无用户态缓冲）
+- fclose(php://stdout) 后 echo 照常 ⇒ stdio 族用 **dup** 包装（fclose 关 dup 副本不动进程标准 fd）
+- stream_get_contents：length null/<0 ⇒ 读至 EOF、0 ⇒ ""；**offset 缺省 ⇒ 不 seek、显式（含 0）⇒ seek(offset)**（missing 哨兵区分）
+
+### 256.3 变更点
+
+| 文件 | 变更 |
+|---|---|
+| runtime_lib_template.zig :89-103 | extern mkstemp + q4c_dup（@extern 避让 :31001 局部 dup 撞名）+ q4Mkstemp/q4Dup 封装 |
+| runtime_lib_template.zig :9826-9898 | php_fopen 的 php:// 支三向：memory/temp ⇒ mkstemp+unlink；stdout/stderr/stdin ⇒ dup；其余空壳保留 |
+| runtime_lib_template.zig :10117-10160 | php_stream_get_contents + wrapper |
+| runtime_lib_template.zig :10056-10070 | php_fflush + wrapper |
+| 双表 | builtin_function_map +stream_get_contents/fflush；builtin_map 同二（stream_get_contents 带 handler_params=3 + optional_defaults=[null, missing]） |
+| ir_generator.zig | （批次二十五续）12 枚缺省占位 const_null⇒const_missing——本批 fscanf 在 memory 流上联测得益 |
+
+### 256.4 验收
+
+- p0m 全族探针 24 行 SAME（含 ftruncate/fstat/fflush/temp 阈值溢写/越界 seek）
+- p0m2 SAME（stdout 直写+fclose 后 echo 照常、memory 'r' 空流 EOF、fscanf×memory 联测）
+- 41 格面板复跑：panel_p28.txt
+
+### 256.5 遗留登记
+
+- ~~php://memory 以 'r' 模式打开后的**写拒绝**语义未模拟~~ | **已收口**：mkstemp 支按 fmode 降级——'r'（无 +）⇒ O_RDONLY 重开（unlink 前）；PHP 实测 fwrite 静默 false，与 fwrite 的 std.c.write 自查（EBADF⇒false）同口径。p0j 探针 SAME。
+- php://output/filter 等其余子协议保持空壳（历史口径）。
+
+### 256.6 续：php://input + file_get_contents php:// 支 + fwrite 错误自查
+
+- **php://input**（CLI ⇒ 空**只读**请求体流，PHP 8.5.8 实测：file_get_contents⇒""、fgets⇒false、feof 读后 true、fwrite⇒false）：mkstemp 空文件 ⇒ O_RDONLY 重开（写拒绝由 access mode 承载）⇒ unlink。
+- **file_get_contents 的 php:// 支**（:9802-9817）：委托 php_fopen + php_stream_get_contents 同路径；负 offset（自尾部）先自行 SEEK_END 再委托（stream_get_contents 的 offset 仅 SEEK_SET）。
+- **php_fwrite 写结果自查**（:10066-10077）：旧走 fileWriteAll 吞错误（只读 fd 恒返全长）⇒ 改 std.c.write 循环（负 errno ⇒ false；部分写 ⇒ 实际字节数）。
+- **验收**：p0h_input 探针 SAME（file_get_contents/fgets/feof/fwrite 写拒绝/fclose 全形）。
+
+
+---
+
+
