@@ -13612,3 +13612,43 @@ PHPArray.release / PHPClosure.release 存在同款「rc==0 & buffered ⇒ 留置
 ---
 
 
+## §260 批次三十：G1/G4 解冻落地（销毁时机全对齐）+ test_loop_unroll 腐坏断言修复
+
+### 260.1 背景
+
+老铁解冻 G2/G4（禁动令解除）。批次二十八/二十九后残余：函数内 unset/覆盖写延至函数退出毁、顶层覆盖写延至程序结束毁、循环覆盖相位差（AOT 1,1,1 vs PHP 1,2,1）。
+
+### 260.2 根因链（生成码逐行取证）
+
+1. **unset 失效**：mem2reg 把 unset 目标变量的 alloca 提升为纯寄存器，`usesRegister` 未登记 `.unset_var` ⇒ store 消除后 unset_var 打遗留空槽（reg 恒 null 无操作），真实值滞留到函数退出。
+2. **覆盖写延迟**：mem2reg 的 store 消除（renameVariables）把「旧值归还」一并消除——SSA 旧寄存器要等 liveness 死亡才释放，而它在重定义后无指令引用 ⇒ 活到作用域尾。
+3. **顶层/global_set 族**：`releaseDeadOperands` 对 `.global_set => {}` 死值不释放（旧注把表内 retain 副本与寄存器引用混为一谈）；且 **native 控制流发射族（if/while/foreach 原生路径约 82 个站点）从不布点 `current_gen_block_idx/inst_idx`** ⇒ releaseDeadOperands 在那里整体失效（仅状态机/单块线性路径有布点）。
+
+### 260.3 变更点
+
+| 文件 | 变更 |
+|---|---|
+| optimizer.zig :2467-2472 | `usesRegister` 登记 `.unset_var`（unset 目标变量 alloca 禁提升） |
+| optimizer.zig :2556-2590 | renameVariables 的 store 消除点改 **release-at-redef**：旧栈顶无 phi 引用 ⇒ store 改写为 `.release(旧值)`（PHP：覆盖写语句点销毁旧值；nlk 全别名通道先 retain ⇒ release 仅减 rc 绝不早杀；RHS 先求值 ⇒ 释放顺序恰为 PHP 的「先 RHS 后释旧」） |
+| optimizer.zig :2457-2472 | 新增 `regReferencedByAnyPhi` 守卫（循环回边 phi 物化读源寄存器，release 置 null 会打断 ⇒ 回退旧口径） |
+| native_linker.zig :22563 | releaseDeadOperands 的 `.global_set` 死值照放（liveness 双闸内） |
+| native_linker.zig :415/:5465-5472 | 新增 `current_block_positions`（块指针→位置索引表，generateFunction 处布点） |
+| native_linker.zig :22967-22987 | 新增 `generateInstructionTracked` 包装（布点+转发 Simple） |
+| native_linker.zig 82 站 | native 发射族 for 循环机械化改写（Python 两遍式变换脚本，for 头加索引 + emit 换包装；单行循环尾巴保留、无 emit 循环不动） |
+| test_loop_unroll.zig :255-256 | 腐坏断言修复：config 收 debug 全关+只开 CSE（cfg_cleanup/rc_elision **默认值即 true** 曾把 cond_br const_true 折直跳 ⇒ else 块被收编 ⇒ oracle 恒炸；HEAD 自 da624f3 起测试目标不可编译，工作树 `}` 修复后才暴露） |
+
+### 260.4 验收
+
+- g4_lin（顶层覆盖写）/ g1_min（函数内 unset）/ g3_recheck（catch 时机回归）全 **SAME**
+- g4 全形探针：循环覆盖相位 1,3,1 与 PHP 全等（含 dtor 交错位置）；残余仅程序结束时的全局对象销毁**顺序**（PHP 官方不保证顺序，登记边界）
+- 46 探针面板（panel_p36）：**36 SAME + 10 DIFF，与批次二十八/二十九终态逐格一致、零转移**
+- `zig build test`：**全绿**（289/289——test_loop_unroll 腐坏治愈）
+- 720 语料回归：基线 tsv 已快照（8 枚既有失败），跑后比对
+
+### 260.5 遗留登记
+
+- 程序退出时全局对象销毁顺序与 PHP 不一致（PHP 官方不保证 shutdown 析构顺序；登记不计失败）
+- mem2reg 旧 quickSort*WithCallback 三枚辅助函数自此无调用方（保留待批，禁擅自删）
+
+---
+

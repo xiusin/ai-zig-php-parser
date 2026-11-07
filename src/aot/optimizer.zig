@@ -2454,6 +2454,23 @@ pub const IROptimizer = struct {
         return true;
     }
 
+    /// ★批次三十（G4）：寄存器是否被任何 phi 的 incoming 引用（release-at-redef 的安全守卫）。
+    ///   覆盖两源：块内既有 .phi 指令 + 本 pass 新建的 phi（new_phis 的 incoming 会随后续
+    ///   块处理继续追加，故只判「当前已存在」即可——后续引用只会取重定义后的新栈顶）。
+    fn regReferencedByAnyPhi(self: *Self, func: *Function, reg_id: u32) bool {
+        _ = self;
+        for (func.blocks.items) |block| {
+            for (block.instructions.items) |inst| {
+                if (inst.op == .phi) {
+                    for (inst.op.phi.incoming) |inc| {
+                        if (inc.value.id == reg_id) return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
     /// Check if instruction uses a register
     fn usesRegister(self: *Self, inst: *Instruction, reg_id: u32) bool {
         _ = self;
@@ -2465,6 +2482,11 @@ pub const IROptimizer = struct {
             .eq, .ne, .lt, .le, .gt, .ge, .identical, .not_identical, .spaceship => |op| return op.lhs.id == reg_id or op.rhs.id == reg_id,
             .and_, .or_, .xor_, .concat => |op| return op.lhs.id == reg_id or op.rhs.id == reg_id,
             .neg, .bit_not, .not, .strlen, .array_count, .clone, .retain, .release, .debug_print, .get_type => |op| return op.operand.id == reg_id,
+            // ★批次三十（G1 解冻）：unset_var 直接改写变量槽（release+置 null）——
+            //   若不在此登记，unset 目标变量的 alloca 会被 mem2reg 提升，store 消除后
+            //   unset_var 打的是遗留空槽（reg 恒 null 无操作），真实值滞留 promoted 寄存器
+            //   到函数退出才释放 ⇒ __destruct/槽位让位时机全面晚于 PHP（实测语句点即毁）。
+            .unset_var => |op| return op.operand.id == reg_id,
             .make_ref => |op| return op.ptr.id == reg_id,
             .call => |op| {
                 for (op.args) |arg| if (arg.id == reg_id) return true;
@@ -2561,10 +2583,26 @@ pub const IROptimizer = struct {
                             try stack_heights.put(alloca, stack.?.items.len);
                         }
 
+                        // ★批次三十（G4 解冻）：重定义点的旧值即时归还——PHP 语义：覆盖写在
+                        //   语句点销毁旧值（__destruct 位置 / 对象槽位让位可观测）。旧栈顶即被覆盖值，
+                        //   store 消除前改写为 release(旧值)。安全性：nlk 全部别名通道（cast 改名
+                        //   :28388、副本 store、phi 物化、call 传参）都先 retain 再持 ⇒ release 仅减
+                        //   rc，末持方才销毁，绝不早杀；RHS 先于 store 求值 ⇒ 释放顺序恰为 PHP 的
+                        //   「先求 RHS 后释旧」。唯一危险面：phi 直接引用旧寄存器（循环回边物化读源
+                        //   寄存器，release 置 null 会打断）⇒ 被任何 phi 引用则回退 nop（旧延迟口径）。
+                        const old_top: ?Register = if (stack.?.items.len > 0) stack.?.items[stack.?.items.len - 1] else null;
                         try stack.?.append(self.allocator, op.value);
 
-                        // Remove store
-                        inst.op = .nop;
+                        if (old_top) |ot| {
+                            if (ot.id != op.value.id and !self.regReferencedByAnyPhi(func, ot.id)) {
+                                inst.op = .{ .release = .{ .operand = ot } };
+                            } else {
+                                inst.op = .nop;
+                            }
+                        } else {
+                            // Remove store
+                            inst.op = .nop;
+                        }
                     }
                 },
                 else => {},

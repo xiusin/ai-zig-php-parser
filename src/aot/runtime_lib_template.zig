@@ -36406,6 +36406,195 @@ fn collectEntries(arr: *PHPArray, allocator: Allocator) ![]KV {
     return items;
 }
 
+// ============================================================================
+// ★批次三十一：zend_sort 忠实移植（php-8.5.8 Zend/zend_sort.c，libc++ 派生 introsort）
+//   usort/uasort/uksort 的比较与交换序列必须与 PHP 逐字节一致——比较器抛异常时数组的
+//   中间态可观测（throw_usort/uasort/uksort 面板格）。稳定性由 orig_idx 平局决胜承载
+//   （对应 Zend 在 zend_hash_sort_internal 里预写 Z_EXTRA 的比较器 tiebreak）。
+// ============================================================================
+
+/// 比较上下文：by_key 选值/键比较（usort/uasort 值、uksort 键）；回调抛错经 error 上抛。
+const Q4SortCtx = struct {
+    callback: Value,
+    by_key: bool,
+    allocator: Allocator,
+
+    /// zend_sort 全分支判据统一为 cmp(a,b)>0；回调平手 ⇒ 原始下标决胜（PHP 8.0+ 稳定化）。
+    fn cmp(self: *const @This(), a: KV, b: KV) !i64 {
+        const av = if (self.by_key) keyToValue(a.key) else a.value;
+        const bv = if (self.by_key) keyToValue(b.key) else b.value;
+        const r = try invokeUserCompare(self.callback, av, bv, self.allocator);
+        if (r == 0) return @as(i64, @intCast(a.orig_idx)) - @as(i64, @intCast(b.orig_idx));
+        return r;
+    }
+};
+
+fn q4Swap(items: []KV, a: usize, b: usize) void {
+    std.mem.swap(KV, &items[a], &items[b]);
+}
+
+fn q4Sort2(items: []KV, a: usize, b: usize, ctx: *const Q4SortCtx) !void {
+    if (try ctx.cmp(items[a], items[b]) > 0) q4Swap(items, a, b);
+}
+
+fn q4Sort3(items: []KV, a: usize, b: usize, c: usize, ctx: *const Q4SortCtx) !void {
+    if (!(try ctx.cmp(items[a], items[b]) > 0)) {
+        if (!(try ctx.cmp(items[b], items[c]) > 0)) return;
+        q4Swap(items, b, c);
+        if (try ctx.cmp(items[a], items[b]) > 0) q4Swap(items, a, b);
+        return;
+    }
+    if (!(try ctx.cmp(items[c], items[b]) > 0)) {
+        q4Swap(items, a, c);
+        return;
+    }
+    q4Swap(items, a, b);
+    if (try ctx.cmp(items[b], items[c]) > 0) q4Swap(items, b, c);
+}
+
+fn q4Sort4(items: []KV, a: usize, b: usize, c: usize, d: usize, ctx: *const Q4SortCtx) !void {
+    try q4Sort3(items, a, b, c, ctx);
+    if (try ctx.cmp(items[c], items[d]) > 0) {
+        q4Swap(items, c, d);
+        if (try ctx.cmp(items[b], items[c]) > 0) {
+            q4Swap(items, b, c);
+            if (try ctx.cmp(items[a], items[b]) > 0) q4Swap(items, a, b);
+        }
+    }
+}
+
+fn q4Sort5(items: []KV, a: usize, b: usize, c: usize, d: usize, e: usize, ctx: *const Q4SortCtx) !void {
+    try q4Sort4(items, a, b, c, d, ctx);
+    if (try ctx.cmp(items[d], items[e]) > 0) {
+        q4Swap(items, d, e);
+        if (try ctx.cmp(items[c], items[d]) > 0) {
+            q4Swap(items, c, d);
+            if (try ctx.cmp(items[b], items[c]) > 0) {
+                q4Swap(items, b, c);
+                if (try ctx.cmp(items[a], items[b]) > 0) q4Swap(items, a, b);
+            }
+        }
+    }
+}
+
+/// zend_insert_sort 忠实移植（元素粒度，siz=1）：前 6 枚朴素回退插入，其后 siz2 跳步查找。
+fn q4InsertSort(items: []KV, ctx: *const Q4SortCtx) !void {
+    switch (items.len) {
+        0, 1 => {},
+        2 => try q4Sort2(items, 0, 1, ctx),
+        3 => try q4Sort3(items, 0, 1, 2, ctx),
+        4 => try q4Sort4(items, 0, 1, 2, 3, ctx),
+        5 => try q4Sort5(items, 0, 1, 2, 3, 4, ctx),
+        else => {
+            const n = items.len;
+            const sentry: usize = 6;
+            // 第一阶段：i ∈ [1, 6) 朴素回退
+            var i: usize = 1;
+            while (i < sentry and i < n) : (i += 1) {
+                var j: usize = i - 1;
+                if (!(try ctx.cmp(items[j], items[i]) > 0)) continue;
+                while (j != 0) {
+                    j -= 1;
+                    if (!(try ctx.cmp(items[j], items[i]) > 0)) {
+                        j += 1;
+                        break;
+                    }
+                }
+                var k: usize = i;
+                while (k > j) : (k -= 1) q4Swap(items, k, k - 1);
+            }
+            // 第二阶段：i ∈ [6, n) 跳步查找（j -= 2 的下溢防护按 C 检查序复刻）
+            i = sentry;
+            while (i < n) : (i += 1) {
+                var j: usize = i - 1;
+                if (!(try ctx.cmp(items[j], items[i]) > 0)) continue;
+                while (true) {
+                    j -= 2;
+                    if (!(try ctx.cmp(items[j], items[i]) > 0)) {
+                        j += 1;
+                        if (!(try ctx.cmp(items[j], items[i]) > 0)) j += 1;
+                        break;
+                    }
+                    if (j == 0) break;
+                    if (j == 1) {
+                        j -= 1;
+                        if (try ctx.cmp(items[i], items[j]) > 0) j += 1;
+                        break;
+                    }
+                }
+                var k: usize = i;
+                while (k > j) : (k -= 1) q4Swap(items, k, k - 1);
+            }
+        },
+    }
+}
+
+/// zend_sort 忠实移植：nmemb<=16 ⇒ 插入排序；否则三点（>=1024 五点）中值枢轴 + 分区 +
+/// 小区间递归/大区间迭代（尾调用消除结构与 C 原文一致）。
+fn q4ZendSort(items: []KV, ctx: *const Q4SortCtx) !void {
+    var base: usize = 0;
+    var n: usize = items.len;
+    while (true) {
+        if (n <= 16) {
+            try q4InsertSort(items[base .. base + n], ctx);
+            return;
+        }
+        const offset = n >> 1;
+        var pivot = base + offset;
+        const end_excl = base + n; // C 的 end = start + nmemb*siz（右开）
+        if (n >> 10 != 0) {
+            const delta = offset >> 1;
+            try q4Sort5(items, base, base + delta, pivot, pivot + delta, end_excl - 1, ctx);
+        } else {
+            try q4Sort3(items, base, pivot, end_excl - 1, ctx);
+        }
+        q4Swap(items, base + 1, pivot);
+        pivot = base + 1;
+        var i: usize = pivot + 1;
+        var j: usize = end_excl - 1;
+        done: {
+            while (true) {
+                while (try ctx.cmp(items[pivot], items[i]) > 0) {
+                    i += 1;
+                    if (i == j) break :done;
+                }
+                j -= 1;
+                if (j == i) break :done;
+                while (try ctx.cmp(items[j], items[pivot]) > 0) {
+                    j -= 1;
+                    if (j == i) break :done;
+                }
+                q4Swap(items, i, j);
+                i += 1;
+                if (i == j) break :done;
+            }
+        }
+        q4Swap(items, pivot, i - 1);
+        // 小区间递归、大区间迭代（C 原文的 (i-siz)-start < end-i 判定，元素粒度）
+        if ((i - 1) - base < end_excl - i) {
+            try q4ZendSort(items[base .. i - 1], ctx);
+            base = i;
+            n = end_excl - i;
+        } else {
+            try q4ZendSort(items[i..end_excl], ctx);
+            n = (i - 1) - base;
+        }
+    }
+}
+
+/// 排序后回写（PHP 原地排语义）：比较器抛错时也必须回写——中间态可被 catch 观测。
+///   renumber=true ⇒ usort（整数键重编）；false ⇒ uasort/uksort（保键）。
+fn q4WritebackSorted(sort_arr: *PHPArray, items: []const KV, renumber: bool, allocator: Allocator) !void {
+    var new_elements = std.ArrayHashMapUnmanaged(ArrayKey, Value, PHPArray.ArrayContext, true){};
+    for (items, 0..) |kv, i| {
+        const key = if (renumber) ArrayKey{ .integer = @intCast(i) } else kv.key;
+        try new_elements.put(allocator, key, kv.value);
+    }
+    sort_arr.elements.deinit();
+    sort_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
+    if (renumber) sort_arr.next_index = @intCast(items.len);
+}
+
 fn quickSortEntriesByValue(items: []KV, allocator: Allocator, descending: bool) !void {
     if (items.len < 2) return;
 
@@ -37157,6 +37346,13 @@ pub fn php_krsort(arr: Value, allocator: Allocator) !Value {
 fn invokeUserCompare(callback: Value, a: Value, b: Value, allocator: Allocator) !i64 {
     const args = [_]Value{ a, b };
     const res = try php_invoke_callable(callback, &args, allocator);
+    // ★批次三十一补缺：比较器抛可捕获异常 = setException 置旗 + 返回异常 Value（非 Zig error，
+    //   见 :12648 契约）。必须立即以内部错误向上冒泡终止排序（PHP 实测 calls 计数恰停在抛出处，
+    //   抛后不再发起任何比较），否则 toInt 吞掉异常值 ⇒ 排序继续 ⇒ 比较次数与中间态全错。
+    if (hasException()) {
+        res.release(allocator);
+        return error.SortAborted;
+    }
     const cmp = res.toInt();
     res.release(allocator);
     return cmp;
@@ -37278,25 +37474,21 @@ pub fn php_usort(arr: Value, callback: Value, allocator: Allocator) !Value {
     // 原地排序：直接修改 PHPArray，所有引用（对象属性/alloca/全局变量）均可见排序结果
     const sort_arr = php_arr;
 
-    const n = sort_arr.count();
-    var values = try allocator.alloc(Value, n);
-    defer allocator.free(values);
-
-    var it = sort_arr.elements.iterator();
-    var idx: usize = 0;
-    while (it.next()) |entry| : (idx += 1) values[idx] = entry.value_ptr.*;
-
-    try quickSortValuesWithCallback(values, callback, allocator, false);
-
-    var new_elements = std.ArrayHashMapUnmanaged(ArrayKey, Value, PHPArray.ArrayContext, true){};
-    var i: usize = 0;
-    while (i < values.len) : (i += 1) {
-        try new_elements.put(allocator, .{ .integer = @intCast(i) }, values[i]);
-    }
-
-    sort_arr.elements.deinit();
-    sort_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
-    sort_arr.next_index = @intCast(values.len);
+    // ★批次三十一：zend_sort 忠实移植（KV 承载 orig_idx 稳定决胜）；
+    //   比较器抛错 ⇒ 先把中间态回写（PHP 原地排语义：catch 可观测部分排序结果）再上抛。
+    const items = try collectEntries(sort_arr, allocator);
+    defer allocator.free(items);
+    const ctx = Q4SortCtx{ .callback = callback, .by_key = false, .allocator = allocator };
+    q4ZendSort(items, &ctx) catch |e| {
+        if (e == error.SortAborted) {
+            // 比较器抛出：先回写中间态（PHP 原地排语义，catch 可观测），再以「占位 Value +
+            // 异常旗仍置位」返回——禁 `return e`（Zig error 会冒过发射点 try 绕过 catch 路由）。
+            try q4WritebackSorted(sort_arr, items, true, allocator);
+            return Value.initNull();
+        }
+        return e;
+    };
+    try q4WritebackSorted(sort_arr, items, true, allocator);
     return Value.initBool(true); // ★R-334（f042 回归红显形）：PHP 排序族契约＝原地排序+返 true；旧返数组本体系非 PHP 语义
 }
 
@@ -37310,15 +37502,16 @@ pub fn php_uasort(arr: Value, callback: Value, allocator: Allocator) !Value {
 
     const items = try collectEntries(sort_arr, allocator);
     defer allocator.free(items);
-
-    try quickSortEntriesByValueWithCallback(items, callback, allocator, false);
-
-    var new_elements = std.ArrayHashMapUnmanaged(ArrayKey, Value, PHPArray.ArrayContext, true){};
-    for (items) |kv| {
-        try new_elements.put(allocator, kv.key, kv.value);
-    }
-    sort_arr.elements.deinit();
-    sort_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
+    const ctx = Q4SortCtx{ .callback = callback, .by_key = false, .allocator = allocator };
+    q4ZendSort(items, &ctx) catch |e| {
+        if (e == error.SortAborted) {
+            // 同 php_usort：回写中间态 + 占位返回（异常旗仍置位，catch 路由由发射点接管）。
+            try q4WritebackSorted(sort_arr, items, false, allocator);
+            return Value.initNull();
+        }
+        return e;
+    };
+    try q4WritebackSorted(sort_arr, items, false, allocator);
     return Value.initBool(true); // ★R-334（f042 回归红显形）：PHP 排序族契约＝原地排序+返 true；旧返数组本体系非 PHP 语义
 }
 
@@ -37332,15 +37525,16 @@ pub fn php_uksort(arr: Value, callback: Value, allocator: Allocator) !Value {
 
     const items = try collectEntries(sort_arr, allocator);
     defer allocator.free(items);
-
-    try quickSortEntriesByKeyWithCallback(items, callback, allocator, false);
-
-    var new_elements = std.ArrayHashMapUnmanaged(ArrayKey, Value, PHPArray.ArrayContext, true){};
-    for (items) |kv| {
-        try new_elements.put(allocator, kv.key, kv.value);
-    }
-    sort_arr.elements.deinit();
-    sort_arr.elements = PHPArray.Elements.initMixed(allocator, new_elements);
+    const ctx = Q4SortCtx{ .callback = callback, .by_key = true, .allocator = allocator };
+    q4ZendSort(items, &ctx) catch |e| {
+        if (e == error.SortAborted) {
+            // 同 php_usort：回写中间态 + 占位返回（异常旗仍置位，catch 路由由发射点接管）。
+            try q4WritebackSorted(sort_arr, items, false, allocator);
+            return Value.initNull();
+        }
+        return e;
+    };
+    try q4WritebackSorted(sort_arr, items, false, allocator);
     return Value.initBool(true); // ★R-334（f042 回归红显形）：PHP 排序族契约＝原地排序+返 true；旧返数组本体系非 PHP 语义
 }
 

@@ -410,6 +410,9 @@ pub const NativeLinker = struct {
     current_liveness: ?*const @import("liveness_analysis.zig").LivenessAnalysis = null, // 活跃性分析结果
     current_gen_block_idx: ?usize = null, // 当前正在生成代码的基本块索引（用于 releaseDeadOperands）
     current_gen_inst_idx: ?usize = null, // 当前正在生成代码的指令索引（用于 releaseDeadOperands）
+    /// ★批次三十（G1/G4 解冻）：块指针 → func.blocks 位置索引（native 控制流发射族的
+    ///   releaseDeadOperands 布点依赖——状态机路径用位置枚举，native 路径只有块指针）。
+    current_block_positions: ?*const std.AutoHashMap(*const IR.BasicBlock, usize) = null,
     current_catch_used_regs: ?*const std.AutoHashMap(usize, void) = null, // catch块中引用的寄存器集合（cleanup时跳过）
     current_exception_owned_regs: ?[]const usize = null, // F-133: catch_/get_exception 结果寄存器（持有 getException() 转移的异常引用，升序）
     current_cond_br_source_block: ?usize = null, // 嵌套cond_br的源块索引（用于PHI incoming选择）
@@ -966,6 +969,20 @@ pub const NativeLinker = struct {
             return alloca_regs.contains(reg_id);
         }
         return false;
+    }
+
+    /// ★R-335：`return $this`（ctx 借用引用）在 return 前补 retain 的统一收口。
+    ///   writeReturnStmt/generateReturnStr 已内建；本函数供 tryGenerateSimpleIfElsePattern
+    ///   等绕过这两个收口的直写 ret 臂使用。
+    fn appendThisRetainIfNeeded(self: *Self, code: *std.ArrayList(u8), reg_id: usize, is_alloca: bool, indent: []const u8) !void {
+        if (self.current_this_regs) |tr| {
+            if (tr.contains(reg_id)) {
+                const suffix: []const u8 = if (is_alloca) ".*" else "";
+                const _f = try std.fmt.allocPrint(self.allocator, "{s}_ = reg_{d}{s}.retain();\n", .{ indent, reg_id, suffix });
+                defer self.allocator.free(_f);
+                try code.appendSlice(self.allocator, _f);
+            }
+        }
     }
 
     /// 生成函数返回前的 cleanup 代码（排除返回值寄存器）
@@ -5459,6 +5476,15 @@ pub const NativeLinker = struct {
         self.current_liveness = &liveness;
         defer self.current_liveness = null;
 
+        // ★批次三十：块位置表（native 发射族的 releaseDeadOperands 布点依据）
+        var block_positions = std.AutoHashMap(*const IR.BasicBlock, usize).init(self.allocator);
+        defer block_positions.deinit();
+        for (func.blocks.items, 0..) |blk, bpos| {
+            try block_positions.put(blk, bpos);
+        }
+        self.current_block_positions = &block_positions;
+        defer self.current_block_positions = null;
+
         // 所有权追踪（暂时禁用）
         // const OwnershipTracker = @import("ownership_tracker.zig").OwnershipTracker;
         // var ownership = OwnershipTracker.init(self.allocator);
@@ -7279,8 +7305,8 @@ pub const NativeLinker = struct {
             const prev_handler = self.current_exception_handler;
             self.current_exception_handler = null;
 
-            for (block.instructions.items) |inst| {
-                try self.generateInstructionSimple(code, inst);
+            for (block.instructions.items, 0..) |inst, q4_iidx_7293| {
+                try self.generateInstructionTracked(code, inst, block, q4_iidx_7293);
             }
 
             // 恢复异常处理器
@@ -7342,23 +7368,8 @@ pub const NativeLinker = struct {
                             // 始终返回原始 Value，不做类型转换
                             // 类型推断可能不准确（如 && 结果推断为 i64 但实际是 bool）
                             const is_alloca = alloca_registers.contains(reg.id);
-                            // 如果返回 $this（ctx 借用引用），需要 retain
-                            const is_this = this_regs.contains(reg.id);
-                            if (is_this) {
-                                if (is_alloca) {
-                                    {
-                                        const _f = try std.fmt.allocPrint(self.allocator, "    _ = reg_{d}.*.retain();\n", .{reg.id});
-                                        defer self.allocator.free(_f);
-                                        try code.appendSlice(self.allocator, _f);
-                                    }
-                                } else {
-                                    {
-                                        const _f = try std.fmt.allocPrint(self.allocator, "    _ = reg_{d}.retain();\n", .{reg.id});
-                                        defer self.allocator.free(_f);
-                                        try code.appendSlice(self.allocator, _f);
-                                    }
-                                }
-                            }
+                            // ★R-335：$this（ctx 借用引用）的 retain 已收口进 generateReturnStr
+                            // （writeReturnStmt 同责），此处不再单独补——否则双记 +1。
                             if (is_alloca) {
                                 const _ret = try self.generateReturnStr(reg.id, true, "    ");
                                 defer self.allocator.free(_ret);
@@ -7559,8 +7570,8 @@ pub const NativeLinker = struct {
 
         // 生成entry块的指令
         try code.appendSlice(self.allocator, "    // Instructions\n");
-        for (entry_block.instructions.items) |inst| {
-            try self.generateInstructionSimple(code, inst);
+        for (entry_block.instructions.items, 0..) |inst, q4_iidx_7573| {
+            try self.generateInstructionTracked(code, inst, entry_block, q4_iidx_7573);
         }
 
         // 生成if语句
@@ -7587,9 +7598,9 @@ pub const NativeLinker = struct {
 
         // 生成then块
         const then_block = func.blocks.items[then_idx.?];
-        for (then_block.instructions.items) |inst| {
+        for (then_block.instructions.items, 0..) |inst, q4_iidx_7601| {
             try code.appendSlice(self.allocator, "    ");
-            try self.generateInstructionSimple(code, inst);
+            try self.generateInstructionTracked(code, inst, then_block, q4_iidx_7601);
         }
 
         // 检查then块的terminator
@@ -7619,6 +7630,9 @@ pub const NativeLinker = struct {
                                 }
                             }
                         }
+
+                        // ★R-335：`return $this` 借用引用 retain（本直写臂绕过了 writeReturnStmt 收口，须自补）
+                        try self.appendThisRetainIfNeeded(code, reg.id, alloca_regs.contains(reg.id), "        ");
 
                         if (func_has_return_value) {
                             // 函数返回runtime.Value，需要检查寄存器类型
@@ -7749,9 +7763,9 @@ pub const NativeLinker = struct {
                     // 生成嵌套的then块
                     if (nested_then_idx) |idx| {
                         const nested_then_block = func.blocks.items[idx];
-                        for (nested_then_block.instructions.items) |inst| {
+                        for (nested_then_block.instructions.items, 0..) |inst, q4_iidx_7763| {
                             try code.appendSlice(self.allocator, "        ");
-                            try self.generateInstructionSimple(code, inst);
+                            try self.generateInstructionTracked(code, inst, nested_then_block, q4_iidx_7763);
                         }
                     }
 
@@ -7762,9 +7776,9 @@ pub const NativeLinker = struct {
                         if (nested_then_idx == null or idx != nested_then_idx.?) {
                             try code.appendSlice(self.allocator, " else {\n");
                             const nested_else_block = func.blocks.items[idx];
-                            for (nested_else_block.instructions.items) |inst| {
+                            for (nested_else_block.instructions.items, 0..) |inst, q4_iidx_7776| {
                                 try code.appendSlice(self.allocator, "        ");
-                                try self.generateInstructionSimple(code, inst);
+                                try self.generateInstructionTracked(code, inst, nested_else_block, q4_iidx_7776);
                             }
                             try code.appendSlice(self.allocator, "        }");
                         }
@@ -7782,9 +7796,9 @@ pub const NativeLinker = struct {
         if (else_idx != null and else_idx.? != then_idx.?) {
             try code.appendSlice(self.allocator, " else {\n");
             const else_block = func.blocks.items[else_idx.?];
-            for (else_block.instructions.items) |inst| {
+            for (else_block.instructions.items, 0..) |inst, q4_iidx_7796| {
                 try code.appendSlice(self.allocator, "    ");
-                try self.generateInstructionSimple(code, inst);
+                try self.generateInstructionTracked(code, inst, else_block, q4_iidx_7796);
             }
 
             // 检查else块的terminator
@@ -7814,6 +7828,9 @@ pub const NativeLinker = struct {
                                     }
                                 }
                             }
+
+                            // ★R-335：`return $this` 借用引用 retain（本直写臂绕过了 writeReturnStmt 收口，须自补）
+                            try self.appendThisRetainIfNeeded(code, reg.id, alloca_regs.contains(reg.id), "        ");
 
                             if (func_has_return_value) {
                                 // 函数返回runtime.Value，需要检查寄存器类型
@@ -7905,9 +7922,9 @@ pub const NativeLinker = struct {
                         // 生成嵌套的then块
                         if (nested_then_idx) |idx| {
                             const nested_then_block = func.blocks.items[idx];
-                            for (nested_then_block.instructions.items) |inst| {
+                            for (nested_then_block.instructions.items, 0..) |inst, q4_iidx_7919| {
                                 try code.appendSlice(self.allocator, "        ");
-                                try self.generateInstructionSimple(code, inst);
+                                try self.generateInstructionTracked(code, inst, nested_then_block, q4_iidx_7919);
                             }
                         }
 
@@ -7918,9 +7935,9 @@ pub const NativeLinker = struct {
                             if (nested_then_idx == null or idx != nested_then_idx.?) {
                                 try code.appendSlice(self.allocator, " else {\n");
                                 const nested_else_block = func.blocks.items[idx];
-                                for (nested_else_block.instructions.items) |inst| {
+                                for (nested_else_block.instructions.items, 0..) |inst, q4_iidx_7932| {
                                     try code.appendSlice(self.allocator, "        ");
-                                    try self.generateInstructionSimple(code, inst);
+                                    try self.generateInstructionTracked(code, inst, nested_else_block, q4_iidx_7932);
                                 }
                                 try code.appendSlice(self.allocator, "        }");
                             }
@@ -8052,7 +8069,7 @@ pub const NativeLinker = struct {
             const current_block = func.blocks.items[current_idx];
             if (!processed.contains(current_idx)) {
                 try processed.put(current_idx, {});
-                for (current_block.instructions.items) |inst| {
+                for (current_block.instructions.items, 0..) |inst, q4_iidx_8066| {
                     // 对于非 cond 块（如 logical_merge_），消解 PHI 指令
                     // PHI 的 incoming 来自前驱块，在顺序代码中，前驱是上一个处理的块
                     // 跳过来自 cond 块（回边）、body 块和 exit 块的 incoming
@@ -8070,7 +8087,7 @@ pub const NativeLinker = struct {
                         }
                     } else {
                         try writer.writeAll(indent);
-                        try self.generateInstructionSimple(writer.list, inst);
+                        try self.generateInstructionTracked(writer.list, inst, current_block, q4_iidx_8066);
                     }
                 }
             }
@@ -8165,9 +8182,9 @@ pub const NativeLinker = struct {
                             const rhs_blk0 = func.blocks.items[ri];
                             if (!processed.contains(ri)) {
                                 try processed.put(ri, {});
-                                for (rhs_blk0.instructions.items) |inst| {
+                                for (rhs_blk0.instructions.items, 0..) |inst, q4_iidx_8179| {
                                     try writer.writeAll(indent);
-                                    try self.generateInstructionSimple(writer.list, inst);
+                                    try self.generateInstructionTracked(writer.list, inst, rhs_blk0, q4_iidx_8179);
                                 }
                             }
                             // 跟随 rhs 的终止符到 merge 块。merge 的 cond_br 若仍是同级 && 链
@@ -8198,7 +8215,7 @@ pub const NativeLinker = struct {
                                 if (!processed.contains(mi)) {
                                     try processed.put(mi, {});
                                     // 消解 merge 块的 PHI（使用来自前置 rhs 块的 incoming）
-                                    for (merge_block.instructions.items) |inst| {
+                                    for (merge_block.instructions.items, 0..) |inst, q4_iidx_8212| {
                                         if (inst.op == .phi) {
                                             if (inst.result) |result| {
                                                 for (inst.op.phi.incoming) |incoming| {
@@ -8210,7 +8227,7 @@ pub const NativeLinker = struct {
                                             }
                                         } else {
                                             try writer.writeAll(indent);
-                                            try self.generateInstructionSimple(writer.list, inst);
+                                            try self.generateInstructionTracked(writer.list, inst, merge_block, q4_iidx_8212);
                                         }
                                     }
                                 }
@@ -8243,9 +8260,9 @@ pub const NativeLinker = struct {
                                         const nblk = func.blocks.items[nhi];
                                         if (!processed.contains(nhi)) {
                                             try processed.put(nhi, {});
-                                            for (nblk.instructions.items) |inst| {
+                                            for (nblk.instructions.items, 0..) |inst, q4_iidx_8257| {
                                                 try writer.writeAll(indent);
-                                                try self.generateInstructionSimple(writer.list, inst);
+                                                try self.generateInstructionTracked(writer.list, inst, nblk, q4_iidx_8257);
                                             }
                                         }
                                         hop_blk = nblk;
@@ -8276,9 +8293,9 @@ pub const NativeLinker = struct {
                             const rhs_block = func.blocks.items[ri];
                             if (!processed.contains(ri)) {
                                 try processed.put(ri, {});
-                                for (rhs_block.instructions.items) |inst| {
+                                for (rhs_block.instructions.items, 0..) |inst, q4_iidx_8290| {
                                     try writer.writeAll(inner_indent);
-                                    try self.generateInstructionSimple(writer.list, inst);
+                                    try self.generateInstructionTracked(writer.list, inst, rhs_block, q4_iidx_8290);
                                 }
                             }
                             // 跟随 br 到 merge 块
@@ -8290,7 +8307,7 @@ pub const NativeLinker = struct {
                                             const merge_block = func.blocks.items[mi];
                                             try processed.put(mi, {});
                                             // 消解 merge 块的 PHI（使用来自 rhs 的 incoming）
-                                            for (merge_block.instructions.items) |inst| {
+                                            for (merge_block.instructions.items, 0..) |inst, q4_iidx_8304| {
                                                 if (inst.op == .phi) {
                                                     if (inst.result) |result| {
                                                         for (inst.op.phi.incoming) |incoming| {
@@ -8302,7 +8319,7 @@ pub const NativeLinker = struct {
                                                     }
                                                 } else {
                                                     try writer.writeAll(inner_indent);
-                                                    try self.generateInstructionSimple(writer.list, inst);
+                                                    try self.generateInstructionTracked(writer.list, inst, merge_block, q4_iidx_8304);
                                                 }
                                             }
                                             // 生成 merge 块的 cond_br 检查
@@ -8363,9 +8380,9 @@ pub const NativeLinker = struct {
                                 const rhs_blk = func.blocks.items[ri];
                                 if (!processed.contains(ri)) {
                                     try processed.put(ri, {});
-                                    for (rhs_blk.instructions.items) |inst| {
+                                    for (rhs_blk.instructions.items, 0..) |inst, q4_iidx_8377| {
                                         try writer.writeAll(inner_indent);
-                                        try self.generateInstructionSimple(writer.list, inst);
+                                        try self.generateInstructionTracked(writer.list, inst, rhs_blk, q4_iidx_8377);
                                     }
                                 }
                             }
@@ -8376,7 +8393,7 @@ pub const NativeLinker = struct {
                                 const merge_blk = func.blocks.items[mi];
                                 if (!processed.contains(mi)) {
                                     try processed.put(mi, {});
-                                    for (merge_blk.instructions.items) |inst| {
+                                    for (merge_blk.instructions.items, 0..) |inst, q4_iidx_8390| {
                                         if (inst.op == .phi) {
                                             // 条件赋值消解 PHI: result = if (cond) rhs_value else non_rhs_value
                                             if (inst.result) |result| {
@@ -8404,7 +8421,7 @@ pub const NativeLinker = struct {
                                             }
                                         } else {
                                             try writer.writeAll(indent);
-                                            try self.generateInstructionSimple(writer.list, inst);
+                                            try self.generateInstructionTracked(writer.list, inst, merge_blk, q4_iidx_8390);
                                         }
                                     }
                                 }
@@ -8507,7 +8524,7 @@ pub const NativeLinker = struct {
         src_blk: *IR.BasicBlock,
         indent: []const u8,
     ) anyerror!void {
-        for (blk.instructions.items) |inst| {
+        for (blk.instructions.items, 0..) |inst, q4_iidx_8521| {
             if (inst.op == .phi) {
                 var resolved = false;
                 if (inst.result) |result| {
@@ -8524,7 +8541,7 @@ pub const NativeLinker = struct {
                 if (resolved) continue;
             }
             try writer.writeAll(indent);
-            try self.generateInstructionSimple(writer.list, inst);
+            try self.generateInstructionTracked(writer.list, inst, blk, q4_iidx_8521);
         }
     }
 
@@ -8598,9 +8615,9 @@ pub const NativeLinker = struct {
         const arm_indent = try std.fmt.allocPrint(self.allocator, "{s}    ", .{indent});
         defer self.allocator.free(arm_indent);
         try processed.put(tv, {});
-        for (t_blk.instructions.items) |inst| {
+        for (t_blk.instructions.items, 0..) |inst, q4_iidx_8612| {
             try writer.writeAll(arm_indent);
-            try self.generateInstructionSimple(writer.list, inst);
+            try self.generateInstructionTracked(writer.list, inst, t_blk, q4_iidx_8612);
         }
         if (t_blk.terminator) |tb| {
             if (tb == .br) {
@@ -8637,18 +8654,18 @@ pub const NativeLinker = struct {
             }
         }
         try processed.put(mv, {});
-        for (m_blk.instructions.items) |inst| {
+        for (m_blk.instructions.items, 0..) |inst, q4_iidx_8651| {
             if (inst.op == .phi) continue;
             try writer.writeAll(indent);
-            try self.generateInstructionSimple(writer.list, inst);
+            try self.generateInstructionTracked(writer.list, inst, m_blk, q4_iidx_8651);
         }
         // 外层 merge（回边块）：物化自嵌套 merge 边的 PHI 并内联非 PHI 推进指令；
         // 不发射其终止符、不标记已处理，真边落入 while 收尾（锁存 PHI + continue）。
         try self.materializeBrTargetMergePhis(writer, m_blk, mdb, indent);
-        for (mdb.instructions.items) |inst| {
+        for (mdb.instructions.items, 0..) |inst, q4_iidx_8659| {
             if (inst.op == .phi) continue;
             try writer.writeAll(indent);
-            try self.generateInstructionSimple(writer.list, inst);
+            try self.generateInstructionTracked(writer.list, inst, mdb, q4_iidx_8659);
         }
         self.return_generated = false;
         self.break_generated = false;
@@ -8809,10 +8826,10 @@ pub const NativeLinker = struct {
             {
                 // 生成 if_merge_ 块的非 PHI 指令
                 try processed.put(i, {});
-                for (block.instructions.items) |inst| {
+                for (block.instructions.items, 0..) |inst, q4_iidx_8823| {
                     if (inst.op != .phi) {
                         try writer.writeAll(indent);
-                        try self.generateInstructionSimple(writer.list, inst);
+                        try self.generateInstructionTracked(writer.list, inst, block, q4_iidx_8823);
                     }
                 }
                 // 使用 cond_br 的条件直接生成 if/else 结构
@@ -8996,9 +9013,9 @@ pub const NativeLinker = struct {
                         // processed 而生成 if(true)，导致 then 分支无条件执行）。
                         const nested_then_blk = func.blocks.items[nti];
                         try processed.put(nti, {});
-                        for (nested_then_blk.instructions.items) |inst| {
+                        for (nested_then_blk.instructions.items, 0..) |inst, q4_iidx_9010| {
                             try writer.writeAll(then_indent);
-                            try self.generateInstructionSimple(writer.list, inst);
+                            try self.generateInstructionTracked(writer.list, inst, nested_then_blk, q4_iidx_9010);
                         }
                         // || 短路：then 块是 logical_merge_（条件 LHS 为真时直接短路到 merge，
                         // 结果 = LHS 值）。与 && 的 else==logical_merge 在下方 else 分支的
@@ -9316,9 +9333,9 @@ pub const NativeLinker = struct {
                                                 }
                                             }
                                             try writer.print("{s}}} else {{\n", .{then_indent});
-                                            for (gr_blk.instructions.items) |inst| {
+                                            for (gr_blk.instructions.items, 0..) |inst, q4_iidx_9330| {
                                                 try writer.writeAll(gor_indent);
-                                                try self.generateInstructionSimple(writer.list, inst);
+                                                try self.generateInstructionTracked(writer.list, inst, gr_blk, q4_iidx_9330);
                                             }
                                             // rhs 边：消解内层 merge PHI（incoming 来自 rhs 块）
                                             for (gm_blk.instructions.items) |phi_inst| {
@@ -9429,9 +9446,9 @@ pub const NativeLinker = struct {
                                                     }
                                                 }
                                             } else {
-                                                for (t_blk_e.instructions.items) |inst| {
+                                                for (t_blk_e.instructions.items, 0..) |inst, q4_iidx_9443| {
                                                     try writer.writeAll(cs_indent);
-                                                    try self.generateInstructionSimple(writer.list, inst);
+                                                    try self.generateInstructionTracked(writer.list, inst, t_blk_e, q4_iidx_9443);
                                                 }
                                                 for (m_blk_e.instructions.items) |phi_inst| {
                                                     if (phi_inst.op != .phi) continue;
@@ -9450,9 +9467,9 @@ pub const NativeLinker = struct {
                                             try writer.print("{s}}} else {{\n", .{then_indent});
                                             // 假边（与真边互补）
                                             if (m_is_then_e) {
-                                                for (t_blk_e.instructions.items) |inst| {
+                                                for (t_blk_e.instructions.items, 0..) |inst, q4_iidx_9464| {
                                                     try writer.writeAll(cs_indent);
-                                                    try self.generateInstructionSimple(writer.list, inst);
+                                                    try self.generateInstructionTracked(writer.list, inst, t_blk_e, q4_iidx_9464);
                                                 }
                                                 for (m_blk_e.instructions.items) |phi_inst| {
                                                     if (phi_inst.op != .phi) continue;
@@ -9484,10 +9501,10 @@ pub const NativeLinker = struct {
                                             }
                                             try writer.print("{s}}}\n", .{then_indent});
                                             // merge 体非 phi 指令：两边汇聚后共同执行
-                                            for (m_blk_e.instructions.items) |inst| {
+                                            for (m_blk_e.instructions.items, 0..) |inst, q4_iidx_9498| {
                                                 if (inst.op == .phi) continue;
                                                 try writer.writeAll(then_indent);
-                                                try self.generateInstructionSimple(writer.list, inst);
+                                                try self.generateInstructionTracked(writer.list, inst, m_blk_e, q4_iidx_9498);
                                             }
                                             // 一跳：外层 merge phi 中来自本 merge 体的 incoming
                                             // （若其 .br 回落外层 merge；外层无 phi 则无输出）
@@ -9743,9 +9760,9 @@ pub const NativeLinker = struct {
                 switch (term) {
                     .ret => |ret_val| {
                         // 生成块内指令
-                        for (block.instructions.items) |inst| {
+                        for (block.instructions.items, 0..) |inst, q4_iidx_9757| {
                             try writer.writeAll(indent);
-                            try self.generateInstructionSimple(writer.list, inst);
+                            try self.generateInstructionTracked(writer.list, inst, block, q4_iidx_9757);
                         }
                         // 生成 cleanup
                         if (cleanup_regs.len > 0) {
@@ -9769,9 +9786,9 @@ pub const NativeLinker = struct {
                     },
                     .br => {
                         // 生成块内指令，不生成 br（控制流由标签驱动）
-                        for (block.instructions.items) |inst| {
+                        for (block.instructions.items, 0..) |inst, q4_iidx_9783| {
                             try writer.writeAll(indent);
-                            try self.generateInstructionSimple(writer.list, inst);
+                            try self.generateInstructionTracked(writer.list, inst, block, q4_iidx_9783);
                         }
                         // 记录 br 是否被当作循环回边处理（决定了是否还需消解目标 merge 的 PHI）。
                         var br_was_backedge = false;
@@ -9871,9 +9888,9 @@ pub const NativeLinker = struct {
                         const cond_br_data = term.cond_br;
 
                         // 生成块内指令（包括条件计算）
-                        for (block.instructions.items) |inst| {
+                        for (block.instructions.items, 0..) |inst, q4_iidx_9885| {
                             try writer.writeAll(indent);
-                            try self.generateInstructionSimple(writer.list, inst);
+                            try self.generateInstructionTracked(writer.list, inst, block, q4_iidx_9885);
                         }
 
                         // 查找 then/else 块索引
@@ -10027,7 +10044,7 @@ pub const NativeLinker = struct {
                             } else if (!processed.contains(ti)) {
                                 try processed.put(ti, {});
                                 const then_blk = func.blocks.items[ti];
-                                for (then_blk.instructions.items) |inst| {
+                                for (then_blk.instructions.items, 0..) |inst, q4_iidx_10041| {
                                     // then 块的 phi（如 ternary_merge_ 的 elvis 真值）：
                                     // 来自当前 cond_br 源块的 incoming 在此消解，否则
                                     // phi 仅剩占位注释、merge 值读到 null（f151 elvis 返回空）
@@ -10045,7 +10062,7 @@ pub const NativeLinker = struct {
                                         continue;
                                     }
                                     try writer.writeAll(body_indent);
-                                    try self.generateInstructionSimple(writer.list, inst);
+                                    try self.generateInstructionTracked(writer.list, inst, then_blk, q4_iidx_10041);
                                 }
                                 // 查找 merge 块或处理 ret 终止符
                                 if (then_blk.terminator) |t| {
@@ -10442,9 +10459,9 @@ pub const NativeLinker = struct {
                                                 }
                                                 try writer.print("{s}}} else {{\n", .{body_indent});
                                                 // else 边：rhs 块指令 + merge phi 中来自 rhs 块的 incoming
-                                                for (nrhs_blk.instructions.items) |inst| {
+                                                for (nrhs_blk.instructions.items, 0..) |inst, q4_iidx_10456| {
                                                     try writer.writeAll(body_indent);
-                                                    try self.generateInstructionSimple(writer.list, inst);
+                                                    try self.generateInstructionTracked(writer.list, inst, nrhs_blk, q4_iidx_10456);
                                                 }
                                                 for (nmerge_blk.instructions.items) |phi_inst| {
                                                     if (phi_inst.op == .phi) {
@@ -10576,9 +10593,9 @@ pub const NativeLinker = struct {
                                                             defer self.allocator.free(nested_indent);
                                                             try processed.put(nti, {});
                                                             const nt_blk = func.blocks.items[nti];
-                                                            for (nt_blk.instructions.items) |inst| {
+                                                            for (nt_blk.instructions.items, 0..) |inst, q4_iidx_10590| {
                                                                 try writer.writeAll(nested_indent);
-                                                                try self.generateInstructionSimple(writer.list, inst);
+                                                                try self.generateInstructionTracked(writer.list, inst, nt_blk, q4_iidx_10590);
                                                             }
                                                             // f067 query：then 臂终止符必须发射——
                                                             // 单语句 `if (c) return null;` 的 ret 此前被
@@ -10625,9 +10642,9 @@ pub const NativeLinker = struct {
                                                                     try writer.print("{s}}} else {{\n", .{body_indent});
                                                                     try processed.put(nei, {});
                                                                     const ne_blk = func.blocks.items[nei];
-                                                                    for (ne_blk.instructions.items) |inst| {
+                                                                    for (ne_blk.instructions.items, 0..) |inst, q4_iidx_10639| {
                                                                         try writer.writeAll(nested_indent);
-                                                                        try self.generateInstructionSimple(writer.list, inst);
+                                                                        try self.generateInstructionTracked(writer.list, inst, ne_blk, q4_iidx_10639);
                                                                     }
                                                                     if (ne_blk.terminator) |net| {
                                                                         switch (net) {
@@ -11560,9 +11577,9 @@ pub const NativeLinker = struct {
                                                             defer self.allocator.free(nested_indent);
                                                             try processed.put(nti, {});
                                                             const nt_blk = func.blocks.items[nti];
-                                                            for (nt_blk.instructions.items) |inst| {
+                                                            for (nt_blk.instructions.items, 0..) |inst, q4_iidx_11574| {
                                                                 try writer.writeAll(nested_indent);
-                                                                try self.generateInstructionSimple(writer.list, inst);
+                                                                try self.generateInstructionTracked(writer.list, inst, nt_blk, q4_iidx_11574);
                                                             }
                                                             // f067 query：then 臂终止符必须发射（与 twin A 对称）——
                                                             // 单语句 `if (c) return null;` 的 ret 此前被整体丢弃；
@@ -11607,9 +11624,9 @@ pub const NativeLinker = struct {
                                                                     try writer.print("{s}}} else {{\n", .{body_indent});
                                                                     try processed.put(nei, {});
                                                                     const ne_blk = func.blocks.items[nei];
-                                                                    for (ne_blk.instructions.items) |inst| {
+                                                                    for (ne_blk.instructions.items, 0..) |inst, q4_iidx_11621| {
                                                                         try writer.writeAll(nested_indent);
-                                                                        try self.generateInstructionSimple(writer.list, inst);
+                                                                        try self.generateInstructionTracked(writer.list, inst, ne_blk, q4_iidx_11621);
                                                                     }
                                                                     if (ne_blk.terminator) |net| {
                                                                         switch (net) {
@@ -12112,10 +12129,10 @@ pub const NativeLinker = struct {
                                 }
 
                                 try processed.put(mi, {});
-                                for (merge_blk.instructions.items) |inst| {
+                                for (merge_blk.instructions.items, 0..) |inst, q4_iidx_12126| {
                                     if (inst.op != .phi) {
                                         try writer.writeAll(indent);
-                                        try self.generateInstructionSimple(writer.list, inst);
+                                        try self.generateInstructionTracked(writer.list, inst, merge_blk, q4_iidx_12126);
                                     }
                                 }
                                 // 方案 C 链式 hop：merge 块若为纯 PHI 且 .br 到另一含 PHI 的块
@@ -12248,24 +12265,24 @@ pub const NativeLinker = struct {
                     },
                     .unreachable_ => {
                         // 生成块内指令
-                        for (block.instructions.items) |inst| {
+                        for (block.instructions.items, 0..) |inst, q4_iidx_12262| {
                             try writer.writeAll(indent);
-                            try self.generateInstructionSimple(writer.list, inst);
+                            try self.generateInstructionTracked(writer.list, inst, block, q4_iidx_12262);
                         }
                     },
                     else => {
                         // 生成块内指令
-                        for (block.instructions.items) |inst| {
+                        for (block.instructions.items, 0..) |inst, q4_iidx_12269| {
                             try writer.writeAll(indent);
-                            try self.generateInstructionSimple(writer.list, inst);
+                            try self.generateInstructionTracked(writer.list, inst, block, q4_iidx_12269);
                         }
                     },
                 }
             } else {
                 // 没有终止符的块
-                for (block.instructions.items) |inst| {
+                for (block.instructions.items, 0..) |inst, q4_iidx_12277| {
                     try writer.writeAll(indent);
-                    try self.generateInstructionSimple(writer.list, inst);
+                    try self.generateInstructionTracked(writer.list, inst, block, q4_iidx_12277);
                 }
             }
 
@@ -12871,9 +12888,9 @@ pub const NativeLinker = struct {
         // 处理 body 块的指令
         const body_block = func.blocks.items[body_idx];
         try processed.put(body_idx, {});
-        for (body_block.instructions.items) |inst| {
+        for (body_block.instructions.items, 0..) |inst, q4_iidx_12885| {
             try writer.writeAll(body_indent);
-            try self.generateInstructionSimple(writer.list, inst);
+            try self.generateInstructionTracked(writer.list, inst, body_block, q4_iidx_12885);
         }
 
         // 处理 body 块的终止符
@@ -13043,9 +13060,9 @@ pub const NativeLinker = struct {
                         } else if (!processed.contains(ti)) {
                             try processed.put(ti, {});
                             const then_blk = func.blocks.items[ti];
-                            for (then_blk.instructions.items) |inst| {
+                            for (then_blk.instructions.items, 0..) |inst, q4_iidx_13057| {
                                 try writer.writeAll(then_indent);
-                                try self.generateInstructionSimple(writer.list, inst);
+                                try self.generateInstructionTracked(writer.list, inst, then_blk, q4_iidx_13057);
                             }
                             if (then_blk.terminator) |tt| {
                                 switch (tt) {
@@ -13595,9 +13612,9 @@ pub const NativeLinker = struct {
                                     }
                                 }
                                 const else_blk = func.blocks.items[ei];
-                                for (else_blk.instructions.items) |inst| {
+                                for (else_blk.instructions.items, 0..) |inst, q4_iidx_13609| {
                                     try writer.writeAll(then_indent);
-                                    try self.generateInstructionSimple(writer.list, inst);
+                                    try self.generateInstructionTracked(writer.list, inst, else_blk, q4_iidx_13609);
                                 }
                                 if (else_blk.terminator) |tt| {
                                     switch (tt) {
@@ -13669,9 +13686,9 @@ pub const NativeLinker = struct {
                                                         // if_then_ 标签重入 generateIfFromLabels）
                                                         try processed.put(nti, {});
                                                         const nt_blk = func.blocks.items[nti];
-                                                        for (nt_blk.instructions.items) |inst| {
+                                                        for (nt_blk.instructions.items, 0..) |inst, q4_iidx_13683| {
                                                             try writer.writeAll(ntbe_indent);
-                                                            try self.generateInstructionSimple(writer.list, inst);
+                                                            try self.generateInstructionTracked(writer.list, inst, nt_blk, q4_iidx_13683);
                                                         }
                                                         // 物化 merge 块来自 then 边的 PHI（如有）
                                                         if (nested_else_idx) |nei_m| {
@@ -13984,9 +14001,9 @@ pub const NativeLinker = struct {
                                     }
                                 }
                                 const else_blk = func.blocks.items[ei];
-                                for (else_blk.instructions.items) |inst| {
+                                for (else_blk.instructions.items, 0..) |inst, q4_iidx_13998| {
                                     try writer.writeAll(then_indent);
-                                    try self.generateInstructionSimple(writer.list, inst);
+                                    try self.generateInstructionTracked(writer.list, inst, else_blk, q4_iidx_13998);
                                 }
                                 if (else_blk.terminator) |tt| {
                                     switch (tt) {
@@ -14058,9 +14075,9 @@ pub const NativeLinker = struct {
                                                         // if_then_ 标签重入 generateIfFromLabels）
                                                         try processed.put(nti, {});
                                                         const nt_blk = func.blocks.items[nti];
-                                                        for (nt_blk.instructions.items) |inst| {
+                                                        for (nt_blk.instructions.items, 0..) |inst, q4_iidx_14072| {
                                                             try writer.writeAll(ntbe_indent);
-                                                            try self.generateInstructionSimple(writer.list, inst);
+                                                            try self.generateInstructionTracked(writer.list, inst, nt_blk, q4_iidx_14072);
                                                         }
                                                         // 物化 merge 块来自 then 边的 PHI（如有）
                                                         if (nested_else_idx) |nei_m| {
@@ -14407,10 +14424,10 @@ pub const NativeLinker = struct {
                             }
                         } else {
                             // 生成非 PHI 指令
-                            for (mtg.instructions.items) |inst| {
+                            for (mtg.instructions.items, 0..) |inst, q4_iidx_14421| {
                                 if (inst.op != .phi) {
                                     try writer.writeAll(body_indent);
-                                    try self.generateInstructionSimple(writer.list, inst);
+                                    try self.generateInstructionTracked(writer.list, inst, mtg, q4_iidx_14421);
                                 }
                             }
                         }
@@ -14491,9 +14508,9 @@ pub const NativeLinker = struct {
             try processed.put(inc_idx, {});
             if (!self.break_generated and !self.lastLineIsReturn(writer)) {
                 const inc_block = func.blocks.items[inc_idx];
-                for (inc_block.instructions.items) |inst| {
+                for (inc_block.instructions.items, 0..) |inst, q4_iidx_14505| {
                     try writer.writeAll(body_indent);
-                    try self.generateInstructionSimple(writer.list, inst);
+                    try self.generateInstructionTracked(writer.list, inst, inc_block, q4_iidx_14505);
                 }
             }
         }
@@ -14559,9 +14576,9 @@ pub const NativeLinker = struct {
         // 生成 cleanup 块
         const cleanup_block = func.blocks.items[cleanup_idx];
         try processed.put(cleanup_idx, {});
-        for (cleanup_block.instructions.items) |inst| {
+        for (cleanup_block.instructions.items, 0..) |inst, q4_iidx_14573| {
             try writer.writeAll(indent);
-            try self.generateInstructionSimple(writer.list, inst);
+            try self.generateInstructionTracked(writer.list, inst, cleanup_block, q4_iidx_14573);
         }
 
         // 生成 exit 块（如果存在）
@@ -14592,9 +14609,9 @@ pub const NativeLinker = struct {
             }
 
             try processed.put(ei, {});
-            for (exit_block.instructions.items) |inst| {
+            for (exit_block.instructions.items, 0..) |inst, q4_iidx_14606| {
                 try writer.writeAll(indent);
-                try self.generateInstructionSimple(writer.list, inst);
+                try self.generateInstructionTracked(writer.list, inst, exit_block, q4_iidx_14606);
             }
 
             if (exit_block.terminator) |term| {
@@ -14887,9 +14904,9 @@ pub const NativeLinker = struct {
             if (!processed.contains(ti)) {
                 try processed.put(ti, {});
                 const then_blk = func.blocks.items[ti];
-                for (then_blk.instructions.items) |inst| {
+                for (then_blk.instructions.items, 0..) |inst, q4_iidx_14901| {
                     try writer.writeAll(then_indent);
-                    try self.generateInstructionSimple(writer.list, inst);
+                    try self.generateInstructionTracked(writer.list, inst, then_blk, q4_iidx_14901);
                 }
                 if (then_blk.terminator) |tt| {
                     switch (tt) {
@@ -14977,9 +14994,9 @@ pub const NativeLinker = struct {
                 if (!processed.contains(ei)) {
                     try processed.put(ei, {});
                     const else_blk = func.blocks.items[ei];
-                    for (else_blk.instructions.items) |inst| {
+                    for (else_blk.instructions.items, 0..) |inst, q4_iidx_14991| {
                         try writer.writeAll(then_indent);
-                        try self.generateInstructionSimple(writer.list, inst);
+                        try self.generateInstructionTracked(writer.list, inst, else_blk, q4_iidx_14991);
                     }
                     if (else_blk.terminator) |tt| {
                         switch (tt) {
@@ -15147,10 +15164,10 @@ pub const NativeLinker = struct {
                 try self.emitted_shared_blocks.put(ci, {});
             }
             try self.materializeEdgePhi(writer, blk, src, indent);
-            for (blk.instructions.items) |inst| {
+            for (blk.instructions.items, 0..) |inst, q4_iidx_15161| {
                 if (inst.op == .phi) continue;
                 try writer.writeAll(indent);
-                try self.generateInstructionSimple(writer.list, inst);
+                try self.generateInstructionTracked(writer.list, inst, blk, q4_iidx_15161);
             }
             src = blk;
             prev_idx = ci;
@@ -15383,9 +15400,9 @@ pub const NativeLinker = struct {
                 _ = processed.remove(loop_idx);
                 try processed.put(loop_idx, {});
                 const loop_blk = func.blocks.items[loop_idx];
-                for (loop_blk.instructions.items) |inst| {
+                for (loop_blk.instructions.items, 0..) |inst, q4_iidx_15397| {
                     try writer.writeAll(body_indent);
-                    try self.generateInstructionSimple(writer.list, inst);
+                    try self.generateInstructionTracked(writer.list, inst, loop_blk, q4_iidx_15397);
                 }
             }
             // PHI 消解：在 for 循环回边处添加 PHI 赋值（来自 loop/body 块的 incoming 值）
@@ -15464,9 +15481,9 @@ pub const NativeLinker = struct {
 
         // 生成 body 块指令
         try processed.put(body_idx, {});
-        for (body_block.instructions.items) |inst| {
+        for (body_block.instructions.items, 0..) |inst, q4_iidx_15478| {
             try writer.writeAll(body_indent);
-            try self.generateInstructionSimple(writer.list, inst);
+            try self.generateInstructionTracked(writer.list, inst, body_block, q4_iidx_15478);
         }
 
         // 预标记 exit 块为已处理：无论 body 终止符类型如何，
@@ -15738,9 +15755,9 @@ pub const NativeLinker = struct {
                         } else if (!processed.contains(ti)) {
                             try processed.put(ti, {});
                             const then_blk = func.blocks.items[ti];
-                            for (then_blk.instructions.items) |inst| {
+                            for (then_blk.instructions.items, 0..) |inst, q4_iidx_15752| {
                                 try writer.writeAll(then_indent);
-                                try self.generateInstructionSimple(writer.list, inst);
+                                try self.generateInstructionTracked(writer.list, inst, then_blk, q4_iidx_15752);
                             }
                             if (then_blk.terminator) |tt| {
                                 switch (tt) {
@@ -16258,9 +16275,9 @@ pub const NativeLinker = struct {
                                     }
                                 }
                                 const else_blk = func.blocks.items[ei];
-                                for (else_blk.instructions.items) |inst| {
+                                for (else_blk.instructions.items, 0..) |inst, q4_iidx_16272| {
                                     try writer.writeAll(then_indent);
-                                    try self.generateInstructionSimple(writer.list, inst);
+                                    try self.generateInstructionTracked(writer.list, inst, else_blk, q4_iidx_16272);
                                 }
                                 if (else_blk.terminator) |tt| {
                                     switch (tt) {
@@ -16332,9 +16349,9 @@ pub const NativeLinker = struct {
                                                         // if_then_ 标签重入 generateIfFromLabels）
                                                         try processed.put(nti, {});
                                                         const nt_blk = func.blocks.items[nti];
-                                                        for (nt_blk.instructions.items) |inst| {
+                                                        for (nt_blk.instructions.items, 0..) |inst, q4_iidx_16346| {
                                                             try writer.writeAll(ntbe_indent);
-                                                            try self.generateInstructionSimple(writer.list, inst);
+                                                            try self.generateInstructionTracked(writer.list, inst, nt_blk, q4_iidx_16346);
                                                         }
                                                         // 物化 merge 块来自 then 边的 PHI（如有）
                                                         if (nested_else_idx) |nei_m| {
@@ -16586,9 +16603,9 @@ pub const NativeLinker = struct {
                                     }
                                 }
                                 const else_blk = func.blocks.items[ei];
-                                for (else_blk.instructions.items) |inst| {
+                                for (else_blk.instructions.items, 0..) |inst, q4_iidx_16600| {
                                     try writer.writeAll(then_indent);
-                                    try self.generateInstructionSimple(writer.list, inst);
+                                    try self.generateInstructionTracked(writer.list, inst, else_blk, q4_iidx_16600);
                                 }
                                 if (else_blk.terminator) |tt| {
                                     switch (tt) {
@@ -16660,9 +16677,9 @@ pub const NativeLinker = struct {
                                                         // if_then_ 标签重入 generateIfFromLabels）
                                                         try processed.put(nti, {});
                                                         const nt_blk = func.blocks.items[nti];
-                                                        for (nt_blk.instructions.items) |inst| {
+                                                        for (nt_blk.instructions.items, 0..) |inst, q4_iidx_16674| {
                                                             try writer.writeAll(ntbe_indent);
-                                                            try self.generateInstructionSimple(writer.list, inst);
+                                                            try self.generateInstructionTracked(writer.list, inst, nt_blk, q4_iidx_16674);
                                                         }
                                                         // 物化 merge 块来自 then 边的 PHI（如有）
                                                         if (nested_else_idx) |nei_m| {
@@ -16999,10 +17016,10 @@ pub const NativeLinker = struct {
 
                     // generateBrToMergeCondBr 处理的 merge 块：在 if/else 后生成非 PHI 指令
                     if (self.pending_merge_non_phi) |mtg| {
-                        for (mtg.instructions.items) |inst| {
+                        for (mtg.instructions.items, 0..) |inst, q4_iidx_17013| {
                             if (inst.op != .phi) {
                                 try writer.writeAll(body_indent);
-                                try self.generateInstructionSimple(writer.list, inst);
+                                try self.generateInstructionTracked(writer.list, inst, mtg, q4_iidx_17013);
                             }
                         }
                     }
@@ -17085,9 +17102,9 @@ pub const NativeLinker = struct {
         if (loop_idx != body_idx and !self.return_generated and !self.lastLineIsReturn(writer)) {
             const loop_block = func.blocks.items[loop_idx];
             try processed.put(loop_idx, {});
-            for (loop_block.instructions.items) |inst| {
+            for (loop_block.instructions.items, 0..) |inst, q4_iidx_17099| {
                 try writer.writeAll(body_indent);
-                try self.generateInstructionSimple(writer.list, inst);
+                try self.generateInstructionTracked(writer.list, inst, loop_block, q4_iidx_17099);
             }
         } else if (loop_idx != body_idx) {
             try processed.put(loop_idx, {});
@@ -17210,9 +17227,9 @@ pub const NativeLinker = struct {
         }
 
         try processed.put(exit_idx, {});
-        for (exit_block.instructions.items) |inst| {
+        for (exit_block.instructions.items, 0..) |inst, q4_iidx_17224| {
             try writer.writeAll(indent);
-            try self.generateInstructionSimple(writer.list, inst);
+            try self.generateInstructionTracked(writer.list, inst, exit_block, q4_iidx_17224);
         }
 
         if (exit_block.terminator) |term| {
@@ -17526,11 +17543,11 @@ pub const NativeLinker = struct {
         // 生成 body 块指令
         const body_block = func.blocks.items[body_idx];
         try processed.put(body_idx, {});
-        for (body_block.instructions.items) |inst| {
+        for (body_block.instructions.items, 0..) |inst, q4_iidx_17540| {
             // 当 body_idx == cond_idx，跳过 PHI 指令（循环变量 PHI 已在循环前消解）
             if (body_idx == cond_idx and inst.op == .phi) continue;
             try writer.writeAll(body_indent);
-            try self.generateInstructionSimple(writer.list, inst);
+            try self.generateInstructionTracked(writer.list, inst, body_block, q4_iidx_17540);
         }
 
         // 预标记 exit 块为已处理：无论 body 终止符类型如何，
@@ -17793,9 +17810,9 @@ pub const NativeLinker = struct {
                                     .unreachable_ => {},
                                 }
                             } else {}
-                            for (then_blk.instructions.items) |inst| {
+                            for (then_blk.instructions.items, 0..) |inst, q4_iidx_17807| {
                                 try writer.writeAll(then_indent);
-                                try self.generateInstructionSimple(writer.list, inst);
+                                try self.generateInstructionTracked(writer.list, inst, then_blk, q4_iidx_17807);
                             }
                             // 处理 then 块终止符
                             if (then_blk.terminator) |tt| {
@@ -18226,10 +18243,10 @@ pub const NativeLinker = struct {
                         // 变量更新，使 $n 永不整除推进，导致死循环（如 primeFactors 中 n 变 0）。
                         if (else_bi) |ei| {
                             const merge_tail_blk = func.blocks.items[ei];
-                            for (merge_tail_blk.instructions.items) |inst| {
+                            for (merge_tail_blk.instructions.items, 0..) |inst, q4_iidx_18240| {
                                 if (inst.op != .phi) {
                                     try writer.writeAll(if_indent);
-                                    try self.generateInstructionSimple(writer.list, inst);
+                                    try self.generateInstructionTracked(writer.list, inst, merge_tail_blk, q4_iidx_18240);
                                 }
                             }
                         }
@@ -18240,9 +18257,9 @@ pub const NativeLinker = struct {
                                 try writer.print("{s}}} else {{\n", .{if_indent});
                                 try processed.put(ei, {});
                                 const else_blk = func.blocks.items[ei];
-                                for (else_blk.instructions.items) |inst| {
+                                for (else_blk.instructions.items, 0..) |inst, q4_iidx_18254| {
                                     try writer.writeAll(then_indent);
-                                    try self.generateInstructionSimple(writer.list, inst);
+                                    try self.generateInstructionTracked(writer.list, inst, else_blk, q4_iidx_18254);
                                 }
                                 if (else_blk.terminator) |tt| {
                                     switch (tt) {
@@ -18314,9 +18331,9 @@ pub const NativeLinker = struct {
                                                         // if_then_ 标签重入 generateIfFromLabels）
                                                         try processed.put(nti, {});
                                                         const nt_blk = func.blocks.items[nti];
-                                                        for (nt_blk.instructions.items) |inst| {
+                                                        for (nt_blk.instructions.items, 0..) |inst, q4_iidx_18328| {
                                                             try writer.writeAll(ntbe_indent);
-                                                            try self.generateInstructionSimple(writer.list, inst);
+                                                            try self.generateInstructionTracked(writer.list, inst, nt_blk, q4_iidx_18328);
                                                         }
                                                         // 物化 merge 块来自 then 边的 PHI（如有）
                                                         if (nested_else_idx) |nei_m| {
@@ -18617,9 +18634,9 @@ pub const NativeLinker = struct {
                                 try writer.print("{s}}} else {{\n", .{if_indent});
                                 try processed.put(ei, {});
                                 const else_blk = func.blocks.items[ei];
-                                for (else_blk.instructions.items) |inst| {
+                                for (else_blk.instructions.items, 0..) |inst, q4_iidx_18631| {
                                     try writer.writeAll(then_indent);
-                                    try self.generateInstructionSimple(writer.list, inst);
+                                    try self.generateInstructionTracked(writer.list, inst, else_blk, q4_iidx_18631);
                                 }
                                 if (else_blk.terminator) |tt| {
                                     switch (tt) {
@@ -18740,9 +18757,9 @@ pub const NativeLinker = struct {
                                                         // if_then_ 标签重入 generateIfFromLabels）
                                                         try processed.put(nti, {});
                                                         const nt_blk = func.blocks.items[nti];
-                                                        for (nt_blk.instructions.items) |inst| {
+                                                        for (nt_blk.instructions.items, 0..) |inst, q4_iidx_18754| {
                                                             try writer.writeAll(ntbe_indent);
-                                                            try self.generateInstructionSimple(writer.list, inst);
+                                                            try self.generateInstructionTracked(writer.list, inst, nt_blk, q4_iidx_18754);
                                                         }
                                                         // 物化 merge 块来自 then 边的 PHI（如有）
                                                         if (nested_else_idx) |nei_m| {
@@ -18849,9 +18866,9 @@ pub const NativeLinker = struct {
                                                         // 因 if_then_ 标签再次调用 generateIfFromLabels 导致重复生成 if 结构
                                                         try processed.put(nti, {});
                                                         const nested_then_blk = func.blocks.items[nti];
-                                                        for (nested_then_blk.instructions.items) |inst| {
+                                                        for (nested_then_blk.instructions.items, 0..) |inst, q4_iidx_18863| {
                                                             try writer.writeAll(nested_indent);
-                                                            try self.generateInstructionSimple(writer.list, inst);
+                                                            try self.generateInstructionTracked(writer.list, inst, nested_then_blk, q4_iidx_18863);
                                                         }
                                                         const saved_rg = self.return_generated;
                                                         const saved_brk = self.break_generated;
@@ -19103,10 +19120,10 @@ pub const NativeLinker = struct {
 
                     // generateBrToMergeCondBr 处理的 merge 块：在 if/else 后生成非 PHI 指令
                     if (self.pending_merge_non_phi) |mtg| {
-                        for (mtg.instructions.items) |inst| {
+                        for (mtg.instructions.items, 0..) |inst, q4_iidx_19117| {
                             if (inst.op != .phi) {
                                 try writer.writeAll(body_indent);
-                                try self.generateInstructionSimple(writer.list, inst);
+                                try self.generateInstructionTracked(writer.list, inst, mtg, q4_iidx_19117);
                             }
                         }
                     }
@@ -19357,9 +19374,9 @@ pub const NativeLinker = struct {
             }
         }
 
-        for (exit_block.instructions.items) |inst| {
+        for (exit_block.instructions.items, 0..) |inst, q4_iidx_19371| {
             try writer.writeAll(indent);
-            try self.generateInstructionSimple(writer.list, inst);
+            try self.generateInstructionTracked(writer.list, inst, exit_block, q4_iidx_19371);
         }
 
         if (exit_block.terminator) |term| {
@@ -19556,9 +19573,9 @@ pub const NativeLinker = struct {
             // 如果前一个块是 cond_br 源且未被处理，生成其指令
             if (prev_is_cond_br_source and !processed.contains(prev_idx)) {
                 try processed.put(prev_idx, {});
-                for (prev_block.instructions.items) |inst| {
+                for (prev_block.instructions.items, 0..) |inst, q4_iidx_19570| {
                     try writer.writeAll(indent);
-                    try self.generateInstructionSimple(writer.list, inst);
+                    try self.generateInstructionTracked(writer.list, inst, prev_block, q4_iidx_19570);
                 }
             }
         }
@@ -19605,9 +19622,9 @@ pub const NativeLinker = struct {
 
         // Step 4: 生成 then 块指令
         try processed.put(then_idx, {});
-        for (then_block.instructions.items) |inst| {
+        for (then_block.instructions.items, 0..) |inst, q4_iidx_19619| {
             try writer.writeAll(then_indent);
-            try self.generateInstructionSimple(writer.list, inst);
+            try self.generateInstructionTracked(writer.list, inst, then_block, q4_iidx_19619);
         }
 
         // Step 5: 处理 then 块终止符
@@ -19801,9 +19818,9 @@ pub const NativeLinker = struct {
                             const nested_then_blk = func.blocks.items[blk_i];
                             if (!processed.contains(blk_i)) {
                                 try processed.put(blk_i, {});
-                                for (nested_then_blk.instructions.items) |inst| {
+                                for (nested_then_blk.instructions.items, 0..) |inst, q4_iidx_19815| {
                                     try writer.writeAll(nested_indent);
-                                    try self.generateInstructionSimple(writer.list, inst);
+                                    try self.generateInstructionTracked(writer.list, inst, nested_then_blk, q4_iidx_19815);
                                 }
                             }
                             // 处理嵌套 then 块终止符
@@ -19888,10 +19905,10 @@ pub const NativeLinker = struct {
                             try writer.print("{s}}}\n", .{then_indent});
                             if (!processed.contains(nmi)) {
                                 try processed.put(nmi, {});
-                                for (nm.instructions.items) |inst| {
+                                for (nm.instructions.items, 0..) |inst, q4_iidx_19902| {
                                     if (inst.op == .phi) continue;
                                     try writer.writeAll(then_indent);
-                                    try self.generateInstructionSimple(writer.list, inst);
+                                    try self.generateInstructionTracked(writer.list, inst, nm, q4_iidx_19902);
                                 }
                             }
                         } else {
@@ -19903,9 +19920,9 @@ pub const NativeLinker = struct {
                                 const nested_else_blk = func.blocks.items[blk_i];
                                 if (!processed.contains(blk_i)) {
                                     try processed.put(blk_i, {});
-                                    for (nested_else_blk.instructions.items) |inst| {
+                                    for (nested_else_blk.instructions.items, 0..) |inst, q4_iidx_19917| {
                                         try writer.writeAll(nested_indent);
-                                        try self.generateInstructionSimple(writer.list, inst);
+                                        try self.generateInstructionTracked(writer.list, inst, nested_else_blk, q4_iidx_19917);
                                     }
                                     // 处理嵌套 else 块终止符
                                     if (nested_else_blk.terminator) |net| {
@@ -20129,9 +20146,9 @@ pub const NativeLinker = struct {
             const else_defer_to_walk = merge_idx == null and else_block.terminator != null and else_block.terminator.? == .cond_br;
             if (else_defer_to_walk) {}
             if (!else_defer_to_walk) {
-                for (else_block.instructions.items) |inst| {
+                for (else_block.instructions.items, 0..) |inst, q4_iidx_20143| {
                     try writer.writeAll(then_indent);
-                    try self.generateInstructionSimple(writer.list, inst);
+                    try self.generateInstructionTracked(writer.list, inst, else_block, q4_iidx_20143);
                 }
             }
 
@@ -20313,9 +20330,9 @@ pub const NativeLinker = struct {
 
         if (processed.contains(merge_idx.?)) return merge_idx.?;
         try processed.put(merge_idx.?, {});
-        for (merge_block.instructions.items) |inst| {
+        for (merge_block.instructions.items, 0..) |inst, q4_iidx_20327| {
             try writer.writeAll(indent);
-            try self.generateInstructionSimple(writer.list, inst);
+            try self.generateInstructionTracked(writer.list, inst, merge_block, q4_iidx_20327);
         }
 
         if (merge_block.terminator) |term| {
@@ -20392,9 +20409,9 @@ pub const NativeLinker = struct {
 
         // 生成 body 块指令
         try processed.put(body_idx, {});
-        for (body_block.instructions.items) |inst| {
+        for (body_block.instructions.items, 0..) |inst, q4_iidx_20406| {
             try writer.writeAll(body_indent);
-            try self.generateInstructionSimple(writer.list, inst);
+            try self.generateInstructionTracked(writer.list, inst, body_block, q4_iidx_20406);
         }
 
         // 递归处理 body 和 cond 之间的嵌套控制流
@@ -20403,9 +20420,9 @@ pub const NativeLinker = struct {
         // 生成 cond 块指令
         const cond_block = func.blocks.items[cond_idx];
         try processed.put(cond_idx, {});
-        for (cond_block.instructions.items) |inst| {
+        for (cond_block.instructions.items, 0..) |inst, q4_iidx_20417| {
             try writer.writeAll(body_indent);
-            try self.generateInstructionSimple(writer.list, inst);
+            try self.generateInstructionTracked(writer.list, inst, cond_block, q4_iidx_20417);
         }
 
         // 生成条件判断
@@ -20447,9 +20464,9 @@ pub const NativeLinker = struct {
         }
 
         try processed.put(exit_idx, {});
-        for (exit_block.instructions.items) |inst| {
+        for (exit_block.instructions.items, 0..) |inst, q4_iidx_20461| {
             try writer.writeAll(indent);
-            try self.generateInstructionSimple(writer.list, inst);
+            try self.generateInstructionTracked(writer.list, inst, exit_block, q4_iidx_20461);
         }
 
         if (exit_block.terminator) |term| {
@@ -21488,6 +21505,22 @@ pub const NativeLinker = struct {
             try std.fmt.allocPrint(self.allocator, "reg_{d}", .{reg_id});
         defer self.allocator.free(val_expr);
 
+        // ★R-335（f051 族 23 枚语料段错误根因）：`return $this` 的 $this 是 ctx 借用引用，
+        //   cleanup 按契約不释放它 ⇒ 返回前必须 retain 给返回槽位自持一份，否则调用方
+        //   release 丢弃的返回值 ⇒ rc 失衡 ⇒ 对象提前 deinit ⇒ UAF（批次二十八即时销毁后显形）。
+        //   此前只有 generateFunction 主路径（:7357）补 retain；writeReturnStmt/generateReturnStr
+        //   的静态快速路径（F-35）与标签驱动路径全部漏掉 ⇒ 默认参数函数（params_merge 汇入）
+        //   的 `return $this` 裸奔。集中在此收口，主路径旧 retain 同步删除（防双记）。
+        if (self.current_this_regs) |tr| {
+            if (tr.contains(reg_id)) {
+                if (actual_is_alloca) {
+                    try writer.print("{s}_ = reg_{d}.*.retain();\n", .{ indent, reg_id });
+                } else {
+                    try writer.print("{s}_ = reg_{d}.retain();\n", .{ indent, reg_id });
+                }
+            }
+        }
+
         if (self.current_return_type) |rt_raw| {
             const rt = self.resolveReturnTypeKeyword(rt_raw);
             // 组合类型不做值转换
@@ -21527,21 +21560,36 @@ pub const NativeLinker = struct {
             try std.fmt.allocPrint(self.allocator, "reg_{d}", .{reg_id});
         defer self.allocator.free(val_expr);
 
+        // ★R-335：`return $this` 借用引用 retain（与 writeReturnStmt 同责，详见该处注释）。
+        const this_retain_prefix: []const u8 = blk: {
+            if (self.current_this_regs) |tr| {
+                if (tr.contains(reg_id)) {
+                    if (actual_is_alloca) {
+                        break :blk try std.fmt.allocPrint(self.allocator, "{s}_ = reg_{d}.*.retain();\n", .{ indent, reg_id });
+                    } else {
+                        break :blk try std.fmt.allocPrint(self.allocator, "{s}_ = reg_{d}.retain();\n", .{ indent, reg_id });
+                    }
+                }
+            }
+            break :blk "";
+        };
+        defer if (this_retain_prefix.len > 0) self.allocator.free(this_retain_prefix);
+
         if (self.current_return_type) |rt_raw| {
             const rt = self.resolveReturnTypeKeyword(rt_raw);
             if (rt.len > 0 and std.mem.indexOfScalar(u8, rt, '|') == null and std.mem.indexOfScalar(u8, rt, '&') == null) {
                 const nullable_str = if (self.current_return_nullable) "true" else "false";
                 // ★F-35（R-334）静态快速路径：编译期类型与声明精确相当 ⇒ 零判定直返
                 if (self.staticallyMatchesReturnType(reg_id, rt)) {
-                    return std.fmt.allocPrint(self.allocator, "{s}return {s};\n", .{ indent, val_expr });
+                    return std.fmt.allocPrint(self.allocator, "{s}{s}return {s};\n", .{ this_retain_prefix, indent, val_expr });
                 }
                 // 动态判定点：模板内完成 nullable/精确匹配/strict/coerce/TE 全链
                 const fn_name = if (self.current_function_for_resolve) |f| f.name else "?";
                 const strict_str = if (self.current_strict_types) "true" else "false";
-                return std.fmt.allocPrint(self.allocator, "{s}return try runtime.php_check_return_type(\"{s}\", {s}, \"{s}\", {s}, {s});\n", .{ indent, try self.escapeString(fn_name), val_expr, try self.escapeString(rt), nullable_str, strict_str });
+                return std.fmt.allocPrint(self.allocator, "{s}{s}return try runtime.php_check_return_type(\"{s}\", {s}, \"{s}\", {s}, {s});\n", .{ this_retain_prefix, indent, try self.escapeString(fn_name), val_expr, try self.escapeString(rt), nullable_str, strict_str });
             }
         }
-        return std.fmt.allocPrint(self.allocator, "{s}return {s};\n", .{ indent, val_expr });
+        return std.fmt.allocPrint(self.allocator, "{s}{s}return {s};\n", .{ this_retain_prefix, indent, val_expr });
     }
 
     fn writeRegAssignmentFmt(
@@ -22548,8 +22596,13 @@ pub const NativeLinker = struct {
             },
             // make_ref 的 ptr 被修改，不释放
             .make_ref => {},
-            // global_set 的 value 被全局变量管理，不释放
-            .global_set => {},
+            // ★批次三十（G1 解冻）：global_set 的 value 死寄存器照放——setGlobalVarDirect 已
+            //   retain（表自有一份），寄存器这份引用独立；liveness 判定死亡即还应。旧注
+            //   「被全局变量管理不释放」把表内副本与寄存器引用混为一谈 ⇒ 顶层覆盖写的旧值
+            //   滞留到程序结束才销毁（PHP 真值：覆盖语句点即毁，__destruct 位置可观测）。
+            .global_set => |op| {
+                if (op.value) |v| try used_regs.append(self.allocator, v.id);
+            },
             // global_unset 的 name 可能被修改，不释放
             .global_unset => {},
             // global_get_dynamic 的 name_reg 可能被消费，不释放
@@ -22938,6 +22991,27 @@ pub const NativeLinker = struct {
     }
 
     /// 生成指令（简化版）
+    /// ★批次三十（G1/G4 解冻）：native 控制流发射族的逐指令包装——把块指针解析为位置索引并
+    ///   布点 current_gen_block_idx/inst_idx，使 generateInstructionSimple 尾部的
+    ///   releaseDeadOperands 在原生 if/while/foreach 发射路径同样生效（此前仅状态机/单块
+    ///   线性路径有布点 ⇒ 顶层与循环族的死亡临时量全部滞留到函数退出，__destruct 时机晚于
+    ///   PHP）。liveness 门禁（isLiveAfter+isLiveAtBlockExit 双闸）保证只放真死亡寄存器。
+    fn generateInstructionTracked(self: *Self, code: *std.ArrayList(u8), inst: *const IR.Instruction, block: *const IR.BasicBlock, inst_idx: usize) !void {
+        const prev_b = self.current_gen_block_idx;
+        const prev_i = self.current_gen_inst_idx;
+        if (self.current_block_positions) |pos| {
+            if (pos.get(block)) |bidx_v| {
+                self.current_gen_block_idx = bidx_v;
+                self.current_gen_inst_idx = inst_idx;
+            }
+        }
+        defer {
+            self.current_gen_block_idx = prev_b;
+            self.current_gen_inst_idx = prev_i;
+        }
+        try self.generateInstructionSimple(code, inst);
+    }
+
     fn generateInstructionSimple(self: *Self, code: *std.ArrayList(u8), inst: *const IR.Instruction) !void {
         @setEvalBranchQuota(10000); // 增加编译时求值限制
         // 🔥 LICM: 跳过已提升的指令
@@ -23368,7 +23442,7 @@ pub const NativeLinker = struct {
                         const bi_exit = self.current_gen_block_idx orelse break :blk false;
                         break :blk lv_exit.isLiveAtBlockExit(bi_exit, op.value.id);
                     };
-                    if (single_store_value and !value_live_at_block_exit and !value_is_alloca and !value_is_ref_param and op.value.id != op.ptr.id and self.regMayHeap(op.value.id)) {
+                    if (false and single_store_value and !value_live_at_block_exit and !value_is_alloca and !value_is_ref_param and op.value.id != op.ptr.id and self.regMayHeap(op.value.id)) { // BISECT-TEST: 临时关停
                         try writer.print("    if (!reg_{d}.isNull()) {{ reg_{d}.release(runtime.runtime_allocator); reg_{d} = runtime.Value.initNull(); }}\n", .{ op.value.id, op.value.id, op.value.id });
                     }
                 } // end of optimized_alloca else
