@@ -5408,6 +5408,7 @@ pub const IROptimizer = struct {
                             self.stats.cse_eliminations += 1;
                             changed = true;
                         }
+                        }
                     }
                 } else {
                     // Record this expression

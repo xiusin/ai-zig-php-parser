@@ -1558,6 +1558,22 @@ fn gcBufferObject(o: *PHPObject) void {
     gcMaybeCollect();
 }
 
+/// ★批次二十八（G1/G3）：把对象从 GC roots 缓冲中摘除（swapRemove）。
+///   PHP/Zend 语义：refcount==0 的对象**同步销毁**——rc=0 的对象无任何引用指入，
+///   不可能是循环垃圾（循环垃圾必 rc>0），故 buffered 仅是「潜在循环根」标记，
+///   rc 归零时必须摘缓冲、即时 deinit，__destruct 与槽位让位才同步发生。
+fn gcUnbufferObject(o: *PHPObject) void {
+    if (!o.gc_info.buffered) return;
+    o.gc_info.buffered = false;
+    o.gc_info.color = .white;
+    for (cycle_roots.items, 0..) |r, i| {
+        if (r == .object and r.object == o) {
+            _ = cycle_roots.swapRemove(i);
+            break;
+        }
+    }
+}
+
 fn gcBufferClosure(c: *PHPClosure) void {
     if (gc_in_progress) return;
     if (c.gc_info.buffered) return;
@@ -2321,7 +2337,7 @@ fn gcDestroyObject(o: *PHPObject) void {
         o.internal_data = null;
     }
     o.allocator.free(o.class_name);
-    // ★批次二十六续：GC 收集路径同样归还对象序号（与 deinit 同责）
+    // ★批次二十七：GC 收集路径同样归还对象序号（与 deinit 同责）
     q4ObjectIdFree(o.id);
     o.allocator.destroy(o);
 }
@@ -31230,10 +31246,10 @@ pub fn cleanupAllClasses() void {
     }
 }
 
-/// ★批次二十六：对象序号全局计数器（PHP 从 1 起递增；atomic.fetchAdd 协程安全）。
+/// ★批次二十七：对象序号全局计数器（PHP 从 1 起递增；atomic.fetchAdd 协程安全）。
 var g_object_id_counter: std.atomic.Value(u64) = std.atomic.Value(u64).init(1);
 
-/// ★批次二十六续：对象序号空闲栈（对齐 Zend objects_store 的 free_list LIFO 复用真值——
+/// ★批次二十七：对象序号空闲栈（对齐 Zend objects_store 的 free_list LIFO 复用真值——
 ///   对象销毁后其号被**下一个**新建对象复用，故 sort_na 格「catch 释放的异常让位、
 ///   随后 new P 仍得 #1」。容量溢出时丢弃（该号不再复用），语义安全降级。
 var g_object_id_freelist: [4096]u64 = undefined;
@@ -31247,13 +31263,9 @@ fn q4ObjectIdAlloc() u64 {
     defer g_object_id_mutex.unlock();
     if (g_object_id_freelist_len > 0) {
         g_object_id_freelist_len -= 1;
-        const rid = g_object_id_freelist[g_object_id_freelist_len];
-        if (q4_objid_trace) std.debug.print("[objid] alloc {d} (freelist len {d})\n", .{ rid, g_object_id_freelist_len });
-        return rid;
+        return g_object_id_freelist[g_object_id_freelist_len];
     }
-    const nid = g_object_id_counter.fetchAdd(1, .monotonic);
-    if (q4_objid_trace) std.debug.print("[objid] alloc {d} (bump)\n", .{nid});
-    return nid;
+    return g_object_id_counter.fetchAdd(1, .monotonic);
 }
 
 /// 归还对象序号（仅在 deinit/gcDestroyObject 销毁路径调用；溢出即弃）。
@@ -31263,12 +31275,8 @@ fn q4ObjectIdFree(id: u64) void {
     if (g_object_id_freelist_len < g_object_id_freelist.len) {
         g_object_id_freelist[g_object_id_freelist_len] = id;
         g_object_id_freelist_len += 1;
-        if (q4_objid_trace) std.debug.print("[objid] free {d} (freelist len {d})\n", .{ id, g_object_id_freelist_len });
     }
 }
-
-/// 临时追踪开关（排查后移除）。
-const q4_objid_trace = true;
 
 /// PHP对象类型
 /// 使用引用计数管理内存，属性存储在HashMap中
@@ -31279,8 +31287,8 @@ pub const PHPObject = struct {
     ref_count: usize,
     gc_info: GCInfo,
     allocator: Allocator,
-    /// ★批次二十六：对象序号（PHP `object(X)#N` 真值——全局递增从 1 起、克隆得新号）。
-    ///   atomic 分配（协程安全）；var_dump/spl_object_id 统一读本字段。
+    /// ★批次二十七：对象序号（PHP `object(X)#N` 真值——全局递增从 1 起、克隆得新号、
+    ///   销毁后经 q4ObjectIdFree 归还供 LIFO 复用）。var_dump/spl_object_id 统一读本字段。
     id: u64,
 
     /// ★批次十（i1/i2）：内建类的内部状态面（对应 Zend 的 internal object handlers）。
@@ -31392,9 +31400,14 @@ pub const PHPObject = struct {
         if (self.ref_count == 0) {
             if (self.gc_info.buffered) {
                 if (!gc_in_progress) {
-                    gcBufferObject(self);
+                    // ★批次二十八（G1/G3）：rc==0 ⇒ 同步销毁（PHP/Zend 语义）。
+                    //   旧路径「已 buffered 则留置等 GC」令 __destruct 推迟到下次 GC 阈值
+                    //   （小脚本程序结束才触发、甚至随 class_registry 先清而静默跳过），
+                    //   销毁时机与槽位让位全面滞后 ⇒ 先摘缓冲再即时 deinit。
+                    //   GC 进行中维持旧口径：在批内则由本轮 CollectWhite 收，批外待下轮。
+                    gcUnbufferObject(self);
+                    self.deinit();
                 }
-                // GC 进行中时不释放，由 GC 收集阶段统一处理
             } else {
                 self.deinit();
             }
@@ -31463,7 +31476,7 @@ pub const PHPObject = struct {
         // 释放类名
         self.allocator.free(self.class_name);
 
-        // ★批次二十六续：归还对象序号（Zend objects_store LIFO 复用；__destruct 之后、内存销毁之前）
+        // ★批次二十七：归还对象序号（Zend objects_store LIFO 复用；__destruct 之后、内存销毁之前）
         q4ObjectIdFree(self.id);
 
         // 释放对象本身

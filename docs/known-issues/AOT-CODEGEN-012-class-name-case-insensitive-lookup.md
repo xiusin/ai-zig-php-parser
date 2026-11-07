@@ -13471,6 +13471,97 @@ PHP 8.5.8 实测口径：纯 enum ⇒ **返回 false**（不抛错，last_error=
 - **php_fwrite 写结果自查**（:10066-10077）：旧走 fileWriteAll 吞错误（只读 fd 恒返全长）⇒ 改 std.c.write 循环（负 errno ⇒ false；部分写 ⇒ 实际字节数）。
 - **验收**：p0h_input 探针 SAME（file_get_contents/fgets/feof/fwrite 写拒绝/fclose 全形）。
 
+## §257 批次二十七：对象序号 `#N` 真值化（var_dump/spl_object_id/clone 同源）+ 槽位 LIFO 复用
+
+### 257.1 缺口
+
+- var_dump 对象打印**硬编码 `#0`**（SplDll 家族支 :16451 与通用支 :16472 两处）——违宪法禁硬编码，PHP 真值为全局递增序号。
+- spl_object_id 对象支用指针掩码（`ptr & 0x7FFFFFFF`），与 var_dump 的 `#N` 不同源（PHP 二者同值）。
+- clone 后对象无序号概念（PHP：clone 得新号）。
+
+### 257.2 PHP 8.5.8 真值（探针实测）
+
+1. 序号全局递增**从 1 起**；同对象复打同号；clone 得新号；spl_object_id 与 var_dump `#N` 同值同源。
+2. **销毁即让位**：序号 = objects_store 槽位句柄，对象销毁后槽位进 free_list，下一个新建对象 **LIFO 复用**（`for` 内 `new+unset` 三轮恒 #1；函数内对象返回即毁 ⇒ 让位）。
+3. **重赋值相位**：`$t = new P()` 覆盖存活对象时 PHP 先求 RHS（新对象先取新号 #2）再释旧值（#1 让位）⇒ 序列 1,2,1。
+
+### 257.3 变更点
+
+| 文件 | 变更 |
+|---|---|
+| runtime_lib_template.zig :31233-31263 | `g_object_id_counter`（atomic 从 1 起）+ `g_object_id_freelist`（4096 槽 LIFO，std.atomic.Mutex 自旋锁协程安全，溢出即弃安全降级）+ `q4ObjectIdAlloc/q4ObjectIdFree` |
+| runtime_lib_template.zig :31276 | PHPObject 加 `id: u64` 字段 |
+| runtime_lib_template.zig init/initWithMeta 两处 | `obj.id = q4ObjectIdAlloc()`（构造路径全汇聚，无第三入口） |
+| runtime_lib_template.zig :31458（deinit）/:2325（gcDestroyObject） | 销毁双挂点 `q4ObjectIdFree(self.id)`（deinit 处位于 __destruct 之后、内存销毁之前——析构内 var_dump($this) 仍见本号） |
+| runtime_lib_template.zig :16451/:16472 | var_dump 两处打印 `#0` ⇒ `#{d}`（obj.id） |
+| runtime_lib_template.zig :22824-22826 | spl_object_id 对象支：指针掩码 ⇒ `obj.id`（闭包支保持指针口径不动） |
+| php_clone（:24811） | 经 PHPObject.init 自动得新号（无额外改点） |
+
+### 257.4 验收
+
+- objid 探针 8 形态 **SAME**（双对象序列/同对象复打/clone 新号/spl_object_id 同值/stdClass/二次 clone）。
+- objid3 探针（函数作用域循环+unset）：f() 前三轮 1,1,1 与 PHP 全等（unset 即时销毁复用生效）；mk() 双调 6,6（函数退出销毁让位生效）。
+- 46 探针面板复跑：**35 SAME + 11 DIFF，与批次二十六终态逐格一致、零转移**（panel_p32）。11 DIFF 全为既有解释族：§七.5 栈帧 ×6、sort 中间态在途 ×3（throw_usort/uasort/uksort）、§七.4 缩进 ×1（b15_r3）、sort_na 对象序号 ×1。
+- **sort_na 格性质收窄**：`object(P)#0 vs #1`（格式差）⇒ `object(P)#6 vs #1`（仅销毁时机差）。
+
+### 257.5 遗留登记：对象销毁时机语义（方案已报，等老铁拍板）
+
+面板与 objid2/3 探针暴露的残余差异全部收敛为**销毁时机**（AOT 释放晚于 PHP ⇒ 序号复用相位滞后），拆四格：
+
+| 编号 | 现象 | 根因定位 | 影响面 |
+|---|---|---|---|
+| G1 | 顶层（main 作用域）循环内 `new+unset` 复用不生效（1,2,3 vs PHP 1,1,1） | 顶层变量驻全局表，unset_var/覆盖写的即时 release 未触发 deinit | 顶层脚本直写对象序号 |
+| G2 | 循环退出边 liveness 临时量滞留 ⇒ 末轮对象延至函数退出才销毁（f() 尾 $x 得 #2 vs PHP #1） | liveness 在回边合并点把 creator 临时量判活到函数尾 | 循环末轮+紧随新建 |
+| G3 | catch 捕获的异常对象保留至程序结束 ⇒ 序号只增不让位（sort_na `#6`） | catch 绑定/异常存储的生命周期未在 catch 块出口释放 | try/catch 高频脚本 |
+| G4 | store 释放顺序：AOT 先释旧值后求 RHS；PHP 先求 RHS 后释旧值 ⇒ 重赋值循环相位差一轮（g() 1,1,1 vs PHP 1,2,1） | store lowering 的顺序假设 | 仅序号观测面，无语义副作用 |
+
+**方案选项**：甲=登记不动（序号绝对值在业务代码中罕见被依赖）；乙=先修 G3+G1（catch 出口释绑定 + 顶层即时 release，面小收益大），G2/G4 牵涉 liveness/store 顺序单列评估；丙=四项全修（liveness 与 store 顺序为全局改动，需全语料回归）。**推荐乙**。
+
+## §258 批次二十八：方案乙落地（G3 catch 绑定生命周期 + G1 顶层即时销毁）
+
+### 258.1 PHP 8.5.8 真值（实测钉死，修正先验假设）
+
+- **catch 绑定 `$e` = 普通局部变量**，生命周期 = 所在作用域：函数内 catch 的异常在**函数退出时**销毁（非 catch 块出口！）；顶层 catch 的异常程序结束才销毁。
+- **重绑 `$e = new X()`**：旧异常在**重绑语句点**立即销毁（普通赋值语义，P2-1 同宗）。
+- **catch 无绑定变量**（`catch (MyEx)`）：异常对象在 **catch 入点**即毁（无人持有）。
+- **顶层 unset/覆盖写**：与函数内**完全一致**——立即销毁（顶层无特殊性）。
+
+### 258.2 根因链（生成码逐行取证）
+
+1. **release() 缓冲延迟**（runtime）：任何经历过「release 后 rc>0」事件的对象（构造器 $this 归还、setException 后临时量归还等）被 gcBufferObject 标记 buffered；之后 rc 真归零时旧路径**留置等 GC 阈值**（256 roots/4096 events）⇒ 小脚本程序结束才销毁、甚至随 class_registry 先清而 __destruct 静默跳过。PHP/Zend 语义：**rc==0 即同步销毁**（rc=0 无引用指入，不可能是循环垃圾）。
+2. **catch 变量被 mem2reg 提升**（irg）：$e 的 alloca `no_optimize=false` ⇒ 优化器提升为纯寄存器 ⇒ 块出口 liveness 死释放把「catch 后仍存活」的变量当临时量提前杀（finally 前销毁）；且 catch_ 结果寄存器与变量寄存器合一 ⇒ 重绑时旧值多挂一份引用到作用域尾。
+3. **catch 无变量仍取结果寄存器**（irg）：滞留至函数退出（PHP 入点即毁）。
+
+### 258.3 变更点
+
+| 文件 | 变更 |
+|---|---|
+| runtime_lib_template.zig :1561-1575 | 新增 `gcUnbufferObject`（buffered 标记清除 + cycle_roots swapRemove） |
+| runtime_lib_template.zig :31400-31416 | release() rc==0 & buffered & 非 GC 进行中 ⇒ **摘缓冲 + 即时 deinit**（GC 进行中维持旧口径）；修复 G3 主路径 + G1 顶层 unset 保持即时 + 一切「buffered 后 rc 归零」场景的同步销毁 |
+| ir_generator.zig :4135-4145 | catch 无绑定变量 ⇒ catch_ 不取结果寄存器（nlk 无结果支生成 getException+立即 release ⇒ 入点即毁，PHP 全等） |
+| ir_generator.zig :4163-4175 | catch 绑定变量 alloca 标记 `no_optimize=true`（禁 mem2reg 提升，与引用变量同例）⇒ catch_ 结果临时量 store 后即时死亡释放、$e 本体由 alloca 持有到函数退出 |
+
+### 258.4 验收
+
+- G3 主探针 **SAME**（函数内 catch 函数退出毁/重绑即毁/顶层 catch 程序结束毁）
+- G3 扩展探针 **SAME**（嵌套 try / rethrow / finally 不干扰 / catch 无变量入点即毁）
+- G1 探针：顶层 unset 即时销毁 ✓（残余见 258.5）
+- sort_na 格转 **SAME**（5 枚 TypeError 异常函数退出即毁让位 ⇒ new P 复用 #1，与 PHP 全等）
+- 46 探针面板复跑（panel_p34）：**36 SAME + 10 DIFF**——较批次二十七终态 **sort_na 治愈**，其余 10 格 DIFF 全为既有解释族（§七.5 栈帧 ×6、sort 中间态在途 ×3、§七.4 缩进 ×1），零转移。
+- `zig build test`：289/290 过；**1 枚失败为既有测试腐坏**（test_loop_unroll.zig CSE-dominance：剥离本批 runtime/irg 改动后单独复跑仍同枚失败 ⇒ 与本批无关的确证。该测试目标自 da624f3 起在 HEAD 不可编译（optimizer.zig 少一枚 `}`，工作树修复后方才暴露）；失败机理是 releaseSafe 配置下首个 optimize 通道后 inst2 不再保持 `.add`，而 :284-287 的 R-166 注释只维护过 inst1 的断言。oracle 修正属 liveness/optimizer 域，处置待老铁拍板）。
+
+### 258.5 残余（冻结域，已报老铁）
+
+| 现象 | 根因 | 冻结依据 |
+|---|---|---|
+| 顶层覆盖写旧值延至程序结束毁（b1） | `releaseDeadOperands` 对 `.global_set => {}` 死值不释放（:22542），creation 寄存器持 +1 至 main 尾 | 老铁令：禁动 liveness |
+| 函数内 unset/覆盖写延至函数退出毁（c/d1） | creation/RHS 寄存器死亡释放时机（store lowering + liveness） | 同上：禁动 store lowering |
+
+> 注：两残余仅影响「__destruct 输出位置 / 对象序号绝对值」观测面，无泄漏（作用域尾必销毁）、无语义副作用。
+
+### 258.6 数组/闭包同构登记（未动，备查）
+
+PHPArray.release / PHPClosure.release 存在同款「rc==0 & buffered ⇒ 留置等 GC」结构。数组无 __destruct、序号观测面不涉及，按范围纪律未动；若后续观测到数组销毁时机差异（如 ArrayObject 包装语义），照本节 258.3 同法收口。
 
 ---
 

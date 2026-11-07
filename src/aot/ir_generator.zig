@@ -4133,7 +4133,16 @@ pub const IRGenerator = struct {
         }
 
         // Emit catch instruction (returns exception object)
-        const catch_reg = try self.emitWithResult(.{ .catch_ = .{ .exception_type = exception_type } }, .php_value);
+        // ★批次二十八（G3 续）：无绑定变量的 catch（`catch (MyEx)`）不取结果寄存器——
+        //   PHP 真值：无绑定 ⇒ 异常对象在 catch 入点即毁（nlk 无结果支生成
+        //   getException+立即 release）；旧路径恒取结果 ⇒ 白白滞留到函数退出。
+        const catch_reg = if (catch_data.variable != null)
+            try self.emitWithResult(.{ .catch_ = .{ .exception_type = exception_type } }, .php_value)
+        else
+            blk: {
+                _ = try self.emit(.{ .catch_ = .{ .exception_type = exception_type } }, null);
+                break :blk null;
+            };
 
         // Set up exception variable if present
         if (catch_data.variable) |var_idx| {
@@ -4149,10 +4158,22 @@ pub const IRGenerator = struct {
                 const cur_fname = if (self.current_function) |f| f.name else "__main__";
                 const is_global_wb = self.global_vars.contains(var_name) or std.mem.eql(u8, cur_fname, "__main__");
                 if (is_global_wb) {
-                    _ = try self.emit(.{ .global_set = .{ .name = var_name, .value = catch_reg } }, null);
+                    _ = try self.emit(.{ .global_set = .{ .name = var_name, .value = catch_reg.? } }, null);
                 } else {
                     const var_reg = try self.getOrCreateVarRegister(var_name, .php_value);
-                    _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = catch_reg } }, null);
+                    // ★批次二十八（G3 续）：catch 绑定变量的 alloca 禁止 mem2reg 提升——
+                    //   PHP 语义 $e 是函数级局部（catch 后可读、销毁时机可观测：__destruct
+                    //   位置 / 槽位让位复用）；提升为纯寄存器后，块出口 liveness 死释放
+                    //   会把异常提前销毁（finally 前 / 重绑旧值滞留）。与引用变量同例（:802）。
+                    for (self.entry_allocas.items) |alloca_inst| {
+                        if (alloca_inst.result) |r| {
+                            if (r.id == var_reg.id) {
+                                alloca_inst.op.alloca.no_optimize = true;
+                                break;
+                            }
+                        }
+                    }
+                    _ = try self.emit(.{ .store = .{ .ptr = var_reg, .value = catch_reg.? } }, null);
                 }
 
                 // Generate catch body
