@@ -753,6 +753,8 @@ pub const Instruction = struct {
             .call_indirect => |op| allocator.free(op.args),
             .method_call => |op| allocator.free(op.args),
             .new_object => |op| allocator.free(op.args),
+            // ★R-344a：ctor_call 的 args 同为堆切片；new_alloc 无堆载荷
+            .ctor_call => |op| allocator.free(op.args),
             .phi => |op| allocator.free(op.incoming),
             .interpolate => |op| allocator.free(op.parts),
             .static_method_call => |op| allocator.free(op.args),
@@ -913,6 +915,10 @@ pub const Instruction = struct {
         // ============ PHP Object Operations ============
         /// Create new object
         new_object: NewObjectOp,
+        /// ★R-344a：`new` 三阶段拆分——裸分配（先于实参求值）
+        new_alloc: NewAllocOp,
+        /// ★R-344a：`new` 三阶段拆分——构造器调用（后于实参求值）
+        ctor_call: CtorCallOp,
         /// Get object property
         property_get: PropertyGetOp,
         /// Set object property
@@ -1185,6 +1191,20 @@ pub const Instruction = struct {
     /// Create new object
     pub const NewObjectOp = struct {
         class_name: []const u8,
+        args: []const Register,
+    };
+
+    /// ★R-344a（§269.6）：`new` 三阶段拆分（对齐 PHP 的 NEW→实参求值→DO_FCALL 顺序）。
+    ///   第一阶段：类解析 + 实例化性检查（不存在/接口/trait/enum/abstract，全部可捕获 Error）
+    ///   + 裸分配（对象 id 在此烧掉）——先于实参求值。
+    pub const NewAllocOp = struct {
+        class_name: []const u8,
+    };
+
+    /// 第三阶段：构造器调用（可见性检查 + invoke）。对象寄存器归生成码所有，
+    ///   构造器抛错时**不**由运行时归还（与组合通道 php_object_new_with_constructor 不同）。
+    pub const CtorCallOp = struct {
+        object: Register,
         args: []const Register,
     };
 
@@ -1641,6 +1661,16 @@ pub const IRPrinter = struct {
             // Object operations
             .new_object => |op| {
                 try self.print("new {s}(", .{op.class_name});
+                for (op.args, 0..) |arg, i| {
+                    if (i > 0) try self.write(", ");
+                    try self.print("{any}", .{arg});
+                }
+                try self.write(")");
+            },
+            // ★R-344a：三阶段拆分打印形
+            .new_alloc => |op| try self.print("new.alloc {s}", .{op.class_name}),
+            .ctor_call => |op| {
+                try self.print("ctor.call {any}(", .{op.object});
                 for (op.args, 0..) |arg, i| {
                     if (i > 0) try self.write(", ");
                     try self.print("{any}", .{arg});

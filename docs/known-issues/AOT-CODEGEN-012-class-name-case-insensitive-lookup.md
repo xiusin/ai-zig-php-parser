@@ -13816,3 +13816,259 @@ wb_do_7:
 
 ---
 
+
+## §264 批次三十四：R-339 数组元素引用三形落地（`[&$m]` / `$a[] =& $m` / 多维与 cufa 保链）
+
+### 264.1 背景与根因
+
+§250.4 待批族销账。三形真值（PHP 8.5.8）：元素引用与源变量共享 cell、双向写穿、COW 拷贝保链、unset 源不悬垂。取证（AST/IR/生成码/运行时四层）钉死六个缺口点：
+
+1. **G1 parser 中缀 `=` 不检测 `&`**（parser.zig :2796）：语句级 parseAssignment（:2099）已消费 `&` 置 `is_reference`；中缀路径（`$a[]=` 等非变量开头 LHS）缺失 ⇒ `&$m` 被 parseUnary 包成 `unary_expr{ampersand}` 静默吃掉。
+2. **G2 ref 赋值 array_access 目标分支是死路**（ir_generator :5505-5528）：调 `php_array_push_ref/set_ref` ⇒ 依赖从未实现的 `PHPArray.pushRef/setRef`，Zig 惰性编译掩盖（无调用点不实例化）。
+3. **G3 main 全局源 × 数组目标静默丢**（ir_generator :5436-5455）：global_ref_bind 是名级绑定表（target/source 皆变量名）挂不进元素槽，目标 switch 只收 `.variable` ⇒ `else return`。
+4. **G4 array_init 元素不识别 `&`**：generateArrayInit 把 `unary_expr{ampersand}` 当普通表达式 push 值拷贝。
+5. **G5 cufa 收集剥 Ref**（runtime `php_invoke_callable_args_array` :13294）：`arr.get()` 读出即解引用（值消费路径）⇒ `[&$v]` 的 Ref 被剥成纯值 ⇒ Q3 误判"value given"警告断链（§250.4 本族的运行时半边）。
+6. **G6 多维下钻中间层未数组化**：`$b['new']['deep'] =& $n` 第一层 vivify 返回 Ref(null cell)，末层 set_keep_ref deref null 静默拒 ⇒ 断链；`$a['x'][] =& $m` 内层 push 同病（原分支 len==1 误判为单层 set）。
+
+已确认**零改动复用**的既有件：make_ref（槽位 Ref 化+cell 复用）、setKeepRef/pushRaw、php_array_get_ref、php_array_elem_ref_vivify（批十五下钻）、getGlobalVarPtrRaw、PHPArray.get 读 deref/set 对 Ref 槽写穿、cloneDeep 对 Ref 元素 retain 不克隆（COW 保链）、setGlobalVar 对 Ref 槽写穿。
+
+### 264.2 变更点
+
+| 文件 | 变更 |
+|---|---|
+| parser.zig :2801-2808 | **共享层**：中缀 `=` 补 is_reference 检测（与 :2099 对称；仅 `=&` 形行为变化从错变对，非 `=&` 形仅多一次 tag 比较） |
+| ir_generator.zig :5436-5468 | 全局源 × 数组目标：`php_global_make_ref(src)` 产 ref_val 落正常分支（G3） |
+| ir_generator.zig :5517-5604 | array_access 目标四分支：push 单层/内层 push（下钻）/单键 set/多维 set（vivify+ensure 下钻链），死路 push_ref/set_ref 改接批二十一 keep_ref 原语（G2/G6） |
+| ir_generator.zig :9771-9821 | 新增 `emitAmpersandElemRef`（源形态分派：局部 make_ref / 全局 php_global_make_ref / 已 Ref load / 元素 php_array_get_ref / 其他回退值）+ `ampersandSrcOf`（G4） |
+| ir_generator.zig :9846-895 | generateArrayInit 元素/pair 值识别 `&` ⇒ keep_ref 存储 |
+| runtime_lib_template.zig :12504-12539 | 新增 `q4_global_make_ref_hook` 钩子 + `php_global_make_ref`（产物侧实现挂载）+ `php_array_ref_vivify_middle`（中间层 null⇒静默 vivify / 非标量⇒警告断链） |
+| runtime_lib_template.zig :7150-7163 | set/push_keep_ref 收 Ref 中间层（deref 取实际数组） |
+| runtime_lib_template.zig :13294-13303 | cufa 位置参收集改 `arr.getPtr` 原始槽保 Ref（G5） |
+| native_linker.zig :2300-2309/:2439 | 产物侧 `q4GlobalMakeRefImpl`（未定义静默 vivify null）+ init 挂载 |
+| native_linker.zig :4954-4957/:6599-6608 | builtin_map 登记两新原语 + 产 Ref 结果登记表（防二次 initRef 断链） |
+
+### 264.3 验收
+
+- 探针矩阵 **15/15 SAME**（PHP 8.5.8 对参）：三形基础（s1/s2/s3）+ 局部源（s4）+ 键形式（s5）+ 嵌套元素源 `[&$a[0]]`（s6）+ COW 保链（s7）+ unset 悬垂（s8）+ 普通字面量对照（s9）+ **cufa `[&$v]` 写回**（sa，§250.4 本族销账）+ 函数内字面量（sb）+ 反向 `$r=&$a[1]`（sc）+ foreach by-ref 共存（sd）+ 多维 `$a['x']['y']=&$m`（se）+ 内层 push+中间层 vivify（sf）
+- b15_r3 面板格：DIFF 逐格同基线（§七.4 缩进豁免族，零转移）
+- `zig build test`：全绿
+- 顺带登记：**AOT 对 call-time by-ref（`f(&$x)`）过接受**（PHP 8 parse error，AOT 当普通调用+Q3 警告）——既有缺口，非本批引入，登记待批
+
+### 264.4 遗留登记
+
+- `$a[]['y'] =&`（push+键混合形）落单键分支按 set 处理——罕见形，登记
+- 中间层为对象/资源时下钻语义未覆盖（按非标量警告断链，PHP 同形失败但文案含 __get 等魔术差异）
+- `php_array_push_ref/set_ref` 死代码原地保留（无调用点不实例化；删除走确认机制）
+- call-time by-ref 过接受（见 §264.3 末条）
+
+---
+
+
+## §265 批次三十五：GMP-α 核心 27 枚落地（libgmp extern + 对象 num 属性承载）
+
+### 265.1 背景与方案
+
+GMP 扩展首批。承载设计（真值驱动）：**GMP 对象 = PHPObject + `num` 属性（十进制字符串）**——与 PHP `var_dump`/`print_r` 输出形态（`["num"]=> string(L) "dec"`）天然对齐；每次运算临时 mpz 装载/取回，**零 C 态驻留** ⇒ RC/clone/deinit/var_dump 全走既有对象机制，不触碰 PHPObject 内存模型。β 批（运算符重载 do_operation、serialize hex 形、internal_data 二进制承载）另行。
+
+底座：`/opt/homebrew/lib/libgmp.{a,dylib}` + `gmp.h`；extern 34 枚 `__gmpz_*`（mpz_t 布局与 gmp.h 一致）；链接 `-lgmp`（nlk build-exe 参数 + build.zig 四 target linkSystemLibrary）。
+
+### 265.2 变更点
+
+| 文件 | 变更 |
+|---|---|
+| runtime_lib_template.zig :96-137 | extern 34 枚 `__gmpz_*` + `__mpz_struct`/`mpz_t` 布局 |
+| runtime_lib_template.zig :26925-27524 | GMP 区（ClassMeta 容器内）：gmpCoerceNum 归一（GMP/int/string(base 0 前缀探测)/float Deprecated+trunc/bool/null→0/其他 TypeError）+ 27 函数 + rounding 三档（0=tdiv/1=cdiv/2=fdiv）+ mpz_mod 恒非负 + registerGmpClass（final、num 属性、__construct/__toString、GMP_ROUND_* 常量） |
+| runtime_lib_template.zig :4177-4347 | 变量调用面 wrapper 27 枚挂 builtin_function_map |
+| runtime_lib_template.zig :14920-14953 | **q4DepNull 手动归一族豁免表**（27 枚 gmp_*）：null ⇒ Deprecated 照打 + **透传不弱转**（gmp.c Z_PARAM_ZVAL 手动归一的实现事实；对照 array_key_exists(null)⇒转"" 的 ZPP union 规则） |
+| runtime_lib_template.zig :1012 | initRuntime 挂 registerGmpClass |
+| native_linker.zig :4959-4986 | builtin_map 登记 27 枚（init/strval/div 系带 optional_defaults） |
+| native_linker.zig :36842 | build-exe 参数加 `-lgmp` |
+| build.zig :103/:170/:199/:220 | 四 target linkSystemLibrary("gmp") |
+
+### 265.3 验收（PHP 8.5.8 对参，id 归一化后 diff）
+
+- **a1_core SAME**：init 全 base 形（16/0b/0x 前缀/空白/42/float Deprecated/bool/null）+ strval（16/36/-36/62）+ intval（含溢出截断）+ sign/cmp + 四则/neg/abs
+- **a2_div/a3_num**：数值全对；残余 DIFF 全属 §七.4（数组内对象 var_dump 嵌套缩进，既有豁免族）
+- **a4_err SAME**：30 枚错误/边界形（init 非法串/非法 base、strval 非法 base、pow/powm 负指数、powm mod=0「Modulo by zero」、mod 除零「Modulo by zero」、div 系除零「Division by zero」、sqrt/sqrtrem 负、fact 负、root nth=0/负偶次、rounding 非法 ValueError、TypeError array、float/bool/null 归一、"0x1F"/" 12 " base 0 探测）逐条对
+- **a5_dyn SAME**：变量调用 `$f()`/call_user_func/call_user_func_array/function_exists
+- **depnull_r1 SAME**：q4DepNull 回归（str_repeat/array_key_exists/strlen/strtolower/abs/str_replace 单类型+union 零漂移）
+- `zig build test`：全绿（含 build.zig gmp 链接四 target）
+
+### 265.4 遗留登记
+
+- **对象 id 序号**：`object(GMP)#N` 的 N 为 AOT 单调计数 vs PHP 句柄池复用（§263.4 同族既有，验收已按 id 归一化对参）
+- **GMP-β 待批**：运算符重载（`$g + 1` ⇒ GMP，truth2 已取真值；**碰 php_add 热路径前必须先量基线性能**）、比较重载（`$g == $g2`/`$g < $g2`）、serialize/__serialize（hex 形 `O:3:"GMP":1:{i:0;s:2:"7b";}`）、`$g->num` 访问拦截（Undefined property Warning，当前 public 属性过接受）、clone 语义核验、internal_data mpz 二进制承载（性能）
+- **GMP-γ 待批**：数论/位/IO 24 枚（prob_prime/nextprime/jacobi/kronecker/legendre/binomial/perfect_*/popcount/hamdist/scan0/1/setbit/clrbit/testbit/and/or/xor/com/export/import/random_*）
+- intval 超 i64 的 float 参数 clamp 语义（minInt/maxInt 边界外 float ⇒ clamp 到 i64 边界；PHP 行为未单独取真值，边界登记）
+- gmp_init 对 GMP 对象参数接受为值拷贝（反射表签名 string|int 不含 GMP，PHP 实测接受——按实测放行）
+
+---
+
+
+## §266 批次三十六：GMP-β 运算符重载 12 枚 + serialize/var_dump/num 保真
+
+### 266.1 背景与方案
+
+GMP 对象 do_operation/do_compare 落地。设计（热路径宪法守卫）：全部分流**tag 快判前置**——`gmpIsGmp`（Value_isObject + class_name 比较）仅对象操作数触发，标量路径新增成本 = 1 次 tag 判 ⇒ **实测 0.169-0.170s vs 基线 0.173-0.179s，零劣化**。
+
+关键语义（PHP 8.5.8 实测逐枚钉死）：
+
+- 运算符结果**恒为 GMP 对象**（含 `+`/`-`/`*`/`/`(tdiv 截断)/`%`(mpz_mod 恒非负)/`**`/`|`/`&`/`^`/`<<`(mul_2exp)/`>>`(fdiv 算术)/`~`(com)/一元 `-`）；`+$g` 直通
+- do_operation 归一化与函数面**文案不同**：null/array/其他对象 ⇒ TypeError「**Number must be of type** GMP|string|int, {type} given」、非数字串 ⇒ ValueError「**Number is not an integer string**」、除零/负移位/负指数 ⇒ 无前缀「Division by zero」/「Modulo by zero」/「Shift must be greater than or equal to 0」/「Exponent must be greater than or equal to 0」
+- **比较对 bool/null 侧按 GMP 零判定转 bool**（`gmp_init("0") == false` ⇒ true、`gmp_init("7") == true` ⇒ true——非对象恒 truthy）
+- `===` 类型判不走重载（GMP === 7 ⇒ false 既有路径 ✓）
+- serialize 真值：`O:3:"GMP":1:{i:0;s:2:"7b";}`（hex 小写）+ __serialize/__unserialize 往返 + `$g->num` ⇒ Undefined property Warning + NULL（num 是 dump 钩子伪属性）
+
+### 266.2 变更点
+
+| 文件 | 变更 |
+|---|---|
+| runtime_lib_template.zig :138-144 | extern 补 6 枚（ior/and/xor/com/mul_2exp/fdiv_q_2exp） |
+| runtime_lib_template.zig :27677-27889 | β 核心：gmpIsGmp/gmpCoerceOperand（do_operation 语境文案）/gmpDoArith（11 op 分流）/gmpDoNeg/gmpDoBitNot/gmpCompareValues（含 boolish 零判定支）/gmpMagicSerialize/gmpMagicUnserialize |
+| runtime_lib_template.zig 挂载 11 处 | php_add/sub/mul/div/mod/pow/neg、php_bit_and/or/xor/not、php_shl/shr、phpCompare（比较全族共用核心）+ php_eq 对象×对象支——全部 tag 快判前置 |
+| runtime_lib_template.zig :25864-25866/:27938 | ClassMeta 加 `gmp_num_hidden` 字段 + registerGmpClass 置位 + magic_toString 直设（putMethodOrdered 不设 magic_ 字段——addMethod 才设） |
+| runtime_lib_template.zig :33896-33906 | php_object_get 对 GMP.num 拦截（Undefined property Warning + NULL；var_dump/内部读走表内承载不拦） |
+| runtime_lib_template.zig :27205-27214/:27340-27346 | float 归一化修正：**仅非整值**发 Deprecated（7.0 不警 1.9 警，与 intParamFromFloat 同口径） |
+
+### 266.3 验收（PHP 8.5.8 对参）
+
+- **b1_ops**（运算符 33 形）：数值全对，残余仅 §七.5 栈帧豁免（intdiv 帧行）
+- **b2_mix SAME**（float Deprecated/string base 0/除零三文案）
+- **b3_ser SAME**：serialize hex 形逐字节 + 往返 + __serialize 负数 hex + **num 拦截**（Undefined property + NULL）+ print_r/`(string)`/echo/clone
+- **b4_cmp SAME**（比较 26 形：GMP×GMP/×int/×string("0x7" base 0)/×float(7.0 不警)/×bool/×null/===/!=/复合比较/位/移位/负移/取反）
+- **热路径实测**：php_add 混合 3e5 次 0.169-0.170s vs 基线 0.173-0.179s ⇒ **零劣化**
+- **arith_regress SAME**（标量算术/位/比较 24 形零转移）
+- `zig build test`：全绿
+
+### 266.4 遗留登记
+
+- php_object_get_ref（`$r = &$g->num` ref 通道）未拦截——罕见形，登记
+- `$g + 对象(非GMP)` ⇒ TypeError「Number must be...」（PHP 对 DateTime 等有 __toString 对象可能不同，未取真值，登记）
+- GMP-γ 待批：数论/位/IO 24 枚
+- internal_data mpz 二进制承载（性能优化，消每次 dec⇔mpz 转换）待批
+
+---
+
+
+## §267 批次三十七：GMP-γ 数论/位扫描/导入导出/随机族 25 枚
+
+### 267.1 背景与要点
+
+GMP 第三批，全 52 枚函数面闭环。要点：
+
+- **kronecker/legendre 无独立符号**：gmp.h 里 `mpz_kronecker`/`mpz_legendre` 是 `mpz_jacobi` 的宏别名 ⇒ 统一走 `__gmpz_jacobi`；`mpz_testbit` 真身拼写是 `__gmpz_tstbit`（无 e）——extern 声明以 `nm libgmp.dylib` 实测为准，不凭 gmp.h 宏名猜。
+- **setbit/clrbit 第一参是 GMP 对象 by-ref**：PHP 对象句柄共享 ⇒ 函数内改 num 属性即写回（无需 Ref 通道）。
+- **export/import flags**：word 序位（MSW=1/LSW=2）、endian 位（LITTLE=4/BIG=8/NATIVE=16），默认 flags=17（MSW_FIRST|NATIVE_ENDIAN）；冲突校验 ValueError 双文案；word_size≥1 校验。
+- **random 族确定性**：全局 mt19937 randstate（`__gmp_randinit_mt` + `__gmp_randseed` mpz 种子）⇒ 同 libgmp 即同序列——实测 `gmp_random_seed(42); random_bits(16)` PHP 与 AOT **同值 51897 逐字节一致**（随机性跨实现可归一验证）。
+- **popcount/hamdist 负数**：GMP 返回 `(c_ulong)-1` ⇒ `@bitCast` i64 即 -1（PHP 实测）。
+
+### 267.2 变更点
+
+| 文件 | 变更 |
+|---|---|
+| runtime_lib_template.zig :145-167 | extern 补 19 枚（数论/位扫描/导入导出/randstate） |
+| runtime_lib_template.zig :27915-28364 | γ 实现 25 枚（prob_prime/nextprime/jacobi/kronecker/legendre/binomial/perfect_power/perfect_square/popcount/hamdist/scan0/scan1/setbit/clrbit/testbit/and/or/xor/com/export/import/random_seed/random_bits/random_range） |
+| runtime_lib_template.zig :4348-4536 | wrapper 25 枚挂 builtin_function_map |
+| runtime_lib_template.zig :28467-28472 | GMP_IO flags 常量五枚注册 |
+| native_linker.zig :4987-5011 | builtin_map 登记 25 枚（prob_prime reps=10/setbit value=true/export/import word=1 flags=17 默认） |
+
+### 267.3 验收（PHP 8.5.8 对参）
+
+- **g1_num SAME**（prob_prime 八形含梅森/卡迈克尔、nextprime 负数、jacobi/kronecker/legendre 符号、binomial、perfect_power/square 零负、popcount/hamdist 负值 -1）
+- **g2_bit SAME**（and/or/xor/com + setbit 三形 by-ref 写回 + clrbit + testbit + scan0/scan1 全 0/全 1/空扫描 -1）
+- **g3_io SAME**（export 默认/4 字节词/两端序、import 往返、空值、flags 冲突双文案、random 种子确定性同值、range 大数跨度、三枚 ValueError 边界）
+- α/β 回归 a1_core/b3_ser/b4_cmp 全 SAME（gmpBinop 复用零漂移）
+- `zig build test`：全绿
+
+### 267.4 遗留登记
+
+- prob_prime 的 reps>25 与 PHP 内部 BPSW 轮数差异（reps 直传 libgmp，语义随库版——同库即同值）
+- random 未 seed 的首次调用序列（PHP 用 time/pid 播种——不可对齐，§七.7 时间族豁免口径）
+- internal_data mpz 二进制承载（性能，全族落地后统一批）
+
+---
+
+
+## §268 批次三十八：R-340 call-time pass-by-reference 拦截（`f(&$x)` 过接受销账）
+
+### 268.1 背景与根因
+
+PHP 8 起 call-time by-ref（`f(&$x)`）是 **compile-time parse error**（`syntax error, unexpected token "&"`，expecting 部分随 bison 状态变化）。AOT 的 parseUnary 把调用实参位的 `&` 当普通一元运算符静默接受（过接受——§264.3 顺带登记项，本批销账）。
+
+**为什么必须改共享层 + 爆炸半径**：调用点 `&` 只能拦在 parser 实参解析层（AST 之后 `&` 已被包成 unary_expr{ampersand}，下游无法区分 `f(&$x)` 与合法一元运算）；半径=全部调用形实参解析点——此前该形被静默接受（错误容忍），改后对齐 PHP 报 parse error；合法 `&` 形（`[&$m]` 字面量、`=&` 赋值、foreach `&$v`、`function &f` 声明位、`use (&$v)`）不经过实参解析点，零影响。
+
+### 268.2 变更点
+
+| 文件 | 变更 |
+|---|---|
+| parser.zig :4097-4124 | parseCallArg 拦（方法/静态/注解实参）+ 命名值位同拦 |
+| parser.zig :2765-2779 | function_call 主循环拦（位置参+命名值） |
+| parser.zig :2955-2969 | 第二调用循环拦（同形） |
+| parser.zig :3794-3807 | 匿名类构造器实参拦 |
+| parser.zig :3874-3887 | new 实参拦 |
+
+### 268.3 验收
+
+- `f(&$x)` / `call_user_func('strlen', &$s)` / `new A(&$y)` 三形全部 **Parse error**（`syntax error, unexpected token "&"` 含行号；expecting 部分 PHP 随 bison 状态变（`f(&$x)` 无、cufa 有 `expecting ")"`）——AOT 统一带 `expecting ")"`，编译期错误不进运行时对参面，拦截即达标）
+- 合法 & 形八枚零影响：ctbr_s4（`[&$m]`/`$b[]=&$m`/`$r=&$m`/foreach `&$v`/`function &getRef`/`&getRef()`/by-ref 声明调用）SAME
+- R-339 回归 s1_lit/s2_push/sa_cufa 全 SAME（`[&$m]`/cufa `[&$v]` 零漂移）
+- `zig build test`：全绿
+- 720 里程碑（批次三十六+三十七合并）：**66 PASS / 1 RUNTIME(f026 既有) / 1 SKIP(f004 既有)，零新增红**（§267 收口后跑）
+
+### 268.4 遗留登记
+
+- 注解实参（`#[Attr(&$x)]`）同拦（parseCallArg 路径自然覆盖；PHP 对注解实参本就只收常量表达式，语义一致）
+- `expecting` 部分与 PHP bison 状态机的逐位差异（编译期错误文案，不进运行时对参面，登记不追）
+
+---
+
+## §269 批次三十九：GMP 全族按裁决删除 + R-341 恢复 + R-342 未定义函数可捕获 + R-343 `.phi` 释放时机（f135 归因）
+
+### 269.1 GMP 立项→删除 决策记录
+
+- **立项**：§265-§267（批次三十五~三十七）落地 GMP α（核心 27）+β（运算符重载 12+序列化保真）+γ（数论/位/IO 25），52 函数面全探针 SAME。
+- **裁决（老铁原话）**：「删除GMP模块，我们要先把基本语言功能能力完全达到与PHP运行结果一致，支持协程栈。不要搞这些没用的扩展」——**GMP 整个删除（含 α），删干净、不留残壳**；方向=基本语言语义对齐优先，扩展族不做。
+- **删除范围**：runtime_lib_template.zig 的 59 枚 `__gmpz_*` extern 与 mpz_t/gmp_randstate_t、ClassMeta 内 1138 行 GMP 区（coerce/助手/α/β/γ/registerGmpClass/magic 方法）、initRuntime 挂载行、277 行 wrapper 与 builtin_function_map 52 枚登记、`gmp_num_hidden` 字段与 php_object_get 拦截、β 的 15 处热路径挂载（php_add/phpCompare/php_eq 等全部还原）、q4DepNull 的 gmp 豁免表（恢复批次二十四原形）、native_linker.zig 的 52 行 builtin_map 登记与 `-lgmp` 链接参数、build.zig 四处 `linkSystemLibrary("gmp")`。
+- **保留决策**：`builtin_param_table_generated.zig` 的 gmp 条目**保留**——该表是反射导出的全量 PHP 函数签名事实数据（含大量未实现函数），函数未登记即走 undefined function 诚实失败；删条目会破坏生成器一致性。
+- **删除后验收**：`zig build` 绿；grep 确认 src/build.zig 零 gmp 残留（唯参数名表保留，见上）；探针 gmp_gone 族全绿——`function_exists('gmp_init')=false`、`class_exists('GMP')=false`、`defined('GMP_ROUND_ZERO')=false`、`gmp_init()`/`gmp_add()` 走**可捕获** `Error: Call to undefined function gmp_init()`（与 GMP 落地前的诚实失败形态一致）；三份 GMP 变更摘要（α/β/γ）头部标注作废留档。
+- **协程附带说明**：裁决中「支持协程栈」一句与宪法 §七.1（Fiber/生成器排除）关系未明，已请老铁澄清（Fiber / yield / 自有调度栈），回话前协程相关代码冻结不动。
+
+### 269.2 R-341 恢复（批次三十布点 + capture_get/storage 借用自有化）
+
+- R-336 曾停用批次三十原生插桩（§261）；本批恢复 `generateInstructionTracked` 布点（`current_gen_block_idx`/`current_gen_inst_idx`，native_linker.zig :23090-23108），releaseDeadOperands 在原生发射路径重新激活销毁时机优化。
+- 连带补两处借用型值自有化：capture_get（:24745-24751 补 `_ = reg_{d}.retain();`）与 ArrayObject storage 支（runtime `:34407` 区 `elements.get` 借用改 `_ = v.retain(); return v;`）——releaseDeadOperands 激活后会偷这两处借用引用。
+- 恢复验收（当时）：R-335 11 探针 SAME、事故五族（f051/f056/f124/f134/f179）SAME、面板 46/8 零转移、`zig build test` 全绿。
+
+### 269.3 R-342 未定义函数直调 ⇒ 可捕获 Error
+
+- **缺口**：`php_call_undefined_function`（runtime :15974）旧实现 `noreturn`+`exit(255)` 硬终止，try/catch 里任何未定义函数调用绕过整条 catch 路由；PHP 真值=`caught: Error + after`（可捕获）。
+- **修法**：函数改 `throwThrowable("Error", msg, allocator)` 契约（置旗+返回异常 Value，非 Zig error），与批次十六①变量调用面同口径；nlk 发射点（:26873-26896）按 handler 在位与否分形（try 区 `catch runtime.Value.initNull()` 占位、区外 `try` 冒泡、无 result 时 `_ =` 形）。
+- **验收**：udf_test（try 捕获 `Error`+`after`）/ udf_uncaught（未捕获 fatal 形态逐字同 PHP，rc=255）/ udf_nested（函数内调用+getMessage 全文+ArgumentCountError 不回归）三探针 SAME；顺带裁决项验收——gmp_init 删除后走同一通道可捕获（§269.1）。
+
+### 269.4 R-343 `.phi` 死操作数释放时机——f135 DIFF 归因与修复
+
+- **现象**：批 36+37 里程碑新增 f135 DIFF（composites 行 `✓✗✗✗✓…`：4/6/8 偶数被 `isPrime` 误判素数，9 正常）。
+- **归因链（非 GMP 副作用，GMP 删除后复测仍 DIFF 证伪）**：`$n % 2 === 0 || $n % 3 === 0` 的 `||` 短路 PHI——releaseDeadOperands 的 `.phi` 臂（:22715）把 incoming 源当「最后使用」在 phi 节点处 `release+置null`，但**真正的消费是其后各前驱 terminator 的 PHI 拷贝**（`writePhiAssignWithRetain`：retain 源→release 宿→赋值，:1610）。真支路径 reg_14 先被置空、后被拷贝 ⇒ `reg_20=null` ⇒ `null.toBool()=false` ⇒ `return false` 守卫被跳过 ⇒ 落入循环返回 true。else 支无前置 release 故 9/15/21/25 正常。liveness 把 phi 用点归到前驱边（正确），`.phi` 臂把 incoming 当归点处使用（模型错误）——该臂自 R-341 恢复布点后在原生路径激活，故 f135 在批 36+37（R-341 后首轮 720 重编译）首现。
+- **修法**：撤掉 releaseDeadOperands 的 `.phi` 臂（:22715-22719 改 `.phi => {}`）。incoming 源引用由拷贝的 retain 接管；源寄存器自身这份留待后续真实用点或退出清理释放（=批次三十前的安全口径；延迟释放不改变析构可观测顺序——源值已被拷进 PHI 宿寄存器持有一份）。
+- **验收**：f135_min（最小复现：静态方法内 `$n%2===0 ||` 守卫）DIFF→SAME；f135 全量 DIFF→SAME；探针面板 31 枚=**30 PASS / 1 FAIL（min_r4=对象 id 顺序，R-344 既有 P2 登记，非本批引入）**；事故五族 5/5 SAME；`zig build test` 全绿；720 里程碑（批次三十九，GMP 删除+R-341+R-342+R-343 同批）结果见 §269.7 更新。
+
+### 269.5 P2-3 销账验证（§250.4 登记：变量调用面 by-value 未定义变量静默）
+
+- q4 机制（emitTempVarRef missing Ref + q4_undef_note/take + q4SplitMissingArgs）**已覆盖**，本批仅验证不改码：`byValue($undef)` 直调/变量调用/内建三形全 SAME（Warning「Undefined variable」+ null 实参 + 不 vivify + strlen depnull Deprecated 逐字同 PHP）。探针 p23_undef_arg。
+
+### 269.6 R-344 取证登记（对象 id 顺序 / `new` 检查时机 / 类不存在不可捕获）——P2 待修
+
+真值取证（oid_order 探针 + min_r4）：
+1. **分配顺序**：PHP `new A(new B())` 外层对象**先于实参求值分配**（NotSpec #3 < IsActive #4）；AOT 实参先求值 ⇒ id 反序（min_r4 红）。
+2. **检查前置**：抽象类/接口/私有构造器/类不存在四族检查 PHP 全部**先于实参求值**抛错（f-eval 不打印）；AOT 先求值后检查（f-eval 误打印）。
+3. **类不存在不可捕获**：`try { new NoSuch(f()); } catch (\Error)` PHP 可捕获；AOT 走 uncaught fatal（R-342 同族缺口在 `new` 面的另一实例）。
+4. **句柄复用**：PHP 对象句柄 LIFO 复用（`id before: 4 after: 3`——释放的 id 被后续 new 回收）；AOT 单调计数 ⇒ 即使修分配顺序也无法复现复用语义。
+5. 变更面预估：ir_generator 三条 new 路径（new_object / php_new_object_named / php_new_object_dynamic）+ nlk new_object 发射 + 运行时分配/构造拆分与 id 分配器——大范围语义改动，动工前按确认机制向老铁报备方案与半径。
+
+### 269.7 更正与里程碑
+
+- **§268.3 数字更正**：批 36+37 里程碑实为 **65 PASS / 1 RUNTIME(f026 既有) / 1 DIFF(f135) / 1 SKIP(f004 既有)**（§268.3 记的「66/零新增红」不准，f135 当时未归因）；f135 由本批 R-343 修复并复测转 SAME。
+- 批次三十九 720 里程碑：**待补**（回归跑完后回填）。
+
+---
+

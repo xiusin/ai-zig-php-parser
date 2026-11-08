@@ -450,6 +450,12 @@ pub const LivenessAnalysis = struct {
             .new_object => |op| {
                 for (op.args) |arg| callback(ctx, arg.id);
             },
+            // ★R-344a：ctor_call 消费 object + args；new_alloc 无寄存器操作数
+            .new_alloc => {},
+            .ctor_call => |op| {
+                callback(ctx, op.object.id);
+                for (op.args) |arg| callback(ctx, arg.id);
+            },
             // === PropertyGetOp (object) ===
             .property_get => |op| callback(ctx, op.object.id),
             // === PropertySetOp (object, value) ===

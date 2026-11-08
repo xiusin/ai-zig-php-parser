@@ -2762,12 +2762,21 @@ pub const Parser = struct {
                 }
                 var args = std.ArrayListUnmanaged(ast.Node.Index).empty;
                 while (self.curr.tag != .r_paren) {
+                    // ★R-340（§268）：call-time pass-by-reference 拦截（与 parseCallArg 同口径）
+                    if (self.curr.tag == .ampersand) {
+                        self.reportError("syntax error, unexpected token \"&\", expecting \")\"");
+                        return error.ParseError;
+                    }
                     // Check for named parameter: name: value
                     if (self.isNamedLabelStart()) {
                         const name_tok = self.curr;
                         const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
                         self.nextToken(); // skip name
                         self.nextToken(); // skip colon
+                        if (self.curr.tag == .ampersand) {
+                            self.reportError("syntax error, unexpected token \"&\", expecting \")\"");
+                            return error.ParseError;
+                        }
                         const value_expr = try self.parseExpression(1);
                         const named_arg_node = try self.createNode(.{
                             .tag = .named_arg,
@@ -2943,12 +2952,21 @@ pub const Parser = struct {
                 }
                 var args = std.ArrayList(ast.Node.Index).empty;
                 while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
+                    // ★R-340（§268）：call-time pass-by-reference 拦截（与 parseCallArg 同口径）
+                    if (self.curr.tag == .ampersand) {
+                        self.reportError("syntax error, unexpected token \"&\", expecting \")\"");
+                        return error.ParseError;
+                    }
                     // Check for named argument: name: value
                     if (self.isNamedLabelStart()) {
                         const name_tok = self.curr;
                         const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
                         self.nextToken(); // skip name
                         self.nextToken(); // skip colon
+                        if (self.curr.tag == .ampersand) {
+                            self.reportError("syntax error, unexpected token \"&\", expecting \")\"");
+                            return error.ParseError;
+                        }
                         const value_expr = try self.parseExpression(1);
                         const named_arg_node = try self.createNode(.{
                             .tag = .named_arg,
@@ -3773,11 +3791,20 @@ pub const Parser = struct {
             if (self.curr.tag == .l_paren) {
                 self.nextToken();
                 while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
+                    // ★R-340（§268）：call-time pass-by-reference 拦截（匿名类构造器实参同罪）
+                    if (self.curr.tag == .ampersand) {
+                        self.reportError("syntax error, unexpected token \"&\", expecting \")\"");
+                        return error.ParseError;
+                    }
                     if (self.isNamedLabelStart()) {
                         const name_tok = self.curr;
                         const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
                         self.nextToken();
                         self.nextToken();
+                        if (self.curr.tag == .ampersand) {
+                            self.reportError("syntax error, unexpected token \"&\", expecting \")\"");
+                            return error.ParseError;
+                        }
                         const value_expr = try self.parseExpression(1);
                         const named_arg_node = try self.createNode(.{
                             .tag = .named_arg,
@@ -3844,11 +3871,20 @@ pub const Parser = struct {
         if (self.curr.tag == .l_paren) {
             self.nextToken();
             while (self.curr.tag != .r_paren and self.curr.tag != .eof) {
+                // ★R-340（§268）：call-time pass-by-reference 拦截（new 实参同罪）
+                if (self.curr.tag == .ampersand) {
+                    self.reportError("syntax error, unexpected token \"&\", expecting \")\"");
+                    return error.ParseError;
+                }
                 if (self.isNamedLabelStart()) {
                     const name_tok = self.curr;
                     const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
                     self.nextToken();
                     self.nextToken();
+                    if (self.curr.tag == .ampersand) {
+                        self.reportError("syntax error, unexpected token \"&\", expecting \")\"");
+                        return error.ParseError;
+                    }
                     const value_expr = try self.parseExpression(1);
                     const named_arg_node = try self.createNode(.{
                         .tag = .named_arg,
@@ -4095,12 +4131,25 @@ pub const Parser = struct {
 
     /// Parse a single call argument, supporting named args (name: value) and keyword-as-name (type: value)
     fn parseCallArg(self: *Parser) anyerror!ast.Node.Index {
+        // ★R-340（§268）：call-time pass-by-reference 拦截——PHP 8 起 `f(&$x)` 为
+        //   compile-time parse error（实测：unexpected token "&", expecting ")"）。
+        //   此前被 parseUnary 静默接受为普通实参（过接受）。合法 `&` 形（[&$m] 字面量、
+        //   =& 赋值、foreach &$v、声明位）不经过本函数，零影响。
+        if (self.curr.tag == .ampersand) {
+            self.reportError("syntax error, unexpected token \"&\", expecting \")\"");
+            return error.ParseError;
+        }
         // Check for named parameter: name: value or keyword: value (e.g. type: 'int')
         if ((self.curr.tag == .t_string or isKeywordIdentifierTag(self.curr.tag)) and self.peek.tag == .colon) {
             const name_tok = self.curr;
             const name_id = try self.context.intern(self.lexer.buffer[name_tok.loc.start..name_tok.loc.end]);
             self.nextToken(); // skip name
             self.nextToken(); // skip colon
+            // ★R-340：命名实参值位同拦（f(x: &$v) 同罪）
+            if (self.curr.tag == .ampersand) {
+                self.reportError("syntax error, unexpected token \"&\", expecting \")\"");
+                return error.ParseError;
+            }
             const value_expr = try self.parseExpression(1);
             return self.createNode(.{
                 .tag = .named_arg,

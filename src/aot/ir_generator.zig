@@ -5528,15 +5528,23 @@ pub const IRGenerator = struct {
                     } }, null);
                 } else if (is_push and keys.items.len >= 1) {
                     // ★R-339（§264）：内层 push `$a['x'][] =& $m`——keys 全部下钻
-                    // vivify（同下方多维支口径），末层 push_keep_ref。
+                    // vivify + ensure 中间层数组化（null ⇒ 静默 []，非标量 ⇒ 警告断链），
+                    // 末层 push_keep_ref。
                     var cur = base_array;
                     for (keys.items) |kreg| {
                         const v_args = try self.allocator.alloc(Register, 2);
                         v_args[0] = cur;
                         v_args[1] = kreg;
-                        cur = try self.emitWithResult(.{ .call = .{
+                        const vref = try self.emitWithResult(.{ .call = .{
                             .func_name = "php_array_elem_ref_vivify",
                             .args = v_args,
+                            .return_type = .php_value,
+                        } }, .php_value);
+                        const e_args = try self.allocator.alloc(Register, 1);
+                        e_args[0] = vref;
+                        cur = try self.emitWithResult(.{ .call = .{
+                            .func_name = "php_array_ref_vivify_middle",
+                            .args = e_args,
                             .return_type = .php_value,
                         } }, .php_value);
                     }
@@ -5561,16 +5569,22 @@ pub const IRGenerator = struct {
                     } }, null);
                 } else if (keys.items.len >= 2) {
                     // ★R-339（§264）：多维下钻 `$a['x']['y'] =& $m`——前 n-1 层逐层
-                    // php_array_elem_ref_vivify（批十五下钻原语：中间层 null/非数组 ⇒
-                    // 原地 vivify 为 []，返回中间层 Ref），末层 set_keep_ref 绑 ref_val。
+                    // vivify + ensure 中间层数组化（同内层 push 支），末层 set_keep_ref。
                     var cur = base_array;
                     for (keys.items[0 .. keys.items.len - 1]) |kreg| {
                         const v_args = try self.allocator.alloc(Register, 2);
                         v_args[0] = cur;
                         v_args[1] = kreg;
-                        cur = try self.emitWithResult(.{ .call = .{
+                        const vref = try self.emitWithResult(.{ .call = .{
                             .func_name = "php_array_elem_ref_vivify",
                             .args = v_args,
+                            .return_type = .php_value,
+                        } }, .php_value);
+                        const e_args = try self.allocator.alloc(Register, 1);
+                        e_args[0] = vref;
+                        cur = try self.emitWithResult(.{ .call = .{
+                            .func_name = "php_array_ref_vivify_middle",
+                            .args = e_args,
                             .return_type = .php_value,
                         } }, .php_value);
                     }
@@ -10092,7 +10106,15 @@ pub const IRGenerator = struct {
         defer ctor_args.deinit(self.allocator);
 
         // ★批次十九②：匿名类命名/展开实参 ⇒ 同一运行时绑定通道（类名编译期已定）
+        // ★R-344a：三阶段——裸分配（类名编译期已定）先于建组与实参求值
         if (self.argsContainNamedOrUnpacking(anon_data.args)) {
+            const class_reg = try self.emitWithResult(.{ .const_string = try self.module.?.internString(anon_class_name) }, .php_value);
+            const anon_alloc_args = try self.allocator.dupe(Register, &.{class_reg});
+            const obj_reg = try self.emitWithResult(.{ .call = .{
+                .func_name = "php_object_alloc_dynamic",
+                .args = anon_alloc_args,
+                .return_type = .php_value,
+            } }, .{ .php_object = anon_class_name });
             const args_arr = try self.emitWithResult(.{ .array_new = .{ .capacity = @intCast(anon_data.args.len) } }, .php_array);
             for (anon_data.args) |arg_idx| {
                 const arg_node = self.getNode(arg_idx) orelse continue;
@@ -10116,28 +10138,26 @@ pub const IRGenerator = struct {
                 const val_reg = try self.generateExpression(arg_idx);
                 _ = try self.emit(.{ .array_push = .{ .array = args_arr, .value = val_reg } }, null);
             }
-            const class_reg = try self.emitWithResult(.{ .const_string = try self.module.?.internString(anon_class_name) }, .php_value);
             const na_args = try self.allocator.alloc(Register, 2);
-            na_args[0] = class_reg;
+            na_args[0] = obj_reg;
             na_args[1] = args_arr;
-            return self.emitWithResult(.{ .call = .{
-                .func_name = "php_new_object_named",
+            _ = try self.emitWithResult(.{ .call = .{
+                .func_name = "php_object_call_ctor_named",
                 .args = na_args,
                 .return_type = .php_value,
-            } }, .{ .php_object = anon_class_name });
+            } }, .php_value);
+            return obj_reg;
         }
 
+        // ★R-344a（§269.6）：匿名类同三阶段——裸分配先于实参求值
+        const obj_reg = try self.emitWithResult(.{ .new_alloc = .{ .class_name = anon_class_name } }, .{ .php_object = anon_class_name });
         for (anon_data.args) |arg_idx| {
             const arg_reg = try self.generateExpression(arg_idx);
             try ctor_args.append(self.allocator, arg_reg);
         }
-
-        // 创建对象：使用new_object指令
         const args_slice = try self.allocator.dupe(Register, ctor_args.items);
-        return self.emitWithResult(.{ .new_object = .{
-            .class_name = anon_class_name,
-            .args = args_slice,
-        } }, .{ .php_object = anon_class_name });
+        _ = try self.emit(.{ .ctor_call = .{ .object = obj_reg, .args = args_slice } }, null);
+        return obj_reg;
     }
 
     /// Generate IR for object instantiation
@@ -10203,7 +10223,27 @@ pub const IRGenerator = struct {
         // ★批次十九②：命名/展开实参 ⇒ 统一运行时绑定通道（php_new_object_named：
         //   继承构造器沿父链解析、变参收命名、overwrites/Unknown 两 Error 与函数面同口径——
         //   原编译期 skip-消耗块绑错继承构造器槽位、静默丢变参命名、漏报两 Error，已拆除）。
+        // ★R-344a（§269.6）：三阶段拆分——先解析类名并**裸分配**（实例化性检查+对象 id 烧掉，
+        //   先于一切实参求值），再建实参数组，最后绑定构造。
         if (self.argsContainNamedOrUnpacking(inst_data.args)) {
+            // 类名通道：动态（$var / static / 表达式）求值；静态名 ⇒ 常量串
+            const class_reg = if (is_dynamic_class and class_node.tag == .static_expr)
+                try self.emitWithResult(.{ .call = .{
+                    .func_name = "php_get_called_class_name",
+                    .args = &.{},
+                    .return_type = .php_value,
+                } }, .php_value)
+            else if (is_dynamic_class or class_name.len == 0)
+                try self.generateExpression(inst_data.class_name)
+            else
+                try self.emitWithResult(.{ .const_string = try self.module.?.internString(class_name) }, .php_value);
+            const obj_result_type = if (is_dynamic_class or class_name.len == 0) Type.php_value else Type{ .php_object = class_name };
+            const alloc_args = try self.allocator.dupe(Register, &.{class_reg});
+            const obj_reg = try self.emitWithResult(.{ .call = .{
+                .func_name = "php_object_alloc_dynamic",
+                .args = alloc_args,
+                .return_type = .php_value,
+            } }, obj_result_type);
             const args_arr = try self.emitWithResult(.{ .array_new = .{ .capacity = @intCast(inst_data.args.len) } }, .php_array);
             for (inst_data.args) |arg_idx| {
                 const arg_node = self.getNode(arg_idx) orelse continue;
@@ -10227,35 +10267,22 @@ pub const IRGenerator = struct {
                 const val_reg = try self.generateExpression(arg_idx);
                 _ = try self.emit(.{ .array_push = .{ .array = args_arr, .value = val_reg } }, null);
             }
-            // 类名通道：动态（$var / static / 表达式）求值；静态名 ⇒ 常量串
-            const class_reg = if (is_dynamic_class and class_node.tag == .static_expr)
-                try self.emitWithResult(.{ .call = .{
-                    .func_name = "php_get_called_class_name",
-                    .args = &.{},
-                    .return_type = .php_value,
-                } }, .php_value)
-            else if (is_dynamic_class or class_name.len == 0)
-                try self.generateExpression(inst_data.class_name)
-            else
-                try self.emitWithResult(.{ .const_string = try self.module.?.internString(class_name) }, .php_value);
             const na_args = try self.allocator.alloc(Register, 2);
-            na_args[0] = class_reg;
+            na_args[0] = obj_reg;
             na_args[1] = args_arr;
-            return self.emitWithResult(.{ .call = .{
-                .func_name = "php_new_object_named",
+            _ = try self.emitWithResult(.{ .call = .{
+                .func_name = "php_object_call_ctor_named",
                 .args = na_args,
                 .return_type = .php_value,
-            } }, if (is_dynamic_class or class_name.len == 0) Type.php_value else Type{ .php_object = class_name });
-        }
-
-        const args = try self.allocator.alloc(Register, inst_data.args.len);
-        for (inst_data.args, 0..) |arg_idx, i| {
-            args[i] = try self.generateExpression(arg_idx);
+            } }, .php_value);
+            return obj_reg;
         }
 
         // 动态类名实例化: new $var() 或 new static()
         if (is_dynamic_class) {
-            // 获取类名字符串（运行时）
+            // ★R-344a（§269.6）：类名求值 → 裸分配（检查+id）→ 实参求值 → 构造器。
+            //   顺带销账旧形**实参双求值**：args 数组在动态分支下被 generateExpression 两遍
+            //   （`new $dyn(f())` 旧发射 f() 调用两次）。
             const class_name_reg = if (class_node.tag == .static_expr)
                 // static:: 延迟绑定 — 运行时获取调用类名
                 try self.emitWithResult(.{ .call = .{
@@ -10266,23 +10293,29 @@ pub const IRGenerator = struct {
             else
                 // 变量类名: new $var()
                 try self.generateExpression(inst_data.class_name);
-            // 构建参数数组
-            const dyn_args = try self.allocator.alloc(Register, inst_data.args.len + 1);
-            dyn_args[0] = class_name_reg;
-            for (inst_data.args, 0..) |arg_idx, i| {
-                dyn_args[i + 1] = try self.generateExpression(arg_idx);
-            }
-            return self.emitWithResult(.{ .call = .{
-                .func_name = "php_new_object_dynamic",
-                .args = dyn_args,
+            const dyn_alloc_args = try self.allocator.dupe(Register, &.{class_name_reg});
+            const obj_reg = try self.emitWithResult(.{ .call = .{
+                .func_name = "php_object_alloc_dynamic",
+                .args = dyn_alloc_args,
                 .return_type = .php_value,
             } }, .php_value);
+            const dyn_args = try self.allocator.alloc(Register, inst_data.args.len);
+            for (inst_data.args, 0..) |arg_idx, i| {
+                dyn_args[i] = try self.generateExpression(arg_idx);
+            }
+            _ = try self.emit(.{ .ctor_call = .{ .object = obj_reg, .args = dyn_args } }, null);
+            return obj_reg;
         }
 
-        return self.emitWithResult(.{ .new_object = .{
-            .class_name = class_name,
-            .args = args,
-        } }, Type{ .php_object = class_name });
+        // ★R-344a（§269.6）：静态路径三阶段拆分——裸分配先于实参求值
+        //   （PHP 的 NEW→实参求值→DO_FCALL 顺序；对象 id 在分配点烧掉，嵌套 new 的 id 顺序对齐）。
+        const obj_reg = try self.emitWithResult(.{ .new_alloc = .{ .class_name = class_name } }, Type{ .php_object = class_name });
+        const args = try self.allocator.alloc(Register, inst_data.args.len);
+        for (inst_data.args, 0..) |arg_idx, i| {
+            args[i] = try self.generateExpression(arg_idx);
+        }
+        _ = try self.emit(.{ .ctor_call = .{ .object = obj_reg, .args = args } }, null);
+        return obj_reg;
     }
 
     /// Generate IR for property access

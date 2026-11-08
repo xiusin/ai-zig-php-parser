@@ -4953,6 +4953,8 @@ pub const NativeLinker = struct {
         .{ "php_array_elem_ref_vivify", bi(.{ .runtime_name = "php_array_elem_ref_vivify", .needs_allocator = true }) },
         // ★R-339（§264 数组元素引用）：main/全局源的元素 Ref 化（产物侧钩子实现）
         .{ "php_global_make_ref", bi(.{ .runtime_name = "php_global_make_ref", .needs_allocator = true }) },
+        // ★R-339：多维下钻中间层数组化（null ⇒ 静默 []，非标量 ⇒ 警告断链）
+        .{ "php_array_ref_vivify_middle", bi(.{ .runtime_name = "php_array_ref_vivify_middle", .needs_allocator = true }) },
         .{ "php_object_get_ref", bi(.{ .runtime_name = "php_object_get_ref", .needs_allocator = true }) },
         // ★批次十二（F-13b）：preg by-ref 数组下标的 copy-in 静默读（coalesce 语义，
         //   不存在 ⇒ null 不告警——PHP by-ref auto-vivify 不对未定义元素告警）。
@@ -5043,6 +5045,9 @@ pub const NativeLinker = struct {
         // Object functions
         .{ "php_object_new", bi(.{ .runtime_name = "php_object_new", .needs_allocator = true }) },
         .{ "php_object_new_with_constructor", bi(.{ .runtime_name = "php_object_new_with_constructor", .needs_allocator = true }) },
+        // ★R-344a：`new` 拆分通道——动态路径裸分配 / 命名实参构造器
+        .{ "php_object_alloc_dynamic", bi(.{ .runtime_name = "php_object_alloc_dynamic", .needs_allocator = true }) },
+        .{ "php_object_call_ctor_named", bi(.{ .runtime_name = "php_object_call_ctor_named", .needs_allocator = true }) },
 
         .{ "abs", bi(.{ .runtime_name = "php_abs", .needs_allocator = false }) },
         .{ "sqrt", .{ .runtime_name = "php_sqrt", .needs_allocator = false } },
@@ -6149,6 +6154,18 @@ pub const NativeLinker = struct {
                             }
                         }
                     },
+                    // ★R-344a：ctor_call 的对象与实参需登记；new_alloc 无寄存器操作数
+                    .new_alloc => {},
+                    .ctor_call => |op| {
+                        if (!all_registers.contains(op.object.id)) {
+                            try all_registers.put(op.object.id, op.object.type_);
+                        }
+                        for (op.args) |arg| {
+                            if (!all_registers.contains(arg.id)) {
+                                try all_registers.put(arg.id, arg.type_);
+                            }
+                        }
+                    },
                     .static_method_call => |op| {
                         for (op.args) |arg| {
                             if (!all_registers.contains(arg.id)) {
@@ -6599,6 +6616,7 @@ pub const NativeLinker = struct {
                     if (std.mem.eql(u8, rn, "php_array_elem_ref_vivify") or
                         std.mem.eql(u8, rn, "php_array_get_ref") or
                         std.mem.eql(u8, rn, "php_global_make_ref") or
+                        std.mem.eql(u8, rn, "php_array_ref_vivify_middle") or
                         std.mem.eql(u8, rn, "php_object_get_ref"))
                     {
                         if (inst_scan.result) |res| try make_ref_result_regs.put(res.id, {});
@@ -7251,6 +7269,8 @@ pub const NativeLinker = struct {
                 const res_owned = inst_owned.result orelse continue;
                 switch (inst_owned.op) {
                     .call, .method_call, .static_method_call, .new_object => try owned_call_result_regs.put(res_owned.id, {}),
+                    // ★R-344a：裸分配结果同为自有 +1 对象
+                    .new_alloc => try owned_call_result_regs.put(res_owned.id, {}),
                     // 变量读取（非 no_deref）在发射时显式 retain 结果 ⇒ 同样自带 +1
                     .load => |ld| {
                         if (!ld.no_deref) try owned_call_result_regs.put(res_owned.id, {});
@@ -22667,6 +22687,10 @@ pub const NativeLinker = struct {
             },
             // new_object 的 args 可能被消费，不释放
             .new_object => {},
+            // ★R-344a：new_alloc 无操作数；ctor_call 的 object 是表达式结果（活），
+            //   args 由构造器形参装填自理（同 new_object 保守口径），不释放
+            .new_alloc => {},
+            .ctor_call => {},
             // property_get: getProperty 内部已 retain 返回值，result 独立于 object，可释放 object
             .property_get => |op| {
                 try used_regs.append(self.allocator, op.object.id);
@@ -22709,11 +22733,13 @@ pub const NativeLinker = struct {
                 try used_regs.append(self.allocator, op.object.id);
                 try used_regs.append(self.allocator, op.class_name.id);
             },
-            .phi => |phi| {
-                for (phi.incoming) |inc| {
-                    try used_regs.append(self.allocator, inc.value.id);
-                }
-            },
+            // ★F-135（R-343）：.phi 节点在原生发射里只是注释，真正的消费是**之后**由各前驱
+            //   terminator 的 PHI 拷贝（writePhiAssignWithRetain：retain 源→release 宿→赋值）。
+            //   若在此把 incoming 当「最后使用」释放，拷贝读到的就是已置空的 null
+            //   （`$n % 2 === 0 || ...` 的真支：reg_14 被 releaseDeadOperands 提前置空 ⇒
+            //   reg_20=null ⇒ 守卫失效，f135 偶数误判素数）。incoming 源的引用由拷贝的
+            //   retain 接管，源寄存器自身这份留待后续真实用点或退出清理释放。
+            .phi => {},
             .select => |op| {
                 try used_regs.append(self.allocator, op.cond.id);
                 // 指针类型 select（ref_ptr result）: reg_X = reg_then 或 &reg_then（bitwise copy，无 retain），不释放 then/else
@@ -23032,14 +23058,18 @@ pub const NativeLinker = struct {
     ///   线性路径有布点 ⇒ 顶层与循环族的死亡临时量全部滞留到函数退出，__destruct 时机晚于
     ///   PHP）。liveness 门禁（isLiveAfter+isLiveAtBlockExit 双闸）保证只放真死亡寄存器。
     fn generateInstructionTracked(self: *Self, code: *std.ArrayList(u8), inst: *const IR.Instruction, block: *const IR.BasicBlock, inst_idx: usize) !void {
-        // ★批次三十一b（R-336）：批次三十的原生路径插桩整体停用——releaseDeadOperands 对
-        //   借用型值（php_array_iter_value 的 iter.array.get 直返支、ctx.captures[N] 读）
-        //   按「自有」释放，每枚闭包调用/迭代元素被偷走属主引用 ⇒ UAF（f056/f124/f134/f179 族）。
-        //   恢复条件：先给借用产出点建「不可释放」登记表（或让借用函数一律 retain），再审。
+        // ★批次三十九（R-341/R-336 恢复）：借用产出点已全部自有化——
+        //   iter.array.get 直返支（PHPArray.get 内部 retain，批次十五 F-139c 既有）；
+        //   ctx.captures[N] 读（R-341 发射补 retain，:24745）；ArrayObject storage 支
+        //   （:34407 elements.get 补 retain）。releaseDeadOperands 按「自有」释放即配平。
+        //   恢复批次三十原生路径布点（停用前形态），销毁时机收益回归（循环/闭包内
+        //   __destruct 语句点即毁）。
         const prev_b = self.current_gen_block_idx;
         const prev_i = self.current_gen_inst_idx;
-        _ = block;
-        _ = inst_idx;
+        if (self.current_block_positions) |bp| {
+            self.current_gen_block_idx = bp.get(block);
+        }
+        self.current_gen_inst_idx = inst_idx;
         defer {
             self.current_gen_block_idx = prev_b;
             self.current_gen_inst_idx = prev_i;
@@ -24688,8 +24718,10 @@ pub const NativeLinker = struct {
             },
             .capture_get => |op| {
                 if (inst.result) |reg| {
-                    // ctx is the closure object
+                    // ★R-341（§269）：captures[N] 裸拷贝是借用读——自有化（retain 配对），
+                    //   R-336 恢复后 releaseDeadOperands 按自有释放即配平、不偷闭包捕获槽。
                     try self.writeRegAssignmentFmt(writer, reg.id, "ctx.asFunction().captures[{d}];\n", .{op.index});
+                    try writer.print("    _ = reg_{d}.retain();\n", .{reg.id});
                 }
             },
             .type_check => |op| {
@@ -26862,13 +26894,29 @@ pub const NativeLinker = struct {
                             // 用户定义函数 - 大小写不敏感解析到规范声明名（§8 #6）
                             const canonical_call_name = self.findUserFunctionCanonical(op.func_name);
                             if (canonical_call_name == null) {
-                                // 函数未定义：生成运行时 Fatal error（消息保留被调拼写）
+                                // ★R-342（§269）：未定义函数直调 ⇒ 可捕获 Error（throwThrowable 契约，
+                                //   与直调用户函数的 try/catch 形态同规：try 区 catch initNull 占位、
+                                //   区外 try 冒泡；hasException 旗由后续调用点检查路由）。
                                 const escaped_func_name = try self.escapeString(op.func_name);
                                 defer self.allocator.free(escaped_func_name);
                                 if (inst.location.line > 0) {
                                     try writer.print("    runtime.setSourceLocation(\"{s}\", {d});\n", .{ inst.location.file, inst.location.line });
                                 }
-                                try writer.print("    runtime.php_call_undefined_function(\"{s}\");\n", .{escaped_func_name});
+                                if (inst.result) |ureg| {
+                                    if (self.current_exception_handler != null) {
+                                        try self.writeRegAssignmentPrefix(writer, ureg.id);
+                                        try writer.print("runtime.php_call_undefined_function(\"{s}\", runtime.runtime_allocator) catch runtime.Value.initNull();\n", .{escaped_func_name});
+                                    } else {
+                                        try self.writeRegAssignmentPrefix(writer, ureg.id);
+                                        try writer.print("try runtime.php_call_undefined_function(\"{s}\", runtime.runtime_allocator);\n", .{escaped_func_name});
+                                    }
+                                } else {
+                                    if (self.current_exception_handler != null) {
+                                        try writer.print("    _ = runtime.php_call_undefined_function(\"{s}\", runtime.runtime_allocator) catch {{}};\n", .{escaped_func_name});
+                                    } else {
+                                        try writer.print("    _ = try runtime.php_call_undefined_function(\"{s}\", runtime.runtime_allocator);\n", .{escaped_func_name});
+                                    }
+                                }
                             } else {
                                 const call_name = canonical_call_name.?;
                                 const call_ident = try self.fnIdentName(call_name);
@@ -27734,6 +27782,84 @@ pub const NativeLinker = struct {
                     }
                     try writer.writeAll("    }\n");
                 }
+            },
+            // ★R-344a：`new` 三阶段拆分第一阶段——裸分配（先于实参求值；对象 id 在此烧掉）。
+            //   发射形态与 new_object 同规（alloca/try 两维分形 + hasException 路由）。
+            .new_alloc => |op| {
+                if (inst.result) |reg| {
+                    const is_alloca = if (self.current_alloca_regs) |alloca_regs|
+                        alloca_regs.contains(reg.id)
+                    else
+                        false;
+
+                    const escaped_class = try self.escapeString(op.class_name);
+                    defer self.allocator.free(escaped_class);
+
+                    const alloc_in_try = self.current_exception_handler != null;
+                    if (is_alloca) {
+                        try writer.print("    reg_{d}.*.release(runtime.runtime_allocator);\n", .{reg.id});
+                        if (alloc_in_try) {
+                            try writer.print("    reg_{d}.* = runtime.php_object_alloc(\"{s}\", ", .{ reg.id, escaped_class });
+                        } else {
+                            try writer.print("    reg_{d}.* = try runtime.php_object_alloc(\"{s}\", ", .{ reg.id, escaped_class });
+                        }
+                    } else {
+                        try writer.print("    reg_{d}.release(runtime.runtime_allocator);\n", .{reg.id});
+                        if (alloc_in_try) {
+                            try writer.print("    reg_{d} = runtime.php_object_alloc(\"{s}\", ", .{ reg.id, escaped_class });
+                        } else {
+                            try writer.print("    reg_{d} = try runtime.php_object_alloc(\"{s}\", ", .{ reg.id, escaped_class });
+                        }
+                    }
+
+                    if (alloc_in_try) {
+                        try writer.writeAll("runtime.runtime_allocator) catch runtime.Value.initNull();\n");
+                    } else {
+                        try writer.writeAll("runtime.runtime_allocator);\n");
+                    }
+
+                    // 检查异常（可捕获 Error：类不存在/接口/trait/enum/abstract）
+                    try writer.writeAll("    if (runtime.hasException()) {\n");
+                    try writer.writeAll("        @branchHint(.unlikely);\n");
+                    try self.generateCleanupCodeExcept(writer, reg.id);
+                    if (self.current_exception_handler) |handler_idx| {
+                        try writer.print("        current_block = {d};\n", .{handler_idx});
+                        try writer.print("        continue;\n", .{});
+                    } else {
+                        try writer.writeAll("        return error.RuntimeError;\n");
+                    }
+                    try writer.writeAll("    }\n");
+                }
+            },
+            // ★R-344a：`new` 三阶段拆分第三阶段——构造器调用（后于实参求值）。
+            //   无结果寄存器；对象归生成码所有（异常清理链归还，运行时不归还）。
+            .ctor_call => |op| {
+                const ctor_in_try = self.current_exception_handler != null;
+                // 对象寄存器可能是 alloca 槽（new 表达式结果与变量槽 mem2reg 合并）⇒ 解引用形态
+                const obj_deref: []const u8 = if (self.isAllocaReg(op.object.id)) ".*" else "";
+                if (ctor_in_try) {
+                    try writer.print("    runtime.php_object_call_ctor(reg_{d}{s}, ", .{ op.object.id, obj_deref });
+                } else {
+                    try writer.print("    try runtime.php_object_call_ctor(reg_{d}{s}, ", .{ op.object.id, obj_deref });
+                }
+                try self.writeValueArgsArray(writer, op.args);
+                if (ctor_in_try) {
+                    try writer.writeAll(", runtime.runtime_allocator) catch {};\n");
+                } else {
+                    try writer.writeAll(", runtime.runtime_allocator);\n");
+                }
+
+                // 检查异常（构造器可见性/构造器内 throw）
+                try writer.writeAll("    if (runtime.hasException()) {\n");
+                try writer.writeAll("        @branchHint(.unlikely);\n");
+                try self.generateCleanupCode(writer);
+                if (self.current_exception_handler) |handler_idx| {
+                    try writer.print("        current_block = {d};\n", .{handler_idx});
+                    try writer.print("        continue;\n", .{});
+                } else {
+                    try writer.writeAll("        return error.RuntimeError;\n");
+                }
+                try writer.writeAll("    }\n");
             },
             .property_get => |op| {
                 if (inst.result) |reg| {

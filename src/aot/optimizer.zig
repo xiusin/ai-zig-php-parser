@@ -3266,6 +3266,14 @@ pub const IROptimizer = struct {
                     try self.used_registers.put(arg.id, {});
                 }
             },
+            // ★R-344a：ctor_call 消费对象寄存器与实参；new_alloc 无寄存器操作数
+            .new_alloc => {},
+            .ctor_call => |op| {
+                try self.used_registers.put(op.object.id, {});
+                for (op.args) |arg| {
+                    try self.used_registers.put(arg.id, {});
+                }
+            },
             .instanceof => |op| {
                 try self.used_registers.put(op.object.id, {});
                 try self.used_registers.put(op.class_name.id, {});
@@ -3469,6 +3477,8 @@ pub const IROptimizer = struct {
             .array_new, .array_get, .array_set, .array_set_nested, .array_ensure, .array_push, .array_key_exists, .array_unset => true,
             .concat, .interpolate => true,
             .new_object, .property_get, .property_set, .method_call, .clone => true,
+            // ★R-344a：分配写对象表且可抛；构造器调用同理 ⇒ 有副作用
+            .new_alloc, .ctor_call => true,
             .static_method_call, .static_property_get, .static_property_set => true,
             .closure_new, .closure_bind, .parent_call => true,
             .retain, .release, .unset_var => true,
@@ -3487,6 +3497,8 @@ pub const IROptimizer = struct {
         _ = self;
         return switch (inst.op) {
             .array_new, .new_object, .concat, .interpolate, .closure_new => true,
+            // ★R-344a：裸分配即对象分配
+            .new_alloc => true,
             else => false,
         };
     }
@@ -3495,6 +3507,8 @@ pub const IROptimizer = struct {
         _ = self;
         return switch (inst.op) {
             .call, .call_indirect, .method_call, .static_method_call, .new_object, .parent_call => true,
+            // ★R-344a：实例化性检查/类不存在/构造器调用均可抛（可捕获 Error）
+            .new_alloc, .ctor_call => true,
             .array_get, .array_set, .array_push, .array_unset, .array_key_exists => true,
             .property_get, .property_set, .static_property_get, .static_property_set => true,
             .concat, .interpolate, .closure_new, .closure_bind => true,
@@ -5581,6 +5595,15 @@ pub const IROptimizer = struct {
                 if (op.value.id == old_reg.id) op.value = new_reg;
             },
             .new_object => |*op| {
+                const args_ptr = @constCast(op.args.ptr);
+                for (0..op.args.len) |i| {
+                    if (args_ptr[i].id == old_reg.id) args_ptr[i] = new_reg;
+                }
+            },
+            // ★R-344a：ctor_call 的对象与实参寄存器同改写；new_alloc 无寄存器操作数
+            .new_alloc => {},
+            .ctor_call => |*op| {
+                if (op.object.id == old_reg.id) op.object = new_reg;
                 const args_ptr = @constCast(op.args.ptr);
                 for (0..op.args.len) |i| {
                     if (args_ptr[i].id == old_reg.id) args_ptr[i] = new_reg;
