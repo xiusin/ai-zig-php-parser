@@ -2297,6 +2297,17 @@ pub const NativeLinker = struct {
             \\    return global_vars.getPtr(name);
             \\}
             \\
+            \\/// ★R-339（§264 数组元素引用）：全局槽 Ref 化（runtime.q4_global_make_ref_hook 实现）。
+            \\///   未定义变量按 PHP by-ref 语境静默 vivify 为 null；make_ref 对已是 Ref 的槽
+            \\///   复用既有 cell（foreach &$val / global_ref_bind 已 Ref 化的全局变量不断链）。
+            \\fn q4GlobalMakeRefImpl(name: []const u8, allocator: std.mem.Allocator) ?runtime.Value {
+            \\    const ptr = getGlobalVarPtrRaw(name) orelse blk: {
+            \\        setGlobalVarDirect(name, runtime.Value.initNull()) catch return null;
+            \\        break :blk getGlobalVarPtrRaw(name) orelse return null;
+            \\    };
+            \\    return runtime.make_ref(ptr, allocator) catch return null;
+            \\}
+            \\
             \\pub fn setGlobalVar(name: []const u8, value: runtime.Value) !void {
             \\    if (!global_vars_initialized) return;
             \\    
@@ -2425,6 +2436,7 @@ pub const NativeLinker = struct {
             \\    try runtime.initRuntime(allocator);
             \\    defer runtime.deinitRuntime();
             \\    runtime.q4_global_lookup = q4GlobalLookupForUndef;
+            \\    runtime.q4_global_make_ref_hook = q4GlobalMakeRefImpl; // ★R-339（§264）
             \\
             \\    // 初始化全局变量表
             \\    global_vars = std.StringHashMap(runtime.Value).init(allocator);
@@ -4939,6 +4951,8 @@ pub const NativeLinker = struct {
         .{ "php_array_get_ref", bi(.{ .runtime_name = "php_array_get_ref", .needs_allocator = true }) },
         // ★批次十五：by-ref 实参数组元素的静默 vivify 下钻（IR generateCall ref 实参支发射）
         .{ "php_array_elem_ref_vivify", bi(.{ .runtime_name = "php_array_elem_ref_vivify", .needs_allocator = true }) },
+        // ★R-339（§264 数组元素引用）：main/全局源的元素 Ref 化（产物侧钩子实现）
+        .{ "php_global_make_ref", bi(.{ .runtime_name = "php_global_make_ref", .needs_allocator = true }) },
         .{ "php_object_get_ref", bi(.{ .runtime_name = "php_object_get_ref", .needs_allocator = true }) },
         // ★批次十二（F-13b）：preg by-ref 数组下标的 copy-in 静默读（coalesce 语义，
         //   不存在 ⇒ null 不告警——PHP by-ref auto-vivify 不对未定义元素告警）。
@@ -6584,6 +6598,7 @@ pub const NativeLinker = struct {
                     const rn = inst_scan.op.call.func_name;
                     if (std.mem.eql(u8, rn, "php_array_elem_ref_vivify") or
                         std.mem.eql(u8, rn, "php_array_get_ref") or
+                        std.mem.eql(u8, rn, "php_global_make_ref") or
                         std.mem.eql(u8, rn, "php_object_get_ref"))
                     {
                         if (inst_scan.result) |res| try make_ref_result_regs.put(res.id, {});
@@ -13117,6 +13132,26 @@ pub const NativeLinker = struct {
                                             }
                                             break :blk false;
                                         };
+                                        // ★R-338（f176 族根因）：Q3 by-ref 写回守卫形——嵌套 then（wb_do_）
+                                        //   以 br 折返与 else **相同**的循环延续块（如
+                                        //   `cond_br(reg_26, wb_do_7, foreach_increment_2)`，wb_do br→increment）。
+                                        //   then_terminates 只认 ret/throw，本形落入下方通用回退 ⇒ nested_end
+                                        //   由回边目标索引（< nested_start）推成空区间，wb_do 永不发射亦不标
+                                        //   processed ⇒ 被本层尾部扫描在 if **外**无条件重发：未命中规则的
+                                        //   迭代用陈旧 temp 覆写变量（Engine::run 第二规则看到 $candidate=null）。
+                                        //   与 then_terminates 同 emission（if (cond) { then 单块行走 }）：
+                                        //   walker 对 br→increment 按 is_to_increment 口径不发 continue，
+                                        //   增量仍交本层尾部统一发射，语义零漂移。
+                                        const then_br_converges_else = blk: {
+                                            if (nested_ti) |nti| {
+                                                if (nested_ei) |nei| {
+                                                    if (func.blocks.items[nti].terminator) |ntt| {
+                                                        if (ntt == .br and ntt.br == func.blocks.items[nei]) break :blk true;
+                                                    }
+                                                }
+                                            }
+                                            break :blk false;
+                                        };
                                         const else_is_loop_continuation = blk: {
                                             if (nested_ei) |nei| {
                                                 const elbl = func.blocks.items[nei].label;
@@ -13164,7 +13199,7 @@ pub const NativeLinker = struct {
                                                     if (!self.break_generated) self.break_generated = saved_brk_sc;
                                                 }
                                             }
-                                        } else if (nested_ti != null and then_terminates and else_is_loop_continuation) {
+                                        } else if (nested_ti != null and (then_terminates or then_br_converges_else) and else_is_loop_continuation) {
                                             const nti = nested_ti.?;
                                             if (!processed.contains(nti)) {
                                                 try writer.print("{s}if (", .{then_indent});
@@ -22997,14 +23032,14 @@ pub const NativeLinker = struct {
     ///   线性路径有布点 ⇒ 顶层与循环族的死亡临时量全部滞留到函数退出，__destruct 时机晚于
     ///   PHP）。liveness 门禁（isLiveAfter+isLiveAtBlockExit 双闸）保证只放真死亡寄存器。
     fn generateInstructionTracked(self: *Self, code: *std.ArrayList(u8), inst: *const IR.Instruction, block: *const IR.BasicBlock, inst_idx: usize) !void {
+        // ★批次三十一b（R-336）：批次三十的原生路径插桩整体停用——releaseDeadOperands 对
+        //   借用型值（php_array_iter_value 的 iter.array.get 直返支、ctx.captures[N] 读）
+        //   按「自有」释放，每枚闭包调用/迭代元素被偷走属主引用 ⇒ UAF（f056/f124/f134/f179 族）。
+        //   恢复条件：先给借用产出点建「不可释放」登记表（或让借用函数一律 retain），再审。
         const prev_b = self.current_gen_block_idx;
         const prev_i = self.current_gen_inst_idx;
-        if (self.current_block_positions) |pos| {
-            if (pos.get(block)) |bidx_v| {
-                self.current_gen_block_idx = bidx_v;
-                self.current_gen_inst_idx = inst_idx;
-            }
-        }
+        _ = block;
+        _ = inst_idx;
         defer {
             self.current_gen_block_idx = prev_b;
             self.current_gen_inst_idx = prev_i;
@@ -23442,7 +23477,12 @@ pub const NativeLinker = struct {
                         const bi_exit = self.current_gen_block_idx orelse break :blk false;
                         break :blk lv_exit.isLiveAtBlockExit(bi_exit, op.value.id);
                     };
-                    if (false and single_store_value and !value_live_at_block_exit and !value_is_alloca and !value_is_ref_param and op.value.id != op.ptr.id and self.regMayHeap(op.value.id)) { // BISECT-TEST: 临时关停
+                    // ★R-337（f006/f010/f090 族根因）：被存值是 $this（ctx 借用引用）时**禁止**本归还——
+                    //   ctx 属调用方所有（调用约定=被调借用，由调用方释放）；此处 release 会吃掉
+                    //   调用方的接收者引用 ⇒ 对象提前 deinit ⇒ 全局表/属性槽悬垂 ⇒ shutdown 野指针。
+                    //   状态机函数（try/catch 族）把 $this 入 alloca（reg_0=ctx → store）恰命中本路径。
+                    const value_is_this = if (self.current_this_regs) |tr| tr.contains(op.value.id) else false;
+                    if (single_store_value and !value_live_at_block_exit and !value_is_this and !value_is_alloca and !value_is_ref_param and op.value.id != op.ptr.id and self.regMayHeap(op.value.id)) {
                         try writer.print("    if (!reg_{d}.isNull()) {{ reg_{d}.release(runtime.runtime_allocator); reg_{d} = runtime.Value.initNull(); }}\n", .{ op.value.id, op.value.id, op.value.id });
                     }
                 } // end of optimized_alloca else

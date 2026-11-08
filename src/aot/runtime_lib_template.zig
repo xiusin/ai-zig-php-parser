@@ -7145,13 +7145,19 @@ pub fn q3WarnByRefValue(fn_name: []const u8, arg_idx: usize, pname: []const u8) 
 }
 
 /// Q3：保 Ref 数组存/推（命名/展开实参包的 by-ref 写回链路；普通 set/push 存储前解引用会丢链）
-pub fn php_array_set_keep_ref(arr: Value, key: Value, value: Value, allocator: Allocator) !void {
+/// ★R-339（§264）：arr 解 Ref——多维下钻 `$a['x']['y'] =& $m` 的中间层来自
+///   php_array_elem_ref_vivify（返回槽 Ref），deref 后取实际数组与直传同口径。
+pub fn php_array_set_keep_ref(arr_val: Value, key: Value, value: Value, allocator: Allocator) !void {
+    var arr = arr_val;
+    while (arr.isRef()) arr = arr.asRef().*;
     if (!arr.isArray()) return;
     const k: ArrayKey = if (key.isString()) .{ .string = key.asString() } else .{ .integer = key.toInt() };
     try arr.asArray().setKeepRef(allocator, k, value);
 }
 
-pub fn php_array_push_keep_ref(arr: Value, value: Value, allocator: Allocator) !void {
+pub fn php_array_push_keep_ref(arr_val: Value, value: Value, allocator: Allocator) !void {
+    var arr = arr_val;
+    while (arr.isRef()) arr = arr.asRef().*;
     if (!arr.isArray()) return;
     try arr.asArray().pushRaw(allocator, value);
 }
@@ -12495,6 +12501,24 @@ pub fn php_array_isset(arr_val: Value, key_val: Value) !Value {
     return Value.initBool(false);
 }
 
+/// ★R-339（§264 数组元素引用）：产物侧全局槽 Ref 化钩子（main.zig 模板初始化时挂载）。
+///   global_vars 表是产物侧状态（nlk 生成），运行库无法直接触达——与 q4_global_lookup
+///   同款的产物侧→运行库反向钩子。
+pub var q4_global_make_ref_hook: ?*const fn (name: []const u8, allocator: Allocator) ?Value = null;
+
+/// ★R-339：`[&$g]` / `$a[] =& $g`（main/全局源）——全局变量槽 Ref 化。
+///   未定义变量按 PHP by-ref 语境静默 vivify 为 null（批十五口径，由产物侧实现保证）。
+///   返回指向全局槽 cell 的 Ref；槽重定向后 global.get 读自动 deref、global.set 写穿。
+pub fn php_global_make_ref(name_val: Value, allocator: Allocator) !Value {
+    if (!name_val.isString()) return error.InvalidArgument;
+    const name = name_val.asString().data;
+    if (q4_global_make_ref_hook) |f| {
+        if (f(name, allocator)) |v| return v;
+    }
+    // 钩子未挂载（不可能：init 恒挂载）或常量名冲突——诚实失败，不静默假成功
+    return error.InvalidArgument;
+}
+
 /// 获取数组元素的引用（用于引用返回）
 /// 参数：array, key
 /// 返回：指向「已装进元素槽的引用单元」的 Ref（值形态为 Value.initRef(堆 cell)）
@@ -13273,8 +13297,13 @@ pub fn php_invoke_callable_args_array(callback: Value, args_array: Value, alloca
     var i: usize = 0;
     while (i < max_count) : (i += 1) {
         const key = ArrayKey{ .integer = @intCast(i) };
-        if (arr.get(key)) |v| {
-            tmp_args[used] = v;
+        // ★R-339（§264 数组元素引用）：保留 Ref 元素——Q3 协议「数组元素是引用 ⇒
+        //   by-ref 位直通写回」（q4NormalizeBuiltinArgs :235）。arr.get 读出即解引用
+        //   （值消费路径 :3093），会把 [&$v] 的 Ref 在收集时剥成纯值 ⇒ 下游误判
+        //   "must be passed by reference, value given" 警告断链。getPtr 取原始槽。
+        if (arr.getPtr(key)) |slot| {
+            tmp_args[used] = slot.*;
+            _ = tmp_args[used].retain();
             used += 1;
         }
     }
@@ -37345,10 +37374,14 @@ pub fn php_krsort(arr: Value, allocator: Allocator) !Value {
 
 fn invokeUserCompare(callback: Value, a: Value, b: Value, allocator: Allocator) !i64 {
     const args = [_]Value{ a, b };
-    const res = try php_invoke_callable(callback, &args, allocator);
-    // ★批次三十一补缺：比较器抛可捕获异常 = setException 置旗 + 返回异常 Value（非 Zig error，
-    //   见 :12648 契约）。必须立即以内部错误向上冒泡终止排序（PHP 实测 calls 计数恰停在抛出处，
-    //   抛后不再发起任何比较），否则 toInt 吞掉异常值 ⇒ 排序继续 ⇒ 比较次数与中间态全错。
+    // ★批次三十一补缺：比较器抛可捕获异常有两条上行通道——①被调函数体内 `return
+    //   error.RuntimeError`（生成码在 hasException 置旗后直返 Zig error）；②返回异常 Value。
+    //   两条都必须归一为 SortAborted 立即终止排序（PHP 实测 calls 计数恰停在抛出处，抛后不再
+    //   发起任何比较），否则中间态回写缺失、比较次数与中间态全错。OOM 等真 Zig error 照传。
+    const res = php_invoke_callable(callback, &args, allocator) catch |e| {
+        if (hasException()) return error.SortAborted;
+        return e;
+    };
     if (hasException()) {
         res.release(allocator);
         return error.SortAborted;

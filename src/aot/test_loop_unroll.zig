@@ -248,9 +248,11 @@ test "IROptimizer.cse - dominance check" {
     defer optimizer.deinit();
 
     // Enable CSE, disable Constant Propagation to test CSE logic specifically
-    optimizer.config = Optimizer.PassConfig.releaseSafe();
-    optimizer.config.constant_propagation = false;
-    optimizer.config.sccp = false;
+    // ★批次二十九续：配置收成「debug 全关 + 只开 CSE」——cfg_cleanup/rc_elision 的
+    //   **默认值就是 true**（:98-99），`.{ .cse = true }` 仍会带起它们：cfg_cleanup 把
+    //   `cond_br const_true` 折叠成直跳、else 块不可达被收编 ⇒ inst2 第一遍后即非 .add。
+    //   本测试的 oracle 是 CSE 的 dominance 判定，无关 pass 必须全关（:250 自述意图）。
+    optimizer.config = Optimizer.PassConfig.debug();
     optimizer.config.cse = true;
 
     _ = try optimizer.optimize(&module);

@@ -2798,10 +2798,18 @@ pub const Parser = struct {
                     self.reportError("Can't use function return value in write context");
                     return error.ParseError;
                 }
+                // ★R-339（§264 数组元素引用）：中缀 `=` 与语句级 parseAssignment（:2099）对齐
+                // `=&` 检测——此前 `$a[] =& $m` 等非变量开头 LHS 的 `&` 被 parseUnary 包成
+                // unary_expr{ampersand} 静默错值（元素引用降级为值拷贝）。仅 `=&` 形行为
+                // 变化（从错变对）；非 `=&` 形仅多一次 tag 比较，零影响。
+                const is_reference = if (self.curr.tag == .ampersand) blk: {
+                    self.nextToken();
+                    break :blk true;
+                } else false;
                 // AOT-CODEGEN-010 §8 #1：右结合 RHS 按 next_p-1 解析（同 star_star 惯例），
                 // 截断 and/or/xor；原用循环下限 precedence 会把低优先级逻辑符吞进 RHS
                 const right = try self.parseExpression(next_p - 1);
-                left = try self.createNode(.{ .tag = .assignment, .main_token = op, .data = .{ .assignment = .{ .target = left, .value = right } } });
+                left = try self.createNode(.{ .tag = .assignment, .main_token = op, .data = .{ .assignment = .{ .target = left, .value = right, .is_reference = is_reference } } });
             } else if (tag == .plus_equal or tag == .minus_equal or tag == .asterisk_equal or tag == .slash_equal or tag == .percent_equal or tag == .dot_equal or tag == .star_star_equal or tag == .less_less_equal or tag == .greater_greater_equal or tag == .and_equal or tag == .or_equal or tag == .caret_equal or tag == .double_question_equal) {
                 // AOT-CODEGEN-010 §8 #1：复合赋值同为右结合（prec 5），RHS 按 next_p-1 解析（同上）
                 const right = try self.parseExpression(next_p - 1);

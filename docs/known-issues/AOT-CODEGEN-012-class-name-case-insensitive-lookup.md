@@ -13652,3 +13652,167 @@ PHPArray.release / PHPClosure.release 存在同款「rc==0 & buffered ⇒ 留置
 
 ---
 
+
+## §261 批次三十一：zend_sort 忠实移植 + R-335 `$this` 借用引用 retain 收口 + R-336 批次三十原生插桩停用
+
+### 261.1 背景与三连根因
+
+720 语料（68 枚 pass 集）在批次三十二进制下爆出 **32 失败**（11-05 基线 67/68 绿）。逐层二分（worktree 双树 + 23 枚最小探针 + rc 轨迹取证）定位出**三条独立根因**：
+
+1. **批次三十一正主**：usort/uasort/uksort 比较器抛异常时中间态不回写（面板 sort 中间态 ×3 DIFF 在途项）。
+2. **R-335（23 枚语料段错误根因）**：`return $this` 的 $this 是 ctx 借用引用，cleanup 按契约不释放它 ⇒ 返回前必须 retain 给返回槽位自持一份。此前只有 `generateFunction` 主路径（:7357）补 retain；`writeReturnStmt/generateReturnStr` 的 **F-35 静态快速路径**与标签驱动路径全部漏掉 ⇒ 默认参数函数（params_all_present/params_has_missing 汇入 params_merge 的 if/else 形态命中 `tryGenerateSimpleIfElsePattern` 或标签驱动）的 `return $this` 裸奔 ⇒ 调用方 release 丢弃的返回值 ⇒ rc 失衡 ⇒ 对象提前 deinit ⇒ UAF。**批次二十八「rc==0 即时 deinit」把这个潜伏坑变成段错误**（此前滞留 GC 缓冲不显形）。
+3. **R-336（f056/f124/f134/f179 族根因）**：批次三十的原生路径插桩（`generateInstructionTracked` 布点 block/inst 索引 ⇒ releaseDeadOperands 在 if/while/foreach 原生发射路径激活）**系统性违反借用型值所有权契约**：
+   - `php_array_iter_value` 的 `iter.array.get` 直返支返回**借用值**（不 retain），releaseDeadOperands 按「自有」在循环头释放 ⇒ 偷走数组元素引用；
+   - `ctx.asFunction().captures[N]` 读取为借用，store 的 caller-retain 与 releaseDeadOperands 的释放错配 ⇒ 每枚闭包调用偷走捕获槽引用（f124 取证：Scheduler rc 单次 createPod +12/-13 ⇒ 净 -1 ⇒ 提前 deinit ⇒ 属性槽悬垂被 Pod 复用 ⇒ 「Call to undefined method Pod::schedule()」）。
+
+### 261.2 变更点
+
+| 文件 | 变更 |
+|---|---|
+| runtime_lib_template.zig :36409-36596 | **zend_sort 忠实移植**（php-8.5.8 Zend/zend_sort.c 逐行核对：sort2-5/insert_sort sentry 两段/三点(≥1024 五点)中值枢轴/分区循环/`<` 小区间递归）；`Q4SortCtx.cmp` 平手按 orig_idx 决胜（对应 Zend Z_EXTRA 稳定化，不产生额外回调） |
+| runtime_lib_template.zig :37346-37363 | `invokeUserCompare` 异常**双通道归一**：①被调体内 `return error.RuntimeError`（Zig error）②返回异常 Value（置旗）⇒ 统一 `error.SortAborted` 终止排序（OOM 等真 Zig error 照传） |
+| runtime_lib_template.zig usort/uasort/uksort | SortAborted ⇒ **先回写中间态**（PHP 原地排语义，catch 可观测）⇒ 返占位 Value（异常旗保持置位，禁 `return e` 冒过 catch 路由——:12648 契约） |
+| native_linker.zig :21491-21525（writeReturnStmt）/ :21546-21595（generateReturnStr） | **R-335**：`return $this` retain 集中收口（current_this_regs 命中 ⇒ 全返回形态前置 retain：静态快速路径/动态判定/裸返回） |
+| native_linker.zig :7357 | 主路径旧 `$this` retain 删除（防双记） |
+| native_linker.zig :974-986 / :7634 / :7832 | `appendThisRetainIfNeeded` 助手 + `tryGenerateSimpleIfElsePattern` 两条直写 ret 臂自补（绕过收口的盲区） |
+| native_linker.zig :22999-23015 | **R-336**：`generateInstructionTracked` 停用布点（纯透传），批次三十原生插桩整体挂起；恢复条件已在注释钉死（先建借用产出点「不可释放」登记表或借用函数一律 retain，再审） |
+
+### 261.3 验收
+
+- **sort 面板格 ×3（throw_usort/uasort/uksort）转 SAME**：比较/交换序列与 PHP 8.5.8 逐字节一致（calls=3 即停、中间态 `[1,3,2,5,4]`/`{"a":1,...}` 全等）；新增 [probe_sort_zend_faithful.php]（插入/分区/五点三路径 + 稳定性 + 保键 + 降序 + 1100 元素大数组）SAME
+- **R-335**：11/11 最小复现（min_c1/d7/h3/j3/k2/k3/k4/m2/m5/n1/n2）+ f051/f056/f124/f134/f179 全过；f051 族 23 枚段错误清零
+- **46+1 探针面板：40 SAME + 7 DIFF（零转移、3 格转绿 +1 新增绿）**；7 格全为既有豁免族（§七.5 栈帧 ×6、§七.4 缩进 ×1）
+- `zig build test`：全绿
+- **720 语料全量回归（23:27 报告）：62 PASS / 4 RUNTIME / 1 DIFF / 1 SKIP**（批次三十二进制下为 36/28/3/1）。基线 8 枚中 f012/f033/f034/f038（exit=139 族）与 f027（DIFF）全部转绿；批次三十回归族 23 枚全灭。残余 6 枚转入 §262 队列：f004（SKIP 既有）、f026（timeout 既有）、**f006/f010/f090（退出时段错误新族——输出完整打印后 shutdown 崩溃，闭包/单例/Promise 族，非 R-335）**、f176（DIFF）
+
+### 261.4 遗留登记（重要）
+
+- **R-336 恢复工单（P0 候选）**：批次三十原生插桩的销毁时机收益（循环/闭包内 __destruct 语句点即毁）随停用挂起。恢复前提（已在代码注释钉死）：
+  1. 普查借用型产出点建「不可释放」登记表：`php_array_iter_value`（iter.array.get 直返支）、`ctx.captures[N]`、`iter.current` 等；或
+  2. 让借用函数统一 retain（变自有，释放即配平）——性能成本要测。
+  3. 恢复后必须重跑 68 语料 + 本批 11 枚最小探针 + f051/f124 族。
+- 旧 `quickSort*WithCallback` 三枚辅助函数仍无调用方（沿 §260.5 保留待批）。
+- `zig build --optimize=debug` 下 f124 报 `AstDirectGenerationFailed`（标签驱动路径在 debug 档的既有缺口，与本次变更无关，登记）。
+
+---
+
+
+## §262 批次三十二：R-337 状态机函数 `$this` 入 alloca 被 F-139 误归还（f006/f010/f090 退出时段错误族）
+
+### 262.1 背景与根因
+
+720 语料批次三十一终态残余 f006/f010/f090 三枚：输出完整打印后 **shutdown 段错误**（`ClassMeta.findMethodLookup("__destruct")` 读野 meta）。最小化 23 枚探针（q1-q23）锁定触发形：
+
+> **方法内含 try/catch（⇒ 状态机发射路径）且其后对 `$this` 有任何属性读/写，随后顶层再出现任意 foreach ⇒ shutdown 崩。**
+
+根因链（rc 轨迹 + 生成码逐行取证）：
+
+1. 线性函数里 `$this` 直接以 `reg_0 = ctx` 使用（借用，全程不释放）；
+2. 状态机函数（try/catch）把 `$this` 抬进变量 alloca：`reg_0 = ctx; _ = reg_0.retain(); val_assign(reg_1, reg_0);` —— 这是一次 **store 指令**（ptr=reg_1 alloca，value=reg_0=ctx）；
+3. **F-139 store 值归还**（:23451）按「single_store + 块出口不活跃 + 堆类型」对 `op.value`（=reg_0=**ctx**）发 `release+置null`；
+4. ctx 是**调用方所有的借用引用**（调用约定：被调借用、调用方释放）——本归还吃掉调用方的接收者引用 ⇒ 对象 rc 提前到 0 ⇒ **__main__ 收尾时对象 deinit，而全局变量表仍映射该对象**；
+5. shutdown 的 `php_force_destruct_if_object` 循环读到已释放/被复用的对象 ⇒ 野 ClassMeta ⇒ 段错误。
+
+q18（无 try/catch）对照：rc 峰值 3、对象活到 shutdown 正常销毁；q17（有 try/catch）：rc 被多吃一口，提前归零。
+
+### 262.2 变更点
+
+| 文件 | 变更 |
+|---|---|
+| native_linker.zig :23451-23458 | F-139 store 值归还增加 `value_is_this` 守卫（`current_this_regs` 命中 ⇒ 禁归还；ctx 归调用方） |
+
+### 262.3 验收
+
+- 最小复现 q13/q15/q17/q19/q20/q21 全转 rc=0
+- f006/f010/f090：**rc=0 且输出与 PHP 全等（SAME）**
+- R-335 族回归：min_d7/m5/n2 + sort 四探针全绿（无转移）
+- 46+1 探针面板：40 SAME + 7 DIFF（与批次三十一逐格一致、零转移）
+- `zig build test`：全绿
+- 720 语料全量回归（批次三十一~三十三合并里程碑，§263 收口后一次性跑）：**66 PASS / 0 COMPILE / 1 RUNTIME / 0 DIFF / 1 SKIP**——f006/f010/f090 转 PASS 确认；残余 2 枚即既有登记项（f026 timeout、f004 SKIP），对照批次三十一前基线（62/4/1/1）零新增红
+
+### 262.4 遗留登记
+
+- f176（Specification 链 DIFF）转入下一工单（输出中段起差异，非崩溃族）→ 已由 §263 闭环
+- f026（timeout 既有）、f004（SKIP 既有）维持登记
+
+---
+
+
+## §263 批次三十三：R-338 foreach 侧 Q3 写回守卫（wb_do 收敛形）丢失（f176 Specification 链）
+
+### 263.1 背景与根因
+
+f176（`f176_specification_chain_rules.php`）：`Engine::run` 对规则表 foreach，命中规则的 `$candidate` 正确，**未命中规则的迭代把 `$candidate` 覆写成 null** ⇒ 第二条规则 `NotSpec(IsActive)` 对 null 恒真（`($c['status'] ?? '') === 'active'` 对 null 得 false、取反得 true）⇒ `is_inactive` 误匹配且 action 收到 null（`Trying to access array offset on null`）。Alice 幸存仅因她先命中规则使写回值恰好有效。
+
+最小复现 min_r7（双规则 Specification 链，16 枚 r 族探针收敛）+ IR/生成码双侧取证：
+
+IR 层（正确）：
+
+```text
+if_then_5:                                  ; 外层 if（spec 命中）then 块
+  ... call_indirect ($rule['action'])($candidate)   ; Q3 变量实参 Ref 化（reg_21 temp）
+  reg_24 = load reg_21                      ; 写回候选值
+  reg_25 = call @php_q4_is_missing(reg_24)
+  reg_26 = not reg_25                       ; 写回守卫：非 missing 才写回
+  br reg_26, wb_do_7, foreach_increment_2   ; ← 守卫在 IR 层完好
+wb_do_7:
+  store reg_24 to reg_2                     ; val_assign($candidate, reg_24)
+  br foreach_increment_2
+```
+
+生成码（修复前，`/tmp/r7_now.zig`）：
+
+```zig
+        if (reg_17.toBool()) {              // 外层 if
+            ... action 调用 ...
+            reg_26 = try runtime.php_not(reg_25);   // 守卫算了但没人用
+        }                                   // ← 外层 if 闭合
+    reg_2.release(...); _ = reg_24.retain();
+    runtime.val_assign(reg_2, reg_24);      // ← 写回**无条件**落在循环体层
+```
+
+根因链（发射器分发放大镜）：
+
+1. 外层 if 走 `generateForeachFromLabels` 的 body `.cond_br` 处理器（:12956），then 块（if_then_5）终结符是**嵌套 cond_br(reg_26, wb_do_7, foreach_increment_2)**；
+2. 嵌套分发五个分支全落空：
+   - `fe_is_or_sc`（logical_merge/logical_rhs 短路形）：标签不符；
+   - **分支 2（then_terminates + else_is_loop_continuation）**：`then_terminates` 只认 ret/throw，wb_do_7 以 `br foreach_increment_2` 收尾 ⇒ 落空；
+   - F-220（continue/ret 形）：wb_do_7 非 continue 目标、非 ret ⇒ 落空；
+   - then==cleanup/exit：不符；
+   - **通用回退**：`nested_start`=wb_do_7(idx 6)，`nested_end` 由 wb_do_7 的回边目标 foreach_increment_2(idx 3)+1=4 ⇒ **区间 `[6,4)` 为空**——零发射、零 processed 标记；
+3. wb_do_7 保持未标记 ⇒ 本层尾部扫描把它当普通块在 if **外**、increment 之前无条件重发（写回+`__def_2=true`）；
+4. 守卫 `reg_26` 被算出后无人消费 ⇒ 未命中规则的迭代照样写回，把上一轮的陈旧 temp（missing/null）灌进 `$candidate`。
+
+对照：for/while 侧同位拷贝**无此缺陷**——它们在嵌套分发先调 `generateNestedContinueChain`（双边 `.br` 链均达 cond 即收口发射），wb_do 形（wb_do→increment→cond、else=increment→cond）两链皆通，被正确发射成 `if (cond) { then 链 } else 链`。
+
+### 263.2 变更点
+
+| 文件 | 变更 |
+|---|---|
+| native_linker.zig :13120-13139 | 新增 `then_br_converges_else` 判定：嵌套 then 块以 `br` 折返**与 else 相同**的循环延续块（收敛形钻石，守卫只包 then 体） |
+| native_linker.zig :13187 | 分支 2 条件放宽为 `(then_terminates or then_br_converges_else) and else_is_loop_continuation`，emission 复用既有 `if (cond) { then 单块行走 }` |
+
+安全性论证：
+
+- walker 对 wb_do_7 的 `br → foreach_increment_2` 按既有 is_to_increment 口径（:9836）**不发 continue**、increment 块无 PHI 可物化 ⇒ 单块行走只发 store 系指令，增量仍由本层尾部统一发射一次（无双发、无跳过）；
+- F-139 归还与 `__def_2` 置位随 store 一并移入守卫内：写回跳过 ⇒ 无 retain 配对 ⇒ 归还也跳过，missing 哨兵留待函数 cleanup/下轮覆盖，语义自洽；
+- 守卫精确匹配收敛形（`br 目标 == else 块` 且 else 为循环延续），不捕获任何其它钻石形。
+
+### 263.3 验收
+
+- min_r 族 16 枚探针：15 SAME；min_r4 DIFF 经 **stash A/B 对照**（修复前编译器同样 DIFF）证明为**既有**对象 id 赋值顺序差异（AOT 单调计数 vs PHP 句柄池复用），与本次无关 → 登记 §263.4
+- f176 原语料：**SAME**
+- 生成码核验：`if (reg_26.toBool()) { val_assign; __def_2 = true; }` 守卫形态正确落入外层 if 内
+- 46+1+7 探针面板全量：46 PASS + 8 DIFF（§七.5 栈帧×7、§七.4 缩进×1，与批次三十二基线逐格一致、**零转移**）
+- `zig build test`：全绿
+- BISECT 插桩拆除：runtime_lib_template.zig 六处 `Q4_TRACE_*`（arr_retain/arr_release/ref_aware_store/php_invoke_callable/PHPObject retain+release）全部移除
+- 720 语料全量回归（批次三十一+三十二+三十三合并里程碑）：**66 PASS / 0 COMPILE / 1 RUNTIME / 0 DIFF / 1 SKIP**——f176 转 PASS 确认；残余 2 枚即既有登记项（f026 timeout、f004 SKIP），零新增红
+
+### 263.4 遗留登记
+
+- **min_r4 对象 id 顺序**：`new NotSpec(new IsActive())` 连续构造时 PHP 句柄池复用使外层获得更小 id（#3/#4），AOT 单调计数按构造序（内#3 外#4）。仅 var_dump `#N` 序号差异，属对象句柄分配实现细节，单列保真缺口（P2，非 f176 族根因）。
+- for/while 侧同位拷贝当前由 `generateNestedContinueChain` 覆盖 wb_do 形；若未来链式收口被拒（链长 >24／链中夹循环头）将落同一通用回退缺陷——届时按本形同步放宽（登记，不预防性扩散）。
+- f026（timeout 既有）、f004（SKIP 既有）维持登记。
+
+---
+

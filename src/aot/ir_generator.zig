@@ -5433,26 +5433,38 @@ pub const IRGenerator = struct {
         // 处理目标
         // 对于全局变量引用（source_ref == null），直接进入 target 处理
         // 对于局部变量引用（source_ref != null），使用 ref_val
-        const ref_val = source_ref orelse {
-            // 全局引用路径：source_ref 为 null，跳过 ref_val，直接处理 target
+        const ref_val = source_ref orelse blk: {
+            // 全局引用路径：source_ref 为 null
+            const src_name_g = self.ref_source_name orelse return;
+            self.ref_source_name = null;
             switch (target_node.tag) {
                 .variable => {
                     const tgt_name = self.getString(target_node.data.variable.name);
-                    const src_name = self.ref_source_name orelse return;
-                    _ = try self.emit(.{ .global_ref_bind = .{ .target = tgt_name, .source = src_name } }, null);
-                    self.ref_source_name = null;
+                    _ = try self.emit(.{ .global_ref_bind = .{ .target = tgt_name, .source = src_name_g } }, null);
                     const is_main = if (self.current_function) |func| std.mem.eql(u8, func.name, "__main__") else false;
                     if (is_main and !self.global_vars.contains(tgt_name)) {
                         try self.global_vars.put(self.allocator, tgt_name, {});
                     }
                     try self.putRefVar(tgt_name);
-                },
-                else => {
-                    self.ref_source_name = null;
                     return;
                 },
+                .array_access => {
+                    // ★R-339（§264 数组元素引用）：全局源 × 数组元素目标——名级绑定表
+                    // （global_ref_bind target/source 皆变量名）挂不进元素槽。经
+                    // php_global_make_ref 把全局槽位 Ref 化（make_ref 语义：槽重定向为 Ref，
+                    // 后续 global.get 读自动 deref、global.set 写穿 cell），产出 ref_val
+                    // 后落入下方正常 array_access 目标分支（keep_ref 存储）。
+                    const name_reg = try self.emitWithResult(.{ .const_string = try self.module.?.internString(src_name_g) }, .php_value);
+                    const gr_args = try self.allocator.alloc(Register, 1);
+                    gr_args[0] = name_reg;
+                    break :blk try self.emitWithResult(.{ .call = .{
+                        .func_name = "php_global_make_ref",
+                        .args = gr_args,
+                        .return_type = .php_value,
+                    } }, .php_value);
+                },
+                else => return,
             }
-            return;
         };
 
         switch (target_node.tag) {
@@ -5504,26 +5516,72 @@ pub const IRGenerator = struct {
 
                 if (is_push and keys.items.len == 0) {
                     // $arr[] = &$var - 追加引用到数组
-                    const args = try self.allocator.alloc(Register, 3);
+                    // ★R-339（§264）：改接批二十一已验收的 keep_ref 原语——原 php_array_push_ref
+                    // 依赖从未实现的 PHPArray.pushRef，是 Zig 惰性编译掩盖下的死路。
+                    const args = try self.allocator.alloc(Register, 2);
                     args[0] = base_array;
                     args[1] = ref_val;
-                    args[2] = try self.emitWithResult(.{ .const_null = {} }, .php_value); // allocator placeholder
                     _ = try self.emit(.{ .call = .{
-                        .func_name = "php_array_push_ref",
+                        .func_name = "php_array_push_keep_ref",
                         .args = args,
-                        .return_type = .void,
+                        .return_type = .php_value,
+                    } }, null);
+                } else if (is_push and keys.items.len >= 1) {
+                    // ★R-339（§264）：内层 push `$a['x'][] =& $m`——keys 全部下钻
+                    // vivify（同下方多维支口径），末层 push_keep_ref。
+                    var cur = base_array;
+                    for (keys.items) |kreg| {
+                        const v_args = try self.allocator.alloc(Register, 2);
+                        v_args[0] = cur;
+                        v_args[1] = kreg;
+                        cur = try self.emitWithResult(.{ .call = .{
+                            .func_name = "php_array_elem_ref_vivify",
+                            .args = v_args,
+                            .return_type = .php_value,
+                        } }, .php_value);
+                    }
+                    const p_args = try self.allocator.alloc(Register, 2);
+                    p_args[0] = cur;
+                    p_args[1] = ref_val;
+                    _ = try self.emit(.{ .call = .{
+                        .func_name = "php_array_push_keep_ref",
+                        .args = p_args,
+                        .return_type = .php_value,
                     } }, null);
                 } else if (keys.items.len == 1) {
-                    // $arr[$key] = &$var - 设置引用到数组
-                    const args = try self.allocator.alloc(Register, 4);
+                    // $arr[$key] = &$var - 设置引用到数组（同 R-339 改接 keep_ref 原语）
+                    const args = try self.allocator.alloc(Register, 3);
                     args[0] = base_array;
                     args[1] = keys.items[0];
                     args[2] = ref_val;
-                    args[3] = try self.emitWithResult(.{ .const_null = {} }, .php_value);
                     _ = try self.emit(.{ .call = .{
-                        .func_name = "php_array_set_ref",
+                        .func_name = "php_array_set_keep_ref",
                         .args = args,
-                        .return_type = .void,
+                        .return_type = .php_value,
+                    } }, null);
+                } else if (keys.items.len >= 2) {
+                    // ★R-339（§264）：多维下钻 `$a['x']['y'] =& $m`——前 n-1 层逐层
+                    // php_array_elem_ref_vivify（批十五下钻原语：中间层 null/非数组 ⇒
+                    // 原地 vivify 为 []，返回中间层 Ref），末层 set_keep_ref 绑 ref_val。
+                    var cur = base_array;
+                    for (keys.items[0 .. keys.items.len - 1]) |kreg| {
+                        const v_args = try self.allocator.alloc(Register, 2);
+                        v_args[0] = cur;
+                        v_args[1] = kreg;
+                        cur = try self.emitWithResult(.{ .call = .{
+                            .func_name = "php_array_elem_ref_vivify",
+                            .args = v_args,
+                            .return_type = .php_value,
+                        } }, .php_value);
+                    }
+                    const s_args = try self.allocator.alloc(Register, 3);
+                    s_args[0] = cur;
+                    s_args[1] = keys.items[keys.items.len - 1];
+                    s_args[2] = ref_val;
+                    _ = try self.emit(.{ .call = .{
+                        .func_name = "php_array_set_keep_ref",
+                        .args = s_args,
+                        .return_type = .php_value,
                     } }, null);
                 }
             },
@@ -9750,6 +9808,64 @@ pub const IRGenerator = struct {
         return call_result;
     }
 
+    /// ★R-339（§264 数组元素引用）：`[&$src]` / `['k' => &$src]` 的 `&` 源 Ref 化。
+    ///   源形态口径与 generateRefAssignment 源侧（:5346+）逐条对齐：
+    ///   局部变量 ⇒ make_ref(alloca)；main/全局变量 ⇒ php_global_make_ref（名级绑定表
+    ///   挂不进元素槽，全局槽直接 Ref 化）；已 Ref 变量 ⇒ load 复用 cell；数组元素源
+    ///   ⇒ php_array_get_ref；其余源（`&f()` 等）⇒ null 回退普通值存储（PHP 对该形
+    ///   fatal「Cannot use temporary expression in write context」，罕见，按值登记）。
+    fn emitAmpersandElemRef(self: *Self, src_idx: Node.Index) !?Register {
+        const src_node = self.getNode(src_idx) orelse return null;
+        switch (src_node.tag) {
+            .variable => {
+                const src_name = self.getString(src_node.data.variable.name);
+                if (std.mem.eql(u8, src_name, "this")) return null;
+                const is_main = if (self.current_function) |func| std.mem.eql(u8, func.name, "__main__") else false;
+                if (self.isRefVar(src_name)) {
+                    if (self.lookupVarRegister(src_name)) |ptr_reg| {
+                        return try self.emitWithResult(.{ .load = .{ .ptr = ptr_reg, .type_ = .php_value } }, .php_value);
+                    }
+                }
+                if (is_main or self.global_vars.contains(src_name) or (self.isRefVar(src_name) and self.lookupVarRegister(src_name) == null)) {
+                    const name_reg = try self.emitWithResult(.{ .const_string = try self.module.?.internString(src_name) }, .php_value);
+                    const gr_args = try self.allocator.alloc(Register, 1);
+                    gr_args[0] = name_reg;
+                    return try self.emitWithResult(.{ .call = .{
+                        .func_name = "php_global_make_ref",
+                        .args = gr_args,
+                        .return_type = .php_value,
+                    } }, .php_value);
+                }
+                const src_reg = try self.getOrCreateVarRegister(src_name, .php_value);
+                return try self.emitWithResult(.{ .make_ref = .{ .ptr = src_reg } }, .php_value);
+            },
+            .array_access => {
+                const arr_reg = try self.generateExpression(src_node.data.array_access.target);
+                const key_reg = if (src_node.data.array_access.index) |key_idx|
+                    try self.generateExpression(key_idx)
+                else
+                    try self.emitWithResult(.{ .const_null = {} }, .php_value);
+                const ref_args = try self.allocator.alloc(Register, 2);
+                ref_args[0] = arr_reg;
+                ref_args[1] = key_reg;
+                return try self.emitWithResult(.{ .call = .{
+                    .func_name = "php_array_get_ref",
+                    .args = ref_args,
+                    .return_type = .php_value,
+                } }, .php_value);
+            },
+            else => return null,
+        }
+    }
+
+    /// 元素节点是否为 `&$src` 形（parser：parseUnary 把 `&` 包成 unary_expr{ampersand}）
+    fn ampersandSrcOf(_: *Self, elem_node: *const Node) ?Node.Index {
+        if (elem_node.tag != .unary_expr) return null;
+        const u = elem_node.data.unary_expr;
+        if (u.op != .ampersand) return null;
+        return u.expr;
+    }
+
     /// Generate IR for array initialization
     fn generateArrayInit(self: *Self, node: *const Node) !Register {
         const array_data = node.data.array_init;
@@ -9776,6 +9892,22 @@ pub const IRGenerator = struct {
             } else if (elem_node.tag == .array_pair) {
                 // Key-value pair
                 const key_reg = try self.generateExpression(elem_node.data.array_pair.key);
+                const val_node = self.getNode(elem_node.data.array_pair.value);
+                // ★R-339：['k' => &$src] 保 Ref 存储（普通 array_set 存值前解引用会丢链）
+                if (val_node != null and self.ampersandSrcOf(val_node.?) != null) {
+                    if (try self.emitAmpersandElemRef(self.ampersandSrcOf(val_node.?).?)) |ref_reg| {
+                        const ks_args = try self.allocator.alloc(Register, 3);
+                        ks_args[0] = arr_reg;
+                        ks_args[1] = key_reg;
+                        ks_args[2] = ref_reg;
+                        _ = try self.emit(.{ .call = .{
+                            .func_name = "php_array_set_keep_ref",
+                            .args = ks_args,
+                            .return_type = .php_value,
+                        } }, null);
+                        continue;
+                    }
+                }
                 const val_reg = try self.generateExpression(elem_node.data.array_pair.value);
                 _ = try self.emit(.{ .array_set = .{
                     .array = arr_reg,
@@ -9783,6 +9915,20 @@ pub const IRGenerator = struct {
                     .value = val_reg,
                 } }, null);
             } else {
+                // ★R-339：[&$src] 保 Ref 推送
+                if (self.ampersandSrcOf(elem_node)) |src_idx| {
+                    if (try self.emitAmpersandElemRef(src_idx)) |ref_reg| {
+                        const kp_args = try self.allocator.alloc(Register, 2);
+                        kp_args[0] = arr_reg;
+                        kp_args[1] = ref_reg;
+                        _ = try self.emit(.{ .call = .{
+                            .func_name = "php_array_push_keep_ref",
+                            .args = kp_args,
+                            .return_type = .php_value,
+                        } }, null);
+                        continue;
+                    }
+                }
                 // Value only - push to array
                 const val_reg = try self.generateExpression(elem_idx);
                 _ = try self.emit(.{ .array_push = .{
