@@ -20,6 +20,22 @@ pub fn build(b: *std.Build) void {
     const build_options = b.addOptions();
     build_options.addOption(bool, "debug_frames", debug_frames);
 
+    // ========== Go 式协程运行时开关（编译期，随 AOT 产物配置写入） ==========
+    // 设计稿 docs/design/2026-11-08-go-style-coroutine-design.md §7 风险回退：
+    // -Dcoroutine=off 时产物回到存根语义；-Dcoroutine_backend=ucontext 切备份后端。
+    const coroutine_switch = b.option(
+        enum { on, off },
+        "coroutine",
+        "Enable Go-style coroutine runtime in AOT products (default: on; off = stub fallback per design §7)",
+    ) orelse .on;
+    const coroutine_backend = b.option(
+        enum { @"asm", ucontext },
+        "coroutine_backend",
+        "Coroutine context-switch backend: asm | ucontext (default: asm)",
+    ) orelse .@"asm";
+    build_options.addOption(bool, "coroutine", coroutine_switch == .on);
+    build_options.addOption([]const u8, "coroutine_backend", @tagName(coroutine_backend));
+
     // ========== 定义共享模块 ==========
     // 这些模块用于解决 Zig 0.15.2 不推荐使用 `../` 跨目录导入的问题
 

@@ -14068,7 +14068,143 @@ PHP 8 起 call-time by-ref（`f(&$x)`）是 **compile-time parse error**（`synt
 ### 269.7 更正与里程碑
 
 - **§268.3 数字更正**：批 36+37 里程碑实为 **65 PASS / 1 RUNTIME(f026 既有) / 1 DIFF(f135) / 1 SKIP(f004 既有)**（§268.3 记的「66/零新增红」不准，f135 当时未归因）；f135 由本批 R-343 修复并复测转 SAME。
-- 批次三十九 720 里程碑：**待补**（回归跑完后回填）。
+- 批次三十九 720 里程碑：**66 PASS / 0 COMPILE / 1 RUNTIME(f026 既有 timeout) / 0 DIFF / 1 SKIP(f004 既有)**——GMP 删除+R-341 恢复+R-342+R-343 全批零新增红，f135 在语料位复测 PASS。
 
 ---
 
+## §270 批次四十：R-344a `new` 三阶段拆分（检查+分配先于实参求值）+ 类不存在可捕获 + 接口/trait/enum 检查补齐
+
+### 270.1 根因与真值
+
+§269.6 取证落码。PHP 的 `NEW` opcode 顺序：**类解析与全部实例化性检查（不存在/接口/trait/enum/abstract/构造器可见性）→ 裸分配（对象 id 烧掉）→ 实参求值 → DO_FCALL 构造器**。AOT 旧形是单一 `new_object` 指令（实参先求值、检查后行、类不存在走自印 fatal+exit(255) 不可捕获）。真值钉板（oid_order / new_checks_truth / php -r 系列）：
+
+1. `new Abs(f())`/`new Iface(f())`/`new Tr(f())`/`new Priv(f())`/`new NoSuch(f())` 全部**先报错不求值**（f-eval 不打印）；
+2. `try { new NoSuch(); } catch (\Error)` 可捕获，措辞 `Class "NoSuch" not found`；接口/trait/enum 措辞 `Cannot instantiate interface X`/`trait X`/`enum X`；
+3. `new C(new D())` 空库 ⇒ C:1 D:2（**外层先分配**）；句柄释放后 LIFO 复用（`unset a,b ⇒ d:4 e:3`）——**复用机制批次二十七已在**（q4ObjectIdAlloc/Free + 4096 空闲栈），缺的是分配**时机**；
+4. `new Abs(x:1)` ⇒ `Cannot instantiate abstract class Abs`（检查先于命名绑定）；`new NoCtor(x:1)` ⇒ `Unknown named parameter $x`。
+
+### 270.2 变更点
+
+| 层 | 文件 | 变更 |
+|---|---|---|
+| IR | ir.zig | 新增 `new_alloc`（class_name→裸分配）与 `ctor_call`（object+args）两算子（AOT 局部）；deinit/print 两镜像臂 |
+| IR 生成 | ir_generator.zig | **四条 new 路径全改三阶段**：静态（new_alloc+实参+ctor_call）、动态（php_object_alloc_dynamic+实参+ctor_call，**顺带销账旧形实参双求值**——`new $dyn(f())` 旧发射 f() 两遍）、命名（alloc_dynamic→建组→php_object_call_ctor_named）、匿名类（同命名/静态两形） |
+| 发射 | native_linker.zig | new_alloc 发射臂（同 new_object 的 alloca/try 两维分形+hasException 路由）；ctor_call 发射臂（无结果、对象 alloca 槽 `.*` 解引用、hasException 路由）；builtin_map 登记 php_object_alloc_dynamic/php_object_call_ctor_named；releaseDeadOperands/寄存器收集/owned_call_result_regs 三处镜像臂 |
+| 优化/活性 | optimizer.zig / liveness_analysis.zig | used_registers、hasSideEffect、isAllocationLike、mayRaiseException、寄存器改写、liveness 回调六处镜像臂 |
+| 运行时 | runtime_lib_template.zig | **拆出** `php_object_alloc`（解析+短名回退+不存在/接口/trait/enum/abstract/**构造器可见性前移**检查+initWithMeta）与 `php_object_call_ctor`（invoke，**不归还对象**——拆分通道对象归生成码）；`php_object_alloc_dynamic`、`php_object_call_ctor_named`（命名绑定+调用）；组合通道 php_object_new_with_constructor/php_new_object_named 改写为 alloc+call 组合（errdefer 归还，工厂语义不变）；**类不存在由自印 fatal+exit(255) 改 throwThrowable 可捕获**（未捕获形态经既有通道逐字一致）；接口/trait/enum 检查补齐（旧只有 abstract） |
+
+### 270.3 验收
+
+- r344_uncaught（未捕获类不存在 fatal）逐字 SAME rc=255；r344_static/oid_order 的**检查顺序与消息面全 SAME**（f-eval 不再误打印；五族检查措辞逐字；`new $dyn(f())` 双求值销账）；
+- min_r4 对象 id **全对齐**（#1/#2/#3/#4 嵌套 new 顺序），面板红降级为**纯大括号缩进**（§七.4 豁免项）；
+- `new C(new D())` 空库 C:1 D:2、`unset` 后 LIFO 复用 `d:4 e:3`、arg-throw 后 `after: 3` 复用全 SAME；
+- 探针面板 31 枚=**30 PASS / 1 FAIL（min_r4=§七.4 缩进豁免残余）**；事故五族 5/5 SAME；`zig build test` 全绿；
+- 批次四十 720 里程碑：**66 PASS / 0 COMPILE / 1 RUNTIME(f026 既有挂) / 0 DIFF / 1 SKIP(f004 既有)**——R-344a 全批零新增红。
+
+### 270.4 遗留登记
+
+- **R-344c（P2）**：连续 catch 序列（6 连 catch 释放异常对象）后空闲栈形态与 zend 微序不一致（`before: 4` vs AOT `2`、`C:3 D:1` vs `C:2 D:4`）——异常对象释放**时点**在 catch 重绑链里与 zend 不同步，属句柄编号可观测微差，主语义（检查顺序/可捕获/外层先分配/基础 LIFO 复用）已全对齐；语料无命中（720 面板零 id 敏感项红）。
+- 反射面 `ReflectionClass::newInstance*` 不经本通道（独立登记，未动）。
+- `new Abs(x:1)` 顺序已对齐（检查先于绑定）；`new Priv` 的可见性判断依赖 getCurrentScopeClass()，与旧 ctor 点位同口径。
+
+---
+
+## §271 批次四十一：R-345 while 面 Q3 wb 收敛形（f026 死循环——720 面板最后红销账）
+
+### 271.1 根因
+
+f026（链表 find 内 `$fn($node->data, $i)` 变量可调用 + Q3 temp-ref 写回链）在 AOT 下死循环（exit=124）。IR 形：`cond_br(q4_is_missing, wb_do_3, wb_cont_4)`，wb_do `br wb_cont`，wb_cont 以 cond_br 终止——与 R-338（§263，foreach 面 f176）**同族**的 wb 收敛形，但发生在 **while 面** walker（generateWhileFromLabels 的 body cond_br 分发）：
+
+1. then（wb_do）内联后，其 `.br → else` 在 :18098 只记 `merge_bi = else_bi`；
+2. `else_is_coalesce`（:18254）对 **else 带 cond_br 终止符**的形一票否决（原意是 `if(isset) continue` 的 if_merge_ 形）；
+3. 落入普通 else 路径把 wb_cont 的内容（共享延续：结果分支 + 循环推进 `$node = $node->next`）**内联进 else 臂** ⇒ then 路径（写回命中时）跳过推进 ⇒ 死循环。
+
+### 271.2 修法
+
+普通 else 路径的两处花括号打印点门控（:18710 开环 / :19193 闭环）：命中 `wb_converge_cond_br`（merge_bi==else_bi 且 else 带 cond_br 终止符）时，**闭合 if 不加 else 臂**，else 块内容在顶格发射为两路共享延续——else 块自身的指令发射、processed 标记、嵌套 cond_br/回边处理与内联形**完全同路**（零重复发射风险），仅括号层级不同。其余收敛形（无 cond_br 终止符）仍走既有 coalesce 路径，生成码零漂移。
+
+- 中途否决方案备录：①自开范围行走 [ei, loop_end)——范围行走对无标签前缀块（wb_cont）的 cond_br 分发不标 if_merge_ processed ⇒ 顶格重复发射推进语句与 continue（Zig unreachable 编译错误）；②撤 else_is_coalesce 的 cond_br 否决——`if(isset) continue` 形回归风险，否证。
+
+### 271.3 验收
+
+- f026_b1（单参无 wb 链，修前已绿）/ f026_b2（命名函数双参 wb 链，修前挂）/ f026_min（闭包双参，修前挂）三探针全 SAME；**f026 全量语料 40 行输出 SAME（720 面板最后红销账）**；
+- 探针面板 31 枚=30/31（min_r4=§七.4 缩进豁免）；事故五族 5/5 SAME；`zig build test` 全绿；
+- 批次四十一 720 里程碑：**67 PASS / 0 COMPILE / 0 RUNTIME / 0 DIFF / 1 SKIP(f004 既有)**——f026 转绿，720 语料面板红清零（唯 f004 既有 SKIP）。
+
+### 271.4 遗留登记
+
+- for/do-while 面同族形**已取证销账**（f026_for 探针：for 体 `$fn($vals[$i], $i)` + do-while 同形，双双 SAME）——wb 链在那两面走了正确分发，无活缺口。
+
+---
+
+## §272 决策记录：协程路线永久裁决（Fiber/yield 永久排除，Go 式协程栈立项）
+
+- **谁定的**：老铁（项目所有者），2026-11-08，经会话转达（「老铁选了 C」）。
+- **裁决原文**：「放弃 Fiber 和 yield，协程能力走 Go 风格（AOT 运行时自有调度栈），这条要写进宪法」。
+- **宪法落点**（AGENTS.md §七，仅此两处，未动其它条款）：
+  - §七.1 拆分重写——Fiber 与生成器（yield/yield from）写为**永久排除项**并注明理由（AOT 无解释器执行栈，zend 的栈挂起/恢复语义在原生编译产物上不适用）；spl/eval/ob 维持原排除；
+  - §七.9 新增——协程能力由 **AOT 运行时自有的 Go 式协程系统**提供（go 式 spawn / channel / 独立调度栈 / M:N 调度），不是 PHP Fiber/生成器语义的实现或兼容；PHP 侧调用面不得与 PHP 内建函数名冲突。
+- **影响面**：
+  - 永久排除：PHP `Fiber` 类、`yield`/`yield from` 语法——测试脚本命中按既有降级策略（§七.8）处理；此前「协程冻结待回话」的代码禁区**解冻方向已定**（Fiber/yield 不做，Go 式另立）。
+  - 新立项：Go 式协程设计稿（仅设计，不写运行时代码）→ 老铁过目后**另开专项会话落地**（避免与模板热区改动撞车）。
+  - 参考资产：docs/knowledge/2026-07-18 索引 §4.8（`preemptive_scheduler` / `sync` / `select` / `io_integration` / `vm_scheduler_integration`，旧 types.Value 体系，只可参考不可直接搬）。
+- **配套**：索引 §4.8 的「AOT 当前排除项」表述随本裁决过时，已在设计稿中注明新口径（索引本体修改留待设计稿评审后同步）。
+
+---
+
+## §273 R-344c 归因闭环：句柄复用微序的三枚根因（全部模板热区，M1 窗口期登记待修）
+
+M1 协程专项窗口期（模板禁改）内的纯取证批，R-344c「catch 风暴后 id 微序不一致」假设（catch 释放时点）被**证伪**，真根因三枚，均落 `runtime_lib_template.zig`：
+
+### 273.1 证伪与钉板
+
+- catch 重绑链（`try{throw new Exception}catch` ×3 + 引擎 throwThrowable ×3）id 序列 **AOT/PHP 逐枚全同**（1,2,1,a:2,b:3,c:4）——R-344a 后的分配/释放时机在 catch 面**已对齐**，原「catch 释放时点」假设证伪。
+- oid_order 形状逐行 id 对参：分叉点精确定位在 **priv（私有构造器）一枚**：PHP `priv:4`（取新顶号）vs AOT `priv:2`（弹空闲栈）。
+
+### 273.2 根因①（R-344c-a）：enum case 早实例化烧号
+
+- 探针：`enum En { case A; case B; }` + 三个 id 打印。PHP：`x:1 caseA:2 z:3`（**case 首访惰性实例化**，未访问的 B 不烧号）；AOT：`x:3 caseA:1 z:4`（**登记期全量实例化**，每个 case 烧 1 号）。
+- 后果：凡脚本含 enum，其后所有对象 id 恒偏 +N（N=case 数）——r344c_ids 探针的「全序列统一 +1」即此。
+- 修法方向：case 改惰性（`En::A`/`En::cases()`/`->from()` 首访时实例化并缓存），登记期只建元数据。落点=模板 enum 注册/常量解析面。
+
+### 273.3 根因②（R-344c-b）：私有/保护构造器失败的「分配-销毁-号不还」序
+
+- 真值（php -r 钉板）：`unset($a) ⇒ FL[#1]` 后 `new Abs()` 的错误对象取 **#1**（弹空闲栈——abstract 检查在分配前，同 R-344a 口径✓）；`unset($c) ⇒ FL[#3]` 后 `new Priv()` 的错误对象取 **#5**（**新顶号**）⇒ PHP 的可见性失败路径是：**先分配对象（弹 #3）→ 检查失败 → 销毁对象但句柄不立即回空闲栈 → Error 取新顶号**。
+- AOT 现状：R-344a 把可见性检查放在分配**前**（`php_object_alloc` 内 initWithMeta 之前）⇒ 不烧号、错误对象弹空闲栈 ⇒ 与 PHP 错一枚号（oid_order 的 `before: 4` vs AOT `2` 全由此）。
+- 修法方向：可见性检查移到 `php_object_alloc` 的 initWithMeta **之后**（分配先于检查，f-eval 仍不求值✓——oid_order 探针不受冲击）；失败路径销毁对象时**跳过 q4ObjectIdFree**（句柄焚毁不还）。落点=模板 `php_object_alloc` + id 分配器口径。
+
+### 273.4 根因③（R-344c-c）：`ReflectionClass::newInstance*` 手写简化通道
+
+- 现状（模板 :28476/:28498）：`newInstance`/`newInstanceArgs` 手写实现——abstract 静默返 null（PHP 抛 `Cannot instantiate abstract class X`）、无接口/trait/enum 检查、无私有/保护构造器可见性检查、类不存在静默返 null、构造器只认 `magic_construct`（继承构造器经 `findMethodLookup` 的解析被绕过）。
+- 修法方向：两枚改走 `php_object_alloc` + `php_object_call_ctor`（组合通道，与 `new` 面同口径；newInstanceArgs 的数组实参经 `php_object_call_ctor` 直接传入，命名绑定不适用）。注意 PHP 侧 `ReflectionClass::newInstance(...$args)` 的实参在调用点已求值完毕，无「检查先于求值」的顺序问题，纯检查覆盖面。
+- **三枚根因均落 `runtime_lib_template.zig`（M1 热区）⇒ 本批只取证登记，不动模板；待 M1 窗口过后按 273.2→273.4→273.1 顺序修**（273.2 与 R-344a 的 oid_order 探针有交互，先修它并复跑探针矩阵防回归）。
+
+---
+
+
+## §274 Go 式协程 M1 落地收口 + 两枚预存缺陷取证（F-1/F-2，待裁决）
+
+### 274.1 M1 落地清单（已全绿）
+
+- 内核：`src/aot/concurrency_runtime.zig` 存根（217 行）整体替换为真调度器——全局汇编 `go_ctx_switch`（aarch64/x86_64，callee-saved 全集+fp/sp/pc，`.globl` 防 LLVM 内联）、64KB 栈+保护页（sigaltstack 上 SIGSEGV 转可读致命）、N:1 协作调度（ready FIFO/blocked/timer 堆/死锁检测）、Channel 真阻塞、go/go_join/go_wait_all 换真、每协程全局态快照（hooks 注册制）、D1=A 协程未捕获整程序致命、D4=A 多协程窗口 cycle-GC 停用。
+- 变更摘要：`docs/changes/2026-11-08/AOT-CODEGEN-012_go_style_coroutine_runtime_M1_2026-11-08_uncommitted.md`。
+- 验收：六枚断言探针全绿；ucontext 备份后端同绿；`-Dcoroutine=off` 回退验证通过；`zig build test` 全绿；探针面板 54/54 SAME；720 语料后台长跑（日志 /tmp/reg720.log）。
+- 切换原语三轮迭代教训（后续动切换汇编必读）：① clobber-list inline 法在独立函数调用下不保 callee-saved（Release 崩溃）；② Zig naked fn+函数指针会被 LLVM 内联克隆裸体、寄存器错位；③ 全局汇编 `.globl` 符号是唯一稳妥形（libco 同宗）。
+
+### 274.2 F-1：裸 `go(...)` 语句命中 Go 语法 go_stmt 解析（parser 预存冲突，待裁决）
+
+- 现象：`go('f', $a);`（裸语句）在 PHP 模式被 `parseGo` 收编为 go_stmt，`('f', $a)` 按 comma-expression 折叠 ⇒ 生成码 `php_go_builtin(&[_]Value{$a})`——callable 变成 `$a`，`'f'` 静默丢弃；协程体查 callable 非 string/Closure ⇒ 静默空跑（无报错）。
+- 复现：/tmp/co_simple.php（`go('quick', $ch);` 协程永不执行）；赋值形 `$id = go('quick', $ch);` 不受影响（走表达式函数调用）。
+- 根因：`parser.zig:472` `.k_go => self.parseGo()` 无条件收编；`parseGo` 直接 `parseExpression(0)`，多实参被 `.comma`（最低优先级）折叠。
+- 修法方向（二选一，待裁决）：① `parseGo` 前瞻 `l_paren` ⇒ 回落 `parseExpressionStatement`（`go(` 打头按内建函数调用处理，Go 语法 `go f(x)` 不受影响）；② go_stmt 限定 Go 语法模式（PHP 模式 `go` 不当关键字收编）。
+
+### 274.3 F-2：`A && $obj->method()` 短路 + break 在 while 内条件反转（ir_generator 预存，待裁决）
+
+- 现象：`while (true) { $v = $ch->recv(); if ($v === null && $ch->isClosed()) break; $acc += $v; }` 首轮拿到非 null 值即 break（生成码：`if (!identical($v,null)) break`——LHS 判定反转）。
+- 复现：/tmp/co_and_loop.php（无协程参与，acc=0 n=1；真值 acc=3 n=3）。**与协程无关**。
+- 定性：标签驱动块合并族（与 f067 单字符 `!==`、逻辑合并 PHI 同族）在「短路 && + 方法调 RHS + 循环 break」组合下的条件反转。
+- 修法方向：按生成码指纹反推定位发射站点（generateLabelDrivenBlockRange 的 nested_cb / merge_bi 面），专项修复并补探针。
+
+### 274.4 回归读数（M1 窗口终态）
+
+- 六探针：6/6 PASS；面板：54 SAME / 0 DIFF / 0 COMPILE_FAIL；`zig build test` 全绿；720 语料后台跑（已跑段落零 FAIL，日志 /tmp/reg720.log，报告落地 fuzzy_scripts_720/regression_report.md）。

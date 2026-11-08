@@ -469,7 +469,19 @@ pub const Parser = struct {
                 return self.parseStatic();
             },
             .k_const => self.parseConst(.{}),
-            .k_go => self.parseGo(),
+            // F-1（AOT-CODEGEN-012）：AOT+PHP 模式下 `go(...)` 是 builtin 协程 spawn 函数调用，
+            // 裸语句须与赋值形 `$id = go(...)` 同路径（function_call，实参逐个解析）——
+            // 原无条件 parseGo 会把 `($f, 1, 2)` 当括号表达式按逗号折叠，静默丢参。
+            // 仅「go 后紧跟 ( 」分流；Go 语句形（`go callee(...)` / `go func(){...}()`）保留 go_stmt；
+            // Go 语法模式与解释器/字节码入口（case_insensitive_keywords=false）原路径不动。
+            .k_go => {
+                if (self.lexer.case_insensitive_keywords and self.syntax_mode != .go and
+                    self.peek.tag == .l_paren)
+                {
+                    return self.parseExpressionStatement();
+                }
+                return self.parseGo();
+            },
             .k_lock => self.parseLock(),
             .k_goto => self.parseGoto(),
             .k_return => self.parseReturn(),

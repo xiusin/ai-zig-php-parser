@@ -4130,36 +4130,32 @@ pub const NativeLinker = struct {
             if (type_def_idx[ci]) |tdi2| {
                 const td2 = ir_module.types.items[tdi2].*;
                 if (td2.kind == .@"enum") {
+                    // ★R-344c-a（§273.2）：枚举 case 改**惰性实例化**——登记期只建元数据
+                    //   （PHP 真值：case 对象在首访时才创建并烧对象 id，未访问不烧号）。
+                    //   旧形在登记期为每个 case 发 php_object_new（全量早实例化烧号）。
                     for (td2.enum_cases) |ec| {
                         const escaped_case = try self.escapeString(ec.name);
                         defer self.allocator.free(escaped_case);
-                        const escaped_enum = try escapeBackslashes(self.allocator, td2.name);
-                        defer self.allocator.free(escaped_enum);
                         try writer.writeAll("    {\n");
-                        try writer.print("        const enum_val = try runtime.php_object_new(\"{s}\", allocator);\n", .{escaped_enum});
-                        try writer.print("        const enum_obj = runtime.Value_asObject(enum_val);\n", .{});
-                        try writer.print("        try enum_obj.setProperty(\"name\", runtime.Value.initString(try runtime.PHPString.init(allocator, \"{s}\")));\n", .{escaped_case});
+                        try writer.print("        try runtime.registerEnumCaseLazy({s}_meta, \"{s}\", ", .{ short_cname, escaped_case });
                         if (ec.value) |cv| {
                             switch (cv) {
-                                .int => |v| try writer.print("        try enum_obj.setProperty(\"value\", runtime.Value.initInt({d}));\n", .{v}),
-                                .float => |v| {
-                                    try writer.writeAll("        try enum_obj.setProperty(\"value\", ");
-                                    try writeFloatValueExpr(writer, v);
-                                    try writer.writeAll("));\n");
-                                },
+                                .int => |v| try writer.print("runtime.Value.initInt({d})", .{v}),
+                                .float => |v| try writeFloatValueExpr(writer, v),
                                 .string => |s| {
                                     const escaped_val = try self.escapeString(s);
                                     defer self.allocator.free(escaped_val);
-                                    try writer.print("        try enum_obj.setProperty(\"value\", runtime.Value.initString(try runtime.PHPString.init(allocator, \"{s}\")));\n", .{escaped_val});
+                                    try writer.print("runtime.Value.initString(try runtime.PHPString.init(allocator, \"{s}\"))", .{escaped_val});
                                 },
-                                .bool => |b| try writer.print("        try enum_obj.setProperty(\"value\", runtime.Value.initBool({s}));\n", .{if (b) "true" else "false"}),
-                                .null => try writer.writeAll("        try enum_obj.setProperty(\"value\", runtime.Value.initNull());\n"),
+                                .bool => |b| try writer.print("runtime.Value.initBool({s})", .{if (b) "true" else "false"}),
+                                .null => try writer.writeAll("runtime.Value.initNull()"),
                                 .array => {}, // enum case不支持数组值
                             }
+                        } else {
+                            // pure case（无 backing 标量）⇒ Missing 占位标记
+                            try writer.writeAll("runtime.Value.initMissing()");
                         }
-                        // ★F-217（R-325）：枚举 case 值入 class_constants（含可见性登记，恒 public）
-                        try writer.print("        try {s}_meta.setClassConst(\"{s}\", enum_val, runtime.ConstVisibility.public);\n", .{ short_cname, escaped_case });
-                        try writer.writeAll("    }\n");
+                        try writer.writeAll(");\n    }\n");
                     }
                     // 存储有序的 case 名称列表
                     try writer.writeAll("    {\n");
@@ -5189,6 +5185,8 @@ pub const NativeLinker = struct {
         .{ "get_loaded_extensions", bi(.{ .runtime_name = "php_get_loaded_extensions", .needs_allocator = true, .may_raise = false }) },
 
         .{ "go", bi(.{ .runtime_name = "php_go_builtin", .needs_allocator = true }) },
+        .{ "go_join", bi(.{ .runtime_name = "php_go_join_builtin", .needs_allocator = true }) },
+        .{ "go_wait_all", bi(.{ .runtime_name = "php_go_wait_all_builtin", .needs_allocator = true }) },
         .{ "php_call_static_dynamic", bi(.{ .runtime_name = "php_call_static_dynamic", .needs_allocator = true }) },
         .{ "php_get_static_property_dynamic", bi(.{ .runtime_name = "php_get_static_property_dynamic", .needs_allocator = true, .may_raise = true }) },
         .{ "php_get_class_constant_dynamic", bi(.{ .runtime_name = "php_get_class_constant_dynamic", .needs_allocator = true, .may_raise = true }) },
@@ -18262,6 +18260,24 @@ pub const NativeLinker = struct {
                         break :blk false;
                     };
 
+                    // ★R-345（f026 族根因）：Q3 by-ref 写回守卫的 wb 收敛形——then 块（wb_do_）
+                    //   以 .br 折返 else 块（wb_cont_），且 else 块带 cond_br 终止符。
+                    //   旧口径经上方 coalesce 否决后落入正常 else 路径：else 内容被内联进
+                    //   else 臂 ⇒ then 路径（写回命中）跳过共享延续 ⇒ 循环推进语句
+                    //   （`$node = $node->next`）永不执行 ⇒ 死循环（while 面 Q3 wb 链；
+                    //   R-338 已在 foreach 面修同族形）。处理：闭合 if 不加 else 臂，
+                    //   else 块作为两路共享延续在臂外交范围行走（与同文件 :18358
+                    //   nested_then_br_to_else 的「if-without-else」口径同构）。
+                    const wb_converge_cond_br = blk: {
+                        if (merge_bi != null and else_bi != null and merge_bi.? == else_bi.?) {
+                            const eb = func.blocks.items[else_bi.?];
+                            if (eb.terminator) |et| {
+                                break :blk et == .cond_br;
+                            }
+                        }
+                        break :blk false;
+                    };
+
                     // 处理 else 块
                     var else_is_back_edge = false;
                     if (else_bi) |ei| {
@@ -18686,7 +18702,14 @@ pub const NativeLinker = struct {
                         // 两个目标都有实际代码
                         if (else_bi) |ei| {
                             if (!processed.contains(ei)) {
-                                try writer.print("{s}}} else {{\n", .{if_indent});
+                                // ★R-345（f026 族）：wb 收敛形（then br→else 且 else 带 cond_br）——
+                                //   闭合 if 不加 else 臂，else 内容在顶格作两路共享延续
+                                //   （标记/嵌套/回边处理与 else 内联形完全一致，仅括号层级不同）。
+                                if (wb_converge_cond_br) {
+                                    try writer.print("{s}}}\n", .{if_indent});
+                                } else {
+                                    try writer.print("{s}}} else {{\n", .{if_indent});
+                                }
                                 try processed.put(ei, {});
                                 const else_blk = func.blocks.items[ei];
                                 for (else_blk.instructions.items, 0..) |inst, q4_iidx_18631| {
@@ -19164,7 +19187,10 @@ pub const NativeLinker = struct {
                                         else => {},
                                     }
                                 }
-                                try writer.print("{s}}}\n", .{if_indent});
+                                // ★R-345：wb 收敛形已在 :18710 闭合 if（无 else 臂），此处不再补闭合括号
+                                if (!wb_converge_cond_br) {
+                                    try writer.print("{s}}}\n", .{if_indent});
+                                }
                             } else {
                                 try writer.print("{s}}}\n", .{if_indent});
                             }
@@ -19326,7 +19352,11 @@ pub const NativeLinker = struct {
             }
         }
 
-        if (!self.return_generated and !self.break_generated) {
+        // F-UX（AOT-CODEGEN-012 验收）：守卫补 `!lastLineIsReturn`（实现实为终止符文本
+        // 检测 return/continue/break，与上方 PHI 物化同款）——body 内经 generateLabelDriven-
+        // BlockRange 内联的 latch（br→cond 回边翻译为「回写+continue」）已终结控制流时，
+        // 此处再补发 continue 即 Zig unreachable code 编译错（如 while(true)+短路if+后续赋值）。
+        if (!self.return_generated and !self.break_generated and !self.lastLineIsReturn(writer)) {
             try writer.print("{s}    continue :{s};\n", .{ indent, label_name });
         }
         try writer.print("{s}}}\n", .{indent});
@@ -21937,12 +21967,29 @@ pub const NativeLinker = struct {
     ///   的 `@min(args,2)` 是**静默丢参**）。未被点名的内建多传一参 ⇒ `expected N argument(s), found N+1` ⇒ 合法 PHP 编不过（实测 49 枚）。
     ///   ⇒ 补齐条件刻意收紧：`handler_params` 未声明 ⇒ 不介入；实参数少于可选段起点（必填参没给齐）⇒ 不介入，
     ///     留给既有 arity 诊断（F-41 丙型）报可读错误，绝不替用户臆造必填实参。
+    /// ★Go 式协程 M1：收「实参切片」约定的内建集（go/go_join/go_wait_all，与 php_call_user_func 同式）。
+    fn isSliceArgsBuiltin(info: BuiltinInfo) bool {
+        return std.mem.eql(u8, info.runtime_name, "php_go_builtin") or
+            std.mem.eql(u8, info.runtime_name, "php_go_join_builtin") or
+            std.mem.eql(u8, info.runtime_name, "php_go_wait_all_builtin");
+    }
+
     fn writeBuiltinArgs(
         self: *Self,
         writer: anytype,
         args: []const IR.Register,
         func_name: []const u8,
     ) !void {
+        // ★Go 式协程 M1：go/go_join/go_wait_all 的运行时实现收「实参切片」（与 php_call_user_func 同式）。
+        //   在写参公共点统一打包，覆盖有值/无值/try 区全部通用发射站点，免逐站特判。
+        if (builtinInfo(func_name)) |info| {
+            if (isSliceArgsBuiltin(info)) {
+                try writer.writeAll("&[_]runtime.Value{");
+                try self.writeValueArgsNamed(writer, args, func_name, 0);
+                try writer.writeAll("}");
+                return;
+            }
+        }
         // ★Deprecated-null（批次二十六续）：守卫下沉 writeDepNullArg 公共点（writeValueArgsNamed），
         //   覆盖 writeBuiltinArgs 之外的直写特殊支（array_* 切片传参等）。
         try self.writeValueArgsNamed(writer, args, func_name, 0);
@@ -22687,10 +22734,15 @@ pub const NativeLinker = struct {
             },
             // new_object 的 args 可能被消费，不释放
             .new_object => {},
-            // ★R-344a：new_alloc 无操作数；ctor_call 的 object 是表达式结果（活），
-            //   args 由构造器形参装填自理（同 new_object 保守口径），不释放
+            // ★R-344a：new_alloc 无操作数
             .new_alloc => {},
-            .ctor_call => {},
+            // ★R-344c-b2（§273.3 追加）：ctor_call 的 **object 操作数登记为候选**——
+            //   表达式语句 `new En();` 的对象在调用后即为最后使用，PHP 于语句末销毁
+            //   （id 回空闲栈）；liveness 判死才放（`$x = new En()` 经 store/alloca 保活
+            //   不受影响）。args 维持 new_object 的保守口径（形参装填自理），不释放。
+            .ctor_call => |op| {
+                try used_regs.append(self.allocator, op.object.id);
+            },
             // property_get: getProperty 内部已 retain 返回值，result 独立于 object，可释放 object
             .property_get => |op| {
                 try used_regs.append(self.allocator, op.object.id);
@@ -26440,6 +26492,9 @@ pub const NativeLinker = struct {
                                     if (pads_all) {
                                         try self.writeBuiltinArgs(writer, op.args, op.func_name);
                                         try writer.writeAll(", runtime.runtime_allocator);\n");
+                                    } else if (info0 != null and isSliceArgsBuiltin(info0.?)) {
+                                        // ★Go 式协程 M1：切片约定面 0 实参同样打包（go_wait_all()）。
+                                        try writer.writeAll("&[_]runtime.Value{}, runtime.runtime_allocator);\n");
                                     } else {
                                         try writer.writeAll("runtime.runtime_allocator);\n");
                                     }
@@ -36790,6 +36845,10 @@ pub const NativeLinker = struct {
 
             // 链接其他运行时文件
             try self.copyOtherRuntimeFiles(temp_dir, base);
+
+            // ★Go 式协程：按编译器构建旗（-Dcoroutine / -Dcoroutine_backend）重写产物侧
+            //   coroutine_config.zig——设计稿 §7 回退开关随产物构建落地（源码树内为默认值）。
+            try self.writeCoroutineConfig(temp_dir);
             found = true;
             break;
         }
@@ -36797,6 +36856,32 @@ pub const NativeLinker = struct {
         if (!found) {
             return error.FileNotFound;
         }
+    }
+
+    /// 按编译器构建旗重写产物侧 coroutine_config.zig（设计稿 §7 回退开关）。
+    /// 内容仅含三个常量声明；不逐字复制源码树默认值，避免旗语漂移。
+    fn writeCoroutineConfig(self: *Self, temp_dir: []const u8) !void {
+        const content = try std.fmt.allocPrint(
+            self.allocator,
+            "pub const enabled: bool = {s};\n" ++
+                "pub const Backend = enum {{ @\"asm\", ucontext }};\n" ++
+                "pub const backend: Backend = .@\"{s}\";\n",
+            .{
+                if (build_options.coroutine) "true" else "false",
+                build_options.coroutine_backend,
+            },
+        );
+        defer self.allocator.free(content);
+
+        const io = getIo();
+        const cwd = getCwd();
+        const dest = try std.fs.path.join(self.allocator, &[_][]const u8{ temp_dir, "coroutine_config.zig" });
+        defer self.allocator.free(dest);
+        // 内容随构建旗生成，必须实体写入（不能符号链接源码树默认值）。
+        cwd.deleteFile(io, dest) catch {};
+        const file = try cwd.createFile(io, dest, .{});
+        defer file.close(io);
+        try file.writeStreamingAll(io, content);
     }
 
     fn copyOtherRuntimeFiles(self: *Self, temp_dir: []const u8, base_path: []const u8) !void {
