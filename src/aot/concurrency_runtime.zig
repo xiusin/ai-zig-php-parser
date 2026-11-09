@@ -476,10 +476,11 @@ pub fn Channel(comptime T: type) type {
             return self.buffer.items.len > 0 or self.send_waiters.items.len > 0 or self.closed;
         }
 
-        /// send 就绪 ⟺ 有接收等待者对接或缓冲未满。
-        /// closed 故意不就绪：避免 select 选中 send-on-closed 即刻炸 error（Go 的 panic 对齐留 M2 评审）。
+        /// send 就绪 ⟺ 有接收等待者对接或缓冲未满；**已关闭也视为就绪**（D-2 裁决，2026-11-09）——
+        /// select 选中 send-on-closed 后由 trySend 抛可捕获 Error（对齐 Go 的 panic），
+        /// 杜绝 timeout=null 时「closed send case 永不就绪 ⇒ 忙等挂死」。
         pub fn canSend(self: *Self) bool {
-            if (self.closed) return false;
+            if (self.closed) return true;
             return self.recv_waiters.items.len > 0 or self.buffer.items.len < self.capacity;
         }
 
@@ -1331,8 +1332,9 @@ fn StubChannel(comptime T: type) type {
             return self.buffer.items.len > 0 or self.closed;
         }
 
+        /// 存根态同名查询（与真 Channel 口径一致：closed 视为就绪，由 trySend 报 ChannelClosed）。
         pub fn canSend(self: *Self) bool {
-            if (self.closed) return false;
+            if (self.closed) return true;
             return self.buffer.items.len < self.capacity;
         }
 

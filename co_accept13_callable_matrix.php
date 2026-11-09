@@ -106,11 +106,12 @@ go_wait_all();
 t("f.mutex_sum", $acc->load() === 2000);
 t("f.mutex_lockcount", $m->getLockCount() === 0);
 
-// ---- g) Atomic：increment 返新值；add 当前口径为「返旧值」 ----
+// ---- g) Atomic：increment/add/sub 均返新值（D-3 裁决）----
 $a2 = new Atomic(5);
 t("g.atomic_inc", $a2->increment() === 6);
-t("g.atomic_add_old", $a2->add(4) === 6);
-t("g.atomic_load", $a2->load() === 10);
+t("g.atomic_add_new", $a2->add(4) === 10);
+t("g.atomic_sub_new", $a2->sub(3) === 7);
+t("g.atomic_load", $a2->load() === 7);
 
 // ---- h) RWLock / SharedData 基本面 ----
 $rw = new RWLock();

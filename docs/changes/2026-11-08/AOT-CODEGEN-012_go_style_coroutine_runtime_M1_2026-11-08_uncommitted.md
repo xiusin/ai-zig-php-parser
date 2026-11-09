@@ -284,10 +284,10 @@ stateDiagram-v2
 
 | 组 | 程序 | 覆盖 | 读数 |
 |---|---|---|---|
-| G12 | [co_accept12_channel_api.php](../../../co_accept12_channel_api.php) | capacity/len/isClosed、trySend 满、tryRecv FIFO/空、close 残余取尽、send-on-closed 可捕获 Error、重复 close、阻塞 receiver/sender 被 close 唤醒、无缓冲 len、select send 分支（命中/满/下标）、closed 空 channel 的 select recv、多 sender 集体唤醒、go_join 幂等 | **PASS 44/44** |
+| G12 | [co_accept12_channel_api.php](../../../co_accept12_channel_api.php) | capacity/len/isClosed、trySend 满、tryRecv FIFO/空、close 残余取尽、send/trySend on closed 可捕获 Error、重复 close、阻塞 receiver/sender 被 close 唤醒、无缓冲 len、select send 分支（命中/满/下标）、closed 空 channel 的 select recv、多 sender 集体唤醒、go_join 幂等 | **PASS 42/42** |
 | G13 | [co_accept13_callable_matrix.php](../../../co_accept13_callable_matrix.php) | 闭包 / `__invoke` 对象 / `[$obj,'m']` / `'Class::static'` / 未定义函数（spawn 点可捕获）/ Mutex / Atomic / RWLock / SharedData / `is_callable` 作用域限定符 | **PASS 20/20** |
 | G14 | [co_accept14_sched.php](../../../co_accept14_sched.php) | 同一目标 3 个 join、动态 wait_all（等待期继续 spawn）、4 定时器按截止顺序唤醒、3 发送者+3 接收者双侧 close、40 生产者×50 数组 + 4 消费者无缓冲争用、main 内 sleep 驱动 worker | **PASS 9/9** |
-| G15 | [co_accept15_select_edge.php](../../../co_accept15_select_edge.php) | closed send case 有限超时返 null、closed send + 活 recv 选活、多 closed recv、select send 值所有权（COW 隔离） | **PASS 7/7** |
+| G15 | [co_accept15_select_edge.php](../../../co_accept15_select_edge.php) | closed send case 就绪即抛可捕获 Error（D-2）、满缓冲 send 不阻塞且必选活 recv、closed+活双就绪随机不挂死、多 closed recv、select send 值所有权（COW 隔离） | **PASS 7/7** |
 | G16 | [co_accept16_lifetime.php](../../../co_accept16_lifetime.php) | 对象作协程实参（句柄共享 + 协程后主侧可用）、闭包捕获对象 unset 后仍可用、4 协程共享对象修改可见 | **PASS 6/6** |
 | G17 | [co_accept17_gostmt.php](../../../co_accept17_gostmt.php) | **Go 语句形必须真 spawn**：裸函数名 / `$fn(...)` / 闭包字面量 / `$obj->m(...)` / `Class::m(...)` / `...` 展开 / `self::` `static::` `parent::` 作用域限定符 / 未定义函数在 spawn 点抛可捕获 Error | **PASS 8/8** |
 
@@ -301,20 +301,20 @@ stateDiagram-v2
 | F-1-d | `go self::m(...)` / `go ['self','m']` 在协程体内致命「Cannot access "self" when no class scope is active」 | 新协程 `exec_ctx` 初始化为空（不继承调用方 class scope），限定符原样进 body 无法解析 | ① `q4ResolveScopeCallable` 在 **spawn 点**把 `self/static/parent` 改写为具体类名（字符串与可调用数组两形态）；② `php_is_callable`/`isCallableNoInvoke` 增限定符解析（类内 `is_callable(['self','m'])` 同口径修正） | go() 调用面 + is_callable |
 | G-2 | main 内 `sleep()/usleep()` 不驱动就绪协程：`go('w'); usleep(100ms);` 期间 worker 一步不跑（直到 main 触达 channel/join/wait_all） | `php_sleep/php_usleep` 仅 `inCoroutine()` 时走调度器，main 走真阻塞 | main 侧也走 `concurrency.sleepNs`（无调度器时内部退化为 `nanosleep`，无协程时墙钟语义不变） | 全局 sleep/usleep；无协程程序不受影响 |
 
-### 11.3 行为变更与待裁决项
+### 11.3 行为变更与裁决结果（2026-11-09 老铁已裁决并实施）
 
-| # | 项 | 现口径 | 建议 |
-|---|---|---|---|
-| D-1 | `Channel::trySend` 对已关闭通道 | 返回 `false`（与「缓冲满」不可区分） | 建议改为抛可捕获 `Error: send on closed channel`（与 `send` 一致；`false` 只表示「满」）。**待老铁裁决，本轮未改** |
-| D-2 | `select` 的 send case 落在已关闭通道且 `timeout=null` | 该 case 永不就绪 ⇒ 无限让出（忙等挂死）；`timeout` 有限时返 null | Go 语义是 panic。建议：send-on-closed 视为就绪并抛可捕获 Error。**待裁决（M2 原设计注明评审）** |
-| D-3 | `Atomic::add/sub` 返回值 | 返**旧值**（`fetchAdd`），而 `increment/decrement` 返**新值** | 二者口径不一致；建议统一为「返新值」（Go `atomic.AddInt64`）或文档明确。**既有面，非本轮引入** |
-| D-4 | 对象 `__destruct` 即时性 | `unset($o)` 后不立即析构（无协程对照脚本同样如此） | 既有全局行为（对象 GC 缓冲），非协程引入；已登记待后续 |
-| D-5 | main 内 sleep 语义（G-2 修订） | main 睡眠期调度 worker；无协程时墙钟等价 | 设计稿 D5=A「main 内真阻塞」的**实施修订**，请老铁确认追认 |
+| # | 裁决 | 实施 |
+|---|---|---|
+| D-1 | `trySend` 对已关闭通道抛可捕获 `Error: send on closed channel`；`false` 只表示「缓冲满/暂无接收者」 | 已改（模板 `trySend` 方法） |
+| D-2 | select 的 send case 落已关闭通道视为**就绪** ⇒ 选中即抛可捕获 `Error`（对齐 Go panic），消除 `timeout=null` 忙等挂死 | 已改（`canSend` 真/存根两实现 + `php_select` send 支） |
+| D-3 | `Atomic::add/sub` 返**新值**（与 increment/decrement 一致；Go `atomic.AddInt64` 口径），溢出按原子回绕 | 已改（`PHPAtomic.add/sub/increment/decrement` 用 `+%/-%`） |
+| D-4 | 对象 `__destruct` 即时性属独立 GC 议题，不在协程轮处理 | 已登记（工单 §275.4） |
+| D-5 | main 内 sleep 经调度器让出（G-2 修订）追认 | 设计稿 D5 注记已改为正式口径 |
 
 ### 11.4 本轮回归读数
 
-- 协程探针全量：**40/40 PASS**（含既有 11 组验收 + 6 枚冒烟 + G12–G17 + F-1 守卫 + 临时取证探针）
+- 协程探针全量：**40/40 PASS**（含既有 11 组验收 + 6 枚冒烟 + G12–G17 + F-1 守卫 + 临时取证探针；D-1/D-2/D-3 裁决实施后复跑仍全绿）
 - `zig build test`：**通过**（rc=0，最终代码）
 - `-Dcoroutine=off`（独立 prefix）：**构建通过**；存根语义符合设计（spawn 不执行、无死锁检测），真协程断言在 off 下按预期失败（非缺陷）
-- 720 语料（最终二进制，2026-11-09 18:02）：**67 Pass / 0 Fail(Compile) / 0 Fail(Runtime) / 0 Fail(Diff) / 1 Skip**——Skip 仍为 f004（预存排除项），与基线逐字节一致，**零漂移**
+- 720 语料（最终二进制，2026-11-09 19:19，含 D-1~D-3 变更）：**67 Pass / 0 Fail(Compile) / 0 Fail(Runtime) / 0 Fail(Diff) / 1 Skip**——Skip 仍为 f004（预存排除项），与基线逐字节一致，**零漂移**
 - 产物清理：`aot_compile_*` 全部删除（保留 `co_*.php` 源脚本，遵守 PHP 源文件保护铁律）

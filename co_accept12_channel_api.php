@@ -71,7 +71,7 @@ $dt = microtime(true) - $t0;
 t("d.recv_null", $v === null);
 t("d.recv_nowait", $dt < 0.05);
 
-// ---- e) send on closed 抛可捕获 Error；trySend 不崩 ----
+// ---- e) send / trySend on closed 均抛可捕获 Error（D-1 裁决：false 只表示「满」）----
 $msg = "";
 try {
     $ch->send(9);
@@ -79,15 +79,13 @@ try {
     $msg = $e->getMessage();
 }
 t("e.send_throw", $msg === 'send on closed channel');
-$r = null;
 $msg2 = "";
 try {
-    $r = $ch->trySend(9);
+    $ch->trySend(9);
 } catch (Throwable $e) {
     $msg2 = $e->getMessage();
 }
-echo "info trySend_on_closed r=" . ($r === null ? "null" : ($r === false ? "false" : "true")) . " msg='" . $msg2 . "'\n";
-t("e.trySend_safe", $r === false || $msg2 !== "");
+t("e.trySend_throw", $msg2 === 'send on closed channel');
 
 // ---- f) 重复 close 幂等 ----
 $err = "";

@@ -14208,3 +14208,42 @@ M1 协程专项窗口期（模板禁改）内的纯取证批，R-344c「catch �
 ### 274.4 回归读数（M1 窗口终态）
 
 - 六探针：6/6 PASS；面板：54 SAME / 0 DIFF / 0 COMPILE_FAIL；`zig build test` 全绿；720 语料后台跑（已跑段落零 FAIL，日志 /tmp/reg720.log，报告落地 fuzzy_scripts_720/regression_report.md）。
+
+---
+
+## §275 多协程能力加固：调用面完整性/陈述形真 spawn/D-1~D-5 裁决（2026-11-09）
+
+### 275.1 本轮修复（已提交 d1abd77）
+
+- **G-1**：`go()` 对 `__invoke` 对象 / `[$obj,'m']` / `'C::m'` / 未定义函数静默空跑 ⇒ spawn 点 `php_is_callable` 校验（未定义函数可捕获 `Error`，非法 callable `TypeError`）+ 协程体统一走 `php_invoke_callable`。
+- **F-1-b**：Go 语句形 `go worker($a,$b)` 实为「同步执行 callee 再把返回值当 callable spawn」⇒ 按 callee 形态分派（函数名/方法/静态方法/闭包/变量/`...` 展开）。
+- **F-1-c**：`.go_spawn` 缺 `hasException` 路由（try/catch 接不到 spawn 失败）⇒ 补 `emitThrowSiteRouting`。
+- **F-1-d**：`go self::m(...)` 在协程体内「no class scope」⇒ spawn 点固化 `self/static/parent` 为具体类名（字符串+数组两形态）；`is_callable` 同步补限定符解析。
+- **G-2**：main 内 `sleep()/usleep()` 不推进就绪协程 ⇒ 统一经 `concurrency.sleepNs`（无调度器时退化为 `nanosleep`，无协程墙钟不变）。
+- 验收：新增 G12–G17 六组真实程序；协程探针 40/40；720 语料 67 Pass/0 Fail/1 Skip 零漂移。
+
+### 275.2 D-1 裁决：`Channel::trySend` 关闭语义
+
+- **裁决（老铁，2026-11-09）**：已关闭通道的 `trySend` **抛可捕获** `Error: send on closed channel`；`false` 只表示「缓冲满/暂无接收者」。
+- **实施**：模板 `trySend` 方法把 `error.ChannelClosed` 映射为 `throwThrowable("Error", ...)`（与 `send` 同文案）；其余错误原样上抛。
+- **验证**：G12 `e.send_throw` / `e.trySend_throw`。
+
+### 275.3 D-2 裁决：select 的 send case 关闭语义
+
+- **裁决**：已关闭通道的 send case 视为**就绪**；选中即抛可捕获 `Error`（对齐 Go panic），不得无限重扫。
+- **实施**：`Channel.canSend`（真/存根两实现）closed ⇒ true；`php_select` send 支把 `error.ChannelClosed` 映射为 `throwThrowable`（其余错误保防御性重扫）。
+- **收益**：消除 `timeout=null` 且仅有 closed-send case 时的忙等挂死。
+- **验证**：G15 `a.closed_send_throw`（dt≈0.0001s）/ `b.pick_live`（满缓冲 send 不就绪）/ `b2.closed_or_live`（closed+活双就绪随机，抛错或取活值均合法）。
+
+### 275.4 D-3/D-4/D-5 裁决
+
+- **D-3**：`Atomic::add/sub` 返**新值**（与 increment/decrement 一致；对齐 Go `atomic.AddInt64`）。实施：`PHPAtomic.add/sub/increment/decrement` 全部用 `+%/-%`（原子回绕语义）。验证：G13 `g.atomic_add_new` / `g.atomic_sub_new` / `g.atomic_load`。
+- **D-4（登记，不在本轮修）**：对象 `__destruct` 即时性——`unset($o)` 后不立即析构（**无协程对照脚本同样如此**，属既有对象 GC 缓冲行为）。拟独立工单处理，验收面=PHP `unset` 即析构 + `gc_collect_cycles` 周期回收；本轮仅登记，避免与协程轮混改。
+- **D-5**：main 内 sleep/usleep 经调度器让出（G-2 修订）**追认**为正式口径；设计稿 D5 注记已更新。
+
+### 275.5 回归读数
+
+- 协程探针全量：40/40 PASS（G12 42 断言、G13 20、G14 9、G15 7、G16 6、G17 8 + 既有组）
+- `zig build test`：rc=0；`-Dcoroutine=off`：构建通过、存根语义符合设计
+- 720 语料：67 Pass / 0 Fail / 1 Skip（f004 预存排除项），零漂移
+

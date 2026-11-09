@@ -145,7 +145,8 @@ flowchart TD
 > 期间就绪 worker 一步不跑（违背 Go 式直觉，且 `go` 后直接 sleep 的用法会饿死 worker）。
 > 现统一为：`sleep()/usleep()` 一律经 `concurrency.sleepNs`——协程内挂定时器让出；main 侧
 > 同样挂定时器让出（睡眠窗口内调度 worker）；调度器不存在（从未 `go()`）时内部退化为
-> `nanosleep`，墙钟语义不变。PHP 调用面零变化。待老铁追认。
+> `nanosleep`，墙钟语义不变。PHP 调用面零变化。
+> **老铁 2026-11-09 已追认本修订为正式口径**（D-5 裁决）。
 
 ## 7. 风险与回退
 

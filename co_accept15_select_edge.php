@@ -8,23 +8,50 @@ function t($name, $cond) {
     }
 }
 
-// ---- a) closed channel 的 send case + 有限超时：不就绪 ⇒ 超时返 null ----
+// ---- a) closed channel 的 send case：视为就绪 ⇒ 立即抛可捕获 Error（D-2 裁决，对齐 Go panic）----
 $ch = new Channel(0);
 $ch->close();
 $t0 = microtime(true);
-$r = Zig\Select::select([[$ch, 1, 'x']], 20);
+$msg = "";
+try {
+    Zig\Select::select([[$ch, 1, 'x']], 20);
+} catch (Throwable $e) {
+    $msg = $e->getMessage();
+}
 $dt = microtime(true) - $t0;
-t("a.closed_send_timeout_null", $r === null);
-t("a.timeout_elapsed", $dt >= 0.015);
+t("a.closed_send_throw", $msg === 'send on closed channel');
+t("a.noTimeoutWait", $dt < 0.05);
 echo "info a dt=" . round($dt, 4) . "\n";
 
-// ---- b) closed send case + 活 recv case：必须选中活 recv ----
-$dead = new Channel(0);
-$dead->close();
+// ---- b) 满缓冲 send case（不就绪）+ 活 recv case ⇒ 必选活 recv ----
+$full = new Channel(1);
+$full->trySend('a');
 $live = new Channel(1);
 $live->send('v1');
-$pick = Zig\Select::select([[$dead, 1, 'x'], [$live, 0]], 50);
+$pick = Zig\Select::select([[$full, 1, 'x'], [$live, 0]], 50);
 t("b.pick_live", is_array($pick) && $pick[0] === 1 && $pick[1] === 'v1');
+
+// ---- b2) closed send + 活 recv 双就绪：随机选中——抛错或取活值，均合法且不得挂死 ----
+$dead = new Channel(0);
+$dead->close();
+$live2 = new Channel(1);
+$live2->send('v2');
+$out = "";
+try {
+    $r = Zig\Select::select([[$dead, 1, 'x'], [$live2, 0]], null);
+    if (is_array($r) && $r[0] === 1 && $r[1] === 'v2') {
+        $out = "recv";
+    } else {
+        $out = "unexpected";
+    }
+} catch (Throwable $e) {
+    if ($e->getMessage() === 'send on closed channel') {
+        $out = "throw";
+    } else {
+        $out = "unexpected";
+    }
+}
+t("b2.closed_or_live", $out === "recv" || $out === "throw");
 
 // ---- c) 多个 closed 空 channel 的 recv：返回其一 + null ----
 $d1 = new Channel(0);

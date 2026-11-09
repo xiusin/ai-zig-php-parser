@@ -13019,9 +13019,14 @@ fn php_select(args: []const Value, allocator: Allocator) !Value {
                 } else {
                     const send_val = case_arr.get(ArrayKey{ .integer = 2 }) orelse Value.initNull();
                     _ = send_val.retain();
-                    const ok = channel.trySend(send_val) catch {
+                    const ok = channel.trySend(send_val) catch |err| {
                         send_val.release(allocator);
-                        break; // 防御（canSend 已排除 closed）：跳出重扫
+                        // ★D-2 裁决（2026-11-09）：closed 通道的 send case 视为就绪 ⇒ 选中即抛
+                        //   可捕获 Error（对齐 Go 的 panic），不再无限重扫。
+                        if (err == error.ChannelClosed) {
+                            return throwThrowable("Error", "send on closed channel", allocator);
+                        }
+                        break; // 其余错误：防御性重扫（落到 timeout/yieldNow）
                     };
                     if (ok) {
                         return Value.initInt(@intCast(picked));
@@ -47938,19 +47943,21 @@ pub const PHPAtomic = struct {
     }
 
     pub fn increment(self: *PHPAtomic) i64 {
-        return self.value.fetchAdd(1, .monotonic) + 1;
+        return self.value.fetchAdd(1, .monotonic) +% 1;
     }
 
     pub fn decrement(self: *PHPAtomic) i64 {
-        return self.value.fetchSub(1, .monotonic) - 1;
+        return self.value.fetchSub(1, .monotonic) -% 1;
     }
 
+    /// ★D-3 裁决（2026-11-09）：add/sub 返**新值**（与 increment/decrement 一致；
+    ///   对齐 Go `atomic.AddInt64`）。溢出按原子回绕语义（+%/-%）。
     pub fn add(self: *PHPAtomic, delta: i64) i64 {
-        return self.value.fetchAdd(delta, .monotonic);
+        return self.value.fetchAdd(delta, .monotonic) +% delta;
     }
 
     pub fn sub(self: *PHPAtomic, delta: i64) i64 {
-        return self.value.fetchSub(delta, .monotonic);
+        return self.value.fetchSub(delta, .monotonic) -% delta;
     }
 
     pub fn swap(self: *PHPAtomic, new_value: i64) i64 {
@@ -48232,9 +48239,14 @@ fn registerChannelClassNamed(allocator: Allocator, class_name: []const u8) !void
 
                 const val = args[0];
                 _ = val.retain();
-                const ok = channel.trySend(val) catch {
+                const ok = channel.trySend(val) catch |err| {
                     val.release(runtime_alloc);
-                    return Value.initBool(false);
+                    // ★D-1 裁决（2026-11-09）：closed 与「满」必须可区分——closed ⇒ 可捕获 Error
+                    //   （与 send 同文案）；`false` 只表示「缓冲满/暂无接收者」。
+                    if (err == error.ChannelClosed) {
+                        return throwThrowable("Error", "send on closed channel", runtime_alloc);
+                    }
+                    return err;
                 };
                 if (!ok) {
                     val.release(runtime_alloc);
