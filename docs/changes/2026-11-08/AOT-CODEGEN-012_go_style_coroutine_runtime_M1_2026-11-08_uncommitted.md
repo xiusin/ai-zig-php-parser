@@ -271,3 +271,50 @@ stateDiagram-v2
 - `STACK_SIZE` 64KB → **256KB**（concurrency_runtime.zig）。依据：64KB 实测 ~30 层调用帧（40 层即保护页致命），无法满足协程内正常业务递归。
 - 代价核实：1 万协程压测 RSS **253MB 不变**（256KB 仅虚拟占用，物理按需驻留），spawn 35ms / total 142ms。
 - 复测：100 层递归 `R:100` 正常；20 万层 overflow 仍由保护页报 `stack overflow in coroutine #1 (guard page hit)` rc=255。
+
+---
+
+## 11. 多协程能力加固（2026-11-09 第二轮）
+
+> 老铁指令：「先提交代码，然后处理（多）协程的问题，必须保证协程能力」。
+> 提交 `3614b3d` 之后，本轮以「公开面一致性 + 调用面完整性 + 调度语义」三条线做真实程序验收，
+> 发现缺陷当场修（F-1-b/F-1-c/G-1），并新增 6 组探针（G12–G17）。
+
+### 11.1 新增验收程序与读数
+
+| 组 | 程序 | 覆盖 | 读数 |
+|---|---|---|---|
+| G12 | [co_accept12_channel_api.php](../../../co_accept12_channel_api.php) | capacity/len/isClosed、trySend 满、tryRecv FIFO/空、close 残余取尽、send-on-closed 可捕获 Error、重复 close、阻塞 receiver/sender 被 close 唤醒、无缓冲 len、select send 分支（命中/满/下标）、closed 空 channel 的 select recv、多 sender 集体唤醒、go_join 幂等 | **PASS 44/44** |
+| G13 | [co_accept13_callable_matrix.php](../../../co_accept13_callable_matrix.php) | 闭包 / `__invoke` 对象 / `[$obj,'m']` / `'Class::static'` / 未定义函数（spawn 点可捕获）/ Mutex / Atomic / RWLock / SharedData / `is_callable` 作用域限定符 | **PASS 20/20** |
+| G14 | [co_accept14_sched.php](../../../co_accept14_sched.php) | 同一目标 3 个 join、动态 wait_all（等待期继续 spawn）、4 定时器按截止顺序唤醒、3 发送者+3 接收者双侧 close、40 生产者×50 数组 + 4 消费者无缓冲争用、main 内 sleep 驱动 worker | **PASS 9/9** |
+| G15 | [co_accept15_select_edge.php](../../../co_accept15_select_edge.php) | closed send case 有限超时返 null、closed send + 活 recv 选活、多 closed recv、select send 值所有权（COW 隔离） | **PASS 7/7** |
+| G16 | [co_accept16_lifetime.php](../../../co_accept16_lifetime.php) | 对象作协程实参（句柄共享 + 协程后主侧可用）、闭包捕获对象 unset 后仍可用、4 协程共享对象修改可见 | **PASS 6/6** |
+| G17 | [co_accept17_gostmt.php](../../../co_accept17_gostmt.php) | **Go 语句形必须真 spawn**：裸函数名 / `$fn(...)` / 闭包字面量 / `$obj->m(...)` / `Class::m(...)` / `...` 展开 / `self::` `static::` `parent::` 作用域限定符 / 未定义函数在 spawn 点抛可捕获 Error | **PASS 8/8** |
+
+### 11.2 本轮当场修复的缺陷
+
+| # | 缺陷 | 根因 | 修法 | 影响面 |
+|---|---|---|---|---|
+| G-1 | `go()` 对合法 callable 静默空跑（`__invoke` 对象 / `[$obj,'m']` / `'C::m'`）；对未定义函数静默空跑 | `php_coroutine_entry` 只认「闭包」「用户函数名字符串」两支，其余 `if` 落空；`php_go` spawn 点不复核 callable | ① `php_go` spawn 点用 `php_is_callable`（无副作用）校验：字符串未定义 ⇒ 可捕获 `Error: Call to undefined function f()`，其余非法 ⇒ `TypeError`；② entry 统一走 `php_invoke_callable`，`'C::m'` 由 `php_call_static` 分派 | `go()` 调用面；不影响 `call_user_func` 既有路径 |
+| F-1-b | **Go 语句形从未 spawn**：`go worker($a,$b)` 被编译成「先同步执行 worker(...)，再把返回值当 callable spawn」 | `generateGoStmt` 只在 callee 为 `literal_string` 时发 `go_spawn`；正常标识符 callee 走 `generateExpression(call)`（就是同步调用）。此前探针只比对输出文本，同步调用同样打印正确文本 ⇒ 长期未暴露 | 改为按 callee 形态分派：裸函数名 ⇒ `go_spawn`；方法/静态方法 ⇒ 可调用数组 `[obj|class,'m']`；闭包/变量/动态名 ⇒ callee 求值（不调用）。新增 `php_go_args_array_builtin` 承载「callee+实参数组」面（支持 `...`） | `src/aot/ir_generator.zig` + 模板；语句形 `go` 全部形态 |
+| F-1-c | `go` 语句形 spawn 点的可捕获失败在 try/catch 中接不到（异常延到 main 末尾成 Uncaught fatal） | `.go_spawn` 指令发射后无 `hasException` 路由（只有 `.call` 有） | `.go_spawn` 发射后补 `emitThrowSiteRouting` | 所有 `go` 语句形 |
+| F-1-d | `go self::m(...)` / `go ['self','m']` 在协程体内致命「Cannot access "self" when no class scope is active」 | 新协程 `exec_ctx` 初始化为空（不继承调用方 class scope），限定符原样进 body 无法解析 | ① `q4ResolveScopeCallable` 在 **spawn 点**把 `self/static/parent` 改写为具体类名（字符串与可调用数组两形态）；② `php_is_callable`/`isCallableNoInvoke` 增限定符解析（类内 `is_callable(['self','m'])` 同口径修正） | go() 调用面 + is_callable |
+| G-2 | main 内 `sleep()/usleep()` 不驱动就绪协程：`go('w'); usleep(100ms);` 期间 worker 一步不跑（直到 main 触达 channel/join/wait_all） | `php_sleep/php_usleep` 仅 `inCoroutine()` 时走调度器，main 走真阻塞 | main 侧也走 `concurrency.sleepNs`（无调度器时内部退化为 `nanosleep`，无协程时墙钟语义不变） | 全局 sleep/usleep；无协程程序不受影响 |
+
+### 11.3 行为变更与待裁决项
+
+| # | 项 | 现口径 | 建议 |
+|---|---|---|---|
+| D-1 | `Channel::trySend` 对已关闭通道 | 返回 `false`（与「缓冲满」不可区分） | 建议改为抛可捕获 `Error: send on closed channel`（与 `send` 一致；`false` 只表示「满」）。**待老铁裁决，本轮未改** |
+| D-2 | `select` 的 send case 落在已关闭通道且 `timeout=null` | 该 case 永不就绪 ⇒ 无限让出（忙等挂死）；`timeout` 有限时返 null | Go 语义是 panic。建议：send-on-closed 视为就绪并抛可捕获 Error。**待裁决（M2 原设计注明评审）** |
+| D-3 | `Atomic::add/sub` 返回值 | 返**旧值**（`fetchAdd`），而 `increment/decrement` 返**新值** | 二者口径不一致；建议统一为「返新值」（Go `atomic.AddInt64`）或文档明确。**既有面，非本轮引入** |
+| D-4 | 对象 `__destruct` 即时性 | `unset($o)` 后不立即析构（无协程对照脚本同样如此） | 既有全局行为（对象 GC 缓冲），非协程引入；已登记待后续 |
+| D-5 | main 内 sleep 语义（G-2 修订） | main 睡眠期调度 worker；无协程时墙钟等价 | 设计稿 D5=A「main 内真阻塞」的**实施修订**，请老铁确认追认 |
+
+### 11.4 本轮回归读数
+
+- 协程探针全量：**40/40 PASS**（含既有 11 组验收 + 6 枚冒烟 + G12–G17 + F-1 守卫 + 临时取证探针）
+- `zig build test`：**通过**（rc=0，最终代码）
+- `-Dcoroutine=off`（独立 prefix）：**构建通过**；存根语义符合设计（spawn 不执行、无死锁检测），真协程断言在 off 下按预期失败（非缺陷）
+- 720 语料（最终二进制，2026-11-09 18:02）：**67 Pass / 0 Fail(Compile) / 0 Fail(Runtime) / 0 Fail(Diff) / 1 Skip**——Skip 仍为 f004（预存排除项），与基线逐字节一致，**零漂移**
+- 产物清理：`aot_compile_*` 全部删除（保留 `co_*.php` 源脚本，遵守 PHP 源文件保护铁律）

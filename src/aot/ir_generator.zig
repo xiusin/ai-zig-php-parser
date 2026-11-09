@@ -4236,44 +4236,129 @@ pub const IRGenerator = struct {
         // go语句的调用表达式
         const call_node = self.getNode(go_data.call) orelse return;
 
+        // ★F-1-b（多协程能力加固）：Go 语句形必须 **spawn**，不得把 callee 同步调用掉。
+        //   旧实现只对 `literal_string` 名走 go_spawn，其余一律 `generateExpression(go_data.call)`
+        //   ——那会把 `go worker($a,$b)`（以及 `go $o->m(...)`）编译成「先同步执行调用，
+        //   再把返回值当 callable spawn」：函数确实跑了（输出看似正确），但协程语义完全丢失。
+        //   现在按 callee 形态分派：
+        //   1) 裸函数名标识符 ⇒ go_spawn(func_name, args...)（快路径，无数组构造）；
+        //   2) 方法/静态方法 callee ⇒ 构造 PHP 可调用数组 [obj|class, 'method'] + 实参数组；
+        //   3) 闭包字面量 / $var(...) / 动态名 ⇒ callee 求值（不调用）+ 实参数组；
+        //   2/3 统一走 php_go_args_array_builtin（实参数组，天然支持 `...` 展开）。
         if (call_node.tag == .function_call) {
             const call_data = call_node.data.function_call;
             const name_node = self.getNode(call_data.name) orelse return;
-            if (name_node.tag != .literal_string) {
-                const expr_reg = try self.generateExpression(go_data.call);
-                const args = try self.allocator.alloc(Register, 1);
-                args[0] = expr_reg;
-                _ = try self.emit(.{ .call = .{
-                    .func_name = "php_go_builtin",
-                    .args = args,
-                    .return_type = .php_value,
-                } }, null);
+            const is_plain_func_name = name_node.tag == .variable and name_node.main_token.tag != .t_variable;
+            if (is_plain_func_name) {
+                const func_name = self.getString(name_node.data.variable.name);
+                // 无 `...`：快路径 go_spawn（不构造实参数组）
+                if (!hasUnpackingArg(self, call_data.args)) {
+                    const args = try self.allocator.alloc(Register, call_data.args.len);
+                    for (call_data.args, 0..) |arg_idx, i| {
+                        args[i] = try self.generateExpression(arg_idx);
+                    }
+                    _ = try self.emit(.{ .go_spawn = .{
+                        .func_name = func_name,
+                        .args = args,
+                    } }, null);
+                    return;
+                }
+                // `...` 展开无法静态摊平进 go_spawn 的定长实参切片 ⇒ 走实参数组面。
+                // ★注意：裸函数名必须**取字符串常量**（emitPropertyNameValue），
+                //   不能 generateExpression(callee)——后者把 `gs` 当全局变量读（Undefined constant "gs"）。
+                const callee_reg = try self.emitPropertyNameValue(func_name);
+                try self.emitGoSpawnArgsArray(callee_reg, call_data.args);
                 return;
             }
-            const func_name = self.getString(name_node.data.literal_string.value);
-
-            // 生成参数
-            const args = try self.allocator.alloc(Register, call_data.args.len);
-            for (call_data.args, 0..) |arg_idx, i| {
-                args[i] = try self.generateExpression(arg_idx);
-            }
-
-            // 发出go_spawn指令
-            _ = try self.emit(.{ .go_spawn = .{
-                .func_name = func_name,
-                .args = args,
-            } }, null);
-        } else {
-            // Fallback: treat as expression and call php_go_builtin
-            const expr_reg = try self.generateExpression(go_data.call);
-            const args = try self.allocator.alloc(Register, 1);
-            args[0] = expr_reg;
-            _ = try self.emit(.{ .call = .{
-                .func_name = "php_go_builtin",
-                .args = args,
-                .return_type = .php_value,
-            } }, null);
+            const callee_reg = try self.generateExpression(call_data.name);
+            try self.emitGoSpawnArgsArray(callee_reg, call_data.args);
+            return;
         }
+
+        if (call_node.tag == .method_call) {
+            const md = call_node.data.method_call;
+            const obj_reg = try self.generateExpression(md.target);
+            const mname_reg = try self.emitPropertyNameValue(self.getString(md.method_name));
+            const cb_reg = try self.emitCallableArray(obj_reg, mname_reg);
+            try self.emitGoSpawnArgsArray(cb_reg, md.args);
+            return;
+        }
+
+        if (call_node.tag == .static_method_call) {
+            const sd = call_node.data.static_method_call;
+            const cls_reg = try self.emitPropertyNameValue(self.getString(sd.class_name));
+            const mname_reg = try self.emitPropertyNameValue(self.getString(sd.method_name));
+            const cb_reg = try self.emitCallableArray(cls_reg, mname_reg);
+            try self.emitGoSpawnArgsArray(cb_reg, sd.args);
+            return;
+        }
+
+        if (call_node.tag == .dynamic_static_method_call) {
+            const dd = call_node.data.dynamic_static_method_call;
+            const cls_reg = try self.generateExpression(dd.class_expr);
+            const mname_reg = try self.emitPropertyNameValue(self.getString(dd.method_name));
+            const cb_reg = try self.emitCallableArray(cls_reg, mname_reg);
+            try self.emitGoSpawnArgsArray(cb_reg, dd.args);
+            return;
+        }
+
+        // Fallback：非调用形（解释器/旧语法兜底）——按可调用表达式 spawn
+        const expr_reg = try self.generateExpression(go_data.call);
+        const args = try self.allocator.alloc(Register, 1);
+        args[0] = expr_reg;
+        _ = try self.emit(.{ .call = .{
+            .func_name = "php_go_builtin",
+            .args = args,
+            .return_type = .php_value,
+        } }, null);
+    }
+
+    /// go 语句形实参里是否含 `...` 展开（展开须运行时摊平，不能进定长切片）。
+    fn hasUnpackingArg(self: *Self, arg_nodes: []const Node.Index) bool {
+        for (arg_nodes) |arg_idx| {
+            const arg_node = self.getNode(arg_idx) orelse continue;
+            if (arg_node.tag == .unpacking_expr) return true;
+        }
+        return false;
+    }
+
+    /// 构造 PHP 可调用数组 `[callee_a, callee_b]`（`[$obj,'m']` / `['C','m']` 同构）。
+    fn emitCallableArray(self: *Self, first: Register, second: Register) !Register {
+        const arr = try self.emitWithResult(.{ .array_new = .{ .capacity = 2 } }, .php_array);
+        _ = try self.emit(.{ .array_push = .{ .array = arr, .value = first } }, null);
+        _ = try self.emit(.{ .array_push = .{ .array = arr, .value = second } }, null);
+        return arr;
+    }
+
+    /// go 语句形：callee + 实参数组 ⇒ php_go_args_array_builtin（支持 `...` 展开）。
+    fn emitGoSpawnArgsArray(self: *Self, callee_reg: Register, arg_nodes: []const Node.Index) !void {
+        const args_arr = try self.emitWithResult(.{ .array_new = .{ .capacity = @intCast(arg_nodes.len) } }, .php_array);
+        for (arg_nodes) |arg_idx| {
+            const arg_node = self.getNode(arg_idx) orelse continue;
+            if (arg_node.tag == .unpacking_expr) {
+                const spread_reg = try self.generateExpression(arg_node.data.unpacking_expr.expr);
+                const spread_args = try self.allocator.alloc(Register, 2);
+                spread_args[0] = args_arr;
+                spread_args[1] = spread_reg;
+                _ = try self.emit(.{ .call = .{
+                    .func_name = "php_args_append_spread",
+                    .args = spread_args,
+                    .return_type = .php_value,
+                } }, null);
+                continue;
+            }
+            const expr_idx = if (arg_node.tag == .named_arg) arg_node.data.named_arg.value else arg_idx;
+            const val_reg = try self.generateExpression(expr_idx);
+            _ = try self.emit(.{ .array_push = .{ .array = args_arr, .value = val_reg } }, null);
+        }
+        const call_args = try self.allocator.alloc(Register, 2);
+        call_args[0] = callee_reg;
+        call_args[1] = args_arr;
+        _ = try self.emit(.{ .call = .{
+            .func_name = "php_go_args_array_builtin",
+            .args = call_args,
+            .return_type = .php_value,
+        } }, null);
     }
 
     /// Redirect throw/return through finally block by duplicating finally body.

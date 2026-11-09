@@ -141,6 +141,12 @@ flowchart TD
 | D4 | cycle-GC | A 多协程期禁用（M1）/ B root 扩展每协程栈（M3） | A→B |
 | D5 | `sleep()` 在协程内自动让出 | A 自动分流 / B 新增 `go_sleep` 显式面 | 倾向 A（面零增） |
 
+> **实施修订（2026-11-09，G-2）**：D5=A 落地时 main 侧走「真阻塞」，实测 `go('w'); usleep(100ms);`
+> 期间就绪 worker 一步不跑（违背 Go 式直觉，且 `go` 后直接 sleep 的用法会饿死 worker）。
+> 现统一为：`sleep()/usleep()` 一律经 `concurrency.sleepNs`——协程内挂定时器让出；main 侧
+> 同样挂定时器让出（睡眠窗口内调度 worker）；调度器不存在（从未 `go()`）时内部退化为
+> `nanosleep`，墙钟语义不变。PHP 调用面零变化。待老铁追认。
+
 ## 7. 风险与回退
 
 - **asm 切换正确性**：寄存器保存不全 ⇒ 间歇性寄存器污染——M1 用「全 callee-saved + 探针矩阵 + 长随机交错压测」兜底；ucontext 备份路径保编译期可切

@@ -29213,6 +29213,9 @@ pub const NativeLinker = struct {
                 try writer.writeAll("\", ");
                 try self.writeValueArgsArray(writer, op.args);
                 try writer.writeAll(", runtime.runtime_allocator);\n");
+                // ★F-1-b：spawn 点的可捕获失败（未定义函数 / 非法 callable）走「异常值正常返回 + 旗标」
+                //   通道 ⇒ 必须在此路由，否则 try/catch 接不到，异常延到 main 末尾成 Uncaught。
+                try self.emitThrowSiteRouting(writer);
             },
             .channel_new => |op| {
                 if (inst.result) |reg| {

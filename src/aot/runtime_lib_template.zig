@@ -25300,11 +25300,10 @@ pub fn php_is_callable(val: Value) !Value {
             }
             // 第一个元素是字符串（类名）：检查静态方法是否存在
             if (elem0.isString()) {
-                const class_name = elem0.asString().data;
-                if (findClass(class_name)) |meta| {
-                    return Value.initBool(meta.findMethodLookup(method_name) != null);
-                }
-                return Value.initBool(false);
+                // ★F-1-b：`self`/`parent`/`static` 作用域限定符须按当前类上下文解析
+                //   （否则类内 `is_callable(['self','m'])` / `go self::m(...)` 误判不可调用）。
+                const meta = resolveClassQualifierName(elem0.asString().data) orelse return Value.initBool(false);
+                return Value.initBool(meta.findMethodLookup(method_name) != null);
             }
             return Value.initBool(false);
         }
@@ -40557,11 +40556,11 @@ pub fn php_sleep(seconds: Value) !Value {
     const secs_bits: u64 = @bitCast(secs_raw);
     const secs: c_uint = @truncate(secs_bits);
     // ★Go 式协程 M1（D5=A）：协程内自动让出（定时器挂起），main 内真阻塞——面不变，行为按上下文分流。
-    if (concurrency.inCoroutine()) {
-        concurrency.sleepNs(@as(u64, secs) * std.time.ns_per_s);
-    } else {
-        _ = sleep(secs);
-    }
+    // ★G14（多协程能力加固）：main 侧 sleep/usleep 也改走调度器（sleepNs 无调度器时内部分流为
+    //   nanosleep，与真阻塞等价）。旧口径下 main 睡多久，就绪协程就饿多久——「go 后 sleep 让 worker
+    //   跑」的 Go 式用法完全失效（worker 直到 main 触达 channel/join/wait_all 才开始执行）。
+    //   改后 main 挂定时器让出，dispatcher 在睡眠窗口内调度 worker；无协程时墙钟语义不变。
+    concurrency.sleepNs(@as(u64, secs) * std.time.ns_per_s);
     return Value.initInt(0);
 }
 
@@ -40577,11 +40576,8 @@ pub fn php_usleep(microseconds: Value) !Value {
     const usecs_bits: u64 = @bitCast(usecs_raw);
     const usecs: c_uint = @truncate(usecs_bits);
     // ★Go 式协程 M1（D5=A）：协程内自动让出，main 内真阻塞。
-    if (concurrency.inCoroutine()) {
-        concurrency.sleepNs(@as(u64, usecs) * std.time.ns_per_us);
-    } else {
-        _ = usleep(usecs);
-    }
+    // ★G14：main 侧同样经调度器让出（见 php_sleep 注释）；无协程时等价 nanosleep。
+    concurrency.sleepNs(@as(u64, usecs) * std.time.ns_per_us);
     return Value.initNull();
 }
 
@@ -40592,6 +40588,67 @@ var shutdown_entries: ?std.ArrayList(ShutdownEntry) = null;
 var shutdown_done: bool = false;
 var shutdown_running: bool = false;
 
+/// ★F-1-b：类名限定符解析（`self`/`parent`/`static` 按当前类作用域；其余常规类查找）。
+///   `is_callable`/`is_callable_no_invoke` 与 go() spawn 校验共用同一口径。
+fn resolveClassQualifierName(name: []const u8) ?*const ClassMeta {
+    if (std.ascii.eqlIgnoreCase(name, "self")) {
+        return getCurrentScopeClass() orelse getCurrentCalledClass();
+    }
+    if (std.ascii.eqlIgnoreCase(name, "static")) {
+        return getCurrentCalledClass() orelse getCurrentScopeClass();
+    }
+    if (std.ascii.eqlIgnoreCase(name, "parent")) {
+        const scope = getCurrentScopeClass() orelse return null;
+        return scope.parent;
+    }
+    return findClass(name);
+}
+
+/// ★F-1-b：把 `self|static|parent::method` 的可调用形式改写为「具体类名」形式。
+///   协程体不继承调用方的 class scope 快照 ⇒ 限定符必须在 spawn 点固化。
+///   支持两种形态：字符串 `'self::m'` 与可调用数组 `['self','m']`。
+///   返回 null 表示无需改写（非可调用形 / 非作用域限定符 / 当前无作用域可解析）。
+fn q4ResolveScopeCallable(callable: Value, allocator: Allocator) ?Value {
+    if (callable.isString()) {
+        const nm = callable.asString().data;
+        const sep = std.mem.indexOf(u8, nm, "::") orelse return null;
+        if (sep == 0 or sep + 2 >= nm.len) return null;
+        const meta = q4ScopeMetaOf(nm[0..sep]) orelse return null;
+        var buf: [512]u8 = undefined;
+        const full = std.fmt.bufPrint(&buf, "{s}::{s}", .{ meta.name, nm[sep + 2 ..] }) catch return null;
+        const str = PHPString.init(allocator, full) catch return null;
+        return Value.initString(str);
+    }
+    if (callable.isArray()) {
+        const arr = callable.asArray();
+        if (arr.elements.count() != 2) return null;
+        const e0 = arr.elements.get(ArrayKey{ .integer = 0 }) orelse return null;
+        const e1 = arr.elements.get(ArrayKey{ .integer = 1 }) orelse return null;
+        if (!e0.isString() or !e1.isString()) return null;
+        const meta = q4ScopeMetaOf(e0.asString().data) orelse return null;
+        const new_cls = PHPString.init(allocator, meta.name) catch return null;
+        defer new_cls.release(allocator);
+        const new_arr = PHPArray.init(allocator) catch return null;
+        defer new_arr.release(allocator);
+        new_arr.push(allocator, Value.initString(new_cls)) catch return null;
+        new_arr.push(allocator, e1) catch return null;
+        _ = new_arr.retain();
+        return Value.initArray(new_arr);
+    }
+    return null;
+}
+
+/// `self|static|parent` ⇒ 当前作用域类；其余名字返回 null（仅限作用域限定符改写）。
+fn q4ScopeMetaOf(name: []const u8) ?*const ClassMeta {
+    if (!std.ascii.eqlIgnoreCase(name, "self") and
+        !std.ascii.eqlIgnoreCase(name, "static") and
+        !std.ascii.eqlIgnoreCase(name, "parent"))
+    {
+        return null;
+    }
+    return resolveClassQualifierName(name);
+}
+
 /// ★F-96：无副作用可调用判定（`php_is_callable` 的 AOT hook 会**执行**可调用体，注册场景不可用）。
 fn isCallableNoInvoke(val: Value) bool {
     const v = if (val.isRef()) val.asRef().* else val;
@@ -40601,7 +40658,7 @@ fn isCallableNoInvoke(val: Value) bool {
         if (lookupBuiltinFunction(name) != null) return true;
         if (lookupUserFunctionCI(name) != null) return true;
         if (std.mem.indexOf(u8, name, "::")) |sep| {
-            const meta = findClass(name[0..sep]) orelse return false;
+            const meta = resolveClassQualifierName(name[0..sep]) orelse return false;
             return meta.findMethodLookup(name[sep + 2 ..]) != null;
         }
         return false;
@@ -40618,7 +40675,8 @@ fn isCallableNoInvoke(val: Value) bool {
             return meta.findMethodLookup(m) != null;
         }
         if (e0.isString()) {
-            const meta = findClass(e0.asString().data) orelse return false;
+            // ★F-1-b：作用域限定符（self/parent/static）与常规类名同口径解析
+            const meta = resolveClassQualifierName(e0.asString().data) orelse return false;
             return meta.findMethodLookup(m) != null;
         }
         return false;
@@ -47704,15 +47762,24 @@ fn php_coroutine_entry(context: ?*anyopaque) anyerror!void {
         // Execute the callable
         // ★Go 式协程 M1：错误一律向上抛给调度跳板，由 reportCoroutineError →
         //   phpCoroutineUncaught 按 D1=A 整程序致命（不再就地按 main 文案处理）。
-        if (ctx.callable.isString()) {
-            const func_name = ctx.callable.asString().data;
-            // §8 #6：用户函数名 CI（go 协程字符串 callable 同样不区分大小写）
-            if (lookupUserFunctionCI(func_name)) |func| {
-                _ = try func(Value.initNull(), ctx.args, ctx.allocator);
-            } else {}
-        } else if (ctx.callable.isFunction()) {
-            const closure = ctx.callable.asFunction();
-            _ = try closure.func(Value.initFunction(closure), ctx.args, ctx.allocator);
+        // ★G13（多协程能力加固）：协程体走完整 PHP 可调用矩阵——
+        //   闭包 / 函数名字符串 / 'Class::method' / [obj, method] / [class, method] / __invoke 对象。
+        //   旧实现只认「闭包」与「用户函数名字符串」两支，其余合法 callable 静默跳过协程体
+        //   （go() 返回 id、join 立即完成、无任何报错——调用面静默失效）。可调用性已在
+        //   php_go spawn 点校验，此处按形态分派：静态方法串走 php_call_static（php_invoke_callable
+        //   的字符串支只查函数表，不含 '::' 解析），其余统一走 php_invoke_callable。
+        const callable = if (ctx.callable.isRef()) ctx.callable.asRef().* else ctx.callable;
+        const static_sep = if (callable.isString())
+            std.mem.indexOf(u8, callable.asString().data, "::")
+        else
+            null;
+        if (static_sep) |sep| {
+            const name = callable.asString().data;
+            if (sep > 0 and sep + 2 < name.len) {
+                _ = try php_call_static(name[0..sep], name[sep + 2 ..], ctx.args, ctx.allocator);
+            }
+        } else {
+            _ = try php_invoke_callable(callable, ctx.args, ctx.allocator);
         }
         // ★D1=A：正常返回但异常旗仍立 ⇒ 协程内未捕获异常（throw 走「返值+旗」通道
         //   而非 Zig 错误通道），按未捕获处理——抛特征错误，由跳板钩子打印并 exit(255)。
@@ -47725,6 +47792,31 @@ pub fn php_go(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Va
     if (args.len < 1) return error.MissingArgument;
 
     const callable = args[0];
+    // ★G13：spawn 点校验可调用性（与 call_user_func 同口径，php_is_callable 无副作用）。
+    //   旧实现不在 spawn 点校验：未定义函数 / 非法数组 / 无 __invoke 对象会被静默接受，
+    //   协程体空跑（go() 看似成功、实际什么也没做）。此处改为可捕获错误：
+    //   字符串未定义函数 ⇒ Error「Call to undefined function f()」（PHP 8 文案）；
+    //   其余非法 callable ⇒ TypeError。调用方可 try/catch，杜绝静默失效。
+    if (!(try php_is_callable(callable)).toBool()) {
+        var cbuf: [512]u8 = undefined;
+        if (callable.isString()) {
+            const msg = std.fmt.bufPrint(&cbuf, "Call to undefined function {s}()", .{callable.asString().data}) catch "Call to undefined function";
+            return try throwThrowable("Error", msg, allocator);
+        }
+        return try throwThrowable("TypeError", "go(): Argument #1 ($callable) must be a valid callback", allocator);
+    }
+
+    // ★F-1-b：作用域限定符在 spawn 点固化——协程体不继承调用方的 class scope 快照，
+    //   `go self::m(...)` 的字符串若原样进协程，body 内会因「no class scope」致命。
+    //   此处把 `self|static|parent::m` 改写为「具体类名::m」的新字符串（协程体持有其份额）。
+    var coro_callable = callable;
+    var coro_callable_owned = false;
+    if (q4ResolveScopeCallable(callable, allocator)) |resolved| {
+        coro_callable = resolved;
+        coro_callable_owned = true;
+    }
+    // 后续任一步失败：改写串的 1 份份额由本守卫释放（成功路径已转交协程）。
+    errdefer if (coro_callable_owned) coro_callable.release(allocator);
 
     const coro_args = try allocator.alloc(Value, args.len - 1);
     for (args[1..], 0..) |arg, i| {
@@ -47734,11 +47826,12 @@ pub fn php_go(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Va
 
     const context = try allocator.create(CoroutineContext);
     context.* = .{
-        .callable = callable,
+        .callable = coro_callable,
         .args = coro_args,
         .allocator = allocator,
     };
-    _ = callable.retain();
+    // 改写串自带的 1 份份额直接转交协程；未改写 ⇒ 常规 retain 一份。
+    if (!coro_callable_owned) _ = coro_callable.retain();
 
     const scheduler = try concurrency.getScheduler(allocator);
     const coro_id = try scheduler.spawn(php_coroutine_entry, context);
@@ -48823,6 +48916,21 @@ fn registerZigSelect(allocator: Allocator) !void {
 pub fn php_go_builtin(args: []const Value, allocator: Allocator) !Value {
     // ★Go 式协程 M1：go(callable, ...args) 变参面——生成码把全部实参打包为切片（与 php_call_user_func 同式）。
     return php_go(Value.initNull(), args, allocator);
+}
+
+/// ★F-1-b（多协程能力加固）：go 语句形（方法/静态方法 callee 或含 `...` 展开）的实参数组面。
+///   生成码先把 callee 与实参分别求值成「可调用数组 + 实参数组」，此处展平后复用 php_go，
+///   与 php_go_builtin 的切片面等价（php_go 内部 retain 每个实参）。
+pub fn php_go_args_array_builtin(callable: Value, args_array: Value) anyerror!Value {
+    if (!args_array.isArray()) return error.InvalidArgument;
+    var list: std.ArrayListUnmanaged(Value) = .empty;
+    defer list.deinit(runtime_allocator);
+    try list.append(runtime_allocator, callable);
+    var it = args_array.asArray().elements.iterator();
+    while (it.next()) |entry| {
+        try list.append(runtime_allocator, entry.value_ptr.*);
+    }
+    return php_go(Value.initNull(), list.items, runtime_allocator);
 }
 
 /// go_join(?int $id) 的直调切片面（生成码打包约定，与 php_go_builtin 同式）。
