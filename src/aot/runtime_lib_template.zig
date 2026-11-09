@@ -964,6 +964,15 @@ pub fn initRuntime(allocator: Allocator) !void {
     ClassMeta.registerDateTimeClasses(runtime_allocator) catch {};
     registerZigChannel(runtime_allocator) catch {};
     registerZigSelect(runtime_allocator) catch {};
+    // ★Go 式协程 M1：注册每协程全局态快照钩子（设计稿 §3.4）与协程未捕获异常钩子（D1=A）。
+    concurrency.registerStateHooks(.{
+        .size = @sizeOf(CoroutineStateSnapshot),
+        .init = coroStateInit,
+        .save = coroStateSave,
+        .restore = coroStateRestore,
+        .deinit = coroStateDeinit,
+    });
+    concurrency.registerCoroutineErrorHook(phpCoroutineUncaught);
     gc_release_events = 0;
     current_exception = Value.initNull();
     has_exception = false;
@@ -1549,6 +1558,20 @@ fn gcBufferArray(a: *PHPArray) void {
     gcMaybeCollect();
 }
 
+/// ★AOT-CODEGEN-012 组10 验收：与 gcUnbufferObject 同式——数组从 GC roots 缓冲摘除。
+/// rc==0 的数组不可能处于引用环（环成员互相持有 ⇒ rc≥1），故可先摘缓冲再同步 deinit。
+fn gcUnbufferArray(a: *PHPArray) void {
+    if (!a.gc_info.buffered) return;
+    a.gc_info.buffered = false;
+    a.gc_info.color = .white;
+    for (cycle_roots.items, 0..) |r, i| {
+        if (r == .array and r.array == a) {
+            _ = cycle_roots.swapRemove(i);
+            break;
+        }
+    }
+}
+
 fn gcBufferObject(o: *PHPObject) void {
     if (gc_in_progress) return;
     if (o.gc_info.buffered) return;
@@ -1585,6 +1608,9 @@ fn gcBufferClosure(c: *PHPClosure) void {
 
 fn gcMaybeCollect() void {
     if (gc_in_progress or !gc_enabled) return;
+    // ★Go 式协程 M1（D4=A）：多协程活跃期禁用 cycle 收集——root 集只覆盖 main 栈，
+    //   挂起协程栈上的值可能被误判为循环垃圾；worker 全部结束后窗口自动恢复。
+    if (concurrency.multiActive()) return;
     gc_release_events += 1;
     if (cycle_roots.items.len >= GC_ROOT_THRESHOLD or gc_release_events >= GC_RELEASE_EVENT_THRESHOLD) {
         _ = gcCollectCycles(false);
@@ -1593,6 +1619,8 @@ fn gcMaybeCollect() void {
 
 fn gcCollectCycles(force: bool) usize {
     if (gc_in_progress) return 0;
+    // ★Go 式协程 M1（D4=A）：显式 gc_collect_cycles() 同样在多协程窗口停用（无法安全扫 root）。
+    if (concurrency.multiActive()) return 0;
     if (!force) {
         if (!gc_enabled) return 0;
         if (cycle_roots.items.len < GC_ROOT_THRESHOLD and gc_release_events < GC_RELEASE_EVENT_THRESHOLD) return 0;
@@ -3029,9 +3057,13 @@ pub const PHPArray = struct {
         if (self.ref_count == 0) {
             if (self.gc_info.buffered) {
                 if (!gc_in_progress) {
-                    // 已被 GC buffer：不能立即释放，否则 GC 扫描时访问已释放内存
-                    // 重新 buffer（标记为 purple），让 GC 在下次收集时安全处理
-                    gcBufferArray(self);
+                    // ★AOT-CODEGEN-012 组10 验收：rc==0 ⇒ 同步销毁（PHP/Zend 语义，与对象
+                    // 批次二十八同口径）。旧路径「已 buffered 则重新入缓冲等 GC」令多协程窗口
+                    // （D4=A 停 GC）内所有曾被 retain 过的临时数组只攒不收——协程内 2 万次数组
+                    // 字面量循环实测泄漏 8.6MB。rc==0 不可能处于引用环 ⇒ 先摘缓冲再即时 deinit。
+                    // GC 进行中维持旧口径：由本轮 CollectWhite 统一收。
+                    gcUnbufferArray(self);
+                    self.deinit(allocator);
                 }
                 // GC 进行中时不释放，由 GC 收集阶段统一处理
             } else {
@@ -12519,6 +12551,25 @@ pub fn php_global_make_ref(name_val: Value, allocator: Allocator) !Value {
     return error.InvalidArgument;
 }
 
+/// ★R-339：多维下钻中间层数组化（`$b['new']['deep'] =& $n` / `$a['x'][] =& $m`）。
+///   PHP auto-vivify 契约：中间层 null ⇒ 静默 vivify 为 []；已数组 ⇒ 直通；
+///   非标量（int/string 等）⇒ "Trying to access array offset on {type}" 警告 + 原样
+///   返回（后续 set/push_keep_ref deref 非数组静默拒 ⇒ 绑定不成立，与 PHP 同形）。
+///   与 php_array_elem_ref_vivify 入参 Ref 支（:12536）同逻辑，独立成枚供 IR 下钻链逐层调用。
+pub fn php_array_ref_vivify_middle(v: Value, allocator: Allocator) !Value {
+    if (!v.isRef()) return error.InvalidArgument;
+    const cell = v.asRef();
+    if (cell.isArray()) return v;
+    if (cell.isNull()) {
+        cell.* = Value.initArray(try PHPArray.init(allocator));
+        return v;
+    }
+    var buf: [256]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "Trying to access array offset on {s}", .{phpArgTypeWord(cell.*)}) catch "Trying to access array offset";
+    emitWarning(msg);
+    return v;
+}
+
 /// 获取数组元素的引用（用于引用返回）
 /// 参数：array, key
 /// 返回：指向「已装进元素槽的引用单元」的 Ref（值形态为 Value.initRef(堆 cell)）
@@ -12895,7 +12946,14 @@ fn php_get_public_object_vars_snapshot(obj_val: Value, allocator: Allocator) !Va
     return Value.initArray(res_arr);
 }
 
+/// Go 式 select 核心（组4 验收重写）：cases = [[channel, op, ?value], ...]（op 0=recv 1=send），
+/// timeout 毫秒（null 无限等，0 ≈ Go 的 default 立即返回）。
+/// 就绪判定走 Channel.canRecv/canSend 非消费查询（N:1 单线程，查询与随后消费间无竞态）；
+/// 多 case 就绪时均匀随机选一枚（Go pollorder 公平性对齐，取代原「迭代序第一个」的确定性偏置）；
+/// 无就绪时 yieldNow 让出调度器（M1 自旋让出；真挂起唤醒属 M2；原 std.Thread.yield 忙等漏项一并修）。
+/// closed channel：recv case 即就绪（返 [index, null]，Go ok=false 口径）；send case 不就绪（防选中即炸）。
 fn php_select(args: []const Value, allocator: Allocator) !Value {
+    if (args.len < 1) return error.MissingArgument;
     const cases_arg = args[0];
     if (!cases_arg.isArray()) return error.InvalidArgument;
 
@@ -12907,41 +12965,69 @@ fn php_select(args: []const Value, allocator: Allocator) !Value {
     const array = cases_arg.asArray();
     const start_time = milliTimestamp();
 
+    var ready_list = std.ArrayListUnmanaged(usize).empty;
+    defer ready_list.deinit(allocator);
+
     while (true) {
+        // 第一遍：非消费查询收集就绪 case 下标
+        ready_list.clearRetainingCapacity();
         var iter = array.elements.iterator();
         var index: usize = 0;
         while (iter.next()) |entry| : (index += 1) {
             const case_val = entry.value_ptr.*;
             if (!case_val.isArray()) continue;
-
             const case_arr = case_val.asArray();
             const ch_val = case_arr.get(ArrayKey{ .integer = 0 }) orelse continue;
             const op_val = case_arr.get(ArrayKey{ .integer = 1 }) orelse continue;
-
             if (!Value_isObject(ch_val)) continue;
             const ch_obj = Value_asObject(ch_val);
             if (ch_obj.getProperty("_ptr")) |ptr_val| {
                 const channel = @as(*concurrency.Channel(Value), @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
                 const op = op_val.toInt();
-
                 if (op == 0) {
-                    if (channel.tryRecv()) |val| {
-                        const res_arr = try PHPArray.init(allocator);
-                        try res_arr.push(allocator, Value.initInt(@intCast(index)));
-                        try res_arr.push(allocator, val);
-                        return Value.initArray(res_arr);
-                    }
+                    if (channel.canRecv()) try ready_list.append(allocator, index);
                 } else if (op == 1) {
+                    if (channel.canSend()) try ready_list.append(allocator, index);
+                }
+            }
+        }
+
+        if (ready_list.items.len > 0) {
+            // 就绪集内均匀随机（Go pollorder；用项目既有 getRandomIntRange，Zig 0.16 兼容）
+            const picked = ready_list.items[getRandomIntRange(usize, 0, ready_list.items.len - 1)];
+            var iter2 = array.elements.iterator();
+            var idx2: usize = 0;
+            while (iter2.next()) |entry| : (idx2 += 1) {
+                if (idx2 != picked) continue;
+                const case_val = entry.value_ptr.*;
+                const case_arr = case_val.asArray();
+                const ch_val = case_arr.get(ArrayKey{ .integer = 0 }).?;
+                const op_val = case_arr.get(ArrayKey{ .integer = 1 }).?;
+                const ch_obj = Value_asObject(ch_val);
+                const ptr_val = ch_obj.getProperty("_ptr").?;
+                const channel = @as(*concurrency.Channel(Value), @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
+                if (op_val.toInt() == 0) {
+                    const res_arr = try PHPArray.init(allocator);
+                    try res_arr.push(allocator, Value.initInt(@intCast(picked)));
+                    if (channel.tryRecv()) |val| {
+                        try res_arr.push(allocator, val);
+                    } else {
+                        // closed 空 channel：就绪因 closed，取零值（Go 的 ok=false 口径）
+                        try res_arr.push(allocator, Value.initNull());
+                    }
+                    return Value.initArray(res_arr);
+                } else {
                     const send_val = case_arr.get(ArrayKey{ .integer = 2 }) orelse Value.initNull();
                     _ = send_val.retain();
                     const ok = channel.trySend(send_val) catch {
                         send_val.release(allocator);
-                        continue;
+                        break; // 防御（canSend 已排除 closed）：跳出重扫
                     };
                     if (ok) {
-                        return Value.initInt(@intCast(index));
+                        return Value.initInt(@intCast(picked));
                     }
                     send_val.release(allocator);
+                    break; // 防御：就绪后消费未果，落到 timeout/yieldNow 重扫
                 }
             }
         }
@@ -12951,7 +13037,7 @@ fn php_select(args: []const Value, allocator: Allocator) !Value {
                 return Value.initNull();
             }
         }
-        std.Thread.yield() catch {};
+        concurrency.yieldNow();
     }
 }
 
@@ -15952,38 +16038,14 @@ fn checkSingleType(expected: []const u8, got: []const u8, arg: Value) bool {
     return false;
 }
 
-/// 调用未定义函数时输出 PHP Fatal error 并终止执行
-pub fn php_call_undefined_function(name: []const u8) noreturn {
-    if (!fatalDisplayEnabled()) {
-        php_run_shutdown_functions();
-        std.process.exit(255);
-    }
-    // PHP 输出顺序：先 stderr，再 stdout
-    var ebuf: [1024]u8 = undefined;
-    const stderr_msg = std.fmt.bufPrint(
-        &ebuf,
-        "PHP Fatal error:  Uncaught Error: Call to undefined" ++
-            " function {s}() in {s}:{d}\nStack trace:\n" ++
-            "#0 {{main}}\n  thrown in {s} on line {d}\n",
-        .{ name, src_file, src_line, src_file, src_line },
-    ) catch {
-        std.process.exit(255);
-    };
-    fileWriteAll(2, stderr_msg);
-    var buf: [1024]u8 = undefined;
-    const stdout_msg = std.fmt.bufPrint(
-        &buf,
-        "\nFatal error: Uncaught Error: Call to undefined" ++
-            " function {s}() in {s}:{d}\nStack trace:\n" ++
-            "#0 {{main}}\n  thrown in {s} on line {d}\n",
-        .{ name, src_file, src_line, src_file, src_line },
-    ) catch {
-        fileWriteAll(1, "\nFatal error: Call to undefined function\n");
-        std.process.exit(255);
-    };
-    fileWriteAll(1, stdout_msg);
-    php_run_shutdown_functions();
-    std.process.exit(255);
+/// ★R-342（§269）：调用未定义函数 ⇒ **可捕获** Error「Call to undefined function X()」
+///   （throwThrowable 契约：setException 置旗 + 返回异常 Value 非 Zig error）——与批次十六①
+///   变量调用面（:13086）同口径；未捕获走既有未捕获 fatal 通道（输出形态与 PHP 一致）。
+///   旧实现 noreturn+exit(255) 绕过整条 catch 路由（try/catch 里调用未定义函数被硬终止）。
+pub fn php_call_undefined_function(name: []const u8, allocator: Allocator) !Value {
+    var ubuf: [512]u8 = undefined;
+    const umsg = std.fmt.bufPrint(&ubuf, "Call to undefined function {s}()", .{name}) catch "Call to undefined function";
+    return throwThrowable("Error", umsg, allocator);
 }
 
 /// 输出 PHP 8.1+ Deprecated 警告到 stdout（匹配 display_errors=On）
@@ -17846,7 +17908,13 @@ pub fn php_note_constant_access(name: []const u8) void {
 fn findClassConstantValue(meta_in: *const ClassMeta, name: []const u8, depth: u32) ?Value {
     if (depth > 32) return null;
     // ★F-217（R-325）：类常量值在 class_constants（枚举 case 亦在此表）
-    if (meta_in.class_constants.get(name)) |val| return val;
+    // ★R-344c-a：枚举 case 惰性占位（Missing）⇒ 先物化再返回
+    if (meta_in.class_constants.get(name)) |val| {
+        if (val.isMissing()) {
+            if (materializeEnumCase(meta_in, name)) |mv| return mv;
+        }
+        return val;
+    }
     if (meta_in.parent) |p| {
         if (findClassConstantValue(p, name, depth + 1)) |v| return v;
     }
@@ -17869,8 +17937,13 @@ fn findClassConstant(meta_in: *const ClassMeta, name: []const u8, depth: u32) ?C
     if (meta_in.const_visibility.get(name)) |vis| {
         if (vis != .private or depth == 0) {
             // ★F-217（R-325）：值在 class_constants
+            // ★R-344c-a：枚举 case 惰性占位（Missing）⇒ 先物化再返回
             if (meta_in.class_constants.get(name)) |val| {
-                return .{ .value = val, .owner = meta_in, .vis = vis };
+                const resolved_val = if (val.isMissing())
+                    (materializeEnumCase(meta_in, name) orelse val)
+                else
+                    val;
+                return .{ .value = resolved_val, .owner = meta_in, .vis = vis };
             }
         }
         // private 不继承：命中即停（不继续向父/接口链）
@@ -25552,6 +25625,11 @@ pub const ClassMeta = struct {
     /// ★F-217（R-325）：类常量**值**的独立表——与 static_properties 命名空间物理隔离
     ///（PHP 允许 `const prop` 与 `static $prop` 同名共存）。枚举 case 值也在此表。
     class_constants: std.StringHashMap(Value),
+    /// ★R-344c-a（§273.2）：枚举 case **惰性实例化**登记表（case 名 → backing 标量，null=pure case）。
+    ///   PHP 真值：case 对象在**首访**（`En::A` / `cases()` / `from()` / unserialize E:）时才创建
+    ///   （烧对象 id）；登记期只入本表与 class_constants 的 Missing 占位，不建对象。
+    ///   物化后即从本表移除（对象唯一缓存于 class_constants）。
+    enum_lazy_cases: ?std.StringHashMap(?Value) = null,
     is_abstract: bool = false,
     is_final: bool = false,
     is_interface: bool = false, // 是否为接口
@@ -28484,15 +28562,11 @@ pub const ClassMeta = struct {
                     const this = Value_asObject(ctx);
                     const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initNull();
                     if (!cname_val.isString()) return Value.initNull();
-                    if (findClass(cname_val.asString().data)) |cmeta| {
-                        if (cmeta.is_abstract) return Value.initNull();
-                        const new_obj = try PHPObject.initWithMeta(alloc, cmeta);
-                        if (cmeta.magic_construct) |ctor| {
-                            _ = try ctor(Value_initObject(new_obj), args, alloc);
-                        }
-                        return Value_initObject(new_obj);
-                    }
-                    return Value.initNull();
+                    // ★R-344c-c（§273.4）：四族检查+分配走组合通道；可见性按**反射口径**自检查——
+                    //   PHP 实测：非公开构造器**无条件**抛 `ReflectionException:
+                    //   "Access to non-public constructor of class {X}"`（不评调用方作用域，
+                    //   scope-mk/child 双钉板）；旧实现 abstract/类不存在静默返 null、绕过继承解析。
+                    return reflectionNewInstanceImpl(cname_val.asString().data, args, alloc);
                 }
             }.call,
             .is_static = false,
@@ -28506,26 +28580,22 @@ pub const ClassMeta = struct {
                     const this = Value_asObject(ctx);
                     const cname_val = this.getPropertyDirect("__class_name") orelse return Value.initNull();
                     if (!cname_val.isString()) return Value.initNull();
-                    if (findClass(cname_val.asString().data)) |cmeta| {
-                        if (cmeta.is_abstract) return Value.initNull();
-                        const new_obj = try PHPObject.initWithMeta(alloc, cmeta);
-                        // 从数组参数中提取
-                        if (args[0].isArray()) {
-                            const arr = args[0].asArray();
-                            const count = arr.elements.count();
-                            const real_args = try alloc.alloc(Value, count);
-                            defer alloc.free(real_args);
-                            var idx: usize = 0;
-                            while (idx < count) : (idx += 1) {
-                                real_args[idx] = arr.elements.get(ArrayKey{ .integer = @intCast(idx) }) orelse Value.initNull();
-                            }
-                            if (cmeta.magic_construct) |ctor| {
-                                _ = try ctor(Value_initObject(new_obj), real_args, alloc);
-                            }
-                        }
-                        return Value_initObject(new_obj);
+                    // 非数组实参 ⇒ TypeError（PHP 实测措辞）
+                    if (!args[0].isArray()) {
+                        var tbuf: [256]u8 = undefined;
+                        const tmsg = std.fmt.bufPrint(&tbuf, "ReflectionClass::newInstanceArgs(): Argument #1 ($args) must be of type array, {s} given", .{valueTypeName(args[0])}) catch "ReflectionClass::newInstanceArgs(): Argument #1 must be of type array";
+                        return throwThrowable("TypeError", tmsg, alloc);
                     }
-                    return Value.initNull();
+                    const arr = args[0].asArray();
+                    const count = arr.elements.count();
+                    const owned = try alloc.alloc(Value, count);
+                    defer alloc.free(owned);
+                    var idx: usize = 0;
+                    while (idx < count) : (idx += 1) {
+                        owned[idx] = arr.elements.get(ArrayKey{ .integer = @intCast(idx) }) orelse Value.initNull();
+                    }
+                    // ★R-344c-c（§273.4）：同 newInstance 走反射口径组合通道
+                    return reflectionNewInstanceImpl(cname_val.asString().data, owned, alloc);
                 }
             }.call,
             .is_static = false,
@@ -32780,7 +32850,12 @@ pub fn php_object_get(obj_val: Value, property_name: []const u8) !Value {
     //   重定向 storage；未命中 Warning `Undefined array key` + null，PHP 真值 m5 钉死）。
     if (arrayObjectAsPropsStorage(obj)) |storage| {
         const key = ArrayKey{ .string = PHPString.initStatic(property_name) };
-        if (storage.elements.get(key)) |v| return v; // 借用返回（同 getProperty 契约）
+        // ★R-341（§269）：elements.get 直读不 retain 是借用——自有化（retain 配对），
+        //   与 getProperty 契约（:33119 retain）对齐；R-336 恢复后释放配平。
+        if (storage.elements.get(key)) |v| {
+            _ = v.retain();
+            return v;
+        }
         var wbuf: [256]u8 = undefined;
         const wmsg = std.fmt.bufPrint(&wbuf, "Undefined array key \"{s}\"", .{property_name}) catch "Undefined array key";
         emitWarning(wmsg);
@@ -33562,8 +33637,20 @@ pub fn php_new_object_dynamic(class_name_val: Value, args: []const Value, alloca
     return php_object_new_with_constructor(class_name, args, allocator);
 }
 
-/// 创建新对象并调用构造函数
-pub fn php_object_new_with_constructor(class_name: []const u8, args: []const Value, allocator: Allocator) !Value {
+/// ★R-344a（§269.6）：`new` 第一阶段——类解析 + 实例化性检查 + **裸分配**（对象 id 在此烧掉）。
+///   PHP 的 NEW opcode 顺序：先分配（id 递增/复用），后求实参，再调构造器。
+///   本函数**不调用构造器**；全部检查失败均为可捕获 Error（throwThrowable 契约）。
+pub fn php_object_alloc(class_name: []const u8, allocator: Allocator) !Value {
+    return phpObjectAllocImpl(class_name, allocator, true);
+}
+
+/// ★R-344c-c（§273.4）：反射面专用——四族检查+分配照旧，但**不做构造器可见性检查**
+///   （反射的可见性失败抛 ReflectionException 而非 Error，由调用方按反射口径自检查）。
+pub fn php_object_alloc_skip_visibility(class_name: []const u8, allocator: Allocator) !Value {
+    return phpObjectAllocImpl(class_name, allocator, false);
+}
+
+fn phpObjectAllocImpl(class_name: []const u8, allocator: Allocator, check_visibility: bool) !Value {
     const resolved = try resolveSpecialClassName(class_name);
     var meta = findClass(resolved);
 
@@ -33576,93 +33663,169 @@ pub fn php_object_new_with_constructor(class_name: []const u8, args: []const Val
     }
 
     if (meta == null) {
-        if (!fatalDisplayEnabled()) {
-            php_run_shutdown_functions();
-            std.process.exit(255);
-        }
-        // PHP Fatal error: Class "X" not found
-        // PHP 输出顺序：先 stderr，再 stdout
-        var ebuf: [1024]u8 = undefined;
-        const stderr_msg = std.fmt.bufPrint(
-            &ebuf,
-            "PHP Fatal error:  Uncaught Error: Class \"{s}\"" ++
-                " not found in {s}:{d}\nStack trace:\n" ++
-                "#0 {{main}}\n  thrown in {s} on line {d}\n",
-            .{ resolved, src_file, src_line, src_file, src_line },
-        ) catch {
-            std.process.exit(255);
-        };
-        fileWriteAll(2, stderr_msg);
-        var buf: [1024]u8 = undefined;
-        const stdout_msg = std.fmt.bufPrint(
-            &buf,
-            "\nFatal error: Uncaught Error: Class \"{s}\"" ++
-                " not found in {s}:{d}\nStack trace:\n" ++
-                "#0 {{main}}\n  thrown in {s} on line {d}\n",
-            .{ resolved, src_file, src_line, src_file, src_line },
-        ) catch {
-            fileWriteAll(1, "\nFatal error: Class not found\n");
-            std.process.exit(255);
-        };
-        fileWriteAll(1, stdout_msg);
-        php_run_shutdown_functions();
-        std.process.exit(255);
+        // ★R-344a（§269.6）：类不存在 ⇒ **可捕获** Error（throwThrowable 契约，与 R-342
+        //   未定义函数同族；PHP 8.5.8 实测 `try { new NoSuch(); } catch (\Error)` 可捕获）。
+        //   旧实现自印 fatal + exit(255)，绕过整条 catch 路由。
+        //   未捕获时由既有未捕获通道输出（形态与 PHP 逐字一致，udf_uncaught 探针实证）。
+        var nbuf: [512]u8 = undefined;
+        const nmsg = std.fmt.bufPrint(&nbuf, "Class \"{s}\" not found", .{resolved}) catch "Class not found";
+        return throwThrowable("Error", nmsg, allocator);
     }
 
+    // 实例化性检查（PHP 8.5.8 实测措辞，new_checks_truth 探针逐字对参）：
+    //   interface / trait / enum / abstract 四族均为可捕获 Error。
+    //   ★R-344a：接口/trait/enum 为补齐项（旧只查 abstract）。
+    const m0 = meta.?;
+    if (m0.is_interface) {
+        var msg_buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "Cannot instantiate interface {s}", .{resolved}) catch "Cannot instantiate interface";
+        return throwThrowable("Error", msg, allocator);
+    }
+    if (m0.is_trait) {
+        var msg_buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "Cannot instantiate trait {s}", .{resolved}) catch "Cannot instantiate trait";
+        return throwThrowable("Error", msg, allocator);
+    }
+    if (m0.is_enum) {
+        var msg_buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&msg_buf, "Cannot instantiate enum {s}", .{resolved}) catch "Cannot instantiate enum";
+        return throwThrowable("Error", msg, allocator);
+    }
     // abstract class 实例化检查：new AbstractClass() 抛出 Error
-    if (meta.?.is_abstract) {
+    if (m0.is_abstract) {
         var msg_buf: [256]u8 = undefined;
         const msg = std.fmt.bufPrint(&msg_buf, "Cannot instantiate abstract class {s}", .{resolved}) catch "Cannot instantiate abstract class";
         return throwThrowable("Error", msg, allocator);
     }
 
+    // ★R-344c-b（§273.3）：构造器可见性检查移到分配**之后**——PHP 真值序：
+    //   先分配对象（句柄烧掉）→ 可见性检查失败 → 销毁对象但句柄**不归还空闲栈**
+    //   （php -r 钉板：`new Priv()` 的错误对象取新顶号，不弹空闲栈）。
+    //   措辞不变：`Call to private|protected {声明类}::__construct() from global scope|scope {类}`。
+    //   （R-344a 曾置于分配前；f-eval 仍不求值——检查在实参求值之前，oid_order 语义不受冲击）
     const obj = try PHPObject.initWithMeta(allocator, meta.?);
-
     const obj_val = Value_initObject(obj);
+    if (check_visibility) {
+        if (m0.findMethodLookup("__construct")) |lookup| {
+        const ctor_m = lookup.method;
+        if (ctor_m.is_private or ctor_m.is_protected) {
+            const scope = getCurrentScopeClass();
+            const allowed = if (ctor_m.is_private)
+                (scope != null and std.mem.eql(u8, scope.?.name, lookup.owner.name))
+            else
+                (scope != null and (scope.?.isSubclassOf(lookup.owner.name) or lookup.owner.isSubclassOf(scope.?.name)));
+            if (!allowed) {
+                const vis: []const u8 = if (ctor_m.is_private) "private" else "protected";
+                const msg = if (scope) |s|
+                    try std.fmt.allocPrint(allocator, "Call to {s} {s}::__construct() from scope {s}", .{ vis, lookup.owner.name, s.name })
+                else
+                    try std.fmt.allocPrint(allocator, "Call to {s} {s}::__construct() from global scope", .{ vis, lookup.owner.name });
+                defer allocator.free(msg);
+                // ★R-344c-b（§273.3 定稿序）：**先**经 throwThrowable 分配 Error（取新顶号），
+                //   **后**销毁失败对象并**归还句柄**（deinit 正常走 q4ObjectIdFree）——
+                //   PHP 真值：失败对象的句柄在 Error 分配之后才回到空闲栈（ids2/oid 全序钉板）。
+                const ex = try throwThrowable("Error", msg, allocator);
+                obj_val.release(allocator);
+                return ex;
+            }
+        }
+        }
+    }
 
-    // 调用 __construct
+    return obj_val;
+}
+
+/// ★R-344c-c（§273.4）：反射实例化组合通道——四族检查+分配（跳过可见性），
+///   可见性按反射口径**无条件**检查（非公开构造器 ⇒ `ReflectionException:
+///   "Access to non-public constructor of class {X}"`，措辞用被实例化类名）。
+///   失败序与 `new` 面同（先分异常对象、后销毁失败对象归还句柄）。
+fn reflectionNewInstanceImpl(class_name: []const u8, args: []const Value, allocator: Allocator) !Value {
+    // 前导反斜杠（完全限定名）剥离，与 new 面同径
+    const cname = if (class_name.len > 0 and class_name[0] == '\\') class_name[1..] else class_name;
+    const obj_val = try php_object_alloc_skip_visibility(cname, allocator);
+    // 四族检查/类不存在失败 ⇒ 异常对象上交（旗已置）
+    if (hasException()) return obj_val;
+    errdefer obj_val.release(allocator);
+    if (Value_asObject(obj_val).class_meta) |m| {
+        if (m.findMethodLookup("__construct")) |lookup| {
+            if (lookup.method.is_private or lookup.method.is_protected) {
+                var rbuf: [256]u8 = undefined;
+                const rmsg = std.fmt.bufPrint(&rbuf, "Access to non-public constructor of class {s}", .{m.name}) catch "Access to non-public constructor";
+                const ex = try throwThrowable("ReflectionException", rmsg, allocator);
+                // 与 new 面同序：先分异常对象（取新顶号），后销毁失败对象归还句柄
+                obj_val.release(allocator);
+                return ex;
+            }
+        }
+    }
+    try php_object_call_ctor(obj_val, args, allocator);
+    if (hasException()) {
+        return error.RuntimeError;
+    }
+    return obj_val;
+}
+
+/// ★R-344a：`new` 第三阶段——构造器调用（invoke；可见性检查在 php_object_alloc 内、initWithMeta 之后[R-344c-b]）。
+///   对象寄存器**归生成码所有**：任何失败路径都**不**归还 obj_val
+///   （组合通道 php_object_new_with_constructor 经 errdefer 自行归还；直拆通道由生成码清理）。
+///   失败形态：构造器 Zig error ⇒ 传播；构造器置旗（F-133 单块发射）⇒ error.RuntimeError（不归还对象）。
+pub fn php_object_call_ctor(obj_val: Value, args: []const Value, allocator: Allocator) !void {
+    const obj = Value_asObject(obj_val);
     if (obj.class_meta) |m| {
         if (m.findMethodLookup("__construct")) |lookup| {
-            // ★P2-2：构造器可见性检查（PHP 8.5.8 实测：可捕获 Error；直调/命名/动态三路在本汇聚点同检）。
-            //   措辞：`Call to private|protected {声明类}::__construct() from global scope|scope {类}`。
-            const ctor_m = lookup.method;
-            if (ctor_m.is_private or ctor_m.is_protected) {
-                const scope = getCurrentScopeClass();
-                const allowed = if (ctor_m.is_private)
-                    (scope != null and std.mem.eql(u8, scope.?.name, lookup.owner.name))
-                else
-                    (scope != null and (scope.?.isSubclassOf(lookup.owner.name) or lookup.owner.isSubclassOf(scope.?.name)));
-                if (!allowed) {
-                    const vis: []const u8 = if (ctor_m.is_private) "private" else "protected";
-                    const msg = if (scope) |s|
-                        try std.fmt.allocPrint(allocator, "Call to {s} {s}::__construct() from scope {s}", .{ vis, lookup.owner.name, s.name })
-                    else
-                        try std.fmt.allocPrint(allocator, "Call to {s} {s}::__construct() from global scope", .{ vis, lookup.owner.name });
-                    defer allocator.free(msg);
-                    // 对象未交出 ⇒ 工厂引用归还（同下方构造器抛错支 :32236 先例）
-                    obj_val.release(allocator);
-                    return throwThrowable("Error", msg, allocator);
-                }
-            }
             const guard = ClassContext.init(m, lookup.owner);
             defer guard.deinit();
-            _ = lookup.method.func(obj_val, args, allocator) catch |err| {
-                // __construct 抛错时对象从未交给调用者，工厂持有的 rc=1 必须归还
-                obj_val.release(allocator);
-                return err;
-            };
+            // ★R-344a：构造器抛错不归还对象（拆分通道对象已交出，由生成码异常清理归还）
+            _ = try lookup.method.func(obj_val, args, allocator);
             // F-133: 单块发射器的 throw 只 setException 后正常返回（不走 Zig error）
-            // ⇒ 构造器置了异常同样意味着对象未交出，工厂引用必须在此归还
             if (hasException()) {
-                obj_val.release(allocator);
                 return error.RuntimeError;
             }
             // 注意：构造函数中的 store $this 会 retain，函数结束时会 release
             // 这是正确的引用计数行为，不需要补偿
         }
     }
+}
 
+/// 创建新对象并调用构造函数（组合通道：内部调用方兼容入口）。
+///   ★R-344a：= php_object_alloc + php_object_call_ctor 组合；构造器失败经 errdefer 归还对象
+///   （对象未交出 ⇒ 工厂语义与旧实现一致）。
+pub fn php_object_new_with_constructor(class_name: []const u8, args: []const Value, allocator: Allocator) !Value {
+    const obj_val = try php_object_alloc(class_name, allocator);
+    // alloc 失败 = 可捕获 Error 已置旗且返回值即异常对象 ⇒ 直接上交（与旧实现同语义：
+    //   生成码 reg 收异常对象，hasException 路由，清理链归还）
+    if (hasException()) return obj_val;
+    errdefer obj_val.release(allocator);
+    try php_object_call_ctor(obj_val, args, allocator);
+    if (hasException()) {
+        return error.RuntimeError;
+    }
     return obj_val;
+}
+
+/// ★R-344a：`new $dyn` 的第一阶段（类名 Value 解包 + 裸分配）。
+pub fn php_object_alloc_dynamic(class_name_val: Value, allocator: Allocator) !Value {
+    var class_name_buf: [256]u8 = undefined;
+    var class_name: []const u8 = "";
+
+    if (class_name_val.isString()) {
+        const s = class_name_val.asString();
+        if (s.length <= class_name_buf.len) {
+            @memcpy(class_name_buf[0..s.length], s.data[0..s.length]);
+            class_name = class_name_buf[0..s.length];
+        } else {
+            class_name = s.data[0..s.length];
+        }
+    } else {
+        return error.InvalidClassName;
+    }
+
+    // 去除前导反斜杠（PHP完全限定名）
+    if (class_name.len > 0 and class_name[0] == '\\') {
+        class_name = class_name[1..];
+    }
+
+    return php_object_alloc(class_name, allocator);
 }
 
 /// ★批次十九②：`new` 的命名/展开实参数组通道（命名或展开 ⇒ 编译期统一改道本函数）。
@@ -33670,6 +33833,38 @@ pub fn php_object_new_with_constructor(class_name: []const u8, args: []const Val
 ///  （继承构造器经 findMethodLookup 沿父链解析）；构造器缺失且含命名 ⇒
 ///   Error `Unknown named parameter $x`（C10；纯位置参 PHP 静默忽略，维持既有通道）；
 ///   纯位置 ⇒ 收编回既有实例化通道（单一口径，不另造语义）。
+/// ★R-344a：`new` 命名实参通道的第三阶段——构造器元数据绑定 + 调用（对象归生成码所有，不归还）。
+///   返回 null 占位（.call 发射面统一带结果寄存器；失败经旗标/Zig error 表达）。
+pub fn php_object_call_ctor_named(obj_val: Value, args_array: Value, allocator: Allocator) !Value {
+    const obj = Value_asObject(obj_val);
+    const meta = obj.class_meta orelse return Value.initNull(); // alloc 必带 meta ⇒ 不可达防御
+    const arr = args_array.asArray();
+    const ctor_lookup = meta.findMethodLookup("__construct") orelse {
+        // 无构造器类 + 命名实参 ⇒ Error `Unknown named parameter $x`（C10 真值）
+        var first: []const u8 = "";
+        var it = arr.elements.iterator();
+        while (it.next()) |entry| {
+            switch (entry.key_ptr.*) {
+                .string => |ks| {
+                    first = ks.data;
+                    break;
+                },
+                else => {},
+            }
+        }
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "Unknown named parameter ${s}", .{first}) catch "Unknown named parameter";
+        try throwThrowableDiscard("Error", msg, allocator);
+        return Value.initNull();
+    };
+    const ctor_display = try std.fmt.allocPrint(allocator, "{s}::__construct", .{meta.name});
+    defer allocator.free(ctor_display);
+    const bind = try phpBindNamedValueArray(arr, ctor_lookup.method.param_names, methodVariadicIndex(ctor_lookup.method), ctor_lookup.method.required_params, ctor_display, allocator);
+    defer bind.deinit(allocator);
+    try php_object_call_ctor(obj_val, bind.final_args, allocator);
+    return Value.initNull();
+}
+
 pub fn php_new_object_named(class_name_val: Value, args_array: Value, allocator: Allocator) !Value {
     // 类名提取（与 php_new_object_dynamic 同径）
     var class_name_buf: [256]u8 = undefined;
@@ -33704,32 +33899,15 @@ pub fn php_new_object_named(class_name_val: Value, args_array: Value, allocator:
         return php_object_new_with_constructor(class_name, tmp[0..used], allocator);
     }
 
-    // 含命名 ⇒ 构造器元数据绑定（类未找到 ⇒ 复用既有 Class not found fatal 通道）
-    const resolved = try resolveSpecialClassName(class_name);
-    const meta = findClass(resolved) orelse
-        return php_object_new_with_constructor(class_name, &[_]Value{}, allocator);
-    const ctor_lookup = meta.findMethodLookup("__construct") orelse {
-        // 无构造器类 + 命名实参 ⇒ Error `Unknown named parameter $x`（C10 真值）
-        var first: []const u8 = "";
-        var it = arr.elements.iterator();
-        while (it.next()) |entry| {
-            switch (entry.key_ptr.*) {
-                .string => |ks| {
-                    first = ks.data;
-                    break;
-                },
-                else => {},
-            }
-        }
-        var buf: [256]u8 = undefined;
-        const msg = std.fmt.bufPrint(&buf, "Unknown named parameter ${s}", .{first}) catch "Unknown named parameter";
-        return try throwThrowable("Error", msg, allocator);
-    };
-    const ctor_display = try std.fmt.allocPrint(allocator, "{s}::__construct", .{meta.name});
-    defer allocator.free(ctor_display);
-    const bind = try phpBindNamedValueArray(arr, ctor_lookup.method.param_names, methodVariadicIndex(ctor_lookup.method), ctor_lookup.method.required_params, ctor_display, allocator);
-    defer bind.deinit(allocator);
-    return php_object_new_with_constructor(class_name, bind.final_args, allocator);
+    // 含命名 ⇒ 实例化性检查 + 裸分配（R-344a：检查与分配先于绑定/构造）+ 绑定构造（组合形）
+    const obj_val = try php_object_alloc(class_name, allocator);
+    if (hasException()) return obj_val;
+    errdefer obj_val.release(allocator);
+    _ = try php_object_call_ctor_named(obj_val, args_array, allocator);
+    if (hasException()) {
+        return error.RuntimeError;
+    }
+    return obj_val;
 }
 
 /// 检查类是否存在
@@ -34142,6 +34320,64 @@ pub fn property_exists(ctx: Value, args: []const Value, allocator: Allocator) an
 }
 
 /// Enum::cases() - 返回所有 case 的数组（保持声明顺序）
+/// ★R-344c-a（§273.2）：枚举 case **惰性登记**（nlk 发射点；替代旧的登记期
+///   `php_object_new` 早实例化——PHP 真值：case 对象在首访时才创建（烧对象 id），
+///   未访问的 case 不烧号）。
+///   本函数只建元数据：class_constants 入 Missing 占位（恒 public），payload 入 enum_lazy_cases。
+pub fn registerEnumCaseLazy(meta: *ClassMeta, case_name: []const u8, scalar: Value) !void {
+    try meta.setClassConst(case_name, Value.initMissing(), .public);
+    if (meta.enum_lazy_cases == null) {
+        meta.enum_lazy_cases = std.StringHashMap(?Value).init(meta.allocator);
+    }
+    const name_dupe = try meta.allocator.dupe(u8, case_name);
+    const sv: ?Value = if (scalar.isMissing()) null else scalar;
+    try meta.enum_lazy_cases.?.put(name_dupe, sv);
+}
+
+/// 物化单枚枚举 case（幂等：已物化/非惰性 case 返回 null；惰性 ⇒ 创建对象、写回 class_constants）。
+///   此刻才烧对象 id（PHP 首访惰性真值）。`meta` 标 const 但惰性物化是**逻辑缓存写**（@constCast）。
+fn materializeEnumCase(meta_const: *const ClassMeta, case_name: []const u8) ?Value {
+    const meta: *ClassMeta = @constCast(meta_const);
+    const lazy = &(meta.enum_lazy_cases orelse return null);
+    if (!lazy.contains(case_name)) return null;
+
+    const scalar = lazy.get(case_name) orelse return null;
+    const obj = PHPObject.initWithMeta(meta.allocator, meta) catch return null;
+    const obj_val = Value_initObject(obj);
+    const name_str = PHPString.init(meta.allocator, case_name) catch {
+        obj_val.release(meta.allocator);
+        return null;
+    };
+    obj.setProperty("name", Value.initString(name_str)) catch {};
+    if (scalar) |s| {
+        obj.setProperty("value", s) catch {};
+    }
+    // 移除惰性条目（本表 key/scalar 这份归还；对象属性的 value 由 setProperty 自 retain）
+    if (lazy.fetchRemove(case_name)) |kv| {
+        meta.allocator.free(kv.key);
+        if (kv.value) |v| v.release(meta.allocator);
+    }
+    // 写回 class_constants 替换 Missing 占位（setClassConst 释放旧占位并 retain 新值；
+    //   工厂这份与登记期早实例化的 nl 发射同形置留——常量永生语义一致）
+    meta.setClassConst(case_name, obj_val, .public) catch {};
+    return meta.class_constants.get(case_name);
+}
+
+/// 物化该枚举的全部惰性 case（迭代器场景：from/tryFrom 需全量比较 backing 值）。
+fn materializeAllEnumCases(meta_const: *const ClassMeta) void {
+    const meta: *ClassMeta = @constCast(meta_const);
+    const lazy = &(meta.enum_lazy_cases orelse return);
+    var names = std.ArrayList([]const u8).empty;
+    defer names.deinit(meta.allocator);
+    var it = lazy.keyIterator();
+    while (it.next()) |k| {
+        names.append(meta.allocator, k.*) catch return;
+    }
+    for (names.items) |n| {
+        _ = materializeEnumCase(meta, n);
+    }
+}
+
 fn enumCases(meta: *const ClassMeta, allocator: Allocator) !Value {
     const arr = try PHPArray.init(allocator);
     // 使用 __enum_cases 有序列表
@@ -34154,10 +34390,17 @@ fn enumCases(meta: *const ClassMeta, allocator: Allocator) !Value {
                 if (name_val.isString()) {
                     const name = name_val.asString().data;
                     // ★F-217：case 值在 class_constants
-                    if (meta.class_constants.get(name)) |case_val| {
-                        _ = case_val.retain();
-                        try arr.push(allocator, case_val);
+                    // ★R-344c-a：惰性 case 按声明序逐枚物化（`cases()` 本身就是全量首访）
+                    const case_val = meta.class_constants.get(name) orelse continue;
+                    if (case_val.isMissing()) {
+                        if (materializeEnumCase(meta, name)) |mv| {
+                            _ = mv.retain();
+                            try arr.push(allocator, mv);
+                        }
+                        continue;
                     }
+                    _ = case_val.retain();
+                    try arr.push(allocator, case_val);
                 }
             }
         }
@@ -34167,6 +34410,8 @@ fn enumCases(meta: *const ClassMeta, allocator: Allocator) !Value {
 
 /// Enum::from(value) - 根据 backing value 查找 case，找不到抛 ValueError
 fn enumFrom(meta: *const ClassMeta, needle: Value, allocator: Allocator) !Value {
+    // ★R-344c-a：全量物化（迭代器中途禁改 map）
+    materializeAllEnumCases(meta);
     var it = meta.class_constants.iterator();
     while (it.next()) |entry| {
         const val = entry.value_ptr.*;
@@ -40311,7 +40556,12 @@ pub fn php_sleep(seconds: Value) !Value {
     }
     const secs_bits: u64 = @bitCast(secs_raw);
     const secs: c_uint = @truncate(secs_bits);
-    _ = sleep(secs);
+    // ★Go 式协程 M1（D5=A）：协程内自动让出（定时器挂起），main 内真阻塞——面不变，行为按上下文分流。
+    if (concurrency.inCoroutine()) {
+        concurrency.sleepNs(@as(u64, secs) * std.time.ns_per_s);
+    } else {
+        _ = sleep(secs);
+    }
     return Value.initInt(0);
 }
 
@@ -40326,7 +40576,12 @@ pub fn php_usleep(microseconds: Value) !Value {
     }
     const usecs_bits: u64 = @bitCast(usecs_raw);
     const usecs: c_uint = @truncate(usecs_bits);
-    _ = usleep(usecs);
+    // ★Go 式协程 M1（D5=A）：协程内自动让出，main 内真阻塞。
+    if (concurrency.inCoroutine()) {
+        concurrency.sleepNs(@as(u64, usecs) * std.time.ns_per_us);
+    } else {
+        _ = usleep(usecs);
+    }
     return Value.initNull();
 }
 
@@ -47242,6 +47497,190 @@ pub fn php_base64_decode(str: Value, strict: Value, allocator: Allocator) !Value
 // Concurrency Support
 // ============================================================================
 
+// ★Go 式协程 M1（设计稿 §3.4）：每协程私有全局态快照。
+//   覆盖：异常旗与 pending 异常、@抑制深度（含保存栈）、src_file/src_line、
+//   实参链（current_call_args + call_args_owned_stack）、q4 未定义 FIFO、last_throw 帧。
+//   全局共享（不随快照）：堆与 RC、类表、分配器、对象 id 计数器（设计稿 §3.4 表）。
+const CoroutineStateSnapshot = struct {
+    has_exception: bool,
+    current_exception: Value,
+    error_suppress_depth: u32,
+    error_suppress_saved_n: u32,
+    error_suppress_saved: [128]i64,
+    src_file: []const u8,
+    src_line: u32,
+    current_call_args: ?[]const Value,
+    call_args_owned_stack: std.ArrayListUnmanaged(?[]Value),
+    q4_undef_fifo: [16][]const u8,
+    q4_undef_head: usize,
+    q4_undef_tail: usize,
+    ltf_active: bool,
+    ltf_len: usize,
+    ltf_buf: [512]u8,
+};
+
+comptime {
+    std.debug.assert(@sizeOf(CoroutineStateSnapshot) <= concurrency.STATE_SNAPSHOT_CAPACITY);
+}
+
+fn coroSnap(buf: [*]u8) *CoroutineStateSnapshot {
+    return @ptrCast(@alignCast(buf));
+}
+
+fn coroStateInit(buf: [*]u8) void {
+    const s = coroSnap(buf);
+    s.* = .{
+        .has_exception = false,
+        .current_exception = Value.initNull(),
+        .error_suppress_depth = 0,
+        .error_suppress_saved_n = 0,
+        .error_suppress_saved = undefined,
+        .src_file = "",
+        .src_line = 0,
+        .current_call_args = null,
+        .call_args_owned_stack = .empty,
+        .q4_undef_fifo = undefined,
+        .q4_undef_head = 0,
+        .q4_undef_tail = 0,
+        .ltf_active = false,
+        .ltf_len = 0,
+        .ltf_buf = undefined,
+    };
+}
+
+fn coroStateSave(buf: [*]u8) void {
+    const s = coroSnap(buf);
+    s.has_exception = has_exception;
+    s.current_exception = current_exception;
+    s.error_suppress_depth = error_suppress_depth;
+    s.error_suppress_saved_n = error_suppress_saved_n;
+    s.error_suppress_saved = error_suppress_saved;
+    s.src_file = src_file;
+    s.src_line = src_line;
+    s.current_call_args = current_call_args;
+    // 实参链栈：所有权随快照搬移（restore 时清空快照侧标记，防双重释放）。
+    s.call_args_owned_stack = call_args_owned_stack;
+    s.q4_undef_fifo = q4_undef_fifo;
+    s.q4_undef_head = q4_undef_head;
+    s.q4_undef_tail = q4_undef_tail;
+    if (last_throw_frame) |frame| {
+        s.ltf_active = true;
+        s.ltf_len = frame.len;
+        @memcpy(s.ltf_buf[0..frame.len], frame);
+    } else {
+        s.ltf_active = false;
+        s.ltf_len = 0;
+    }
+}
+
+fn coroStateRestore(buf: [*]const u8) void {
+    const s: *const CoroutineStateSnapshot = @ptrCast(@alignCast(buf));
+    has_exception = s.has_exception;
+    current_exception = s.current_exception;
+    error_suppress_depth = s.error_suppress_depth;
+    error_suppress_saved_n = s.error_suppress_saved_n;
+    error_suppress_saved = s.error_suppress_saved;
+    src_file = s.src_file;
+    src_line = s.src_line;
+    current_call_args = s.current_call_args;
+    call_args_owned_stack = s.call_args_owned_stack;
+    // 快照内堆持有标记清空：所有权已移回全局（见 hooks 所有权纪律注释）。
+    coroSnapMut(buf).call_args_owned_stack = .empty;
+    q4_undef_fifo = s.q4_undef_fifo;
+    q4_undef_head = s.q4_undef_head;
+    q4_undef_tail = s.q4_undef_tail;
+    if (s.ltf_active) {
+        @memcpy(last_throw_frame_buf[0..s.ltf_len], s.ltf_buf[0..s.ltf_len]);
+        last_throw_frame = last_throw_frame_buf[0..s.ltf_len];
+    } else {
+        last_throw_frame = null;
+    }
+}
+
+fn coroSnapMut(buf: [*]const u8) *CoroutineStateSnapshot {
+    return @ptrCast(@alignCast(@constCast(buf)));
+}
+
+fn coroStateDeinit(buf: [*]u8) void {
+    const s = coroSnap(buf);
+    // 仅释放快照仍持有的实参链栈缓冲（元素所有权语义与主路径一致：进程期不回收）。
+    if (s.call_args_owned_stack.capacity > 0) {
+        s.call_args_owned_stack.deinit(runtime_allocator);
+        s.call_args_owned_stack = .empty;
+    }
+}
+
+/// ★Go 式协程 M1（设计 D1=A）：协程内未捕获异常 ⇒ 整程序致命，文案含协程 id，rc=255。
+fn phpCoroutineUncaught(coro_id: u64, err: anyerror) noreturn {
+    if (has_exception) {
+        var ex = getException();
+        defer ex.release(runtime_allocator);
+
+        var class_name: []const u8 = "Exception";
+        var message: []const u8 = "";
+        var ex_file: []const u8 = src_file;
+        var ex_line: i64 = src_line;
+        if (Value_isObject(ex)) {
+            const obj = Value_asObject(ex);
+            class_name = obj.class_name;
+            if (obj.getProperty("message")) |msg_val| {
+                if (msg_val.isString()) message = msg_val.asString().data;
+            }
+            if (obj.getProperty("file")) |fv| {
+                if (fv.isString()) ex_file = fv.asString().data;
+            }
+            if (obj.getProperty("line")) |lv| {
+                if (lv.isInt()) ex_line = lv.asInt();
+            }
+        } else if (ex.isString()) {
+            message = ex.asString().data;
+        }
+
+        var trace_buf: [768]u8 = undefined;
+        const trace: []const u8 = if (last_throw_frame) |frame|
+            std.fmt.bufPrint(&trace_buf, "#0 {s}({d}): {s}\n#1 {{coroutine}}", .{ ex_file, ex_line, frame }) catch "#0 {coroutine}"
+        else
+            "#0 {coroutine}";
+
+        var ebuf: [1536]u8 = undefined;
+        const emsg = std.fmt.bufPrint(
+            &ebuf,
+            "PHP Fatal error:  uncaught {s}: {s} in coroutine #{d}\n" ++
+                "Stack trace:\n{s}\n" ++
+                "  thrown in {s} on line {d}\n",
+            .{ class_name, message, coro_id, trace, ex_file, ex_line },
+        ) catch "";
+        fileWriteAll(2, emsg);
+        var buf: [1536]u8 = undefined;
+        const msg = std.fmt.bufPrint(
+            &buf,
+            "\nFatal error: uncaught {s}: {s} in coroutine #{d}\n" ++
+                "Stack trace:\n{s}\n" ++
+                "  thrown in {s} on line {d}\n",
+            .{ class_name, message, coro_id, trace, ex_file, ex_line },
+        ) catch "";
+        fileWriteAll(1, msg);
+    } else {
+        // 非异常错误（OOM 等）逃逸协程体：同样整程序致命（D1=A）。
+        var ebuf: [256]u8 = undefined;
+        const emsg = std.fmt.bufPrint(
+            &ebuf,
+            "PHP Fatal error:  coroutine #{d} failed with error {s}\n",
+            .{ coro_id, @errorName(err) },
+        ) catch "";
+        fileWriteAll(2, emsg);
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(
+            &buf,
+            "\nFatal error: coroutine #{d} failed with error {s}\n",
+            .{ coro_id, @errorName(err) },
+        ) catch "";
+        fileWriteAll(1, msg);
+    }
+    php_run_shutdown_functions();
+    std.process.exit(255);
+}
+
 const CoroutineContext = struct {
     callable: Value,
     args: []Value,
@@ -47263,26 +47702,21 @@ fn php_coroutine_entry(context: ?*anyopaque) anyerror!void {
         }
 
         // Execute the callable
+        // ★Go 式协程 M1：错误一律向上抛给调度跳板，由 reportCoroutineError →
+        //   phpCoroutineUncaught 按 D1=A 整程序致命（不再就地按 main 文案处理）。
         if (ctx.callable.isString()) {
             const func_name = ctx.callable.asString().data;
             // §8 #6：用户函数名 CI（go 协程字符串 callable 同样不区分大小写）
             if (lookupUserFunctionCI(func_name)) |func| {
-                _ = func(Value.initNull(), ctx.args, ctx.allocator) catch |err| {
-                    if (has_exception) {
-                        php_handle_uncaught_exception();
-                    }
-                    return err;
-                };
+                _ = try func(Value.initNull(), ctx.args, ctx.allocator);
             } else {}
         } else if (ctx.callable.isFunction()) {
             const closure = ctx.callable.asFunction();
-            _ = closure.func(Value.initFunction(closure), ctx.args, ctx.allocator) catch |err| {
-                if (has_exception) {
-                    php_handle_uncaught_exception();
-                }
-                return err;
-            };
+            _ = try closure.func(Value.initFunction(closure), ctx.args, ctx.allocator);
         }
+        // ★D1=A：正常返回但异常旗仍立 ⇒ 协程内未捕获异常（throw 走「返值+旗」通道
+        //   而非 Zig 错误通道），按未捕获处理——抛特征错误，由跳板钩子打印并 exit(255)。
+        if (has_exception) return error.UncaughtCoroutineException;
     }
 }
 
@@ -47593,7 +48027,14 @@ pub fn channel_send(ch: Value, val: Value) !void {
     if (obj.getProperty("_ptr")) |ptr_val| {
         const channel = @as(*concurrency.Channel(Value), @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
         _ = val.retain();
-        try channel.send(val);
+        channel.send(val) catch |err| {
+            // ★Go 式协程 M1：close 后 send ⇒ 可捕获 Error「send on closed channel」（设计稿 §3.3）。
+            val.release(runtime_allocator);
+            if (err == error.ChannelClosed) {
+                _ = throwThrowable("Error", "send on closed channel", runtime_allocator);
+            }
+            return err;
+        };
     }
 }
 
@@ -47644,7 +48085,6 @@ fn registerChannelClassNamed(allocator: Allocator, class_name: []const u8) !void
         .name = "send",
         .func = struct {
             fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
-                _ = runtime_alloc;
                 const this = Value_asObject(ctx);
                 if (args.len < 1) return error.MissingArgument;
 
@@ -47653,7 +48093,14 @@ fn registerChannelClassNamed(allocator: Allocator, class_name: []const u8) !void
 
                 const val = args[0];
                 _ = val.retain();
-                try channel.send(val);
+                channel.send(val) catch |err| {
+                    // ★Go 式协程 M1：close 后 send ⇒ 可捕获 Error「send on closed channel」（设计稿 §3.3）。
+                    val.release(runtime_alloc);
+                    if (err == error.ChannelClosed) {
+                        return throwThrowable("Error", "send on closed channel", runtime_alloc);
+                    }
+                    return err;
+                };
                 return Value.initNull();
             }
         }.call,
@@ -48363,68 +48810,8 @@ fn registerZigSelect(allocator: Allocator) !void {
         .func = struct {
             fn call(ctx: Value, args: []const Value, runtime_alloc: Allocator) anyerror!Value {
                 _ = ctx;
-                if (args.len < 1) return error.MissingArgument;
-                const cases_arg = args[0];
-                if (!cases_arg.isArray()) return error.InvalidArgument;
-
-                var timeout: ?i64 = null;
-                if (args.len > 1 and !args[1].isNull()) {
-                    timeout = args[1].toInt();
-                }
-
-                const array = cases_arg.asArray();
-                const start_time = milliTimestamp();
-
-                while (true) {
-                    var iter = array.elements.iterator();
-                    var index: usize = 0;
-                    while (iter.next()) |entry| : (index += 1) {
-                        const case_val = entry.value_ptr.*;
-                        if (!case_val.isArray()) continue;
-
-                        const case_arr = case_val.asArray();
-
-                        // [channel, op, ?value]
-                        const ch_val = case_arr.get(ArrayKey{ .integer = 0 }) orelse continue;
-                        const op_val = case_arr.get(ArrayKey{ .integer = 1 }) orelse continue;
-
-                        if (!Value_isObject(ch_val)) continue;
-                        const ch_obj = Value_asObject(ch_val);
-                        if (ch_obj.getProperty("_ptr")) |ptr_val| {
-                            const channel = @as(*concurrency.Channel(Value), @ptrFromInt(@as(usize, @intCast(ptr_val.asInt()))));
-                            const op = op_val.toInt(); // 0=recv, 1=send
-
-                            if (op == 0) { // recv
-                                if (channel.tryRecv()) |val| {
-                                    // Return array [index, value]
-                                    const res_arr = try PHPArray.init(runtime_alloc);
-                                    try res_arr.push(runtime_alloc, Value.initInt(@intCast(index)));
-                                    try res_arr.push(runtime_alloc, val);
-                                    return Value.initArray(res_arr);
-                                }
-                            } else if (op == 1) { // send
-                                const send_val = case_arr.get(ArrayKey{ .integer = 2 }) orelse Value.initNull();
-                                _ = send_val.retain();
-                                const ok = channel.trySend(send_val) catch {
-                                    send_val.release(runtime_alloc);
-                                    continue;
-                                };
-                                if (ok) {
-                                    return Value.initInt(@intCast(index));
-                                }
-                                send_val.release(runtime_alloc);
-                            }
-                        }
-                    }
-
-                    if (timeout) |t| {
-                        if (milliTimestamp() - start_time >= t) {
-                            return Value.initNull();
-                        }
-                    }
-
-                    std.Thread.yield() catch {};
-                }
+                // Go 式 select 核心统一实现（就绪集收集+均匀随机+yieldNow），见 php_select。
+                return php_select(args, runtime_alloc);
             }
         }.call,
         .is_static = true,
@@ -48433,9 +48820,19 @@ fn registerZigSelect(allocator: Allocator) !void {
     try registerClass(meta);
 }
 
-pub fn php_go_builtin(callable: Value, allocator: Allocator) !Value {
-    const args = [_]Value{callable};
-    return php_go(Value.initNull(), &args, allocator);
+pub fn php_go_builtin(args: []const Value, allocator: Allocator) !Value {
+    // ★Go 式协程 M1：go(callable, ...args) 变参面——生成码把全部实参打包为切片（与 php_call_user_func 同式）。
+    return php_go(Value.initNull(), args, allocator);
+}
+
+/// go_join(?int $id) 的直调切片面（生成码打包约定，与 php_go_builtin 同式）。
+pub fn php_go_join_builtin(args: []const Value, allocator: Allocator) !Value {
+    return php_go_join(Value.initNull(), args, allocator);
+}
+
+/// go_wait_all() 的直调切片面。
+pub fn php_go_wait_all_builtin(args: []const Value, allocator: Allocator) !Value {
+    return php_go_wait_all(Value.initNull(), args, allocator);
 }
 
 /// array_count_values() - 统计数组中所有值出现的次数

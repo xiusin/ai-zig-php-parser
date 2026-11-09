@@ -245,8 +245,13 @@ fn machineCtxSwitch(save: *MachineContext, restore: *MachineContext) void {
 // 栈分配（64KB 定长 + 末尾保护页；设计 D2：M1 定长，M3 才评审扩容）
 // ============================================================================
 
-/// 每协程可用栈尺寸（设计稿 §3.1：M1 定长 64KB）。
-pub const STACK_SIZE: usize = 64 * 1024;
+/// 每协程可用栈尺寸。
+/// ★AOT-CODEGEN-012 组9 验收（L-3）：原 64KB 实测仅容纳 ~30 层 PHP 调用帧
+/// （AOT 每帧约 2KB：寄存器暂存 + Value 临时量），40 层即保护页致命，无法满足
+/// 「协程内正常业务调用（20+ 层）」；提升到 256KB（≈120 层）。
+/// 虚拟占用 256KB+1 页/协程（1 万协程 ≈ 2.6GB 虚拟，按需驻留——实测 RSS 与 64KB
+/// 时同级，因仅触碰实际使用页）；M3 动态扩容（D2 决议）仍按设计推进。
+pub const STACK_SIZE: usize = 256 * 1024;
 
 const StackAlloc = struct {
     /// 完整映射（含低址保护页）。
@@ -1054,10 +1059,18 @@ fn installGuardPageHandler() void {
         .flags = std.posix.SA.SIGINFO | std.posix.SA.ONSTACK,
     };
     std.posix.sigaction(std.posix.SIG.SEGV, &act, null);
+    // ★AOT-CODEGEN-012 组9 验收：macOS 对 PROT_NONE 保护页的访问经 Mach
+    // KERN_PROTECTION_FAILURE 映射为 SIGBUS（而非 SIGSEGV）——只装 SEGV 时栈溢出
+    // 退化为无文案的 SIGBUS（实测协程栈 40 层递归即 rc=138）。darwin 族两路同装。
+    switch (native_os) {
+        .macos, .ios, .tvos, .watchos, .visionos, .maccatalyst, .driverkit => {
+            std.posix.sigaction(std.posix.SIG.BUS, &act, null);
+        },
+        else => {},
+    }
 }
 
 fn guardSegvHandler(sig: std.posix.SIG, info: *const std.posix.siginfo_t, _: ?*anyopaque) callconv(.c) void {
-    _ = sig;
     const fault_addr: usize = switch (native_os) {
         .linux => @intFromPtr(info.fields.sigfault.addr),
         .macos, .ios, .tvos, .watchos, .visionos, .maccatalyst, .driverkit => @intFromPtr(info.addr),
@@ -1075,14 +1088,14 @@ fn guardSegvHandler(sig: std.posix.SIG, info: *const std.posix.siginfo_t, _: ?*a
             }
         }
     }
-    // 非本运行时保护页：恢复默认处理器并重抛，保持原生崩溃语义（不掩盖真实 bug）。
+    // 非本运行时保护页：恢复默认处理器并按**收到的信号**重抛，保持原生崩溃语义（不掩盖真实 bug）。
     var dfl = std.posix.Sigaction{
         .handler = .{ .handler = std.posix.SIG.DFL },
         .mask = std.posix.sigemptyset(),
         .flags = 0,
     };
-    std.posix.sigaction(std.posix.SIG.SEGV, &dfl, null);
-    std.posix.raise(std.posix.SIG.SEGV) catch {};
+    std.posix.sigaction(sig, &dfl, null);
+    std.posix.raise(sig) catch {};
     std.process.exit(134);
 }
 

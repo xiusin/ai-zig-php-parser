@@ -195,3 +195,79 @@ stateDiagram-v2
 - `zig build test`：全绿
 - 720 语料（pass/ 68 枚全量）：**67 Pass / 0 Compile Fail / 0 Runtime Fail / 0 Diff / 1 Skip**——唯一 Skip 为 f004_oop_deep_inheritance_magic.php（PHP 解释器侧 exit=255 的预存排除项，与基线逐字节一致）；`regression_failures.tsv` 与基线语义零漂移（脚本现版仅落 SKIP/FAIL 条目，基线含全量 PASS 行属旧版格式差异，非行为差异）。报告：[regression_report.md](../../../fuzzy_scripts_720/regression_report.md)（2026-11-08 22:43:32）
 - 探针面板（31 枚 AOT 断言探针）：**54 SAME / 0 DIFF / 0 COMPILE_FAIL**，零漂移
+
+## 10. M1 完整验收（2026-11-09，11 组真实程序）
+
+> 六枚 M1 探针只是冒烟；本节为「协程真能跑起来、结果正确」的完整验收，按老铁要求
+> 写真实业务程序（非玩具断言），发现问题当场修并回报。
+
+### 10.1 验收矩阵与读数
+
+| 组 | 程序 | 预期 | 实际 |
+|---|---|---|---|
+| 1a | [co_accept1a_unbuffered.php](../../../co_accept1a_unbuffered.php) cap=0 多产多消 | 120 元素、无丢失无重复、子序列单调 | **PASS** total=120 order_ok=1 cover_ok=1 |
+| 1b | [co_accept1b_buffered.php](../../../co_accept1b_buffered.php) cap=8 | 300 元素同断言 | **PASS** total=300 order_ok=1 cover_ok=1 |
+| 2 | [co_accept2_pool.php](../../../co_accept2_pool.php) 4 worker×500 任务 | 全完成、每任务一次、平方正确 | **PASS** dist=428,24,24,24 done=500 correct=1 |
+| 3 | [co_accept3_pipeline.php](../../../co_accept3_pipeline.php) 4 段流水线 | close 传播 + 残余处理 + 结果正确 | **PASS** sum=171700 cnt=50 |
+| 4 | [co_accept4_select.php](../../../co_accept4_select.php) select | 公平性/默认/超时/无就绪阻塞 | **PASS** dist=1000,1000 / 0s / 0.15s / [0,ping] |
+| 5 | [co_accept5_nested.php](../../../co_accept5_nested.php) 嵌套 spawn | 12 孙/6 子/2 父、协程内 wait_all | **PASS** waits=1 after_wait=0 |
+| 6a | [co_accept6a_uncaught.php](../../../co_accept6a_uncaught.php) 未捕获 | rc=255 + 协程 id + 栈帧 | **PASS** |
+| 6b | [co_accept6b_catch.php](../../../co_accept6b_catch.php) try/catch 隔离 | 100 次拦截、无串扰 | **PASS** a=100 b=125250 |
+| 7 | [co_accept7_sleep.php](../../../co_accept7_sleep.php) sleep 让出 | 睡眠期他者推进；main 真阻塞 | **PASS** ticks=5 a_ms=154 main_ms=103 |
+| 8 | [co_accept8_stress.php](../../../co_accept8_stress.php) 1 万协程 | 全完成/耗时/内存 | **PASS** spawn=50ms total=99ms RSS=253MB |
+| 9a | [co_accept9a_deep_ok.php](../../../co_accept9a_deep_ok.php) 20/25 层递归 | 正常返回 | **PASS** r20=210 r25=325 |
+| 9b | [co_accept9b_overflow.php](../../../co_accept9b_overflow.php) 20 万层 | 保护页明确致命错 | **PASS** rc=255 `stack overflow in coroutine #1 (guard page hit)` |
+| 10a | [co_accept10a_cow.php](../../../co_accept10a_cow.php) COW/对象句柄 | 收发隔离 + 句柄共享 | **PASS** cow_send=1 cow_recv=1 obj=1 |
+| 10c | [co_accept10c_rc.php](../../../co_accept10c_rc.php) 20 万数组过 channel | 值正确 + RSS 有界 | **PASS** sum 正确，RSS 修复前 106MB → **4.0MB** |
+| 11 | [co_accept11_gc.php](../../../co_accept11_gc.php) cycle-GC 交互 | D4=A 停用 + 活数组不误扫 | **PASS** gc_during=0 gc_after=98 sum 完好 |
+
+### 10.2 本轮当场修复的缺陷
+
+| # | 缺陷 | 根因 | 修法 | 影响面 |
+|---|---|---|---|---|
+| F-1 | 裸 `go(...)` 丢实参 | `k_go` 无条件 parseGo，实参被逗号折叠 | 语句分派前瞻 `l_paren` + AOT/PHP 模式分流 | 仅裸 go 语句 AST 形态 |
+| N-1 | `while(true){...}` 内联 latch 后补发 continue ⇒ Zig `unreachable code` 编译失败 | 循环尾补发缺终止符守卫 | 补 `!lastLineIsReturn`（与 PHI 物化同款） | 循环尾不可达时不再重复 continue |
+| N-2 | 循环体内 builtin 静态调用使后续块整体丢失 | `static_method_call` 的 hasException 条件块内 return 误置 `return_generated` | 移除该置旗（条件块内 return 非函数级终止） | 所有 builtin 静态调用点 |
+| N-3 | `else { foreach ... }` 编译失败（AST-DIRECT-FAIL） | else 臂终止符 switch 缺 `.br` 分支，循环块从未行走 | 补 `.br → 循环头` 递归行走，其余形态不动 | else 臂嵌套循环 |
+| N-4 | **协程内数组大量泄漏**（2 万次数组循环 8.6MB；20 万次过 channel 106MB） | `PHPArray.release` 在 rc==0 且已 buffered 时重新入 GC 缓冲等 GC；多协程窗口 D4=A 停 GC ⇒ 只攒不收（对象侧批次二十八已改，数组侧遗漏） | 新增 `gcUnbufferArray`，rc==0 时摘缓冲 + 同步 deinit（PHP/Zend 语义） | **核心 RC 语义**，需全量回归（已跑） |
+| N-5 | macOS 协程栈溢出报信号 SIGBUS 且无文案（rc=138） | darwin 对 PROT_NONE 违规映射 SIGBUS，处理器只装 SIGSEGV | darwin 双装 SEGV+BUS；兜底按收到信号恢复 DFL 重抛 | 仅 darwin 信号处理 |
+
+### 10.3 本轮新增上报（已修复项见下；剩余项）
+
+| # | 缺陷 | 最小复现 | 状态 |
+|---|---|---|---|
+| F-2a | 单语句 `if (!isset(...) \|\| ...) $x=false;` 后接语句 ⇒ 语句跑到守卫外 | /tmp/v3.php | **已修**（见 §10.5） |
+| F-2b | `??` 合并块后接语句 ⇒ 语句重复发射且一份跑出守卫 | /tmp/v6.php | **已修**（见 §10.5） |
+| L-3 | 64KB 定长栈实测仅容纳 ~30 层 PHP 调用帧（每帧 ~2KB）；40 层即保护页致命 | /tmp/d40.php | **已修**：STACK_SIZE 提升至 256KB（≈120 层）；RSS 实测不变（按需驻留） |
+| L-4 | 31 探针面板脚本不在仓库（上轮为会话本地脚本，已随产物清理） | - | 待重建 |
+
+### 10.4 终末回归读数
+
+- `zig build test`：**通过**（rc=0）
+- `-Dcoroutine=off`（独立 prefix 构建）：**存根语义回退通过**——co_deadlock 无死锁检测 rc=0、co_pingpong spawn 不执行返 NULL
+- 720 语料（深度修复后终轮，2026-11-09 15:39）：**67 Pass / 0 Fail(Compile) / 0 Fail(Runtime) / 0 Fail(Diff) / 1 Skip**——Skip 仍为 f004（PHP 解释器侧 exit=255 预存排除项），与基线逐字节一致，**零漂移**（覆盖 N-4 核心 RC 变更、F-2a/F-2b codegen 变更、256KB 栈变更）
+- 11 组协程验收 + v3/v6 逐字 diff：全绿（见 §10.1/§10.5）
+- 探针面板：脚本缺失（L-4），本轮以 720 + 11 组真实程序 + v3/v6 逐字 diff 替代覆盖
+
+### 10.5 深度修复（F-2a/F-2b 根因与实现）
+
+**根因**：`native_linker.generateForeachFromLabels` 的循环体 cond_br 处理，对臂内「嵌套 if/with-else 或 `||` 短路 + `??` 链」只做**单块/范围行走**：else 臂（if_else_）与 merge 体被外层按顺序无条件重发 ⇒ 语句跑出守卫、重复执行（警告/副作用翻倍），但最终值常碰巧相同，故长期未被语料捕获。`emitSpilledNestedIfMerge` 只认 if-without-else（else==merge）且要求 merge br → 外层 if_merge_/while cond，遇目标为循环增量/coalesce 链即整段放弃。
+
+**实现**：新增 `emitNestedIfElseInline`（native_linker.zig），在**原位缩进**内展开：
+1. 形态 A：嵌套 if-with-else（then/else 均 br 同一 merge）；
+2. 形态 B：嵌套 if-without-else（cond_br.else 即 merge）；
+3. merge 尾链：`??`/`?:`（coalesce_merge_/ternary_merge_）、`||` 短路门（logical_merge_/logical_rhs_）、链尾 if-without-else（br→循环增量/cond/出口），逐级校验后逐级展开，最多 16 级；
+4. 所有校验（PHI、processed、目标形态）在**发射前**完成，任一不满足返回 false，保持既有路径零扩散。
+
+**接入点**（4 处）：foreach/while 循环体 cond_br 的 then/else 臂、GIFL 嵌套 then 臂、`||` 短路门后的 logical_merge 单块行走。
+
+**验证**：
+- v6（`??` + if/else）AOT 输出与 PHP **逐字相同**（修复前 3 次重复 + 守卫外执行）
+- v3（`||` + 嵌套 `??` 链 + 链尾 if）AOT 输出与 PHP **逐字相同**（修复前多出 2 轮警告）
+- 11 组协程验收程序全部复跑 **PASS**（零回归）
+
+### 10.6 栈容量提升（L-3）
+
+- `STACK_SIZE` 64KB → **256KB**（concurrency_runtime.zig）。依据：64KB 实测 ~30 层调用帧（40 层即保护页致命），无法满足协程内正常业务递归。
+- 代价核实：1 万协程压测 RSS **253MB 不变**（256KB 仅虚拟占用，物理按需驻留），spawn 35ms / total 142ms。
+- 复测：100 层递归 `R:100` 正常；20 万层 overflow 仍由保护页报 `stack overflow in coroutine #1 (guard page hit)` rc=255。
