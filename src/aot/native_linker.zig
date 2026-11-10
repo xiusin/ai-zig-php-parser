@@ -5187,6 +5187,8 @@ pub const NativeLinker = struct {
         .{ "go", bi(.{ .runtime_name = "php_go_builtin", .needs_allocator = true }) },
         .{ "go_join", bi(.{ .runtime_name = "php_go_join_builtin", .needs_allocator = true }) },
         .{ "go_wait_all", bi(.{ .runtime_name = "php_go_wait_all_builtin", .needs_allocator = true }) },
+        // ★M2-1：异常收取面（D1=B 可选）
+        .{ "go_join_error", bi(.{ .runtime_name = "php_go_join_error_builtin", .needs_allocator = true }) },
         .{ "php_call_static_dynamic", bi(.{ .runtime_name = "php_call_static_dynamic", .needs_allocator = true }) },
         .{ "php_get_static_property_dynamic", bi(.{ .runtime_name = "php_get_static_property_dynamic", .needs_allocator = true, .may_raise = true }) },
         .{ "php_get_class_constant_dynamic", bi(.{ .runtime_name = "php_get_class_constant_dynamic", .needs_allocator = true, .may_raise = true }) },
@@ -5392,6 +5394,8 @@ pub const NativeLinker = struct {
         // Socket 函数
         .{ "socket_create_pair", bi(.{ .runtime_name = "php_socket_create_pair", .needs_allocator = true }) },
         .{ "socket_close", bi(.{ .runtime_name = "php_socket_close", .needs_allocator = false }) },
+        // ★M2-2：socketpair 的流资源面（fread/fwrite 同一套分派；NetPoller 让出探针通道）
+        .{ "stream_socket_pair", bi(.{ .runtime_name = "php_stream_socket_pair", .needs_allocator = true }) },
 
         // 异常处理函数
         .{ "throwThrowable", bi(.{ .runtime_name = "throwThrowable", .needs_allocator = true }) },
@@ -22332,7 +22336,8 @@ pub const NativeLinker = struct {
     fn isSliceArgsBuiltin(info: BuiltinInfo) bool {
         return std.mem.eql(u8, info.runtime_name, "php_go_builtin") or
             std.mem.eql(u8, info.runtime_name, "php_go_join_builtin") or
-            std.mem.eql(u8, info.runtime_name, "php_go_wait_all_builtin");
+            std.mem.eql(u8, info.runtime_name, "php_go_wait_all_builtin") or
+            std.mem.eql(u8, info.runtime_name, "php_go_join_error_builtin");
     }
 
     fn writeBuiltinArgs(

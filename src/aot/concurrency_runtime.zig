@@ -543,6 +543,20 @@ const TimerEntry = struct {
     coro: *Coroutine,
 };
 
+/// ★M2-2 NetPoller 等待者：协程阻塞在 fd 就绪上（模板流族 read/write 的让出点）。
+/// 所有权纪律：waiter 驻留在**阻塞协程栈帧**上；调度器 poll 后就绪摘下并置 linked=false，
+/// 协程恢复后据 linked 判定是否需自行摘除（防悬挂指针驻留等待表）。
+const IoWaiter = struct {
+    coro: *Coroutine,
+    fd: std.posix.fd_t,
+    events: i16,
+    /// 读超时截止（M2-2-b：stream_set_timeout 建模；null＝无限等）。与定时器共用 poll 超时。
+    deadline_ns: ?i128 = null,
+    /// 截止已到（调度器置位；协程侧据此返回 false）。
+    timed_out: bool = false,
+    linked: bool = true,
+};
+
 const WaitAllWaiter = struct {
     coro: *Coroutine,
     deadline_ns: ?i128,
@@ -567,6 +581,9 @@ const RealScheduler = struct {
     dispatcher_started: bool = false,
     pending_fresh: ?*Coroutine = null,
     timers: std.ArrayListUnmanaged(TimerEntry) = .empty,
+    /// ★M2-2：NetPoller 等待表与 poll(2) 入参缓冲（容量随等待者增长复用）。
+    io_waiters: std.ArrayListUnmanaged(*IoWaiter) = .empty,
+    io_pollfds: std.ArrayListUnmanaged(std.posix.pollfd) = .empty,
     blocked_count: usize = 0,
     worker_alive: usize = 0,
     wait_all_waiters: std.ArrayListUnmanaged(*WaitAllWaiter) = .empty,
@@ -591,6 +608,8 @@ const RealScheduler = struct {
         self.all.deinit(self.allocator);
         self.by_id.deinit(self.allocator);
         self.timers.deinit(self.allocator);
+        self.io_waiters.deinit(self.allocator);
+        self.io_pollfds.deinit(self.allocator);
         self.wait_all_waiters.deinit(self.allocator);
         self.ready.deinit(self.allocator);
         if (self.dispatcher_stack) |*st| st.deinit();
@@ -820,6 +839,96 @@ const RealScheduler = struct {
         }
     }
 
+    // ---- NetPoller（M2-2：poll(2) 便携实现——darwin/linux 同一路径，无 kqueue/epoll 分叉） ----
+
+    fn removeIoWaiter(self: *Scheduler, waiter: *IoWaiter) void {
+        for (self.io_waiters.items, 0..) |w, i| {
+            if (w == waiter) {
+                _ = self.io_waiters.swapRemove(i);
+                return;
+            }
+        }
+    }
+
+    /// poll 超时（ms）：取「最近定时器截止」与「最近 IO 读超时截止」的较小者；
+    /// 两者皆无 ⇒ -1（无限等，Go 的阻塞 IO 语义）。
+    fn pollTimeoutMs(self: *Scheduler) i32 {
+        var deadline: ?i128 = null;
+        if (self.timers.items.len > 0) deadline = self.timers.items[self.timers.items.len - 1].deadline_ns;
+        for (self.io_waiters.items) |w| {
+            const dl = w.deadline_ns orelse continue;
+            if (deadline == null or dl < deadline.?) deadline = dl;
+        }
+        const dl = deadline orelse return -1;
+        const now = nanoNow();
+        const delta = dl - now;
+        if (delta <= 0) return 0;
+        const ms = @divTrunc(delta + std.time.ns_per_ms - 1, std.time.ns_per_ms);
+        return @intCast(@min(ms, std.math.maxInt(i32)));
+    }
+
+    /// 空转等待：有 IO 等待者 ⇒ poll（定时器截止作超时）；否则按既有路径睡到定时器到期。
+    fn waitForEvents(self: *Scheduler) void {
+        if (self.io_waiters.items.len == 0) {
+            if (self.timers.items.len > 0) {
+                const deadline = self.timers.items[self.timers.items.len - 1].deadline_ns;
+                const now = nanoNow();
+                if (deadline > now) {
+                    const delta = deadline - now;
+                    sleepRaw(if (delta > std.math.maxInt(u64)) std.math.maxInt(u64) else @intCast(delta));
+                }
+            }
+            return;
+        }
+        const timeout_ms = self.pollTimeoutMs();
+        self.io_pollfds.clearRetainingCapacity();
+        for (self.io_waiters.items) |w| {
+            self.io_pollfds.append(self.allocator, .{ .fd = w.fd, .events = w.events, .revents = 0 }) catch {
+                // 分配失败：退化为 1ms 睡眠（不挂死、不误报死锁）。
+                sleepRaw(std.time.ns_per_ms);
+                return;
+            };
+        }
+        _ = std.posix.poll(self.io_pollfds.items, timeout_ms) catch {
+            // poll 异常：退化为 1ms 睡眠防忙转；等待者留待下一轮（syscall 终会自报错误）。
+            sleepRaw(std.time.ns_per_ms);
+            return;
+        };
+        const now = nanoNow();
+        self.fireDueTimers(now);
+        self.wakeReadyIoWaiters(now);
+    }
+
+    /// poll 返回后按 revents/截止唤醒：HUP/ERR/NVAL 同样唤醒——让后续 read/write 自行返回 0/错误，
+    /// 避免「对端已关闭却永久挂起」的假死（与 Go netpoller 的 HUP 即就绪口径一致）。
+    /// 读超时截止已到且未就绪 ⇒ 置 timed_out 唤醒（M2-2-b）。
+    fn wakeReadyIoWaiters(self: *Scheduler, now: i128) void {
+        var any_ready = false;
+        for (self.io_waiters.items, 0..) |w, i| {
+            if (self.io_pollfds.items[i].revents != 0) {
+                w.linked = false;
+                any_ready = true;
+            } else if (w.deadline_ns) |dl| {
+                if (now >= dl) {
+                    w.linked = false;
+                    w.timed_out = true;
+                    any_ready = true;
+                }
+            }
+        }
+        if (!any_ready) return;
+        var keep: usize = 0;
+        for (self.io_waiters.items) |w| {
+            if (w.linked) {
+                self.io_waiters.items[keep] = w;
+                keep += 1;
+            } else if (w.coro.state == .blocked) {
+                self.wakeFromDispatch(w.coro);
+            }
+        }
+        self.io_waiters.items.len = keep;
+    }
+
     // ---- 协程收尾 ----
 
     fn onCoroutineFinished(self: *Scheduler, coro: *Coroutine) void {
@@ -851,14 +960,10 @@ const RealScheduler = struct {
                 if (coro.state == .finished) self.onCoroutineFinished(coro);
                 continue;
             }
-            // ready 空：有定时器 ⇒ 睡到最早到期（N:1 下整个进程无可跑者，睡眠时间不饿死任何人）。
-            if (self.timers.items.len > 0) {
-                const deadline = self.timers.items[self.timers.items.len - 1].deadline_ns;
-                const now = nanoNow();
-                if (deadline > now) {
-                    const delta = deadline - now;
-                    sleepRaw(if (delta > std.math.maxInt(u64)) std.math.maxInt(u64) else @intCast(delta));
-                }
+            // ready 空：有定时器或 IO 等待者 ⇒ 阻塞等待（poll 同时覆盖 fd 就绪与定时器截止；
+            // N:1 下整个进程无可跑者，等待窗口不饿死任何人）。
+            if (self.timers.items.len > 0 or self.io_waiters.items.len > 0) {
+                self.waitForEvents();
                 continue;
             }
             if (self.blocked_count > 0) {
@@ -1026,7 +1131,22 @@ pub fn registerCoroutineErrorHook(hook: CoroutineErrorHook) void {
     coroutine_error_hook = hook;
 }
 
-pub fn reportCoroutineError(coro_id: u64, err: anyerror) noreturn {
+/// ★M2-1（D1=B 可选面）：协程体错误先经捕获钩子；返回 true ⇒ 已捕获（记录 Throwable，
+///   由 go_join_error 收取），协程按 finished 正常收尾；返回 false ⇒ 走致命钩子（D1=A）。
+pub const CoroutineErrorCapture = *const fn (coro_id: u64, err: anyerror) bool;
+
+var coroutine_error_capture: ?CoroutineErrorCapture = null;
+
+pub fn registerCoroutineErrorCapture(h: CoroutineErrorCapture) void {
+    coroutine_error_capture = h;
+}
+
+/// 错误逃逸点：先尝试捕获（D1=B），未捕获再按 D1=A 致命。
+/// 注意：本函数**可正常返回**——捕获成功时跳板继续做 finished 收尾。
+pub fn reportCoroutineError(coro_id: u64, err: anyerror) void {
+    if (coroutine_error_capture) |capture| {
+        if (capture(coro_id, err)) return;
+    }
     if (coroutine_error_hook) |hook| {
         hook(coro_id, err);
     }
@@ -1194,6 +1314,73 @@ pub fn multiActive() bool {
         return sched.worker_alive > 0;
     }
     return false;
+}
+
+// ============================================================================
+// NetPoller 公共面（M2-2：模板流族 IO 的让出入口）
+// ============================================================================
+
+/// poll(2) 事件位（模板侧以 `waitFd(fd, IO_READABLE/IO_WRITABLE)` 使用）。
+pub const IO_READABLE: i16 = std.posix.POLL.IN;
+pub const IO_WRITABLE: i16 = std.posix.POLL.OUT;
+
+/// 协程体系是否处于「IO 需要让出」的活跃期：
+/// 无协程（从未 go）/ 已全部结束 / 调度器收尾 ⇒ false，模板走原真阻塞路径（零额外 syscall）。
+pub inline fn ioYieldActive() bool {
+    if (enabled) {
+        const sched = global_scheduler orelse return false;
+        return sched.running and sched.worker_alive > 0;
+    }
+    return false;
+}
+
+/// 等待 fd 就绪（读/写事件）。返回 false ＝读超时截止已到（仅读侧使用；写侧传 null）。
+///   - timeout_ms == 0 ⇒ 非阻塞快检（poll(0) 直返，**不进调度器、不置 timed_out**——
+///     供 stream_set_blocking(false) 与 stream_set_timeout(0,0) 复用）；
+///   - 协程体系活跃 ⇒ 挂 NetPoller 让出，调度器 poll 到就绪/挂断/读超时后唤醒；
+///   - 否则 ⇒ 直接 poll 阻塞（等价原真阻塞语义——此时无其他协程可运行）。
+/// HUP/ERR 亦按就绪返回，由调用方随后的 read/write 自报 0/错误。
+pub fn waitFd(fd: std.posix.fd_t, events: i16, timeout_ms: ?u64) bool {
+    if (timeout_ms) |ms| {
+        if (ms == 0) {
+            var pfd = [1]std.posix.pollfd{.{ .fd = fd, .events = events, .revents = 0 }};
+            const n = std.posix.poll(&pfd, 0) catch return true;
+            return n > 0;
+        }
+    }
+    if (enabled) {
+        if (global_scheduler) |sched| {
+            if (sched.running and sched.worker_alive > 0) {
+                // 快路径：已就绪 ⇒ 不挂起（省一次调度往返；常见于管道已有数据/有写空间）。
+                var pfd = [1]std.posix.pollfd{.{ .fd = fd, .events = events, .revents = 0 }};
+                const ready = std.posix.poll(&pfd, 0) catch 1;
+                if (ready > 0) return true;
+                sched.ensureStarted() catch return pollBlocking(fd, events, timeout_ms);
+                const me = sched.currentCoroutine();
+                var waiter: IoWaiter = .{
+                    .coro = me,
+                    .fd = fd,
+                    .events = events,
+                    .deadline_ns = if (timeout_ms) |ms| nanoNow() + @as(i128, ms) * std.time.ns_per_ms else null,
+                };
+                sched.io_waiters.append(sched.allocator, &waiter) catch return pollBlocking(fd, events, timeout_ms);
+                sched.blockCurrent();
+                // 调度器就绪/超时唤醒时已摘下（linked=false）；异常路径兜底摘除。
+                if (waiter.linked) sched.removeIoWaiter(&waiter);
+                return !waiter.timed_out;
+            }
+        }
+    }
+    return pollBlocking(fd, events, timeout_ms);
+}
+
+/// 无调度器参与的真阻塞 poll（单 fd；EINTR 由 std.posix.poll 内部续等）。
+/// 返回 false ＝超时未就绪（timeout_ms 非 null 时）。
+fn pollBlocking(fd: std.posix.fd_t, events: i16, timeout_ms: ?u64) bool {
+    var pfd = [1]std.posix.pollfd{.{ .fd = fd, .events = events, .revents = 0 }};
+    const timeout: i32 = if (timeout_ms) |ms| @intCast(@min(ms, @as(u64, std.math.maxInt(i32)))) else -1;
+    const n = std.posix.poll(&pfd, timeout) catch return true;
+    return n > 0;
 }
 
 /// Zig\Select 等多路等待的协作让出点。

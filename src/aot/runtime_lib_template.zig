@@ -399,6 +399,8 @@ pub inline fn milliTimestamp() i64 {
 
 /// Zig 0.17 兼容：替代 File.writeAll()（已移除）
 /// 使用 POSIX write() 系统调用直接写入文件描述符（忽略错误，无需 libc）
+/// ★M2-2：本函数**不**做协程让出（诊断/致命/普通文件共用；让出会把 fatal 打印挂进调度器）。
+///   用户 echo/print/printf 的背压让出走 `q4OutputWrite`；流资源读写走 `q4ReadFh/q4WriteFh`。
 pub inline fn fileWriteAll(fd: std.posix.fd_t, data: []const u8) void {
     _ = std.posix.system.write(fd, data.ptr, data.len);
 }
@@ -917,6 +919,15 @@ fn deltaU64(current: u64, base: u64) u64 {
 
 /// 初始化运行时
 pub fn initRuntime(allocator: Allocator) !void {
+    // ★M2-2：忽略 SIGPIPE（PHP CLI 同口径）——向已关闭的 socket/管道写时由 write(2)
+    //   返回 EPIPE（q4WriteFd 归类为 BrokenPipe），而不是进程被信号 13 静默杀死。
+    var sigpipe_ign = std.posix.Sigaction{
+        .handler = .{ .handler = std.posix.SIG.IGN },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.PIPE, &sigpipe_ign, null);
+
     alloc_counters = .{};
     alloc_baseline = .{};
     last_opened_dir = null;
@@ -973,6 +984,9 @@ pub fn initRuntime(allocator: Allocator) !void {
         .deinit = coroStateDeinit,
     });
     concurrency.registerCoroutineErrorHook(phpCoroutineUncaught);
+    // ★M2-1：先捕获记录（go_join_error 面），未捕获再走 D1=A 致命钩子。
+    concurrency.registerCoroutineErrorCapture(coCaptureCoroutineError);
+    coroutine_errors = .empty;
     gc_release_events = 0;
     current_exception = Value.initNull();
     has_exception = false;
@@ -1425,6 +1439,9 @@ pub fn deinitRuntime() void {
         last_opened_dir = null;
         res.release(runtime_allocator);
     }
+    // ★M2-1：收尾前未收取的协程异常 ⇒ 按 D1=A 致命；无残留则释放记录表。
+    fatalOnUnobservedCoroutineErrors();
+    coroutineErrorsDeinit();
     concurrency.shutdownScheduler();
     cleanupAllClasses();
     debugFramesDeinit(); // ★F-6：清空 debug_backtrace 帧栈（开态兜底；关态本就是空）
@@ -3369,6 +3386,22 @@ pub const Value = struct {
         context_options: ?*PHPArray = null,
         /// ★批次二十九：tmpfile() 语义——fclose/释放时删除 uri 指向的临时文件
         unlink_on_close: bool = false,
+        /// ★M2-2：fd 的阻塞类别（NetPoller 让出判据；fopen/stream_socket_pair 创建时判定一次）
+        wait_mode: WaitMode = .always_ready,
+        /// ★M2-2：socket 对流（stream_socket_pair）——meta 形状与非 seekable 语义
+        sock: bool = false,
+        /// ★M2-2-b：读超时（stream_set_timeout 建模；仅 socket 流受理）。
+        ///   null＝无限等（负值实参的 PHP 实测口径）；0＝非阻塞读（PHP 实测 (0,0)：空串、timed_out 不置位）。
+        ///   socket 流创建时默认 60000ms（PHP 的 default_socket_timeout 默认值）。
+        read_timeout_ms: ?u64 = null,
+        /// ★M2-2-c：本次读因「非阻塞（stream_set_blocking(false) 或 (0,0) 超时）」而无数据。
+        ///   口径（PHP 8.5.8 实测）：不算 EOF、不置 timed_out；fread/stream_get_contents ⇒ ""，
+        ///   fgets/fgetc/fscanf/fgetcsv/stream_get_line ⇒ false，fpassthru ⇒ 已转发字节数。
+        would_block: bool = false,
+
+        /// fd 阻塞类别：普通文件恒就绪（跳过 poll）；blocking＝poll 后 syscall；
+        /// nonblocking＝自行置了 O_NONBLOCK（socket pair），syscall 可能 EAGAIN，需让出重试。
+        pub const WaitMode = enum { always_ready, blocking, nonblocking };
 
         pub fn retain(self: *PHPResource) void {
             self.ref_count += 1;
@@ -4681,6 +4714,7 @@ const builtin_function_map = std.StaticStringMap(BuiltinFn).initComptime(.{
     .{ "shmop_open", wrapBuiltin_shmop_open },
     .{ "socket_close", wrapBuiltin_socket_close },
     .{ "socket_create_pair", wrapBuiltin_socket_create_pair },
+    .{ "stream_socket_pair", wrapBuiltin_stream_socket_pair },
     .{ "stream_register_wrapper", wrapBuiltin_stream_register_wrapper },
     .{ "stream_wrapper_register", wrapBuiltin_stream_wrapper_register },
 
@@ -7136,6 +7170,12 @@ fn wrapBuiltin_socket_create_pair(ctx: Value, args: []const Value, allocator: Al
     return php_socket_create_pair(args[0], args[1], args[2], args[3], allocator);
 }
 
+fn wrapBuiltin_stream_socket_pair(ctx: Value, args: []const Value, allocator: Allocator) !Value {
+    _ = ctx;
+    if (args.len < 3) return error.InvalidArgumentCount;
+    return php_stream_socket_pair(args[0], args[1], args[2], allocator);
+}
+
 fn wrapBuiltin_stream_register_wrapper(ctx: Value, args: []const Value, allocator: Allocator) !Value {
     _ = ctx;
     if (args.len < 2) return error.InvalidArgumentCount;
@@ -9262,9 +9302,10 @@ fn wrapBuiltin_fscanf(ctx: Value, args: []const Value, allocator: Allocator) !Va
     defer buf.deinit(allocator);
     var chunk: [8192]u8 = undefined;
     while (true) {
-        const n = std.posix.read(fh.handle, &chunk) catch break;
+        const n = q4ReadFh(res, fh, &chunk) catch break;
         if (n == 0) {
-            res.eof = true;
+            // ★M2-2-b/c：超时/非阻塞无数据不算 EOF（buf 空 ⇒ 下方 eof_before_any ⇒ false）
+            if (!res.timed_out and !res.would_block) res.eof = true;
             break;
         }
         try buf.appendSlice(allocator, chunk[0..n]);
@@ -9836,6 +9877,168 @@ fn substrReplaceString(str: []const u8, replacement: []const u8, start: i64, len
 }
 
 // ============================================================================
+// ★M2-2：协程感知 IO（NetPoller 让出）——流族 read/write 的统一出入口
+//   设计：docs/design/2026-11-08-go-style-coroutine-design.md §M2 / §3.4
+//   - 普通文件恒就绪 ⇒ 不做任何 poll（零开销；file/php://memory/temp/input 全走此路）；
+//   - 管道/终端/stdio ⇒ poll(POLLIN/POLLOUT) 就绪后再 syscall（poll 保证随后 syscall 不长阻塞）；
+//   - socket 对（O_NONBLOCK）⇒ syscall 先试，EAGAIN 再挂 NetPoller 让出重试（快路径零 poll）。
+//   仅在协程体系活跃（ioYieldActive）时让出；无协程程序与原实现逐字节等价。
+// ============================================================================
+
+/// 阻塞 fd 的单次写块上限：POSIX 保证 poll(POLLOUT) 后可无阻塞写入 PIPE_BUF（各平台最小 512）。
+const Q4_IO_CHUNK: usize = 512;
+
+/// fd 阻塞类别判定（fstat；普通文件恒就绪，跳过 poll）。
+fn q4ClassifyFd(fd: std.posix.fd_t) Value.PHPResource.WaitMode {
+    var st: std.c.Stat = undefined;
+    if (std.c.fstat(fd, &st) != 0) return .blocking;
+    return if (st.mode & std.c.S.IFMT == std.c.S.IFREG) .always_ready else .blocking;
+}
+
+/// 协程感知读：返回实际读字节数（0=EOF/超时/非阻塞无数据）；错误原样上抛。
+/// ★M2-2-b 读超时：等待截止 ⇒ 置 res.timed_out 并返回 0（调用方据此返回 false/部分内容）；
+///   成功读（含 EOF 的 0 字节）复位 timed_out（PHP 实测口径）。
+/// ★M2-2-c 非阻塞：`stream_set_blocking(false)` 或 `(0,0)` 超时 ⇒ 不挂 NetPoller、不置 timed_out，
+///   置 res.would_block 并返回 0（调用方据此区分 EOF 与「暂无数据」）。
+fn q4ReadFh(res: *Value.PHPResource, fh: *std.Io.File, buf: []u8) !usize {
+    res.would_block = false;
+    // 非阻塞读判定：显式 set_blocking(false)，或零超时（(0,0)——PHP 实测与 set_blocking(false) 同效）
+    const nonblocking_read = !res.blocked or (if (res.read_timeout_ms) |ms| ms == 0 else false);
+    if (res.wait_mode == .nonblocking) {
+        while (true) {
+            const n = std.posix.read(fh.handle, buf) catch |err| switch (err) {
+                error.WouldBlock => {
+                    if (nonblocking_read) {
+                        res.would_block = true;
+                        return 0;
+                    }
+                    const t = res.read_timeout_ms;
+                    if (!concurrency.waitFd(fh.handle, concurrency.IO_READABLE, t)) {
+                        res.timed_out = true;
+                        return 0;
+                    }
+                    continue;
+                },
+                else => return err,
+            };
+            res.timed_out = false;
+            return n;
+        }
+    }
+    // 阻塞类 fd（普通文件恒就绪 / 管道/终端）：非阻塞读用 poll(0) 快检，不占用调度器
+    if (nonblocking_read and res.wait_mode != .always_ready) {
+        if (!concurrency.waitFd(fh.handle, concurrency.IO_READABLE, 0)) {
+            res.would_block = true;
+            return 0;
+        }
+    } else if (res.wait_mode == .blocking and concurrency.ioYieldActive()) {
+        const t = res.read_timeout_ms; // 当前仅 socket 流有超时（管道/终端恒 null）
+        if (!concurrency.waitFd(fh.handle, concurrency.IO_READABLE, t)) {
+            res.timed_out = true;
+            return 0;
+        }
+    }
+    const n = try std.posix.read(fh.handle, buf);
+    res.timed_out = false;
+    return n;
+}
+
+/// 协程感知写：返回累计写入字节数；阻塞口径下 EAGAIN/部分写按让出重试，错误上抛。
+/// ★M2-2-c 非阻塞写（stream_set_blocking(false)）：单次试写，EAGAIN ⇒ 0、部分写 ⇒ 实际字节数
+///   （PHP 8.5.8 实测：满缓冲 fwrite 返 0，部分写返部分长度）；普通文件恒就绪 ⇒ 仍写全量。
+fn q4WriteFh(res: *Value.PHPResource, fh: *std.Io.File, bytes: []const u8) !usize {
+    if (!res.blocked and res.wait_mode != .always_ready) {
+        if (res.wait_mode == .blocking) {
+            // 阻塞 fd（管道/终端）：逻辑非阻塞须先 poll(0) 快检——否则满缓冲 write 会真阻塞；
+            // 可写 ⇒ 至多 PIPE_BUF 一次写（POSIX 保证 poll(POLLOUT) 后该量不阻塞）。
+            if (!concurrency.waitFd(fh.handle, concurrency.IO_WRITABLE, 0)) return 0;
+            const chunk = bytes[0..@min(bytes.len, Q4_IO_CHUNK)];
+            while (true) {
+                const n = q4WriteFd(fh.handle, chunk) catch |err| switch (err) {
+                    error.Interrupted => continue,
+                    error.WouldBlock => return 0,
+                    else => return err,
+                };
+                return n;
+            }
+        }
+        // O_NONBLOCK fd（socket 对）：直接试写，EAGAIN ⇒ 0、部分写 ⇒ 实际字节数
+        while (true) {
+            const n = q4WriteFd(fh.handle, bytes) catch |err| switch (err) {
+                error.Interrupted => continue,
+                error.WouldBlock => return 0,
+                else => return err,
+            };
+            return n;
+        }
+    }
+    const yielding = res.wait_mode != .always_ready and concurrency.ioYieldActive();
+    var written: usize = 0;
+    while (written < bytes.len) {
+        const rest = bytes[written..];
+        // 阻塞 fd：分块 + 先等 POLLOUT（poll 保证随后整块写不长阻塞）；
+        // 非阻塞 fd：整段试写，EAGAIN 再等（快路径零 poll）。
+        const chunk = if (res.wait_mode == .blocking and yielding) rest[0..@min(rest.len, Q4_IO_CHUNK)] else rest;
+        if (res.wait_mode == .blocking and yielding) _ = concurrency.waitFd(fh.handle, concurrency.IO_WRITABLE, null);
+        const n = q4WriteFd(fh.handle, chunk) catch |err| switch (err) {
+            error.Interrupted => continue,
+            error.WouldBlock => {
+                _ = concurrency.waitFd(fh.handle, concurrency.IO_WRITABLE, null);
+                continue;
+            },
+            else => return err,
+        };
+        if (n == 0) break;
+        written += n;
+    }
+    return written;
+}
+
+/// 单次 write(2)（Zig 0.17 无 std.posix.write ⇒ libc 直调 + errno 归类）。
+fn q4WriteFd(fd: std.posix.fd_t, bytes: []const u8) !usize {
+    const n = std.c.write(fd, bytes.ptr, bytes.len);
+    if (n >= 0) return @intCast(n);
+    return switch (std.c._errno().*) {
+        @intFromEnum(std.c.E.AGAIN) => error.WouldBlock,
+        @intFromEnum(std.c.E.INTR) => error.Interrupted,
+        @intFromEnum(std.c.E.PIPE) => error.BrokenPipe,
+        @intFromEnum(std.c.E.BADF) => error.NotOpenForWriting,
+        @intFromEnum(std.c.E.NOSPC) => error.NoSpaceLeft,
+        else => error.WriteFailed,
+    };
+}
+
+/// echo/print/printf 的输出口（★M2-2）：协程活跃期对管道/终端分块 + POLLOUT 让出，
+/// stdout 背压（慢消费者）不再卡死整个调度器；无协程或重定向到普通文件 ⇒ 一次直写（等价旧路径）。
+/// 诊断/致命路径仍走 fileWriteAll —— 那里让出会把 fatal 打印挂进调度器。
+fn q4OutputWrite(bytes: []const u8) void {
+    if (!concurrency.ioYieldActive() or q4StdFdAlwaysReady(1)) {
+        _ = std.posix.system.write(1, bytes.ptr, bytes.len);
+        return;
+    }
+    var written: usize = 0;
+    while (written < bytes.len) {
+        const chunk = bytes[written..][0..@min(bytes.len - written, Q4_IO_CHUNK)];
+        _ = concurrency.waitFd(1, concurrency.IO_WRITABLE, null);
+        const n = q4WriteFd(1, chunk) catch break;
+        if (n == 0) break;
+        written += n;
+    }
+}
+
+/// 标准 fd 恒就绪缓存（-1 未探测）：重定向到普通文件 ⇒ 直写；管道/终端 ⇒ 让出治理。
+var q4_std_fd_ready: [2]i8 = .{ -1, -1 };
+fn q4StdFdAlwaysReady(fd: std.posix.fd_t) bool {
+    const idx: usize = if (fd == 1) 0 else 1;
+    var v = q4_std_fd_ready[idx];
+    if (v < 0) {
+        v = if (q4ClassifyFd(fd) == .always_ready) 1 else 0;
+        q4_std_fd_ready[idx] = v;
+    }
+    return v == 1;
+}
+
+// ============================================================================
 // 文件I/O函数
 // ============================================================================
 
@@ -10043,7 +10246,7 @@ pub fn php_fopen(filename: Value, mode: Value, allocator: Allocator) !Value {
                 allocator.destroy(handle);
                 return Value.initBool(false);
             };
-            res.* = .{ .ref_count = 1, .file_handle = handle, .type_name = "stream" };
+            res.* = .{ .ref_count = 1, .file_handle = handle, .type_name = "stream", .wait_mode = q4ClassifyFd(handle.handle) };
             // ★批次二十九：meta 承载（uri=原始入参全文；mode 强制带 b——PHP 实测 memory/temp 恒 "w+b" 形）
             res.uri = allocator.dupe(u8, fname) catch "";
             res.mode = q4CanonMode(allocator, mode_letter, mode_plus, true) catch "";
@@ -10073,7 +10276,7 @@ pub fn php_fopen(filename: Value, mode: Value, allocator: Allocator) !Value {
                 allocator.destroy(handle);
                 return Value.initBool(false);
             };
-            res.* = .{ .ref_count = 1, .file_handle = handle, .type_name = "stream" };
+            res.* = .{ .ref_count = 1, .file_handle = handle, .type_name = "stream", .wait_mode = q4ClassifyFd(handle.handle) };
             // ★批次二十九：stdio 族 mode 按实参（PHP 实测 'w' 不强制 b）
             res.uri = allocator.dupe(u8, fname) catch "";
             res.mode = q4CanonMode(allocator, mode_letter, mode_plus, mode_binary) catch "";
@@ -10095,7 +10298,7 @@ pub fn php_fopen(filename: Value, mode: Value, allocator: Allocator) !Value {
                 allocator.destroy(handle);
                 return Value.initBool(false);
             };
-            res.* = .{ .ref_count = 1, .file_handle = handle, .type_name = "stream" };
+            res.* = .{ .ref_count = 1, .file_handle = handle, .type_name = "stream", .wait_mode = q4ClassifyFd(handle.handle) };
             res.uri = allocator.dupe(u8, fname) catch "";
             res.mode = q4CanonMode(allocator, mode_letter, mode_plus, true) catch "";
             return Value.initResource(res);
@@ -10125,7 +10328,7 @@ pub fn php_fopen(filename: Value, mode: Value, allocator: Allocator) !Value {
                 allocator.destroy(handle);
                 return Value.initBool(false);
             };
-            res.* = .{ .ref_count = 1, .file_handle = handle, .type_name = "stream" };
+            res.* = .{ .ref_count = 1, .file_handle = handle, .type_name = "stream", .wait_mode = q4ClassifyFd(handle.handle) };
             // ★批次二十九：input 的 meta mode 强制带 b（PHP 实测 "rb"）
             res.uri = allocator.dupe(u8, fname) catch "";
             res.mode = q4CanonMode(allocator, mode_letter, mode_plus, true) catch "";
@@ -10207,10 +10410,68 @@ pub fn php_fopen(filename: Value, mode: Value, allocator: Allocator) !Value {
         allocator.destroy(handle);
         return Value.initBool(false);
     };
-    res.* = .{ .ref_count = 1, .file_handle = handle, .type_name = "stream", .append = append };
+    res.* = .{ .ref_count = 1, .file_handle = handle, .type_name = "stream", .append = append, .wait_mode = q4ClassifyFd(handle.handle) };
     // ★批次二十九：真实文件的 meta 承载（uri=路径原文；mode=归一化形，b 按实参）
     res.uri = allocator.dupe(u8, fname) catch "";
     res.mode = q4CanonMode(allocator, mode_letter, mode_plus, mode_binary) catch "";
+    return Value.initResource(res);
+}
+
+/// stream_socket_pair - PHP 契约：返回两枚互通流资源（[0]/[1]），fread/fwrite/fclose 与
+///   普通流同一套分派。★M2-2：承载为 socketpair(2) + O_NONBLOCK（新建 fd，独占 open file
+///   description，改标志不与任何既有描述符共享）⇒ 读写经 NetPoller 让出，是协程 echo 的
+///   标准探针通道。meta 形状对齐 PHP 8.5.8：stream_type=generic_socket、mode=r+、seekable=false。
+pub fn php_stream_socket_pair(domain: Value, sock_type: Value, protocol: Value, allocator: Allocator) !Value {
+    const d: c_int = @intCast(domain.toInt());
+    const t: c_int = @intCast(sock_type.toInt());
+    const p: c_int = @intCast(protocol.toInt());
+    var sv: [2]c_int = .{ -1, -1 };
+    if (socketpair(d, t, p, &sv) != 0) return Value.initBool(false);
+    q4SetNonblock(sv[0]);
+    q4SetNonblock(sv[1]);
+    const arr = try PHPArray.init(allocator);
+    var i: usize = 0;
+    while (i < 2) : (i += 1) {
+        const v = q4WrapSocketStream(sv[i], allocator) orelse {
+            // 未包装的 fd 直接关（已入列者随 arr.release 关闭）
+            arr.release(allocator);
+            var j: usize = i;
+            while (j < 2) : (j += 1) _ = close(sv[j]);
+            return Value.initBool(false);
+        };
+        arr.push(allocator, v) catch {
+            var vv = v;
+            vv.release(allocator); // 关当前 fd
+            arr.release(allocator); // 关已入列 fd
+            var j: usize = i + 1;
+            while (j < 2) : (j += 1) _ = close(sv[j]);
+            return Value.initBool(false);
+        };
+    }
+    return Value.initArray(arr);
+}
+
+/// 置 O_NONBLOCK（F_GETFL|F_SETFL；保留既有标志位）。
+fn q4SetNonblock(fd: std.posix.fd_t) void {
+    const fl = std.c.fcntl(fd, std.c.F.GETFL);
+    if (fl < 0) return;
+    const OInt = @Int(.unsigned, @bitSizeOf(std.c.O));
+    const nb: OInt = @bitCast(@as(std.c.O, .{ .NONBLOCK = true }));
+    _ = std.c.fcntl(fd, std.c.F.SETFL, @as(c_int, @intCast(fl | @as(c_int, @intCast(nb)))));
+}
+
+/// socket fd ⇒ stream 资源（type_name=stream；wait_mode=nonblocking；sock=true）。
+fn q4WrapSocketStream(fd: std.posix.fd_t, allocator: Allocator) ?Value {
+    const handle = allocator.create(std.Io.File) catch return null;
+    handle.* = .{ .handle = fd, .flags = .{ .nonblocking = true } };
+    const res = allocator.create(Value.PHPResource) catch {
+        handle.close(getIo());
+        allocator.destroy(handle);
+        return null;
+    };
+    res.* = .{ .ref_count = 1, .file_handle = handle, .type_name = "stream", .wait_mode = .nonblocking, .sock = true, .read_timeout_ms = 60_000 };
+    res.uri = "";
+    res.mode = allocator.dupe(u8, "r+") catch "";
     return Value.initResource(res);
 }
 
@@ -10252,14 +10513,8 @@ pub fn php_fwrite(handle: Value, data: Value, allocator: Allocator) !Value {
 
     // ★批次二十六：写结果自查（旧走 fileWriteAll 吞错误 ⇒ 只读 fd/满盘场景恒返全长）。
     //   PHP 口径：写失败 ⇒ false；部分写 ⇒ 实际字节数。
-    var written: usize = 0;
-    while (written < content.len) {
-        // std.c.write：isize 返回，负值 = -errno（PHP 口径：写失败 ⇒ false；部分写 ⇒ 实际字节数）
-        const n = std.c.write(fh.handle, content[written..].ptr, content.len - written);
-        if (n < 0) return Value.initBool(false);
-        if (n == 0) break;
-        written += @intCast(n);
-    }
+    // ★M2-2：经 NetPoller 让出（管道/socket 背压时让出调度器；普通文件直写不变）。
+    const written = q4WriteFh(res, fh, content) catch return Value.initBool(false);
     return Value.initInt(@intCast(written));
 }
 
@@ -10276,8 +10531,15 @@ pub fn php_fread(handle: Value, length: Value, allocator: Allocator) !Value {
     const fh = res.file_handle.?;
     const buffer = allocator.alloc(u8, @intCast(len)) catch return Value.initBool(false);
     defer allocator.free(buffer);
-    const bytes_read = std.posix.read(fh.handle, buffer) catch return Value.initBool(false);
-    if (bytes_read < buffer.len) res.eof = true;
+    // ★M2-2：经 NetPoller 让出（管道/终端/socket 对；普通文件恒就绪走原直读）
+    const bytes_read = q4ReadFh(res, fh, buffer) catch return Value.initBool(false);
+    // ★M2-2-b：读超时 ⇒ false（PHP 实测；EOF 标志不置位）
+    if (res.timed_out) return Value.initBool(false);
+    // ★M2-2-c：非阻塞无数据 ⇒ ""（PHP 实测；不算 EOF）
+    if (res.would_block) return Value.initString(try PHPString.init(allocator, ""));
+    // ★M2-2：EOF 口径对齐 PHP——socket/管道只在 read=0 时置 EOF（短读＝当前可用数据读完，
+    //   不意味流结束）；普通文件保持「短读即 EOF」（read(2) 对普通文件除 EOF 外不会短读）。
+    if (bytes_read == 0 or (bytes_read < buffer.len and res.wait_mode == .always_ready)) res.eof = true;
     const output = try PHPString.init(allocator, buffer[0..bytes_read]);
     return Value.initString(output);
 }
@@ -10339,8 +10601,11 @@ pub fn php_fgets(handle: Value, length: Value) !Value {
     var pos: usize = 0;
 
     while (pos < limit) {
-        const n = std.posix.read(fh.handle, buf[pos .. pos + 1]) catch break;
+        const n = q4ReadFh(res, fh, buf[pos .. pos + 1]) catch break;
         if (n == 0) {
+            // ★M2-2-b：超时 ⇒ 返回已读部分（PHP 实测）；EOF 标志不置位
+            // ★M2-2-c：非阻塞无数据 ⇒ 同样返回已读部分，不算 EOF
+            if (res.timed_out or res.would_block) break;
             res.eof = true;
             break;
         }
@@ -10365,9 +10630,9 @@ pub fn php_fgetc(handle: Value, allocator: Allocator) !Value {
     const res = handle.asResource();
     const fh = res.file_handle orelse return Value.initBool(false);
     var buf: [1]u8 = undefined;
-    const n = std.posix.read(fh.handle, &buf) catch return Value.initBool(false);
+    const n = q4ReadFh(res, fh, &buf) catch return Value.initBool(false);
     if (n == 0) {
-        res.eof = true;
+        if (!res.timed_out and !res.would_block) res.eof = true; // ★M2-2-b/c：超时/非阻塞无数据不算 EOF
         return Value.initBool(false);
     }
     return Value.initString(try PHPString.init(allocator, &buf));
@@ -10406,9 +10671,10 @@ pub fn php_stream_get_contents(handle: Value, length: Value, offset: Value, allo
     while (true) {
         const room: usize = if (want) |w| @min(chunk.len, w -| buf.items.len) else chunk.len;
         if (room == 0) break;
-        const n = std.posix.read(fh.handle, chunk[0..room]) catch break;
+        const n = q4ReadFh(res, fh, chunk[0..room]) catch break;
         if (n == 0) {
-            res.eof = true;
+            // ★M2-2-b/c：超时或非阻塞无数据 ⇒ 返回已收内容（PHP 实测 ""）；不算 EOF
+            if (!res.timed_out and !res.would_block) res.eof = true;
             break;
         }
         try buf.appendSlice(allocator, chunk[0..n]);
@@ -10490,6 +10756,8 @@ pub fn php_ftell(handle: Value) !Value {
     if (!handle.isResource()) return Value.initBool(false);
     const res = handle.asResource();
     const fh = res.file_handle orelse return Value.initBool(false);
+    // ★M2-2：socket 对流不可 seek，但 PHP 8.5.8 实测 ftell 返 0（流层位置恒 0）且不发警告。
+    if (res.sock) return Value.initInt(0);
     const pos = streamLseek(fh, 0, 1) catch return Value.initBool(false);
     return Value.initInt(@intCast(pos));
 }
@@ -10499,6 +10767,11 @@ pub fn php_fseek(handle: Value, offset: Value, whence: Value) !Value {
     if (!handle.isResource() or !offset.isInt()) return Value.initInt(-1);
     const res = handle.asResource();
     const fh = res.file_handle orelse return Value.initInt(-1);
+    // ★M2-2：socket 对流不可 seek（PHP 8.5.8 实测：Warning「Stream does not support seeking」+ -1）
+    if (res.sock) {
+        emitWarning("fseek(): Stream does not support seeking");
+        return Value.initInt(-1);
+    }
 
     const off = offset.asInt();
     const w = if (whence.isInt()) whence.asInt() else 0;
@@ -10691,8 +10964,12 @@ pub fn php_fpassthru(handle: Value) !Value {
     var buf: [8192]u8 = undefined;
     var total: usize = 0;
     while (true) {
-        const n = std.posix.read(fh.handle, &buf) catch return Value.initBool(false);
+        const n = q4ReadFh(res, fh, &buf) catch return Value.initBool(false);
         if (n == 0) {
+            // ★M2-2-b：读超时 ⇒ -1（PHP 8.5.8 实测：copy_to_stream 失败返回 -1）
+            if (res.timed_out) return Value.initInt(-1);
+            // ★M2-2-c：非阻塞无数据 ⇒ 返回已转发字节数（PHP 实测 0）；不算 EOF
+            if (res.would_block) break;
             res.eof = true;
             break;
         }
@@ -10790,6 +11067,15 @@ pub fn php_stream_get_meta_data(handle: Value, allocator: Allocator) !Value {
     try Put.b(arr, allocator, "timed_out", res.timed_out);
     try Put.b(arr, allocator, "blocked", res.blocked);
     try Put.b(arr, allocator, "eof", res.eof);
+    // ★M2-2：socket 对流（stream_socket_pair）的 meta 形状对齐 PHP 8.5.8——
+    //   仅 7 键（无 wrapper_type/uri），stream_type=generic_socket、seekable=false。
+    if (res.sock) {
+        try Put.str(arr, allocator, "stream_type", "generic_socket");
+        try Put.str(arr, allocator, "mode", res.mode);
+        try Put.i(arr, allocator, "unread_bytes", 0);
+        try Put.b(arr, allocator, "seekable", false);
+        return Value.initArray(arr);
+    }
     try Put.str(arr, allocator, "wrapper_type", kinds.wrapper);
     try Put.str(arr, allocator, "stream_type", kinds.stype);
     try Put.str(arr, allocator, "mode", res.mode);
@@ -10799,32 +11085,46 @@ pub fn php_stream_get_meta_data(handle: Value, allocator: Allocator) !Value {
     return Value.initArray(arr);
 }
 
-/// stream_set_blocking - PHP 8.5.8 实测分族：真实文件/stdout/stderr/output 受理并记账
+/// stream_set_blocking - PHP 8.5.8 实测分族：真实文件/stdout/stderr/output/socket 受理并记账
 ///   （meta blocked 随置位）；php://memory/temp/input **忽略非阻塞标志**（blocked 恒 true——
 ///   内存族与只读请求体无非阻塞语义）。返回值全族恒 true。
+/// ★M2-2-c：socket 流（O_NONBLOCK 承载，供 NetPoller）不改 fd 标志，由 res.blocked 逻辑分流——
+///   false ⇒ 读侧 poll(0) 快检/试读、无数据置 would_block；写侧单次试写（EAGAIN ⇒ 0）。
 pub fn php_stream_set_blocking(handle: Value, enabled: Value) !Value {
     const res = switch (try q4StreamArgCheck("stream_set_blocking", handle)) {
         .ok => |r| r,
         .thrown => |v| return v,
     };
     const st = q4StreamKinds(res.uri).stype;
-    const ignorable = std.mem.eql(u8, st, "MEMORY") or std.mem.eql(u8, st, "TEMP") or std.mem.eql(u8, st, "Input");
+    const ignorable = !res.sock and (std.mem.eql(u8, st, "MEMORY") or std.mem.eql(u8, st, "TEMP") or std.mem.eql(u8, st, "Input"));
     if (!ignorable) {
         res.blocked = enabled.toBool();
     }
     return Value.initBool(true);
 }
 
-/// stream_set_timeout - PHP 8.5.8 实测：普通文件流 / php://memory / php://input 恒 false
-///   （超时仅网络流语义）。AOT 流族无网络承载 ⇒ 恒 false 为诚实真值。
+/// stream_set_timeout - ★M2-2-b：socket 流受理并建模读超时（秒+微秒；0,0 ⇒ 非阻塞读；
+///   负值 ⇒ 无限等）；普通文件流 / php://memory / php://input 仍恒 false（PHP 实测口径）。
+///   超时效果：fread/fscanf/fgetcsv/stream_get_line ⇒ false；fgets ⇒ 已读部分；
+///   stream_get_contents ⇒ 已收内容；fpassthru ⇒ -1；meta timed_out 置位（成功读后复位）。
 pub fn php_stream_set_timeout(handle: Value, seconds: Value, microseconds: Value) !Value {
-    switch (try q4StreamArgCheck("stream_set_timeout", handle)) {
-        .ok => {},
+    const res = switch (try q4StreamArgCheck("stream_set_timeout", handle)) {
+        .ok => |r| r,
         .thrown => |v| return v,
+    };
+    if (!res.sock) return Value.initBool(false);
+    const sec = seconds.toInt();
+    const usec = microseconds.toInt();
+    if (sec < 0 or usec < 0) {
+        // 负值 ⇒ 无限等（PHP 实测：负超时等同未设置）
+        res.read_timeout_ms = null;
+        return Value.initBool(true);
     }
-    _ = seconds;
-    _ = microseconds;
-    return Value.initBool(false);
+    const sec_ms = std.math.mul(u64, @as(u64, @intCast(sec)), 1000) catch std.math.maxInt(u64);
+    const usec_u: u64 = @intCast(usec);
+    const usec_ms: u64 = usec_u / 1000 + @intFromBool(usec_u % 1000 != 0); // 微秒向上取整到毫秒
+    res.read_timeout_ms = std.math.add(u64, sec_ms, usec_ms) catch std.math.maxInt(u64);
+    return Value.initBool(true);
 }
 
 /// stream_get_line - PHP 8.5.8 实测口径：length 0 ⇒ 不限（读至 EOF/分隔符）；
@@ -10836,6 +11136,7 @@ pub fn php_stream_get_line(handle: Value, length: Value, ending: Value, allocato
         .thrown => |v| return v,
     };
     const fh = res.file_handle.?; // q4StreamArgCheck 已保证非空
+    res.would_block = false; // 本函数末尾据「本次是否非阻塞无数据」判 false
     var limit: usize = 0; // 0 = 不限
     if (length.isInt()) {
         const l = length.asInt();
@@ -10852,9 +11153,10 @@ pub fn php_stream_get_line(handle: Value, length: Value, ending: Value, allocato
         var byte: [1]u8 = undefined;
         var matched: usize = 0;
         while (limit == 0 or buf.items.len < limit) {
-            const n = std.posix.read(fh.handle, &byte) catch break;
+            const n = q4ReadFh(res, fh, &byte) catch break;
             if (n == 0) {
-                res.eof = true;
+                // ★M2-2-b/c：超时/非阻塞无数据不算 EOF
+                if (!res.timed_out and !res.would_block) res.eof = true;
                 break;
             }
             if (byte[0] == delim[matched]) {
@@ -10879,15 +11181,17 @@ pub fn php_stream_get_line(handle: Value, length: Value, ending: Value, allocato
         var chunk: [8192]u8 = undefined;
         while (limit == 0 or buf.items.len < limit) {
             const room = if (limit == 0) chunk.len else @min(chunk.len, limit - buf.items.len);
-            const n = std.posix.read(fh.handle, chunk[0..room]) catch break;
+            const n = q4ReadFh(res, fh, chunk[0..room]) catch break;
             if (n == 0) {
-                res.eof = true;
+                // ★M2-2-b/c：超时/非阻塞无数据不算 EOF
+                if (!res.timed_out and !res.would_block) res.eof = true;
                 break;
             }
             try buf.appendSlice(allocator, chunk[0..n]);
         }
     }
-    if (buf.items.len == 0 and res.eof) return Value.initBool(false);
+    // ★M2-2-b/c：超时/非阻塞无数据且无任何内容 ⇒ false（PHP 实测）
+    if (buf.items.len == 0 and (res.eof or res.timed_out or res.would_block)) return Value.initBool(false);
     return Value.initString(try PHPString.init(allocator, buf.items));
 }
 
@@ -10922,7 +11226,7 @@ pub fn php_tmpfile(allocator: Allocator) !Value {
         std.Io.Dir.cwd().deleteFile(getIo(), tmpl) catch {};
         return Value.initBool(false);
     };
-    res.* = .{ .ref_count = 1, .file_handle = handle, .type_name = "stream", .unlink_on_close = true };
+    res.* = .{ .ref_count = 1, .file_handle = handle, .type_name = "stream", .unlink_on_close = true, .wait_mode = q4ClassifyFd(handle.handle) };
     res.uri = allocator.dupe(u8, tmpl) catch "";
     res.mode = allocator.dupe(u8, "r+b") catch "";
     return Value.initResource(res);
@@ -11094,12 +11398,18 @@ fn csvParamChar(v: Value, default: u8) u8 {
 }
 
 /// 读一条 CSV 逻辑行（引号内的换行不算行尾）。返回 0 表示 EOF（无内容）。
-fn csvReadLine(fh: *std.Io.File, encl: u8, out: *std.ArrayList(u8), allocator: Allocator) !usize {
+fn csvReadLine(res: *Value.PHPResource, fh: *std.Io.File, encl: u8, out: *std.ArrayList(u8), allocator: Allocator) !usize {
     var in_quotes = false;
     while (true) {
         var b: [1]u8 = undefined;
-        const n = std.posix.read(fh.handle, &b) catch return error.ReadFailed;
+        const n = q4ReadFh(res, fh, &b) catch return error.ReadFailed;
         if (n == 0) {
+            if (res.timed_out) return error.ReadFailed; // ★M2-2-b：fgetcsv 超时 ⇒ false
+            if (res.would_block) {
+                // ★M2-2-c：非阻塞无数据 ⇒ false；已读部分照常成行（PHP 实测口径）
+                if (out.items.len == 0) return error.ReadFailed;
+                break;
+            }
             if (out.items.len == 0) return 0;
             break;
         }
@@ -11198,7 +11508,7 @@ pub fn php_fgetcsv(handle: Value, length: Value, separator: Value, enclosure: Va
 
     var line = std.ArrayList(u8).empty;
     defer line.deinit(allocator);
-    const n = csvReadLine(fh, encl, &line, allocator) catch return Value.initBool(false);
+    const n = csvReadLine(res, fh, encl, &line, allocator) catch return Value.initBool(false);
     if (n == 0) {
         res.eof = true;
         return Value.initBool(false);
@@ -11281,8 +11591,9 @@ pub fn php_fputcsv(handle: Value, fields: Value, separator: Value, enclosure: Va
         }
     }
     try out.appendSlice(allocator, eol_str);
-    fileWriteAll(fh.handle, out.items);
-    return Value.initInt(@intCast(out.items.len));
+    // ★M2-2：经 NetPoller 让出（与 fwrite 同口径；写失败 ⇒ false）
+    const written = q4WriteFh(res, fh, out.items) catch return Value.initBool(false);
+    return Value.initInt(@intCast(written));
 }
 
 // ============================================================================
@@ -16898,7 +17209,7 @@ fn php_output_write(bytes: []const u8) !void {
         return;
     }
 
-    fileWriteAll(1, bytes);
+    q4OutputWrite(bytes);
 }
 
 pub fn php_echo(value: Value) !void {
@@ -47673,56 +47984,120 @@ fn coroStateDeinit(buf: [*]u8) void {
     }
 }
 
+/// ★M2-1（D1=B 可选面）：协程异常记录表（id → Throwable + 抛出帧副本）。
+///   仅在 go_join_error 未收取前驻留；go_join / go_wait_all / 进程收尾按 D1=A 兜底致命。
+const CoroErrorRecord = struct {
+    ex: Value,
+    /// runtime_allocator 所有的抛出帧文本副本（null = 无帧）。
+    frame: ?[]u8,
+};
+
+var coroutine_errors: std.AutoHashMapUnmanaged(u64, CoroErrorRecord) = .empty;
+
+/// 捕获钩子：PHP 异常 ⇒ 记入表并正常返回（协程按 finished 收尾）；非 PHP 异常 ⇒ false 走致命。
+fn coCaptureCoroutineError(coro_id: u64, _: anyerror) bool {
+    if (!has_exception) return false;
+    const ex = getException(); // 转移所有权并清旗（异常态不再留给快照）
+    var frame_copy: ?[]u8 = null;
+    if (last_throw_frame) |frame| {
+        frame_copy = runtime_allocator.dupe(u8, frame) catch {
+            ex.release(runtime_allocator);
+            return false;
+        };
+    }
+    coroutine_errors.put(runtime_allocator, coro_id, .{ .ex = ex, .frame = frame_copy }) catch {
+        ex.release(runtime_allocator);
+        if (frame_copy) |fc| runtime_allocator.free(fc);
+        return false;
+    };
+    return true;
+}
+
+fn takeCoroError(coro_id: u64) ?CoroErrorRecord {
+    return if (coroutine_errors.fetchRemove(coro_id)) |kv| kv.value else null;
+}
+
+/// D1=A 门禁：仍有未收取的协程异常 ⇒ 取最小 id 按未捕获致命（join / wait_all / 收尾共用）。
+fn fatalOnUnobservedCoroutineErrors() void {
+    if (coroutine_errors.count() == 0) return;
+    var min_id: u64 = std.math.maxInt(u64);
+    var it = coroutine_errors.iterator();
+    while (it.next()) |entry| {
+        if (entry.key_ptr.* < min_id) min_id = entry.key_ptr.*;
+    }
+    const rec = takeCoroError(min_id).?;
+    coroutineFatalWithException(min_id, rec.ex, rec.frame);
+}
+
+fn coroutineErrorsDeinit() void {
+    var it = coroutine_errors.iterator();
+    while (it.next()) |entry| {
+        entry.value_ptr.ex.release(runtime_allocator);
+        if (entry.value_ptr.frame) |fc| runtime_allocator.free(fc);
+    }
+    coroutine_errors.deinit(runtime_allocator);
+    coroutine_errors = .empty;
+}
+
+/// 未捕获协程异常的统一致命文案（立即路径与延迟到 join/wait_all 的路径共用）。
+/// frame 为抛出帧文本（null ⇒ `#0 {coroutine}`）。
+fn coroutineFatalWithException(coro_id: u64, ex: Value, frame: ?[]const u8) noreturn {
+    var class_name: []const u8 = "Exception";
+    var message: []const u8 = "";
+    var ex_file: []const u8 = src_file;
+    var ex_line: i64 = src_line;
+    if (Value_isObject(ex)) {
+        const obj = Value_asObject(ex);
+        class_name = obj.class_name;
+        if (obj.getProperty("message")) |msg_val| {
+            if (msg_val.isString()) message = msg_val.asString().data;
+        }
+        if (obj.getProperty("file")) |fv| {
+            if (fv.isString()) ex_file = fv.asString().data;
+        }
+        if (obj.getProperty("line")) |lv| {
+            if (lv.isInt()) ex_line = lv.asInt();
+        }
+    } else if (ex.isString()) {
+        message = ex.asString().data;
+    }
+
+    var trace_buf: [768]u8 = undefined;
+    const trace: []const u8 = if (frame) |f|
+        std.fmt.bufPrint(&trace_buf, "#0 {s}({d}): {s}\n#1 {{coroutine}}", .{ ex_file, ex_line, f }) catch "#0 {coroutine}"
+    else
+        "#0 {coroutine}";
+
+    var ebuf: [1536]u8 = undefined;
+    const emsg = std.fmt.bufPrint(
+        &ebuf,
+        "PHP Fatal error:  uncaught {s}: {s} in coroutine #{d}\n" ++
+            "Stack trace:\n{s}\n" ++
+            "  thrown in {s} on line {d}\n",
+        .{ class_name, message, coro_id, trace, ex_file, ex_line },
+    ) catch "";
+    fileWriteAll(2, emsg);
+    var buf: [1536]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        &buf,
+        "\nFatal error: uncaught {s}: {s} in coroutine #{d}\n" ++
+            "Stack trace:\n{s}\n" ++
+            "  thrown in {s} on line {d}\n",
+        .{ class_name, message, coro_id, trace, ex_file, ex_line },
+    ) catch "";
+    fileWriteAll(1, msg);
+
+    php_run_shutdown_functions();
+    std.process.exit(255);
+}
+
 /// ★Go 式协程 M1（设计 D1=A）：协程内未捕获异常 ⇒ 整程序致命，文案含协程 id，rc=255。
+/// ★M2-1：PHP 异常若已被捕获记录（go_join_error 面），此钩子不会被调用；
+///   本钩子仅服务「立即致命」路径（非异常错误，或捕获失败）。
 fn phpCoroutineUncaught(coro_id: u64, err: anyerror) noreturn {
     if (has_exception) {
-        var ex = getException();
-        defer ex.release(runtime_allocator);
-
-        var class_name: []const u8 = "Exception";
-        var message: []const u8 = "";
-        var ex_file: []const u8 = src_file;
-        var ex_line: i64 = src_line;
-        if (Value_isObject(ex)) {
-            const obj = Value_asObject(ex);
-            class_name = obj.class_name;
-            if (obj.getProperty("message")) |msg_val| {
-                if (msg_val.isString()) message = msg_val.asString().data;
-            }
-            if (obj.getProperty("file")) |fv| {
-                if (fv.isString()) ex_file = fv.asString().data;
-            }
-            if (obj.getProperty("line")) |lv| {
-                if (lv.isInt()) ex_line = lv.asInt();
-            }
-        } else if (ex.isString()) {
-            message = ex.asString().data;
-        }
-
-        var trace_buf: [768]u8 = undefined;
-        const trace: []const u8 = if (last_throw_frame) |frame|
-            std.fmt.bufPrint(&trace_buf, "#0 {s}({d}): {s}\n#1 {{coroutine}}", .{ ex_file, ex_line, frame }) catch "#0 {coroutine}"
-        else
-            "#0 {coroutine}";
-
-        var ebuf: [1536]u8 = undefined;
-        const emsg = std.fmt.bufPrint(
-            &ebuf,
-            "PHP Fatal error:  uncaught {s}: {s} in coroutine #{d}\n" ++
-                "Stack trace:\n{s}\n" ++
-                "  thrown in {s} on line {d}\n",
-            .{ class_name, message, coro_id, trace, ex_file, ex_line },
-        ) catch "";
-        fileWriteAll(2, emsg);
-        var buf: [1536]u8 = undefined;
-        const msg = std.fmt.bufPrint(
-            &buf,
-            "\nFatal error: uncaught {s}: {s} in coroutine #{d}\n" ++
-                "Stack trace:\n{s}\n" ++
-                "  thrown in {s} on line {d}\n",
-            .{ class_name, message, coro_id, trace, ex_file, ex_line },
-        ) catch "";
-        fileWriteAll(1, msg);
+        const ex = getException();
+        coroutineFatalWithException(coro_id, ex, last_throw_frame);
     } else {
         // 非异常错误（OOM 等）逃逸协程体：同样整程序致命（D1=A）。
         var ebuf: [256]u8 = undefined;
@@ -47849,6 +48224,8 @@ pub fn php_go_wait_all(ctx: Value, args: []const Value, allocator: Allocator) an
     _ = args;
     _ = allocator;
     _ = concurrency.drainScheduler(null);
+    // ★M2-1：wait_all 是同步点 ⇒ 未收取的协程异常按 D1=A 致命（go_join_error 收走的不再触发）。
+    fatalOnUnobservedCoroutineErrors();
     return Value.initNull();
 }
 
@@ -47857,11 +48234,33 @@ pub fn php_go_join(ctx: Value, args: []const Value, allocator: Allocator) anyerr
     _ = allocator;
     if (args.len == 0 or args[0].isNull()) {
         _ = concurrency.drainScheduler(null);
+        fatalOnUnobservedCoroutineErrors();
         return Value.initNull();
     }
     const id = @as(u64, @intCast(args[0].toInt()));
     const scheduler = try concurrency.getScheduler(runtime_allocator);
     try scheduler.join(id);
+    // ★M2-1：go_join 不收异常（M1 口径）⇒ 目标带未收取异常时在 join 点按 D1=A 致命。
+    if (takeCoroError(id)) |rec| {
+        coroutineFatalWithException(id, rec.ex, rec.frame);
+    }
+    return Value.initNull();
+}
+
+/// ★M2-1（D1=B 可选面）：`go_join_error(?int $id): ?Throwable`
+///   等待 id 结束并返回其未捕获 Throwable（**收取后清除**，二次调用返回 null）；
+///   正常结束 / 未知 id ⇒ null。异常收取后不再触发 D1=A 致命。
+pub fn php_go_join_error(ctx: Value, args: []const Value, allocator: Allocator) anyerror!Value {
+    _ = ctx;
+    _ = allocator;
+    if (args.len == 0 or args[0].isNull()) return Value.initNull();
+    const id = @as(u64, @intCast(args[0].toInt()));
+    const scheduler = try concurrency.getScheduler(runtime_allocator);
+    try scheduler.join(id);
+    if (takeCoroError(id)) |rec| {
+        if (rec.frame) |fc| runtime_allocator.free(fc);
+        return rec.ex;
+    }
     return Value.initNull();
 }
 
@@ -48905,6 +49304,8 @@ fn registerZigChannel(allocator: Allocator) !void {
     try registerUserFunction("go", php_go);
     try registerUserFunction("go_wait_all", php_go_wait_all);
     try registerUserFunction("go_join", php_go_join);
+    // ★M2-1：异常收取面（PHP 无同名内建，安全）
+    try registerUserFunction("go_join_error", php_go_join_error);
 }
 
 fn registerZigSelect(allocator: Allocator) !void {
@@ -48953,6 +49354,11 @@ pub fn php_go_join_builtin(args: []const Value, allocator: Allocator) !Value {
 /// go_wait_all() 的直调切片面。
 pub fn php_go_wait_all_builtin(args: []const Value, allocator: Allocator) !Value {
     return php_go_wait_all(Value.initNull(), args, allocator);
+}
+
+/// ★M2-1：go_join_error(?int $id) 的直调切片面（与 go_join 同式）。
+pub fn php_go_join_error_builtin(args: []const Value, allocator: Allocator) !Value {
+    return php_go_join_error(Value.initNull(), args, allocator);
 }
 
 /// array_count_values() - 统计数组中所有值出现的次数
@@ -50817,6 +51223,11 @@ pub fn php_rewind(handle: Value) !Value {
     if (!handle.isResource()) return Value.initBool(false);
     const res = handle.asResource();
     const fh = res.file_handle orelse return Value.initBool(false);
+    // ★M2-2：socket 对流不可 seek（PHP 8.5.8 实测：Warning + false）
+    if (res.sock) {
+        emitWarning("rewind(): Stream does not support seeking");
+        return Value.initBool(false);
+    }
     _ = streamLseek(fh, 0, 0) catch return Value.initBool(false);
     res.eof = false;
     return Value.initBool(true);
