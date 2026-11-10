@@ -439,7 +439,7 @@ M1 里程碑（Go 式协程内核 + 11 组真实程序验收 + 多协程能力�
 
 ### 14.3 验证
 
-- **G19**（[co_accept19_io_echo.php](../../../co_accept19_io_echo.php)）：**83/83 断言 PASS**——资源/meta 形状、短读 EOF 口径、双协程 echo 往返、定时器与 IO 混排、对端关闭（读残留/EOF/EPIPE 写失败）、多协程并发写、跨协程分片写拼行、`stream_get_contents`/`stream_get_line`/`fgetcsv` 的 socket 路径（含 HUP 唤醒）、字符设备 `.blocking` 读写路径、协程内普通文件 IO；**k 组 28 断言**覆盖 `stream_set_timeout` 全口径（受理面/fread/fgets/fgetc/stream_get_contents/stream_get_line/fgetcsv/fscanf/fpassthru/meta 复位/(0,0)/负值/超时后 EOF）；**l 组 23 断言**覆盖 `stream_set_blocking` 非阻塞口径（meta 记账、各读函数返回值、feof/timed_out 不置位、非阻塞写、对端关闭、与 (0,0) 一致性、普通文件回归）。
+- **G19**（[co_accept19_io_echo.php](../../../co_accept19_io_echo.php)）：**99/99 断言 PASS**——资源/meta 形状、短读 EOF 口径、双协程 echo 往返、定时器与 IO 混排、对端关闭（读残留/EOF/EPIPE 写失败）、多协程并发写、跨协程分片写拼行、`stream_get_contents`/`stream_get_line`/`fgetcsv` 的 socket 路径（含 HUP 唤醒）、字符设备 `.blocking` 读写路径、协程内普通文件 IO；**k 组 28 断言**覆盖 `stream_set_timeout` 全口径；**l 组 23 断言**覆盖 `stream_set_blocking` 非阻塞口径；**m 组 16 断言**覆盖用户态读缓冲（回推/拼接/部分匹配前缀/unread_bytes/混用/EOF/普通文件不受影响）。
 - 全量协程探针：**44/44 预期**（43 既有 + G19；`rc=255` 组：deadlock/uncaught/overflow/18b/18c），零 `FAIL`。
 - `zig build test`：通过（rc=0）。
 - `-Dcoroutine=off`：存根语义不变（co_pingpong 如旧失败）；流资源面无协程路径正常（stream_socket_pair/meta/读写）。
@@ -453,6 +453,6 @@ M1 里程碑（Go 式协程内核 + 11 组真实程序验收 + 多协程能力�
 | ~~M2-2-a~~ | ~~`stream_set_timeout`~~ | **已建模（2026-11-09，见 §14.1；代码标注 M2-2-b）**：socket 读超时经 NetPoller 截止，全族返回值对齐 PHP 实测 |
 | M2-2-c | FIFO 阻塞 `open()` | open 本身不 fiber 化（两个协程各持一端会互等）；读写阶段已走让出 |
 | M2-2-d | `var_dump`/`print_r` 等诊断输出 | 直接 `fileWriteAll`，不让出（与 PHP 阻塞写等价） |
-| M2-2-f | 非阻塞 `stream_get_line` 无分隔符命中 | PHP 靠用户态缓冲返 false 并在下次调用续读；AOT 无用户态缓冲 ⇒ 返回已读部分（不丢数据，返回值有差） |
+| ~~M2-2-f~~ | ~~非阻塞 `stream_get_line` 无分隔符命中~~ | **已消解（M2-2-h，2026-11-10）**：用户态读缓冲回推全部已读字节，返 false 且下次续读拼接（PHP 实测同口径） |
 | M2-2-g | x86_64-linux poll(2) | 与 M1 同环境限制（开发机 aarch64-macos），代码路径无平台分叉 |
 
