@@ -84,12 +84,14 @@ flowchart TD
 | `runtime_allocator`（GPA）、class_registry、内建形参表 | **全局共享**（N:1 无竞争；M3 需审计加锁） | Go 共享内存模型 |
 | 对象 id 计数器/空闲栈 | 全局共享（已 atomic） | — |
 | RC 与 cycle-GC | **共享堆，RC 即活证**；挂起协程栈上的 alloca 槽值由 RC 钉活，无泄漏；cycle-GC 的 root 集 M1 只扫 main 栈，**多协程活跃期禁用 cycle 收集**（文档标注；M3 扩展 root 到各协程栈） | 防 GC 误扫/漏扫 |
-| fiber 化 IO | M1：channel/timer 之外**一律真阻塞**（含文件/网络 IO——文档标注）；M2：kqueue NetPoller（参考 io_integration.zig） | 边界清晰 |
+| fiber 化 IO | M1：channel/timer 之外**一律真阻塞**（含文件/网络 IO——文档标注）；M2：kqueue NetPoller（参考 io_integration.zig） | 边界清晰；**M2-2 已落地 poll(2) NetPoller（2026-11-09）**：流族读写/echo 在协程活跃期让出 |
 
 ### 3.5 异常语义（Go 对齐 + PHP 可读）
 
 - 协程内**未捕获异常**（逃逸出协程体）：Go 口径=整个程序致命错——`Fatal error: uncaught {Class}: {msg} in coroutine #{id}` + 协程内栈帧（§七.5 行号豁免适用）+ exit 255
 - `go_join` **不**传播对端异常（M1 与 Go 一致）；M2 增设可选 `go_join_error($id): ?Throwable` 面（不破坏 M1 口径）
+  - **M2-1 已实现（2026-11-09）**：`go_join_error(?int $id): ?Throwable`——等待目标结束并**收取**其未捕获 Throwable（取后清除，二次调用返 null）；正常结束/未知 id ⇒ null。
+  - 实现口径：协程异常总是先捕获记录；D1=A 前移到**同步点门禁**——`go_join($id)`、`go_wait_all()`、进程收尾三处，未被 `go_join_error` 收取的异常按原文案致命（rc=255）。非 PHP 错误（OOM 等）仍立即致命。
 - 协程体内的 try/catch/finally 全在协程栈内自洽（既有异常机制零改动——只是栈换了）
 
 ### 3.6 PHP 调用面与命名冲突
@@ -125,6 +127,33 @@ flowchart TD
 
 - 内容：timer 堆（sleep/usleep 在协程内让出）；`go_select`（多 channel 就绪多路 + timeout，参考 select.zig）；`go_join_error`；stream/socket IO 经 kqueue 挂 NetPoller（参考 io_integration.zig）非阻塞让出
 - 探针：`co_sleep_interleave.php`（两协程异速 sleep 输出交错断言）、`co_select.php`（就绪随机性归一化断言）、`co_io_echo.php`（socket pair 双协程 echo）
+- **实施追记（2026-11-09，M2-2）**：NetPoller **落地为 poll(2) 便携实现**（darwin/linux 同一路径，免 kqueue/epoll 双实现分叉）。
+  - 调度器空转改为 `poll(fds, timeout)`：fd 就绪与最近定时器截止统一等待；HUP/ERR/NVAL 按就绪唤醒（由 syscall 自报 0/错误）。
+  - 流族出入口：新增 `concurrency.waitFd(fd, IO_READABLE|IO_WRITABLE)`；模板侧按资源 fd 分类——
+    普通文件恒就绪（零 poll）、管道/终端/stdio 先 poll 再 syscall、socket 对 `O_NONBLOCK` 先试写读 EAGAIN 再让出。
+  - `fileWriteAll`（echo/stdout）在协程活跃期分块 + POLLOUT 让出（stdout 背压不再卡死调度器）；无协程程序保持原一次 write。
+  - 新增 PHP 面 `stream_socket_pair($domain,$type,$protocol)`（socketpair(2) + 流资源包装；meta 对齐 PHP 8.5.8：
+    `generic_socket`/`r+`/`seekable=false`，7 键无 wrapper_type/uri）作为协程 IO 的标准探针通道。
+  - 探针落地为 [co_accept19_io_echo.php](../../co_accept19_io_echo.php)：资源/meta 形状、短读 EOF 口径、双协程 echo、
+    定时器与 IO 混排、对端关闭边界、多协程并发写、跨协程分片写拼行、协程内普通文件 IO、stream_set_timeout 全口径、
+    stream_set_blocking 非阻塞口径（83 断言）。
+  - **M2-2-b 已落地（2026-11-09）**：`stream_set_timeout` 对 socket 流建模——读超时经 NetPoller 截止（与定时器共用 poll 超时）：
+    fread/fscanf/fgetcsv/stream_get_line 超时 ⇒ false；fgets ⇒ 已读部分；stream_get_contents ⇒ 已收内容；fpassthru ⇒ -1；
+    meta `timed_out` 置位、成功读（含 EOF 0 字节）复位；`(0,0)` ⇒ 非阻塞读（空串、timed_out 不置位）；负值 ⇒ 无限等；
+    socket 流默认 60000ms（PHP `default_socket_timeout` 默认值）。普通文件/php://memory/input 仍恒 false（PHP 实测）。
+  - **M2-2-c 已落地（2026-11-10）**：`stream_set_blocking($sock, false)` 复用非阻塞口径（与 `(0,0)` 同一实现）：
+    读侧 poll(0)/试读，无数据置 `would_block`（不算 EOF、不置 timed_out）——fread/stream_get_contents ⇒ ""，
+    fgets/fgetc/fscanf/fgetcsv/stream_get_line ⇒ false，fpassthru ⇒ 已转发字节数（0）；写侧单次试写，EAGAIN ⇒ 0、部分写 ⇒ 实际字节数。
+    socket 的 fd 保持 O_NONBLOCK（NetPoller 承载），阻塞/非阻塞由资源标志逻辑分流；普通文件恒就绪语义不变。
+    已知边界：非阻塞 `stream_get_line` 未命中断言分隔符时 PHP 靠用户态缓冲返 false（下次调用续读），AOT 无用户态缓冲 ⇒ 返回已读部分（不丢数据）。
+  - **M2-2-h 已落地（2026-11-10）**：流层**用户态读缓冲**（仅管道/终端/socket；普通文件直读以保 ftell/fseek 语义）。
+    已读入未消费区间 `read_buf[read_pos..]`，作用三处：
+    1) 非阻塞 `stream_get_line` 未命中分隔符 ⇒ 已读字节（含部分匹配前缀）放回缓冲、返回 false，下次调用续读拼接（PHP 口径，**撤销上条「返回已读部分」的边界**）；
+    2) `fscanf` 未消耗后缀回推缓冲（不可 seek 流不再丢数据，PHP 因 seek 失败会丢）；
+    3) `fgets`/`fgetc`/`csv` 由「每字节一次 syscall」降为「每 8KB 一次」。
+    meta `unread_bytes` 如实报缓冲未读量（PHP 同口径：回推后 3、消费后 0）。
+    回推安全阀：单次 > 8MB 不回推（与 PHP seek 失败丢数据同径，防内存爆）。
+  - 未纳入本批：FIFO 的阻塞 open 不在让出范围（open 本身不 fiber 化）。
 
 ### M3 栈与调度
 
@@ -135,7 +164,7 @@ flowchart TD
 
 | # | 决策点 | 备选 | 倾向 |
 |---|---|---|---|
-| D1 | 协程内未捕获异常 | A 整程序致命（Go 原教旨）/ B join 可收 | M1 取 A，M2 加 B 可选面 |
+| D1 | 协程内未捕获异常 | A 整程序致命（Go 原教旨）/ B join 可收 | M1 取 A；M2 加 B 可选面（**M2-1 已实现 `go_join_error`，2026-11-09**） |
 | D2 | M3 栈扩容 | A 倍增拷栈（实现重）/ B 分段栈（遍历重）/ C 提上限 1MB 不扩容 | 倾向 C→A |
 | D3 | M:N 线程池 | A 永不做（N:1 终态）/ B 构建旗可选 | 倾向 B 但默认关 |
 | D4 | cycle-GC | A 多协程期禁用（M1）/ B root 扩展每协程栈（M3） | A→B |

@@ -3398,6 +3398,13 @@ pub const Value = struct {
         ///   口径（PHP 8.5.8 实测）：不算 EOF、不置 timed_out；fread/stream_get_contents ⇒ ""，
         ///   fgets/fgetc/fscanf/fgetcsv/stream_get_line ⇒ false，fpassthru ⇒ 已转发字节数。
         would_block: bool = false,
+        /// ★M2-2-h：用户态读缓冲（仅非普通文件：管道/终端/socket——普通文件直读，保 ftell/fseek 语义）。
+        ///   已读入未消费区间 = read_buf.items[read_pos..]。作用：
+        ///     1) stream_get_line 非阻塞未命中分隔符时把已读部分放回（PHP 同口径：返 false、下次续读）；
+        ///     2) fscanf 多读的未消耗后缀回推（不可 seek 流不再丢数据）；
+        ///     3) fgets/fgetc/csv 从「每字节一次 syscall」降为「每块一次 syscall」。
+        read_buf: std.ArrayListUnmanaged(u8) = .empty,
+        read_pos: usize = 0,
 
         /// fd 阻塞类别：普通文件恒就绪（跳过 poll）；blocking＝poll 后 syscall；
         /// nonblocking＝自行置了 O_NONBLOCK（socket pair），syscall 可能 EAGAIN，需让出重试。
@@ -3431,6 +3438,8 @@ pub const Value = struct {
                     // ★批次二十九：meta 承载字段与 context 选项表统一回收
                     if (self.uri.len > 0) allocator.free(self.uri);
                     if (self.mode.len > 0) allocator.free(self.mode);
+                    // ★M2-2-h：用户态读缓冲回收
+                    self.read_buf.deinit(allocator);
                     if (self.context_options) |opts| {
                         opts.release(allocator);
                     }
@@ -9302,7 +9311,7 @@ fn wrapBuiltin_fscanf(ctx: Value, args: []const Value, allocator: Allocator) !Va
     defer buf.deinit(allocator);
     var chunk: [8192]u8 = undefined;
     while (true) {
-        const n = q4ReadFh(res, fh, &chunk) catch break;
+        const n = q4BufferedRead(res, fh, &chunk) catch break;
         if (n == 0) {
             // ★M2-2-b/c：超时/非阻塞无数据不算 EOF（buf 空 ⇒ 下方 eof_before_any ⇒ false）
             if (!res.timed_out and !res.would_block) res.eof = true;
@@ -9316,10 +9325,18 @@ fn wrapBuiltin_fscanf(ctx: Value, args: []const Value, allocator: Allocator) !Va
 
     // 回推未消耗后缀；回推成功 ⇒ 尚有未读 ⇒ 清 eof 标志
     if (outcome.consumed < buf.items.len) {
-        const unread: i64 = @intCast(buf.items.len - outcome.consumed);
-        if (streamLseek(fh, -unread, 1)) |_| {
+        const unread = buf.items[outcome.consumed..];
+        if (q4BufEnabled(res)) {
+            // ★M2-2-h：不可 seek 流（socket/管道）回推用户态缓冲 ⇒ 后续 fread/fgets 可见，
+            //   不再走「seek 失败即丢数据」的旧径（PHP 在 socket 上会丢，AOT 不丢）。
+            q4BufUnread(res, allocator, unread);
             res.eof = false;
-        } else |_| {} // 不可 seek 流：多读字节丢失（已知边界，见头注）
+        } else {
+            const unread_n: i64 = @intCast(unread.len);
+            if (streamLseek(fh, -unread_n, 1)) |_| {
+                res.eof = false;
+            } else |_| {} // 不可 seek 流：多读字节丢失（已知边界，见头注）
+        }
     }
 
     // 任何转换前 EOF ⇒ false（两形态同）
@@ -9895,7 +9912,9 @@ fn q4ClassifyFd(fd: std.posix.fd_t) Value.PHPResource.WaitMode {
     return if (st.mode & std.c.S.IFMT == std.c.S.IFREG) .always_ready else .blocking;
 }
 
-/// 协程感知读：返回实际读字节数（0=EOF/超时/非阻塞无数据）；错误原样上抛。
+/// 协程感知读（**底层**，绕过用户态缓冲）：返回实际读字节数（0=EOF/超时/非阻塞无数据）。
+/// 上层一律经 `q4BufferedRead` / `q4BufferedByte`——缓冲解决 stream_get_line 回滚、fscanf 回推，
+/// 并把 fgets/fgetc 的「每字节一次 syscall」摊薄为「每 8KB 一次」。
 /// ★M2-2-b 读超时：等待截止 ⇒ 置 res.timed_out 并返回 0（调用方据此返回 false/部分内容）；
 ///   成功读（含 EOF 的 0 字节）复位 timed_out（PHP 实测口径）。
 /// ★M2-2-c 非阻塞：`stream_set_blocking(false)` 或 `(0,0)` 超时 ⇒ 不挂 NetPoller、不置 timed_out，
@@ -10006,6 +10025,77 @@ fn q4WriteFd(fd: std.posix.fd_t, bytes: []const u8) !usize {
         @intFromEnum(std.c.E.NOSPC) => error.NoSpaceLeft,
         else => error.WriteFailed,
     };
+}
+
+// ---- ★M2-2-h 用户态读缓冲（仅非普通文件：管道/终端/socket） ----
+
+/// 缓冲填充块大小（同 PHP 的 chunk_size 默认值）。
+const Q4_BUF_CHUNK: usize = 8192;
+/// 回推安全阀：单次回推超过该量即丢弃（不可 seek 流与 PHP 的 seek 失败丢数据同径，防内存爆）。
+const Q4_BUF_UNREAD_MAX: usize = 8 * 1024 * 1024;
+
+inline fn q4BufEnabled(res: *Value.PHPResource) bool {
+    // 普通文件直读：用户态预读会让 ftell/fseek 位置失真，且无回滚/回推需求。
+    return res.wait_mode != .always_ready;
+}
+
+inline fn q4BufAvail(res: *Value.PHPResource) usize {
+    return res.read_buf.items.len - res.read_pos;
+}
+
+/// 消费 n 字节；全部消费完即重置（容量保留复用）。
+fn q4BufConsume(res: *Value.PHPResource, n: usize) void {
+    res.read_pos += n;
+    if (res.read_pos >= res.read_buf.items.len) {
+        res.read_buf.clearRetainingCapacity();
+        res.read_pos = 0;
+    }
+}
+
+/// 把 bytes 放回未消费区间头部（bytes 在前、原有未消费在后）。
+fn q4BufUnread(res: *Value.PHPResource, allocator: Allocator, bytes: []const u8) void {
+    if (bytes.len == 0 or bytes.len > Q4_BUF_UNREAD_MAX) return;
+    res.read_buf.insertSlice(allocator, res.read_pos, bytes) catch {};
+}
+
+/// 协程感知**缓冲**读：先取用户态缓冲；缓冲空则走底层（含超时/非阻塞/NetPoller 让出）。
+fn q4BufferedRead(res: *Value.PHPResource, fh: *std.Io.File, dst: []u8) !usize {
+    if (!q4BufEnabled(res)) return q4ReadFh(res, fh, dst);
+    const avail = q4BufAvail(res);
+    if (avail > 0) {
+        const take = @min(avail, dst.len);
+        @memcpy(dst[0..take], res.read_buf.items[res.read_pos..][0..take]);
+        q4BufConsume(res, take);
+        // 本次确实取到数据 ⇒ 清「无数据」与「超时」状态（PHP 口径：成功读复位 timed_out；
+        //   would_block 若不复位，会把上一次 fscanf/stream_get_line 的遗留态误带给调用方）
+        res.would_block = false;
+        res.timed_out = false;
+        return take;
+    }
+    return q4ReadFh(res, fh, dst);
+}
+
+/// 取一字节（fgets/fgetc/csv/get_line 共用）：缓冲空时按 8KB 块填充再弹出。
+/// 返回 1＝取到（写 *out）；0＝无字节（据 res.timed_out/would_block 区分超时/非阻塞，否则为 EOF）。
+fn q4BufferedByte(res: *Value.PHPResource, fh: *std.Io.File, allocator: Allocator, out: *u8) !usize {
+    if (!q4BufEnabled(res)) {
+        var one: [1]u8 = undefined;
+        const n = try q4ReadFh(res, fh, &one);
+        if (n == 0) return 0;
+        out.* = one[0];
+        return 1;
+    }
+    if (q4BufAvail(res) == 0) {
+        var tmp: [Q4_BUF_CHUNK]u8 = undefined;
+        const n = try q4ReadFh(res, fh, &tmp);
+        if (n == 0) return 0;
+        try res.read_buf.appendSlice(allocator, tmp[0..n]);
+    }
+    out.* = res.read_buf.items[res.read_pos];
+    q4BufConsume(res, 1);
+    res.would_block = false; // 取到数据 ⇒ 清遗留「无数据」态
+    res.timed_out = false;
+    return 1;
 }
 
 /// echo/print/printf 的输出口（★M2-2）：协程活跃期对管道/终端分块 + POLLOUT 让出，
@@ -10532,7 +10622,8 @@ pub fn php_fread(handle: Value, length: Value, allocator: Allocator) !Value {
     const buffer = allocator.alloc(u8, @intCast(len)) catch return Value.initBool(false);
     defer allocator.free(buffer);
     // ★M2-2：经 NetPoller 让出（管道/终端/socket 对；普通文件恒就绪走原直读）
-    const bytes_read = q4ReadFh(res, fh, buffer) catch return Value.initBool(false);
+    // ★M2-2-h：缓冲优先（socket/管道上上次 fscanf/stream_get_line 回推的字节在此可见）
+    const bytes_read = q4BufferedRead(res, fh, buffer) catch return Value.initBool(false);
     // ★M2-2-b：读超时 ⇒ false（PHP 实测；EOF 标志不置位）
     if (res.timed_out) return Value.initBool(false);
     // ★M2-2-c：非阻塞无数据 ⇒ ""（PHP 实测；不算 EOF）
@@ -10601,16 +10692,19 @@ pub fn php_fgets(handle: Value, length: Value) !Value {
     var pos: usize = 0;
 
     while (pos < limit) {
-        const n = q4ReadFh(res, fh, buf[pos .. pos + 1]) catch break;
-        if (n == 0) {
+        var b: u8 = undefined;
+        // ★M2-2-h：缓冲取字节（底层按 8KB 块填充，syscall 摊薄）
+        const got = q4BufferedByte(res, fh, runtime_allocator, &b) catch break;
+        if (got == 0) {
             // ★M2-2-b：超时 ⇒ 返回已读部分（PHP 实测）；EOF 标志不置位
             // ★M2-2-c：非阻塞无数据 ⇒ 同样返回已读部分，不算 EOF
             if (res.timed_out or res.would_block) break;
             res.eof = true;
             break;
         }
+        buf[pos] = b;
         pos += 1;
-        if (buf[pos - 1] == '\n') break;
+        if (b == '\n') break;
     }
 
     if (pos == 0) return Value.initBool(false);
@@ -10630,8 +10724,9 @@ pub fn php_fgetc(handle: Value, allocator: Allocator) !Value {
     const res = handle.asResource();
     const fh = res.file_handle orelse return Value.initBool(false);
     var buf: [1]u8 = undefined;
-    const n = q4ReadFh(res, fh, &buf) catch return Value.initBool(false);
-    if (n == 0) {
+    // ★M2-2-h：缓冲取字节（与 fgets 同一层，避免逐字节 syscall）
+    const got = q4BufferedByte(res, fh, allocator, &buf[0]) catch return Value.initBool(false);
+    if (got == 0) {
         if (!res.timed_out and !res.would_block) res.eof = true; // ★M2-2-b/c：超时/非阻塞无数据不算 EOF
         return Value.initBool(false);
     }
@@ -10671,7 +10766,7 @@ pub fn php_stream_get_contents(handle: Value, length: Value, offset: Value, allo
     while (true) {
         const room: usize = if (want) |w| @min(chunk.len, w -| buf.items.len) else chunk.len;
         if (room == 0) break;
-        const n = q4ReadFh(res, fh, chunk[0..room]) catch break;
+        const n = q4BufferedRead(res, fh, chunk[0..room]) catch break;
         if (n == 0) {
             // ★M2-2-b/c：超时或非阻塞无数据 ⇒ 返回已收内容（PHP 实测 ""）；不算 EOF
             if (!res.timed_out and !res.would_block) res.eof = true;
@@ -10964,7 +11059,7 @@ pub fn php_fpassthru(handle: Value) !Value {
     var buf: [8192]u8 = undefined;
     var total: usize = 0;
     while (true) {
-        const n = q4ReadFh(res, fh, &buf) catch return Value.initBool(false);
+        const n = q4BufferedRead(res, fh, &buf) catch return Value.initBool(false);
         if (n == 0) {
             // ★M2-2-b：读超时 ⇒ -1（PHP 8.5.8 实测：copy_to_stream 失败返回 -1）
             if (res.timed_out) return Value.initInt(-1);
@@ -11072,14 +11167,14 @@ pub fn php_stream_get_meta_data(handle: Value, allocator: Allocator) !Value {
     if (res.sock) {
         try Put.str(arr, allocator, "stream_type", "generic_socket");
         try Put.str(arr, allocator, "mode", res.mode);
-        try Put.i(arr, allocator, "unread_bytes", 0);
+        try Put.i(arr, allocator, "unread_bytes", @intCast(q4BufAvail(res))); // ★M2-2-h：用户态缓冲未读量（PHP 同口径）
         try Put.b(arr, allocator, "seekable", false);
         return Value.initArray(arr);
     }
     try Put.str(arr, allocator, "wrapper_type", kinds.wrapper);
     try Put.str(arr, allocator, "stream_type", kinds.stype);
     try Put.str(arr, allocator, "mode", res.mode);
-    try Put.i(arr, allocator, "unread_bytes", 0); // fd 直读无用户态缓冲 ⇒ 恒 0
+    try Put.i(arr, allocator, "unread_bytes", @intCast(q4BufAvail(res))); // ★M2-2-h：用户态缓冲未读量（普通文件恒 0）
     try Put.b(arr, allocator, "seekable", true); // AOT 全部流种均为 STDIO 语义承载（PHP 同报 true）
     try Put.str(arr, allocator, "uri", res.uri);
     return Value.initArray(arr);
@@ -11153,8 +11248,8 @@ pub fn php_stream_get_line(handle: Value, length: Value, ending: Value, allocato
         var byte: [1]u8 = undefined;
         var matched: usize = 0;
         while (limit == 0 or buf.items.len < limit) {
-            const n = q4ReadFh(res, fh, &byte) catch break;
-            if (n == 0) {
+            const got = q4BufferedByte(res, fh, allocator, &byte[0]) catch break;
+            if (got == 0) {
                 // ★M2-2-b/c：超时/非阻塞无数据不算 EOF
                 if (!res.timed_out and !res.would_block) res.eof = true;
                 break;
@@ -11177,17 +11272,30 @@ pub fn php_stream_get_line(handle: Value, length: Value, ending: Value, allocato
                 try buf.append(allocator, byte[0]);
             }
         }
+        // ★M2-2-h：非阻塞且未命中分隔符 ⇒ 已读字节全部放回缓冲、返回 false（PHP 实测口径：
+        //   下次调用续读并拼接）。插入语义是「插到未消费区头部」，故先插前缀、后插正文
+        //   ⇒ 最终顺序 [正文][部分匹配前缀]（读入顺序）。
+        if (res.would_block) {
+            if (matched > 0) q4BufUnread(res, allocator, delim[0..matched]);
+            q4BufUnread(res, allocator, buf.items);
+            return Value.initBool(false);
+        }
     } else {
         var chunk: [8192]u8 = undefined;
         while (limit == 0 or buf.items.len < limit) {
             const room = if (limit == 0) chunk.len else @min(chunk.len, limit - buf.items.len);
-            const n = q4ReadFh(res, fh, chunk[0..room]) catch break;
+            const n = q4BufferedRead(res, fh, chunk[0..room]) catch break;
             if (n == 0) {
                 // ★M2-2-b/c：超时/非阻塞无数据不算 EOF
                 if (!res.timed_out and !res.would_block) res.eof = true;
                 break;
             }
             try buf.appendSlice(allocator, chunk[0..n]);
+        }
+        // ★M2-2-h：非阻塞且无内容 ⇒ 放回已读字节、返回 false（PHP 实测口径）
+        if (res.would_block) {
+            q4BufUnread(res, allocator, buf.items);
+            return Value.initBool(false);
         }
     }
     // ★M2-2-b/c：超时/非阻塞无数据且无任何内容 ⇒ false（PHP 实测）
@@ -11402,8 +11510,8 @@ fn csvReadLine(res: *Value.PHPResource, fh: *std.Io.File, encl: u8, out: *std.Ar
     var in_quotes = false;
     while (true) {
         var b: [1]u8 = undefined;
-        const n = q4ReadFh(res, fh, &b) catch return error.ReadFailed;
-        if (n == 0) {
+        const got = q4BufferedByte(res, fh, allocator, &b[0]) catch return error.ReadFailed;
+        if (got == 0) {
             if (res.timed_out) return error.ReadFailed; // ★M2-2-b：fgetcsv 超时 ⇒ false
             if (res.would_block) {
                 // ★M2-2-c：非阻塞无数据 ⇒ false；已读部分照常成行（PHP 实测口径）

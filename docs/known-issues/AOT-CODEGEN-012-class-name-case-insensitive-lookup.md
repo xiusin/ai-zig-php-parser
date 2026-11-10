@@ -14247,3 +14247,83 @@ M1 协程专项窗口期（模板禁改）内的纯取证批，R-344c「catch �
 - `zig build test`：rc=0；`-Dcoroutine=off`：构建通过、存根语义符合设计
 - 720 语料：67 Pass / 0 Fail / 1 Skip（f004 预存排除项），零漂移
 
+---
+
+## §276 M2-1 落地：`go_join_error` 异常收取面（2026-11-09）
+
+### 276.1 语义（D1=A 不破坏）
+
+- `go_join_error(?int $id): ?Throwable`：等待目标结束并**收取**未捕获 Throwable；取后清除（二次 ⇒ null）；正常结束/未知 id ⇒ null；null 实参 ⇒ 立即 null。
+- 协程异常总是先记录（模板侧 id→Throwable 表）；未收取的异常在同步点按 D1=A 原文案致命：
+  `go_join($id)`（含 `go_join(null)`）、`go_wait_all()`、进程收尾（`deinitRuntime` 兜底）。
+- 非 PHP 错误（OOM 等）不进入记录表，仍立即致命。
+
+### 276.2 实现
+
+| 层 | 变更 |
+|---|---|
+| `concurrency_runtime.zig` | 新增 `CoroutineErrorCapture` 钩子；`reportCoroutineError` 改为「捕获成功 ⇒ 正常返回，协程 finished；否则致命」 |
+| `runtime_lib_template.zig` | `coroutine_errors` 记录表、`coCaptureCoroutineError`、`fatalOnUnobservedCoroutineErrors`、`coroutineFatalWithException`（立即/延迟共用文案）；`php_go_join`/`php_go_wait_all` 门禁；`php_go_join_error` + 切片面 + 注册 |
+| `native_linker.zig` | `builtin_map` 增 `go_join_error`；`isSliceArgsBuiltin` 增切片面 |
+
+### 276.3 验证
+
+- G18a：9/9 断言 PASS（类型/消息/二次 null/正常 null/多失败逐枚/未知 id/动态调用/协程内收取/收取后 wait_all 不致命）
+- G18b：`go_join` 未收取异常 ⇒ rc=255，文案含 `uncaught RuntimeException: join-fatal in coroutine #1`
+- G18c：`go_wait_all` 未收取异常 ⇒ rc=255，文案含 `uncaught LogicException: waitall-fatal in coroutine #1`
+- 全量协程探针、`zig build test`、720 语料见变更摘要 §13.3
+
+---
+
+## §277 M2-2 落地：IO 非阻塞让出（poll(2) NetPoller，2026-11-09）
+
+### 277.1 语义
+
+- 让出点新增：流族 read/write（fread/fgets/fgetc/stream_get_contents/fscanf/fpassthru/stream_get_line/fgetcsv/fwrite/fputcsv）
+  与 echo/print/printf 输出；仅协程体系活跃期生效（`ioYieldActive()`）。
+- NetPoller 采用 **poll(2)**（darwin/linux 同路径）：调度器空转 `poll(fds, timeout)` 同时等 fd 就绪与最近定时器；
+  HUP/ERR/NVAL 按就绪唤醒，由后续 syscall 自报 0/错误。
+- fd 三分：普通文件恒就绪（零 poll）；管道/终端/stdio 先 poll 再 syscall（写按 PIPE_BUF 512B 分块）；
+  socket 对 `O_NONBLOCK` 先试，EAGAIN ⇒ 挂 NetPoller 让出重试。
+- 新增 PHP 面 `stream_socket_pair($domain,$type,$protocol)`（socketpair(2) 包装流资源；meta 对齐 PHP 8.5.8
+  的 7 键形状：generic_socket / r+ / seekable=false）。
+- 口径修正：socket/管道短读不置 EOF；socket 流 fseek/rewind ⇒ Warning + 失败、ftell ⇒ 0；
+  `initRuntime` 按 PHP CLI 口径忽略 SIGPIPE（写已关闭对端 ⇒ fwrite false，不杀进程）。
+- `fileWriteAll` 明确不让出（诊断/致命路径），用户 echo 背压走 `q4OutputWrite`。
+- **M2-2-b `stream_set_timeout` 对 socket 建模（2026-11-09）**：socket 流受理（普通文件/php://memory/input 恒 false），
+  默认 60000ms；读超时经 NetPoller 截止——fread/fscanf/fgetcsv/stream_get_line ⇒ false、fgets ⇒ 已读部分、
+  stream_get_contents ⇒ 已收内容、fpassthru ⇒ -1；meta timed_out 置位/成功读（含 EOF 0 字节）复位；
+  (0,0) ⇒ 非阻塞读（空串、timed_out 不置位）；负值 ⇒ 无限等。
+- **M2-2-c `stream_set_blocking` 复用非阻塞口径（2026-11-10）**：socket 流受理并记账（fd 保持 O_NONBLOCK 供 NetPoller，
+  由资源标志逻辑分流）；非阻塞无数据 ⇒ `would_block`（不算 EOF、不置 timed_out）——fread/stream_get_contents ⇒ ""，
+  fgets/fgetc/fscanf/fgetcsv/stream_get_line ⇒ false，fpassthru ⇒ 0；写侧单次试写（EAGAIN ⇒ 0、部分写 ⇒ 实际字节数）；
+  已被 `stream_set_timeout(0,0)` 复用同一实现。已知边界：非阻塞 stream_get_line 未命中分隔符时返回已读部分（PHP 因用户态缓冲返 false）。
+- **M2-2-h 流层用户态读缓冲（2026-11-10，消解上条边界）**：`PHPResource.read_buf`/`read_pos`（仅管道/终端/socket；
+  普通文件直读保 ftell/fseek）：非阻塞 stream_get_line 回推全部已读字节（含部分匹配前缀）返 false、下次续读拼接；
+  fscanf 未消耗后缀回推（不可 seek 流不丢数据）；fgets/fgetc/fgetcsv 摊薄为每 8KB 一次 syscall；
+  meta `unread_bytes` 如实报缓冲未读量；回推安全阀 8MB。
+
+### 277.2 实现
+
+| 层 | 变更 |
+|---|---|
+| `concurrency_runtime.zig` | IoWaiter 表（含读超时 deadline）+ io_pollfds 复用；waitForEvents/wakeReadyIoWaiters/pollTimeoutMs（定时器与 IO 截止取最小）/removeIoWaiter；dispatchLoop 空转改 waitForEvents；公共面 IO_READABLE/IO_WRITABLE、ioYieldActive、waitFd(fd, events, timeout_ms) bool（poll(0) 快路径） |
+| `runtime_lib_template.zig` | PHPResource.wait_mode/sock/read_timeout_ms/would_block/read_buf/read_pos；q4ClassifyFd/q4ReadFh（底层：超时+非阻塞感知）/q4BufferedRead/q4BufferedByte/q4BufUnread/q4BufConsume/q4WriteFh（非阻塞单次试写）/q4WriteFd/q4OutputWrite；九个读点+两个写点换核并接超时/非阻塞/缓冲口径；fopen 六处补 wait_mode；stream_socket_pair 实现与注册（默认 60s 读超时）；stream_set_timeout/stream_set_blocking 建模；meta 形状与 unread_bytes；seek/EOF 口径；SIGPIPE 忽略 |
+| `native_linker.zig` | `builtin_map` 增 `stream_socket_pair` |
+
+### 277.3 验证
+
+- G19：[co_accept19_io_echo.php](../../co_accept19_io_echo.php) **83/83** 断言 PASS（资源/meta、短读 EOF、双协程 echo、
+  定时器与 IO 混排、关闭边界含 EPIPE、多协程并发写、跨协程分片写、stream_get_contents/stream_get_line/fgetcsv
+  的 socket 路径、字符设备 .blocking 路径、协程内普通文件回归；k 组 28 断言覆盖 stream_set_timeout 全口径；
+  l 组 23 断言覆盖 stream_set_blocking 非阻塞口径）。
+- 全量协程探针 44/44 预期；`zig build test` rc=0；`-Dcoroutine=off` 存根语义不变（socket 超时/非阻塞经 pollBlocking 同口径）；
+  720 语料（2026-11-10 12:18:49）67 Pass / 0 Fail / 1 Skip，零漂移（语料零 stream_set_blocking/stream_set_timeout 使用）。
+- 手工背压：慢消费者（sleep 0.7s）管道 + 2MB echo，worker 0.051s 即运行（MAIN_DONE 0.705s）。
+
+### 277.4 边界（未纳入）
+
+- FIFO 阻塞 open 不 fiber 化（读写阶段已让出）。
+- var_dump/print_r 等诊断直写不让出（与 PHP 阻塞写等价）。
+
+
